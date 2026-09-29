@@ -131,6 +131,29 @@ if TYPE_CHECKING:
 
 # aws-cli EPOCH_TIME: the stamp used when a file's mtime cannot be represented.
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+# aws-cli's warning for that fallback (skip_file=False: the file is kept).
+_INVALID_TIMESTAMP = "File has an invalid timestamp. Passing epoch time as timestamp."
+
+
+def _warn_unrepresentable_mtime(info: LocalFileInfo, notify: Callable[[str], None]) -> None:
+    """Send aws-cli's invalid-timestamp warning for a final scan-time record.
+
+    ``stat_info`` stamps a regular file's record silently, because the
+    recursive walk re-stats the leaf at its turn (``restat_leaf``), which is
+    where aws-cli takes the timestamp and warns. A record the walk keeps as
+    built - a one-level scan's child - draws its warning here instead; a link's
+    own stat (``S_IFLNK``) already warned in ``stat_info``, and a directory
+    carries no timestamp.
+    """
+    st = info.stat_result
+    if (
+        info.kind is FileKind.FILE
+        and st is not None
+        and not stat_module.S_ISLNK(st.st_mode)
+        and _size_mtime(st)[1] is None
+    ):
+        notify(_INVALID_TIMESTAMP)
+
 
 # Boundary thresholds for the full-path fallback (see
 # LocalFileGenerator.crosses_full_path_boundary). The fast walk vets each entry
@@ -676,9 +699,12 @@ class LocalFileGenerator:
           refreshed from this stat, so what is transferred and what ``sync``
           compares are the file as of its turn - aws-cli takes every leaf's size
           and timestamp here, never at scan time. The unrepresentable-timestamp
-          fallback stamps ``EPOCH_TIME`` as ``stat_info`` does, and warns only
-          when the scan's stat was still representable, so one file draws
-          aws-cli's one warning rather than two.
+          fallback stamps ``EPOCH_TIME`` as ``stat_info`` does and sends the one
+          warning aws-cli sends for the file, here rather than at scan time:
+          so it sorts among the walk's other warnings as aws-cli's does (a
+          sibling directory's warnings come first), and a timestamp that
+          became representable since the scan draws none (``stat_info`` stamps
+          the scan-time record silently).
 
         ``is_symlink`` is left as classified: re-testing it would cost a second
         syscall per leaf, and aws-cli carries no such flag.
@@ -721,11 +747,12 @@ class LocalFileGenerator:
             return self.promoted_directory(info, st, is_symlink=is_link)
         size, mtime = _size_mtime(st)
         if mtime is None:
-            if classified is None or _size_mtime(classified)[1] is not None:
-                # First unrepresentable now, so this is aws-cli's one warning for
-                # the file; if the scan's stat was unrepresentable too, stat_info
-                # already sent it.
-                notify("File has an invalid timestamp. Passing epoch time as timestamp.")
+            # aws-cli's one warning for the file, sent where aws-cli sends it -
+            # at the leaf's turn, from this stat (the scan-time record was
+            # stamped silently), so it sorts among the other warnings as
+            # aws-cli's does and a timestamp that healed since the scan draws
+            # none.
+            notify(_INVALID_TIMESTAMP)
             mtime = self.EPOCH_TIME
         info.size = size
         info.mtime = mtime
@@ -803,7 +830,7 @@ class LocalFileGenerator:
         if not is_directory:
             size, mtime = _size_mtime(st)
             if mtime is None:
-                notify("File has an invalid timestamp. Passing epoch time as timestamp.")
+                notify(_INVALID_TIMESTAMP)
                 mtime = self.EPOCH_TIME
         return LocalFileInfo(
             key=key,
@@ -1255,11 +1282,18 @@ class LocalFileGenerator:
         those three - rather than adding to the record - pairs with that seam;
         everything else this stamps survives to the stream. The record built
         here is what a link leaf and a non-recursive scan keep as is.
+
+        The invalid-timestamp warning is sent from here only for a link's own
+        stat (``S_IFLNK``), which no re-stat follows; a regular file's record
+        is stamped silently, and its warning is ``restat_leaf``'s (at the
+        leaf's turn, where aws-cli warns) or, for a one-level scan that keeps
+        this record, the scan's.
         """
         size, mtime = _size_mtime(st)
         if mtime is None:
-            # skip_file=False in aws-cli: warn but keep the file, stamped epoch.
-            notify("File has an invalid timestamp. Passing epoch time as timestamp.")
+            # skip_file=False in aws-cli: keep the file, stamped epoch.
+            if stat_module.S_ISLNK(st.st_mode):
+                notify(_INVALID_TIMESTAMP)
             mtime = self.EPOCH_TIME
         return LocalFileInfo(
             key=full.replace(os.sep, "/"),
@@ -1579,6 +1613,7 @@ class LocalStorage(Storage):
                 root_anchor, strip=strip, options=options, notify=notify
             ):
                 info.storage = options.storage
+                _warn_unrepresentable_mtime(info, notify)
                 if item_filter is None or item_filter(info):
                     yield info
             return
@@ -1617,6 +1652,9 @@ class LocalStorage(Storage):
             # scan_children stamps compare_key only; stamp the producing backend
             # here (options.storage == self, forced by scan_pages) before the filter.
             info.storage = options.storage
+            # This record is kept as scanned (no yield-time re-stat), so its
+            # timestamp warning is due here.
+            _warn_unrepresentable_mtime(info, notify)
             if item_filter is None or item_filter(info):
                 yield info
 
@@ -1665,7 +1703,7 @@ class LocalStorage(Storage):
             return None
         size, mtime = get_file_stat(path, st)
         if mtime is None:
-            notify("File has an invalid timestamp. Passing epoch time as timestamp.")
+            notify(_INVALID_TIMESTAMP)
             mtime = _EPOCH
         return LocalFileInfo(
             key=path.replace(os.sep, "/"),

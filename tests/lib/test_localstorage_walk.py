@@ -870,26 +870,29 @@ class TestLeafRewrittenBeforeItsTurn:
         # POSIX) - never the rewritten target's 120 bytes.
         assert leaf.size == link.lstat().st_size
 
-    def test_an_mtime_that_becomes_unrepresentable_warns_once(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # The epoch fallback belongs to whichever stat first cannot represent the
-        # timestamp; aws-cli warns once per file, so the yield-time stat warns
-        # only when the scan's stat was still representable (that one already
-        # warned - see TestWalkWarnings.test_invalid_timestamp_falls_back_to_epoch).
-        _make_tree(tmp_path, "aaa.txt", "mmm.txt")
-        target = tmp_path / "mmm.txt"
-        unrepresentable = 1234567890.0  # the stamp this host is pretending it cannot render
+    @staticmethod
+    def _pretend_unrepresentable(monkeypatch: pytest.MonkeyPatch, stamp: float) -> None:
+        """Make this host unable to render exactly one mtime value."""
         real_fromtimestamp = datetime.fromtimestamp
 
         class _BoomOnOneStamp:
             @staticmethod
             def fromtimestamp(ts: float, tz: object = None) -> datetime:
-                if ts == unrepresentable:
+                if ts == stamp:
                     raise OverflowError("timestamp out of range")
                 return real_fromtimestamp(ts, tz)  # pyright: ignore[reportArgumentType]
 
         monkeypatch.setattr("boto3_s3.localstorage.datetime", _BoomOnOneStamp)
+
+    def test_an_mtime_that_becomes_unrepresentable_warns_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The warning belongs to the yield-time stat, where aws-cli takes the
+        # timestamp: one per file, whatever the scan-time stat said.
+        _make_tree(tmp_path, "aaa.txt", "mmm.txt")
+        target = tmp_path / "mmm.txt"
+        unrepresentable = 1234567890.0  # the stamp this host is pretending it cannot render
+        self._pretend_unrepresentable(monkeypatch, unrepresentable)
         walker = _MutateAtFinalize(
             target, lambda: os.utime(target, (unrepresentable, unrepresentable))
         )
@@ -901,6 +904,96 @@ class TestLeafRewrittenBeforeItsTurn:
             "mmm.txt",
             datetime(1970, 1, 1, tzinfo=timezone.utc),
         )
+        assert warnings == ["File has an invalid timestamp. Passing epoch time as timestamp."]
+
+    def test_an_mtime_that_healed_before_its_turn_draws_no_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws-cli never sees the scan-time stamp - its only stat is the one at
+        # the leaf's turn - so a timestamp that became representable by then
+        # is just the file's timestamp: no warning, rc 0 (measured on the
+        # pinned aws with the same mutation; ours warned and exited 2, while
+        # stamping the healed value the warning said it would not).
+        _make_tree(tmp_path, "aaa.txt", "mmm.txt")
+        target = tmp_path / "mmm.txt"
+        unrepresentable = 1234567890.0
+        self._pretend_unrepresentable(monkeypatch, unrepresentable)
+        os.utime(target, (unrepresentable, unrepresentable))
+        healed = 1577836800  # 2020-01-01T00:00:00Z
+        walker = _MutateAtFinalize(target, lambda: os.utime(target, (healed, healed)))
+        warnings: list[str] = []
+        infos = list(
+            LocalStorage(str(tmp_path), walker=walker).walk_local(on_warning=warnings.append)
+        )
+        assert walker.fired
+        assert [(info.compare_key, info.mtime) for info in infos][1] == (
+            "mmm.txt",
+            datetime(2020, 1, 1, tzinfo=timezone.utc),
+        )
+        assert warnings == []
+
+    def test_the_timestamp_warning_sorts_where_aws_cli_sends_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws-cli warns at the leaf's turn, after every earlier-sorting
+        # sibling's subtree has been vetted, so a special file under `aaa/`
+        # warns before the timestamp of `zzz` (measured on the pinned aws:
+        # fifo first, then the timestamp; ours had them the other way round
+        # from warning at the parent's scan).
+        _make_tree(tmp_path, "zzz")
+        (tmp_path / "aaa").mkdir()
+        os.mkfifo(tmp_path / "aaa" / "fifo")  # pyright: ignore[reportAttributeAccessIssue]
+        unrepresentable = 1234567890.0
+        self._pretend_unrepresentable(monkeypatch, unrepresentable)
+        os.utime(tmp_path / "zzz", (unrepresentable, unrepresentable))
+        warnings: list[str] = []
+        assert _keys(tmp_path, on_warning=warnings.append) == ["zzz"]
+        assert warnings == [
+            f"Skipping file {tmp_path / 'aaa' / 'fifo'}. File is character special device, "
+            "block special device, FIFO, or socket.",
+            "File has an invalid timestamp. Passing epoch time as timestamp.",
+        ]
+
+    def test_a_one_level_scan_still_warns_for_its_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A non-recursive scan keeps the scan-time record (no yield-time
+        # re-stat), so its warning is sent from the scan, once.
+        _make_tree(tmp_path, "aaa.txt", "mmm.txt")
+        unrepresentable = 1234567890.0
+        self._pretend_unrepresentable(monkeypatch, unrepresentable)
+        os.utime(tmp_path / "mmm.txt", (unrepresentable, unrepresentable))
+        warnings: list[str] = []
+        infos = list(
+            LocalStorage(str(tmp_path)).scan(
+                LocalScanOptions(recursive=False, on_warning=warnings.append)
+            )
+        )
+        assert [(info.compare_key, info.mtime) for info in infos] == [
+            ("aaa.txt", infos[0].mtime),
+            ("mmm.txt", datetime(1970, 1, 1, tzinfo=timezone.utc)),
+        ]
+        assert warnings == ["File has an invalid timestamp. Passing epoch time as timestamp."]
+
+    def test_a_link_leaf_warns_from_its_own_stat(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The complete no-follow view keeps a link as its lstat leaf, which no
+        # re-stat follows, so that record's warning comes from the scan.
+        _make_tree(tmp_path, "real.txt")
+        link = tmp_path / "link.txt"
+        link.symlink_to(tmp_path / "real.txt")
+        unrepresentable = 1234567890.0
+        self._pretend_unrepresentable(monkeypatch, unrepresentable)
+        os.utime(link, (unrepresentable, unrepresentable), follow_symlinks=False)
+        warnings: list[str] = []
+        infos = list(
+            LocalStorage(
+                str(tmp_path), follow_symlinks=False, enumerate_all_entries=True
+            ).walk_local(on_warning=warnings.append)
+        )
+        leaf = next(info for info in infos if info.compare_key == "link.txt")
+        assert leaf.mtime == datetime(1970, 1, 1, tzinfo=timezone.utc)
         assert warnings == ["File has an invalid timestamp. Passing epoch time as timestamp."]
 
 

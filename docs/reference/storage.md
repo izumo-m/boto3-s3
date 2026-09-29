@@ -1394,9 +1394,12 @@ children of a name swapped for a directory are transferred rather than the name
 being submitted as a file. Otherwise: `info` itself with `size`, `mtime` and
 `stat_result` refreshed from this stat, which is where the AWS CLI takes every
 leaf's size and timestamp, so what is transferred and what `sync` compares is
-the file as of its turn. An mtime that has become unrepresentable stamps
-`EPOCH_TIME` as `stat_info` does, and warns unless the scan's stat was already
-unrepresentable, so one file draws one warning rather than two.
+the file as of its turn. An mtime this stat cannot represent stamps
+`EPOCH_TIME` as `stat_info` does and sends the file's one invalid-timestamp
+warning from here, where the AWS CLI sends it: it sorts among the walk's other
+warnings as the AWS CLI's does (an earlier-sorting sibling directory's warnings
+come first), and a timestamp that became representable since the scan draws
+none — `stat_info` stamps the scan-time record silently.
 
 `is_symlink` is left as classified — re-testing it would cost a second syscall
 per leaf. A record whose classification stat is a symlink's own (the complete
@@ -1613,7 +1616,10 @@ still warns "not readable".
 Builds one file entry's `LocalFileInfo` from the stat `classify_child` already
 took, at scan time. It never fails: the race case was handled upstream, and an
 mtime the host's local zone cannot represent — the AWS CLI's own test, as
-above — keeps the file, warns, and stamps `EPOCH_TIME`. The info carries `st` as
+above — keeps the file and stamps `EPOCH_TIME`. The warning for it is sent from
+here only for a link's own stat, which no re-stat follows; a regular file's
+record is stamped silently and warns at its turn (`restat_leaf`), or from the
+scan when a one-level scan keeps this record. The info carries `st` as
 `stat_result` and the entry's symlink flag.
 
 Of what this stamps, `size`, `mtime` and `stat_result` are refreshed by
