@@ -87,12 +87,15 @@ if TYPE_CHECKING:
 # logging HOWTO's rule for libraries): the library reports through `logging` and
 # never prints, so a WARNING it emits where the application configured no
 # handler - the deleter's unattributable-entry guard - must not reach stderr
-# through Python's `lastResort` handler. Registered here because every path
-# that logs imports this module: the deleter and the transfer engine directly,
-# and the CRT support's one warning fires inside the manager builder only the
-# transfer engine calls. A configured handler (the CLI's --debug stream logger,
+# through Python's `lastResort` handler. Registered here because the deleter
+# and the transfer engine import this module, and again in `crtsupport`, a
+# documented surface reachable on its own whose warning fires inside the
+# manager builder; both registrations skip a handler already present, so the
+# logger carries one. A configured handler (the CLI's --debug stream logger,
 # an application's root handler) still sees every record.
-logging.getLogger("boto3_s3").addHandler(logging.NullHandler())
+_package_logger = logging.getLogger("boto3_s3")
+if not any(isinstance(h, logging.NullHandler) for h in _package_logger.handlers):
+    _package_logger.addHandler(logging.NullHandler())
 
 # S3Storage.open implements only "rb" (a GetObject read convenience, chiefly for
 # a content-based sync filter that reads an object's bytes). "wb" stays

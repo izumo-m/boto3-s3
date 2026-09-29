@@ -197,8 +197,9 @@ versioned bucket) cannot be mapped back to submission order.
   failures, per-key failures / warning: unattributable entries) - an intentional
   break from parity. The CLI's `--debug` picks up this logger, and nothing
   else does: the `boto3_s3` package logger carries a `NullHandler` (registered
-  by `s3storage`, which every logging path imports - as boto3's own loggers
-  do), so where no handler is configured the warning stays off stderr instead
+  by `s3storage` and, for its own warning, by `crtsupport` - every logging path
+  imports one of the two - as boto3's own loggers do), so where no handler is
+  configured the warning stays off stderr instead
   of surfacing through Python's `lastResort` handler.
 
 ## 5. Out of scope (outside this component)

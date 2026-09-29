@@ -3,7 +3,9 @@
 import io
 import logging
 import pathlib
+import subprocess
 import sys
+import textwrap
 from collections.abc import Generator
 from contextlib import contextmanager
 
@@ -590,6 +592,30 @@ class TestPackageLogger:
         importlib.import_module("boto3_s3.s3storage")  # the registering module
         handlers = logging.getLogger("boto3_s3").handlers
         assert [type(h) for h in handlers].count(logging.NullHandler) == 1
+
+    def test_crtsupport_on_its_own_registers_the_same_handler(self) -> None:
+        # crtsupport is a documented surface reachable without s3storage, and
+        # its manager builder warns (a config the installed s3transfer cannot
+        # take): a fresh interpreter that imports only it must still find the
+        # NullHandler - and one, not one per module, once both registering
+        # modules have loaded.
+        code = textwrap.dedent(
+            """
+            import logging
+            import sys
+
+            import boto3_s3.crtsupport
+
+            assert "boto3_s3.s3storage" not in sys.modules
+            handlers = logging.getLogger("boto3_s3").handlers
+            assert [type(h) for h in handlers].count(logging.NullHandler) == 1, handlers
+            import boto3_s3.s3storage
+
+            handlers = logging.getLogger("boto3_s3").handlers
+            assert [type(h) for h in handlers].count(logging.NullHandler) == 1, handlers
+            """
+        )
+        subprocess.run([sys.executable, "-c", code], check=True)
 
 
 class TestSetStreamLogger:

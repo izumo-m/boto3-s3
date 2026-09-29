@@ -65,6 +65,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# The package logger's NullHandler (the rule and the reason are at the same
+# registration in s3storage): this module is a documented surface reachable
+# without s3storage - `from boto3_s3 import crtsupport` and a
+# `create_crt_transfer_manager` call whose config the installed s3transfer
+# cannot take - so its warning must not fall through to `lastResort` either.
+_package_logger = logging.getLogger("boto3_s3")
+if not any(isinstance(h, logging.NullHandler) for h in _package_logger.handlers):
+    _package_logger.addHandler(logging.NullHandler())
+
 __all__ = [
     "CLIENT_REGION",
     "PROCESS_LOCK_NAME",
