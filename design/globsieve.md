@@ -158,9 +158,11 @@ relative to the prefix that `rm_filter_root(key, recursive=...)` determines.
 (Stamping is a contract the concrete backend's `scan_pages` producer fulfils,
 not the base `Storage.scan`; the single-key path stamps it inline.) The prefix
 is: for recursive, the target normalized to a `/`-terminated form; for a single
-key, everything through its final `/`; for a bucket-level target, `""`
-(equivalent to the composition of aws's `filters._get_s3_root` plus
-`FileFormat.s3_format`). The
+key, everything through its final `/`, where a parent that already ends in `/`
+gains no second one (`a//b` roots at `a/` and is matched as `/b`, as aws's
+`os.path.join` of the pattern onto its root leaves it); for a bucket-level
+target, `""` (equivalent to the composition of aws's `filters._get_s3_root`
+plus `FileFormat.s3_format`). The
 relative form is what keeps `GlobPattern.exclude("*")`
 recognized as the catch-all and the section 2 optimizations in effect; the
 bucket name does not affect the decision under either aws's join or the

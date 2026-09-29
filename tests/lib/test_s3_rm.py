@@ -115,6 +115,13 @@ class TestRmFilterRoot:
             ("a.txt", False, ""),  # top-level key roots at bucket
             ("data/a.txt", False, "data/"),  # parent "directory"
             ("data/", False, "data/"),  # explicit marker target roots at itself
+            # aws joins the pattern onto the parent with os.path.join, which adds
+            # no second "/" after a parent already ending in one, so the entry
+            # is matched as "/b" - never as "b" under an "a//" root.
+            ("a//b", False, "a/"),
+            ("x/a//b", False, "x/a/"),
+            ("/b", False, ""),  # a leading "/" is the whole parent: roots at the bucket
+            ("//b", False, "/"),
             ("data", True, "data/"),  # recursive normalizes to "/"
             ("data/", True, "data/"),
             ("data/sub", True, "data/sub/"),
@@ -125,6 +132,20 @@ class TestRmFilterRoot:
 
 
 class TestRmSingleKey:
+    def test_doubled_slash_key_gets_the_verdict_aws_gives_it(self) -> None:
+        # Under rm s3://b/a//b aws matches the entry as "/b" (the pattern is
+        # os.path.join-ed onto root "a/"): --exclude b keeps it, and
+        # --exclude '*' --include b drops it (pinned aws 2.36.40, dryrun).
+        kept = _rm("s3://b/a//b", _FakeS3Client(), dryrun=True, filter=GlobFilter().exclude("b"))
+        assert [(r.outcome, r.compare_key) for r in kept] == [(OpOutcome.DRYRUN, "/b")]
+        dropped = _rm(
+            "s3://b/a//b",
+            _FakeS3Client(),
+            dryrun=True,
+            filter=GlobFilter().exclude("*").include("b"),
+        )
+        assert dropped == []
+
     def test_blind_delete_no_listing(self) -> None:
         client = _FakeS3Client()
         results = _rm("s3://b/data/a.txt", client)

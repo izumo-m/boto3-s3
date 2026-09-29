@@ -98,13 +98,21 @@ def rm_filter_root(key: str, *, recursive: bool) -> str:
     (aws-cli ``filters._get_s3_root``). ``--exclude`` / ``--include``
     patterns resolve relative to this prefix, and the recursive listing uses
     it as the ``Prefix``. Always empty or ``/``-terminated.
+
+    aws joins the pattern onto that parent with ``os.path.join``, which adds
+    no second ``/`` after a parent that already ends in one, so the parent of
+    ``a//b`` is ``a/`` (the entry is matched as ``/b``, not ``b``) and the
+    parent of ``/b`` is ``""``; the same rule here keeps a glob's verdict on
+    such keys identical to aws's.
     """
     if recursive:
         return f"{key}/" if key and not key.endswith("/") else key
     if not key or key.endswith("/"):
         return key
     head, sep, _tail = key.rpartition("/")
-    return f"{head}/" if sep else ""
+    if not sep or not head:
+        return ""
+    return head if head.endswith("/") else f"{head}/"
 
 
 # Every key TransferOptions accepts (the TypedDict is total=False, so the

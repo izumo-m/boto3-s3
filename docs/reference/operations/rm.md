@@ -211,7 +211,11 @@ cases are:
   empty key gives `""`.
 - `recursive=False` with a key not ending in `/` — everything through its last
   `/`, so `"data/a.txt"` gives `"data/"`, and `""` when the key contains no
-  `/` at all, so `"a.txt"` gives `""`.
+  `/` at all, so `"a.txt"` gives `""`. A `/` that directly follows another, or
+  opens the key, is not counted twice: `"a//b"` gives `"a/"` and `"/b"` gives
+  `""`, so both entries are matched as `"/b"` — the relative key aws is left
+  with after joining a pattern onto its root with `os.path.join`, which adds
+  no second `/`.
 - `recursive=False` with a key that already ends in `/`, or an empty key — the
   key unchanged: `"data/"` gives `"data/"` and `""` gives `""`.
 
