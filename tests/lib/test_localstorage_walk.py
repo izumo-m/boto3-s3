@@ -763,6 +763,49 @@ class TestLeafVanishedBeforeItsTurn:
         assert keys == ["", "aaa.txt", "zzz/", "zzz/inner.txt"]
         assert warnings == [f"Skipping file {tmp_path / 'mmm.txt'}. File does not exist."]
 
+    @pytest.mark.skipif(not hasattr(os, "symlink"), reason="needs symlinks")
+    @pytest.mark.parametrize("become", ["dangling", "loop"])
+    def test_the_complete_view_keeps_a_leaf_that_became_a_link(
+        self, tmp_path: Path, become: str
+    ) -> None:
+        # The complete view's failed-follow rule (classify_child): the entry
+        # is kept as the link's own lstat leaf, warned when links are followed
+        # and silently otherwise - the same leaf at its turn must not vanish
+        # merely because the change came after the parent's scan. Before, the
+        # yield-time re-stat dropped it with a warning in both modes.
+        _make_tree(tmp_path, "aaa.txt", "mmm.txt", "zzz/inner.txt")
+        target = tmp_path / "mmm.txt"
+
+        def swap() -> None:
+            target.unlink()
+            target.symlink_to(tmp_path / ("nowhere" if become == "dangling" else "mmm.txt"))
+
+        for follow, expected_warnings in (
+            (True, [f"Skipping file {target}. File does not exist."]),
+            (False, []),
+        ):
+            walker = _MutateAtFinalize(target, swap)
+            warnings: list[str] = []
+            storage = LocalStorage(
+                str(tmp_path), walker=walker, follow_symlinks=follow, enumerate_all_entries=True
+            )
+            infos = list(storage.walk_local(on_warning=warnings.append))
+            assert walker.fired
+            assert [info.compare_key for info in infos] == [
+                "",
+                "aaa.txt",
+                "mmm.txt",
+                "zzz/",
+                "zzz/inner.txt",
+            ]
+            leaf = infos[2]
+            assert leaf.is_symlink
+            assert leaf.stat_result is not None and stat.S_ISLNK(leaf.stat_result.st_mode)
+            assert leaf.size == target.lstat().st_size
+            assert warnings == expected_warnings
+            target.unlink()
+            target.write_bytes(b"x" * 3)
+
     def test_the_paged_scan_drops_it_too(self, tmp_path: Path) -> None:
         # sync consumes the walk through scan, so pin the warn-skip there as well.
         _make_tree(tmp_path, "aaa.txt", "mmm.txt", "zzz/inner.txt")

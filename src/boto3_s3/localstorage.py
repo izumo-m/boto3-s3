@@ -689,7 +689,11 @@ class LocalFileGenerator:
           runs on the path - normally ``File does not exist.``, rc 2 - and the
           leaf is dropped, warned or not, like aws-cli's ``_safely_get_file_stats``
           returning nothing. Without this the stale record was submitted and the
-          transfer failed to open it (rc 1);
+          transfer failed to open it (rc 1). The complete view first tries the
+          link's own lstat (``_lstat_leaf``): a leaf that became a dangling
+          link or a loop is kept as that lstat leaf, warned only when this
+          walk follows links - ``classify_child``'s failed-follow rule, at
+          the leaf's turn;
         - it says ``S_IFDIR``: the returned record is the promoted directory
           (built from this same stat, which is the **followed** one
           ``os.path.isdir`` takes), which ``walk_dir`` descends. Without this the
@@ -729,6 +733,15 @@ class LocalFileGenerator:
         try:
             st = os.stat(path)
         except (OSError, ValueError):
+            if options.enumerate_all_entries:
+                # The complete view's rule for a link whose follow fails
+                # (classify_child's): warn when this walk follows links, keep
+                # the entry as the link's own lstat leaf either way - a leaf
+                # that became a dangling link or a loop since the scan is that
+                # case at its turn. Gone altogether (no lstat either) drops it.
+                fallback = self._lstat_leaf(path, info, options=options, notify=notify)
+                if fallback is not None:
+                    return fallback
             # aws-cli runs its battery on the path the stat failed on and skips
             # the leaf either way (a battery that finds nothing wrong - the race
             # healed between the two calls - still yields no file stats).
@@ -757,6 +770,42 @@ class LocalFileGenerator:
         info.size = size
         info.mtime = mtime
         info.stat_result = st
+        return info
+
+    def _lstat_leaf(
+        self,
+        path: str,
+        info: LocalFileInfo,
+        *,
+        options: LocalScanOptions,
+        notify: Callable[[str], None],
+    ) -> LocalFileInfo | None:
+        """``info`` refreshed as the link's own lstat leaf, or ``None`` when even that is gone.
+
+        The yield-time counterpart of ``symlink_child``'s fallback for the
+        complete view: the followed stat failed, so the record describes the
+        link itself (``size`` / ``mtime`` / ``stat_result`` from lstat,
+        ``is_symlink`` set), warned "File does not exist." only when this walk
+        follows links - a no-follow walk keeps a link silently. A path that is
+        no link at all (the stat failed for another reason) is left to the
+        caller's battery.
+        """
+        try:
+            lst = os.lstat(path)
+        except OSError:
+            return None
+        if not stat_module.S_ISLNK(lst.st_mode):
+            return None
+        if options.follow_symlinks:
+            notify(f"Skipping file {path}. File does not exist.")
+        size, mtime = _size_mtime(lst)
+        if mtime is None:
+            notify(_INVALID_TIMESTAMP)
+            mtime = self.EPOCH_TIME
+        info.size = size
+        info.mtime = mtime
+        info.stat_result = lst
+        info.is_symlink = True
         return info
 
     def promoted_directory(
