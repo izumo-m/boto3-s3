@@ -581,8 +581,9 @@ already issued to S3 cannot be aborted safely.
 For the transfer lanes of `cp` / `mv` / `sync`, `GRACEFUL` is a drain: the
 operation stops accepting new work and lets everything it already accepted run
 to completion, so those items report their real outcomes and no `CANCELLED`
-record arises. `IMMEDIATE` additionally cancels pending and in-flight transfers,
-and then an accepted item that had not started — or was abandoned mid-flight —
+record arises. `IMMEDIATE` additionally cancels pending and in-flight transfers
+(whenever it arrives once the engine is built, a submission waiting on the
+engine's backpressure included), and then an accepted item that had not started — or was abandoned mid-flight —
 reports `CANCELLED`, while an in-flight request that completes despite the
 cancellation reports its real outcome, since its bytes really landed. Work never
 accepted, because the submission loop stopped before reaching it, produces no

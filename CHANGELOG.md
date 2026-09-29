@@ -6,6 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - A streaming upload from a seekable stream is no longer cut to `expected_size`; the hint now sizes only a stream the engine cannot size itself.
+- An immediate cancellation now also interrupts a CRT run whose submission is waiting on the engine's backpressure.
 - An incomplete listing, bucket or HeadObject response, or a timestamp the host cannot represent, now raises `MalformedResponseError` instead of the bare `KeyError` / `OverflowError`.
 - Log masking now also hides a legacy SigV2 `Authorization` header whose access key id is not AWS-shaped (an S3-compatible endpoint's, say), and such an id in a credentials response body.
 

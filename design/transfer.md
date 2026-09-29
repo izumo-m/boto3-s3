@@ -110,7 +110,12 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   exits 1). The exception to that is `CancelMode.GRACEFUL`'s
   `CancelledError`, which drains by definition (graceful cancel = stop
   submitting, run accepted work; exceptions.md). `CancelMode.IMMEDIATE`
-  additionally calls `cancel()` on the active top-level transfer futures.
+  additionally calls `cancel()` on the active top-level transfer futures, from
+  a watcher thread that runs from the manager's construction to the end of the
+  drain - so the escalation is acted on while the submitting thread waits on
+  the engine's backpressure (the CRT manager's transfer semaphore, which a
+  stalled request would otherwise hold until it completed by itself) as well
+  as during the drain.
   Futures already running may still finish - a cancelled-mid-flight transfer
   that completes reports its real outcome (s3transfer lets the completion
   win), while a revoked one reports one `CANCELLED` record

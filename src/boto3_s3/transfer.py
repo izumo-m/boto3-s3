@@ -885,6 +885,9 @@ class Transferrer:
         self._futures_lock = threading.Lock()
         self._futures: set[Any] = set()
         self._shutdown_done = threading.Event()
+        # The immediate-cancel watcher, alive from the manager's construction
+        # (`_get_manager`) until the shutdown is done (`__exit__`).
+        self._watcher: threading.Thread | None = None
         # True once this run's cancel token ordered accepted transfers
         # cancelled - set by `__exit__` folding the manager under the token's
         # own `CancelledError`, and by `_cancel_futures` when the drain-time
@@ -966,14 +969,10 @@ class Transferrer:
             and self._cancel_token.mode is CancelMode.GRACEFUL
         )
         cancel = exc is not None and not graceful_drain
-        watcher: threading.Thread | None = None
-        if self._cancel_token is not None and not cancel:
-            watcher = threading.Thread(
-                target=self._watch_for_immediate_cancel,
-                name="boto3-s3-cancel",
-                daemon=True,
-            )
-            watcher.start()
+        # The immediate-cancel watcher has run since the manager was built
+        # (`_get_manager`); the drain keeps it alive until the shutdown is
+        # done, so a mid-drain escalation to IMMEDIATE stays effective.
+        watcher = self._watcher
         try:
             if cancel:
                 # A CancelledError with this run's token cancelled is the
@@ -1005,7 +1004,12 @@ class Transferrer:
                 self._capture.unregister(self._client)
 
     def _watch_for_immediate_cancel(self) -> None:
-        """Cancel tracked futures if the token escalates while shutdown drains."""
+        """Cancel tracked futures once the token escalates to IMMEDIATE.
+
+        Runs from the manager's construction until the shutdown is done, so
+        the escalation is acted on during submission and during the drain
+        alike.
+        """
         token = self._cancel_token
         assert token is not None
         while not self._shutdown_done.wait(0.1):
@@ -1485,6 +1489,20 @@ class Transferrer:
                 self._capture = _ResponseCapture()
                 self._capture.register(self._client)
             self._manager = manager
+            if self._cancel_token is not None:
+                # From here to the end of the drain, not only during the
+                # drain: an IMMEDIATE order must reach in-flight work while
+                # the submitting thread waits on the engine's backpressure
+                # (the CRT manager's transfer semaphore), where a stalled
+                # request would otherwise hold the run until it completed by
+                # itself (measured: 25 s of a 25 s stall for 140 files,
+                # against 3 s once the loop had finished submitting 20).
+                self._watcher = threading.Thread(
+                    target=self._watch_for_immediate_cancel,
+                    name="boto3-s3-cancel",
+                    daemon=True,
+                )
+                self._watcher.start()
         return self._manager
 
     def _create_crt_manager(self) -> Any | None:

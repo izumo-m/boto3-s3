@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 import os
 import threading
+import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2993,3 +2994,122 @@ class TestAnnotationErrorWordingScope:
             "(none). Annotations that failed: ann-a: An error occurred "
             "(AccessDenied) when calling the PutObjectAnnotation operation: stub."
         )
+
+
+class _BackpressureFuture(_FakeCrtFuture):
+    """A pending transfer that settles on ``cancel()`` or at shutdown."""
+
+    def __init__(self, key: str, subscribers: list[Any], manager: _BackpressureManager) -> None:
+        super().__init__(RuntimeError("unused"))
+        self._key = key
+        self._subscribers = subscribers
+        self._manager = manager
+        self._settled = threading.Event()
+        self._outcome: BaseException | None = None
+
+    def done(self) -> bool:
+        return self._settled.is_set()
+
+    def result(self) -> None:
+        if self._outcome is not None:
+            raise self._outcome
+        return None
+
+    def cancel(self) -> None:
+        self._outcome = _CrtCancelError("AWS_ERROR_S3_CANCELED: Request successfully cancelled")
+        self._manager.cancelled.append(self._key)
+        self.settle()
+
+    def settle(self) -> None:
+        if self._settled.is_set():
+            return
+        self._settled.set()
+        for subscriber in self._subscribers:
+            on_done = getattr(subscriber, "on_done", None)
+            if on_done is not None:
+                on_done(self)
+        self._manager.slot.release()
+
+
+class _BackpressureManager:
+    """A stand-in with one in-flight slot: the next hand-over blocks until the
+    previous transfer settles, as the CRT manager's transfer semaphore does."""
+
+    def __init__(self) -> None:
+        self.slot = threading.Semaphore(1)
+        self.cancelled: list[str] = []
+        self._accepted: list[_BackpressureFuture] = []
+
+    def upload(self, **kwargs: Any) -> _BackpressureFuture:
+        assert self.slot.acquire(timeout=10), "the in-flight slot was never released"
+        future = _BackpressureFuture(kwargs["key"], list(kwargs["subscribers"]), self)
+        self._accepted.append(future)
+        return future
+
+    def shutdown(self) -> None:
+        for future in list(self._accepted):
+            future.settle()
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self.shutdown()
+
+
+class TestImmediateCancelWatcher:
+    """The immediate-cancel watcher runs from the manager's construction, not
+    only during the drain: an IMMEDIATE order must reach in-flight work while
+    the submitting thread waits on the engine's backpressure (measured on the
+    CRT engine against a server stalling every PUT 25 s: 140 files took the
+    whole 25 s to honor a cancel ordered at 3 s, 20 files - the loop done
+    submitting, the drain's watcher up - returned at 3 s)."""
+
+    @staticmethod
+    def _watchers() -> list[threading.Thread]:
+        return [thread for thread in threading.enumerate() if thread.name == "boto3-s3-cancel"]
+
+    def test_the_watcher_lives_from_the_manager_build_to_the_exit(self) -> None:
+        client, _ = make_recording_client([])
+        transferrer = Transferrer(
+            TransferType.UPLOAD, client, transfer_config=_SYNC_CONFIG, cancel_token=CancelToken()
+        )
+        assert self._watchers() == []
+        with transferrer:
+            transferrer.prepare()
+            assert len(self._watchers()) == 1
+        assert self._watchers() == []
+
+    def test_no_token_means_no_watcher(self) -> None:
+        client, _ = make_recording_client([])
+        with Transferrer(TransferType.UPLOAD, client, transfer_config=_SYNC_CONFIG) as transferrer:
+            transferrer.prepare()
+            assert self._watchers() == []
+
+    def test_an_escalation_frees_a_submission_waiting_on_backpressure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        manager = _BackpressureManager()
+        monkeypatch.setattr(Transferrer, "_create_crt_manager", lambda _self: manager)
+        client, _ = make_recording_client([])
+        token = CancelToken()
+        results: list[OpResult] = []
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x")
+
+        def item(key: str) -> TransferItem:
+            return TransferItem(
+                compare_key=key, size=1, src_path=str(src), dest_bucket="b", dest_key=key
+            )
+
+        with Transferrer(
+            TransferType.UPLOAD, client, cancel_token=token, on_result=results.append
+        ) as transferrer:
+            transferrer.submit(item("a"))
+            threading.Timer(0.3, lambda: token.cancel(mode=CancelMode.IMMEDIATE)).start()
+            started = time.monotonic()
+            # Blocked on the slot "a" holds until the watcher cancels "a".
+            transferrer.submit(item("b"))
+            assert time.monotonic() - started < 5.0
+        assert manager.cancelled == ["a"]
+        assert {result.dest_info or result.dest: result.outcome for result in results} == {
+            "s3://b/a": OpOutcome.CANCELLED,
+            "s3://b/b": OpOutcome.SUCCEEDED,
+        } or [result.outcome for result in results] == [OpOutcome.CANCELLED, OpOutcome.SUCCEEDED]
