@@ -403,20 +403,23 @@ Nothing is validated: a string that is not an S3 path simply reports `False`,
 unless its first segment happens to end in one of the two alias suffixes.
 
 The same module, `boto3_s3.pathresolver`, also carries the string probes
-`is_mrap_path`, `is_outpost_path`, `is_outpost_alias_path` and
-`is_s3express_path`, which are not
+`is_mrap_path`, `is_outpost_path`, `is_outpost_alias_path`,
+`is_s3express_path` and `is_s3express_accesspoint_path`, which are not
 re-exported from the package root. They name the target shapes whose signing
 scheme botocore has to resolve for itself — asymmetric SigV4a for the first
 three (a Multi-Region Access Point, and an S3 on Outposts access point in
-either notation, ARN or `--op-s3` alias), `sigv4-s3express` for the fourth —
+either notation, ARN or `--op-s3` alias), `sigv4-s3express` for the last two
+(a directory bucket, `--x-s3`, and an access point of one, `--xa-s3`; the two
+stay separate because the AWS CLI's own `is_s3express_bucket`, which the
+`sync` rejection mirrors, tests only the bucket suffix) —
 so a caller that pins a symmetric
 `signature_version` on its client (as the `boto3-s3` command does) can stand
 that pin down for them. They test what botocore's endpoint rules test rather
 than the ARN spellings above: an MRAP is an `s3` access-point ARN with an
 empty region field, and the alias probe reads the fixed-width slices the rules
-read. The two suffix probes, `is_outpost_alias_path` and `is_s3express_path`,
-require the `s3://` scheme, since a local path can plausibly end in `--op-s3`
-or `--x-s3`.
+read. The suffix probes, `is_outpost_alias_path`, `is_s3express_path` and
+`is_s3express_accesspoint_path`, require the `s3://` scheme, since a local
+path can plausibly end in `--op-s3` or `--x-s3`.
 
 ## S3Deleter
 

@@ -850,10 +850,10 @@ def _includes_endpoint_auth_path(args: argparse.Namespace) -> bool:
 
     True for the shapes that must sign asymmetric SigV4a (an MRAP bucket, an
     S3 Outposts access point in either notation - the ARN or the ``--op-s3``
-    alias) and for an S3 Express directory bucket (must sign
-    ``sigv4-s3express`` with `CreateSession` credentials) - the shapes an
-    explicit `signature_version` would mis-sign, so the s3v4 pin stands down
-    for them.
+    alias) and for an S3 Express directory bucket or one of its access points
+    (``--x-s3`` / ``--xa-s3``: must sign ``sigv4-s3express`` with
+    `CreateSession` credentials) - the shapes an explicit `signature_version`
+    would mis-sign, so the s3v4 pin stands down for them.
     Reads the parsed positionals off the namespace - `paths` (a string, or the
     transfer family's two-item list) and presign's `path`. The single-path
     commands' positionals arrive paramfile-expanded by client-build time; the
@@ -879,6 +879,7 @@ def _includes_endpoint_auth_path(args: argparse.Namespace) -> bool:
         is_mrap_path,
         is_outpost_alias_path,
         is_outpost_path,
+        is_s3express_accesspoint_path,
         is_s3express_path,
     )
 
@@ -899,6 +900,7 @@ def _includes_endpoint_auth_path(args: argparse.Namespace) -> bool:
             or is_outpost_path(value)
             or is_outpost_alias_path(value)
             or is_s3express_path(value)
+            or is_s3express_accesspoint_path(value)
         )
         for value in values
     )

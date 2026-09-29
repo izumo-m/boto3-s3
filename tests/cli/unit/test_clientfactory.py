@@ -622,6 +622,17 @@ class TestBuildClient:
         resolver = client._ruleset_resolver  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
         assert resolver._requested_auth_scheme is None  # pyright: ignore[reportPrivateUsage]
 
+    def test_s3express_access_point_lifts_the_pin_too(self) -> None:
+        # An access point of a directory bucket (--xa-s3) resolves to the same
+        # sigv4-s3express scheme as the bucket - measured against a recording
+        # endpoint: aws dials CreateSession first, while the pin left on sent
+        # a plain SigV4 ListObjectsV2 with no session.
+        args = _parse(["--region", "us-east-1"])
+        args.paths = "s3://myap--use1-az4--xa-s3/"
+        client = clientfactory.build_client(args)
+        resolver = client._ruleset_resolver  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+        assert resolver._requested_auth_scheme is None  # pyright: ignore[reportPrivateUsage]
+
     def test_local_x_s3_suffix_lookalike_keeps_the_pin(self) -> None:
         # A local path can plausibly end in --x-s3; only the s3:// form names
         # a directory bucket, so the pin stays.

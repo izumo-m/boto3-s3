@@ -338,7 +338,8 @@ planner, `transfer`'s engine pair + the `--no-overwrite` floor probe,
 `globsieve`, `localstorage.translate_os_error`, `awsconfig`'s shared size
 core, `awsclicompare`, `crtsupport`, `masking`'s `SecretMaskingFilter`, and
 `pathresolver`'s pin stand-down probes `is_mrap_path` / `is_outpost_path` /
-`is_outpost_alias_path` / `is_s3express_path`). What the in-repo CLI needs, an external
+`is_outpost_alias_path` / `is_s3express_path` / `is_s3express_accesspoint_path`).
+What the in-repo CLI needs, an external
 compatible-tool author needs too (overview.md's mission), so a CLI dependency
 is met by *publishing* the symbol, never by importing a private one. Enforced
 by `tests/cli/unit/test_library_surface.py`, which walks every `boto3_s3`

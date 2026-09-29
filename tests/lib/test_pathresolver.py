@@ -21,6 +21,7 @@ from boto3_s3.pathresolver import (
     is_mrap_path,
     is_outpost_alias_path,
     is_outpost_path,
+    is_s3express_accesspoint_path,
     is_s3express_path,
 )
 from tests.utils.fakes3 import client_error
@@ -326,6 +327,26 @@ class TestIsS3ExpressPath:
         assert not is_s3express_path("./backup--x-s3")
         assert not is_s3express_path("backup--x-s3")
         assert not is_s3express_path("-")
+
+
+class TestIsS3ExpressAccessPointPath:
+    def test_the_access_point_suffix_matches_under_the_scheme(self) -> None:
+        # The endpoint rules sign an access point of a directory bucket
+        # (accessPointSuffix --xa-s3) sigv4-s3express like the bucket itself,
+        # so the CLI's pin must stand down for it too - measured: with the pin
+        # left on, ours sent a plain SigV4 ListObjectsV2 where aws first dials
+        # CreateSession and signs with the session's scope.
+        assert is_s3express_accesspoint_path("s3://myap--use1-az4--xa-s3/k.txt")
+        assert is_s3express_accesspoint_path("s3://myap--use1-az4--xa-s3")
+        assert not is_s3express_accesspoint_path("s3://mybkt--use1-az4--x-s3/k.txt")
+        assert not is_s3express_accesspoint_path("s3://plain-bucket/inner--xa-s3")
+        assert not is_s3express_accesspoint_path("./backup--xa-s3")
+        assert not is_s3express_accesspoint_path("-")
+
+    def test_the_bucket_probe_keeps_its_narrower_answer(self) -> None:
+        # aws-cli's is_s3express_bucket tests only --x-s3, and the sync
+        # rejection mirrors it; the access point probe is a separate question.
+        assert not is_s3express_path("s3://myap--use1-az4--xa-s3/k.txt")
 
 
 class TestResolve:

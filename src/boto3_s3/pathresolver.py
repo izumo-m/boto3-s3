@@ -176,6 +176,25 @@ def is_s3express_path(path: str) -> bool:
     return bucket.endswith("--x-s3")
 
 
+def is_s3express_accesspoint_path(path: str) -> bool:
+    """Whether an ``s3://`` path names an access point of an S3 Express directory
+    bucket (the ``--xa-s3`` suffix).
+
+    The endpoint rules sign a request through such an access point
+    ``sigv4-s3express`` exactly as they sign the directory bucket itself, off
+    the ``accessPointSuffix`` they read from the bucket part, so the same pin
+    stand-down applies as for `is_s3express_path`. It is a separate probe
+    because aws-cli's own ``is_s3express_bucket`` tests only ``--x-s3``, and
+    the places that mirror that test (the ``sync`` rejection, the
+    ``--case-conflict`` warning) must keep its narrower answer. The ``s3://``
+    scheme is required for the same reason as there.
+    """
+    if not path.startswith("s3://"):
+        return False
+    bucket, _key = _split_bucket_key(path)
+    return bucket.endswith("--xa-s3")
+
+
 def _split_bucket_key(path: str) -> tuple[str, str]:
     """Scheme-stripped ``(bucket, key)`` via the S3 grammar on ``S3Storage``.
 
@@ -351,5 +370,6 @@ __all__ = [
     "is_mrap_path",
     "is_outpost_alias_path",
     "is_outpost_path",
+    "is_s3express_accesspoint_path",
     "is_s3express_path",
 ]
