@@ -52,9 +52,11 @@ S3(session=None, *, endpoint_url=None, config=None,
   `CLIENT_REGION` (the default) reads it off the client that was built, which
   is what boto3 does. Passing your own already-resolved region uses that value
   instead, `None` included — and `None` is the whole point: when nothing
-  configures a region, botocore quietly gives the client the `aws-global`
-  pseudo-region, while `aws s3` resolves its own chain to `None` and awscrt
-  then refuses to build a client at all. Only reproducing that refusal needs
+  configures a region, botocore quietly gives the client one anyway
+  (`us-east-1` by default, the `aws-global` pseudo-region under the regional
+  endpoint mode the `boto3-s3` command pins), while `aws s3` resolves its own
+  chain to `None` and awscrt then refuses to build a client at all. Only
+  reproducing that refusal needs
   it. Like the flag above it does nothing unless
   `TransferConfig.preferred_transfer_client` selects the CRT engine.
 - **`crt_sign_requests`** — whether the CRT transfer engine signs its

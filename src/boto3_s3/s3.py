@@ -859,8 +859,10 @@ class S3:
     from. ``CLIENT_REGION`` (the default) is boto3's source, the built client's
     own ``meta.region_name``; an explicit value is the application's already
     resolved region and rides verbatim. The distinction only shows when nothing
-    resolves a region at all: botocore then invents the ``aws-global``
-    pseudo-region for the client, while aws-cli's own region chain yields
+    resolves a region at all: botocore then hands the client a concrete region
+    anyway - ``us-east-1`` in its default (legacy) us-east-1 endpoint mode, the
+    ``aws-global`` pseudo-region under the regional mode the CLI pins - while
+    aws-cli's own region chain yields
     ``None`` and awscrt refuses to build (its ``assert isinstance(region,
     str)``). Passing ``crt_region=None`` declares that absence and reproduces
     that refusal; again only the CLI distribution sets it (design/crt.md
