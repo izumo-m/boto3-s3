@@ -335,6 +335,28 @@ class TestValidationOperationAttribution:
         assert exc_info.value.__cause__ is cause
 
 
+class TestStrictChecksPrecedeTheGates:
+    """aws rejects the unsupported ARN families before every other check (its
+    ``add_paths`` runs ahead of the stream checks and ``_validate_path_args``),
+    so a bad location reports as such whatever else is wrong with the call."""
+
+    _OLAP = "s3://arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/olap/k"
+
+    def test_mvs_same_path_check_comes_after(self) -> None:
+        with pytest.raises(ValidationError, match="Object Lambda") as exc_info:
+            S3().mv(self._OLAP, self._OLAP)
+        assert exc_info.value.operation == "mv"
+
+    def test_the_stream_gates_come_after(self) -> None:
+        with pytest.raises(ValidationError, match="Object Lambda"):
+            S3().cp(IOStorage(io.BytesIO(b"x")), self._OLAP, recursive=True)
+        with pytest.raises(ValidationError, match="Object Lambda"):
+            S3().cp(self._OLAP, IOStorage(io.BytesIO()), no_overwrite=True)
+        with pytest.raises(ValidationError, match="Object Lambda") as exc_info:
+            S3().mv(self._OLAP, IOStorage(io.BytesIO()), recursive=True)
+        assert exc_info.value.operation == "mv"
+
+
 class TestStorageMethodAttribution:
     """A storage's ``open`` / ``delete`` raise unnamed; the operation names them.
 

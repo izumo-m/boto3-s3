@@ -1234,6 +1234,13 @@ class S3:
             transfer_config = self._transfer_config
         src_storage = self.resolve(src)
         dest_storage = self.resolve(dest)
+        # aws rejects the unsupported ARN families before any other check (its
+        # add_paths runs ahead of the stream gates and _validate_path_args), so
+        # the strict checks come first here too: a bad location reports as
+        # such whatever else is wrong with the call. Construction was
+        # permissive; a stream side validates as a no-op.
+        _validate_storage(src_storage, operation="cp")
+        _validate_storage(dest_storage, operation="cp")
         if isinstance(src_storage, IOStorage) or isinstance(dest_storage, IOStorage):
             self._cp_stream(
                 src_storage,
@@ -1282,12 +1289,13 @@ class S3:
         capture_response: bool = False,
         options: TransferOptions,
     ) -> None:
-        """The shared cp/mv pipeline for parsed, non-stream locations.
+        """The shared cp/mv pipeline for parsed, validated, non-stream locations.
 
         Route classification, the pre-batch checks, enumeration, the gates,
         and the submit loop - identical for both operations; ``mv`` differs
         only by what it validated beforehand and by ``is_move`` (the engine's
-        delete-source + MOVE reporting).
+        delete-source + MOVE reporting). Both sides passed the strict
+        location checks in the caller, ahead of its own gates.
 
         The built-in routes assert the concrete ``LocalStorage`` / ``S3Storage``
         pair, because the engine reaches into ``S3Storage``'s client/bucket and
@@ -1299,8 +1307,6 @@ class S3:
         surfaces as a clear ``ValidationError`` instead of failing deep in the
         engine.
         """
-        _validate_storage(src_storage, operation=operation)
-        _validate_storage(dest_storage, operation=operation)
         # A pre-cancelled token acts before this method's side effects: the
         # destination pre-create below, the case-gate's destination walk, and
         # any lazily-deferred client build (a caller-made S3Storage without a
@@ -1612,21 +1618,19 @@ class S3:
 
     @staticmethod
     def _stream_s3_peer(peer: Storage) -> S3Storage:
-        """The S3 side facing a stream in ``_cp_stream``, validated.
+        """The S3 side facing a stream in ``_cp_stream``.
 
-        ``cp`` already resolved both sides, so the stream's peer is a ``Storage``
-        instance: an ``S3Storage`` is the only well-formed one (a local or other
-        non-S3 peer is the "stream on one side" error, not the generic
-        `_resolve_s3_target` message, which reads as if ``cp`` never takes a local
-        path). Construction was permissive, so run the strict aws-cli checks
-        before use.
+        ``cp`` already resolved and validated both sides, so the stream's peer
+        is a ``Storage`` instance: an ``S3Storage`` is the only well-formed one
+        (a local or other non-S3 peer is the "stream on one side" error, not
+        the generic `_resolve_s3_target` message, which reads as if ``cp``
+        never takes a local path).
         """
         if not isinstance(peer, S3Storage):
             raise ValidationError(
                 "cp supports a stream on one side only (the other must be s3://)",
                 operation="cp",
             )
-        _validate_storage(peer, operation="cp")
         return peer
 
     def mv(
@@ -1679,6 +1683,10 @@ class S3:
             transfer_config = self._transfer_config
         src_storage = self.resolve(src)
         dest_storage = self.resolve(dest)
+        # The strict location checks first, ahead of the stream gates and the
+        # same-path check below - aws's order (see cp).
+        _validate_storage(src_storage, operation="mv")
+        _validate_storage(dest_storage, operation="mv")
         if isinstance(src_storage, IOStorage):
             # A move deletes its source, which a stream cannot be (no delete).
             # The destination side is different: a single-object move onto a
