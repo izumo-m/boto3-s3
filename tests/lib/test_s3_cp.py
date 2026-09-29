@@ -104,6 +104,30 @@ class TestUploadRoute:
         assert ops(calls) == ["PutObject"]
         assert calls[0].params["Key"] == "up/a.txt"
 
+    @pytest.mark.skipif(not hasattr(os, "symlink"), reason="needs symlinks")
+    def test_a_source_typed_through_a_symlink_and_dot_dot_is_admitted_like_aws(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `lsub/../x` is sub/x to the kernel (lsub -> sub/other) and <cwd>/x
+        # to os.path.abspath, which folds `..` lexically. aws's pre-check asks
+        # the kernel and admits the source; its generator then looks for the
+        # lexical form and warns "File does not exist." - rc 2 (measured).
+        # Ours tested abspath up front and refused it: fatal error, rc 1.
+        (tmp_path / "sub" / "other").mkdir(parents=True)
+        (tmp_path / "sub" / "x").write_bytes(b"sub-x")
+        (tmp_path / "lsub").symlink_to(tmp_path / "sub" / "other")
+        monkeypatch.chdir(tmp_path)
+        client, calls = make_recording_client([])
+        results: list[OpResult] = []
+        S3().cp(
+            LocalStorage("lsub/../x"),
+            S3Storage("s3://bucket/k", client=client),
+            on_result=results.append,
+        )
+        assert calls == []
+        assert [r.outcome for r in results] == [OpOutcome.WARNED]
+        assert str(results[0].error) == f"Skipping file {tmp_path / 'x'}. File does not exist."
+
     def test_an_empty_local_path_is_rejected_before_anything_runs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

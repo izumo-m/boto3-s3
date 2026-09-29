@@ -500,6 +500,18 @@ on the `mv` download route.
 constructor input, the construction-time absolute form, the durability knob and
 the walk strategy respectively.
 
+### exists()
+
+Whether the location exists, asked the way the AWS CLI's pre-check asks:
+`os.path.exists` on the path as typed, anchored at the construction-time
+working directory like `abspath` but without `abspath`'s lexical
+normalization. The two differ once `..` follows a symlinked directory —
+`lsub/../x` is `sub/x` to the kernel and `<cwd>/x` to `abspath` — and the AWS
+CLI admits such a source up front and lets its generator warn "File does not
+exist." (exit code 2) for the lexical form; the operations' source existence
+check asks this method so they admit the same, and the walk or `get_fileinfo`
+then answers for the lexical form. An empty path does not exist.
+
 ### relative_path(filename, start=os.path.curdir)
 
 A static method rendering a local path relative to `start` in the form `aws`

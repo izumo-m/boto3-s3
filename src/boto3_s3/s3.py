@@ -587,11 +587,13 @@ def _check_local_source_exists(storage: LocalStorage, *, operation: str) -> None
     (Their bare RuntimeError -> rc 255; ``NotFoundError`` without a
     ``ClientError`` cause maps the same.)
     """
-    # Test the construction-time abspath (the anchor scan / the plan use) so
-    # the check agrees with the walk even if the process chdir'd since the
-    # storage was built; the message keeps the raw form, like aws echoing the
-    # user-typed path.
-    if not os.path.exists(storage.abspath):
+    # exists() asks the kernel about the path as typed, anchored at the
+    # construction-time cwd (so the check survives a chdir): what aws-cli's
+    # os.path.exists on the raw path admits - including `..` through a
+    # symlinked directory, which the lexical abspath would refuse - ours
+    # admits, and the generator then warns like aws-cli's. The message keeps
+    # the raw form, like aws echoing the user-typed path.
+    if not storage.exists():
         raise NotFoundError(
             f"The user-provided path {storage.path} does not exist.", operation=operation
         )

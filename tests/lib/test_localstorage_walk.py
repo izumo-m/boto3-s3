@@ -2100,6 +2100,46 @@ class TestEmptyPath:
         LocalStorage(Path("")).validate()  # pathlib spells "" as "."
 
 
+class TestExists:
+    def test_asks_the_kernel_about_the_path_as_typed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # abspath folds `..` lexically; the kernel resolves it after the
+        # symlink. aws-cli's pre-check asks the kernel, so exists() does too.
+        (tmp_path / "sub" / "other").mkdir(parents=True)
+        (tmp_path / "sub" / "x").write_bytes(b"x")
+        if not hasattr(os, "symlink"):
+            pytest.skip("needs symlinks")
+        (tmp_path / "lsub").symlink_to(tmp_path / "sub" / "other")
+        monkeypatch.chdir(tmp_path)
+        storage = LocalStorage("lsub/../x")
+        assert storage.exists()
+        assert not os.path.exists(storage.abspath)
+        assert not LocalStorage("lsub/../nosuch").exists()
+
+    def test_is_anchored_at_the_construction_cwd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        workdir = tmp_path / "work"
+        workdir.mkdir()
+        (workdir / "a.txt").write_bytes(b"x")
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(workdir)
+        storage = LocalStorage("a.txt")
+        monkeypatch.chdir(elsewhere)
+        assert storage.exists()
+        assert not LocalStorage("a.txt").exists()
+
+    def test_the_empty_path_does_not_exist(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # os.path.exists("") is False; only abspath / join would turn "" into
+        # the working directory.
+        monkeypatch.chdir(tmp_path)
+        assert not LocalStorage("").exists()
+
+
 class TestLocalStorageIO:
     def test_open_round_trip_creates_parents(self, tmp_path: Path) -> None:
         storage = LocalStorage(tmp_path)

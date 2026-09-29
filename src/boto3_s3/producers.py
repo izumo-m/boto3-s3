@@ -158,6 +158,30 @@ def _single_source_info(
     return single
 
 
+def _warn_absent_local_source(src: Storage, transferrer: Transferrer) -> None:
+    """aws-cli's verdict for a single local source its pre-check admitted but
+    its generator cannot find: "File does not exist.", a warning and rc 2.
+
+    The pre-check (``_check_local_source_exists`` -> `LocalStorage.exists`)
+    asks the kernel about the path as typed, the generator looks for the
+    lexical ``abspath`` form, and ``..`` after a symlinked directory makes
+    those two different files (``lsub/../x``); a source that vanished between
+    the two is the same case. `get_fileinfo` returns a silent ``None`` for
+    absence by contract, so the warning aws-cli's ``should_ignore_file``
+    sends there is the operation layer's. A symlink not followed is aws-cli's
+    silent skip, and an entry the stat warned away (special, unreadable) has
+    already warned - both leave the path in place, so only true absence
+    warns.
+    """
+    if not isinstance(src, LocalStorage):
+        return
+    path = src.abspath
+    if not src.default_scan_options().follow_symlinks and os.path.islink(path):
+        return
+    if not os.path.exists(path):
+        transferrer.warner.warn(f"Skipping file {path}. File does not exist.")
+
+
 def open_side_display(storage: Storage, key: str) -> str:
     """A display string for the custom (``open``-routed) side of a transfer.
 
@@ -348,6 +372,8 @@ def upload_items(
         # counterpart). None = warned-away (special/unreadable) or absent.
         # get_fileinfo has no filter, so an excluded single source is dropped here.
         single = _single_source_info(plan, transferrer, operation=operation)
+        if single is None:
+            _warn_absent_local_source(plan.src, transferrer)
         infos = iter([single] if single is not None else [])
         if item_filter is not None:
             infos = (info for info in infos if item_filter(info))

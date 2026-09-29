@@ -1447,6 +1447,10 @@ class LocalStorage(Storage):
         # entry. Binding the cwd here also keeps a relative path resolving
         # consistently if the process later chdir's.
         self._abspath = os.path.abspath(self._path)
+        # The same anchor without abspath's lexical normalization, for
+        # ``exists``: ``..`` folded by abspath and ``..`` resolved by the
+        # kernel name different files once a symlinked directory is involved.
+        self._unnormalized = os.path.join(os.getcwd(), self._path)
         # How this local source is read: symlink interpretation, whether every
         # metadata-readable native entry is enumerated before filtering, and
         # whether recursive descent guards against symlink cycles. Seeded into
@@ -1478,11 +1482,33 @@ class LocalStorage(Storage):
         """The construction-time absolute form of `path`.
 
         The anchor every scan, `get_fileinfo`, and transfer plan resolves
-        against (see `__init__`); existence checks and directory creation in
-        the operations use it too, so a relative `path` keeps meaning the same
-        directory even if the process chdir's after construction.
+        against (see `__init__`); directory creation in the operations uses
+        it too, so a relative `path` keeps meaning the same directory even if
+        the process chdir's after construction. The operations' source
+        existence check asks `exists` instead, which resolves the path the
+        way the kernel does rather than lexically.
         """
         return self._abspath
+
+    def exists(self) -> bool:
+        """Whether the location exists, asked the way aws-cli's pre-check asks.
+
+        aws-cli's ``_validate_path_args`` runs ``os.path.exists`` on the path
+        as typed - the kernel's resolution - while its generator then looks
+        for the lexical ``abspath`` form. The two differ once ``..`` follows a
+        symlinked directory: ``lsub/../x`` is ``sub/x`` to the kernel and
+        ``<cwd>/x`` to ``abspath``. aws-cli admits such a source and its
+        generator warns "File does not exist." (rc 2); testing ``abspath``
+        here refused it up front instead (rc 1). This asks the kernel, anchored
+        at the construction-time working directory like `abspath`, so the
+        operations admit what aws-cli admits and the walk / `get_fileinfo`
+        then answer for the lexical form. An empty path does not exist
+        (Python's own ``os.path.exists("")``; ``os.path.join`` would make it
+        the working directory).
+        """
+        if not self._path:
+            return False
+        return os.path.exists(self._unnormalized)
 
     @property
     def fsync(self) -> bool:
