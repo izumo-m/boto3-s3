@@ -11,12 +11,13 @@ aws-cli note: ``aws s3 rm`` deletes one key per ``DeleteObject`` call and never
 uses the batch API. The batched ``DeleteObjects`` here is a wire-level
 deviation that is observably equivalent for ordinary keys (a nonexistent key
 deletes "successfully" either way, and per-key success/failure is preserved via
-``Quiet=True`` plus the response ``Errors[]``). Keys that cannot be represented
-in the DeleteObjects XML 1.0 body fall back to per-key ``DeleteObject``, matching
-aws-cli instead of failing their whole batch (control characters ride that
-route fine; an unpaired surrogate cannot be carried by the HTTP layer on
-either route, and whether a listing can return such a key at all is
-unverified).
+``Quiet=True`` plus the response ``Errors[]``). Keys that cannot make the
+DeleteObjects XML 1.0 round trip - characters the body cannot hold, and a
+carriage return, which a response may hand back as a line feed - fall back to
+per-key ``DeleteObject``, matching aws-cli instead of failing their whole batch
+(control characters ride that route fine; an unpaired surrogate cannot be
+carried by the HTTP layer on either route, and whether a listing can return
+such a key at all is unverified).
 User-facing lines such as ``delete: s3://...`` are the CLI layer's job, fed by
 ``on_result``; the library only emits ``logging`` diagnostics.
 
@@ -75,21 +76,31 @@ logger = logging.getLogger(__name__)
 S3_DELETE_BATCH = 1000
 
 
-# The complement of XML 1.0's Char production: C0 controls other than
-# TAB/LF/CR, surrogate code points, and the two terminal BMP noncharacters.
-# A compiled class instead of a per-character Python loop: `_run_batch` runs
-# this over every submitted key.
-_XML_INCOMPATIBLE = re.compile("[^\t\n\r\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
+# What a DeleteObjects round trip cannot carry verbatim. The complement of XML
+# 1.0's Char production - C0 controls other than TAB/LF/CR, surrogate code
+# points, and the two terminal BMP noncharacters - cannot be written at all;
+# CR can be written (botocore sends it as a character reference) but not
+# relied on coming back: an XML parser turns a literal CR into LF (end-of-line
+# normalization), so a response naming the key with its CR unescaped is read
+# as a different key. A compiled class instead of a per-character Python loop:
+# `_run_batch` runs this over every submitted key.
+_XML_INCOMPATIBLE = re.compile("[^\t\n\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
 
 
 def _delete_objects_compatible(key: str) -> bool:
-    """Whether *key* can be serialized as XML 1.0 character data.
+    """Whether *key* survives a ``DeleteObjects`` round trip as XML character data.
 
-    ``DeleteObjects`` carries keys in an XML document. Botocore escapes CR/LF
-    before sending that document, but XML 1.0 still forbids the remaining C0
-    controls, surrogate code points, and the two terminal BMP noncharacters.
-    ``DeleteObject`` carries the key in the URL instead and is the same route
-    aws-cli uses for every key, so incompatible keys must take that path.
+    ``DeleteObjects`` carries keys in an XML document, both ways. XML 1.0
+    forbids the C0 controls other than TAB/LF/CR, surrogate code points, and
+    the two terminal BMP noncharacters, so a key holding one cannot be sent.
+    A carriage return can be sent - botocore escapes CR/LF before sending the
+    document - but the response is the other half: its ``Errors[]`` names the
+    failed keys, and a service writing the CR back unescaped has it normalized
+    to LF by the parser. The failure then matches no submitted key (failing
+    the whole batch closed), or matches a sibling key that differs only by
+    that CR/LF - reporting the wrong one failed and the failed one deleted. So
+    a key with a CR is not batched either. ``DeleteObject`` carries the key in
+    the URL instead and is the route aws-cli uses for every key.
     """
     return _XML_INCOMPATIBLE.search(key) is None
 

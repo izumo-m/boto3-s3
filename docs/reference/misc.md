@@ -712,10 +712,12 @@ for ordinary keys: deleting a key that does not exist succeeds either way, and
 per-key success and failure are preserved. Two consequences follow. A run that
 dies mid-way leaves different remote state, because the unsent buffer — up to
 `batch_size - 1` entries — is abandoned, where the AWS CLI has already issued a
-delete for everything it enumerated. And a key that XML 1.0 cannot carry
-(C0 control characters other than TAB/LF/CR, surrogate code points, `U+FFFE` /
-`U+FFFF`) falls back to an individual `DeleteObject`, the route the AWS CLI
-uses for every key, while the rest of the batch stays batched. Deleting a
+delete for everything it enumerated. And a key the XML round trip cannot carry
+verbatim — C0 control characters other than TAB and LF, surrogate code points,
+`U+FFFE` / `U+FFFF` (a carriage return can be written but may come back from
+the service as a line feed, so it is on the list) — falls back to an individual
+`DeleteObject`, the route the AWS CLI uses for every key, while the rest of the
+batch stays batched. Deleting a
 specific `VersionId` is not provided, as `aws s3 rm` does not offer it either.
 
 ## S3_DELETE_BATCH

@@ -158,7 +158,7 @@ Two consequences of batching:
 - **A run that dies mid-way leaves different state.** `aws` has already issued
   a delete for everything it enumerated; here the unsent buffer — up to
   `batch_size - 1` entries — is abandoned.
-- **Keys XML cannot carry** (C0 control characters other than TAB / LF / CR,
-  surrogates, `U+FFFE` / `U+FFFF`) fall back to individual requests, which is
-  what `aws` does for every key. The rest of the buffer stays batched.
+- **Keys XML cannot carry verbatim** (C0 control characters other than TAB
+  and LF, surrogates, `U+FFFE` / `U+FFFF`) fall back to individual requests,
+  which is what `aws` does for every key. The rest of the buffer stays batched.
 

@@ -192,7 +192,12 @@ versioned bucket) cannot be mapped back to submission order.
   with the fatal-cancel contract in [`opresult.md`](./opresult.md)). A key containing XML 1.0-forbidden controls, surrogate code points,
   or `U+FFFE` / `U+FFFF` cannot be carried in a `DeleteObjects` body; it falls
   back to `DeleteObject`, preserving aws-cli behavior without sacrificing
-  batching for the other keys.
+  batching for the other keys. A key containing a carriage return takes the
+  same route for the response's sake: the request can carry it (botocore sends
+  a character reference), but an `Errors[]` entry that writes it back
+  unescaped is read with the CR normalized to LF, which would either strand
+  the entry (failing the batch closed) or pin it on a sibling key that differs
+  only by CR/LF - a delete reported for the key that was refused.
 - Failure messages are unified to the full `str(ClientError)`
   (`An error occurred (...) ...`), the same shape as the string aws-cli emits on
   a failure line (so the CLI layer can use it as-is when composing

@@ -310,7 +310,9 @@ class TestXmlIncompatibleFallback:
         [
             ("\t", True),
             ("\n", True),
-            ("\r", True),
+            # Writable (botocore escapes it), but a response may hand it back
+            # unescaped, which an XML parser reads as LF: not batched.
+            ("\r", False),
             ("\x00", False),
             ("\x1f", False),  # last C0 control below the allowed range
             ("\x20", True),  # first allowed non-control
@@ -327,10 +329,34 @@ class TestXmlIncompatibleFallback:
     )
     def test_xml_char_production_boundaries(self, char: str, compatible: bool) -> None:
         # Pins the predicate exactly at the edges of XML 1.0's Char production,
-        # where an off-by-one in the character class would flip silently.
+        # where an off-by-one in the character class would flip silently - and
+        # at CR, the one Char the round trip cannot be trusted with.
         from boto3_s3.deleter import _delete_objects_compatible
 
         assert _delete_objects_compatible(f"key-{char}-tail") is compatible
+
+    def test_keys_differing_only_by_cr_and_lf_get_their_own_results(self) -> None:
+        # Batched together, a response writing the CR key's failure back with
+        # the CR unescaped is parsed as naming the LF key: the LF key is
+        # reported failed though it was deleted, and the CR key deleted though
+        # it was refused. On the per-key route the CR key's failure is its own
+        # (aws-cli's shape: `delete failed: s3://b/p/k^Mx ...` for that key
+        # alone, measured against the pinned aws 2.36.40 through a 127.0.0.1
+        # fake).
+        denied = _client_error("AccessDenied", 403, "DeleteObject")
+        fake = _FakeS3Client(single_script=[denied])
+        results: list[OpResult] = []
+        deleter = _deleter(fake, batch_size=10, on_result=results.append)
+        deleter.submit(_info("p/k\nx"))
+        deleter.submit(_info("p/k\rx"))
+        deleter.close()
+        assert _keys(fake.calls) == [["p/k\nx"]]
+        assert [call["Key"] for call in fake.single_calls] == ["p/k\rx"]
+        assert [(r.src, r.outcome) for r in results] == [
+            ("s3://bucket/p/k\nx", OpOutcome.SUCCEEDED),
+            ("s3://bucket/p/k\rx", OpOutcome.FAILED),
+        ]
+        assert results[1].error is not None and results[1].error.__cause__ is denied
 
     def test_only_xml_incompatible_keys_use_delete_object(self) -> None:
         fake = _FakeS3Client()
@@ -348,10 +374,12 @@ class TestXmlIncompatibleFallback:
             deleter.submit(_info(key))
         deleter.close()
 
-        # Botocore escapes CR/LF before the XML body is sent; XML 1.0's
-        # forbidden controls/noncharacters alone need the per-key URL route.
-        assert _keys(fake.calls) == [["plain", "line\nbreak", "carriage\rreturn", "tab\tkey"]]
+        # Botocore escapes LF before the XML body is sent; XML 1.0's forbidden
+        # controls/noncharacters need the per-key URL route, and so does CR,
+        # which the response half of the round trip may not preserve.
+        assert _keys(fake.calls) == [["plain", "line\nbreak", "tab\tkey"]]
         assert [call["Key"] for call in fake.single_calls] == [
+            "carriage\rreturn",
             "control-\x01",
             "noncharacter-\uffff",
         ]
