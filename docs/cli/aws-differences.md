@@ -18,7 +18,8 @@ code**, bar the entries in section 2 that say outright that the run comes out
 differently. Those are a corrupted ranged download, a transfer whose connection
 dies below the HTTP layer, a download body cut mid-stream, a listing an
 S3-compatible endpoint returns unsorted, a recursive delete whose listing dies
-part way, a plain-HTTP
+part way, a `sync --delete` between two nested prefixes of one bucket, a
+plain-HTTP
 endpoint taken from the environment under the CRT engine, an `aws` plugin the
 config file loads through `cli_legacy_plugin_path`, a `cli_history` directory
 `aws` cannot create, the modification time a download stamps for an object
@@ -211,8 +212,8 @@ run comes out differently, listed in section 1.
   out in batches here — up to a thousand keys per `DeleteObjects` request —
   where `aws` sends one `DeleteObject` per key. For a run that finishes
   enumerating, the objects removed and the exit code are the same (a key that
-  no longer exists is a success on both wire shapes); the per-key failure line
-  is not. It reads `delete failed:
+  no longer exists is a success on both wire shapes) — nested prefixes aside,
+  below; the per-key failure line is not. It reads `delete failed:
   s3://bkt/key An error occurred (AccessDenied) when calling the DeleteObjects
   operation: <message>` — the plural operation name, and no
   `(reached max retries: N)` suffix — because the line is composed from that
@@ -237,6 +238,24 @@ run comes out differently, listed in section 1.
   without being deleted and without a record: **up to 999 objects that `aws`
   would have removed survive**. Re-running the command deletes them, and a run
   that enumerates to the end is unaffected.
+
+  And batching moves the moment a delete goes out, which shows in the one
+  arrangement where a delete and a copy of the same run touch the same object:
+  **a `sync --delete` between two prefixes of one bucket, one inside the
+  other**. Syncing a prefix into its own parent
+  (`sync s3://bkt/p/dir/ s3://bkt/p/ --delete`) makes every source object a
+  destination orphan as well — `p/dir/x.txt` is to be copied to `p/x.txt` and
+  is also a key under `p/` the source does not have. `aws` issues each delete
+  as it is enumerated, and the orphan sorts ahead of its own copy, so the
+  source is gone before the copy starts: `copy failed: ... (NoSuchKey)`, exit
+  code 1, and nothing left under `p/` (measured, five runs of five). Here the
+  delete waits in the batch until the enumeration ends, and then races the
+  copy: usually the copy wins — exit code 0, `p/x.txt` kept, the source
+  removed — and now and then the delete does, which is aws's outcome. The
+  other nesting (`sync s3://bkt/p/ s3://bkt/p/sub/ --delete`) is a race on
+  both tools, each ending either way from run to run. Neither tool makes
+  these commands safe; do not pass `--delete` when one side of a same-bucket
+  sync contains the other.
 - **A big tag set is written at a different point of a `--copy-props all`
   copy.** For an S3-to-S3 copy above the multipart threshold whose source tags
   do not fit the create call's header — roughly 2 KiB once percent-encoded —

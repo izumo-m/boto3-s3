@@ -192,7 +192,16 @@ versioned bucket) cannot be mapped back to submission order.
   the partial S3 state differs - aws has already issued a per-key delete for
   everything enumerated, while the body exception here abandons the unsent
   buffer (up to `batch_size - 1` entries; `close(flush=False)`, consistent
-  with the fatal-cancel contract in [`opresult.md`](./opresult.md)). A key containing XML 1.0-forbidden controls, surrogate code points,
+  with the fatal-cancel contract in [`opresult.md`](./opresult.md)). It also
+  assumes the deleted keys and the run's transfers are disjoint, which a
+  `sync --delete` between nested prefixes of one bucket breaks: a destination
+  orphan is then the source of a copy of the same run. aws-cli queues the
+  delete at enumeration, ahead of that copy when the orphan sorts first
+  (deterministically losing the object: the copy fails `NoSuchKey`); here the
+  delete sits in the buffer until the deleter closes - which `sync`'s
+  `ExitStack` does before the transferrer has drained, the deleter being
+  entered later - so the final flush races the in-flight copies and the run
+  ends either way (measured; aws-differences.md records it for the reader). A key containing XML 1.0-forbidden controls, surrogate code points,
   or `U+FFFE` / `U+FFFF` cannot be carried in a `DeleteObjects` body; it falls
   back to `DeleteObject`, preserving aws-cli behavior without sacrificing
   batching for the other keys. A key containing a carriage return takes the
