@@ -642,13 +642,23 @@ A per-key failure from the response's `Errors[]` is translated by S3 error
 code, through the same table the request-level path uses: `AccessDenied`
 becomes [`AccessDeniedError`](./exceptions.md#accessdeniederror);
 `NoSuchBucket`, `NoSuchKey`, `NoSuchVersion` and `NotFound` become
-[`NotFoundError`](./exceptions.md#notfounderror); `InternalError`, `SlowDown`,
-`ServiceUnavailable` and `RequestTimeout` become
-[`TransportError`](./exceptions.md#transporterror); anything else becomes
+[`NotFoundError`](./exceptions.md#notfounderror); anything else becomes
 [`Boto3S3Error`](./exceptions.md#boto3s3error). The message is shaped like
 botocore's `ClientError` string — `An error occurred ({Code}) when calling the
 DeleteObjects operation: {Message}` — and the exception carries `operation`,
 `bucket` and `key`.
+
+The four codes that table files under
+[`TransportError`](./exceptions.md#transporterror) — `InternalError`,
+`SlowDown`, `ServiceUnavailable` and `RequestTimeout` — are faults the service
+asks the caller to retry, and a per-key entry of a successful `DeleteObjects`
+response is out of reach of the client's retry policy. A key reported with one
+of them is therefore **sent again as an individual `DeleteObject`**, where that
+policy applies, and the key's result is that request's: a success, or — once
+its attempts are spent — the translated `DeleteObject` error, the same text
+the AWS CLI reports for the key. Only per-key entries are retried this way; a
+`DeleteObjects` request that fails as a whole has already been retried by the
+client and is recorded as below.
 
 Successes on the batch route are synthesized as the submitted keys minus the
 keys in `Errors[]`. An entry that cannot be attributed to a submitted key,

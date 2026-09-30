@@ -441,10 +441,6 @@ class TestResults:
             ("NoSuchKey", NotFoundError),
             ("NoSuchVersion", NotFoundError),
             ("NotFound", NotFoundError),
-            ("InternalError", TransportError),
-            ("SlowDown", TransportError),
-            ("ServiceUnavailable", TransportError),
-            ("RequestTimeout", TransportError),
             ("SomethingNovel", Boto3S3Error),
         ],
     )
@@ -464,6 +460,119 @@ class TestResults:
         assert (error.operation, error.bucket, error.key) == ("delete", "bucket", "k")
         assert results[0].outcome is OpOutcome.FAILED
         assert (deleter.succeeded, deleter.failed) == (0, 1)
+
+    # The four codes the shared table files under TransportError are the ones
+    # the service asks the caller to retry. aws-cli deletes with one
+    # DeleteObject per key, so botocore's retry policy covers them; a per-key
+    # entry of a 200 DeleteObjects response is beyond that policy's reach, and
+    # the key is sent again on the per-key route instead. Measured against the
+    # pinned aws (2.36.40) through a 127.0.0.1 fake answering one key's first
+    # delete with InternalError, AWS_MAX_ATTEMPTS=3: aws sends that key's
+    # DELETE twice, prints its `delete:` line and exits 0.
+    @pytest.mark.parametrize(
+        "code", ["InternalError", "SlowDown", "ServiceUnavailable", "RequestTimeout"]
+    )
+    def test_a_transient_per_key_failure_is_retried_with_delete_object(self, code: str) -> None:
+        fake = _FakeS3Client(script=[{"Errors": [{"Key": "b", "Code": code, "Message": "msg"}]}])
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append, request_payer="requester")
+        for key in ("a", "b", "c"):
+            deleter.submit(_info(key))
+        deleter.close()
+        assert _keys(fake.calls) == [["a", "b", "c"]]
+        assert fake.single_calls == [{"Bucket": "bucket", "Key": "b", "RequestPayer": "requester"}]
+        assert [(r.src, r.outcome) for r in results] == [
+            ("s3://bucket/a", OpOutcome.SUCCEEDED),
+            ("s3://bucket/b", OpOutcome.SUCCEEDED),
+            ("s3://bucket/c", OpOutcome.SUCCEEDED),
+        ]
+        assert (deleter.succeeded, deleter.failed) == (3, 0)
+
+    def test_a_transient_failure_that_persists_reports_the_per_key_request(self) -> None:
+        # The retry's own failure is the record: botocore's DeleteObject error,
+        # the text aws-cli prints for the key (singular operation name).
+        persisted = _client_error("InternalError", 500, "DeleteObject")
+        fake = _FakeS3Client(
+            script=[{"Errors": [{"Key": "b", "Code": "InternalError", "Message": "msg"}]}],
+            single_script=[persisted],
+        )
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append, operation="delete")
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
+        deleter.close()
+        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED, OpOutcome.FAILED]
+        error = results[1].error
+        assert type(error) is TransportError
+        assert error.__cause__ is persisted
+        assert str(error) == str(persisted)
+        assert (error.operation, error.bucket, error.key) == ("delete", "bucket", "b")
+        assert (deleter.succeeded, deleter.failed) == (1, 1)
+        assert deleter.first_error is error
+
+    def test_a_retried_key_takes_its_captured_slot_from_the_per_key_response(self) -> None:
+        fake = _FakeS3Client(
+            script=[
+                {
+                    "Deleted": [{"Key": "a"}],
+                    "Errors": [{"Key": "b", "Code": "SlowDown", "Message": "msg"}],
+                }
+            ],
+            single_script=[{"ResponseMetadata": {"HTTPStatusCode": 204}, "VersionId": "v1"}],
+        )
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append, capture_response=True)
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
+        deleter.close()
+        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED, OpOutcome.SUCCEEDED]
+        assert [r.extra_info for r in results] == [{"delete": {}}, {"delete": {"VersionId": "v1"}}]
+
+    def test_a_lasting_per_key_failure_is_not_retried(self) -> None:
+        fake = _FakeS3Client(
+            script=[{"Errors": [{"Key": "a", "Code": "AccessDenied", "Message": "msg"}]}]
+        )
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append)
+        deleter.submit(_info("a"))
+        deleter.close()
+        assert fake.single_calls == []
+        assert [r.outcome for r in results] == [OpOutcome.FAILED]
+
+    def test_a_transient_request_level_failure_is_not_retried_per_key(self) -> None:
+        # The whole request failing is botocore's to retry, and it already
+        # has: every key of the batch fails with that error, none goes out
+        # again one by one.
+        fake = _FakeS3Client(script=[_client_error("InternalError", 500)])
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append)
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
+        deleter.close()
+        assert fake.single_calls == []
+        assert [type(r.error) for r in results] == [TransportError, TransportError]
+
+    def test_a_transient_key_is_retried_beside_an_unattributable_entry(self) -> None:
+        # The retry gives that key an answer of its own; the rest of the batch
+        # still fails closed on the entry nobody can attribute.
+        fake = _FakeS3Client(
+            script=[
+                {
+                    "Errors": [
+                        {"Key": "b", "Code": "InternalError", "Message": "msg"},
+                        {"Code": "AccessDenied", "Message": "no key"},
+                    ]
+                }
+            ]
+        )
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append)
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
+        deleter.close()
+        assert fake.single_calls == [{"Bucket": "bucket", "Key": "b"}]
+        assert [r.outcome for r in results] == [OpOutcome.FAILED, OpOutcome.SUCCEEDED]
+        assert "cannot be confirmed" in str(results[0].error)
 
     def test_error_entry_missing_code_and_message_uses_defaults(self) -> None:
         fake = _FakeS3Client(script=[{"Errors": [{"Key": "k"}]}])

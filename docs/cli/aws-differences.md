@@ -218,7 +218,11 @@ run comes out differently, listed in section 1.
   `(reached max retries: N)` suffix — because the line is composed from that
   batch response's own per-key error rather than written by botocore, where
   `aws`'s reads `... when calling the DeleteObject operation (reached max
-  retries: 0): <message>`. Only the batching routes are affected —
+  retries: 0): <message>`. (A key the batch reports with a fault the service
+  asks to have retried — `InternalError`, `SlowDown`, `ServiceUnavailable`,
+  `RequestTimeout` — is the exception: it is sent again as a `DeleteObject`
+  of its own, retried as `aws` retries it, and if it still fails its line is
+  aws's.) Only the batching routes are affected —
   `rm --recursive`, an S3-side `sync --delete`, and `rb --force` — while a
   single `rm s3://bkt/key` still issues `DeleteObject` and its line is byte for
   byte aws's. So a script grepping for the singular name, or for the retry

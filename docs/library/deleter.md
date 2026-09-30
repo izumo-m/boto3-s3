@@ -107,9 +107,14 @@ unattributable responses as warnings.
 
 A per-key failure carries the taxonomy exception matching S3's error code:
 `AccessDenied` becomes `AccessDeniedError`, the not-found family becomes
-`NotFoundError`, the throttling and 5xx family becomes `TransportError`, and
-anything else the base `Boto3S3Error`. The message reads like botocore's, so it
-can be printed as-is.
+`NotFoundError`, and anything else the base `Boto3S3Error`. The message reads
+like botocore's, so it can be printed as-is.
+
+A key the batch response reports with a passing fault — `InternalError`,
+`SlowDown`, `ServiceUnavailable`, `RequestTimeout` — is not failed on the spot:
+it is sent again on its own, as a `DeleteObject`, so the client's retry policy
+gets to work on it the way it does for every key `aws` deletes. Only if that
+request still fails is the key recorded as failed, with a `TransportError`.
 
 If the batch request itself fails, **every key in that batch** is recorded as
 failed and the deleter continues with the following batches. So a wrong bucket

@@ -109,7 +109,7 @@ versioned bucket) cannot be mapped back to submission order.
   |---|---|
   | `AccessDenied` | `AccessDeniedError` |
   | `NoSuchBucket` / `NoSuchKey` / `NoSuchVersion` / `NotFound` | `NotFoundError` |
-  | `InternalError` / `SlowDown` / `ServiceUnavailable` / `RequestTimeout` | `TransportError` |
+  | `InternalError` / `SlowDown` / `ServiceUnavailable` / `RequestTimeout` | `TransportError` (retried per key first, below) |
   | other | `Boto3S3Error` |
 
   The message has the same shape as the str() of a botocore `ClientError`:
@@ -118,6 +118,19 @@ versioned bucket) cannot be mapped back to submission order.
   read alike (the only difference is that the request-level path gains a retry
   suffix when retries are exhausted). It carries `operation` / `bucket` / `key`
   attributes.
+- **a transient per-key failure** (an `Errors[]` entry whose code the table
+  files under `TransportError`): the key is sent again as an individual
+  `DeleteObject` on the same worker, and that request's outcome is the key's
+  result. These are the faults the service asks the caller to retry, and
+  aws-cli - one `DeleteObject` per key - has botocore retry them (measured:
+  a key answered with `InternalError` once is deleted at rc 0), while a
+  per-key entry of a 200 `DeleteObjects` response never reaches the client's
+  retry policy. The per-key request puts the key back under that policy, and
+  when the attempts are spent the recorded error is the `DeleteObject`
+  `ClientError` - aws-cli's own line for the key, singular operation name and
+  retry suffix included. It is not a fallback for a failed batch: a
+  `DeleteObjects` request failing as a whole was retried by the client already
+  and fails every key it carried (below).
 - **an unattributable `Errors[]` entry** (a missing `Key`, or a spelling that
   does not match the submitted key): logs a WARNING (the trace stays) and
   **fails the rest of that batch closed**. Such an entry means the response no

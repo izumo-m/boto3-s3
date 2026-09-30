@@ -46,7 +46,7 @@ from concurrent.futures import (
 )
 from typing import TYPE_CHECKING, Any
 
-from boto3_s3.exceptions import Boto3S3Error, ValidationError
+from boto3_s3.exceptions import Boto3S3Error, TransportError, ValidationError
 from boto3_s3.s3storage import S3_CODE_CATEGORIES, S3Storage, request_failure, s3_errors
 from boto3_s3.types import (
     CancelMode,
@@ -364,6 +364,11 @@ class S3Deleter:
         if batchable:
             self._run_delete_objects(batchable, errors, deletes)
         for index, info in singles:
+            logger.debug(
+                "deleting XML-incompatible key with DeleteObject: s3://%s/%s",
+                self._bucket,
+                info.key,
+            )
             self._run_delete_object(index, info, errors, deletes)
 
         for index, info in enumerate(batch):
@@ -388,6 +393,7 @@ class S3Deleter:
             kwargs["RequestPayer"] = self._request_payer
         failures: dict[str, Boto3S3Error]
         deleted: dict[str, dict[str, Any]] = {}
+        transient: set[str] = set()
         try:
             with s3_errors(operation=self._operation, bucket=self._bucket):
                 response = self._client.delete_objects(**kwargs)
@@ -409,9 +415,28 @@ class S3Deleter:
             )
             if self._capture_response:
                 deleted = self._delete_slots(response)
+            # Read before the fail-closed synthesis below adds its own entries:
+            # only a key the service itself reported a passing fault for.
+            transient = {
+                key for key, failure in failures.items() if isinstance(failure, TransportError)
+            }
             if unattributable:
                 self._fail_unconfirmed(batch, failures, deleted, unattributable)
         for index, info in batch:
+            if info.key in transient:
+                # The service answered this one key with a fault it asks the
+                # caller to retry (InternalError, SlowDown, ...). aws-cli, sending
+                # one DeleteObject per key, has botocore retry exactly that, so
+                # the key goes out again on the per-key route, where the client's
+                # own retry policy applies and the outcome - a delete, or the
+                # error once the attempts are spent - is the one aws-cli reports.
+                logger.debug(
+                    "retrying transient DeleteObjects failure with DeleteObject: s3://%s/%s",
+                    self._bucket,
+                    info.key,
+                )
+                self._run_delete_object(index, info, errors, deletes)
+                continue
             errors[index] = failures.get(info.key)
             deletes[index] = deleted.get(info.key)
 
@@ -422,12 +447,12 @@ class S3Deleter:
         errors: list[Boto3S3Error | None],
         deletes: list[dict[str, Any] | None],
     ) -> None:
-        """Delete one XML-incompatible key through aws-cli's per-key route."""
-        logger.debug(
-            "deleting XML-incompatible key with DeleteObject: s3://%s/%s",
-            self._bucket,
-            info.key,
-        )
+        """Delete one key through aws-cli's per-key route.
+
+        Taken by a key the batch cannot carry, and by a key the batch response
+        reported a transient fault for - the request botocore's retry policy
+        covers, which a per-key entry of a 200 response never reaches.
+        """
         kwargs: dict[str, Any] = {"Bucket": self._bucket, "Key": info.key}
         if self._request_payer is not None:
             kwargs["RequestPayer"] = self._request_payer
