@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An immediate cancellation now also interrupts a CRT run whose submission is waiting on the engine's backpressure.
 - An incomplete listing, bucket or HeadObject response, or a timestamp the host cannot represent, now raises `MalformedResponseError` instead of the bare `KeyError` / `OverflowError`.
 - Log masking now also hides a legacy SigV2 `Authorization` header whose access key id is not AWS-shaped (an S3-compatible endpoint's, say), and such an id in a credentials response body.
+- A failed S3 request is now a `Boto3S3Error` whatever botocore raised inside it; a listing, a HEAD or a single-object call could leak a bare `KeyError` / `RecursionError` / `ValueError`.
+- A batched delete now retries a key S3 reports with a transient error (as `aws s3`'s per-key deletes are retried) instead of failing it.
+- A listing failure's `operation` now names the operation that was listing (`ls` / `rm` / `cp` / `mv`, as `sync` already did); a direct `get_fileinfo` or `list_buckets` call leaves it unset.
+- `get_file` no longer fails on a long multi-byte destination name, and `put_file` refuses a FIFO, socket or device instead of hanging or leaking an `OSError`.
 
 ## [0.11.1] - 2026-09-07
 
