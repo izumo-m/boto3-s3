@@ -1677,6 +1677,52 @@ class _PutRecordingClient:
         return self._response
 
 
+class TestGetFileTempName:
+    """The sibling temp file's name fits the filesystem's per-name limit in bytes."""
+
+    # "a" is 1 byte and the hiragana 3 in UTF-8, the filesystem encoding the
+    # POSIX hosts use; the suffix is the 9-byte ".xxxxxxxx".
+    _SUFFIX = ".0a1b2c3d"
+    _WIDE = chr(0x3042)
+
+    def test_a_short_name_is_kept_whole(self) -> None:
+        from boto3_s3.s3storage import _download_temp_name
+
+        assert _download_temp_name("state.json", self._SUFFIX) == "state.json.0a1b2c3d"
+
+    def test_a_long_ascii_name_is_cut_to_the_limit(self) -> None:
+        from boto3_s3.s3storage import _download_temp_name
+
+        name = _download_temp_name("a" * 255, self._SUFFIX)
+        assert name == "a" * 246 + self._SUFFIX
+        assert len(os.fsencode(name)) == 255
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="the byte width assumed is UTF-8's")
+    def test_a_multibyte_name_is_cut_by_bytes_at_a_character_boundary(self) -> None:
+        from boto3_s3.s3storage import _download_temp_name
+
+        # 85 characters, 255 bytes: a valid name that a cut by characters
+        # leaves whole, making the suffixed name 264 bytes.
+        name = _download_temp_name(self._WIDE * 85, self._SUFFIX)
+        assert name == self._WIDE * 82 + self._SUFFIX  # 246 bytes of name
+        assert len(os.fsencode(name)) == 255
+        # One byte over a boundary drops the whole character, not a part of it.
+        mixed = _download_temp_name("a" + self._WIDE * 85, self._SUFFIX)
+        assert mixed == "a" + self._WIDE * 81 + self._SUFFIX
+        assert len(os.fsencode(mixed)) == 253
+
+    def test_downloads_onto_a_valid_name_of_255_multibyte_bytes(self, tmp_path: Path) -> None:
+        dest = tmp_path / (self._WIDE * 85)
+        try:
+            dest.write_bytes(b"old")
+        except OSError:
+            pytest.skip("this filesystem cannot hold the name at all")
+        client, _calls = make_recording_client([_get_response(b"new")])
+        S3Storage("s3://bucket/obj", client=client).get_file(dest)
+        assert dest.read_bytes() == b"new"
+        assert [p.name for p in tmp_path.iterdir()] == [dest.name]
+
+
 class TestPutFile:
     """``S3Storage.put_file`` - one ``PutObject`` carrying a local file."""
 

@@ -655,7 +655,8 @@ _DOWNLOAD_CHUNK_SIZE = 256 * 1024
 # (``OSUtils.get_temp_filename``): the destination's name plus a random
 # extension, in the destination's directory - so the ``os.replace`` that commits
 # the download stays inside one filesystem and is therefore atomic. The length
-# cap is the 255-character limit common filesystems impose, and it eats the
+# cap is the 255 that common filesystems impose on one name - counted in the
+# name's encoded bytes, which is how the POSIX ones count it - and it eats the
 # destination's name rather than the random part.
 _TEMP_NAME_MAX = 255
 _TEMP_SUFFIX_BYTES = 4
@@ -671,6 +672,28 @@ _TEMP_OPEN_FLAGS: int = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BI
 _TEMP_OPEN_MODE = 0o666
 
 
+def _download_temp_name(base: str, suffix: str) -> str:
+    """``base + suffix``, with ``base`` cut so the name fits ``_TEMP_NAME_MAX``.
+
+    The limit is measured on the filesystem encoding (``os.fsencode``), not on
+    ``len``: a destination named in multi-byte characters can be a valid name
+    of 255 bytes and well under 255 characters, and a cut by characters would
+    leave it whole and push the suffixed name past the limit - failing every
+    download onto such a name with ``ENAMETOOLONG`` (s3transfer's own temp
+    naming cuts by characters and does fail there). Whole characters are
+    dropped from the end, never part of one. Where the filesystem counts
+    UTF-16 units instead (NTFS), the byte count only overestimates, so the cut
+    is at worst a little deeper than it had to be.
+    """
+    room = _TEMP_NAME_MAX - len(os.fsencode(suffix))
+    size = 0
+    for index, char in enumerate(base):
+        size += len(os.fsencode(char))
+        if size > room:
+            return base[:index] + suffix
+    return base + suffix
+
+
 def _create_download_temp(path: str) -> tuple[int, str]:
     """Create the sibling temp file a download finishes into; return ``(fd, temp_path)``.
 
@@ -684,7 +707,7 @@ def _create_download_temp(path: str) -> tuple[int, str]:
     base = os.path.basename(path)
     for _ in range(_TEMP_NAME_ATTEMPTS):
         suffix = f".{secrets.token_hex(_TEMP_SUFFIX_BYTES)}"
-        candidate = os.path.join(directory, base[: _TEMP_NAME_MAX - len(suffix)] + suffix)
+        candidate = os.path.join(directory, _download_temp_name(base, suffix))
         try:
             return os.open(candidate, _TEMP_OPEN_FLAGS, _TEMP_OPEN_MODE), candidate
         except FileExistsError:

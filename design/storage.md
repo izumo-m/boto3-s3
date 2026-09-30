@@ -494,7 +494,11 @@ its temp file was created with. In full:
 - the body streams into a **sibling temp file** in the destination's own
   directory (so the commit stays inside one filesystem), created `O_EXCL` with
   a random name and mode `0o666` — the umask decides a *new* destination's bits,
-  exactly as a plain `open(…, "wb")` would;
+  exactly as a plain `open(…, "wb")` would. The name is the destination's own
+  plus a random extension, cut to the filesystem's 255 per name in **encoded
+  bytes**, so a valid destination named in multi-byte characters still gets a
+  temp name that fits (s3transfer's own cut counts characters and fails there
+  with `ENAMETOOLONG`, as `cp` therefore does on both tools);
 - an existing **regular** destination's permission bits are copied onto the temp
   file first: the atomic swap lands a new inode, so without that the file's mode
   would silently become the temp file's;
