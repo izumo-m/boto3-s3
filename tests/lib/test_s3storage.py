@@ -212,11 +212,15 @@ class TestEtagIsKeptAsReceived:
         info = storage.get_fileinfo()
         assert info is not None and info.etag == etag
 
-    def test_a_missing_or_empty_etag_is_none(self) -> None:
+    def test_only_a_missing_etag_is_none(self) -> None:
+        # An empty ETag is still what the response carried: aws-cli provides
+        # it to s3transfer like any other (so no HeadObject probe goes out
+        # for that object - measured through a fake serving `<ETag></ETag>`),
+        # and only an entry with no ETag element at all has none.
         pages = [{"Contents": [_obj("prefix/a.txt"), _obj("prefix/b.txt", etag="")]}]
         storage, _ = _storage(pages)
         infos = list(storage.scan(S3ScanOptions(recursive=True)))
-        assert [info.etag for info in infos if isinstance(info, S3FileInfo)] == [None, None]
+        assert [info.etag for info in infos if isinstance(info, S3FileInfo)] == [None, ""]
 
 
 class TestScanRecursive:

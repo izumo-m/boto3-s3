@@ -301,8 +301,9 @@ s3.sync(src, dest, update_filter=EtagComparison())            # 8 MiB default pa
 s3.sync(src, dest, update_filter=EtagComparison(part_size=16 * 1024 * 1024))   # explicit part size
 ```
 
-- **s3->s3** compares the two listings' ETags verbatim (no bytes read): equal
-  strings - opaque non-MD5 values included - read as same, a missing ETag as
+- **s3->s3** compares the two listings' ETags as strings (no bytes read), each
+  with its one surrounding pair of quotes removed and otherwise verbatim: equal
+  strings - opaque non-MD5 values included - read as same, a missing or empty ETag as
   differing. **upload / download** reconstructs the local file's single- or
   multipart S3-style ETag and compares; there a missing or non-MD5 remote ETag
   can never match the MD5-based reconstruction, so it reads as differing

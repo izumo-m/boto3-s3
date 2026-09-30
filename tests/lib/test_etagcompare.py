@@ -205,6 +205,17 @@ class TestCopyDirectEtag:
         assert EtagComparison()(_pair(TransferType.COPY, src=bare, dest=_s3(etag="abc"))) is False
         assert EtagComparison()(_pair(TransferType.COPY, src=bare, dest=_s3(etag="xyz"))) is True
 
+    def test_two_empty_etags_are_not_the_same_object(self) -> None:
+        # An endpoint serving an empty ETag leaves nothing to compare: the
+        # pair differs (copy), whichever empty spelling each side carries.
+        for left, right in [("", ""), ('""', '""'), ("", '""')]:
+            pair = _pair(
+                TransferType.COPY,
+                src=S3FileInfo(key="k", etag=left),
+                dest=S3FileInfo(key="k", etag=right),
+            )
+            assert EtagComparison()(pair) is True
+
     def test_non_s3_side_counts_as_differ(self) -> None:
         # A side that is not an S3FileInfo has no comparable etag -> differ.
         pair = _pair(TransferType.COPY, src=FileInfo(key="k"), dest=_s3(etag="abc"))
@@ -459,7 +470,15 @@ class TestContentDiffers:
         # quotes is removed, so it never equals a computed ETag.
         p = write_file(tmp_path, _TEN)
         assert EtagComparison().content_differs(p, etag=f'W/"{_TEN_SINGLE}"') is True
-        assert EtagComparison().content_differs(p, etag='""') is True  # empty: indeterminate
+        # A quote on one side only is not a pair: it stays, and the value
+        # differs (stripping every quote would make these two read as same).
+        assert EtagComparison().content_differs(p, etag=f'"{_TEN_SINGLE}') is True
+        assert EtagComparison().content_differs(p, etag=f'{_TEN_SINGLE}"') is True
+
+    def test_an_etag_empty_inside_its_quotes_is_indeterminate(self, tmp_path: Path) -> None:
+        # Nothing is opened: a path that does not exist would raise otherwise.
+        missing = tmp_path / "no-such-file"
+        assert EtagComparison().content_differs(missing, etag='""') is True
 
     def test_str_path_accepted(self, tmp_path: Path) -> None:
         # str and PathLike sources are the same source.

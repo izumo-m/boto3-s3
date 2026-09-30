@@ -401,6 +401,23 @@ class TestDownload:
         assert transferrer.succeeded == 1
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
 
+    def test_an_empty_etag_is_provided_too(self, tmp_path: Path) -> None:
+        # Provided means "is not None": with size and an (empty) etag in hand
+        # s3transfer sends no HeadObject probe, exactly as when aws-cli hands
+        # it the empty ETag an endpoint served.
+        item = self._item(tmp_path)
+        item.etag = ""
+        calls, _, results, _ = _run(TransferType.DOWNLOAD, [item], [self._get_object_response()])
+        assert ops(calls) == ["GetObject"]
+        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED]
+
+    def test_a_missing_etag_lets_s3transfer_probe(self, tmp_path: Path) -> None:
+        item = self._item(tmp_path)
+        item.etag = None
+        head = {"ContentLength": 7, "ETag": '"abc123"'}
+        calls, _, _, _ = _run(TransferType.DOWNLOAD, [item], [head, self._get_object_response()])
+        assert ops(calls) == ["HeadObject", "GetObject"]
+
     def test_result_carries_source_etag_as_extra_info(self, tmp_path: Path) -> None:
         # s3transfer records the object's ETag on the future; it rides through to
         # OpResult.extra_info as the result's S3 response metadata.

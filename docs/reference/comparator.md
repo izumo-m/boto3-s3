@@ -396,7 +396,9 @@ skip a copy — MD5 can collide, and the size is independent evidence.
 `transfer_type`. After the `check_size` step:
 
 - both sides `S3FileInfo`: the two listings' stored ETags are compared as
-  strings, whatever form they take, and no bytes are read.
+  strings — each with its one surrounding pair of double quotes removed,
+  whatever form it takes otherwise — and no bytes are read. An entry with no
+  ETag, or an empty one, reads as differing.
 - exactly one side `S3FileInfo`: the other is the readable side. Its bytes are
   read through the backend stamped on its `storage` attribute, as
   `storage.open(info.compare_key, "rb")` ([`./storage.md`](./storage.md)), so

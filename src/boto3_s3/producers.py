@@ -748,7 +748,7 @@ def head_single(
         key=key,
         size=size,
         mtime=mtime,
-        etag=etag or None,
+        etag=etag,
         storage_class=head.get("StorageClass"),
         head=head,
         compare_key=key.rsplit("/", 1)[-1],

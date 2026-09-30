@@ -129,7 +129,8 @@ class S3FileInfo(FileInfo):
     """``FileInfo`` enriched with fields derived from an S3 object listing.
 
     ``etag`` is the ETag exactly as the response carried it - S3's surrounding
-    ``"`` included, the form a boto3 response's ``ETag`` has - when populated.
+    ``"`` included, the form a boto3 response's ``ETag`` has - and ``None`` only
+    when the response carried none (an empty one stays the empty string).
     Nothing is stripped, so the value can go back to S3 as an ``If-Match``
     unchanged (the transfer engine does just that, as aws-cli does) whatever
     an endpoint's ETags look like; a comparison against a computed ETag

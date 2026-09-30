@@ -1386,7 +1386,11 @@ class Transferrer:
             # or resolves the hint it was handed, which is not the count.
             counted = _CountBytes()
             subscribers.append(counted)
-        if item.etag:
+        # "is not None", not truthiness: an endpoint's empty ETag is provided
+        # like any other (aws-cli hands s3transfer whatever the response
+        # carried), and a provided etag - empty or not - is what makes
+        # s3transfer skip its HeadObject probe.
+        if item.etag is not None:
             subscribers.append(_ProvideETag(item.etag))
         if self._on_progress is not None:
             subscribers.append(

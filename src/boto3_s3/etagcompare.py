@@ -91,7 +91,8 @@ class EtagComparison(ContentComparison):
     ``SyncPair``s - both
     sides present by construction (a new, source-only entry is ``create_filter``'s
     lane): an s3-to-s3 pair compares the listings' ETags
-    directly (as strings, whatever their form); an upload / download
+    directly (as strings, each without the quotes S3 wraps it in, whatever
+    their form otherwise); an upload / download
     reconstructs the readable (non-S3) side's
     single- or multipart ETag (at ``part_size``) and compares - there, a
     missing / non-MD5
@@ -313,8 +314,16 @@ def _bare_etag(etag: str | None) -> str | None:
 
 
 def _s3_etag(info: object) -> str | None:
-    """The bare ETag of an S3 listing entry, or ``None`` for any other side."""
-    return _bare_etag(info.etag) if isinstance(info, S3FileInfo) else None
+    """The bare ETag of an S3 listing entry, or ``None`` when there is none to compare.
+
+    ``None`` for a side that is not an S3 entry, for an entry without an ETag,
+    and for one whose ETag is empty once the quotes are off (``""`` or
+    ``'""'``): an empty value identifies no content, so two of them must not
+    read as the same object.
+    """
+    if not isinstance(info, S3FileInfo):
+        return None
+    return _bare_etag(info.etag) or None
 
 
 def _etag_differs(a: str | None, b: str | None) -> bool:
