@@ -195,13 +195,18 @@ versioned bucket) cannot be mapped back to submission order.
   with the fatal-cancel contract in [`opresult.md`](./opresult.md)). It also
   assumes the deleted keys and the run's transfers are disjoint, which a
   `sync --delete` between nested prefixes of one bucket breaks: a destination
-  orphan is then the source of a copy of the same run. aws-cli queues the
-  delete at enumeration, ahead of that copy when the orphan sorts first
-  (deterministically losing the object: the copy fails `NoSuchKey`); here the
-  delete sits in the buffer until the deleter closes - which `sync`'s
-  `ExitStack` does before the transferrer has drained, the deleter being
-  entered later - so the final flush races the in-flight copies and the run
-  ends either way (measured; aws-differences.md records it for the reader). A key containing XML 1.0-forbidden controls, surrogate code points,
+  orphan is then the source of a copy of the same run, and the delete and the
+  copy race. They race on aws-cli too - its `DeleteObject` and `CopyObject` go
+  out on separate s3transfer worker threads, the delete a few milliseconds
+  ahead when the orphan sorts first, a head start a fast endpoint always
+  honors (50 of 50 runs on a local MinIO lose the object) and a slower one
+  need not. Here the delete sits in the buffer until the deleter closes -
+  which `sync`'s `ExitStack` does before the transferrer has drained, the
+  deleter being entered later - so the final flush races the in-flight copies
+  and the copy usually wins. Either way the outcome is execution order under
+  concurrency, which the parity charter leaves out
+  ([`overview.md`](./overview.md) section 3): no ordering is added to settle
+  it, and aws-differences.md tells the reader not to run the command. A key containing XML 1.0-forbidden controls, surrogate code points,
   or `U+FFFE` / `U+FFFF` cannot be carried in a `DeleteObjects` body; it falls
   back to `DeleteObject`, preserving aws-cli behavior without sacrificing
   batching for the other keys. A key containing a carriage return takes the
