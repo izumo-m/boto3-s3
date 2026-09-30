@@ -337,7 +337,9 @@ def request_failure(
     ``delete failed: s3://b/k 'Credentials'`` on both tools (measured). The
     transfer engine gets the same from s3transfer itself; the deleter, the
     blind single-key delete, sync's synchronous deletes and the single-call
-    operations apply it by hand.
+    operations apply it by hand, and the storage's own requests - the listing,
+    the HEAD, ``open`` / ``delete`` / ``get_file`` / ``put_file`` - through
+    `s3_request`.
     """
     error = translate_boto_error(exc, operation=operation, bucket=bucket, key=key)
     if error is not exc:
@@ -345,6 +347,37 @@ def request_failure(
     else:
         attribute_failure(error, operation=operation, bucket=bucket, key=key)
     return error
+
+
+@contextmanager
+def s3_request(
+    *, operation: str | None, bucket: str | None = None, key: str | None = None
+) -> Generator[None, None, None]:
+    """Report whatever one S3 request raised as a ``Boto3S3Error``.
+
+    `s3_errors` for the boto family, plus the `request_failure` capture for
+    everything else the call raised from inside botocore - a redirect loop
+    ending in ``RecursionError``, an S3 Express ``CreateSession`` reply without
+    ``Credentials`` (``KeyError``), a response value its parser cannot convert
+    (``ValueError``) - so ``except Boto3S3Error`` catches a failed request
+    whatever botocore died of. Those become the base error carrying the
+    original as ``__cause__`` and its ``str()`` as the message, which is the
+    text aws-cli prints for the same failure. A family error raised inside
+    passes through untouched, and ``AssertionError`` alone is left
+    untranslated (an invariant or a test double's guard, never a request
+    outcome).
+
+    Wrap the request only - the client call, or one step of a paginator -
+    never the code that consumes its result: what that code raises is not a
+    request failing.
+    """
+    try:
+        with s3_errors(operation=operation, bucket=bucket, key=key):
+            yield
+    except (Boto3S3Error, AssertionError):
+        raise
+    except Exception as exc:
+        raise request_failure(exc, operation=operation, bucket=bucket, key=key) from exc
 
 
 # Years a listing timestamp can carry without its local-zone rendering being
@@ -482,6 +515,37 @@ def _page_to_infos(
             compare_key=key[len(prefix) :],
             storage=storage,
         )
+
+
+# The entry elements botocore itself subscripts on a listing page, ahead of
+# `_page_to_infos`: a response that echoes ``EncodingType`` (S3 and MinIO do,
+# botocore having asked for ``url``) has every ``Contents`` ``Key`` and every
+# ``CommonPrefixes`` ``Prefix`` URL-decoded in place as the page is parsed.
+_LISTING_DECODED_ELEMENTS = frozenset({"Key", "Prefix"})
+
+
+def _next_listing_page(
+    pages: Iterator[ListObjectsV2OutputTypeDef], *, bucket: str
+) -> ListObjectsV2OutputTypeDef | None:
+    """Fetch the next ``ListObjectsV2`` page, or ``None`` once the listing ends.
+
+    A page whose entry lacks ``Key`` (or whose common prefix lacks ``Prefix``)
+    never reaches `_page_to_infos` when the response echoes ``EncodingType``:
+    botocore's own URL-decoding of the page subscripts the same element first
+    and dies on the ``KeyError``, as aws-cli does on the same response. That is
+    the incomplete entry `read_required` reports, met one step earlier, so it
+    is reported the same way - `MalformedResponseError` naming the element,
+    the ``KeyError`` on ``__cause__``. Here the whole page is lost with it, the
+    decoding running before any of its entries is handed out (aws-cli's
+    listing stops at the same point). Any other ``KeyError`` is left to the
+    caller's request capture.
+    """
+    try:
+        return next(pages, None)
+    except KeyError as exc:
+        if exc.args and exc.args[0] in _LISTING_DECODED_ELEMENTS:
+            raise MalformedResponseError(str(exc), bucket=bucket) from exc
+        raise
 
 
 def _collect_page(entries: Iterator[S3FileInfo]) -> Iterator[list[S3FileInfo]]:
@@ -1082,17 +1146,23 @@ class S3Storage(Storage):
         # only ls, but also rm / cp / mv / sync source enumeration - so the calling
         # subcommand is not known here, and stamping a fixed "ls" would mislabel
         # the others (the service-root list_buckets below is ls-only, so it can).
-        with s3_errors(operation=None, bucket=self._bucket):
-            paginator = self.get_client().get_paginator("list_objects_v2")
-            for page in paginator.paginate(**paging):
-                yield from _collect_page(
-                    _page_to_infos(
-                        page,
-                        include_common_prefixes=include_common_prefixes,
-                        prefix=prefix,
-                        storage=self,
-                    )
+        with s3_request(operation=None, bucket=self._bucket):
+            pages = iter(self.get_client().get_paginator("list_objects_v2").paginate(**paging))
+        while True:
+            # Each page is its own request, and only the request sits inside
+            # the capture: what the conversion below raises is this module's.
+            with s3_request(operation=None, bucket=self._bucket):
+                page = _next_listing_page(pages, bucket=self._bucket)
+            if page is None:
+                return
+            yield from _collect_page(
+                _page_to_infos(
+                    page,
+                    include_common_prefixes=include_common_prefixes,
+                    prefix=prefix,
+                    storage=self,
                 )
+            )
 
     def list_buckets(
         self,
@@ -1120,28 +1190,34 @@ class S3Storage(Storage):
         """
         with s3_errors(operation="ls"):
             client = self.get_client()
-            reason = _bucket_filters_unsupported_reason(
-                client, name_prefix=name_prefix, region=region
-            )
-            if reason is not None:
-                # The environment (SDK floor) lacks the capability, not the
-                # caller's arguments: a ConfigurationError. s3_errors translates
-                # botocore exceptions only, so this reaches the caller as raised.
-                raise ConfigurationError(reason, operation="ls")
-            if not client.can_paginate("list_buckets"):
-                # Back-compat (floor botocore 1.31): the ListBuckets paginator is a
-                # late-2024 addition (botocore 1.34.162), so an older botocore has
-                # only the single unpaginated call to list with. Drop this branch
-                # once the floor reaches the paginator.
-                yield from _page_to_bucket_infos(client.list_buckets(), self)
+        reason = _bucket_filters_unsupported_reason(client, name_prefix=name_prefix, region=region)
+        if reason is not None:
+            # The environment (SDK floor) lacks the capability, not the
+            # caller's arguments: a ConfigurationError.
+            raise ConfigurationError(reason, operation="ls")
+        if not client.can_paginate("list_buckets"):
+            # Back-compat (floor botocore 1.31): the ListBuckets paginator is a
+            # late-2024 addition (botocore 1.34.162), so an older botocore has
+            # only the single unpaginated call to list with. Drop this branch
+            # once the floor reaches the paginator.
+            with s3_request(operation="ls"):
+                listing = client.list_buckets()
+            yield from _page_to_bucket_infos(listing, self)
+            return
+        paging: dict[str, Any] = {"PaginationConfig": {"PageSize": self._page_size}}
+        if name_prefix:
+            paging["Prefix"] = name_prefix
+        if region:
+            paging["BucketRegion"] = region
+        with s3_request(operation="ls"):
+            pages = iter(client.get_paginator("list_buckets").paginate(**paging))
+        while True:
+            # Only the request sits inside the capture, as in the object listing.
+            with s3_request(operation="ls"):
+                page = next(pages, None)
+            if page is None:
                 return
-            paging: dict[str, Any] = {"PaginationConfig": {"PageSize": self._page_size}}
-            if name_prefix:
-                paging["Prefix"] = name_prefix
-            if region:
-                paging["BucketRegion"] = region
-            for page in client.get_paginator("list_buckets").paginate(**paging):
-                yield from _page_to_bucket_infos(page, self)
+            yield from _page_to_bucket_infos(page, self)
 
     @override
     def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
@@ -1181,7 +1257,7 @@ class S3Storage(Storage):
             raise NotImplementedError(_OPEN_WRITE_NOT_IMPLEMENTED)
         # operation=None: the storage cannot know which operation opened it;
         # the operation layer fills the name in (attribute_failure).
-        with s3_errors(operation=None, bucket=self._bucket, key=key):
+        with s3_request(operation=None, bucket=self._bucket, key=key):
             response = self.get_client().get_object(Bucket=self._bucket, Key=key)
         return cast("BinaryIO", response["Body"])
 
@@ -1204,7 +1280,7 @@ class S3Storage(Storage):
         # operation=None, like open: rm's single-key path, a sync's orphan
         # removal and an mv's source delete all reach this, and each stamps
         # its own name on the way out (attribute_failure).
-        with s3_errors(operation=None, bucket=self._bucket, key=info.key):
+        with s3_request(operation=None, bucket=self._bucket, key=info.key):
             return self.get_client().delete_object(**kwargs)
 
     def _resolve_key(self, key: str) -> str:
@@ -1245,7 +1321,7 @@ class S3Storage(Storage):
         """
         target_key = self._resolve_key(key)
         try:
-            with s3_errors(operation="head", bucket=self._bucket, key=target_key):
+            with s3_request(operation="head", bucket=self._bucket, key=target_key):
                 head = self.get_client().head_object(Bucket=self._bucket, Key=target_key)
         except NotFoundError:
             return None
@@ -1328,7 +1404,7 @@ class S3Storage(Storage):
         """
         target_key = self._resolve_key(key)
         dest = os.fspath(path)
-        with s3_errors(operation=_GET_FILE_OPERATION, bucket=self._bucket, key=target_key):
+        with s3_request(operation=_GET_FILE_OPERATION, bucket=self._bucket, key=target_key):
             response = self.get_client().get_object(Bucket=self._bucket, Key=target_key)
         # closing(): the body holds its HTTP connection until it is released,
         # whether the download finished or a local failure abandoned it.
@@ -1393,7 +1469,7 @@ class S3Storage(Storage):
                 size = os.fstat(stream.fileno()).st_size
             except OSError as exc:
                 raise translate_os_error(exc, operation=_PUT_FILE_OPERATION, key=source) from exc
-            with s3_errors(operation=_PUT_FILE_OPERATION, bucket=self._bucket, key=target_key):
+            with s3_request(operation=_PUT_FILE_OPERATION, bucket=self._bucket, key=target_key):
                 response = self.get_client().put_object(
                     Bucket=self._bucket, Key=target_key, Body=stream
                 )
@@ -1463,16 +1539,17 @@ class S3Storage(Storage):
         """Copy the streamed response body into the open temp file, chunk by chunk.
 
         The two error families are kept apart without splitting the loop: the
-        whole of it runs under the botocore translation, and a write's
+        whole of it runs under the request capture (`s3_request`), and a write's
         ``OSError`` is translated locally on the spot instead of reaching that
-        translation as a raw one. ``s3_errors`` catches only ``ClientError`` /
-        ``BotoCoreError``, so the already-translated local error passes straight
-        out through it. Pre-translating there is what the split rests on -
-        botocore's ``ReadTimeoutError`` is itself an ``OSError``, so a single
+        capture as a raw one - a family error passes straight out through it,
+        so the already-translated local error keeps its own attribution.
+        Pre-translating there is what the split rests on: botocore's
+        ``ReadTimeoutError`` is itself an ``OSError``, so a single
         ``except OSError`` reaching around the reads would file a broken stream
-        as a local failure (see ``_write_body_atomically``).
+        as a local failure (see ``_write_body_atomically``), and whatever else
+        a read raises is the request failing, not the filesystem.
         """
-        with s3_errors(operation=_GET_FILE_OPERATION, bucket=self._bucket, key=key):
+        with s3_request(operation=_GET_FILE_OPERATION, bucket=self._bucket, key=key):
             while True:
                 chunk = body.read(_DOWNLOAD_CHUNK_SIZE)
                 if not chunk:

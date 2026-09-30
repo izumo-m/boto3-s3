@@ -77,6 +77,13 @@ instances exist only where no classification applies:
   clause claims — notably an `OSError` raised inside s3transfer's task
   execution, deliberately kept at the base rather than `TransportError` so the
   AWS CLI's message survives verbatim;
+- whatever an S3 request raised from inside botocore that is none of
+  botocore's own exceptions — a redirect loop ending in `RecursionError`, an
+  S3 Express session reply without `Credentials` (`KeyError`), a response
+  value its parser cannot convert (`ValueError`). The request failed all the
+  same, so every request the library issues reports it as the base error
+  with that exception on `__cause__` and its text — what the AWS CLI prints —
+  as the message;
 - the status-widening fallback for a `ClientError` whose error code is not in
   the category table and whose HTTP status is not one the widening rules cover
   (403, 404, 5xx, other 4xx);
@@ -104,8 +111,10 @@ failure above — with no exception object behind them, so their `__cause__` is
 `None` and only the message carries the S3 error code.
 
 Some exceptions stay outside the hierarchy by design. Programming bugs
-(`TypeError`, `AssertionError`) propagate unwrapped on the synchronous paths;
-`KeyboardInterrupt` and `SystemExit` always propagate. A response the service
+(`TypeError`, `AssertionError`) propagate unwrapped on the synchronous paths —
+the library's own code, that is: what botocore raises from inside a request is
+the request failing, reported as above, with `AssertionError` alone left
+untranslated there too. `KeyboardInterrupt` and `SystemExit` always propagate. A response the service
 returned incomplete, or a timestamp the host cannot represent, is inside it:
 [`MalformedResponseError`](#malformedresponseerror) carries the `KeyError` /
 `OverflowError` the AWS CLI dies with on `__cause__` and its text as the
@@ -234,7 +243,11 @@ the same element (the exact rules are under `scan_pages`, `list_buckets` and
 host's local zone cannot represent (years 1 and 9999, within the zone's offset
 of `datetime`'s range), which the CLI's conversion of every S3 timestamp to
 local time rejects. A truncating proxy or a partial S3 implementation is the
-usual source of the first kind.
+usual source of the first kind. An element that is present but unreadable — a
+`LastModified` that is no timestamp, a `Size` that is no integer — is not this
+class: botocore's own parser fails on it before the library reads anything,
+and that arrives as the base [`Boto3S3Error`](#boto3s3error) carrying the
+parser's `ValueError`.
 
 The run stops where the CLI's stops: the entries ahead of the bad one are
 already delivered — an `ls` has reported them, a transfer has submitted them —

@@ -214,7 +214,16 @@ other 4xx -> `ValidationError`, otherwise the base `Boto3S3Error`. The error
 - `translate_boto_error`'s last clause, for an exception no earlier clause
   claims - notably an `OSError` raised inside s3transfer's task execution,
   deliberately kept base (not `TransportError`) so aws's message rides
-  through verbatim;
+  through verbatim, and whatever a request raised from inside botocore
+  outside botocore's own family (`s3storage.request_failure`: a redirect
+  loop's `RecursionError`, an S3 Express session reply without `Credentials`,
+  a value the response parser cannot convert). Every request point applies
+  it - the per-item captures, the single-call operations, and the storage's
+  own requests through `s3storage.s3_request` (the listing page by page, the
+  single-object HEAD, `open` / `delete` / `get_file` / `put_file`) - so a
+  failed request is a family error whatever botocore died of, with
+  `AssertionError` alone passing through. The capture wraps the request
+  only: what the library's own reading of the result raises keeps its type;
 - the deleter's per-key `Errors[]` translation, whose entries carry a bare code
   with no HTTP status to widen on (an unknown code becomes the base category,
   deleter.md section 3).
@@ -269,7 +278,9 @@ class BatchError(Boto3S3Error):
   (`s3storage.request_failure`), with `AssertionError` alone passing through.
   Note that an error before item
   processing begins - such as a failure of the enumeration (scan) itself, or
-  `cp`'s missing-source check - **propagates as the category exception** (the
+  `cp`'s missing-source check - **propagates as the category exception**, the
+  listing's and the single-source HEAD's requests capturing what botocore
+  raised outside its own family the same way (the
   CLI's transfer-family commands turn an enumeration failure into rc 1, while
   `cp`'s missing local source is rc 255 as on aws; cli.md section 6).
 - `OpOutcome.DRYRUN` is the report for an item a dry run *would* have acted on

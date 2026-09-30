@@ -97,7 +97,10 @@ front only when the declaration is honest:
   naming the element (aws-cli's `KeyError` text and cause) instead of being
   silently dropped - the object listing emitting the part of
   the page it had converted, the bucket listing being streamed entry by entry
-  to begin with. Its single-object `HeadObject` (`get_fileinfo`, and the
+  to begin with. (A response that echoes `EncodingType` has botocore
+  URL-decode each `Key` / `Prefix` by subscript while it parses the page, so
+  there the same error is raised from the page fetch, the whole page lost with
+  it - aws-cli's listing dies in that same handler.) Its single-object `HeadObject` (`get_fileinfo`, and the
   transfer engine's `producers.head_single`) reads `ContentLength` ->
   `LastModified` the same way, `ETag` with a default - aws-cli's
   `_list_single_object` order.

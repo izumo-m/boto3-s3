@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 import pytest
 from boto3.s3.transfer import TransferConfig
 
-from boto3_s3 import S3, MalformedResponseError, OpOutcome, OpResult, S3Storage
+from boto3_s3 import S3, Boto3S3Error, MalformedResponseError, OpOutcome, OpResult, S3Storage
 from tests.lib.test_s3storage import _local_zone, _needs_tzset
 from tests.utils.fakes3 import MTIME, get_response, head_response
 from tests.utils.recorder import make_recording_client, ops
@@ -35,6 +35,35 @@ if TYPE_CHECKING:
 
 _SYNC = TransferConfig(use_threads=False)
 _FAR_FUTURE = datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+
+
+class TestSingleObjectHeadRaisingOutsideTheBotoFamily:
+    """What the HEAD raises from inside botocore is the request failing.
+
+    An S3 Express ``CreateSession`` reply without ``Credentials`` kills the
+    single-source HEAD with botocore's own ``KeyError``; aws-cli ends the run
+    on its text (``fatal error: 'Credentials'`` at rc 1 for
+    ``cp s3://bkt--use1-az4--x-s3/k x``, measured against the pinned aws
+    2.36.40 through a 127.0.0.1 fake). Here it is the base ``Boto3S3Error``
+    carrying it, attributed like every other failed HEAD, so
+    ``except Boto3S3Error`` catches it.
+    """
+
+    def test_it_is_the_base_error_attributed_to_the_operation(self, tmp_path: Path) -> None:
+        boom = KeyError("Credentials")
+        client, calls = make_recording_client([boom])
+        with pytest.raises(Boto3S3Error) as excinfo:
+            S3().cp(
+                S3Storage("s3://b/d/a.txt", client=client),
+                str(tmp_path / "out.bin"),
+                transfer_config=_SYNC,
+            )
+        error = excinfo.value
+        assert type(error) is Boto3S3Error
+        assert str(error) == "'Credentials'"  # str(KeyError): the CLI's line
+        assert error.__cause__ is boom
+        assert (error.operation, error.bucket, error.key) == ("cp", "b", "d/a.txt")
+        assert ops(calls) == ["HeadObject"]
 
 
 class TestSingleObjectRequiredElements:

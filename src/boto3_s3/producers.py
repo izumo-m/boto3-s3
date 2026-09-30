@@ -38,7 +38,7 @@ from boto3_s3.s3storage import (
     # owns.
     read_required,
     reject_unrepresentable_stamp,
-    s3_errors,
+    s3_request,
 )
 from boto3_s3.storage import Storage, StorageCapability
 from boto3_s3.transfer import TransferItem, Transferrer
@@ -678,7 +678,7 @@ def head_single(
     if getattr(client.meta.config, "response_checksum_validation", None) == "when_supported":
         params.setdefault("ChecksumMode", "ENABLED")
     try:
-        with s3_errors(operation=operation, bucket=src_storage.bucket, key=key):
+        with s3_request(operation=operation, bucket=src_storage.bucket, key=key):
             head = client.head_object(Bucket=src_storage.bucket, Key=key, **params)
     except NotFoundError as exc:
         # aws-cli's filegenerator rewrites only the bare HTTP-404 HeadObject

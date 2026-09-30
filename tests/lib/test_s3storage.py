@@ -1067,6 +1067,191 @@ class _DeleteRecordingClient:
         return {}
 
 
+def _request_scan(storage: S3Storage, tmp_path: Path) -> object:
+    return list(storage.scan(S3ScanOptions(recursive=True)))
+
+
+def _request_list_buckets(storage: S3Storage, tmp_path: Path) -> object:
+    return list(storage.list_buckets())
+
+
+def _request_get_fileinfo(storage: S3Storage, tmp_path: Path) -> object:
+    return storage.get_fileinfo("k")
+
+
+def _request_open(storage: S3Storage, tmp_path: Path) -> object:
+    return storage.open("prefix/k", "rb")
+
+
+def _request_delete(storage: S3Storage, tmp_path: Path) -> object:
+    return storage.delete(FileInfo(key="prefix/k"))
+
+
+def _request_get_file(storage: S3Storage, tmp_path: Path) -> object:
+    return storage.get_file(tmp_path / "out.bin", key="k")
+
+
+def _request_put_file(storage: S3Storage, tmp_path: Path) -> object:
+    source = tmp_path / "in.bin"
+    source.write_bytes(b"x")
+    return storage.put_file(source, key="k")
+
+
+# Each request the backend issues itself, with the attribution its failure
+# carries: (operation, bucket, key).
+_REQUEST_POINTS: list[tuple[Any, tuple[str | None, str | None, str | None]]] = [
+    (_request_scan, (None, "bucket", None)),
+    (_request_list_buckets, ("ls", None, None)),
+    (_request_get_fileinfo, ("head", "bucket", "prefix/k")),
+    (_request_open, (None, "bucket", "prefix/k")),
+    (_request_delete, (None, "bucket", "prefix/k")),
+    (_request_get_file, ("get_file", "bucket", "prefix/k")),
+    (_request_put_file, ("put_file", "bucket", "prefix/k")),
+]
+
+
+class TestRequestRaisingOutsideTheBotoFamily:
+    """Whatever a request raises from inside botocore is that request failing.
+
+    botocore can die reading a response with an exception that is none of its
+    own: an S3 Express ``CreateSession`` reply without ``Credentials``
+    (``KeyError``), a region-less 301 looping its redirector into
+    ``RecursionError``, a value its parser cannot convert (``ValueError``).
+    aws-cli ends the run with that exception's text - ``fatal error:
+    'Credentials'`` at rc 1 for a transfer, ``[ERROR]: 'Credentials'`` at rc 255
+    for ``ls``, measured against the pinned aws (2.36.40) through a 127.0.0.1
+    fake - and every request the backend issues reports it as the base
+    ``Boto3S3Error`` carrying the original, so ``except Boto3S3Error`` catches
+    a failed request whatever botocore died of (the deleter and the
+    single-call operations already did).
+    """
+
+    @pytest.mark.parametrize(("request_point", "attribution"), _REQUEST_POINTS)
+    @pytest.mark.parametrize(
+        "boom",
+        [
+            KeyError("Credentials"),
+            RecursionError("maximum recursion depth exceeded"),
+            ValueError('Invalid timestamp "garbage": Unknown string format: garbage'),
+        ],
+        ids=["KeyError", "RecursionError", "ValueError"],
+    )
+    def test_it_becomes_the_base_error_carrying_the_original(
+        self,
+        tmp_path: Path,
+        request_point: Any,
+        attribution: tuple[str | None, str | None, str | None],
+        boom: Exception,
+    ) -> None:
+        client, _calls = make_recording_client([boom])
+        storage = S3Storage("s3://bucket/prefix/", client=client)
+        with pytest.raises(Boto3S3Error) as excinfo:
+            request_point(storage, tmp_path)
+        error = excinfo.value
+        assert type(error) is Boto3S3Error
+        assert error.__cause__ is boom
+        assert str(error) == str(boom)  # the text aws-cli's line carries
+        assert (error.operation, error.bucket, error.key) == attribution
+
+    @pytest.mark.parametrize(("request_point", "attribution"), _REQUEST_POINTS)
+    def test_an_assertion_passes_through(
+        self,
+        tmp_path: Path,
+        request_point: Any,
+        attribution: tuple[str | None, str | None, str | None],
+    ) -> None:
+        # An invariant or a test double's unexpected-call guard is never a
+        # request outcome: the carve-out the deleter's capture makes too.
+        client, _calls = make_recording_client([AssertionError("unexpected call")])
+        storage = S3Storage("s3://bucket/prefix/", client=client)
+        with pytest.raises(AssertionError, match="unexpected call"):
+            request_point(storage, tmp_path)
+
+    def test_a_later_page_failing_keeps_the_pages_already_listed(self) -> None:
+        boom = RecursionError("maximum recursion depth exceeded")
+        first = {
+            "Contents": [_obj("prefix/a")],
+            "IsTruncated": True,
+            "NextContinuationToken": "t",
+        }
+        client, _calls = make_recording_client([first, boom])
+        storage = S3Storage("s3://bucket/prefix/", client=client)
+        keys = _keys_until_raise(storage.scan(S3ScanOptions(recursive=True)), Boto3S3Error)
+        assert keys == ["prefix/a"]
+
+    def test_a_body_read_raising_it_leaves_no_file_behind(self, tmp_path: Path) -> None:
+        # The streamed body is part of the GetObject: what reading it raises
+        # is the request failing, not the local filesystem.
+        boom = RecursionError("maximum recursion depth exceeded")
+
+        class _Body:
+            def read(self, amt: int | None = None) -> bytes:
+                raise boom
+
+            def close(self) -> None:
+                pass
+
+        client, _calls = make_recording_client([{"Body": _Body(), "ContentLength": 9}])
+        storage = S3Storage("s3://bucket/prefix/", client=client)
+        dest = tmp_path / "out.bin"
+        dest.write_bytes(b"old")
+        with pytest.raises(Boto3S3Error) as excinfo:
+            storage.get_file(dest, key="k")
+        assert type(excinfo.value) is Boto3S3Error
+        assert excinfo.value.__cause__ is boom
+        assert (excinfo.value.bucket, excinfo.value.key) == ("bucket", "prefix/k")
+        assert dest.read_bytes() == b"old"
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["out.bin"]
+
+    def test_the_conversion_of_a_fetched_page_is_not_a_request(self) -> None:
+        # Only the request sits inside the capture: what this module's own
+        # reading of the page raises keeps its type (a programming error
+        # stays loud instead of being reported as the service failing).
+        entry = {**_obj("prefix/a"), "ETag": 7}  # no parser ever yields a non-str ETag
+        client, _calls = make_recording_client([{"Contents": [entry]}])
+        storage = S3Storage("s3://bucket/prefix/", client=client)
+        with pytest.raises(AttributeError):
+            list(storage.scan(S3ScanOptions(recursive=True)))
+
+
+class TestListingEntryBotocoreCannotDecode:
+    """An entry missing ``Key`` is a malformed response even when botocore
+    meets it first.
+
+    botocore asks every ``ListObjectsV2`` for ``EncodingType=url`` and, when
+    the response echoes it (S3 and MinIO do), URL-decodes each entry's ``Key``
+    and each common prefix's ``Prefix`` by subscript as it parses the page -
+    ahead of the backend's own required-element read. aws-cli dies in that
+    same handler (``fatal error: 'Key'`` at rc 1 for ``rm --recursive``,
+    ``[ERROR]: 'Key'`` at rc 255 for ``ls --recursive``, measured against the
+    pinned aws (2.36.40) through a 127.0.0.1 fake echoing ``EncodingType``),
+    so the report is the one `TestMalformedListingEntries` pins for a response
+    that does not echo it. The recording client bypasses botocore's parser, so
+    the handler's ``KeyError`` is raised in its place.
+    """
+
+    @pytest.mark.parametrize("element", ["Key", "Prefix"])
+    def test_the_decoding_key_error_is_a_malformed_response(self, element: str) -> None:
+        boom = KeyError(element)
+        client, _calls = make_recording_client([boom])
+        storage = S3Storage("s3://bucket/prefix/", client=client)
+        with pytest.raises(MalformedResponseError) as excinfo:
+            list(storage.scan(S3ScanOptions(recursive=True)))
+        error = excinfo.value
+        assert str(error) == f"'{element}'"  # str(KeyError): the CLI's line
+        assert error.__cause__ is boom
+        assert (error.operation, error.bucket, error.key) == (None, "bucket", None)
+
+    def test_another_missing_element_stays_the_base_error(self) -> None:
+        # Not an entry of this listing: an element botocore reads elsewhere in
+        # the request (an S3 Express session reply) is the request failing.
+        client, _calls = make_recording_client([KeyError("Credentials")])
+        storage = S3Storage("s3://bucket/prefix/", client=client)
+        with pytest.raises(Boto3S3Error) as excinfo:
+            list(storage.scan(S3ScanOptions(recursive=True)))
+        assert type(excinfo.value) is Boto3S3Error
+
+
 class TestDelete:
     def test_blind_delete_object_call(self) -> None:
         client = _DeleteRecordingClient()

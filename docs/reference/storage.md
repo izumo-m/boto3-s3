@@ -826,7 +826,12 @@ a `CommonPrefixes` entry missing `Prefix`, raises
 element (the AWS CLI's `KeyError` text, that `KeyError` on `__cause__`), read
 in that order. The entries converted before it are still delivered — that
 page is emitted short and the error follows it — so a consumer sees them ahead
-of the failure exactly as the AWS CLI's entry-by-entry listing does. A
+of the failure exactly as the AWS CLI's entry-by-entry listing does. One shape
+loses the whole page instead: when the response echoes `EncodingType` (S3 and
+MinIO do), botocore URL-decodes every `Key` and `Prefix` of the page before
+handing it over, so an entry missing one fails there — the same class, element
+and cause, with none of that page's entries delivered, which is also where the
+AWS CLI's listing stops. A
 `LastModified` the host's local zone cannot represent raises the same class
 (`date value out of range`, the `OverflowError` on `__cause__`) at the same
 point, for the same reason — the AWS CLI converts every timestamp it reads to
