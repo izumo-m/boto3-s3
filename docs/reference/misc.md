@@ -605,9 +605,13 @@ the entry minus its `Key`, with a `DeleteMarkerVersionId` renamed to
 `VersionId` (which is how a single `DeleteObject` reports the same id), plus
 the batch-wide `RequestCharged` when the response carries one. The per-key
 fallback route uses its real `DeleteObject` response with `ResponseMetadata`
-stripped. Either way the caller sees the same shape. Failed keys get no slot,
-and with `capture_response=False` (the default) the batch is sent with
-`Quiet=True` and no slot is produced at all.
+stripped. Either way the caller sees the same shape. Failed keys get no slot
+— a key the response lists under both `Deleted[]` and `Errors[]` is a failure —
+and neither does a successful key the response's `Deleted[]` leaves out:
+success on the batch route is absence from `Errors[]` whichever way `Quiet` was
+sent, so an endpoint that answers `Quiet=False` without listing every key
+yields successes with nothing to show. With `capture_response=False` (the
+default) the batch is sent with `Quiet=True` and no slot is produced at all.
 
 One limitation: `DeleteObjects` reports per key spelling, so when the same key
 was submitted more than once in one batch, all of that key's results share a

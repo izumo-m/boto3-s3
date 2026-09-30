@@ -449,7 +449,9 @@ class S3Deleter:
                 self._run_delete_object(index, info, errors, deletes)
                 continue
             errors[index] = failures.get(info.key)
-            deletes[index] = deleted.get(info.key)
+            # A slot belongs to a success only: a response listing one key
+            # under both Deleted[] and Errors[] is reported by its error.
+            deletes[index] = None if errors[index] is not None else deleted.get(info.key)
 
     def _run_delete_object(
         self,

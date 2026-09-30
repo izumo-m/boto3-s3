@@ -95,7 +95,10 @@ the successful `Deleted[]` entries; each is reconstructed into a per-key
 The fallback route strips `ResponseMetadata` from its actual `DeleteObject`
 response and uses the same slot, so the caller sees a single-object shape
 regardless of the wire form (design/opresult.md). Failures are still read from
-`Errors[]` as below. One limitation: when the same key was submitted more than
+`Errors[]` as below, and a slot rides a success only: a key listed under both
+`Deleted[]` and `Errors[]` is a failure without one, and a key `Deleted[]`
+leaves out is still a success (absence from `Errors[]`, the `Quiet=True` rule,
+which an endpoint ignoring `Quiet=False` depends on) with no slot to attach. One limitation: when the same key was submitted more than
 once in a batch, all of that key's `OpResult`s share a single slot (the
 response's last entry for the key wins). `DeleteObjects` reports per key
 spelling, so per-submission responses (e.g. two distinct delete markers on a

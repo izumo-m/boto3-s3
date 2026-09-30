@@ -304,6 +304,43 @@ class TestBatching:
         assert first is not None and first["delete"] == {"VersionId": "v2"}
 
 
+class TestCapturedSlotOnOddResponses:
+    """``capture_response`` against a response that does not account for every key once."""
+
+    def test_a_key_listed_as_both_deleted_and_failed_gets_no_slot(self) -> None:
+        # Failed keys carry no slot (docs/reference/misc.md): the error wins,
+        # and the contradicting Deleted[] entry is not surfaced beside it.
+        fake = _FakeS3Client(
+            script=[
+                {
+                    "Deleted": [{"Key": "a"}, {"Key": "b", "VersionId": "v1"}],
+                    "Errors": [{"Key": "a", "Code": "AccessDenied", "Message": "msg"}],
+                }
+            ]
+        )
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append, capture_response=True)
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
+        deleter.close()
+        assert [r.outcome for r in results] == [OpOutcome.FAILED, OpOutcome.SUCCEEDED]
+        assert results[0].extra_info is None
+        assert results[1].extra_info == {"delete": {"VersionId": "v1"}}
+
+    def test_a_key_the_response_leaves_out_succeeds_without_a_slot(self) -> None:
+        # Absence from Errors[] is success on either Quiet setting - the rule
+        # an endpoint that ignores Quiet=False (and lists no Deleted[] at all)
+        # needs - so a key missing from Deleted[] has simply nothing to show.
+        fake = _FakeS3Client(script=[{"Deleted": [{"Key": "a"}]}])
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append, capture_response=True)
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
+        deleter.close()
+        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED, OpOutcome.SUCCEEDED]
+        assert [r.extra_info for r in results] == [{"delete": {}}, None]
+
+
 class TestXmlIncompatibleFallback:
     @pytest.mark.parametrize(
         ("char", "compatible"),
