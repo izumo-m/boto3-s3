@@ -661,7 +661,8 @@ class TestListBuckets:
         message = str(exc_info.value)
         assert "1.35.42" in message
         assert version("botocore") in message
-        assert exc_info.value.operation == "ls"
+        # A storage-level call names no operation; `S3.ls` stamps its own.
+        assert exc_info.value.operation is None
         assert client.calls == []
 
     def test_prefix_only_model_carries_name_prefix_and_refuses_region(self) -> None:
@@ -1054,6 +1055,53 @@ class TestScanErrorMapping:
             list(storage.scan())
         assert exc_info.value.operation is None
 
+    @pytest.mark.parametrize(
+        "operation",
+        ["ls", "rm", "cp", "mv", "sync"],
+    )
+    def test_the_operation_reading_the_listing_names_its_failure(
+        self, tmp_path: Path, operation: str
+    ) -> None:
+        # The listing cannot know who reads it, so it raises unnamed and the
+        # operation fills its own name in - the rule open / delete / validate
+        # failures follow. One listing failure, five names.
+        denied = client_error("AccessDenied", 403, "ListObjectsV2")
+        client, _calls = make_recording_client([denied, denied])
+        source = S3Storage("s3://bucket/prefix/", client=client)
+        s3 = S3()
+        runs = {
+            "ls": lambda: s3.ls(source, on_entry=lambda info: None, recursive=True),
+            "rm": lambda: s3.rm(source, recursive=True),
+            "cp": lambda: s3.cp(source, str(tmp_path), recursive=True),
+            "mv": lambda: s3.mv(source, str(tmp_path), recursive=True),
+            "sync": lambda: s3.sync(source, str(tmp_path)),
+        }
+        with pytest.raises(AccessDeniedError) as exc_info:
+            runs[operation]()
+        error = exc_info.value
+        assert (error.operation, error.bucket, error.key) == (operation, "bucket", None)
+        assert error.__cause__ is denied
+
+    def test_a_bucket_listing_failure_is_named_by_ls_alone(self) -> None:
+        denied = client_error("AccessDenied", 403, "ListBuckets")
+        client, _calls = make_recording_client([denied, denied])
+        storage = S3Storage("s3://", client=client)
+        with pytest.raises(AccessDeniedError) as direct:
+            list(storage.list_buckets())
+        assert direct.value.operation is None
+        with pytest.raises(AccessDeniedError) as through_ls:
+            S3().ls(storage, on_entry=lambda info: None)
+        assert through_ls.value.operation == "ls"
+
+    def test_a_direct_head_failure_names_no_operation(self) -> None:
+        # get_fileinfo is a storage-level call like open and delete: only an
+        # operation that reaches it could name the failure.
+        storage, _ = _storage(head_error=client_error("AccessDenied", 403, "HeadObject"))
+        with pytest.raises(AccessDeniedError) as exc_info:
+            storage.get_fileinfo()
+        error = exc_info.value
+        assert (error.operation, error.bucket, error.key) == (None, "bucket", "prefix/")
+
 
 class _DeleteRecordingClient:
     def __init__(self, error: Exception | None = None) -> None:
@@ -1101,8 +1149,8 @@ def _request_put_file(storage: S3Storage, tmp_path: Path) -> object:
 # carries: (operation, bucket, key).
 _REQUEST_POINTS: list[tuple[Any, tuple[str | None, str | None, str | None]]] = [
     (_request_scan, (None, "bucket", None)),
-    (_request_list_buckets, ("ls", None, None)),
-    (_request_get_fileinfo, ("head", "bucket", "prefix/k")),
+    (_request_list_buckets, (None, None, None)),
+    (_request_get_fileinfo, (None, "bucket", "prefix/k")),
     (_request_open, (None, "bucket", "prefix/k")),
     (_request_delete, (None, "bucket", "prefix/k")),
     (_request_get_file, ("get_file", "bucket", "prefix/k")),

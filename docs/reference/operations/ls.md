@@ -168,9 +168,9 @@ order the listing produces them, so what a caller may rely on is that order:
 
 An error raised while the listing runs surfaces on the pull that hits it, from
 inside the delivery loop — so `ls` can raise after `on_entry` has already
-received entries. Botocore errors from the object listing carry
-`operation=None`, because that listing path is shared with the recursive forms
-of `cp` / `mv` / `rm` / `sync`; the bucket listing stamps `operation="ls"`.
+received entries. Either listing's errors carry `operation="ls"`: the storage
+raises them unnamed (the object listing is shared with the recursive forms of
+`cp` / `mv` / `rm` / `sync`) and `ls` fills its own name in.
 
 - [`ValidationError`](../exceptions.md#validationerror) — `target` is neither an
   `S3Storage` nor a `str` / `os.PathLike[str]`; it is an S3 Object Lambda or an

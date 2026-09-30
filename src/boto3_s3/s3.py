@@ -1153,7 +1153,12 @@ class S3:
                 ),
                 cancel_token=cancel_token,
             )
-        with _scan_teardown(items, reusable_after_interrupt=self._reusable_after_interrupt):
+        # The listing is the storage's, which cannot know the operation reading
+        # it: a family error it raises unnamed is this ls's (`_attributed_to`).
+        with (
+            _attributed_to("ls"),
+            _scan_teardown(items, reusable_after_interrupt=self._reusable_after_interrupt),
+        ):
             for info in items:
                 if cancel_token is not None and cancel_token.cancelled:
                     break
@@ -1494,7 +1499,11 @@ class S3:
                 while True:
                     _raise_if_cancelled(cancel_token, operation)
                     try:
-                        item = next(item_iter)
+                        # The pull runs the enumeration - a listing page, the
+                        # source walk - inside a storage that cannot know the
+                        # operation: what it raises unnamed is this run's.
+                        with _attributed_to(operation):
+                            item = next(item_iter)
                     except StopIteration:
                         break
                     if dryrun:
@@ -2274,7 +2283,10 @@ class S3:
             # cancel_token on the scan too (like ls): the prefetch producer
             # stops between page pulls instead of fetching pages nobody reads.
             entries = storage.scan(options, cancel_token=cancel_token)
-            with _scan_teardown(entries, reusable_after_interrupt=self._reusable_after_interrupt):
+            with (
+                _attributed_to("rm"),  # the listing's unnamed failure is this rm's
+                _scan_teardown(entries, reusable_after_interrupt=self._reusable_after_interrupt),
+            ):
                 for info in entries:
                     _raise_if_cancelled(cancel_token, "rm")
                     _emit_result(on_result, info=info, storage=storage, outcome=OpOutcome.DRYRUN)
@@ -2293,7 +2305,10 @@ class S3:
             # cancel_token on the scan too (like ls): the prefetch producer
             # stops between page pulls instead of fetching pages nobody reads.
             entries = storage.scan(options, cancel_token=cancel_token)
-            with _scan_teardown(entries, reusable_after_interrupt=self._reusable_after_interrupt):
+            with (
+                _attributed_to("rm"),  # the listing's unnamed failure is this rm's
+                _scan_teardown(entries, reusable_after_interrupt=self._reusable_after_interrupt),
+            ):
                 for info in entries:
                     _raise_if_cancelled(cancel_token, "rm")
                     deleter.submit(info)

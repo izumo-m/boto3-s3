@@ -68,9 +68,9 @@ and never parse `str(exc)`.
 
 The context attributes are best-effort. `operation=None` is a legitimate value
 rather than a gap: it means no single operation was in scope — while a client is
-being built, while a recursive run is listing entries, or when you call a
-storage-level method such as `Storage.validate` yourself; the same validation
-run by an operation carries that operation's name. And `key` names the
+being built, or when you call a storage-level method such as
+`Storage.validate` or `Storage.scan` yourself; the same call made by an
+operation carries that operation's name. And `key` names the
 failing entry in whichever address space it came from, so a locally-originating
 error puts a filesystem path there, with no `bucket`.
 

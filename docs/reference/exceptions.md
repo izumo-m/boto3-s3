@@ -50,14 +50,17 @@ class Boto3S3Error(Exception):
 
 `operation` is the operation name the failure belongs to (`"cp"`, `"sync"`,
 …). `None` is a legitimate value rather than a gap: it means no single
-operation was in scope — while a client is being built, on the shared
-object-listing path that backs every recursive scan, which `ls` / `rm` / `cp` /
-`mv` / `sync` all ride, or when the caller invokes a storage-level method
-directly — `validate`, `open`, `delete` or `get_fileinfo`
+operation was in scope — while a client is being built, or when the caller
+invokes a storage-level method directly — `validate`, `open`, `delete`,
+`get_fileinfo`, a `scan` or `list_buckets` listing
 ([`storage.md`](./storage.md)), whose errors leave it unset because the
 storage cannot know which operation is using it. The same call reached through an operation carries that operation's name
 instead, whichever path the operation took: a `DeleteObject` the service denies
-reads `"rm"` on the blind single-key path and on the batched path alike.
+reads `"rm"` on the blind single-key path and on the batched path alike, and a
+listing the service denies reads `"ls"`, `"rm"`, `"cp"`, `"mv"` or `"sync"`
+after the operation that was reading it. `S3Storage.get_file` and `put_file`
+are the exception among the storage-level methods: no operation ever runs
+them, so they name their own failures `"get_file"` / `"put_file"`.
 
 `bucket` and `key` are best-effort context for the failing entry. `key` names
 that entry in the address space it came from, not necessarily an S3 key: a
@@ -256,9 +259,9 @@ the same response: the `KeyError`'s `str()`, which is the element name in
 quotes (`'LastModified'`), or `date value out of range`; that original
 exception is on `__cause__`. `bucket` and `key` name the entry when the
 response carried them (an entry missing `Key` names only its bucket; a bucket
-entry puts its name in `bucket`), and `operation` is set on the single-object
-paths a transfer runs and left unset on the shared listing path and on a
-storage-level call, like every other error those raise.
+entry puts its name in `bucket`), and `operation` names the operation that
+was reading the response and is left unset on a storage-level call, like
+every other error those raise.
 
 ```python
 class MalformedResponseError(Boto3S3Error): ...

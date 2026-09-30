@@ -118,15 +118,19 @@ so their `__cause__` is `None` and only the message carries the code.
 
 The context attributes are best-effort, and `operation=None` is a legitimate
 value: it means no subcommand-scoped operation was in scope - client
-construction, the shared object-listing path that backs every recursive
-scan (`ls` / `rm` / `cp` / `mv` / `sync` all ride it, so stamping any one name
-would mislabel the others), and a storage-level method the caller invokes
-itself - `validate`, `open`, `delete` - whose raise sites leave it unset because
-the storage cannot know which operation is using it; an operation making the
-same call stamps its own name, since only the operation layer knows it (the
-single rule `s3storage.attribute_failure` applies for every capture, so a
-`DeleteObject` denied under `rm` reads `"rm"` on the blind single-key path and
-the batched path alike). A locally-originating error carries a filesystem path in `key`
+construction, and a storage-level method the caller invokes itself -
+`validate`, `open`, `delete`, `get_fileinfo`, the `scan` / `list_buckets`
+listings - whose raise sites leave it unset because the storage cannot know
+which operation is using it (the object listing backs `ls` / `rm` / `cp` /
+`mv` / `sync` alike, so a name stamped there would mislabel four of them); an
+operation making the same call stamps its own name, since only the operation
+layer knows it (the single rule `s3storage.attribute_failure` applies for
+every capture, so a `DeleteObject` denied under `rm` reads `"rm"` on the blind
+single-key path and the batched path alike, and each operation wraps the pull
+of its enumeration, so a listing failure reads the name of the run that was
+listing). `S3Storage.get_file` / `put_file` are storage-level methods no
+operation ever runs; nothing above them could name their failures, so they
+stamp `"get_file"` / `"put_file"` themselves. A locally-originating error carries a filesystem path in `key`
 (and no `bucket`) when set: the field names the failing entry in the backend's
 own address space, not always an S3 key.
 

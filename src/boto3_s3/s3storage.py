@@ -641,9 +641,11 @@ def _bucket_filters_unsupported_reason(
     return None
 
 
-# The ``operation`` the single-request lane stamps on the errors it raises
-# (design/exceptions.md: a storage-level method the caller invokes itself names
-# its own errors, since no subcommand is in scope).
+# The ``operation`` the single-request lane stamps on the errors it raises.
+# ``get_file`` / ``put_file`` are not a storage half of some operation the way
+# ``open`` / ``delete`` / ``get_fileinfo`` are (those leave it unset for the
+# operation to fill): nothing above them will ever name the failure, so they
+# name it themselves (design/exceptions.md section 2).
 _GET_FILE_OPERATION = "get_file"
 _PUT_FILE_OPERATION = "put_file"
 
@@ -1206,8 +1208,8 @@ class S3Storage(Storage):
         # a lazy-build failure also surfaces as a Boto3S3Error on the first pull.
         # operation=None: this object listing backs every recursive scan - not
         # only ls, but also rm / cp / mv / sync source enumeration - so the calling
-        # subcommand is not known here, and stamping a fixed "ls" would mislabel
-        # the others (the service-root list_buckets below is ls-only, so it can).
+        # subcommand is not known here; the operation reading the listing fills
+        # its own name in (attribute_failure).
         with s3_request(operation=None, bucket=self._bucket):
             pages = iter(self.get_client().get_paginator("list_objects_v2").paginate(**paging))
         while True:
@@ -1250,19 +1252,21 @@ class S3Storage(Storage):
         1.34.162) it falls back to one unpaginated ``list_buckets()``. Errors
         surface on the consumer's pull.
         """
-        with s3_errors(operation="ls"):
+        # operation=None throughout, like the object listing: ``S3.ls`` stamps
+        # its own name on what this raises, a direct call has none in scope.
+        with s3_errors(operation=None):
             client = self.get_client()
         reason = _bucket_filters_unsupported_reason(client, name_prefix=name_prefix, region=region)
         if reason is not None:
             # The environment (SDK floor) lacks the capability, not the
             # caller's arguments: a ConfigurationError.
-            raise ConfigurationError(reason, operation="ls")
+            raise ConfigurationError(reason)
         if not client.can_paginate("list_buckets"):
             # Back-compat (floor botocore 1.31): the ListBuckets paginator is a
             # late-2024 addition (botocore 1.34.162), so an older botocore has
             # only the single unpaginated call to list with. Drop this branch
             # once the floor reaches the paginator.
-            with s3_request(operation="ls"):
+            with s3_request(operation=None):
                 listing = client.list_buckets()
             yield from _page_to_bucket_infos(listing, self)
             return
@@ -1271,11 +1275,11 @@ class S3Storage(Storage):
             paging["Prefix"] = name_prefix
         if region:
             paging["BucketRegion"] = region
-        with s3_request(operation="ls"):
+        with s3_request(operation=None):
             pages = iter(client.get_paginator("list_buckets").paginate(**paging))
         while True:
             # Only the request sits inside the capture, as in the object listing.
-            with s3_request(operation="ls"):
+            with s3_request(operation=None):
                 page = next(pages, None)
             if page is None:
                 return
@@ -1383,7 +1387,10 @@ class S3Storage(Storage):
         """
         target_key = self._resolve_key(key)
         try:
-            with s3_request(operation="head", bucket=self._bucket, key=target_key):
+            # operation=None, like open and delete: a direct call has no
+            # operation in scope, and one that reaches this through a run has
+            # its name filled in by that run (attribute_failure).
+            with s3_request(operation=None, bucket=self._bucket, key=target_key):
                 head = self.get_client().head_object(Bucket=self._bucket, Key=target_key)
         except NotFoundError:
             return None
