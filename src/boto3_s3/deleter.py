@@ -169,9 +169,15 @@ class S3Deleter:
                 f"S3Deleter requires an S3Storage target, got {type(storage).__name__}",
                 operation=operation,
             )
-        if not 1 <= batch_size <= S3_DELETE_BATCH:
+        if (
+            not isinstance(batch_size, int)  # pyright: ignore[reportUnnecessaryIsInstance]
+            or not 1 <= batch_size <= S3_DELETE_BATCH
+        ):
             # Same taxonomy as the storage-type guard above: a caller-argument
-            # problem raises ValidationError, not a bare ValueError.
+            # problem raises ValidationError, not a bare ValueError. The type
+            # is checked with the range because a float inside it (2.0, from
+            # arithmetic) would pass here and only fail at the first flush,
+            # as a TypeError slicing the buffer.
             raise ValidationError(
                 f"batch_size must be between 1 and {S3_DELETE_BATCH} (got {batch_size!r})",
                 operation=operation,

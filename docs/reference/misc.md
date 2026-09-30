@@ -474,7 +474,8 @@ result — see [Captured responses](#captured-responses). `dryrun` makes the
 deleter a rehearsal — see [Dry runs](#dry-runs).
 
 Construction raises [`ValidationError`](./exceptions.md#validationerror) for a
-`storage` that is not an `S3Storage` and for a `batch_size` outside 1..1000. If
+`storage` that is not an `S3Storage` and for a `batch_size` that is not an
+integer in 1..1000. If
 `storage` has to build its own default client, that build can raise
 [`ConfigurationError`](./exceptions.md#configurationerror) or
 [`InvalidConfigError`](./exceptions.md#invalidconfigerror).

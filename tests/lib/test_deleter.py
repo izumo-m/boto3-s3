@@ -131,6 +131,14 @@ class TestConstruction:
             _deleter(_FakeS3Client(), batch_size=batch_size)
         assert type(excinfo.value) is ValidationError
 
+    @pytest.mark.parametrize("batch_size", [2.0, 1.5, "10", None])
+    def test_batch_size_of_another_type_rejected(self, batch_size: Any) -> None:
+        # A float inside the range (a computed 2.0) used to pass the range
+        # check and fail at the first flush, slicing the buffer with it - a
+        # TypeError that dropped the buffered entries unsent.
+        with pytest.raises(ValidationError, match="batch_size"):
+            _deleter(_FakeS3Client(), batch_size=batch_size)
+
     @pytest.mark.parametrize("batch_size", [1, S3_DELETE_BATCH])
     def test_batch_size_bounds_accepted(self, batch_size: int) -> None:
         _deleter(_FakeS3Client(), batch_size=batch_size).close()
