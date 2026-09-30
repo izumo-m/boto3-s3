@@ -248,7 +248,7 @@ app.put_file("./cache/manifest.json", key="manifest.json")
 ```
 
 Both return an `S3FileInfo` for the object — the full key, the size, the
-dequoted ETag, and the whole response under `head` — so a download needs no
+ETag as S3 returned it, and the whole response under `head` — so a download needs no
 follow-up `HeadObject` for the object's mtime or storage class either. (An
 upload's info describes what `PutObject` answered, which carries no timestamp.)
 

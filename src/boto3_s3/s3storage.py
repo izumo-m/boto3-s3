@@ -516,7 +516,7 @@ def _page_to_infos(
             key=key,
             size=size,
             mtime=mtime,
-            etag=etag.strip('"') if etag else None,
+            etag=etag or None,
             storage_class=obj.get("StorageClass"),
             owner=owner.get("ID") if owner else None,
             compare_key=key[len(prefix) :],
@@ -1417,7 +1417,7 @@ class S3Storage(Storage):
             key=target_key,
             size=size,
             mtime=mtime,
-            etag=etag.strip('"') if etag else None,
+            etag=etag or None,
             storage_class=head.get("StorageClass"),
             head=head,
             compare_key=target_key.rsplit("/", 1)[-1],
@@ -1462,7 +1462,7 @@ class S3Storage(Storage):
         parity behavior; here the caller holds the returned ``S3FileInfo`` and
         decides. That info describes the object as ``get_fileinfo``'s does: the
         full key, ``ContentLength`` as ``size``, ``LastModified`` as ``mtime``,
-        the dequoted ETag, the storage class, the key's basename as
+        the ETag as the response carried it, the storage class, the key's basename as
         ``compare_key``. Its ``head`` differs from ``get_fileinfo``'s raw one:
         the response minus its transport metadata and its body.
 
@@ -1490,7 +1490,7 @@ class S3Storage(Storage):
             key=target_key,
             size=response.get("ContentLength"),
             mtime=response.get("LastModified"),
-            etag=etag.strip('"') if etag else None,
+            etag=etag or None,
             storage_class=response.get("StorageClass"),
             head=strip_response_metadata(response, drop_body=True),
             compare_key=target_key.rsplit("/", 1)[-1],
@@ -1519,7 +1519,7 @@ class S3Storage(Storage):
 
         ``key`` addresses the object exactly as ``get_fileinfo``'s does
         (``_resolve_key``). The returned ``S3FileInfo`` carries the full key, the
-        local file's size as ``size``, the response's dequoted ETag, the key's
+        local file's size as ``size``, the response's ETag as it came, the key's
         basename as ``compare_key``, and the whole ``PutObject`` response under
         ``head``; ``mtime`` stays unset, the response carrying none.
 
@@ -1570,7 +1570,7 @@ class S3Storage(Storage):
         return S3FileInfo(
             key=target_key,
             size=size,
-            etag=etag.strip('"') if etag else None,
+            etag=etag or None,
             head=strip_response_metadata(response),
             compare_key=target_key.rsplit("/", 1)[-1],
             storage=self,

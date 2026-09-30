@@ -128,7 +128,12 @@ class LocalFileInfo(FileInfo):
 class S3FileInfo(FileInfo):
     """``FileInfo`` enriched with fields derived from an S3 object listing.
 
-    ``etag`` is the dequoted ETag (surrounding ``"`` stripped) when populated.
+    ``etag`` is the ETag exactly as the response carried it - S3's surrounding
+    ``"`` included, the form a boto3 response's ``ETag`` has - when populated.
+    Nothing is stripped, so the value can go back to S3 as an ``If-Match``
+    unchanged (the transfer engine does just that, as aws-cli does) whatever
+    an endpoint's ETags look like; a comparison against a computed ETag
+    removes the quotes at the comparison (``EtagComparison``).
     ``storage_class`` is the object's storage class from the listing
     (``ListObjectsV2``'s ``StorageClass``), consulted by the aws-cli glacier gate
     to skip ``GLACIER`` / ``DEEP_ARCHIVE`` sources on ``cp`` / ``mv`` / ``sync``

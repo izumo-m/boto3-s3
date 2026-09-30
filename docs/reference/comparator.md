@@ -473,8 +473,10 @@ stream. A path is opened `"rb"` here and closed again. A stream is read from its
 current position to the end and is **never** closed: it stays the caller's, and
 so does its failure mode (see Raises).
 
-`etag` is required and keyword-only: the object's ETag **dequoted**, the form
-[`S3FileInfo.etag`](./results.md#s3fileinfo) carries. `None` or an empty string
+`etag` is required and keyword-only: the object's ETag, with or without the
+double quotes S3 wraps it in — [`S3FileInfo.etag`](./results.md#s3fileinfo) and
+a boto3 response's `ETag` can be passed as they are, and so can the bare hex.
+`None` or an empty string
 is indeterminate and returns `True` with nothing opened or read. An ETag bearing
 a `-<n>` suffix is reconstructed as `MD5(concatenated part MD5s) + "-<n>"`, any
 other as the hex MD5 of the whole stream — the same two forms, at the same

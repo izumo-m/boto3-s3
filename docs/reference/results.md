@@ -435,9 +435,14 @@ class S3FileInfo(FileInfo):
     head: Mapping[str, Any] | None = None
 ```
 
-`etag` is the dequoted ETag — the surrounding `"` characters stripped — where
-the listing supplied one. Note that `OpResult.extra_info` reports an ETag in
-S3's raw quoted form instead.
+`etag` is the ETag exactly as the response carried it — S3's surrounding `"`
+characters included, the form a boto3 response's `ETag` has — where the listing
+supplied one; `OpResult.extra_info` reports an ETag in the same form. Nothing is
+stripped, so the value can be sent back as an `If-Match` unchanged, which is
+what the transfer engine does for a ranged download or a multipart copy, as the
+AWS CLI does. To compare it with an ETag computed from bytes, use
+[`EtagComparison`](./comparator.md#etagcomparison), which takes either form, or
+drop the quotes yourself.
 
 `storage_class` is the object's storage class as the listing reported it. It is
 what the glacier gate consults to skip `GLACIER` and `DEEP_ARCHIVE` sources on

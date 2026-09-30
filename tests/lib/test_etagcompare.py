@@ -59,7 +59,9 @@ _CONTENT_6MIB_MP5 = "6976d829a1a06b80396a19f0a92087e6-2"
 
 
 def _s3(*, etag: str | None = None, size: int | None = None, key: str = "k") -> S3FileInfo:
-    return S3FileInfo(key=key, etag=etag, size=size)
+    """An S3 listing entry whose ETag is *etag* the way a listing carries it:
+    wrapped in S3's double quotes (``S3FileInfo.etag`` keeps the response's text)."""
+    return S3FileInfo(key=key, etag=None if etag is None else f'"{etag}"', size=size)
 
 
 def _pair(transfer_type: TransferType, *, src: FileInfo, dest: FileInfo) -> SyncPair:
@@ -195,6 +197,13 @@ class TestCopyDirectEtag:
             EtagComparison()(_pair(TransferType.COPY, src=_s3(etag="abc"), dest=_s3(etag=None)))
             is True
         )
+
+    def test_a_hand_built_bare_etag_compares_like_a_quoted_one(self) -> None:
+        # An entry built by hand may carry the bare hex; the quotes are not
+        # part of what is compared.
+        bare = S3FileInfo(key="k", etag="abc")
+        assert EtagComparison()(_pair(TransferType.COPY, src=bare, dest=_s3(etag="abc"))) is False
+        assert EtagComparison()(_pair(TransferType.COPY, src=bare, dest=_s3(etag="xyz"))) is True
 
     def test_non_s3_side_counts_as_differ(self) -> None:
         # A side that is not an S3FileInfo has no comparable etag -> differ.
@@ -435,6 +444,22 @@ class TestContentDiffers:
 
     def test_path_mismatch_differs(self, tmp_path: Path) -> None:
         assert EtagComparison().content_differs(write_file(tmp_path, _TEN), etag="0" * 32) is True
+
+    def test_the_etag_is_taken_quoted_or_bare(self, tmp_path: Path) -> None:
+        # `S3FileInfo.etag` and a boto3 response carry S3's quotes; a caller
+        # holding the bare hex passes that. Both name the same object.
+        p = write_file(tmp_path, _TEN)
+        comparison = EtagComparison()
+        assert comparison.content_differs(p, etag=f'"{_TEN_SINGLE}"') is False
+        assert comparison.content_differs(p, etag=_TEN_SINGLE) is False
+        assert comparison.content_differs(p, etag='"' + "0" * 32 + '"') is True
+
+    def test_an_etag_that_is_not_a_plain_one_reads_as_differing(self, tmp_path: Path) -> None:
+        # A weak validator is not the content's MD5; only a matched pair of
+        # quotes is removed, so it never equals a computed ETag.
+        p = write_file(tmp_path, _TEN)
+        assert EtagComparison().content_differs(p, etag=f'W/"{_TEN_SINGLE}"') is True
+        assert EtagComparison().content_differs(p, etag='""') is True  # empty: indeterminate
 
     def test_str_path_accepted(self, tmp_path: Path) -> None:
         # str and PathLike sources are the same source.

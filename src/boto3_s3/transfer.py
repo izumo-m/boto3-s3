@@ -172,9 +172,10 @@ class TransferItem:
     ``size`` is the transfer byte count, provided to s3transfer to skip its
     size probe; a copy also reads it for the copy-props multipart decision, so
     a copy item must carry it - an under-threshold value routes metadata/tags
-    down the single-part path. ``etag`` is the source object's ETag held
-    unquoted (``S3Storage`` strips the surrounding quotes); the engine
-    re-quotes it when it provides it to s3transfer. ``size_hint`` is a stream
+    down the single-part path. ``etag`` is the source object's ETag exactly as
+    the listing or the HEAD carried it (``S3FileInfo.etag``, quotes and all),
+    and the engine provides it to s3transfer untouched - the text aws-cli
+    sends as ``If-Match``. ``size_hint`` is a stream
     upload's ``expected_size``: a sizing hint for a source the engine cannot
     size itself, never a byte count - `_applied_size_hint` provides it only
     for a non-seekable fileobj, and SUCCEEDED reports the bytes counted
@@ -1931,7 +1932,7 @@ class _ProvideETag:
 
     def on_queued(self, future: Any, **kwargs: Any) -> None:
         if hasattr(future.meta, "provide_object_etag"):
-            future.meta.provide_object_etag(f'"{self._etag}"')
+            future.meta.provide_object_etag(self._etag)
 
 
 class _Progress:

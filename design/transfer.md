@@ -131,7 +131,12 @@ are plain classes that do not inherit `BaseSubscriber` - the base class would
 add nothing the `getattr` protocol uses.
 
 1. `_ProvideSize` / `_ProvideETag` - provide every kind with the size and (if
-   present, in quoted form) the etag up front (as in aws-cli). **In s3transfer
+   present) the etag up front (as in aws-cli) - the etag as the listing or the
+   HEAD carried it, untouched: `S3FileInfo.etag` keeps the response's text
+   rather than a dequoted form, because s3transfer sends the provided value as
+   `If-Match` and a strip-and-requote is an identity only for the usual quoted
+   form (an endpoint serving `abc` or `W/"abc"` would get `"abc"` / `"W/"abc"`
+   back where aws-cli returns what it was given). **In s3transfer
    0.17, even a copy fires a probe HeadObject against the source if either size
    or etag is missing**, so providing both is a precondition for wire parity.
    Because the CRT manager's future meta does not have `provide_transfer_size` /

@@ -180,10 +180,43 @@ class TestScanNonRecursive:
         assert info.compare_key == "a.txt"
         assert info.size == 10
         assert info.mtime == MTIME
-        assert info.etag == "abc"  # surrounding quotes stripped
+        assert info.etag == '"abc"'  # as the response carried it, quotes included
         assert info.storage_class == "STANDARD"
         assert info.owner == "me"
         assert info.storage is storage
+
+
+class TestEtagIsKeptAsReceived:
+    """``S3FileInfo.etag`` is the response's own text; nothing is stripped.
+
+    The transfer engine hands it to s3transfer as the ``If-Match`` of a ranged
+    download (and a multipart copy's ``CopySourceIfMatch``), and aws-cli sends
+    the response's text there untouched. Stripping the quotes and putting them
+    back is only an identity for the usual quoted form: measured against the
+    pinned aws (2.36.40) through a 127.0.0.1 fake, an ETag served as ``abc``
+    goes back as ``abc`` and one served as ``W/"abc"`` as ``W/"abc"``, where a
+    strip-and-requote sent ``"abc"`` and ``"W/"abc"``.
+    """
+
+    @pytest.mark.parametrize("etag", ['"abc"', '"abc-2"', "abc", 'W/"abc"'])
+    def test_a_listing_entry_keeps_the_etag_text(self, etag: str) -> None:
+        storage, _ = _storage([{"Contents": [_obj("prefix/a.txt", 10, etag=etag)]}])
+        (info,) = storage.scan(S3ScanOptions(recursive=True))
+        assert isinstance(info, S3FileInfo)
+        assert info.etag == etag
+
+    @pytest.mark.parametrize("etag", ['"abc"', "abc", 'W/"abc"'])
+    def test_a_head_keeps_the_etag_text(self, etag: str) -> None:
+        head = {"ContentLength": 7, "LastModified": MTIME, "ETag": etag}
+        storage, _ = _storage(url="s3://bucket/prefix/obj.txt", head_response=head)
+        info = storage.get_fileinfo()
+        assert info is not None and info.etag == etag
+
+    def test_a_missing_or_empty_etag_is_none(self) -> None:
+        pages = [{"Contents": [_obj("prefix/a.txt"), _obj("prefix/b.txt", etag="")]}]
+        storage, _ = _storage(pages)
+        infos = list(storage.scan(S3ScanOptions(recursive=True)))
+        assert [info.etag for info in infos if isinstance(info, S3FileInfo)] == [None, None]
 
 
 class TestScanRecursive:
@@ -517,7 +550,7 @@ class TestGetFileinfo:
         assert info.key == "prefix/obj.txt"
         assert info.compare_key == "obj.txt"  # basename
         assert info.size == 7
-        assert info.etag == "abc"  # surrounding quotes stripped
+        assert info.etag == '"abc"'  # as the response carried it, quotes included
         assert info.head is head  # the HeadObject payload is cached
         assert client.head_calls == [{"Bucket": "bucket", "Key": "prefix/obj.txt"}]
 
@@ -1260,10 +1293,10 @@ class TestRequestRaisingOutsideTheBotoFamily:
         # Only the request sits inside the capture: what this module's own
         # reading of the page raises keeps its type (a programming error
         # stays loud instead of being reported as the service failing).
-        entry = {**_obj("prefix/a"), "ETag": 7}  # no parser ever yields a non-str ETag
+        entry = {**_obj("prefix/a"), "Key": 7}  # no parser ever yields a non-str Key
         client, _calls = make_recording_client([{"Contents": [entry]}])
         storage = S3Storage("s3://bucket/prefix/", client=client)
-        with pytest.raises(AttributeError):
+        with pytest.raises(TypeError):
             list(storage.scan(S3ScanOptions(recursive=True)))
 
 
@@ -1568,7 +1601,7 @@ class TestGetFile:
         assert info.compare_key == "manifest.json"  # basename, as get_fileinfo stamps
         assert info.size == 13
         assert info.mtime == MTIME
-        assert info.etag == "abc"  # surrounding quotes stripped
+        assert info.etag == '"abc"'  # as the response carried it, quotes included
         assert info.storage_class == "STANDARD_IA"
         assert info.storage is storage
         # head is the parsed response minus the transport metadata and the body.
@@ -1821,7 +1854,7 @@ class TestPutFile:
         assert info.key == "prefix/manifest.json"
         assert info.compare_key == "manifest.json"
         assert info.size == 13  # the local file's size
-        assert info.etag == "abc"  # surrounding quotes stripped
+        assert info.etag == '"abc"'  # as the response carried it, quotes included
         assert info.storage is storage
         assert info.head == {"ETag": '"abc"'}
 
@@ -1913,8 +1946,9 @@ class TestSingleRequestTransferRoundTrip:
             uploaded = storage.put_file(source, key="state.json")
             assert uploaded.key == "app/state.json"
             assert uploaded.size == len(payload)
-            # A single-part object's ETag is the MD5 of its bytes, undecorated.
-            assert uploaded.etag == hashlib.md5(payload, usedforsecurity=False).hexdigest()
+            # A single-part object's ETag is the MD5 of its bytes, in S3's quotes.
+            digest = hashlib.md5(payload, usedforsecurity=False).hexdigest()
+            assert uploaded.etag == f'"{digest}"'
 
             back = tmp_path / "downloaded.json"
             downloaded = storage.get_file(back, key="state.json")

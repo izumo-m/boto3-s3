@@ -162,7 +162,7 @@ head = s3.client().head_object(Bucket="my-bucket", Key="dist/app.tar.gz")
 
 if comparison.content_differs(
     "dist/app.tar.gz",
-    etag=head["ETag"].strip('"'),      # dequoted, as a listing entry carries it
+    etag=head["ETag"],                 # as S3 returned it; a listing entry's etag works too
     s3_size=head["ContentLength"],
 ):
     ...  # the object does not hold these bytes

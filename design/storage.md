@@ -539,7 +539,7 @@ spanning both would file a broken stream as a local failure.
 
 Both address the object through the same `""`-is-this-location /
 join-under-the-prefix rule as `get_fileinfo`, and both return an `S3FileInfo`
-filled as `get_fileinfo`'s is: full `key`, dequoted `etag`, basename
+filled as `get_fileinfo`'s is: full `key`, the response's `etag`, basename
 `compare_key`, `storage`. The `head` slot is where they differ — these two store
 the response with its transport metadata stripped (`strip_response_metadata`,
 the convention for every response slot the API surfaces; `get_file` drops the

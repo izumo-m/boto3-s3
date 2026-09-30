@@ -179,8 +179,10 @@ class EtagComparison(ContentComparison):
         from its current position to the end and is never closed - it stays the
         caller's, as does whatever it raises, which propagates unchanged.
 
-        ``etag`` is the object's ETag, dequoted (what ``S3FileInfo.etag``
-        carries). Missing or empty is indeterminate -> ``True``, with nothing
+        ``etag`` is the object's ETag, with or without the double quotes S3
+        wraps it in: ``S3FileInfo.etag`` and a boto3 response's ``ETag`` can be
+        passed as they are, and so can the bare hex. Missing or empty is
+        indeterminate -> ``True``, with nothing
         opened or read. An ETag bearing a ``-<n>`` suffix is reconstructed as a
         multipart ETag at ``part_size`` (adjusted per file exactly as an upload
         would chunk it), any other as the whole-stream hex MD5 - so the module
@@ -201,6 +203,7 @@ class EtagComparison(ContentComparison):
         safeguard, and the reason a size is worth passing. ``check_size=False``
         ignores ``s3_size`` entirely.
         """
+        etag = _bare_etag(etag)
         if not etag:
             return True  # no ETag to compare against -> indeterminate
         multipart = "-" in etag
@@ -294,9 +297,24 @@ def _taxonomy_error(exc: OSError, *, operation: str, key: str) -> Boto3S3Error:
     return translate_os_error(exc, operation=operation, key=key)
 
 
+def _bare_etag(etag: str | None) -> str | None:
+    """An ETag without the double quotes S3 wraps it in.
+
+    ``S3FileInfo.etag`` holds the response's own text, quotes included, while
+    an ETag computed from bytes is the bare hex - so the quotes come off here,
+    at the comparison. Only a matched surrounding pair is removed: an already
+    bare value passes through (``content_differs`` accepts both forms), and
+    anything else - a weak ``W/"..."`` validator, say - is left as it is, which
+    never equals a computed ETag and so reads as differing.
+    """
+    if etag and len(etag) >= 2 and etag[0] == etag[-1] == '"':
+        return etag[1:-1]
+    return etag
+
+
 def _s3_etag(info: object) -> str | None:
-    """The dequoted ETag of an S3 listing entry, or ``None`` for any other side."""
-    return info.etag if isinstance(info, S3FileInfo) else None
+    """The bare ETag of an S3 listing entry, or ``None`` for any other side."""
+    return _bare_etag(info.etag) if isinstance(info, S3FileInfo) else None
 
 
 def _etag_differs(a: str | None, b: str | None) -> bool:

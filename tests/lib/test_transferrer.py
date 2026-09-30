@@ -375,7 +375,7 @@ class TestDownload:
         return TransferItem(
             compare_key="a.bin",
             size=7,
-            etag="abc123",
+            etag='"abc123"',
             mtime=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
             src_bucket="bucket",
             src_key="d/a.bin",
@@ -479,7 +479,7 @@ class TestCopy:
         return TransferItem(
             compare_key="a.bin",
             size=size,
-            etag="abc123",
+            etag='"abc123"',
             src_bucket="src-b",
             src_key="d/a.bin",
             dest_bucket="dest-b",
@@ -1647,7 +1647,7 @@ class TestSerialExecutorInterrupt:
         item = TransferItem(
             compare_key="a.bin",
             size=7,
-            etag="abc123",
+            etag='"abc123"',
             src_bucket="bucket",
             src_key="d/a.bin",
             dest_path=str(tmp_path / "out" / "a.bin"),
@@ -1741,7 +1741,7 @@ class TestNoOverwrite:
         item = TransferItem(
             compare_key="a.bin",
             size=9 * _MIB,
-            etag="abc123",
+            etag='"abc123"',
             src_bucket="src-b",
             src_key="d/a.bin",
             dest_bucket="dest-b",
@@ -1774,7 +1774,7 @@ class TestMove:
         return TransferItem(
             compare_key="a.bin",
             size=7,
-            etag="abc123",
+            etag='"abc123"',
             mtime=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
             src_bucket="bucket",
             src_key="d/a.bin",
@@ -1836,7 +1836,7 @@ class TestMove:
         item = TransferItem(
             compare_key="a.bin",
             size=7,
-            etag="abc123",
+            etag='"abc123"',
             src_bucket="src-b",
             src_key="d/a.bin",
             dest_bucket="dest-b",
@@ -1857,7 +1857,7 @@ class TestMove:
         item = TransferItem(
             compare_key="a.bin",
             size=7,
-            etag="abc123",
+            etag='"abc123"',
             src_bucket="src-b",
             src_key="d/a.bin",
             dest_bucket="dest-b",
@@ -1966,7 +1966,7 @@ class TestMove:
         item = TransferItem(
             compare_key="a.bin",
             size=9 * _MIB,
-            etag="abc123",
+            etag='"abc123"',
             src_bucket="src-b",
             src_key="d/a.bin",
             dest_bucket="dest-b",
@@ -2003,7 +2003,7 @@ class TestMove:
         item = TransferItem(
             compare_key="a.bin",
             size=9 * _MIB,
-            etag="abc123",
+            etag='"abc123"',
             src_bucket="src-b",
             src_key="d/a.bin",
             dest_bucket="dest-b",
@@ -2064,7 +2064,7 @@ class TestDownloadMoveFsync:
         return TransferItem(
             compare_key="a.bin",
             size=7,
-            etag="abc123",
+            etag='"abc123"',
             mtime=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
             src_bucket="bucket",
             src_key="d/a.bin",
@@ -2204,7 +2204,7 @@ class TestChecksumOptions:
         item = TransferItem(
             compare_key="a.bin",
             size=7,
-            etag="abc123",
+            etag='"abc123"',
             src_bucket="b",
             src_key="k",
             dest_path=str(tmp_path / "out.bin"),
@@ -2665,6 +2665,28 @@ class TestCrtSubscriberCompat:
 
         future = type("F", (), {"meta": self._CrtLikeMeta()})()
         _ProvideETag("abc").on_queued(future)  # must not raise
+
+
+class TestProvidedEtagIsTheResponseText:
+    """The engine hands s3transfer the source ETag exactly as the response
+    carried it - the ``If-Match`` aws-cli sends.
+
+    s3transfer puts the provided value on every ranged GET of a multipart
+    download and on a multipart copy's ``CopySourceIfMatch``. Measured against
+    the pinned aws (2.36.40) through a 127.0.0.1 fake: an ETag served without
+    quotes goes back without them, a weak ``W/"..."`` one as it came, and the
+    usual quoted one quoted.
+    """
+
+    @pytest.mark.parametrize("etag", ['"abc123"', '"abc123-2"', "abc123", 'W/"abc123"'])
+    def test_the_value_is_provided_untouched(self, etag: str) -> None:
+        from boto3_s3.transfer import _ProvideETag
+
+        provided: list[str] = []
+        meta = type("Meta", (), {"provide_object_etag": staticmethod(provided.append)})()
+        future = type("F", (), {"meta": meta})()
+        _ProvideETag(etag).on_queued(future)
+        assert provided == [etag]
 
 
 class TestResponseCaptureExpectGate:

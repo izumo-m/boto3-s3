@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A failed S3 request is now a `Boto3S3Error` whatever botocore raised inside it; a listing, a HEAD or a single-object call could leak a bare `KeyError` / `RecursionError` / `ValueError`.
 - A batched delete now retries a key S3 reports with a transient error (as `aws s3`'s per-key deletes are retried) instead of failing it.
 - A listing failure's `operation` now names the operation that was listing (`ls` / `rm` / `cp` / `mv`, as `sync` already did); a direct `get_fileinfo` or `list_buckets` call leaves it unset.
+- `S3FileInfo.etag` now holds the ETag exactly as S3 returned it, quotes included (it used to be stripped), so a multipart download's `If-Match` is the response's own text as with `aws s3`; `EtagComparison.content_differs` takes an ETag in either form.
 - `get_file` no longer fails on a long multi-byte destination name, and `put_file` refuses a FIFO, socket or device instead of hanging or leaking an `OSError`.
 
 ## [0.11.1] - 2026-09-07

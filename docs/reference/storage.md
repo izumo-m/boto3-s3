@@ -1015,7 +1015,7 @@ s3transfer's own download lane has — so:
 Nothing stamps the local file's mtime: that is the transfer lanes' AWS CLI
 parity behavior, and here the caller holds the returned info and decides. The
 returned `S3FileInfo` is shaped like `get_fileinfo`'s — the full key,
-`ContentLength` as `size`, `LastModified` as `mtime`, the dequoted ETag, the
+`ContentLength` as `size`, `LastModified` as `mtime`, the ETag as returned, the
 storage class, the key's basename as `compare_key` — and carries the whole
 `GetObject` response minus its transport metadata and its body under `head`.
 
@@ -1050,7 +1050,7 @@ not this lane's. Shape the object through `S3.cp`'s transfer options, or call
 
 `key` addresses the object exactly as `get_fileinfo`'s does. The returned
 `S3FileInfo` carries the full key, the local file's size (taken from the open
-handle, so it describes what was actually sent), the response's dequoted ETag,
+handle, so it describes what was actually sent), the response's ETag as returned,
 the key's basename as `compare_key`, and the whole `PutObject` response minus
 its transport metadata under `head`; `mtime` stays unset, the response carrying
 none.
