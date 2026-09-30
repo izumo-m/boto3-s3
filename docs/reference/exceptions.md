@@ -219,7 +219,8 @@ library calls need only catch `ValidationError`.
 A network or local I/O failure. Raised for an S3 5xx or a throttling response
 (`InternalError`, `SlowDown`, `ServiceUnavailable`, `RequestTimeout`), for
 botocore's connection and HTTP-client failures (endpoint or connect failure,
-proxy failure, read timeout, a dropped connection), and for a local `OSError`
+proxy failure, read timeout, a dropped connection, a response body that ends
+short of its `Content-Length`), and for a local `OSError`
 that is neither `FileNotFoundError` nor `PermissionError` on boto3-s3's own
 paths, including a failed directory creation. One carve-out: an `OSError`
 surfacing from inside s3transfer's task execution stays at the base

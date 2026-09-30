@@ -45,6 +45,7 @@ from botocore.exceptions import (
     ClientError,
     EndpointConnectionError,
     HTTPClientError,
+    IncompleteReadError,
     MissingDependencyException,
     NoCredentialsError,
     NoRegionError,
@@ -133,11 +134,17 @@ _INVALID_CONFIG_ERRORS: tuple[type[BaseException], ...] = (
 )
 # Both halves of botocore's transport tree: ConnectionError (endpoint /
 # connect-timeout / proxy) and HTTPClientError (read timeout, a closed
-# connection - "An HTTP Client raised an unhandled exception").
+# connection - "An HTTP Client raised an unhandled exception"). Beside them,
+# IncompleteReadError: a body that ends short of its Content-Length is a
+# transfer cut short like the others, but botocore files it directly under
+# BotoCoreError - and only raises it itself under urllib3 1.x; urllib3 2
+# enforces the length first and the same cut arrives as ResponseStreamingError,
+# an HTTPClientError. Listed so one event has one category on both.
 _TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
     EndpointConnectionError,
     BotoConnectionError,
     HTTPClientError,
+    IncompleteReadError,
 )
 
 # S3 error Code -> exception category, shared by every translation path: the
@@ -1463,9 +1470,8 @@ class S3Storage(Storage):
         attributed to its own side: the ``GetObject`` and the reads of its
         streamed body through the botocore translation (a missing key is
         ``NotFoundError``, denied access ``AccessDeniedError``, a stream
-        breaking mid-body ``TransportError``, and one ending short of its
-        ``Content-Length`` the base ``Boto3S3Error`` - botocore files that as an
-        incomplete read, which is none of its transport errors - all carrying
+        breaking mid-body or ending short of its ``Content-Length``
+        ``TransportError`` - all carrying
         ``bucket`` / ``key``), and the local filesystem failures - the temp
         file, the writes, the replace - through the local one, which names the
         local path in ``key`` and leaves ``bucket`` unset

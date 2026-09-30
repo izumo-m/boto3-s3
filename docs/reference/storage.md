@@ -1025,10 +1025,8 @@ side. The `GetObject` and the reads of its streamed body translate as botocore
 errors and carry `bucket` / `key`: a missing object is `NotFoundError` (unlike
 `get_fileinfo`, a download of an absent object is a failure, not a `None`),
 denied access `AccessDeniedError`, and a stream that breaks mid-body — a reset
-connection, a read timeout — `TransportError`. A body that merely ends short of
-its `Content-Length` is the exception: botocore reports that as an incomplete
-read, which is none of its transport errors, so it arrives as the base
-`Boto3S3Error`. The local filesystem failures — the temp file, the writes, the
+connection, a read timeout, a body that ends short of its `Content-Length` —
+`TransportError`. The local filesystem failures — the temp file, the writes, the
 replace — translate as local errors, naming the local path in `key` with
 `bucket` unset.
 

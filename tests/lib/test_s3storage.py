@@ -26,7 +26,12 @@ from typing import Any
 
 import boto3
 import pytest
-from botocore.exceptions import ClientError, ProfileNotFound, ResponseStreamingError
+from botocore.exceptions import (
+    ClientError,
+    IncompleteReadError,
+    ProfileNotFound,
+    ResponseStreamingError,
+)
 from moto import mock_aws
 
 from boto3_s3 import (
@@ -1647,6 +1652,32 @@ class TestGetFile:
         assert dest.read_bytes() == b"previous-contents"  # byte-for-byte
         assert sorted(p.name for p in tmp_path.iterdir()) == ["state.json"]  # no temp-file litter
         assert body.closes == 1  # the connection is released either way
+
+    def test_a_body_ending_short_is_a_transport_error_on_either_urllib3(
+        self, tmp_path: Path
+    ) -> None:
+        # urllib3 2 enforces Content-Length itself and the cut arrives as a
+        # broken stream (the case above); under urllib3 1.x botocore's own
+        # length check raises IncompleteReadError, which botocore files
+        # outside its transport tree. One event, one category.
+        short = IncompleteReadError(actual_bytes=5, expected_bytes=16)
+
+        class _ShortBody:
+            def read(self, amt: int | None = None) -> bytes:
+                raise short
+
+            def close(self) -> None:
+                pass
+
+        dest = tmp_path / "state.json"
+        dest.write_bytes(b"previous-contents")
+        client, _calls = make_recording_client([{"Body": _ShortBody(), "ContentLength": 16}])
+        with pytest.raises(TransportError) as exc_info:
+            S3Storage("s3://bucket/state.json", client=client).get_file(dest)
+        assert exc_info.value.__cause__ is short
+        assert (exc_info.value.bucket, exc_info.value.key) == ("bucket", "state.json")
+        assert dest.read_bytes() == b"previous-contents"
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["state.json"]
 
     def test_a_local_write_failure_is_attributed_locally_and_cleans_up(
         self, tmp_path: Path
