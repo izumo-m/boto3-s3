@@ -1049,7 +1049,10 @@ none.
 
 Raises: opening or stat'ing the local file translates as a local error — a
 missing file is `NotFoundError`, an unreadable one `AccessDeniedError`, naming
-the local path in `key` with `bucket` unset — and no request is made. The
+the local path in `key` with `bucket` unset — and no request is made. A FIFO,
+a socket or a device is refused the same way, before it is opened, with
+`ValidationError`: the body of a single `PutObject` has to be sized and
+rewound, which none of them can do. The
 `PutObject` itself translates as a botocore error carrying `bucket` / `key`,
 including a failure botocore hits while reading the body mid-request, which it
 reports as one of its own.

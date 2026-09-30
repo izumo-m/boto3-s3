@@ -1785,6 +1785,21 @@ class TestPutFile:
         assert isinstance(exc_info.value.__cause__, FileNotFoundError)
         assert client.calls == []
 
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs a FIFO")
+    def test_a_fifo_source_is_refused_without_opening_it(self, tmp_path: Path) -> None:
+        # Opening a FIFO blocks until a writer appears, and with one botocore
+        # dies sizing the body (`tell()` -> [Errno 29] Illegal seek). Refused
+        # before the open, so the call returns at once and sends nothing.
+        source = tmp_path / "pipe"
+        os.mkfifo(source)
+        client = _PutRecordingClient()
+        storage = S3Storage("s3://bucket/prefix/", client=client)  # type: ignore[arg-type]
+        with pytest.raises(ValidationError, match="FIFO, or socket") as exc_info:
+            storage.put_file(source, key="k")
+        assert client.calls == []
+        error = exc_info.value
+        assert (error.operation, error.bucket, error.key) == ("put_file", None, str(source))
+
     def test_a_put_failure_translates_to_the_taxonomy(self, tmp_path: Path) -> None:
         source = tmp_path / "a.bin"
         source.write_bytes(b"x")

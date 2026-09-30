@@ -68,7 +68,7 @@ from boto3_s3.exceptions import (
     TransportError,
     ValidationError,
 )
-from boto3_s3.localstorage import translate_os_error
+from boto3_s3.localstorage import is_special_file, translate_os_error
 from boto3_s3.storage import Storage, StorageCapability, sieve_pages
 from boto3_s3.types import (
     FileInfo,
@@ -1477,9 +1477,27 @@ class S3Storage(Storage):
         naming the local path in ``key``), while the ``PutObject`` - including a
         failure botocore hits reading the body mid-request, which it reports as
         one of its own - translates through the botocore one.
+
+        A FIFO, a socket or a device is refused up front with
+        ``ValidationError`` (naming the local path in ``key``), in the words
+        the transfer lanes warn such a source away with: the request body has
+        to be sized and rewound, which none of them can do - a FIFO would
+        block the open until a writer appears and then fail botocore's
+        ``tell()`` mid-request with a bare ``OSError``.
         """
         target_key = self._resolve_key(key)
         source = os.fspath(path)
+        try:
+            special = is_special_file(source)
+        except OSError:
+            special = False  # missing, or unreachable: the open below reports it
+        if special:
+            raise ValidationError(
+                f"{source}: File is character special device, block special device, "
+                "FIFO, or socket.",
+                operation=_PUT_FILE_OPERATION,
+                key=source,
+            )
         try:
             stream = open(source, "rb")
         except OSError as exc:
