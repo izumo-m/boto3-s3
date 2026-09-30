@@ -182,6 +182,20 @@ def _warn_absent_local_source(src: Storage, transferrer: Transferrer) -> None:
         transferrer.warner.warn(f"Skipping file {path}. File does not exist.")
 
 
+def _s3_source_display(plan: transferplan.TransferPlan, src_bucket: str, info: FileInfo) -> str:
+    """The ``s3://`` string a download / copy item reports as its source.
+
+    aws-cli's two shapes: a listed entry is ``bucket/key`` joined with ``/``
+    (its ``BucketLister``), while a single source is the path as it was
+    written (``_list_single_object`` hands the argument through) - the plan's
+    source root. The two differ only for a location whose key is set off from
+    the bucket by something other than ``/`` (``S3Storage.format``).
+    """
+    if plan.dir_op:
+        return f"s3://{src_bucket}/{info.key}"
+    return f"s3://{plan.src_root}"
+
+
 def open_side_display(storage: Storage, key: str) -> str:
     """A display string for the custom (``open``-routed) side of a transfer.
 
@@ -503,10 +517,9 @@ def download_item_from_info(
 ) -> TransferItem | None:
     """One download item from a listing entry, or ``None`` once a gate
     consumed it (the gate emits its own warn/skip/notice record)."""
-    src_path = f"{src_bucket}/{info.key}"
     compare_key = _compare_key(info)
     dest = transferplan.dest_for(plan, compare_key)
-    src_display = f"s3://{src_path}"
+    src_display = _s3_source_display(plan, src_bucket, info)
     is_s3_info = isinstance(info, S3FileInfo)
     item = TransferItem(
         compare_key=compare_key,
@@ -563,10 +576,9 @@ def copy_item_from_info(
 ) -> TransferItem | None:
     """One S3-to-S3 copy item from a listing entry, or ``None`` when the
     glacier gate consumed it."""
-    src_path = f"{src_bucket}/{info.key}"
     compare_key = _compare_key(info)
     dest = transferplan.dest_for(plan, compare_key)
-    src_display = f"s3://{src_path}"
+    src_display = _s3_source_display(plan, src_bucket, info)
     is_s3_info = isinstance(info, S3FileInfo)
     if _glacier_gate(
         info,
@@ -1100,7 +1112,7 @@ def open_download_item(
     """
     compare_key = _compare_key(info)
     open_key = transferplan.dest_for(plan, compare_key)
-    src_display = f"s3://{src_bucket}/{info.key}"
+    src_display = _s3_source_display(plan, src_bucket, info)
     is_s3_info = isinstance(info, S3FileInfo)
     if _glacier_gate(
         info,

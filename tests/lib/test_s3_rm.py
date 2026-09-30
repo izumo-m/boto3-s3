@@ -187,6 +187,17 @@ class TestRmSingleKey:
         assert client.list_calls == []
         assert [(r.compare_key, r.outcome) for r in results] == [("no-such", OpOutcome.DRYRUN)]
 
+    def test_the_single_key_is_reported_as_it_was_written(self) -> None:
+        # aws-cli's single-object route hands the argument through, so an
+        # Outposts access-point key set off with ":" prints with its colon:
+        # `(dryrun) delete: s3://<arn>:k` (measured against the pinned aws
+        # 2.36.40, offline). A listed key is always `bucket/key`.
+        arn = "arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-1/accesspoint/ap"
+        results = _rm(f"s3://{arn}:k", _FakeS3Client(), dryrun=True)
+        assert [r.src for r in results] == [f"s3://{arn}:k"]
+        assert results[0].src_info is not None and results[0].src_info.key == "k"
+        assert [r.src for r in _rm("s3://b/k", _FakeS3Client(), dryrun=True)] == ["s3://b/k"]
+
     def test_failure_emits_failed_and_raises_batch_error(self) -> None:
         client = _FakeS3Client(
             delete_object_error=client_error("NoSuchBucket", 404, "DeleteObject")

@@ -667,12 +667,14 @@ therefore optional here — `S3Storage("bucket/key")` reads exactly as
 `S3Storage("s3://bucket/key")` — a deliberate library leniency that `S3.resolve`
 does not share, since `resolve` must still route a bare `bucket/key` to local.
 The stored text is split once into `bucket` and `key`, which are the properties
-every operation reads and from which `as_text`, `normalized_uri` and
-`same_path_as` are derived, as is `format` everywhere but the bare service root
+every operation reads and from which `as_text`, `normalized_uri`,
+`same_path_as` and `format` are derived — together with the one character the
+split found between them, and, for the bare service root, its spelling
 (below). So `uri` is the input as accepted, scheme filled in, while `as_text()`
 is the canonical rebuilt token; they differ when the input carried a trailing
-slash on a keyless bucket or on the service root, or an Outposts access point
-ARN whose key follows a `:` rather than a `/`.
+slash on a keyless bucket or on the service root. An Outposts access point ARN
+whose key follows a `:` rather than a `/` — a spelling the AWS CLI's pattern
+accepts — keeps its colon in all of these, as the AWS CLI's own output does.
 
 An empty bucket part — a bare `"s3://"` — is the service root: `list_buckets`
 lists the account's buckets there, while object listing or a transfer needs a
@@ -727,12 +729,16 @@ work and its access point warning.
 
 ### same_path_as(dest)
 
-The instance form of `same_path`, computed from held state rather than rebuilt
-strings: `True` when the two storages' buckets are equal **and** their keys
-satisfy the `same_path` rule anchored at `/`. With equal buckets the URI prefix
-is inert, so this is equivalent to running `same_path` over the two
-keyless-normalized URIs, with the `/`-anchoring preserving `os.path`'s
-semantics exactly.
+The instance form of `same_path`: `True` when `same_path` holds over the two
+`normalized_uri()` strings, or when the two storages name a bucket, the buckets
+are equal **and** their keys satisfy the `same_path` rule anchored at `/` (with
+equal buckets the URI prefix is inert, and the `/`-anchoring preserves
+`os.path`'s semantics exactly). The two agree except for one object spelled two
+ways — an Outposts access point key set off with `:` on one side and `/` on the
+other — which the AWS CLI's string comparison takes for two objects, letting
+the move run onto itself; here it is a self-move like any other. Two locations
+without a bucket are compared as strings only, so `s3://` and `s3:///` are
+different, as they are to the AWS CLI.
 
 ### split_bucket_key(path) / strip_scheme(path) / normalize_s3_uri(path)
 
@@ -755,10 +761,13 @@ hand, `normalized_uri` derives the same form from held state.
 
 ### normalized_uri()
 
-The keyless-normalized `s3://` URI derived from `bucket` and `key` with no
-string round-trip: a keyless bucket reads as `s3://bucket/`, and the bare
-service root stays `s3://`. This is the form `mv`'s same-path error message
-shows.
+The keyless-normalized `s3://` URI derived from the held state with no string
+round-trip: a keyless bucket reads as `s3://bucket/`, and the bare service root
+keeps the spelling it was given, `s3://` or `s3:///`. It equals
+`normalize_s3_uri(uri)` except for an access point name the AWS CLI's pattern
+cuts short (`accesspoint/my_ap` — not a valid name; the pattern stops at `my`),
+which is rebuilt with a `/` at the cut. This is the form `mv`'s same-path error
+message shows.
 
 ### as_text() / format(\*, dir_op)
 
@@ -766,11 +775,11 @@ shows.
 echoing the constructor input, so a keyless location normalizes to a slashless
 `s3://bucket` and the service root to `s3://`.
 
-`format` returns the scheme-less `bucket/key` as the root, with the same
-keyless-bucket normalization (`s3://bucket` formats as `bucket/`); only the
-bare service root formats empty — or as `/`, taking the source's name, when
-spelled `s3:///`, the one case where the stored text rather than the held
-bucket and key decides. A `dir_op` root is `/`-terminated and
+`format` returns the scheme-less `bucket/key` as the root — `normalized_uri()`
+without its scheme — with the same keyless-bucket normalization (`s3://bucket`
+formats as `bucket/`); only the bare service root formats empty — or as `/`,
+taking the source's name, when spelled `s3:///`, the one case where the stored
+text rather than the held bucket and key decides. A `dir_op` root is `/`-terminated and
 `use_src_name` is `True`; otherwise `use_src_name` is whether the root already
 ends in `/`, and a `dir_op` on the service root formats it as `/`.
 

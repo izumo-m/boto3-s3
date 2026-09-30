@@ -727,6 +727,39 @@ class TestDownloadRoute:
         assert ops(calls) == ["HeadObject"]
         assert [result.outcome for result in results] == [OpOutcome.DRYRUN]
 
+    def test_a_colon_separated_outposts_key_is_reported_as_written(self, tmp_path: Path) -> None:
+        # aws-cli's Outposts access-point pattern takes ":" between the ARN and
+        # the key and keeps printing the location as typed: `cp f.txt
+        # s3://<arn>:dir/ --dryrun` previews `upload: ./f.txt to
+        # s3://<arn>:dir/f.txt` (measured against the pinned aws 2.36.40,
+        # offline). The request still takes the ARN as Bucket and `dir/f.txt`
+        # as Key; a single source reports its own spelling the same way.
+        arn = "arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-1/accesspoint/ap"
+        source = tmp_path / "f.txt"
+        source.write_bytes(b"x")
+        client, calls = make_recording_client([])
+        results: list[OpResult] = []
+        S3().cp(
+            str(source),
+            S3Storage(f"s3://{arn}:dir/", client=client),
+            dryrun=True,
+            on_result=results.append,
+        )
+        assert calls == []
+        assert [r.dest for r in results] == [f"s3://{arn}:dir/f.txt"]
+
+        client, calls = make_recording_client([head_response()])
+        results = []
+        S3().cp(
+            S3Storage(f"s3://{arn}:dir/a.txt", client=client),
+            str(tmp_path / "x"),
+            dryrun=True,
+            on_result=results.append,
+        )
+        assert calls[0].params["Bucket"] == arn
+        assert calls[0].params["Key"] == "dir/a.txt"
+        assert [r.src for r in results] == [f"s3://{arn}:dir/a.txt"]
+
     def test_keyless_non_recursive_source_transfers_nothing(self, tmp_path: Path) -> None:
         # `cp s3://bucket .`: aws lists the bucket and exact-matches nothing
         # (rc 0, silent). The listing itself is observable when ListBucket is

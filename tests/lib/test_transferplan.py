@@ -471,6 +471,10 @@ class TestMvSamePathGuards:
         assert same_key("s3://b1/d/k.txt", "s3://b2/d/")
 
     # The full URI matrix the string rule covers, for the equivalence pin below.
+    # The bucket-less spellings ride it too: aws-cli keeps `s3://` and `s3:///`
+    # apart (its trailing-slash pass leaves both alone), so
+    # `mv s3:// s3:///` is not a self-move there and dies on the empty bucket
+    # name instead (measured against the pinned aws 2.36.40, offline).
     _URIS = (
         "s3://b/k.txt",
         "s3://b/d/a.txt",
@@ -480,6 +484,10 @@ class TestMvSamePathGuards:
         "s3://b",
         "s3://other/k.txt",
         "s3://other/d/",
+        "s3://",
+        "s3:///",
+        "s3:///k.txt",
+        "s3:///-",
     )
 
     def test_same_path_hand_pinned_matrix(self) -> None:
@@ -506,7 +514,7 @@ class TestMvSamePathGuards:
         expected = same_path(normalize_s3_uri(src), normalize_s3_uri(dest))
         assert S3Storage(src).same_path_as(S3Storage(dest)) is expected
 
-    @pytest.mark.parametrize("uri", (*_URIS, "s3://"))
+    @pytest.mark.parametrize("uri", _URIS)
     def test_normalized_uri_is_equivalent_to_the_string_form(self, uri: str) -> None:
         # The instance form derives the keyless-normalized URI from the held
         # state; it must render exactly what the string pass produces.
@@ -519,6 +527,57 @@ class TestMvSamePathGuards:
         assert S3Storage("s3://b/k").same_path_as(S3Storage("s3://b"))  # keyless dest
         assert not S3Storage("s3://b/k").same_path_as(S3Storage("s3://other/k"))
         assert not S3Storage("s3://b/d/a").same_path_as(S3Storage("s3://b/other/"))
+
+    # aws-cli's Outposts access-point pattern also takes ":" between the ARN
+    # and the key, and aws-cli goes on printing and comparing the location as
+    # typed: `cp f.txt s3://<arn>:dir/ --dryrun` previews
+    # `upload: ./f.txt to s3://<arn>:dir/f.txt` (measured against the pinned
+    # aws 2.36.40, offline). The string forms keep that separator.
+    _OUTPOST_AP = (
+        "arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-01234567890123456/accesspoint/myap"
+    )
+
+    def test_a_colon_before_the_key_survives_in_the_string_forms(self) -> None:
+        storage = S3Storage(f"s3://{self._OUTPOST_AP}:dir/k.txt")
+        assert (storage.bucket, storage.key) == (self._OUTPOST_AP, "dir/k.txt")
+        uri = f"s3://{self._OUTPOST_AP}:dir/k.txt"
+        assert storage.normalized_uri() == uri == normalize_s3_uri(uri)
+        assert storage.as_text() == uri
+        assert storage.format(dir_op=False) == (f"{self._OUTPOST_AP}:dir/k.txt", False)
+        assert storage.format(dir_op=True) == (f"{self._OUTPOST_AP}:dir/k.txt/", True)
+        # One separator either way, so a key still slices off by the bucket's length.
+        root, _ = storage.format(dir_op=True)
+        assert root[len(storage.bucket) + 1 :] == "dir/k.txt/"
+
+    def test_a_colon_with_no_key_normalizes_like_aws(self) -> None:
+        # aws appends the keyless "/" after the colon, and its splitter then
+        # reads that slash as the key's first character.
+        storage = S3Storage(f"s3://{self._OUTPOST_AP}:")
+        uri = f"s3://{self._OUTPOST_AP}:"
+        assert storage.normalized_uri() == normalize_s3_uri(uri) == uri + "/"
+        assert storage.format(dir_op=False) == (f"{self._OUTPOST_AP}:/", True)
+
+    def test_one_object_spelled_both_ways_is_still_a_self_move(self) -> None:
+        # Stricter than aws-cli on purpose: its string rule takes `<arn>:k`
+        # and `<arn>/k` for two objects and lets the move run onto itself;
+        # the held bucket/key say it is one object, and that refuses it.
+        colon = S3Storage(f"s3://{self._OUTPOST_AP}:k")
+        slash = S3Storage(f"s3://{self._OUTPOST_AP}/k")
+        assert not same_path(colon.normalized_uri(), slash.normalized_uri())
+        assert colon.same_path_as(slash)
+        assert slash.same_path_as(colon)
+
+    def test_a_name_the_pattern_cuts_short_is_joined_with_a_slash(self) -> None:
+        # `my_ap` is no access-point name: aws-cli's pattern stops at `my` and
+        # reads `_ap/k` as the key. Both tools send that split; here the
+        # string form marks the boundary with "/" (aws-cli keeps the typed
+        # text), so the key still slices off by the bucket's length plus one.
+        arn = self._OUTPOST_AP[: -len("myap")] + "my_ap"
+        storage = S3Storage(f"s3://{arn}/k")
+        assert storage.key == "_ap/k"
+        root, _ = storage.format(dir_op=False)
+        assert root == f"{storage.bucket}/_ap/k"
+        assert root[len(storage.bucket) + 1 :] == storage.key
 
     def test_same_key_splits_access_point_arns_whole(self) -> None:
         assert same_key(f"s3://{_ACCESSPOINT_ARN}/k.txt", "s3://plain-bucket/k.txt")

@@ -891,29 +891,67 @@ class S3Storage(Storage):
         """The keyless-normalized ``s3://`` URI, from the held state.
 
         The instance form of ``normalize_s3_uri`` (aws-cli's
-        ``_normalize_s3_trailing_slash``), derived from ``bucket`` / ``key``
-        with no string round-trip: a keyless bucket reads as the bucket root
-        ``s3://bucket/`` (the join supplies the slash), a bare service root
-        stays ``s3://``. The form aws validates and prints - ``mv``'s
-        same-path error shows it.
+        ``_normalize_s3_trailing_slash``), derived from the held state with no
+        string round-trip: a keyless bucket reads as the bucket root
+        ``s3://bucket/``, and the service root keeps the spelling it was given
+        (``s3://`` or ``s3:///``), which aws-cli leaves alone. The form aws
+        validates and prints - ``mv``'s same-path error shows it.
+        """
+        return _S3_SCHEME + self._normalized_path()
+
+    def _normalized_path(self) -> str:
+        """The scheme-less, keyless-normalized ``bucket/key`` string.
+
+        What aws-cli's ``_normalize_s3_trailing_slash`` leaves after the scheme
+        is stripped, rebuilt from ``bucket`` / ``key`` and the separator that
+        stood between them (``_key_sep``): a keyless location gains the
+        trailing ``/`` that makes it the bucket root, anything with a key is
+        the plain join. The bare service root has no join to fall out of, and
+        its two spellings stay apart the way aws-cli's scheme strip leaves
+        them - ``s3://`` is ``""``, ``s3:///`` is ``"/"`` - so the raw URI
+        decides there (tested on the scheme-less rest, because ``"s3://"``
+        itself ends in a slash).
+
+        One shape is rebuilt differently from how it was typed: an access
+        point name the pattern cuts short (``accesspoint/my_ap`` - the name
+        stops at ``my``) leaves nothing between bucket and key, and is joined
+        with ``/`` here, because the callers slice the key back off by the
+        bucket's length plus one separator.
         """
         if not self._bucket and not self._key:
-            return _S3_SCHEME
-        return f"{_S3_SCHEME}{self._bucket}/{self._key}"
+            return "/" if self._uri[len(_S3_SCHEME) :].endswith("/") else ""
+        path = f"{self._bucket}{self._key_sep}{self._key}"
+        if not self._key and not path.endswith("/"):
+            path += "/"
+        return path
 
     def same_path_as(self, dest: S3Storage) -> bool:
         """Whether ``mv self dest`` would move an object onto itself (held state).
 
-        Equivalent to aws-cli's ``CommandParameters._same_path`` over the two
-        keyless-normalized URIs, computed from the held ``bucket`` / ``key``
-        instead of rebuilt strings: the buckets must match (with equal
-        buckets the URI prefix is inert), and the keys are compared with the
-        ``same_path`` rule anchored at ``/`` - the ``same_key``
+        aws-cli's ``CommandParameters._same_path`` over the two
+        keyless-normalized URIs (``normalized_uri``), plus the one case that
+        string rule misses. For two locations in a bucket the comparison is
+        made on the held ``bucket`` / ``key``: the buckets must match (with
+        equal buckets the URI prefix is inert), and the keys are compared
+        with the ``same_path`` rule anchored at ``/`` - the ``same_key``
         anchoring, which preserves ``os.path.join`` / ``basename``'s host
         semantics exactly (a keyless side reads as the ``/``-terminated
         bucket root, and any prefix ending in ``/`` reproduces the full
-        URI's behavior, ntpath's drive-relative reset included).
+        URI's behavior, ntpath's drive-relative reset included). That agrees
+        with aws-cli's strings except where one object is spelled two ways -
+        an Outposts access-point key set off with ``:`` on one side and ``/``
+        on the other - which aws-cli takes for two objects and lets the move
+        proceed onto itself; here it is refused like any other self-move.
+
+        A location without a bucket has no object to protect, only a message
+        to get right, so there aws-cli's string rule alone decides: ``s3://``
+        and ``s3:///`` are different strings, and the run goes on to fail on
+        the empty bucket name as aws-cli's does.
         """
+        if S3Storage.same_path(self.normalized_uri(), dest.normalized_uri()):
+            return True
+        if not self._bucket or not dest._bucket:
+            return False
         return self._bucket == dest._bucket and S3Storage.same_path(
             f"/{self._key}", f"/{dest._key}"
         )
@@ -938,6 +976,15 @@ class S3Storage(Storage):
             text = f"{_S3_SCHEME}{text}"
         self._uri = text
         self._bucket, self._key = _parse_s3_uri(text)
+        # What stood between the bucket part and the key as written. It is "/"
+        # everywhere but one spelling: aws-cli's Outposts access-point pattern
+        # also accepts ":" there (``...:accesspoint/name:key``), and aws-cli
+        # keeps printing and comparing the location as it was typed. The
+        # string forms below rebuild the location with this separator, so they
+        # spell it aws-cli's way; nothing else reads it (the requests take
+        # ``bucket`` and ``key``).
+        boundary = text[len(_S3_SCHEME) + len(self._bucket) : len(text) - len(self._key)]
+        self._key_sep = ":" if boundary == ":" else "/"
         self._client = client
         self._owns_client = client is None
         # How this source is listed (the scan's source-config): the ListObjectsV2
@@ -971,32 +1018,24 @@ class S3Storage(Storage):
         (``boto3_s3.transferplan``).
         """
         if self._key:
-            return f"{_S3_SCHEME}{self._bucket}/{self._key}"
+            return f"{_S3_SCHEME}{self._bucket}{self._key_sep}{self._key}"
         return f"{_S3_SCHEME}{self._bucket}"
 
     @override
     def format(self, *, dir_op: bool) -> tuple[str, bool]:
         """Format this S3 side; return ``(root, use_src_name)`` (``Storage.format``).
 
-        aws-cli's ``FileFormat.s3_format``, computed from the held
-        ``bucket`` / ``key`` instead of a re-parsed URI string: the
-        scheme-less ``bucket/key`` root falls straight out of the join, and so
-        does the keyless-bucket normalization (aws-cli's
+        aws-cli's ``FileFormat.s3_format``, computed from the held state
+        instead of a re-parsed URI string: the scheme-less ``bucket/key`` root
+        with the keyless-bucket normalization applied (aws-cli's
         ``_normalize_s3_trailing_slash``: ``s3://bucket`` reads as the bucket
-        root ``bucket/``).
-        Only the bare service root has no join to fall out of, and there the
-        two spellings differ the way aws's scheme strip leaves them: ``s3://``
-        formats to ``""`` (no source name), ``s3:///`` to ``"/"`` (the source
-        name is taken). The raw URI decides, since ``bucket`` and ``key`` are
-        both empty either way - and the test is on the scheme-less rest,
-        because ``"s3://"`` itself ends in a slash.
+        root ``bucket/``) - ``_normalized_path``, which also keeps the two
+        spellings of the bare service root apart (``s3://`` formats to ``""``,
+        no source name; ``s3:///`` to ``"/"``, the source name is taken).
         A ``dir_op`` root is ``/``-terminated and takes the source's name;
         otherwise only an explicit trailing ``/`` does.
         """
-        if not self._bucket and not self._key:
-            path = "/" if self._uri[len(_S3_SCHEME) :].endswith("/") else ""
-        else:
-            path = f"{self._bucket}/{self._key}"
+        path = self._normalized_path()
         if dir_op:
             if not path.endswith("/"):
                 path += "/"

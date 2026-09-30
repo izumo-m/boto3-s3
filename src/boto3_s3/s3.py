@@ -201,7 +201,14 @@ def _emit_result(
     outcome: OpOutcome,
     error: Boto3S3Error | None = None,
     extra_info: Mapping[str, Any] | None = None,
+    src: str | None = None,
 ) -> None:
+    """Hand one ``rm`` record to ``on_result``.
+
+    ``src`` is the listing form ``s3://bucket/key`` unless the caller names
+    one: the blind single-key path reports its target as it was written
+    (``S3Storage.as_text``), like aws-cli's single-object route.
+    """
     if on_result is not None:
         on_result(
             OpResult(
@@ -209,7 +216,7 @@ def _emit_result(
                 compare_key=info.compare_key if info.compare_key is not None else info.key,
                 outcome=outcome,
                 error=error,
-                src=f"s3://{storage.bucket}/{info.key}",
+                src=f"s3://{storage.bucket}/{info.key}" if src is None else src,
                 src_info=info,
                 src_storage=storage,
                 extra_info=extra_info,
@@ -1610,7 +1617,7 @@ class S3:
                 dest_bucket=storage.bucket,
                 dest_key=storage.key,
                 src_display="-",
-                dest_display=f"s3://{storage.bucket}/{storage.key}",
+                dest_display=storage.as_text(),
             )
         else:
             storage = self._stream_s3_peer(src_storage)
@@ -1623,7 +1630,7 @@ class S3:
                 src_bucket=storage.bucket,
                 src_key=storage.key,
                 dest_fileobj=dest_fileobj,
-                src_display=f"s3://{storage.bucket}/{storage.key}",
+                src_display=storage.as_text(),
                 dest_display="-",
             )
         transferrer = Transferrer(
@@ -2345,8 +2352,9 @@ class S3:
         info = S3FileInfo(key=key, compare_key=key[len(root) :], storage=storage)
         if item_filter is not None and not item_filter(info):
             return
+        src = storage.as_text()
         if dryrun:
-            _emit_result(on_result, info=info, storage=storage, outcome=OpOutcome.DRYRUN)
+            _emit_result(on_result, info=info, storage=storage, outcome=OpOutcome.DRYRUN, src=src)
             return
         try:
             response = storage.delete(info, request_payer=request_payer)
@@ -2362,7 +2370,12 @@ class S3:
             # both alike).
             failure = request_failure(exc, operation="rm", bucket=storage.bucket, key=key)
             _emit_result(
-                on_result, info=info, storage=storage, outcome=OpOutcome.FAILED, error=failure
+                on_result,
+                info=info,
+                storage=storage,
+                outcome=OpOutcome.FAILED,
+                error=failure,
+                src=src,
             )
             _raise_if_cancelled(cancel_token, "rm")
             raise BatchError(
@@ -2383,6 +2396,7 @@ class S3:
             storage=storage,
             outcome=OpOutcome.SUCCEEDED,
             extra_info=extra_info,
+            src=src,
         )
 
     # -- bucket / signing -------------------------------------------------
