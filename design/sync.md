@@ -257,7 +257,9 @@ mtime rule (full float precision; `delta = dest.mtime - src.mtime`):
   `missing/` and then fails on an existing `out`; and for `lsub/../out` with
   `lsub` a symlinked directory the kernel's answer decides - nothing is
   created lexically, and the destination walk warns about the missing lexical
-  directory (rc 2). The recursive cp / mv use the same call.
+  directory (rc 2). The `..` cases are POSIX's (Windows folds `..` first; the
+  trailing-separator case holds there too, measured). The recursive cp / mv
+  use the same call.
 - `sync s3://b/p s3://b/p` (identical path) makes every pair identical -> silent
   rc 0 (there is no onto-itself guard like mv's).
 - An S3 Express directory bucket (`--x-s3`) on either side is rejected with

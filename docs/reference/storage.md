@@ -539,6 +539,11 @@ AWS CLI:
   warns "File does not exist." for the lexical directory (exit code 2), and
   one the kernel does not find is created where the kernel resolves it.
 
+The two `..` cases are POSIX's. Windows folds `..` out of a path before the
+filesystem sees it, so there the typed path differs from `abspath` by the
+trailing separator alone (measured: `missing\..\out` over an existing `out`
+exists, and nothing is created).
+
 An `OSError` propagates; the operations translate it.
 
 ### relative_path(filename, start=os.path.curdir)

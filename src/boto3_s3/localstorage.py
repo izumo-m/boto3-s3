@@ -1544,8 +1544,10 @@ class LocalStorage(Storage):
         link target's parent, so a destination the kernel finds there is not
         created lexically (a ``sync`` then warns about the missing lexical
         directory) and one it does not find is created where the kernel
-        resolves it. Each of these is aws-cli's own outcome, measured. An
-        ``OSError`` propagates for the caller to translate.
+        resolves it. Each of these is aws-cli's own outcome, measured. (The
+        ``..`` cases are POSIX's: Windows folds ``..`` before the filesystem
+        sees the path, leaving the trailing separator the only difference.)
+        An ``OSError`` propagates for the caller to translate.
         """
         if not self.exists():
             os.makedirs(self._unnormalized)

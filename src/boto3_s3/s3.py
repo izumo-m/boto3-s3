@@ -656,8 +656,8 @@ def _classify_transfer_route(
     ``LocalStorage``'s path directly; an open route pairs a capability-checked
     custom backend with S3. The missing-local-source check runs here
     (identical in cp/mv and sync); the destination-directory creation does
-    not - its guard shapes deliberately differ (cp's recursive-gated
-    ``exist_ok=True`` vs sync's unconditional bare ``makedirs``) and stay with
+    not - the same `LocalStorage.ensure_directory` call, but gated on
+    ``recursive`` for cp / mv and unconditional for sync, so it stays with
     the callers.
     """
     src_storage = plan.src
@@ -2002,8 +2002,9 @@ class S3:
         # aws-cli creates the destination directory during validation - before
         # any listing, so even an empty sync leaves it behind. The bare
         # exists() test (not exist_ok=True) is deliberate: a destination that
-        # exists as a *file* passes here and fails per item instead
-        # ([Errno 20], rc 1). (cp's guard differs: recursive-gated, exist_ok.)
+        # exists as a *file* - written without a trailing separator - passes
+        # here and fails per item instead ([Errno 20], rc 1). (cp's guard is
+        # the same call, gated on recursive.)
         if isinstance(dest_storage, LocalStorage):
             try:
                 dest_storage.ensure_directory()

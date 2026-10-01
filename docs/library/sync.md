@@ -167,7 +167,9 @@ refused. See [`compatibility.md`](../compatibility.md).
 
 - **Downloading** creates the destination directory before scanning, so it
   exists even if the sync transfers nothing. If a *file* already exists at that
-  path, the run proceeds and then every item fails.
+  path, the run proceeds and then every item fails — or, when the path is
+  written with a trailing separator, stops before anything is listed, the
+  directory creation failing on the file.
 - **Uploading** from a path that does not exist raises. If the source is a file
   rather than a directory, `sync` warns and completes with warnings rather than
   failing — `sync` is a directory operation.

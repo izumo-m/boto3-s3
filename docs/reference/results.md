@@ -57,7 +57,9 @@ submission or discarded after acceptance:
 - entries the deleter accepted but never ran, which produce no record at all:
   its unsent buffer, discarded by a cancellation or by an exception that ends
   the run (a listing failure part-way through, say), and, under
-  `CancelMode.IMMEDIATE`, a dispatched batch whose request had not started
+  `CancelMode.IMMEDIATE`, a dispatched batch whose request had not started —
+  or, inside a started batch, a key sent as a request of its own (one the XML
+  round trip cannot carry) that had not gone out when the run was abandoned
   ([`../../design/deleter.md`](../../design/deleter.md)).
 
 `WARNED` and `NOTICE` sit outside that rule in the other direction as well.
@@ -246,11 +248,14 @@ error elsewhere in the run, an immediate cancellation, or Ctrl-C shut the engine
 down. On the CRT engine only a cancellation this run's `CancelToken` ordered
 reports `CANCELLED`: every other CRT cancellation reports `FAILED`, and a Ctrl-C
 the CRT manager swallows during its transfer drain ends the run in `BatchError`
-([`../../design/opresult.md`](../../design/opresult.md)). One case is the same
-on every engine: an item whose outcome is itself an interrupt — a
-`KeyboardInterrupt` or `SystemExit` that landed in, or was raised by, code
-running for that item, such as a caller's stream — reports `CANCELLED`, and
-that interrupt is then raised to the caller. `error` is a
+([`../../design/opresult.md`](../../design/opresult.md)). One case does not
+depend on the token: an item whose outcome the engine holds as an interrupt —
+a `KeyboardInterrupt` or `SystemExit` that landed in, or was raised by, code
+running for that item — reports `CANCELLED`, and that interrupt is then raised
+to the caller. Not every engine route keeps an interrupt raised by a caller's
+stream as the outcome, though: `use_threads=False`, a threaded upload and a CRT
+download do; a threaded download and a CRT upload do not, and what happens
+there is the engine's. `error` is a
 [`CancelledError`](./exceptions.md#cancellederror) naming the cause where the
 canceller supplied one; an immediate-mode escalation arriving during a drain
 revokes without a message and those records carry the bare `canceled`, while the
@@ -602,9 +607,12 @@ drain is already running is honored.
 
 For the delete lanes of `rm` and `sync`, `GRACEFUL` discards the deleter's
 unsent buffer and drains the batch already dispatched; `IMMEDIATE` additionally
-cancels a dispatched batch that has not started. A batch whose S3 request has
-started always completes and delivers its per-key records first. Discarded
-buffered entries and the entries of a cancelled batch produce no records
+cancels a dispatched batch that has not started, and starts none of the
+per-key requests a started batch still had to send (its XML-incompatible keys,
+its re-sends of transient failures). A batch whose S3 request has started
+otherwise completes and delivers its per-key records first. Discarded
+buffered entries, the entries of a cancelled batch and an XML-incompatible key
+left unsent produce no records
 ([`../../design/deleter.md`](../../design/deleter.md)).
 
 For `ls`, both modes behave identically: cancellation stops entry delivery,

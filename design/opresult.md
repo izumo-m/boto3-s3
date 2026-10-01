@@ -86,9 +86,10 @@ that never reaches it - filtered out during enumeration, or never enumerated
 because the run died first - produces nothing. The delete lane carries one
 carve-out: `S3Deleter` entries accepted but never run produce no record - the
 unsent buffer, which a cancellation or an exception that ends the run (a
-listing failure part-way through, say) discards, and a dispatched batch an
-immediate cancellation stopped before its request started
-([`deleter.md`](./deleter.md) section 2). Three pre-submission gates carve out
+listing failure part-way through, say) discards, a dispatched batch an
+immediate cancellation stopped before its request started, and a started
+batch's XML-incompatible key that an abandoned run had not sent yet
+([`deleter.md`](./deleter.md) sections 2-3). Three pre-submission gates carve out
 the other direction: each consumes the item it blocks with an advisory instead
 of an outcome, so that item never reaches the operation layer and gets no
 terminal record - a glacier-blocked source without `ignore_glacier_warnings`
@@ -115,10 +116,16 @@ cancel only - see below) resolves the accepted transfer items like this:
 
 On the CRT engine, `CANCELLED` is reserved for the cancel this run's
 `CancelToken` ordered - the one revocation aws-cli has no counterpart for -
-and for an item whose stored outcome is itself an interrupt (a
-`KeyboardInterrupt` / `SystemExit` a caller's stream raised: awscrt puts what
-a Python callback raised on the future as it is), which is `CANCELLED` on
-every engine and re-raised to the caller (`Transferrer._record_failure`).
+and for an item whose stored outcome is itself an interrupt, which is
+`CANCELLED` wherever it occurs and re-raised to the caller
+(`Transferrer._record_failure`). On the CRT engine that is a download whose
+sink raised `KeyboardInterrupt` / `SystemExit`: awscrt puts what the write
+callback raised on the future as it is. An upload's reader raising one is not
+stored that way (awscrt turns `KeyboardInterrupt` into its own
+`AWS_ERROR_UNKNOWN`, a `FAILED`, and does not return from a `SystemExit`),
+nor is a classic threaded download's sink (upstream's IO task swallows it and
+the item reports `SUCCEEDED`); both are upstream's behaviour, measured and
+left as it is.
 Every other CRT cancellation (awscrt's `AWS_ERROR_S3_CANCELED`) reports
 `FAILED` with the error carrying awscrt's cancellation wording - aws-cli's
 measured classification: a fatal or Ctrl-C folding its CRT manager counts
