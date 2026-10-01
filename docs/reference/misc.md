@@ -469,8 +469,9 @@ per-call limit.
 
 `operation` is the operation tag stamped on the exceptions the deleter raises
 and on the per-key failures it reports; `rm` and `sync` put their own name
-there. `capture_response` attaches the per-key response to each successful
-result — see [Captured responses](#captured-responses). `dryrun` makes the
+there. `capture_response` attaches the per-key response to a successful
+result — see [Captured responses](#captured-responses), which also says when a
+success carries none. `dryrun` makes the
 deleter a rehearsal — see [Dry runs](#dry-runs).
 
 Construction raises [`ValidationError`](./exceptions.md#validationerror) for a

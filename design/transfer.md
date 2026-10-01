@@ -251,7 +251,7 @@ chain:
   inside the CompleteMultipartUpload task, which finishes before any
   subscriber's `on_done` - so the tagging write goes out last. The console
   lines, the exit code and the object left at the destination are the same in
-  every failure corner (the four combinations of an annotation write, the
+  every failure corner (every combination of an annotation write, the
   tagging write and the rollback delete being denied, measured against the
   pinned aws-cli); the order differs, and so does the request set, below. An
   annotation write that fails part way (the copy completed; upstream's

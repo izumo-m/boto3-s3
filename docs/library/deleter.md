@@ -28,8 +28,11 @@ its client and bucket are used for addressing — the key part is ignored — bu
 the object itself rides along on every result. Keep it open until the deleter is
 closed. The client is built during construction, so a client that cannot be
 built — an unknown profile, say — fails on your thread rather than in the
-worker. Credentials are resolved by the first request, so missing credentials
-arrive as per-key failures (`ConfigurationError`).
+worker. The credential chain is walked then too, so a provider that fails
+outright — partial credentials, a failing `credential_process` — fails
+construction the same way; a chain that simply finds nothing raises nothing
+until the first request is signed, so missing credentials arrive as per-key
+failures (`ConfigurationError`).
 
 `batch_size` must be between 1 and 1000, S3's own limit for one batch request.
 

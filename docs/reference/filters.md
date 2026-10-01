@@ -77,7 +77,13 @@ gate ([`options.md`](./options.md)). On the single-object paths — a
 non-recursive `cp` / `mv`, `rm`'s blind single-key delete — it is applied
 inline on the calling thread. An exception raised by the predicate is re-raised
 on the consumer side of the enumeration (after entries already queued) and
-propagates out of the operation call.
+propagates out of the operation call. One detail on the enumerating paths: the
+predicate runs inside the listing, and the operation puts its name on a
+listing failure that carries none — so a `Boto3S3Error` the predicate lets out
+with `operation` unset (from a storage call of its own, say) arrives with
+`operation` set to the operation's name, the same exception object otherwise.
+On the single-object paths, and from `on_result` / `on_entry`, it arrives as
+raised.
 
 **Where it does not apply.** `cp`'s stream route — an `IOStorage` on either
 side — has no listing to prune, and `filter` is not consulted on it. `mv` has

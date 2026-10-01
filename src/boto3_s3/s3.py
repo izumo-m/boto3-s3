@@ -163,7 +163,10 @@ def _attributed_entries(entries: Iterable[_T], operation: str) -> Iterator[_T]:
     the consumer then does with the entry - the caller's ``on_entry`` /
     ``on_result``, a storage method the callback calls itself - runs between
     two pulls, outside the attribution, so a failure raised there keeps the
-    ``operation`` its raiser gave it.
+    ``operation`` its raiser gave it. A ``ScanOptions.filter`` is not such a
+    consumer: the scan calls it while producing the page, inside the pull,
+    so an unnamed family error it lets out is named with the listing's
+    (docs/reference/filters.md says so).
     """
     iterator = iter(entries)
     while True:

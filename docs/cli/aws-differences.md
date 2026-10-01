@@ -318,8 +318,11 @@ run comes out differently, listed in section 1.
   Outposts access point's key can be set off from the ARN with `:` or with `/`.
   `aws` compares its two arguments as text, takes
   `mv s3://<arn>:k s3://<arn>/k` for a move between two objects and sends it —
-  onto itself. This command recognizes the one object and refuses the run like
-  any other self-move (`Cannot mv a file onto itself: ...`).
+  onto itself. This command recognizes the one object and stops: after the
+  same "may resolve to same underlying s3 object(s)" warning `aws` prints, it
+  ends with `fatal error: Cannot mv a file onto itself: ...` and exit code 1.
+  (A `mv` whose two arguments are the same text is refused earlier, as a usage
+  error with exit code 252, on both tools.)
 - **Copying a directory without `--recursive`.** A `cp` or `mv` whose local
   source is a directory fails — exit code 1 on both tools, the source left in
   place — unless a filter excludes the source (`--exclude 'd/'`, its
