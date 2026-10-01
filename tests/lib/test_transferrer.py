@@ -10,6 +10,7 @@ deterministic.
 
 from __future__ import annotations
 
+import concurrent.futures
 import io
 import os
 import threading
@@ -1210,6 +1211,39 @@ class TestNonTransferOutcomes:
         assert progress[0].bytes_done == 0  # queued notification
         assert progress[-1].bytes_done == 1000
         assert all(p.bytes_total == 1000 for p in progress)
+
+
+class TestCancellationTypeOnAFuture:
+    """`transfer._is_cancellation`: the two cancellation types mean "revoked"
+    only when somebody revoked. The classic coordinator says so itself; where
+    there is no such word (the CRT engine, a submit-time failure) only this
+    run's cancel token having ordered a cancel does."""
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            concurrent.futures.CancelledError("thrown"),
+            CancelledError("thrown"),
+        ],
+        ids=["engine-type", "library-type"],
+    )
+    @pytest.mark.parametrize(
+        ("revoked", "cancel_initiated", "expected"),
+        [
+            (True, False, True),
+            (False, False, False),
+            (False, True, False),
+            (None, False, False),
+            (None, True, True),
+        ],
+    )
+    def test_the_type_alone_never_decides(
+        self, exc: BaseException, revoked: bool | None, cancel_initiated: bool, expected: bool
+    ) -> None:
+        judged = transfer._is_cancellation(  # pyright: ignore[reportPrivateUsage]
+            exc, cancel_initiated=cancel_initiated, revoked=revoked
+        )
+        assert judged is expected
 
 
 class _CrtCancelError(Exception):

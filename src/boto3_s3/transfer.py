@@ -291,9 +291,14 @@ def _is_cancellation(
     Classic s3transfer settles cancelled futures with its own
     ``CancelledError`` (``FatalError`` on aws's fatal path is a subclass):
     revoked when the coordinator says so (``revoked``, `_future_revoked`),
-    a failure when a task raised that type itself. The library's own
-    `CancelledError` is included for symmetry (a subscriber re-raising a
-    translated cancellation) and always classifies as revoked.
+    a failure when a task raised that type itself - a caller's stream throwing
+    it, nobody having ordered a cancel. The library's own `CancelledError` is
+    judged the same way: nothing in the library puts one on a future, so one
+    found there came from the caller's code too. Where the engine keeps no
+    such status (``revoked`` is None: the CRT coordinator, which never
+    produces either type itself, and a submit-time failure) the type cannot
+    tell an ordered cancel from a thrown one, and only this run's cancel
+    token having ordered one (``cancel_initiated``) makes it a revocation.
     The CRT data plane surfaces awscrt's ``AWS_ERROR_S3_CANCELED`` instead,
     matched by the error's ``name`` without importing awscrt - but only when
     this run's cancel token ordered the cancel (``cancel_initiated``), the
@@ -307,10 +312,10 @@ def _is_cancellation(
     discards the interrupt - the item classified FAILED is then the only
     evidence the run was cut short (design/crt.md section 6).
     """
-    if isinstance(exc, CancelledError):
-        return True
-    if isinstance(exc, S3TransferCancelledError):
-        return revoked is not False
+    if isinstance(exc, (CancelledError, S3TransferCancelledError)):
+        if revoked is None:
+            return cancel_initiated
+        return revoked
     return cancel_initiated and getattr(exc, "name", None) == "AWS_ERROR_S3_CANCELED"
 
 
@@ -1811,6 +1816,15 @@ class Transferrer:
                 self._skipped += 1
             self._emit(self._result(item, OpOutcome.SKIPPED))
             return
+        if isinstance(exc, CancelledError):
+            # The library's cancellation type on a future nobody revoked: the
+            # caller's own code threw it. The item failed, and a FAILED record
+            # must not carry the type that means "revoked", so it is reported
+            # as the base error with the throw on __cause__ - what the same
+            # throw of concurrent.futures' CancelledError becomes.
+            thrown = exc
+            exc = Boto3S3Error(str(thrown))
+            exc.__cause__ = thrown
         error = translate_boto_error(
             exc,
             operation=self._operation,

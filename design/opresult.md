@@ -132,10 +132,14 @@ interrupt (on the other windows the run still ends with the fatal or the
 re-raised `KeyboardInterrupt` itself). The classic engine settles every
 revoked item with s3transfer's `CancelledError` shapes and re-raises a
 drain-time interrupt, so none of this arises there. A `CancelledError` a task
-itself raised - a caller's stream read throwing
-`concurrent.futures.CancelledError`, nobody having ordered a cancel - wears the
-type but is not a revocation: the coordinator settled it as a failure, and the
-item is `FAILED`.
+itself raised - a caller's stream throwing `concurrent.futures.CancelledError`
+or the library's own, nobody having ordered a cancel - wears the type but is
+not a revocation, and the item is `FAILED` (the library's type is reported as
+the base error with the throw as its cause, so a `FAILED` record never carries
+the type that means "revoked"). The classic coordinator settles such a throw
+as a failure and says so; the CRT engine keeps no such status and never
+produces either type itself, so there the type counts as a revocation only
+when this run's cancel token ordered one.
 
 A graceful cancel (`CancelMode.GRACEFUL`, the default) is a drain: accepted
 items run to completion and report their real outcomes, so no `CANCELLED`

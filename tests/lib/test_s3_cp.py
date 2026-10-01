@@ -26,6 +26,7 @@ from botocore.exceptions import ClientError, ParamValidationError
 from boto3_s3 import GlobFilter, producers, transferplan
 from boto3_s3.exceptions import (
     BatchError,
+    Boto3S3Error,
     CancelledError,
     NotFoundError,
     TransportError,
@@ -1101,6 +1102,30 @@ class TestStreamRoutes:
                 on_result=results.append,
             )
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert calls == []
+
+    def test_the_librarys_own_cancellederror_from_the_stream_is_a_failure_too(self) -> None:
+        # The same throw with boto3_s3's type: it classified as revoked on the
+        # type alone, so the run returned normally with a CANCELLED record and
+        # nothing stored. A FAILED record must not carry the type that means
+        # "revoked" either - the base error, the throw on __cause__.
+        class _StrayReader:
+            def read(self, size: int = -1) -> bytes:
+                raise CancelledError("nobody ordered this")
+
+        client, calls = make_recording_client([{}])
+        results: list[OpResult] = []
+        with pytest.raises(BatchError):
+            S3().cp(
+                IOStorage(_StrayReader()),
+                S3Storage("s3://bucket/k", client=client),
+                transfer_config=_SYNC,
+                on_result=results.append,
+            )
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        error = results[0].error
+        assert type(error) is Boto3S3Error
+        assert isinstance(error.__cause__, CancelledError)
         assert calls == []
 
     def test_stream_download_probes_then_streams(self) -> None:
