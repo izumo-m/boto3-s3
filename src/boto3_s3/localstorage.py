@@ -1502,9 +1502,12 @@ class LocalStorage(Storage):
         here refused it up front instead (rc 1). This asks the kernel, anchored
         at the construction-time working directory like `abspath`, so the
         operations admit what aws-cli admits and the walk / `get_fileinfo`
-        then answer for the lexical form. An empty path does not exist
-        (Python's own ``os.path.exists("")``; ``os.path.join`` would make it
-        the working directory).
+        then answer for the lexical form. Windows has no such gap - it folds
+        ``..`` out of a path before the filesystem sees it, so the typed path
+        is already the lexical one - and there ``aws.exe`` refuses that
+        source as missing up front (measured), as this does. An empty path
+        does not exist (Python's own ``os.path.exists("")``; ``os.path.join``
+        would make it the working directory).
         """
         if not self._path:
             return False

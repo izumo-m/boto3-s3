@@ -104,7 +104,9 @@ class TestUploadRoute:
         assert ops(calls) == ["PutObject"]
         assert calls[0].params["Key"] == "up/a.txt"
 
-    @pytest.mark.skipif(not hasattr(os, "symlink"), reason="needs symlinks")
+    @pytest.mark.skipif(
+        os.name == "nt", reason="Windows folds `..` before the filesystem sees the path"
+    )
     def test_a_source_typed_through_a_symlink_and_dot_dot_is_admitted_like_aws(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -127,6 +129,24 @@ class TestUploadRoute:
         assert calls == []
         assert [r.outcome for r in results] == [OpOutcome.WARNED]
         assert str(results[0].error) == f"Skipping file {tmp_path / 'x'}. File does not exist."
+
+    @pytest.mark.skipif(os.name != "nt", reason="the Windows path rule")
+    def test_on_windows_that_source_is_refused_as_missing_like_aws(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Windows folds `..` out of a path before the filesystem sees it, so
+        # the typed path and the lexical form name the same missing <cwd>/x:
+        # aws.exe's pre-check refuses the source (rc 255, measured) and so
+        # does this one.
+        (tmp_path / "sub" / "other").mkdir(parents=True)
+        (tmp_path / "sub" / "x").write_bytes(b"sub-x")
+        (tmp_path / "lsub").symlink_to(tmp_path / "sub" / "other", target_is_directory=True)
+        monkeypatch.chdir(tmp_path)
+        client, calls = make_recording_client([])
+        with pytest.raises(NotFoundError) as excinfo:
+            S3().cp(LocalStorage("lsub/../x"), S3Storage("s3://bucket/k", client=client))
+        assert str(excinfo.value) == "The user-provided path lsub/../x does not exist."
+        assert calls == []
 
     def test_an_empty_local_path_is_rejected_before_anything_runs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

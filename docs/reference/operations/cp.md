@@ -286,8 +286,10 @@ upload, the parent reference) are emitted inline on the calling thread
   it (the check asks the kernel about the path as typed, like the AWS CLI's:
   a source typed through a symlinked directory and `..` is admitted, and the
   walk or stat then warns "File does not exist." for the lexical form, exit
-  code 2, as the AWS CLI does); a single S3 source whose `HeadObject` answers
-  404; a single custom-backend source `get_fileinfo` cannot resolve.
+  code 2, as the AWS CLI does — on Windows, which folds `..` before the
+  filesystem sees the path, both refuse it as missing); a single S3 source
+  whose `HeadObject` answers 404; a single custom-backend source
+  `get_fileinfo` cannot resolve.
 - [`ConfigurationError`](../exceptions.md#configurationerror), or its
   [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement —
   `no_overwrite` on an SDK without conditional writes, or `copy_props=ALL` on

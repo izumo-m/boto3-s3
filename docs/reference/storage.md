@@ -510,7 +510,10 @@ normalization. The two differ once `..` follows a symlinked directory —
 CLI admits such a source up front and lets its generator warn "File does not
 exist." (exit code 2) for the lexical form; the operations' source existence
 check asks this method so they admit the same, and the walk or `get_fileinfo`
-then answers for the lexical form. An empty path does not exist.
+then answers for the lexical form. Windows has no such gap — it folds `..` out
+of a path before the filesystem sees it, so the typed path is already the
+lexical one — and there the AWS CLI refuses that source as missing up front,
+as this does. An empty path does not exist.
 
 ### relative_path(filename, start=os.path.curdir)
 

@@ -975,6 +975,7 @@ class TestLeafRewrittenBeforeItsTurn:
         )
         assert warnings == []
 
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
     def test_the_timestamp_warning_sorts_where_aws_cli_sends_it(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1026,9 +1027,12 @@ class TestLeafRewrittenBeforeItsTurn:
         _make_tree(tmp_path, "real.txt")
         link = tmp_path / "link.txt"
         link.symlink_to(tmp_path / "real.txt")
-        unrepresentable = 1234567890.0
-        self._pretend_unrepresentable(monkeypatch, unrepresentable)
-        os.utime(link, (unrepresentable, unrepresentable), follow_symlinks=False)
+        # The stamp this host pretends it cannot render is the one the link
+        # already carries, read from its lstat: Windows cannot set a link's
+        # own time (no utime without following). The target is moved to a
+        # different stamp, so only the link's record can draw the warning.
+        os.utime(tmp_path / "real.txt", (1577836800, 1577836800))
+        self._pretend_unrepresentable(monkeypatch, link.lstat().st_mtime)
         warnings: list[str] = []
         infos = list(
             LocalStorage(
@@ -2101,21 +2105,40 @@ class TestEmptyPath:
 
 
 class TestExists:
+    @staticmethod
+    def _link_into_a_subdirectory(tmp_path: Path) -> None:
+        """``lsub`` -> ``sub/other``, with a file ``sub/x`` beside the target."""
+        (tmp_path / "sub" / "other").mkdir(parents=True)
+        (tmp_path / "sub" / "x").write_bytes(b"x")
+        (tmp_path / "lsub").symlink_to(tmp_path / "sub" / "other", target_is_directory=True)
+
+    @pytest.mark.skipif(
+        os.name == "nt", reason="Windows folds `..` before the filesystem sees the path"
+    )
     def test_asks_the_kernel_about_the_path_as_typed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # abspath folds `..` lexically; the kernel resolves it after the
         # symlink. aws-cli's pre-check asks the kernel, so exists() does too.
-        (tmp_path / "sub" / "other").mkdir(parents=True)
-        (tmp_path / "sub" / "x").write_bytes(b"x")
-        if not hasattr(os, "symlink"):
-            pytest.skip("needs symlinks")
-        (tmp_path / "lsub").symlink_to(tmp_path / "sub" / "other")
+        self._link_into_a_subdirectory(tmp_path)
         monkeypatch.chdir(tmp_path)
         storage = LocalStorage("lsub/../x")
         assert storage.exists()
         assert not os.path.exists(storage.abspath)
         assert not LocalStorage("lsub/../nosuch").exists()
+
+    @pytest.mark.skipif(os.name != "nt", reason="the Windows path rule")
+    def test_on_windows_the_typed_path_is_already_the_lexical_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Windows folds `..` out of a path before the filesystem sees it, so
+        # `lsub/../x` is <cwd>/x there whatever lsub links to: aws.exe's
+        # pre-check finds nothing (measured), and exists() answers the same.
+        self._link_into_a_subdirectory(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        assert not LocalStorage("lsub/../x").exists()
+        (tmp_path / "x").write_bytes(b"x")
+        assert LocalStorage("lsub/../x").exists()
 
     def test_is_anchored_at_the_construction_cwd(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
