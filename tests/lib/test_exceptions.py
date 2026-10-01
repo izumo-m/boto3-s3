@@ -2,6 +2,7 @@
 
 import asyncio
 import concurrent.futures
+import pickle
 
 import pytest
 
@@ -129,6 +130,20 @@ class TestBatchError:
         with pytest.raises(ex.Boto3S3Error):
             raise ex.BatchError("x", succeeded=0, failed=1, warned=0, skipped=0)
 
+    def test_survives_a_pickle_round_trip(self) -> None:
+        # A worker process sends a failure back pickled. The default exception
+        # pickling calls cls(message) and so could not rebuild the required
+        # keyword-only counts: the parent saw a BrokenProcessPool (or a
+        # multiprocessing result that never arrived) instead of this error.
+        err = ex.BatchError(
+            "2 of 3 transfers failed", succeeded=1, failed=2, warned=4, skipped=8, operation="cp"
+        )
+        back = pickle.loads(pickle.dumps(err))
+        assert type(back) is ex.BatchError
+        assert str(back) == "2 of 3 transfers failed"
+        assert (back.succeeded, back.failed, back.warned, back.skipped) == (1, 2, 4, 8)
+        assert (back.operation, back.bucket, back.key) == ("cp", None, None)
+
     def test_re_exported(self) -> None:
         assert boto3_s3.BatchError is ex.BatchError
         assert "BatchError" in boto3_s3.__all__
@@ -152,6 +167,15 @@ class TestStructuredContextFields:
     def test_context_fields_are_keyword_only(self) -> None:
         with pytest.raises(TypeError):
             ex.NotFoundError("msg", "cp")  # pyright: ignore[reportCallIssue]
+
+
+class TestPickling:
+    @pytest.mark.parametrize("name", [n for n in ex.__all__ if n != "BatchError"])
+    def test_every_other_class_round_trips_with_its_context(self, name: str) -> None:
+        err = getattr(ex, name)("boom", operation="sync", bucket="b", key="k")
+        back = pickle.loads(pickle.dumps(err))
+        assert type(back) is type(err)
+        assert (str(back), back.operation, back.bucket, back.key) == ("boom", "sync", "b", "k")
 
 
 class TestBackendExceptionChaining:

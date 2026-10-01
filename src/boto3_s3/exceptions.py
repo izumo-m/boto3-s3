@@ -1,5 +1,10 @@
 """Public exception hierarchy for the boto3-s3 library."""
 
+from __future__ import annotations
+
+import functools
+from typing import Any
+
 
 class Boto3S3Error(Exception):
     """Root of every *classified* failure raised from boto3-s3 public APIs.
@@ -136,6 +141,24 @@ class BatchError(Boto3S3Error):
         self.failed: int = failed
         self.warned: int = warned
         self.skipped: int = skipped
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        """Pickle with the counts, which ``BaseException``'s default cannot rebuild.
+
+        An exception pickles as ``cls(*args)`` plus its ``__dict__``, and the
+        required keyword-only counts make that call a ``TypeError`` - on the
+        receiving side, where it reads as a broken process pool rather than
+        as this failure. The module-level functions are meant to be handed to
+        a ``ProcessPoolExecutor``, whose worker sends a failure back pickled.
+        """
+        rebuild = functools.partial(
+            type(self),
+            succeeded=self.succeeded,
+            failed=self.failed,
+            warned=self.warned,
+            skipped=self.skipped,
+        )
+        return (rebuild, self.args, self.__dict__)
 
     @property
     def total(self) -> int:
