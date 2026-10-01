@@ -441,6 +441,20 @@ class TestOpenDownloadRoute:
         assert store == {}
         assert dest.opens == []
 
+    def test_single_download_is_matched_under_aws_clis_filter_root(self) -> None:
+        # The open route applies the same single-source rule as the built-in
+        # one: `a//b` is matched as `/b` under aws-cli's root `a/`, so
+        # exclude("*").include("b") drops it. Reverting this route's call
+        # alone left every test green.
+        store: dict[str, bytes] = {}
+        dest = _MemStorage(store, location="mem://data/")
+        only_b = GlobFilter().exclude("*").include("b")
+        client, calls = make_recording_client([head_response()])
+        S3().cp(S3Storage("s3://b/a//b", client=client), dest, filter=only_b, transfer_config=_SYNC)
+        assert ops(calls) == ["HeadObject"]
+        assert store == {}
+        assert dest.opens == []
+
     def test_recursive_download_writes_each_relative_key(self) -> None:
         store: dict[str, bytes] = {}
         dest = _MemStorage(store, location="mem://data/")
