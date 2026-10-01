@@ -63,24 +63,27 @@ class _DeletePrinter:
             logger.debug("Error printing result %s: %s", result, exc, exc_info=True)
 
     def _write_line(self, result: OpResult) -> None:
-        # The printed line needs the full object key; a delete record's
-        # compare_key is the operation-relative form (design/opresult.md), and
-        # the listed entry always rides on src_info.
-        info = result.src_info
-        key = info.key if info is not None else result.compare_key
+        # The line names the object the way the record's `src` does: the
+        # listed entry as s3://bucket/key, the single-key target as it was
+        # written - an Outposts access point's `<arn>:key` keeps its colon,
+        # like aws-cli's line. A record without one (not produced by rm
+        # itself) is spelled from its full key: a delete record's compare_key
+        # is the operation-relative form (design/opresult.md), and the listed
+        # entry rides on src_info.
+        location = result.src
+        if location is None:
+            info = result.src_info
+            key = info.key if info is not None else result.compare_key
+            location = f"s3://{self._bucket}/{key}"
         if result.outcome is OpOutcome.FAILED:
-            sys.stderr.write(output.format_delete_failed(self._bucket, key, result.error) + "\n")
+            sys.stderr.write(output.format_delete_failed(location, result.error) + "\n")
         elif result.outcome is OpOutcome.DRYRUN:
             # uni_write (aws's uni_print): an unencodable key on a narrow
             # console/pipe encoding must not raise out of the deleter worker
             # and kill the run - aws prints it with replacements and finishes.
-            output.uni_write(
-                sys.stdout, output.format_delete(self._bucket, key, dryrun=True) + "\n"
-            )
+            output.uni_write(sys.stdout, output.format_delete(location, dryrun=True) + "\n")
         elif not self._only_show_errors:
-            output.uni_write(
-                sys.stdout, output.format_delete(self._bucket, key, dryrun=False) + "\n"
-            )
+            output.uni_write(sys.stdout, output.format_delete(location, dryrun=False) + "\n")
 
 
 class RmCommand(Command):

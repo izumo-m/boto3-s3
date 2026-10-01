@@ -128,15 +128,20 @@ def format_summary(total_objects: int, total_size: int, *, human_readable: bool)
     return f"\nTotal Objects: {total_objects}\n{'Total Size: ':>15}{size}\n"
 
 
-def format_delete(bucket: str, key: str, *, dryrun: bool) -> str:
-    """One ``rm`` success line (aws-cli results.py SUCCESS/DRY_RUN_FORMAT)."""
+def format_delete(location: str, *, dryrun: bool) -> str:
+    """One ``rm`` success line (aws-cli results.py SUCCESS/DRY_RUN_FORMAT).
+
+    ``location`` is the object as aws-cli names it on the line: the record's
+    ``src`` (``s3://bucket/key`` for a listed entry, the target as written on
+    the single-key route).
+    """
     prefix = "(dryrun) " if dryrun else ""
-    return f"{prefix}delete: s3://{bucket}/{key}"
+    return f"{prefix}delete: {location}"
 
 
-def format_delete_failed(bucket: str, key: str, error: BaseException | None) -> str:
+def format_delete_failed(location: str, error: BaseException | None) -> str:
     """One ``rm`` per-key failure line (aws-cli results.py FAILURE_FORMAT)."""
-    return f"delete failed: s3://{bucket}/{key} {error}"
+    return f"delete failed: {location} {error}"
 
 
 def format_make_bucket(bucket: str) -> str:
