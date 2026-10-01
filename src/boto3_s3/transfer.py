@@ -247,6 +247,25 @@ def _applied_size_hint(item: TransferItem) -> int | None:
     return None if seekable(item.src_fileobj) else item.size_hint
 
 
+def _outcome(future: Any) -> BaseException | None:
+    """A settled future's exception, or None when the transfer succeeded.
+
+    What every ``on_done`` subscriber asks first. It catches ``BaseException``
+    on purpose: an interrupt can be the stored outcome - upstream's submission
+    task stores whatever stopped it, a ``KeyboardInterrupt`` under
+    ``use_threads=False`` included, and the subscribers here store one that
+    lands in their own work (`_CloseFileobj`, `_DeleteSource`) - and a
+    subscriber that let it escape would skip its failure branch and leave the
+    item without a record. `Transferrer._record_failure` turns that outcome
+    into CANCELLED and hands the interrupt back to the caller.
+    """
+    try:
+        future.result()
+    except BaseException as exc:
+        return exc
+    return None
+
+
 def _future_revoked(future: Any) -> bool | None:
     """Whether classic s3transfer settled ``future`` through ``cancel()``.
 
@@ -1003,6 +1022,12 @@ class Transferrer:
                 # unregister with stragglers in flight than to leave the handlers
                 # feeding _store forever on a longer-lived client.
                 self._capture.unregister(self._client)
+        # An interrupt that became an item's outcome during the drain (or on
+        # the last submit's worker) has no later `submit` to re-raise it.
+        pending = self._pending_interrupt
+        if pending is not None and exc is None:
+            self._pending_interrupt = None
+            raise pending
 
     def _watch_for_immediate_cancel(self) -> None:
         """Cancel tracked futures once the token escalates to IMMEDIATE.
@@ -1153,7 +1178,10 @@ class Transferrer:
             else:
                 future = self._submit_copy(item)
             self._track_future(future)
-        except BaseException:
+        except BaseException as raised:
+            if raised is self._pending_interrupt:
+                # Already on its way to the caller: nothing left to hand back.
+                self._pending_interrupt = None
             # The item may carry a stream handle - _cp_stream's already-open
             # fileobj, or the open route's deferred reader/writer. A submit
             # that raises before the manager accepted the work - the grants
@@ -1742,7 +1770,18 @@ class Transferrer:
         # Failed / skipped / cancelled items surface no captured response, but
         # the entry must still leave the store (see _drain_captured).
         self._drain_captured(item)
-        if _is_cancellation(exc, cancel_initiated=self._cancel_initiated, revoked=revoked):
+        interrupted = not isinstance(exc, Exception)
+        if interrupted:
+            # An interrupt stored as the item's outcome (`_outcome`): the item
+            # was cut short, not found faulty, and whoever stored it swallowed
+            # it on the way - so it is kept for `submit` / `__exit__` to hand
+            # back to the caller, and the item records CANCELLED under the
+            # wording the serial executor's own cancel uses.
+            self._note_interrupt(exc)
+            exc = S3TransferCancelledError(str(exc) or repr(exc))
+        if interrupted or _is_cancellation(
+            exc, cancel_initiated=self._cancel_initiated, revoked=revoked
+        ):
             # An accepted item revoked as a cancellation: classic s3transfer's
             # CancelledError shapes (a fatal elsewhere, classic Ctrl-C) or a
             # CRT cancel this run's token ordered. CANCELLED, not FAILED -
@@ -1867,6 +1906,11 @@ class _SerialExecutor(NonThreadedExecutor):
     callback (past ``_execute_main``) is noted at the executor boundary the
     same way, and the terminal subscribers run once per item so upstream's
     second announce, re-running the uncleared list, cannot double-count.
+    The subscribers whose own work decides the item's fate do not let one
+    escape at all - the open route's commit and mv's source delete store it
+    as the future's outcome, as upstream's submission task does for one that
+    lands in its own body - and that outcome records CANCELLED and is handed
+    back the same way (`_outcome`, `Transferrer._record_failure`).
     Both attribute lookups are guards: an upstream that reshapes its task
     degrades to its own behavior.
     """
@@ -2056,9 +2100,7 @@ class _FsyncDest:
         self._path = path
 
     def on_done(self, future: Any, **kwargs: Any) -> None:
-        try:
-            future.result()
-        except Exception:
+        if _outcome(future) is not None:
             return
         try:
             self._fsync()
@@ -2115,9 +2157,7 @@ class _StampMtime:
         self._stamp = stamp
 
     def on_done(self, future: Any, **kwargs: Any) -> None:
-        try:
-            future.result()
-        except Exception:
+        if _outcome(future) is not None:
             return
         self._stamp(self._item)
 
@@ -2146,13 +2186,15 @@ class _DeleteSource:
         if self._ran:
             return
         self._ran = True
-        try:
-            future.result()
-        except Exception:
+        if _outcome(future) is not None:
             return
         try:
             response = self._delete()
-        except Exception as exc:
+        except BaseException as exc:
+            # An interrupt included (use_threads=False runs this on the calling
+            # thread): whether the delete reached the service is unknown, so
+            # the item must not be recorded as moved. Stored as the outcome, it
+            # becomes CANCELLED and is re-raised to the caller (`_outcome`).
             future.set_exception(exc)
             return
         # mv's S3 source removal returns a DeleteObject response; stash it (minus
@@ -2186,9 +2228,7 @@ class _CloseFileobj:
         self._fileobj = fileobj
 
     def on_done(self, future: Any, **kwargs: Any) -> None:
-        try:
-            future.result()
-        except Exception:
+        if _outcome(future) is not None:
             release = getattr(self._fileobj, "discard", None)
             try:
                 release() if release is not None else self._fileobj.close()
@@ -2197,7 +2237,13 @@ class _CloseFileobj:
             return
         try:
             self._fileobj.close()
-        except Exception as exc:
+        except BaseException as exc:
+            # An interrupt included (use_threads=False runs this on the calling
+            # thread): a writer's commit that was cut short committed nothing
+            # the run can vouch for. Stored as the outcome, it keeps
+            # `_DeleteSource` from deleting a mv source and makes the item
+            # CANCELLED instead of SUCCEEDED; the interrupt itself is
+            # re-raised to the caller (`_outcome`).
             future.set_exception(exc)
 
 
@@ -2259,9 +2305,8 @@ class _Completion:
         if self._settled:
             return
         self._settled = True
-        try:
-            future.result()
-        except Exception as exc:
+        exc = _outcome(future)
+        if exc is not None:
             self._on_failure(self._item, exc, _future_revoked(future))
             return
         # Classic s3transfer resolves an unknown-size download's size on the
@@ -2914,9 +2959,8 @@ class _SetTags:
         tag_set = future.meta.user_context.get(_POST_TAGGING_KEY)
         if not tag_set:
             return
-        try:
-            future.result()
-        except Exception as exc:
+        exc = _outcome(future)
+        if exc is not None:
             if not _is_annotation_copy_failure(exc):
                 return  # the copy itself failed; nothing to tag or roll back
             # The object was copied and only its annotation writes failed:

@@ -1682,6 +1682,57 @@ class TestSerialExecutorInterrupt:
         assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
         assert transferrer.cancelled == 1
 
+    def test_interrupt_inside_the_source_delete_records_cancelled(self, tmp_path: Path) -> None:
+        # Past the transfer, inside mv's DeleteObject: whether the delete
+        # reached the service is unknown, so the item is not a completed move.
+        # It was recorded SUCCEEDED with the source still there - the once
+        # guard kept upstream's second announce from sending the delete again.
+        item = TransferItem(
+            compare_key="a.bin",
+            size=7,
+            etag='"abc123"',
+            src_bucket="bucket",
+            src_key="d/a.bin",
+            dest_path=str(tmp_path / "out" / "a.bin"),
+        )
+        results: list[OpResult] = []
+        calls, transferrer = self._run_interrupted(
+            TransferType.DOWNLOAD,
+            item,
+            [{"Body": io.BytesIO(b"payload"), "ContentLength": 7}, KeyboardInterrupt()],
+            is_move=True,
+            on_result=results.append,
+        )
+        assert ops(calls) == ["GetObject", "DeleteObject"]  # sent once, not re-sent
+        assert (tmp_path / "out" / "a.bin").read_bytes() == b"payload"
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+        assert (transferrer.succeeded, transferrer.cancelled) == (0, 1)
+
+    def test_interrupt_in_the_submission_stage_records_cancelled(self) -> None:
+        # A non-seekable stream is read by upstream's submission task, outside
+        # any request task: upstream stores the interrupt as the outcome and
+        # swallows it. The item used to end without a record at all.
+        class _InterruptingPipe:
+            def read(self, amount: int = -1) -> bytes:
+                raise KeyboardInterrupt
+
+        item = TransferItem(
+            compare_key="-",
+            size=None,
+            src_fileobj=cast("Any", _InterruptingPipe()),
+            src_info=FileInfo(key="-"),
+            dest_bucket="b",
+            dest_key="k",
+        )
+        results: list[OpResult] = []
+        calls, transferrer = self._run_interrupted(
+            TransferType.UPLOAD, item, [], is_move=False, on_result=results.append
+        )
+        assert calls == []
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+        assert str(results[0].error) == "KeyboardInterrupt()"
+        assert (transferrer.succeeded, transferrer.cancelled) == (0, 1)
+
     def test_interrupt_inside_on_result_reports_the_item_once(self, tmp_path: Path) -> None:
         # Past the request, inside the terminal callback: the transfer itself
         # completed, so the record stands - once, although upstream re-runs the

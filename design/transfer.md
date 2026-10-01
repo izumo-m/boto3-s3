@@ -58,7 +58,16 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   executor wraps each task's main so the interrupt first cancels the
   coordinator (`CancelledError` naming it, the manager's own Ctrl-C shape: the
   item records CANCELLED, upstream's failure cleanups run) and re-raises it
-  from `submit` once the manager call returns. Classic-only knobs under CRT also follow boto3: auto-selected CRT
+  from `submit` once the manager call returns. An interrupt that lands
+  outside a request task is settled the same way from the other end: one in
+  upstream's submission stage (a non-seekable stream's read, a copy's
+  `on_queued` requests) is stored by upstream as the future's outcome, and one
+  inside a done subscriber's own work - the open route's commit
+  (`_CloseFileobj`), mv's source delete (`_DeleteSource`) - is stored by that
+  subscriber, so the subscribers after it see a failed transfer (no source
+  delete), `_Completion` records CANCELLED, and the interrupt is handed back
+  to the caller from `submit` (`_outcome`, `_record_failure`). Classic-only
+  knobs under CRT also follow boto3: auto-selected CRT
   ignores them, while an explicit `preferred_transfer_client='crt'` rejects
   them up front (`_validate_crt_transfer_config`). The overall design of CRT
   mode is in [`crt.md`](./crt.md).

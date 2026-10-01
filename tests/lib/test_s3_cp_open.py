@@ -608,6 +608,40 @@ class TestOpenRouteContracts:
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
         assert store == {}
 
+    def test_mv_commit_cut_short_by_an_interrupt_keeps_the_s3_source(self) -> None:
+        # use_threads=False runs the writer's close - the commit - on the
+        # calling thread, where a Ctrl-C can land. The interrupt escaped the
+        # close subscriber, upstream re-ran the callback list, the second
+        # close was a no-op, and the mv then deleted the S3 source and
+        # recorded SUCCEEDED for bytes no backend ever committed.
+        class _InterruptedCommitWriter(_MemWriter):
+            def close(self) -> None:
+                raise KeyboardInterrupt
+
+        class _InterruptedCommitMem(_MemStorage):
+            def open(
+                self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None
+            ) -> BinaryIO:
+                if mode == "wb":
+                    self.opens.append((key, mode))
+                    return _InterruptedCommitWriter(self._store, key)  # type: ignore[return-value]
+                return super().open(key, mode, size=size)
+
+        store: dict[str, bytes] = {}
+        dest = _InterruptedCommitMem(store, location="mem://data/out.bin")
+        client, calls = make_recording_client([head_response(), get_response(), {}])
+        results: list[OpResult] = []
+        with pytest.raises(KeyboardInterrupt):
+            S3().mv(
+                S3Storage("s3://b/d/a.txt", client=client),
+                dest,
+                transfer_config=_SYNC,
+                on_result=results.append,
+            )
+        assert ops(calls) == ["HeadObject", "GetObject"]  # and no DeleteObject
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+        assert store == {}
+
     def test_backend_failure_fails_the_item_and_the_run_continues(self) -> None:
         # design/transfer.md: an open/write failure on one item is that item's
         # FAILED record - the run moves on to the next item instead of dying.
