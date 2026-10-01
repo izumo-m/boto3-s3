@@ -583,6 +583,42 @@ class TestBotoCoreErrorAborts:
             "obj",
         )
 
+    def test_the_part_listing_request_is_covered_too(self, tmp_path: Path) -> None:
+        # The second GetObjectAttributes - the next page of a COMPOSITE
+        # object's parts - goes through the same wrapper; reverting that one
+        # call left every test green.
+        err = ValueError("invalid literal for int() with base 10: 'abc'")
+
+        def respond(kw: dict[str, Any]) -> Any:
+            if kw.get("PartNumberMarker"):
+                raise err
+            return {
+                "Checksum": {"ChecksumSHA256": "ABC-2", "ChecksumType": "COMPOSITE"},
+                "ObjectParts": {
+                    "Parts": [{"PartNumber": 1, "Size": 500}],
+                    "IsTruncated": True,
+                    "NextPartNumberMarker": 1,
+                },
+            }
+
+        client = _FakeClient({"obj": respond})
+        with pytest.raises(Boto3S3Error) as excinfo:
+            _upload_filter(client)(self._pair_at(tmp_path))
+        assert type(excinfo.value) is Boto3S3Error
+        assert excinfo.value.__cause__ is err
+        assert len(client.calls) == 2
+
+    def test_a_family_error_from_inside_the_call_passes_as_it_is(self, tmp_path: Path) -> None:
+        # Raised by a handler registered on the client, say. It was handed to
+        # the non-boto wrapping, came back as itself and was raised `from`
+        # itself: an exception that is its own __cause__.
+        err = TransportError("connection reset by a handler")
+        client = _FakeClient({"obj": err})
+        with pytest.raises(TransportError) as excinfo:
+            _upload_filter(client)(self._pair_at(tmp_path))
+        assert excinfo.value is err
+        assert err.__cause__ is None
+
 
 # -- request payer -------------------------------------------------------------
 

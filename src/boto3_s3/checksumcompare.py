@@ -316,11 +316,16 @@ def _get_object_attributes(client: Any, **kwargs: Any) -> Any:
     """
     from botocore.exceptions import BotoCoreError, ClientError
 
+    from boto3_s3.exceptions import Boto3S3Error
     from boto3_s3.s3storage import request_failure
 
     try:
         return client.get_object_attributes(**kwargs)
-    except (ClientError, BotoCoreError, AssertionError):
+    except (ClientError, BotoCoreError, Boto3S3Error, AssertionError):
+        # A family error raised from inside the call (a handler registered on
+        # the client) is already what it should be; passed on to
+        # request_failure it would come back as itself and be raised as its
+        # own __cause__.
         raise
     except Exception as exc:
         raise request_failure(
