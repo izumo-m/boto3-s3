@@ -2800,7 +2800,13 @@ def _align_annotation_put_args() -> None:
 
 # The S3CopyFailedError subclass a partial annotation write raises, built on
 # first use: the floor s3transfer predates the base class (and the write path).
+# Built under the lock: two workers failing at once would otherwise each
+# define a class, and the one whose definition lost the assignment would raise
+# a type `_is_annotation_copy_failure` no longer recognizes (its item's
+# oversized tags would then go unwritten). The window is a few bytecodes
+# under the GIL; a free-threaded build widens it.
 _annotation_copy_failure_cls: type[S3CopyFailedError] | None = None
+_annotation_copy_failure_lock = threading.Lock()
 
 
 def _annotation_copy_failure_type() -> type[S3CopyFailedError]:
@@ -2814,14 +2820,15 @@ def _annotation_copy_failure_type() -> type[S3CopyFailedError]:
     tags when the annotation write failed).
     """
     global _annotation_copy_failure_cls
-    if _annotation_copy_failure_cls is None:
-        from s3transfer.exceptions import S3CopyFailedError
+    with _annotation_copy_failure_lock:
+        if _annotation_copy_failure_cls is None:
+            from s3transfer.exceptions import S3CopyFailedError
 
-        class AnnotationCopyFailedError(S3CopyFailedError):
-            """A completed copy that could not carry every annotation."""
+            class AnnotationCopyFailedError(S3CopyFailedError):
+                """A completed copy that could not carry every annotation."""
 
-        _annotation_copy_failure_cls = AnnotationCopyFailedError
-    return _annotation_copy_failure_cls
+            _annotation_copy_failure_cls = AnnotationCopyFailedError
+        return _annotation_copy_failure_cls
 
 
 def _is_annotation_copy_failure(exc: BaseException) -> bool:
