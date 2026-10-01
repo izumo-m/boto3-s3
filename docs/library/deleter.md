@@ -168,4 +168,6 @@ Two consequences of batching:
 - **Keys XML cannot carry verbatim** (C0 control characters other than TAB
   and LF, surrogates, `U+FFFE` / `U+FFFF`) fall back to individual requests,
   which is what `aws` does for every key. The rest of the buffer stays batched.
+  The individual requests of a batch go out up to ten at a time, and once the
+  run is abandoned no further one is started.
 

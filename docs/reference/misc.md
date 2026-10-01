@@ -568,7 +568,12 @@ in-flight batch finishes.
 
 `submit`, `flush` and `close` belong to a single caller thread (single
 producer). The work runs on one worker thread (thread name prefix
-`boto3-s3-deleter`), spawned lazily at the first dispatch.
+`boto3-s3-deleter`), spawned lazily at the first dispatch. The per-key
+`DeleteObject` requests of a batch — the keys the XML round trip cannot carry,
+and the re-sends of transient failures — are the exception: when a batch has
+more than one, they go out from up to ten short-lived threads of their own
+(prefix `boto3-s3-deleter-resend`), so the client, and any handler registered
+on it, is called concurrently there.
 
 `on_result` is invoked from that worker thread. It must be fast and must not
 raise. If it does raise, its own record has already been counted in the rollup,
@@ -729,7 +734,10 @@ verbatim — C0 control characters other than TAB and LF, surrogate code points,
 `U+FFFE` / `U+FFFF` (a carriage return can be written but may come back from
 the service as a line feed, so it is on the list) — falls back to an individual
 `DeleteObject`, the route the AWS CLI uses for every key, while the rest of the
-batch stays batched. Deleting a
+batch stays batched. Those individual requests run up to ten at a time, and
+abandoning the run — `close(flush=False)`, or a cancel in immediate mode —
+starts no further ones: a key not yet sent is dropped without a record, like
+an entry still in the buffer. Deleting a
 specific `VersionId` is not provided, as `aws s3 rm` does not offer it either.
 
 ## S3_DELETE_BATCH

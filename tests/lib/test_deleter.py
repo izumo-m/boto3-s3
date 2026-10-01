@@ -12,6 +12,7 @@ import contextlib
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -351,6 +352,68 @@ class TestCapturedSlotOnOddResponses:
 
 
 class TestXmlIncompatibleFallback:
+    def test_incompatible_keys_go_out_side_by_side(self) -> None:
+        # A prefix of keys holding a carriage return is a batch of per-key
+        # requests. In line on the one worker they took a request's latency
+        # each (50 keys at 200 ms: 10.5 s, 1.5 s on aws-cli); each waits here
+        # for a second one to be in flight with it.
+        keys = [f"k{i}\r" for i in range(6)]
+        fake = _FakeS3Client()
+        together = threading.Barrier(2, timeout=5.0)
+
+        def delete_object(**kwargs: Any) -> dict[str, Any]:
+            fake.single_calls.append(kwargs)
+            together.wait()
+            return {}
+
+        fake.delete_object = delete_object  # type: ignore[method-assign]
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append)
+        for key in keys:
+            deleter.submit(_info(key))
+        deleter.close()
+        assert fake.calls == []
+        assert sorted(call["Key"] for call in fake.single_calls) == keys
+        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED] * 6
+
+    def test_an_abandoned_run_sends_no_further_incompatible_keys(self) -> None:
+        # ...and nothing stopped them: after Ctrl-C the worker went on to
+        # delete every remaining key of the batch (measured on the command:
+        # 93 objects deleted after the interrupt, none on aws-cli). A key the
+        # run never sent has no request and so no record, like an entry still
+        # in the buffer.
+        keys = [f"k{i:02d}\r" for i in range(30)]
+        fake = _FakeS3Client()
+        release = threading.Event()
+        started = threading.Semaphore(0)
+
+        def delete_object(**kwargs: Any) -> dict[str, Any]:
+            fake.single_calls.append(kwargs)
+            started.release()
+            assert release.wait(timeout=5.0), "the request was never released"
+            return {}
+
+        fake.delete_object = delete_object  # type: ignore[method-assign]
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append)
+        for key in keys:
+            deleter.submit(_info(key))
+        deleter.flush()
+        for _ in range(10):
+            assert started.acquire(timeout=5.0)
+        closer = threading.Thread(target=deleter.close, kwargs={"flush": False})
+        closer.start()
+        while not deleter._abandoned:  # pyright: ignore[reportPrivateUsage]
+            time.sleep(0.01)
+        release.set()
+        closer.join(timeout=5.0)
+        assert not closer.is_alive()
+        assert len(fake.single_calls) == 10
+        sent = {call["Key"] for call in fake.single_calls}
+        assert {r.compare_key for r in results} == sent
+        assert all(r.outcome is OpOutcome.SUCCEEDED for r in results)
+        assert (deleter.succeeded, deleter.failed) == (10, 0)
+
     @pytest.mark.parametrize(
         ("char", "compatible"),
         [
@@ -713,6 +776,66 @@ class TestResults:
         assert len(left) == 20
         assert all(type(r.error) is TransportError for r in left)
         assert all("DeleteObjects operation" in str(r.error) for r in left)
+
+    def test_an_immediate_cancel_starts_no_further_resends(self) -> None:
+        # The other way to abandon a run: the token switched to IMMEDIATE
+        # while the batch is re-sending. Same outcome as close(flush=False) -
+        # the requests out finish, the rest keep the batch's error.
+        keys = [f"k{i:02d}" for i in range(30)]
+        fake = _FakeS3Client(
+            script=[{"Errors": [{"Key": k, "Code": "SlowDown", "Message": "msg"} for k in keys]}]
+        )
+        release = threading.Event()
+        started = threading.Semaphore(0)
+
+        def delete_object(**kwargs: Any) -> dict[str, Any]:
+            fake.single_calls.append(kwargs)
+            started.release()
+            assert release.wait(timeout=5.0), "the re-send was never released"
+            return {}
+
+        fake.delete_object = delete_object  # type: ignore[method-assign]
+        token = CancelToken()
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append, cancel_token=token)
+        for key in keys:
+            deleter.submit(_info(key))
+        deleter.flush()
+        for _ in range(10):
+            assert started.acquire(timeout=5.0)
+        token.cancel(mode=CancelMode.IMMEDIATE)
+        release.set()
+        deleter.close()
+        assert len(fake.single_calls) == 10
+        failed = [r for r in results if r.outcome is OpOutcome.FAILED]
+        assert len(results) == 30
+        assert len(failed) == 20
+        assert all("DeleteObjects operation" in str(r.error) for r in failed)
+
+    def test_resends_fall_back_in_line_when_no_thread_can_be_started(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An unclosed deleter's last batch finishes while the interpreter is
+        # shutting down (shutdown waits for it), and by then a new pool
+        # refuses every submit. That RuntimeError killed the batch: no
+        # re-send, no record for any of its keys, nothing raised anywhere.
+        keys = ["a", "b", "c"]
+        fake = _FakeS3Client(
+            script=[{"Errors": [{"Key": k, "Code": "SlowDown", "Message": "msg"} for k in keys]}]
+        )
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append)
+
+        class _ShuttingDownPool(ThreadPoolExecutor):
+            def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
+                raise RuntimeError("cannot schedule new futures after interpreter shutdown")
+
+        monkeypatch.setattr("boto3_s3.deleter.ThreadPoolExecutor", _ShuttingDownPool)
+        for key in keys:
+            deleter.submit(_info(key))
+        deleter.close()
+        assert [call["Key"] for call in fake.single_calls] == keys
+        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED] * 3
 
     def test_a_close_that_is_interrupted_abandons_the_run_too(
         self, monkeypatch: pytest.MonkeyPatch

@@ -87,8 +87,17 @@ synthesized as "the submitted keys minus the keys in `Errors[]`" (to reduce the
 response payload) - unless an entry cannot be attributed to a submitted key at
 all, which voids that synthesis for its batch (below). XML-incompatible keys
 use `DeleteObject`, whose request success or translated exception directly
-determines the per-key result. Results from both routes are emitted in original
-submission order.
+determines the per-key result. A batch's per-key requests - these, and the
+re-sends of transient failures below - share one sender (`_send_singly`): ten
+at a time (aws-cli's default request concurrency, which is what sends its
+per-key deletes), since either kind can be most of a batch, and no further
+request once the run is abandoned (`close(flush=False)`, a `close()` that was
+itself interrupted, or the token cancelled in immediate mode). An
+XML-incompatible key left unsent that way gets no record, like an entry still
+in the buffer; the requests already out finish. When the interpreter is
+shutting down - an unclosed deleter's last batch, which shutdown waits for -
+no thread can be started, and the sender falls back to the worker itself.
+Results from both routes are emitted in original submission order.
 
 `capture_response=True` instead sends `Quiet=False`, so the response also lists
 the successful `Deleted[]` entries; each is reconstructed into a per-key
@@ -126,13 +135,10 @@ versioned bucket) cannot be mapped back to submission order.
 - **a transient per-key failure** (an `Errors[]` entry whose code the table
   files under `TransportError`): the key is sent again as an individual
   `DeleteObject`, and that request's outcome is the key's result. A throttled
-  endpoint can answer every key of a batch this way, so a batch's re-sends run
-  ten at a time (aws-cli's default request concurrency, which is what sends
-  its per-key deletes) instead of in line on the one worker - each may sit
-  through the client's own backoff. They stop being started once the run is
-  abandoned (`close(flush=False)`, or the token cancelled in immediate mode):
-  a key not re-sent keeps the error the batch reported, and the requests
-  already out finish. The batch entry is not counted against the client's
+  endpoint can answer every key of a batch this way, so the re-sends go
+  through the shared per-key sender above - each may sit through the client's
+  own backoff - and a key not re-sent because the run was abandoned keeps the
+  error the batch reported. The batch entry is not counted against the client's
   retry policy, so a re-sent key gets one attempt more than aws-cli gives it
   (a key that fails exactly `total_max_attempts` times is deleted here and
   failed there) - except when the client is configured for a single attempt

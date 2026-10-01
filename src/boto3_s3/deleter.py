@@ -59,6 +59,7 @@ from boto3_s3.types import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from types import TracebackType
 
     from mypy_boto3_s3 import S3Client
@@ -414,19 +415,24 @@ class S3Deleter:
             (batchable if _delete_objects_compatible(info.key) else singles).append((index, info))
         errors: list[Boto3S3Error | None] = [None] * len(batch)
         deletes: list[dict[str, Any] | None] = [None] * len(batch)
+        # A per-key request the run was abandoned before sending: no request,
+        # so no record - the same as an entry still in the buffer.
+        unsent: set[int] = set()
 
         if batchable:
             self._run_delete_objects(batchable, errors, deletes)
-        for index, info in singles:
-            logger.debug(
-                "deleting XML-incompatible key with DeleteObject: s3://%s/%s",
-                self._bucket,
-                info.key,
+        if singles:
+            self._send_singly(
+                singles,
+                errors,
+                deletes,
+                purpose="deleting XML-incompatible key",
+                not_sent=lambda index, _info: unsent.add(index),
             )
-            self._run_delete_object(index, info, errors, deletes)
 
         for index, info in enumerate(batch):
-            self._record(info, errors[index], deletes[index])
+            if index not in unsent:
+                self._record(info, errors[index], deletes[index])
 
     def _run_delete_objects(
         self,
@@ -509,40 +515,81 @@ class S3Deleter:
         is re-sent at all (`_retries_disabled`).
 
         A throttled endpoint can fail every key of a batch this way, so the
-        re-sends run `_RESEND_CONCURRENCY` at a time (each may sit through the
-        client's own backoff) rather than in line, and stop being started once
-        the run is abandoned - ``close(flush=False)``, or the token cancelled
-        in IMMEDIATE mode: a key not re-sent keeps the error the batch
-        reported for it. Requests already out finish, as the batch request
-        itself does.
+        re-sends go out side by side and stop being started once the run is
+        abandoned (`_send_singly`): a key not re-sent keeps the error the
+        batch reported for it.
         """
 
-        def resend(entry: tuple[int, FileInfo]) -> None:
+        def keep_batch_error(index: int, info: FileInfo) -> None:
+            errors[index] = failures[info.key]
+
+        self._send_singly(
+            keys,
+            errors,
+            deletes,
+            purpose="retrying transient DeleteObjects failure",
+            not_sent=keep_batch_error,
+        )
+
+    def _send_singly(
+        self,
+        entries: list[tuple[int, FileInfo]],
+        errors: list[Boto3S3Error | None],
+        deletes: list[dict[str, Any] | None],
+        *,
+        purpose: str,
+        not_sent: Callable[[int, FileInfo], None],
+    ) -> None:
+        """Send each entry as a ``DeleteObject`` of its own, several at a time.
+
+        The per-key route of a batch: the keys XML 1.0 cannot carry, and the
+        re-sends of transient per-key failures. Either can be most of a
+        batch - a prefix of keys holding a carriage return, an endpoint
+        throttling every key - so the requests run `_RESEND_CONCURRENCY` at a
+        time (aws-cli's own concurrency for its per-key deletes; each may sit
+        through the client's backoff) instead of in line on the one worker.
+
+        No further request is started once the run is abandoned -
+        ``close(flush=False)``, a ``close()`` that was itself interrupted, or
+        the token cancelled in IMMEDIATE mode; ``not_sent`` is told about each
+        entry left out, and the requests already out finish, as the batch
+        request itself does. An unclosed deleter's last batch can get here
+        while the interpreter is shutting down, when no thread can be started
+        any more: the entries the pool refuses are sent in line, on the
+        worker that shutdown is waiting for.
+        """
+
+        def send(entry: tuple[int, FileInfo]) -> None:
             index, info = entry
             if self._abandoned or (
                 self._cancel_token is not None and self._cancel_token.mode is CancelMode.IMMEDIATE
             ):
-                errors[index] = failures[info.key]
+                not_sent(index, info)
                 return
-            logger.debug(
-                "retrying transient DeleteObjects failure with DeleteObject: s3://%s/%s",
-                self._bucket,
-                info.key,
-            )
+            logger.debug("%s with DeleteObject: s3://%s/%s", purpose, self._bucket, info.key)
             self._run_delete_object(index, info, errors, deletes)
 
-        if len(keys) == 1:
-            resend(keys[0])
+        if len(entries) == 1:
+            send(entries[0])
             return
         with ThreadPoolExecutor(
-            max_workers=min(len(keys), _RESEND_CONCURRENCY),
+            max_workers=min(len(entries), _RESEND_CONCURRENCY),
             thread_name_prefix="boto3-s3-deleter-resend",
         ) as pool:
-            # Consumed for its exceptions: an AssertionError from a re-send
-            # (a test double's guard, an invariant) must reach the worker's
+            started: list[Future[None]] = []
+            refused: list[tuple[int, FileInfo]] = []
+            for entry in entries:
+                try:
+                    started.append(pool.submit(send, entry))
+                except RuntimeError:  # "cannot schedule new futures after interpreter shutdown"
+                    refused.append(entry)
+            for entry in refused:
+                send(entry)
+            # Read for their exceptions: an AssertionError from a request (a
+            # test double's guard, an invariant) must reach the worker's
             # caller like one from the batch request.
-            for _ in pool.map(resend, keys):
-                pass
+            for future in started:
+                future.result()
 
     def _run_delete_object(
         self,
