@@ -541,7 +541,9 @@ class TestXmlIncompatibleFallback:
         # controls/noncharacters need the per-key URL route, and so does CR,
         # which the response half of the round trip may not preserve.
         assert _keys(fake.calls) == [["plain", "line\nbreak", "tab\tkey"]]
-        assert [call["Key"] for call in fake.single_calls] == [
+        # Sorted: the per-key requests of a batch go out side by side, so the
+        # order they reach the client in is not the submission order.
+        assert sorted(call["Key"] for call in fake.single_calls) == [
             "carriage\rreturn",
             "control-\x01",
             "noncharacter-\uffff",
@@ -556,7 +558,7 @@ class TestXmlIncompatibleFallback:
         deleter.submit(_info("form-feed-\x0c"))
         deleter.close()
         assert fake.calls == []
-        assert [call["Key"] for call in fake.single_calls] == ["nul-\x00", "form-feed-\x0c"]
+        assert {call["Key"] for call in fake.single_calls} == {"nul-\x00", "form-feed-\x0c"}
 
     def test_single_failure_is_attributed_without_failing_batchable_keys(self) -> None:
         fake = _FakeS3Client(
