@@ -669,6 +669,54 @@ class TestSyncDownload:
         assert (workdir / "out").is_dir()
         assert not (elsewhere / "out").exists()
 
+    @pytest.mark.skipif(
+        os.name == "nt", reason="Windows folds `..` before the filesystem sees the path"
+    )
+    def test_a_destination_the_kernel_finds_is_not_created_lexically(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `lsub/../out` is sub/out to the kernel (lsub -> sub/other) and
+        # <cwd>/out to abspath. aws-cli's pre-check asks the kernel, finds the
+        # directory and creates nothing; its destination walk then looks for
+        # the lexical form and warns (rc 2, measured). Ours created <cwd>/out
+        # from the lexical test and so never warned (rc 0).
+        (tmp_path / "sub" / "other").mkdir(parents=True)
+        (tmp_path / "sub" / "out").mkdir()
+        (tmp_path / "lsub").symlink_to(tmp_path / "sub" / "other")
+        monkeypatch.chdir(tmp_path)
+        client, _calls = make_recording_client([listing()])
+        results: list[OpResult] = []
+        S3().sync(
+            S3Storage("s3://bucket/d", client=client),
+            LocalStorage("lsub/../out"),
+            transfer_config=_SERIAL,
+            on_result=results.append,
+        )
+        assert not (tmp_path / "out").exists()
+        assert [(r.outcome, str(r.error)) for r in results] == [
+            (OpOutcome.WARNED, f"Skipping file {tmp_path / 'out'}{os.sep}. File does not exist.")
+        ]
+
+    @pytest.mark.skipif(
+        os.name == "nt", reason="Windows folds `..` before the filesystem sees the path"
+    )
+    def test_a_destination_the_kernel_does_not_find_is_created_where_it_resolves(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The other half of the same aws-cli pre-check: makedirs on the typed
+        # path, so the directory appears under the link's target.
+        (tmp_path / "sub" / "other").mkdir(parents=True)
+        (tmp_path / "lsub").symlink_to(tmp_path / "sub" / "other")
+        monkeypatch.chdir(tmp_path)
+        client, _calls = make_recording_client([listing()])
+        S3().sync(
+            S3Storage("s3://bucket/d", client=client),
+            LocalStorage("lsub/../new"),
+            transfer_config=_SERIAL,
+        )
+        assert (tmp_path / "sub" / "new").is_dir()
+        assert not (tmp_path / "new").exists()
+
     def test_directory_bucket_source_is_rejected_after_dest_dir_creation(
         self, tmp_path: Path
     ) -> None:

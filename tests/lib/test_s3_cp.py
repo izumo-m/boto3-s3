@@ -865,6 +865,30 @@ class TestDownloadRoute:
         assert dest.read_bytes() == b"keep"
         assert results == []
 
+    @pytest.mark.skipif(
+        os.name == "nt", reason="Windows folds `..` before the filesystem sees the path"
+    )
+    def test_a_recursive_destination_the_kernel_finds_is_not_created_lexically(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # As for sync: aws-cli's pre-check asks the kernel about `lsub/../out`
+        # (sub/out, which exists) and creates nothing, so an empty prefix
+        # leaves no <cwd>/out behind (measured). Ours tested the lexical form
+        # and created it.
+        (tmp_path / "sub" / "other").mkdir(parents=True)
+        (tmp_path / "sub" / "out").mkdir()
+        (tmp_path / "lsub").symlink_to(tmp_path / "sub" / "other")
+        monkeypatch.chdir(tmp_path)
+        client, calls = make_recording_client([{}])  # empty ListObjectsV2 page
+        S3().cp(
+            S3Storage("s3://b/pre", client=client),
+            LocalStorage("lsub/../out"),
+            recursive=True,
+            transfer_config=_SYNC,
+        )
+        assert ops(calls) == ["ListObjectsV2"]
+        assert not (tmp_path / "out").exists()
+
 
 class TestGlacierGate:
     def _download(

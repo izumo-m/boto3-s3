@@ -1375,21 +1375,16 @@ class S3:
             plan, operation=operation
         )
         # aws-cli's _validate_path_args only creates the dest dir when it does
-        # not already exist; check the sep-less construction-time abspath
-        # (plan.dest_root carries a trailing os.sep, so exists() on it is
-        # False for an existing *file*; the same anchor keeps the check
-        # consistent with the plan if the process chdir'd since). An
-        # existing-file dest then skips makedirs and fails per item like aws
-        # (rc 1) instead of crashing up front; an empty listing transfers
-        # nothing and exits 0. (sync's guard differs: unconditional, bare
-        # makedirs.)
-        if (
-            recursive
-            and isinstance(dest_storage, LocalStorage)
-            and not os.path.exists(dest_storage.abspath)
-        ):
+        # not already exist, testing and creating the path as typed -
+        # ensure_directory does both on the construction-time anchor (sep-less,
+        # so an existing *file* counts as existing; consistent with the plan
+        # if the process chdir'd since). An existing-file dest then skips
+        # makedirs and fails per item like aws (rc 1) instead of crashing up
+        # front; an empty listing transfers nothing and exits 0. (sync's guard
+        # differs: unconditional, bare makedirs.)
+        if recursive and isinstance(dest_storage, LocalStorage):
             try:
-                os.makedirs(plan.dest_root, exist_ok=True)
+                dest_storage.ensure_directory(exist_ok=True)
             except OSError as exc:
                 raise translate_os_error(exc, operation=operation, key=None) from exc
         client = client_provider.get_client()
@@ -1969,9 +1964,9 @@ class S3:
         # exists() test (not exist_ok=True) is deliberate: a destination that
         # exists as a *file* passes here and fails per item instead
         # ([Errno 20], rc 1). (cp's guard differs: recursive-gated, exist_ok.)
-        if isinstance(dest_storage, LocalStorage) and not os.path.exists(dest_storage.abspath):
+        if isinstance(dest_storage, LocalStorage):
             try:
-                os.makedirs(dest_storage.abspath)
+                dest_storage.ensure_directory()
             except OSError as exc:
                 raise translate_os_error(exc, operation="sync", key=None) from exc
         # An S3 Express directory bucket lists in unspecified order

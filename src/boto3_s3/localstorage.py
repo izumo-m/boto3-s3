@@ -1518,6 +1518,25 @@ class LocalStorage(Storage):
             return False
         return os.path.exists(self._unnormalized)
 
+    def ensure_directory(self, *, exist_ok: bool = False) -> None:
+        """Create the location as a directory unless it exists, as aws-cli's pre-check does.
+
+        aws-cli's ``_validate_path_args`` creates a directory destination
+        with ``os.path.exists`` / ``os.makedirs`` on the path as typed, so
+        this tests `exists` and creates the same typed, construction-anchored
+        path - not the lexical ``abspath`` form the transfer then writes
+        under. The two differ only once ``..`` follows a symlinked directory
+        (see `exists`), and there aws-cli's outcome is this one: a
+        destination the kernel finds is not created lexically, so a ``sync``
+        warns about the missing lexical directory exactly as aws-cli does,
+        and one the kernel does not find is created where the kernel resolves
+        it. An existing file passes (the transfer fails per item). ``exist_ok``
+        is ``os.makedirs``'s; an ``OSError`` propagates for the caller to
+        translate.
+        """
+        if not self.exists():
+            os.makedirs(self._unnormalized, exist_ok=exist_ok)
+
     @property
     def fsync(self) -> bool:
         """Whether a ``mv`` download into this destination fsyncs before deleting the source.
