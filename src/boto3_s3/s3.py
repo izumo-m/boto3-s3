@@ -409,7 +409,9 @@ def _reject_lane_filter_shapes(
     listings, submit transfers and only then fail as a mid-run ``TypeError``
     when the lane first calls it; refuse it up front instead, the same
     reasoning as `_reject_pair_filter_conflicts` and the unknown-option
-    check. Takes ``object`` because this is the shape check itself.
+    check. A ``ParallelFilter`` is held to the same test one level down: the
+    ``decide`` it wraps must be callable. Takes ``object`` because this is
+    the shape check itself.
     """
     for name, value, allows_none in (
         ("create_filter", create_filter, False),
@@ -418,7 +420,17 @@ def _reject_lane_filter_shapes(
     ):
         if value is None and allows_none:
             continue
-        if isinstance(value, (bool, ParallelFilter)) or callable(value):
+        if isinstance(value, ParallelFilter):
+            # The container is a shape; what it wraps is called on the pool and
+            # must be callable for the same reason a bare filter must.
+            decide = cast("ParallelFilter[Any]", value).decide
+            if not callable(decide):
+                raise ValidationError(
+                    f"sync: {name}'s ParallelFilter must wrap a callable, not {decide!r}",
+                    operation="sync",
+                )
+            continue
+        if isinstance(value, bool) or callable(value):
             continue
         shapes = "None, True, False, a callable, or a ParallelFilter"
         if not allows_none:

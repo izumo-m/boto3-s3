@@ -960,6 +960,24 @@ class TestLaneFilterShapes:
         assert exc_info.value.operation == "sync"
         assert calls == []
 
+    @pytest.mark.parametrize("name", ["create_filter", "update_filter", "delete_filter"])
+    def test_a_parallel_filter_wrapping_no_callable_is_refused_too(
+        self, tmp_path: Path, name: str
+    ) -> None:
+        # The container passed the shape check whatever it wrapped, so
+        # ParallelFilter(None, pool) still listed both sides, uploaded and
+        # then died on the pool with the same TypeError (measured on MinIO).
+        src = tmp_path / "src"
+        src.mkdir()
+        _write(src, "a.txt", b"a")
+        client, calls = make_recording_client([])
+        with ThreadPoolExecutor(1) as pool:
+            wrapped = ParallelFilter(cast("Any", None), pool)
+            with pytest.raises(ValidationError, match=f"sync: {name}'s ParallelFilter") as exc_info:
+                S3().sync(str(src), S3Storage("s3://bucket/p/", client=client), **{name: wrapped})  # pyright: ignore[reportArgumentType]
+        assert exc_info.value.operation == "sync"
+        assert calls == []
+
     def test_update_filter_none_stays_the_default(self, tmp_path: Path) -> None:
         src = tmp_path / "src"
         src.mkdir()
