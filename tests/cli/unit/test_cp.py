@@ -422,11 +422,13 @@ class TestSuccessShapes:
     ) -> None:
         # A dir_op pre-creates its destination, and makedirs("") is aws-cli's
         # own pre-pipeline failure (rc 255, measured) - "" never becomes ".".
+        # The OS words the error ([Errno 2] on POSIX, a localized [WinError 3]
+        # on Windows); what is pinned is that it names the empty path.
         monkeypatch.chdir(tmp_path)
         ctx, calls = _recording_ctx([])
         rc = cli.main(["cp", "s3://bucket/p/", "", "--recursive"], ctx=ctx)
         assert rc == 255
-        assert "[Errno 2] No such file or directory: ''" in capsys.readouterr().err
+        assert capsys.readouterr().err.rstrip().endswith(": ''")
         assert calls == []
 
     def test_quiet_suppresses_success_output(
