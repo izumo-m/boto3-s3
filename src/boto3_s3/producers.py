@@ -481,7 +481,7 @@ def s3_source_items(
             # (its filter pipeline stage runs regardless of dir_op); the
             # recursive branch filters inside the scan above. An excluded mv
             # source must not transfer - and must not be deleted.
-            infos = (info for info in infos if item_filter(info))
+            infos = _filter_single_s3_source(infos, item_filter)
 
     for info in infos:
         if transfer_type is TransferType.DOWNLOAD:
@@ -504,6 +504,45 @@ def s3_source_items(
             )
         if item is not None:
             yield item
+
+
+def single_object_filter_root(key: str) -> str:
+    """The parent a single S3 object's filter patterns resolve under (aws-cli parity).
+
+    aws-cli's ``filters._get_s3_root`` for a non-``dir_op`` source: the key's
+    parent directory, empty for a bucket-root key, and a folder-marker key
+    its own root. aws joins the pattern onto that parent with
+    ``os.path.join``, which adds no second ``/`` after a parent that already
+    ends in one, so the parent of ``a//b`` is ``a/`` (the entry is matched as
+    ``/b``, not ``b``) and the parent of ``/b`` is ``""``. Always empty or
+    ``/``-terminated. ``rm_filter_root`` is this for its non-recursive form.
+    """
+    if not key or key.endswith("/"):
+        return key
+    head, sep, _tail = key.rpartition("/")
+    if not sep or not head:
+        return ""
+    return head if head.endswith("/") else f"{head}/"
+
+
+def _filter_single_s3_source(
+    infos: Iterator[FileInfo], item_filter: FileFilter
+) -> Iterator[FileInfo]:
+    """Apply ``item_filter`` to a single S3 source the way aws-cli matches it.
+
+    The record's ``compare_key`` is the key's last component, which also names
+    the destination (``transferplan.dest_for``). aws-cli matches the object
+    against its key relative to `single_object_filter_root` instead, and the
+    two differ for a key that doubles a slash or starts with one: ``a//b`` is
+    ``/b`` there. The filter is shown a copy carrying that relative key - what
+    ``rm``'s blind single-key path stamps on its own record - and the record
+    handed on is the original.
+    """
+    for info in infos:
+        relative = info.key[len(single_object_filter_root(info.key)) :]
+        view = info if relative == info.compare_key else replace(info, compare_key=relative)
+        if item_filter(view):
+            yield info
 
 
 def download_item_from_info(
@@ -1079,7 +1118,7 @@ def open_download_items(
             # Mirror the built-in download route: aws filters the
             # single-object case too (the recursive branch filters inside
             # the scan above).
-            infos = (info for info in infos if item_filter(info))
+            infos = _filter_single_s3_source(infos, item_filter)
     for info in infos:
         item = open_download_item(
             plan,

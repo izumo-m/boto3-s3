@@ -614,6 +614,46 @@ class TestFilters:
         assert results == []
         assert not (tmp_path / "k.txt").exists()
 
+    @pytest.mark.parametrize("operation", ["cp", "mv"])
+    @pytest.mark.parametrize(
+        ("key", "patterns", "kept"),
+        [
+            # aws-cli matches a single object relative to its parent, and the
+            # parent of `a//b` is `a/`: the entry is `/b`, not `b` (measured
+            # on the pinned aws for cp and mv alike).
+            ("a//b", ("-b",), True),
+            ("a//b", ("-*", "+b"), False),
+            ("a//b", ("-?b",), False),
+            ("/b", ("-b",), True),
+            ("/b", ("-*", "+b"), False),
+            ("a/b", ("-b",), False),
+            ("a/b", ("-*", "+b"), True),
+        ],
+    )
+    def test_a_single_s3_source_is_matched_under_aws_clis_filter_root(
+        self, tmp_path: Path, operation: str, key: str, patterns: tuple[str, ...], kept: bool
+    ) -> None:
+        # The record's compare_key is the key's last component (it names the
+        # destination), and the filter was matched against that - so a key
+        # doubling a slash got the opposite verdict from aws-cli's, and from
+        # the blind rm's. A mv then moved, and deleted, a source aws-cli
+        # leaves alone.
+        glob = GlobFilter()
+        for pattern in patterns:
+            glob = glob.exclude(pattern[1:]) if pattern[0] == "-" else glob.include(pattern[1:])
+        client, calls = make_recording_client([head_response()])
+        results: list[OpResult] = []
+        getattr(S3(), operation)(
+            S3Storage(f"s3://bucket/{key}", client=client),
+            str(tmp_path) + os.sep,
+            filter=glob,
+            dryrun=True,
+            on_result=results.append,
+        )
+        assert ops(calls) == ["HeadObject"]
+        # The record still names the item by its last component.
+        assert [result.compare_key for result in results] == (["b"] if kept else [])
+
     def test_single_upload_is_filtered_too(self, tmp_path: Path) -> None:
         src = tmp_path / "k.txt"
         src.write_bytes(b"x")

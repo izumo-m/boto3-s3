@@ -107,12 +107,7 @@ def rm_filter_root(key: str, *, recursive: bool) -> str:
     """
     if recursive:
         return f"{key}/" if key and not key.endswith("/") else key
-    if not key or key.endswith("/"):
-        return key
-    head, sep, _tail = key.rpartition("/")
-    if not sep or not head:
-        return ""
-    return head if head.endswith("/") else f"{head}/"
+    return producers.single_object_filter_root(key)
 
 
 # Every key TransferOptions accepts (the TypedDict is total=False, so the

@@ -44,7 +44,12 @@ their own form — on the single-object `cp` / `mv` routes the last
 `/`-separated component of the key, so a pattern for
 `cp s3://bucket/a/b/c.txt .` is matched against `c.txt` and not `a/b/c.txt`;
 on `rm`'s blind single-key path the key relative to what
-[`rm_filter_root`](./operations/rm.md#rm_filter_root) returns. Each operation
+[`rm_filter_root`](./operations/rm.md#rm_filter_root) returns. The two are the
+same string except for a key that doubles a slash or starts with one, where
+the AWS CLI matches `a//b` as `/b`: there a single S3 source's predicate on
+`cp` / `mv` is shown a copy of the entry carrying that `rm_filter_root`-relative
+key, while the record keeps the last component, which names the destination.
+Each operation
 page states which key its filter matches
 ([`operations/README.md`](./operations/README.md)). `storage` is stamped before
 the filter runs too, so a predicate can reach the backend the entry came from
