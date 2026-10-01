@@ -524,14 +524,19 @@ for the MinIO stack (section 4).
 1. **Copy the working tree to NTFS** (why: below). From `<repo>`:
 
        rsync -a --delete --exclude .git --exclude .venv --exclude __pycache__ \
-         --exclude out --exclude .pytest_cache --exclude .ruff_cache \
+         --exclude .pytest_cache \
+         --exclude-from=<(git ls-files -oi --exclude-standard --directory | sed 's|^|/|') \
          --exclude "$(git config -f .gitmodules --get-regexp path | awk '{print $2}')" \
          ./ /mnt/c/tmp/boto3-s3-wintest/
 
-   The last exclusion is the aws-cli source checkout - reference-only for the
-   tests, nothing imports from it - which keeps the copy to a few MiB. Re-run
-   the command whenever the tree changes: `--delete` keeps the copy exact, and
-   the excluded `.venv` on the copy survives it.
+   The `--exclude-from` list is everything git ignores in the tree - caches,
+   build output, and above all the other virtualenvs (the benchmark one alone
+   is tens of thousands of files, minutes across the drive boundary on every
+   sync). The last exclusion is the aws-cli source checkout - reference-only
+   for the tests, nothing imports from it. Together they keep the copy to a
+   few MiB and a sync to seconds. Re-run the command whenever the tree
+   changes: `--delete` keeps the copy exact, and what the named exclusions
+   cover on the copy - its own `.venv` and caches - survives it.
 
 2. **Work from inside the copy.** Every `cmd.exe` call below is issued from a
    WSL2 shell whose current directory is inside the copy: the interop layer
