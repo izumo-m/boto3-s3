@@ -25,7 +25,7 @@ import functools
 import inspect
 import os
 import time
-from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import Executor, Future
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
@@ -156,6 +156,28 @@ def _attributed_to(operation: str) -> Generator[None, None, None]:
         if exc.operation is None:
             exc.operation = operation
         raise
+
+
+_T = TypeVar("_T")
+
+
+def _attributed_entries(entries: Iterable[_T], operation: str) -> Iterator[_T]:
+    """Yield ``entries``, attributing what *fetching* one raises to ``operation``.
+
+    The pull is the listing's and so the operation's (`_attributed_to`); what
+    the consumer then does with the entry - the caller's ``on_entry`` /
+    ``on_result``, a storage method the callback calls itself - runs between
+    two pulls, outside the attribution, so a failure raised there keeps the
+    ``operation`` its raiser gave it.
+    """
+    iterator = iter(entries)
+    while True:
+        with _attributed_to(operation):
+            try:
+                entry = next(iterator)
+            except StopIteration:
+                return
+        yield entry
 
 
 def _validate_storage(storage: Storage, *, operation: str) -> None:
@@ -1138,6 +1160,11 @@ class S3:
         """
         storage = self._resolve_s3_target(target, operation="ls")
         _raise_if_cancelled(cancel_token, "ls")
+        # A lazily-deferred client is built here, ahead of the listing's
+        # attribution: a construction failure belongs to no operation
+        # (``operation`` None, docs/reference/exceptions.md), as on the
+        # transfer routes.
+        storage.get_client()
         if not storage.bucket:
             items = storage.list_buckets(name_prefix=bucket_name_prefix, region=bucket_region)
         else:
@@ -1154,12 +1181,10 @@ class S3:
                 cancel_token=cancel_token,
             )
         # The listing is the storage's, which cannot know the operation reading
-        # it: a family error it raises unnamed is this ls's (`_attributed_to`).
-        with (
-            _attributed_to("ls"),
-            _scan_teardown(items, reusable_after_interrupt=self._reusable_after_interrupt),
-        ):
-            for info in items:
+        # it: a family error fetching an entry raises unnamed is this ls's
+        # (`_attributed_entries`); what `on_entry` raises is the caller's own.
+        with _scan_teardown(items, reusable_after_interrupt=self._reusable_after_interrupt):
+            for info in _attributed_entries(items, "ls"):
                 if cancel_token is not None and cancel_token.cancelled:
                     break
                 on_entry(info)
@@ -2278,14 +2303,15 @@ class S3:
         )
 
         if dryrun:
+            # A lazily-deferred client is built ahead of the listing's
+            # attribution, like the deleter's eager build below (and ls's).
+            storage.get_client()
             # cancel_token on the scan too (like ls): the prefetch producer
             # stops between page pulls instead of fetching pages nobody reads.
             entries = storage.scan(options, cancel_token=cancel_token)
-            with (
-                _attributed_to("rm"),  # the listing's unnamed failure is this rm's
-                _scan_teardown(entries, reusable_after_interrupt=self._reusable_after_interrupt),
-            ):
-                for info in entries:
+            with _scan_teardown(entries, reusable_after_interrupt=self._reusable_after_interrupt):
+                # the listing's unnamed failure is this rm's; on_result's is not
+                for info in _attributed_entries(entries, "rm"):
                     _raise_if_cancelled(cancel_token, "rm")
                     _emit_result(on_result, info=info, storage=storage, outcome=OpOutcome.DRYRUN)
                     _raise_if_cancelled(cancel_token, "rm")
@@ -2303,11 +2329,9 @@ class S3:
             # cancel_token on the scan too (like ls): the prefetch producer
             # stops between page pulls instead of fetching pages nobody reads.
             entries = storage.scan(options, cancel_token=cancel_token)
-            with (
-                _attributed_to("rm"),  # the listing's unnamed failure is this rm's
-                _scan_teardown(entries, reusable_after_interrupt=self._reusable_after_interrupt),
-            ):
-                for info in entries:
+            with _scan_teardown(entries, reusable_after_interrupt=self._reusable_after_interrupt):
+                # the listing's unnamed failure is this rm's
+                for info in _attributed_entries(entries, "rm"):
                     _raise_if_cancelled(cancel_token, "rm")
                     deleter.submit(info)
             _raise_if_cancelled(cancel_token, "rm")
@@ -2369,6 +2393,11 @@ class S3:
         if dryrun:
             _emit_result(on_result, info=info, storage=storage, outcome=OpOutcome.DRYRUN, src=src)
             return
+        # A lazily-deferred client is built ahead of the request: failing to
+        # build one is not this key failing to delete (no FAILED record, no
+        # BatchError), and belongs to no operation - as on the recursive route,
+        # where the deleter builds it eagerly.
+        storage.get_client()
         try:
             response = storage.delete(info, request_payer=request_payer)
         except AssertionError:
@@ -2476,8 +2505,9 @@ class S3:
         bucket = storage.bucket
         if not bucket:
             raise ValidationError('Invalid bucket name "": rb requires a bucket', operation="rb")
+        client = storage.get_client()  # built ahead of the request's attribution, like mb
         with _single_request("rb", bucket=bucket):
-            storage.get_client().delete_bucket(Bucket=bucket)
+            client.delete_bucket(Bucket=bucket)
 
     def presign(
         self,
@@ -2563,10 +2593,9 @@ class S3:
             config["IndexDocument"] = {"Suffix": index_document}
         if error_document is not None:
             config["ErrorDocument"] = {"Key": error_document}
+        client = storage.get_client()  # built ahead of the request's attribution, like mb
         with _single_request("website", bucket=storage.bucket):
-            storage.get_client().put_bucket_website(
-                Bucket=storage.bucket, WebsiteConfiguration=config
-            )
+            client.put_bucket_website(Bucket=storage.bucket, WebsiteConfiguration=config)
 
 
 @contextmanager

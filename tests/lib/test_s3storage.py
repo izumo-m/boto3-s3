@@ -45,6 +45,7 @@ from boto3_s3 import (
     LocalStorage,
     MalformedResponseError,
     NotFoundError,
+    OpResult,
     S3FileInfo,
     S3ScanOptions,
     S3Storage,
@@ -55,7 +56,7 @@ from boto3_s3 import (
 )
 from boto3_s3.storage import sieve_pages
 from tests.utils.fakemodel import model_meta
-from tests.utils.fakes3 import MTIME, client_error
+from tests.utils.fakes3 import MTIME, client_error, listing
 from tests.utils.recorder import ApiCall, make_recording_client, ops
 
 
@@ -1098,11 +1099,18 @@ class TestScanErrorMapping:
         assert exc_info.value.operation is None
 
     @pytest.mark.parametrize(
-        "operation",
-        ["ls", "rm", "cp", "mv", "sync"],
+        ("run", "operation"),
+        [
+            ("ls", "ls"),
+            ("rm", "rm"),
+            ("rm --dryrun", "rm"),
+            ("cp", "cp"),
+            ("mv", "mv"),
+            ("sync", "sync"),
+        ],
     )
     def test_the_operation_reading_the_listing_names_its_failure(
-        self, tmp_path: Path, operation: str
+        self, tmp_path: Path, run: str, operation: str
     ) -> None:
         # The listing cannot know who reads it, so it raises unnamed and the
         # operation fills its own name in - the rule open / delete / validate
@@ -1114,15 +1122,71 @@ class TestScanErrorMapping:
         runs = {
             "ls": lambda: s3.ls(source, on_entry=lambda info: None, recursive=True),
             "rm": lambda: s3.rm(source, recursive=True),
+            "rm --dryrun": lambda: s3.rm(source, recursive=True, dryrun=True),
             "cp": lambda: s3.cp(source, str(tmp_path), recursive=True),
             "mv": lambda: s3.mv(source, str(tmp_path), recursive=True),
             "sync": lambda: s3.sync(source, str(tmp_path)),
         }
         with pytest.raises(AccessDeniedError) as exc_info:
-            runs[operation]()
+            runs[run]()
         error = exc_info.value
         assert (error.operation, error.bucket, error.key) == (operation, "bucket", None)
         assert error.__cause__ is denied
+
+    @pytest.mark.parametrize("run", ["ls", "rm --dryrun"])
+    def test_what_the_callers_callback_raises_is_not_the_listings(self, run: str) -> None:
+        # Only fetching an entry is the listing's. A storage call the callback
+        # makes itself - the documented way to read an entry's object - raises
+        # unnamed, and stays unnamed: the operation's name was being written
+        # over the whole delivery loop.
+        denied = client_error("AccessDenied", 403, "HeadObject")
+        client, _calls = make_recording_client([listing(("prefix/a", 1)), denied])
+        source = S3Storage("s3://bucket/prefix/", client=client)
+
+        def read_it(_record: object) -> None:
+            source.get_fileinfo("prefix/a")
+
+        s3 = S3()
+        runs = {
+            "ls": lambda: s3.ls(source, on_entry=read_it, recursive=True),
+            "rm --dryrun": lambda: s3.rm(source, recursive=True, dryrun=True, on_result=read_it),
+        }
+        with pytest.raises(AccessDeniedError) as exc_info:
+            runs[run]()
+        assert exc_info.value.operation is None
+
+    @pytest.mark.parametrize(
+        "run", ["ls", "rb", "website", "rm", "rm --recursive", "rm --recursive --dryrun"]
+    )
+    def test_failing_to_build_the_client_names_no_operation(self, run: str) -> None:
+        # A storage built without a client builds one on first use. That
+        # failing is no operation's failure (exceptions.md), and the transfer
+        # routes, mb and presign reported it so; these routes built the client
+        # inside their request's or listing's attribution and named
+        # themselves - the single-key rm as a FAILED record and a BatchError.
+        class _Unbuildable(S3Storage):
+            def get_client(self) -> Any:
+                raise InvalidConfigError("The config profile (nope) could not be found")
+
+        results: list[OpResult] = []
+        s3 = S3()
+        key = _Unbuildable("s3://bucket/k")
+        prefix = _Unbuildable("s3://bucket/prefix/")
+        runs = {
+            "ls": lambda: s3.ls(prefix, on_entry=lambda info: None),
+            "rb": lambda: s3.rb(_Unbuildable("s3://bucket")),
+            "website": lambda: s3.website(_Unbuildable("s3://bucket"), index_document="i.html"),
+            "rm": lambda: s3.rm(key, on_result=results.append),
+            "rm --recursive": lambda: s3.rm(prefix, recursive=True, on_result=results.append),
+            "rm --recursive --dryrun": lambda: s3.rm(
+                prefix, recursive=True, dryrun=True, on_result=results.append
+            ),
+        }
+        with pytest.raises(InvalidConfigError) as exc_info:
+            runs[run]()
+        error = exc_info.value
+        assert (error.operation, error.bucket, error.key) == (None, None, None)
+        assert results == []
 
     def test_a_bucket_listing_failure_is_named_by_ls_alone(self) -> None:
         denied = client_error("AccessDenied", 403, "ListBuckets")
