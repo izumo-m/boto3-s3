@@ -244,7 +244,15 @@ def _applied_size_hint(item: TransferItem) -> int | None:
     """
     if item.size is not None or item.size_hint is None or item.src_fileobj is None:
         return None
-    return None if seekable(item.src_fileobj) else item.size_hint
+    try:
+        engine_sizes_it = seekable(item.src_fileobj)
+    except Exception:
+        # A stream that cannot even answer - a closed file raises here. Not
+        # this question's failure to report: the hint goes through, and the
+        # engine's own first touch of the stream fails the item on its task,
+        # a FAILED record like every other unusable source.
+        engine_sizes_it = False
+    return None if engine_sizes_it else item.size_hint
 
 
 def _outcome(future: Any) -> BaseException | None:
@@ -1407,17 +1415,21 @@ class Transferrer:
         # carry an etag; local sources have none, and uploads never probe.
         subscribers: list[Any] = []
         counted: _CountBytes | None = None
+        total = item.size
         if item.size is not None:
             subscribers.append(_ProvideSize(item.size))
         else:
             hint = _applied_size_hint(item)
             if hint is not None:
                 subscribers.append(_ProvideSize(hint))
+                # The caller's word on the size is also the only total a
+                # progress report can carry for a stream nobody can measure.
+                total = hint
             # A size-unknown item (a stream, a custom backend's deferred
             # reader): count what actually moves, so SUCCEEDED can report it
             # where the engine resolves no size of its own (`_CountBytes`) -
             # or resolves the hint it was handed, which is not the count.
-            counted = _CountBytes()
+            counted = _CountBytes(hinted=hint is not None)
             subscribers.append(counted)
         # "is not None", not truthiness: an endpoint's empty ETag is provided
         # like any other (aws-cli hands s3transfer whatever the response
@@ -1427,9 +1439,7 @@ class Transferrer:
             subscribers.append(_ProvideETag(item.etag))
         if self._on_progress is not None:
             subscribers.append(
-                _Progress(
-                    self._result_transfer_type, item.compare_key, item.size, self._on_progress
-                )
+                _Progress(self._result_transfer_type, item.compare_key, total, self._on_progress)
             )
         return subscribers, counted
 
@@ -1440,7 +1450,7 @@ class Transferrer:
             on_success=self._record_success,
             on_failure=self._record_failure,
             counted=counted,
-            hinted=_applied_size_hint(item) is not None,
+            hinted=counted is not None and counted.hinted,
         )
 
     def _delete_source_subscriber(self, item: TransferItem) -> _DeleteSource:
@@ -1689,9 +1699,11 @@ class Transferrer:
         delete_response: dict[str, Any] | None = None,
     ) -> None:
         """Count and emit a successful terminal result with captured response data."""
-        # item.size is unset for an unknown-size transfer (a streaming download
-        # lets s3transfer probe the object); fall back to the size s3transfer
-        # resolved on the future so SUCCEEDED reports the real byte count.
+        # item.size is unset for an unknown-size transfer (a stream, a custom
+        # backend's deferred reader); fall back to what `_Completion` resolved
+        # - the size the engine put on the future, or the bytes `_CountBytes`
+        # counted where it put none or only echoed a hint - so SUCCEEDED
+        # reports the real byte count.
         size = item.size if item.size is not None else resolved_size
         extra_info = self._build_extra_info(item, etag, delete_response)
         with self._lock:
@@ -2058,9 +2070,12 @@ class _CountBytes:
     that actually landed.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, hinted: bool = False) -> None:
         self._lock = threading.Lock()
         self.total = 0
+        # Whether the engine was handed a size hint for this item: its
+        # meta.size is then the hint, not a count (`_Completion`).
+        self.hinted = hinted
 
     def on_progress(self, future: Any, bytes_transferred: int, **kwargs: Any) -> None:
         with self._lock:

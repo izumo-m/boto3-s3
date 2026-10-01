@@ -2426,6 +2426,48 @@ class TestStreams:
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
         assert results[0].bytes_transferred == 4
 
+    def test_a_stream_that_cannot_say_whether_it_seeks_fails_as_an_item(self) -> None:
+        # The hint asks the stream whether it is seekable on the submitting
+        # thread, and a closed file answers by raising ValueError - which left
+        # the operation bare, with no record. Without a hint the same stream
+        # is the engine's to touch and fails the item; with one it does too.
+        closed = io.BytesIO(b"foo\n")
+        closed.close()
+        client, calls = make_recording_client([{}])
+        results: list[OpResult] = []
+        item = TransferItem(
+            compare_key="-", size_hint=2, src_fileobj=closed, dest_bucket="b", dest_key="k"
+        )
+        with Transferrer(
+            TransferType.UPLOAD, client, transfer_config=_SYNC_CONFIG, on_result=results.append
+        ) as transferrer:
+            transferrer.submit(item)
+        assert calls == []
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert transferrer.failed == 1
+
+    def test_progress_totals_carry_the_hint_only_where_it_sizes_the_stream(self) -> None:
+        # bytes_total is the size known up front. For a non-seekable stream
+        # that is the caller's hint (results.md); a seekable one ignores the
+        # hint, so it has none to report.
+        totals: dict[str, set[int | None]] = {}
+        for label, stream in (("pipe", _Pipe(b"foo\n")), ("seekable", io.BytesIO(b"foo\n"))):
+            client, _calls = make_recording_client([{}])
+            _consume_bodies(client)
+            progress: list[TransferProgress] = []
+            item = TransferItem(
+                compare_key="-", size_hint=9, src_fileobj=stream, dest_bucket="b", dest_key="k"
+            )
+            with Transferrer(
+                TransferType.UPLOAD,
+                client,
+                transfer_config=_SYNC_CONFIG,
+                on_progress=progress.append,
+            ) as transferrer:
+                transferrer.submit(item)
+            totals[label] = {event.bytes_total for event in progress}
+        assert totals == {"pipe": {9}, "seekable": {None}}
+
     def test_the_hint_is_provided_to_the_engine_only_for_a_non_seekable_stream(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

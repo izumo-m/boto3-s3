@@ -287,9 +287,10 @@ in-flight set before any bytes move. `bytes_done` can step backward when the
 engine rewinds a mid-transfer retry with a negative delta.
 
 `bytes_total` is the item's size when the operation knew it up front — from the
-listing entry, or from `expected_size` on a streaming upload — and `None`
-otherwise, as for a streaming download whose size the transfer engine probes
-itself.
+listing entry, or from `expected_size` on a streaming upload of a non-seekable
+stream, the one case that hint applies to — and `None` otherwise, as for a
+seekable stream or a streaming download, whose size the transfer engine works
+out itself.
 
 Records for one item are delivered in order: the accumulate-and-deliver step is
 locked per item, so two multipart workers cannot deliver snapshots of the same

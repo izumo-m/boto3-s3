@@ -1269,7 +1269,10 @@ class S3:
         engine applies to a stream it cannot size - a non-seekable one - and
         ignores for a seekable stream it sizes itself) and is ignored on the
         non-stream routes, exactly like aws's ``--expected-size`` (which
-        applies to its non-seekable stdin alone and only matters above ~50 GB).
+        applies to its non-seekable stdin alone). The hint is *needed* only
+        above ~50 GB, where the default part size would run out of parts, but
+        it decides the upload's shape at any size: a stream is sent as a
+        single PutObject when the hint is below the multipart threshold.
 
         Results stream to ``on_result`` from the engine's worker threads for
         submitted transfers; non-submitting records - dryrun, skips, notices,
