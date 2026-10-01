@@ -43,7 +43,7 @@ from boto3_s3.checksumcompare import (
     _whole_b64,  # pyright: ignore[reportPrivateUsage]
 )
 from boto3_s3.comparator import SyncPair
-from boto3_s3.exceptions import ConfigurationError, TransportError
+from boto3_s3.exceptions import Boto3S3Error, ConfigurationError, TransportError
 from boto3_s3.types import FileInfo, S3FileInfo, TransferType
 from tests.utils.pairbuilders import local_info, make_pair, native_key, write_file
 
@@ -563,6 +563,25 @@ class TestBotoCoreErrorAborts:
             _upload_filter(client)(self._pair_at(tmp_path))
         assert type(excinfo.value) is ConfigurationError
         assert excinfo.value.__cause__ is err
+
+    def test_a_failure_from_outside_the_boto_family_is_the_requests_too(
+        self, tmp_path: Path
+    ) -> None:
+        # botocore's parser raises a bare ValueError on an attribute it
+        # cannot convert (a LastModified that is no timestamp). Every other
+        # request point reports that as the base error; this one let the
+        # ValueError out of S3.sync, past `except Boto3S3Error`.
+        err = ValueError('Invalid timestamp "garbage": Unknown string format: garbage')
+        client = _FakeClient({"obj": err})
+        with pytest.raises(Boto3S3Error) as excinfo:
+            _upload_filter(client)(self._pair_at(tmp_path))
+        assert type(excinfo.value) is Boto3S3Error
+        assert excinfo.value.__cause__ is err
+        assert (excinfo.value.operation, excinfo.value.bucket, excinfo.value.key) == (
+            "sync",
+            "b",
+            "obj",
+        )
 
 
 # -- request payer -------------------------------------------------------------

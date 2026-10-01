@@ -267,8 +267,8 @@ def _fetch_remote(
 
     extra: dict[str, Any] = {"RequestPayer": request_payer} if request_payer else {}
     try:
-        resp: Any = client.get_object_attributes(
-            Bucket=bucket, Key=key, ObjectAttributes=["Checksum", "ObjectParts"], **extra
+        resp: Any = _get_object_attributes(
+            client, Bucket=bucket, Key=key, ObjectAttributes=["Checksum", "ObjectParts"], **extra
         )
         checksum: Any = resp.get("Checksum") or {}
         algorithm: str | None = None
@@ -302,6 +302,32 @@ def _fetch_remote(
         raise translate_boto_error(exc, operation="sync", bucket=bucket, key=key) from exc
 
 
+def _get_object_attributes(client: Any, **kwargs: Any) -> Any:
+    """One ``GetObjectAttributes``, its non-boto failure reported as the request's.
+
+    The boto family is `_fetch_remote`'s to sort (a ``ClientError`` is
+    per-object, a ``BotoCoreError`` aborts). Anything else the call raises
+    from inside botocore - its parser failing on a ``LastModified`` that is no
+    timestamp, an ``ObjectSize`` that is no integer - is this request failing
+    all the same, and becomes the base ``Boto3S3Error`` with the original as
+    ``__cause__``, the shape every other request point gives it
+    (`s3storage.request_failure`). ``AssertionError`` passes: an invariant or
+    a test double's guard, never a request outcome.
+    """
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    from boto3_s3.s3storage import request_failure
+
+    try:
+        return client.get_object_attributes(**kwargs)
+    except (ClientError, BotoCoreError, AssertionError):
+        raise
+    except Exception as exc:
+        raise request_failure(
+            exc, operation="sync", bucket=kwargs["Bucket"], key=kwargs["Key"]
+        ) from exc
+
+
 def _part_sizes(
     client: Any, bucket: str, key: str, first: Any, request_payer: str | None
 ) -> tuple[int, ...] | None:
@@ -316,7 +342,8 @@ def _part_sizes(
     while truncated:
         if not marker:
             return None  # truncated but no marker (malformed) -> indeterminate -> copy
-        resp: Any = client.get_object_attributes(
+        resp: Any = _get_object_attributes(
+            client,
             Bucket=bucket,
             Key=key,
             ObjectAttributes=["ObjectParts"],
