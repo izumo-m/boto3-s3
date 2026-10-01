@@ -100,7 +100,11 @@ calls it on your own thread — see [Rehearsing with
 Cancelling through `cancel_token` never discards a batch whose request has
 already started — it completes and delivers its results. Buffered entries not
 yet sent are dropped without records, and immediate mode may also cancel a
-dispatched batch that has not begun.
+dispatched batch that has not begun. One kind of entry inside a started batch
+can still go unsent: a key the batch sends as a request of its own (one XML
+cannot carry) that had not gone out when the run was abandoned — by
+`close(flush=False)` for anything but a graceful cancel, or by an immediate
+one. It is dropped without a record, like a buffered entry.
 
 Nothing is printed. Beyond the result records, the deleter logs to the
 `boto3_s3.deleter` logger — batch dispatches and failures at debug level,

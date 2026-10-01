@@ -54,7 +54,8 @@ constant is `boto3_s3.deleter.S3_DELETE_BATCH`.
   caller thread (single producer).
 - `on_result` is called **from the worker thread**. One `OpResult` per
   dispatched key (`transfer_type=TransferType.DELETE`, `bytes_transferred=0`, in submit order
-  within a batch; it is not emitted for keys in a discarded buffer). The callback
+  within a batch; it is not emitted for keys in a discarded buffer, nor for an
+  XML-incompatible key an abandoned run never sent - section 3). The callback
   must finish quickly and must not raise. If it does raise: records up to that
   point are counted, the rest of the same batch remain undelivered, and the
   exception is re-raised to the caller on the next **non-empty** `flush()` or on
@@ -73,9 +74,12 @@ constant is `boto3_s3.deleter.S3_DELETE_BATCH`.
   manager is recommended.
 - Cancellation never discards a *running* batch's results: a batch whose S3
   request has started completes and delivers its per-key results before
-  shutdown returns - with a transient per-key failure left as the batch
-  reported it when the run is abandoned before its re-send went out (the
-  failure paths above). Unsent buffered entries are discarded without an
+  shutdown returns - bar the per-key requests an abandoned run had not sent
+  yet: a transient failure is left as the batch reported it, an
+  XML-incompatible key gets no record (section 3). A graceful cancel is not an
+  abandonment - it drains the batch in flight whole, although rm and sync
+  leave the deleter through `close(flush=False)` then. Unsent buffered entries
+  are discarded without an
   `OpResult`, and immediate mode may also cancel a dispatched batch that has
   not started yet - its entries likewise produce no records.
 
@@ -91,8 +95,9 @@ determines the per-key result. A batch's per-key requests - these, and the
 re-sends of transient failures below - share one sender (`_send_singly`): ten
 at a time (aws-cli's default request concurrency, which is what sends its
 per-key deletes), since either kind can be most of a batch, and no further
-request once the run is abandoned (`close(flush=False)`, a `close()` that was
-itself interrupted, or the token cancelled in immediate mode). An
+request once the run is abandoned (`close(flush=False)` for anything but a
+graceful cancel, a `close()` that was itself interrupted, or the token
+cancelled in immediate mode). An
 XML-incompatible key left unsent that way gets no record, like an entry still
 in the buffer; the requests already out finish. When the interpreter is
 shutting down - an unclosed deleter's last batch, which shutdown waits for -

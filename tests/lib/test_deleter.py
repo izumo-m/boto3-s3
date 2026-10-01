@@ -414,6 +414,60 @@ class TestXmlIncompatibleFallback:
         assert all(r.outcome is OpOutcome.SUCCEEDED for r in results)
         assert (deleter.succeeded, deleter.failed) == (10, 0)
 
+    @pytest.mark.parametrize("kind", ["incompatible keys", "transient re-sends"])
+    def test_a_graceful_cancel_still_sends_the_whole_batch_in_flight(
+        self, monkeypatch: pytest.MonkeyPatch, kind: str
+    ) -> None:
+        # Graceful cancellation drains what was accepted. rm and sync leave
+        # the deleter through their CancelledError then - close(flush=False) -
+        # and that abandoned the batch in flight like an error would: its
+        # remaining per-key requests were never sent (570 of 1000 measured).
+        if kind == "incompatible keys":
+            keys = [f"k{i:02d}\r" for i in range(30)]
+            fake = _FakeS3Client()
+        else:
+            keys = [f"k{i:02d}" for i in range(30)]
+            fake = _FakeS3Client(
+                script=[
+                    {"Errors": [{"Key": k, "Code": "SlowDown", "Message": "msg"} for k in keys]}
+                ]
+            )
+        release = threading.Event()
+        started = threading.Semaphore(0)
+
+        def delete_object(**kwargs: Any) -> dict[str, Any]:
+            fake.single_calls.append(kwargs)
+            started.release()
+            assert release.wait(timeout=5.0), "the request was never released"
+            return {}
+
+        fake.delete_object = delete_object  # type: ignore[method-assign]
+        token = CancelToken()
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append, cancel_token=token)
+        for key in keys:
+            deleter.submit(_info(key))
+        deleter.flush()
+        for _ in range(10):
+            assert started.acquire(timeout=5.0)
+        token.cancel()  # graceful
+        waiting = threading.Event()
+        wait_pending = deleter._wait_pending  # pyright: ignore[reportPrivateUsage]
+
+        def signalling_wait() -> None:
+            waiting.set()
+            wait_pending()
+
+        monkeypatch.setattr(deleter, "_wait_pending", signalling_wait)
+        closer = threading.Thread(target=deleter.close, kwargs={"flush": False})
+        closer.start()
+        assert waiting.wait(timeout=5.0)  # close() is past its abandon decision
+        release.set()
+        closer.join(timeout=5.0)
+        assert not closer.is_alive()
+        assert sorted(call["Key"] for call in fake.single_calls) == keys
+        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED] * 30
+
     @pytest.mark.parametrize(
         ("char", "compatible"),
         [

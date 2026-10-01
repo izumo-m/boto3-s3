@@ -136,8 +136,8 @@ class S3Deleter:
     part is not consulted, and the client is held for the deleter's whole
     lifetime (do not ``storage.close()`` until this deleter is closed). The
     buffer auto-flushes at ``batch_size``; each flush batches its XML-compatible
-    keys and sends each incompatible key through ``DeleteObject`` on the same
-    worker while the caller keeps submitting. Duplicate keys within a batch are
+    keys and sends each incompatible key through a ``DeleteObject`` of its own
+    (up to ten at a time) while the caller keeps submitting. Duplicate keys within a batch are
     passed through as-is (dedup is the caller's concern).
 
     Per-key completion is reported through ``on_result`` - one ``OpResult`` per
@@ -222,8 +222,9 @@ class S3Deleter:
         # A transient per-key failure is re-sent unless the client's own
         # policy is not to retry (`_retries_disabled`).
         self._resend_transient = not _retries_disabled(self._client)
-        # Set by close(flush=False): the run is being abandoned (an exception,
-        # Ctrl-C), so a batch in flight stops re-sending. Written on the
+        # Set when the run is abandoned - close(flush=False) for anything but
+        # a graceful cancel, or a close() that is itself interrupted - so a
+        # batch in flight starts no further per-key request. Written on the
         # caller's thread, read on the workers'.
         self._abandoned = False
 
@@ -295,7 +296,12 @@ class S3Deleter:
         """
         if self._closed:
             return
-        if not flush:
+        if not flush and not self._graceful_cancel():
+            # A graceful cancel is defined as draining what was accepted: rm
+            # and sync leave the deleter through an exception then too (their
+            # CancelledError), and the batch in flight must still send every
+            # key it holds. Any other reason to skip the flush - an error, an
+            # interrupt, the caller's own choice - abandons the run.
             self._abandoned = True
         try:
             if flush and not self._cancelled():
@@ -405,6 +411,10 @@ class S3Deleter:
 
     def _cancelled(self) -> bool:
         return self._cancel_token is not None and self._cancel_token.cancelled
+
+    def _graceful_cancel(self) -> bool:
+        token = self._cancel_token
+        return token is not None and token.cancelled and token.mode is CancelMode.GRACEFUL
 
     def _run_batch(self, batch: list[FileInfo]) -> None:
         """Delete one batch, falling back for keys XML 1.0 cannot carry."""
@@ -550,8 +560,10 @@ class S3Deleter:
         through the client's backoff) instead of in line on the one worker.
 
         No further request is started once the run is abandoned -
-        ``close(flush=False)``, a ``close()`` that was itself interrupted, or
-        the token cancelled in IMMEDIATE mode; ``not_sent`` is told about each
+        ``close(flush=False)`` for any reason but a graceful cancel (which
+        drains the batch in flight, these requests included), a ``close()``
+        that was itself interrupted, or the token cancelled in IMMEDIATE
+        mode; ``not_sent`` is told about each
         entry left out, and the requests already out finish, as the batch
         request itself does. An unclosed deleter's last batch can get here
         while the interpreter is shutting down, when no thread can be started
