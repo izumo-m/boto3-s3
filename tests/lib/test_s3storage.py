@@ -11,6 +11,7 @@ instead, where what botocore itself does with the arguments is the point
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import io
 import os
@@ -19,7 +20,7 @@ import sys
 import threading
 import time
 from collections.abc import Collection, Generator, Iterator
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,7 @@ from boto3_s3 import (
     StorageCapability,
     TransportError,
     ValidationError,
+    s3storage,
 )
 from boto3_s3.storage import sieve_pages
 from tests.utils.fakemodel import model_meta
@@ -969,6 +971,34 @@ class TestListingTimestampRepresentability:
         with _local_zone("Asia/Tokyo"):
             storage, _ = _storage([{"Contents": [_obj("prefix/a.txt")]}])
             assert [r.key for r in storage.scan(S3ScanOptions(recursive=True))] == ["prefix/a.txt"]
+
+    def test_the_windows_shape_of_the_failure_is_translated_too(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # On Windows the conversion goes through time.localtime, which fails
+        # with OSError [Errno 22] - not OverflowError - for a stamp below the
+        # epoch or past its own limit. Only the POSIX pair was caught, so the
+        # OSError left the library bare (measured on a Windows host; aws.exe
+        # dies on the same error with the same line).
+        class _WindowsLocalZone(tzinfo):
+            def utcoffset(self, dt: datetime | None) -> timedelta:
+                raise OSError(errno.EINVAL, "Invalid argument")
+
+        monkeypatch.setattr("dateutil.tz.tzlocal", _WindowsLocalZone)
+        monkeypatch.setattr(s3storage, "_ALWAYS_CHECK_LOCAL_ZONE", True)
+        with pytest.raises(MalformedResponseError) as exc_info:
+            s3storage.reject_unrepresentable_stamp(
+                datetime(1960, 1, 1, tzinfo=timezone.utc), bucket="b", key="k"
+            )
+        error = exc_info.value
+        assert str(error) == "[Errno 22] Invalid argument"
+        assert isinstance(error.__cause__, OSError)
+        assert (error.bucket, error.key) == ("b", "k")
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="the Windows localtime limits")
+    def test_a_stamp_below_the_epoch_is_malformed_on_windows(self) -> None:
+        with pytest.raises(MalformedResponseError):
+            s3storage.reject_unrepresentable_stamp(datetime(1960, 1, 1, tzinfo=timezone.utc))
 
 
 class TestScanErrorMapping:

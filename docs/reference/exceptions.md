@@ -245,9 +245,11 @@ element read in the CLI's own order, so a doubly incomplete entry is blamed on
 the same element (the exact rules are under `scan_pages`, `list_buckets` and
 `get_fileinfo` in [`storage.md`](./storage.md)) — and a `LastModified` the
 host's local zone cannot represent (years 1 and 9999, within the zone's offset
-of `datetime`'s range), which the CLI's conversion of every S3 timestamp to
-local time rejects. A truncating proxy or a partial S3 implementation is the
-usual source of the first kind. An element that is present but unreadable — a
+of `datetime`'s range; on Windows also every timestamp before 1970 or past the
+year 3000, which its local-time conversion refuses), which the CLI's
+conversion of every S3 timestamp to local time rejects. A truncating proxy or
+a partial S3 implementation is the usual source of the first kind. An element
+that is present but unreadable — a
 `LastModified` that is no timestamp, a `Size` that is no integer — is not this
 class: botocore's own parser fails on it before the library reads anything,
 and that arrives as the base [`Boto3S3Error`](#boto3s3error) carrying the
@@ -257,8 +259,9 @@ The run stops where the CLI's stops: the entries ahead of the bad one are
 already delivered — an `ls` has reported them, a transfer has submitted them —
 and nothing after it is read. The message is the text the AWS CLI prints for
 the same response: the `KeyError`'s `str()`, which is the element name in
-quotes (`'LastModified'`), or `date value out of range`; that original
-exception is on `__cause__`. `bucket` and `key` name the entry when the
+quotes (`'LastModified'`), or `date value out of range` (on Windows,
+`[Errno 22] Invalid argument` for the timestamps only it refuses); that
+original exception is on `__cause__`. `bucket` and `key` name the entry when the
 response carried them (an entry missing `Key` names only its bucket; a bucket
 entry puts its name in `bucket`), and `operation` names the operation that
 was reading the response and is left unset on a storage-level call, like

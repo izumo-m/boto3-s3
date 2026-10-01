@@ -168,7 +168,7 @@ taxonomy ([`storage.md`](./storage.md) section 2).
 | connection failure / timeout / a body ending short of its `Content-Length` (botocore's `IncompleteReadError` under urllib3 1.x, a broken stream under urllib3 2); a local-I/O `OSError` caught on boto3-s3's own paths (incl. a failed `makedirs`) | `TransportError` |
 | an `OSError` surfacing from inside s3transfer's task execution (aws's message survives verbatim, e.g. `[Errno 21] Is a directory`) | base `Boto3S3Error` (the last-resort clause, section 3) |
 | a listing / bucket / single-object HEAD entry missing an element aws-cli reads by subscript (its bare `KeyError` naming the element - `s3storage.read_required`) | `MalformedResponseError` |
-| an S3 `LastModified` the host's local zone cannot represent (aws-cli's `astimezone` `OverflowError`, `date value out of range` - `s3storage.reject_unrepresentable_stamp`) | `MalformedResponseError` |
+| an S3 `LastModified` the host's local zone cannot represent (aws-cli's `astimezone` `OverflowError`, `date value out of range`; on Windows also the `OSError` `[Errno 22]` its `time.localtime` raises below the epoch and past the year 3000, measured against `aws.exe` - `s3storage.reject_unrepresentable_stamp`) | `MalformedResponseError` |
 | `NoCredentialsError` / `NoRegionError` | `ConfigurationError` |
 | `MissingDependencyException` from a request/signing path (awscrt absent where SigV4a is required - an MRAP target) | `ConfigurationError` |
 | `ProfileNotFound` / `PartialCredentialsError` (the library translator's list; the CLI's client factory goes further and maps every other construction-time `BotoCoreError` here too, while the library's general translator keeps unlisted ones at the base) | `InvalidConfigError` |

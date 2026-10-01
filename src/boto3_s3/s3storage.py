@@ -441,7 +441,9 @@ def reject_unrepresentable_stamp(
     kept here stays UTC per the ``FileInfo.mtime`` contract, so this runs the
     conversion only for the exception it may raise, which surfaces as
     `MalformedResponseError` (aws-cli's ``date value out of range`` as the
-    message, the ``OverflowError`` on ``__cause__``). dateutil's ``tzlocal`` is
+    message, the ``OverflowError`` on ``__cause__``; on Windows, where the
+    conversion fails as an ``OSError`` instead - for every stamp below the
+    epoch too - that error and its message). dateutil's ``tzlocal`` is
     rebuilt per call the way aws-cli does, so a process that changes ``TZ`` (and
     calls ``time.tzset``) follows; the import is deferred because the whole
     dateutil package costs about as much to import as boto3-s3 itself.
@@ -457,7 +459,10 @@ def reject_unrepresentable_stamp(
 
     try:
         mtime.astimezone(tzlocal())
-    except (OverflowError, ValueError) as exc:
+    except (OverflowError, ValueError, OSError) as exc:
+        # OSError is Windows': the conversion goes through time.localtime,
+        # which fails outright there - below the epoch and past its own upper
+        # limit alike ([Errno 22]) - where POSIX raises OverflowError.
         raise MalformedResponseError(str(exc), operation=operation, bucket=bucket, key=key) from exc
 
 
