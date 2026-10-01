@@ -238,7 +238,9 @@ run comes out differently, listed in section 1.
   asks to have retried — `InternalError`, `SlowDown`, `ServiceUnavailable`,
   `RequestTimeout` — is the exception: it is sent again as a `DeleteObject`
   of its own, retried as `aws` retries it, and if it still fails its line is
-  aws's.) Only the batching routes are affected —
+  aws's. With retries turned off — `AWS_MAX_ATTEMPTS=1` — it is not sent
+  again, fails as it does on `aws`, and keeps the batch's line.) Only the
+  batching routes are affected —
   `rm --recursive`, an S3-side `sync --delete`, and `rb --force` — while a
   single `rm s3://bkt/key` still issues `DeleteObject` and its line is byte for
   byte aws's. So a script grepping for the singular name, or for the retry

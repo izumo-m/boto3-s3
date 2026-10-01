@@ -661,7 +661,14 @@ response is out of reach of the client's retry policy. A key reported with one
 of them is therefore **sent again as an individual `DeleteObject`**, where that
 policy applies, and the key's result is that request's: a success, or — once
 its attempts are spent — the translated `DeleteObject` error, the same text
-the AWS CLI reports for the key. Only per-key entries are retried this way; a
+the AWS CLI reports for the key. A batch's re-sends run up to ten at a time.
+The batch entry itself is not counted against the policy, so a re-sent key
+gets one attempt more than the policy's limit; a client limited to a single
+attempt (`AWS_MAX_ATTEMPTS=1`, `max_attempts=0`) re-sends nothing, and the key
+is recorded with the batch's own per-key error. Abandoning the run —
+`close(flush=False)`, or a cancel in immediate mode — starts no further
+re-sends either: the ones already out finish, and the rest are recorded with
+the batch's error. Only per-key entries are retried this way; a
 `DeleteObjects` request that fails as a whole has already been retried by the
 client and is recorded as below.
 

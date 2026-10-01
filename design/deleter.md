@@ -33,7 +33,7 @@ that are not objects).
 
 | Argument / method | Description |
 |---|---|
-| `S3Deleter(storage, *, request_payer=None, on_result=None, cancel_token=None, batch_size=1000, operation="delete", capture_response=False, dryrun=False)` | From `storage` (an `S3Storage`; anything else raises `ValidationError`) it addresses requests with **only the client and bucket** (the key/prefix part is ignored for addressing; the `storage` itself is kept and rides each `OpResult.src_storage`). The client is built eagerly at construction time so that a client-construction failure surfaces on the caller's thread; credentials are resolved by the first request, so missing credentials arrive as per-key `ConfigurationError` failures. Keep `storage` (and the client it holds) open until the deleter's `close()` (do not call `storage.close()` first). `cancel_token` stops dispatching buffered batches; graceful mode drains the in-flight batch, while immediate mode also cancels it if it has not started (a running S3 request still finishes). `batch_size` is 1-1000 (out of range raises `ValidationError`); it bounds one worker dispatch and the XML-compatible subset's `DeleteObjects` call, while incompatible keys use `DeleteObject`. `operation` is the operation tag attached to exceptions (`rm` / `sync` put their own name here). `dryrun` makes the whole deleter a rehearsal: no worker is created, nothing is buffered or sent, and each `submit` reports its entry immediately (below). |
+| `S3Deleter(storage, *, request_payer=None, on_result=None, cancel_token=None, batch_size=1000, operation="delete", capture_response=False, dryrun=False)` | From `storage` (an `S3Storage`; anything else raises `ValidationError`) it addresses requests with **only the client and bucket** (the key/prefix part is ignored for addressing; the `storage` itself is kept and rides each `OpResult.src_storage`). The client is built eagerly at construction time so that a client-construction failure surfaces on the caller's thread; credentials are resolved by the first request, so missing credentials arrive as per-key `ConfigurationError` failures. Keep `storage` (and the client it holds) open until the deleter's `close()` (do not call `storage.close()` first). `cancel_token` stops dispatching buffered batches; graceful mode drains the in-flight batch, while immediate mode also cancels it if it has not started (a running S3 request still finishes; a batch's re-sends of transient per-key failures that have not gone out are dropped). `batch_size` is 1-1000 (out of range raises `ValidationError`); it bounds one worker dispatch and the XML-compatible subset's `DeleteObjects` call, while incompatible keys use `DeleteObject`. `operation` is the operation tag attached to exceptions (`rm` / `sync` put their own name here). `dryrun` makes the whole deleter a rehearsal: no worker is created, nothing is buffered or sent, and each `submit` reports its entry immediately (below). |
 | `submit(info)` | Accumulates one listing entry (`FileInfo`) into the buffer; its `key` is the **full object key** to delete, and the rest of the entry (e.g. an `S3FileInfo.etag`) rides through to its `OpResult` untouched. Auto-flushes when `batch_size` is reached. An empty `info.key` raises `ValidationError` (rejected up front, because a single empty key would break the entire batch). If an auto-flush re-raises a worker exception from a previous batch, the entry has still been accumulated (do not re-submit it after catching). Duplicate keys within the same batch pass through (dedup is the caller's responsibility). |
 | `flush()` | Splits the buffer into batches of `batch_size` and hands them to the worker (a complete no-op when empty). **Each dispatch first waits for the previous batch to complete** - this is the backpressure point, and the point where an unexpected worker exception is re-raised on the caller's thread (keys not yet dispatched remain intact in the buffer). After a re-raise it re-splits even if the buffer exceeds `batch_size`, so a single call never exceeds 1000 keys. |
 | `close(*, flush=True)` | flush (with `flush=False` the remaining buffer is discarded) -> wait for in-flight -> stop the worker. Idempotent. Subsequent `submit` / `flush` raise `ValidationError`. A worker exception is re-raised here too, but it closes fully regardless. Keys left in the buffer by a re-raise or by `flush=False` are discarded **without an OpResult**. |
@@ -73,7 +73,9 @@ constant is `boto3_s3.deleter.S3_DELETE_BATCH`.
   manager is recommended.
 - Cancellation never discards a *running* batch's results: a batch whose S3
   request has started completes and delivers its per-key results before
-  shutdown returns. Unsent buffered entries are discarded without an
+  shutdown returns - with a transient per-key failure left as the batch
+  reported it when the run is abandoned before its re-send went out (the
+  failure paths above). Unsent buffered entries are discarded without an
   `OpResult`, and immediate mode may also cancel a dispatched batch that has
   not started yet - its entries likewise produce no records.
 
@@ -123,8 +125,21 @@ versioned bucket) cannot be mapped back to submission order.
   attributes.
 - **a transient per-key failure** (an `Errors[]` entry whose code the table
   files under `TransportError`): the key is sent again as an individual
-  `DeleteObject` on the same worker, and that request's outcome is the key's
-  result. These are the faults the service asks the caller to retry, and
+  `DeleteObject`, and that request's outcome is the key's result. A throttled
+  endpoint can answer every key of a batch this way, so a batch's re-sends run
+  ten at a time (aws-cli's default request concurrency, which is what sends
+  its per-key deletes) instead of in line on the one worker - each may sit
+  through the client's own backoff. They stop being started once the run is
+  abandoned (`close(flush=False)`, or the token cancelled in immediate mode):
+  a key not re-sent keeps the error the batch reported, and the requests
+  already out finish. The batch entry is not counted against the client's
+  retry policy, so a re-sent key gets one attempt more than aws-cli gives it
+  (a key that fails exactly `total_max_attempts` times is deleted here and
+  failed there) - except when the client is configured for a single attempt
+  (`AWS_MAX_ATTEMPTS=1`, `max_attempts=0`), the no-retry setting, under which
+  nothing is re-sent and the key keeps the batch's error, as before (measured:
+  aws-cli fails the key, rc 1). These are the faults the service asks the
+  caller to retry, and
   aws-cli - one `DeleteObject` per key - has botocore retry them (measured:
   a key answered with `InternalError` once is deleted at rc 0), while a
   per-key entry of a 200 `DeleteObjects` response never reaches the client's

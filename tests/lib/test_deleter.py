@@ -12,6 +12,7 @@ import contextlib
 import logging
 import threading
 import time
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -624,6 +625,111 @@ class TestResults:
         deleter.close()
         assert fake.single_calls == []
         assert [type(r.error) for r in results] == [TransportError, TransportError]
+
+    def test_a_client_told_not_to_retry_does_not_resend_the_key(self) -> None:
+        # One attempt per request (AWS_MAX_ATTEMPTS=1, max_attempts=0) is the
+        # no-retry setting: aws-cli sends the key once and fails it (measured),
+        # and re-sending it here was the retry the setting turns off.
+        fake = _FakeS3Client(
+            script=[{"Errors": [{"Key": "b", "Code": "InternalError", "Message": "msg"}]}]
+        )
+        fake.meta = SimpleNamespace(  # type: ignore[attr-defined]
+            config=SimpleNamespace(retries={"total_max_attempts": 1, "mode": "standard"})
+        )
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append)
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
+        deleter.close()
+        assert fake.single_calls == []
+        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED, OpOutcome.FAILED]
+        assert type(results[1].error) is TransportError
+
+    def test_the_resends_of_one_batch_run_side_by_side(self) -> None:
+        # A throttled endpoint can fail a whole batch transiently. Re-sent in
+        # line on the one worker, a thousand keys would take a thousand
+        # requests' worth of backoff; each waits here for a second re-send to
+        # be in flight with it, which a serial loop never provides.
+        keys = [f"k{i}" for i in range(6)]
+        fake = _FakeS3Client(
+            script=[{"Errors": [{"Key": k, "Code": "SlowDown", "Message": "msg"} for k in keys]}]
+        )
+        together = threading.Barrier(2, timeout=5.0)
+
+        def delete_object(**kwargs: Any) -> dict[str, Any]:
+            fake.single_calls.append(kwargs)
+            together.wait()
+            return {}
+
+        fake.delete_object = delete_object  # type: ignore[method-assign]
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append)
+        for key in keys:
+            deleter.submit(_info(key))
+        deleter.close()
+        assert sorted(call["Key"] for call in fake.single_calls) == keys
+        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED] * 6
+        # Records still come out in the batch's own order.
+        assert [r.src for r in results] == [f"s3://bucket/{k}" for k in keys]
+
+    def test_an_abandoned_run_starts_no_further_resends(self) -> None:
+        # close(flush=False) - the body raised, Ctrl-C - waits for what is in
+        # flight, and that used to mean every re-send of the batch, one after
+        # another. The re-sends already out finish; the rest are not started
+        # and keep the error the batch reported for them.
+        keys = [f"k{i:02d}" for i in range(30)]
+        fake = _FakeS3Client(
+            script=[{"Errors": [{"Key": k, "Code": "SlowDown", "Message": "msg"} for k in keys]}]
+        )
+        release = threading.Event()
+        started = threading.Semaphore(0)
+
+        def delete_object(**kwargs: Any) -> dict[str, Any]:
+            fake.single_calls.append(kwargs)
+            started.release()
+            assert release.wait(timeout=5.0), "the re-send was never released"
+            return {}
+
+        fake.delete_object = delete_object  # type: ignore[method-assign]
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append)
+        for key in keys:
+            deleter.submit(_info(key))
+        deleter.flush()
+        for _ in range(10):  # the re-send pool is full: ten requests are out
+            assert started.acquire(timeout=5.0)
+        closer = threading.Thread(target=deleter.close, kwargs={"flush": False})
+        closer.start()
+        while not deleter._abandoned:  # pyright: ignore[reportPrivateUsage]
+            time.sleep(0.01)
+        release.set()
+        closer.join(timeout=5.0)
+        assert not closer.is_alive()
+        assert len(fake.single_calls) == 10
+        resent = {call["Key"] for call in fake.single_calls}
+        by_key = {r.src.rsplit("/", 1)[-1]: r for r in results if r.src is not None}
+        assert {k for k, r in by_key.items() if r.outcome is OpOutcome.SUCCEEDED} == resent
+        left = [by_key[k] for k in keys if k not in resent]
+        assert len(left) == 20
+        assert all(type(r.error) is TransportError for r in left)
+        assert all("DeleteObjects operation" in str(r.error) for r in left)
+
+    def test_a_close_that_is_interrupted_abandons_the_run_too(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # When the last batch is the one in flight the caller is inside a
+        # flushing close(), not the with body, so Ctrl-C lands in its wait and
+        # never reaches close(flush=False). The run is abandoned all the same
+        # (measured on the command: 85 s after the interrupt before, under 2 s).
+        deleter = _deleter(_FakeS3Client())
+
+        def interrupted() -> None:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(deleter, "_wait_pending", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            deleter.close()
+        assert deleter._abandoned  # pyright: ignore[reportPrivateUsage]
 
     def test_a_transient_key_is_retried_beside_an_unattributable_entry(self) -> None:
         # The retry gives that key an answer of its own; the rest of the batch

@@ -114,7 +114,11 @@ A key the batch response reports with a passing fault — `InternalError`,
 `SlowDown`, `ServiceUnavailable`, `RequestTimeout` — is not failed on the spot:
 it is sent again on its own, as a `DeleteObject`, so the client's retry policy
 gets to work on it the way it does for every key `aws` deletes. Only if that
-request still fails is the key recorded as failed, with a `TransportError`.
+request still fails is the key recorded as failed, with that request's error.
+A batch's re-sends go out up to ten at a time. Two things switch them off: a
+client configured not to retry at all (a single attempt per request), and
+abandoning the run — `close(flush=False)`, or an immediate-mode cancel — after
+which the keys not yet re-sent are recorded with the batch's own error.
 
 If the batch request itself fails, **every key in that batch** is recorded as
 failed and the deleter continues with the following batches. So a wrong bucket
