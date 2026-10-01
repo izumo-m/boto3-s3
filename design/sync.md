@@ -253,7 +253,8 @@ mtime rule (full float precision; `delta = dest.mtime - src.mtime`):
   Test and creation both use the path as typed (`LocalStorage.ensure_directory`),
   as aws-cli's do, so what `abspath` would fold away decides the outcome the
   way it does there (all measured on aws-cli): `out/` over an existing file
-  fails the creation (`[Errno 17]`, rc 255); `missing/../out` creates
+  fails the creation (`[Errno 17]`, rc 255 - `[Errno 20]` on macOS, whose
+  mkdir answers ENOTDIR there); `missing/../out` creates
   `missing/` and then fails on an existing `out`; and for `lsub/../out` with
   `lsub` a symlinked directory the kernel's answer decides - nothing is
   created lexically, and the destination walk warns about the missing lexical

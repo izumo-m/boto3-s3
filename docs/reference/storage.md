@@ -530,7 +530,8 @@ AWS CLI:
 
 - an existing file written without a trailing separator exists, so nothing is
   created and the transfer fails per item; written `out/` it does not exist as
-  typed, and the creation fails (`[Errno 17] File exists`);
+  typed, and the creation fails (`[Errno 17] File exists`; on macOS
+  `[Errno 20] Not a directory`);
 - `..` after a component that does not exist creates that component on the
   way (`missing/../out` leaves `missing/` behind) and then fails if the result
   already exists; after a component that is a file it fails (`[Errno 20]`);

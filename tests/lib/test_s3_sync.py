@@ -729,8 +729,10 @@ class TestSyncDownload:
         # The typed path keeps the separator abspath strips. `out/` over an
         # existing file does not exist as typed, so the creation is attempted
         # and fails before anything is listed - aws-cli's rc 255 (`[Errno 17]
-        # File exists: 'out/'`, measured). Written `out`, the same file passes
-        # the check and every item fails instead.
+        # File exists: 'out/'`, measured on Linux). Written `out`, the same
+        # file passes the check and every item fails instead. Which error the
+        # OS gives mkdir is its own: EEXIST on Linux and Windows, ENOTDIR on
+        # macOS (seen on the macOS CI runner).
         (tmp_path / "out").write_bytes(b"keep")
         monkeypatch.chdir(tmp_path)
         client, calls = make_recording_client([])
@@ -740,7 +742,7 @@ class TestSyncDownload:
                 LocalStorage("out" + os.sep),
                 transfer_config=_SERIAL,
             )
-        assert isinstance(excinfo.value.__cause__, FileExistsError)
+        assert isinstance(excinfo.value.__cause__, (FileExistsError, NotADirectoryError))
         assert excinfo.value.operation == "sync"
         assert calls == []
         assert (tmp_path / "out").read_bytes() == b"keep"
