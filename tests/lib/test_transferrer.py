@@ -1767,6 +1767,59 @@ class TestSerialExecutorInterrupt:
         assert str(results[0].error) == "KeyboardInterrupt()"
         assert (transferrer.succeeded, transferrer.cancelled) == (0, 1)
 
+    def test_interrupt_in_the_unwind_after_the_item_settled_is_not_swallowed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The item's final task ran inside the submission call and settled
+        # it; the submission task is still unwinding when the interrupt lands.
+        # Upstream catches it and tries to store it on a coordinator that is
+        # already done - a no-op - so nothing recorded or re-raised it and the
+        # run went on to the next item (about 1 real SIGINT in 100).
+        from s3transfer.futures import TransferCoordinator
+
+        original = TransferCoordinator.add_associated_future
+        fired: list[bool] = []
+
+        def add_associated_future(coordinator: Any, future: Any) -> None:
+            if not fired and coordinator.status == "success":
+                fired.append(True)
+                raise KeyboardInterrupt  # the SIGINT's stand-in
+            original(coordinator, future)
+
+        monkeypatch.setattr(TransferCoordinator, "add_associated_future", add_associated_future)
+        item = self._upload_item(tmp_path)
+        results: list[OpResult] = []
+        calls, transferrer = self._run_interrupted(
+            TransferType.UPLOAD, item, [{}], is_move=False, on_result=results.append
+        )
+        assert fired
+        assert ops(calls) == ["PutObject"]
+        # The transfer itself completed, so its record stands - once.
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+        assert (transferrer.succeeded, transferrer.cancelled) == (1, 0)
+
+    def test_an_interrupt_that_became_the_last_outcome_is_raised_at_the_exit(
+        self, tmp_path: Path
+    ) -> None:
+        # An interrupt can become an item's outcome with no later submit to
+        # hand it back - on a worker during the drain, or where the engine's
+        # own shutdown discards it (the CRT manager's does). The exit is then
+        # the only place left to re-raise it.
+        item = self._upload_item(tmp_path)
+        client, _calls = make_recording_client([])
+        results: list[OpResult] = []
+        transferrer = Transferrer(
+            TransferType.UPLOAD,
+            client,
+            src_storage=LocalStorage("."),
+            transfer_config=_SYNC_CONFIG,
+            on_result=results.append,
+        )
+        with pytest.raises(KeyboardInterrupt), transferrer:
+            transferrer.prepare()
+            transferrer._record_failure(item, KeyboardInterrupt())  # pyright: ignore[reportPrivateUsage]
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+
     def test_interrupt_inside_on_result_reports_the_item_once(self, tmp_path: Path) -> None:
         # Past the request, inside the terminal callback: the transfer itself
         # completed, so the record stands - once, although upstream re-runs the

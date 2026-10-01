@@ -283,7 +283,8 @@ def _future_revoked(future: Any) -> bool | None:
     an exception a task raised, which may wear the cancellation type too: a
     ``CancelledError`` a caller's stream read threw is a failure nobody
     ordered. None where the engine keeps no such status (the CRT
-    coordinator), leaving the exception type alone to decide.
+    coordinator); `_is_cancellation` then asks whether this run's cancel
+    token ordered a cancel.
     """
     status = getattr(getattr(future, "_coordinator", None), "status", None)
     if not isinstance(status, str):
@@ -1936,8 +1937,11 @@ class _SerialExecutor(NonThreadedExecutor):
     escape at all - the open route's commit and mv's source delete store it
     as the future's outcome, as upstream's submission task does for one that
     lands in its own body - and that outcome records CANCELLED and is handed
-    back the same way (`_outcome`, `Transferrer._record_failure`).
-    Both attribute lookups are guards: an upstream that reshapes its task
+    back the same way (`_outcome`, `Transferrer._record_failure`). The last
+    gap is the submission task's own unwind after its final task settled the
+    item: upstream swallows an interrupt there without storing it, so the
+    hook that would have stored it notes it too (`_noting`).
+    The attribute lookups are guards: an upstream that reshapes its task
     degrades to its own behavior.
     """
 
@@ -1952,12 +1956,38 @@ class _SerialExecutor(NonThreadedExecutor):
         execute = getattr(fn, "_execute_main", None)
         if coordinator is not None and execute is not None:
             fn._execute_main = self._guarded(execute, coordinator)
+        log_and_set = getattr(fn, "_log_and_set_exception", None)
+        if log_and_set is not None and hasattr(fn, "_submit"):
+            fn._log_and_set_exception = self._noting(log_and_set)
         try:
             return super().submit(fn, *args, **kwargs)
         except BaseException as exc:
             if not isinstance(exc, Exception):
                 self._note(exc)
             raise
+
+    def _noting(self, log_and_set: Callable[[Any], Any]) -> Callable[[Any], Any]:
+        """Wrap a submission task's ``_log_and_set_exception`` to note an interrupt.
+
+        Upstream's ``SubmissionTask._main`` catches ``BaseException`` and hands
+        it here to be stored as the transfer's outcome - which does nothing
+        once the coordinator has settled. That is exactly where an interrupt
+        can land under ``use_threads=False``: the item's final task ran
+        inside the submission call, announced done and cleared the done
+        callbacks, and the submission task is still unwinding
+        (``BoundedExecutor.submit``'s bookkeeping, ``add_associated_future``).
+        Nothing would then record or re-raise it and the run would go on to
+        the next item (measured: about 1 real SIGINT in 100 on a run of small
+        uploads). Noted here, it is re-raised by `Transferrer.submit` whether
+        upstream manages to store it or not.
+        """
+
+        def _log_and_set_exception(exception: Any) -> Any:
+            if not isinstance(exception, Exception):
+                self._note(exception)
+            return log_and_set(exception)
+
+        return _log_and_set_exception
 
     def _guarded(self, execute: Callable[[Any], Any], coordinator: Any) -> Callable[[Any], Any]:
         def _execute_main(main_kwargs: Any) -> Any:

@@ -114,7 +114,11 @@ cancel only - see below) resolves the accepted transfer items like this:
   next item) produces no record.
 
 On the CRT engine, `CANCELLED` is reserved for the cancel this run's
-`CancelToken` ordered - the one revocation aws-cli has no counterpart for.
+`CancelToken` ordered - the one revocation aws-cli has no counterpart for -
+and for an item whose stored outcome is itself an interrupt (a
+`KeyboardInterrupt` / `SystemExit` a caller's stream raised: awscrt puts what
+a Python callback raised on the future as it is), which is `CANCELLED` on
+every engine and re-raised to the caller (`Transferrer._record_failure`).
 Every other CRT cancellation (awscrt's `AWS_ERROR_S3_CANCELED`) reports
 `FAILED` with the error carrying awscrt's cancellation wording - aws-cli's
 measured classification: a fatal or Ctrl-C folding its CRT manager counts

@@ -66,7 +66,11 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   (`_CloseFileobj`), mv's source delete (`_DeleteSource`) - is stored by that
   subscriber, so the subscribers after it see a failed transfer (no source
   delete), `_Completion` records CANCELLED, and the interrupt is handed back
-  to the caller from `submit` (`_outcome`, `_record_failure`). Classic-only
+  to the caller from `submit` (`_outcome`, `_record_failure`). One landing in
+  the submission task's unwind after its final task settled the item cannot
+  be stored - the coordinator is done - so the executor notes it at the hook
+  upstream calls to store it (`_noting`); the item's own record stands, and
+  `submit` still re-raises. Classic-only
   knobs under CRT also follow boto3: auto-selected CRT
   ignores them, while an explicit `preferred_transfer_client='crt'` rejects
   them up front (`_validate_crt_transfer_config`). The overall design of CRT

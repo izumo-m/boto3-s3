@@ -246,7 +246,11 @@ error elsewhere in the run, an immediate cancellation, or Ctrl-C shut the engine
 down. On the CRT engine only a cancellation this run's `CancelToken` ordered
 reports `CANCELLED`: every other CRT cancellation reports `FAILED`, and a Ctrl-C
 the CRT manager swallows during its transfer drain ends the run in `BatchError`
-([`../../design/opresult.md`](../../design/opresult.md)). `error` is a
+([`../../design/opresult.md`](../../design/opresult.md)). One case is the same
+on every engine: an item whose outcome is itself an interrupt — a
+`KeyboardInterrupt` or `SystemExit` that landed in, or was raised by, code
+running for that item, such as a caller's stream — reports `CANCELLED`, and
+that interrupt is then raised to the caller. `error` is a
 [`CancelledError`](./exceptions.md#cancellederror) naming the cause where the
 canceller supplied one; an immediate-mode escalation arriving during a drain
 revokes without a message and those records carry the bare `canceled`, while the
