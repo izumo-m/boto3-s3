@@ -2140,6 +2140,24 @@ class TestExists:
         (tmp_path / "x").write_bytes(b"x")
         assert LocalStorage("lsub/../x").exists()
 
+    @pytest.mark.skipif(os.name == "nt", reason="Windows refuses to remove a working directory")
+    def test_an_absolute_path_needs_no_working_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The typed-path anchor asked getcwd unconditionally, so a process
+        # whose working directory was gone could no longer build a storage
+        # for an absolute path: a bare FileNotFoundError from the constructor.
+        (tmp_path / "a.txt").write_bytes(b"x")
+        gone = tmp_path / "gone"
+        gone.mkdir()
+        monkeypatch.chdir(gone)
+        gone.rmdir()
+        with pytest.raises(FileNotFoundError):
+            os.getcwd()
+        storage = LocalStorage(str(tmp_path / "a.txt"))
+        assert storage.exists()
+        assert storage.abspath == str(tmp_path / "a.txt")
+
     def test_is_anchored_at_the_construction_cwd(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

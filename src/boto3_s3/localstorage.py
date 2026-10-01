@@ -1450,7 +1450,12 @@ class LocalStorage(Storage):
         # The same anchor without abspath's lexical normalization, for
         # ``exists``: ``..`` folded by abspath and ``..`` resolved by the
         # kernel name different files once a symlinked directory is involved.
-        self._unnormalized = os.path.join(os.getcwd(), self._path)
+        # An absolute path needs no anchor, and must not ask for one: getcwd
+        # fails in a process whose working directory has been removed, where
+        # abspath above - which consults it for a relative path only - works.
+        self._unnormalized = (
+            self._path if os.path.isabs(self._path) else os.path.join(os.getcwd(), self._path)
+        )
         # How this local source is read: symlink interpretation, whether every
         # metadata-readable native entry is enumerated before filtering, and
         # whether recursive descent guards against symlink cycles. Seeded into
