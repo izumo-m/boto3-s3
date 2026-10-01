@@ -1109,7 +1109,8 @@ class LocalFileGenerator:
         aws-cli's lstat-based test lands where the directory grants no search
         permission. A followed stat that
         comes back ``None`` warns; the complete view then falls back to the link's
-        lstat, while the normal view skips it. A stat that
+        lstat (whose own timestamp warning still goes out), while the normal
+        view skips it. A stat that
         says ``S_IFLNK`` (only an lstat-style override produces one) is its own
         vetting-free leaf, like ``symlink_child``; then
         the normal view's ``should_ignore_entry`` vets that valid stat, and the kind is keyed on
@@ -1139,7 +1140,15 @@ class LocalFileGenerator:
         if st is None:
             notify(f"Skipping file {full}. File does not exist.")
             if options.enumerate_all_entries and entry.is_symlink():
-                return self.symlink_child(entry, full, notify=lambda _body: None)
+                # That warning is sent; symlink_child must not repeat it when
+                # the lstat fails too. What the link's own stat has to say -
+                # a timestamp the host cannot render - still goes out, as it
+                # does for the same leaf built at its turn (`_lstat_leaf`).
+                def own_stat_warnings(body: str) -> None:
+                    if body == _INVALID_TIMESTAMP:
+                        notify(body)
+
+                return self.symlink_child(entry, full, notify=own_stat_warnings)
             return None
         if stat_module.S_ISLNK(st.st_mode):
             # Only an lstat-style entry_stat_result override produces this mode:

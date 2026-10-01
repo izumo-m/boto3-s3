@@ -1043,6 +1043,30 @@ class TestLeafRewrittenBeforeItsTurn:
         assert leaf.mtime == datetime(1970, 1, 1, tzinfo=timezone.utc)
         assert warnings == ["File has an invalid timestamp. Passing epoch time as timestamp."]
 
+    def test_a_link_broken_at_the_scan_warns_about_its_own_stamp_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The complete followed view falls back to a broken link's lstat leaf.
+        # A link that broke before its turn warned about its unrenderable
+        # stamp, one already broken at the parent's scan did not - the
+        # fallback silenced every warning to keep "does not exist" single.
+        link = tmp_path / "link.txt"
+        link.symlink_to(tmp_path / "gone.txt")
+        self._pretend_unrepresentable(monkeypatch, link.lstat().st_mtime)
+        warnings: list[str] = []
+        infos = list(
+            LocalStorage(
+                str(tmp_path), follow_symlinks=True, enumerate_all_entries=True
+            ).walk_local(on_warning=warnings.append)
+        )
+        leaf = next(info for info in infos if info.compare_key == "link.txt")
+        assert leaf.is_symlink
+        assert leaf.mtime == datetime(1970, 1, 1, tzinfo=timezone.utc)
+        assert warnings == [
+            f"Skipping file {link}. File does not exist.",
+            "File has an invalid timestamp. Passing epoch time as timestamp.",
+        ]
+
 
 class TestSymlinks:
     def test_followed_by_default(self, tmp_path: Path) -> None:
