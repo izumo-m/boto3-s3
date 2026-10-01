@@ -136,7 +136,7 @@ class TestConstruction:
         # A float inside the range (a computed 2.0) used to pass the range
         # check and fail at the first flush, slicing the buffer with it - a
         # TypeError that dropped the buffered entries unsent.
-        with pytest.raises(ValidationError, match="batch_size"):
+        with pytest.raises(ValidationError, match="batch_size must be an integer between"):
             _deleter(_FakeS3Client(), batch_size=batch_size)
 
     @pytest.mark.parametrize("batch_size", [1, S3_DELETE_BATCH])

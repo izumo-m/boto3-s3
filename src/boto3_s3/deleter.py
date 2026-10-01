@@ -179,7 +179,8 @@ class S3Deleter:
             # arithmetic) would pass here and only fail at the first flush,
             # as a TypeError slicing the buffer.
             raise ValidationError(
-                f"batch_size must be between 1 and {S3_DELETE_BATCH} (got {batch_size!r})",
+                f"batch_size must be an integer between 1 and {S3_DELETE_BATCH} "
+                f"(got {batch_size!r})",
                 operation=operation,
             )
         # Eager: resolve the client and bucket now, so a bad storage fails on
