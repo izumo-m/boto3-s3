@@ -930,6 +930,30 @@ class TestDownloadRoute:
         assert ops(calls) == ["ListObjectsV2"]
         assert not (tmp_path / "out").exists()
 
+    @pytest.mark.skipif(
+        os.name == "nt", reason="Windows folds `..` before the filesystem sees the path"
+    )
+    def test_a_recursive_destination_is_created_bare_like_aws(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `missing/../out` does not exist as typed (missing/ is not there), so
+        # aws-cli's bare makedirs creates missing/ on the way and then fails
+        # on the existing out: rc 255, `[Errno 17] File exists`, measured. The
+        # recursive cp created it with exist_ok, swallowed that and went on.
+        (tmp_path / "out").mkdir()
+        monkeypatch.chdir(tmp_path)
+        client, calls = make_recording_client([])
+        with pytest.raises(TransportError) as excinfo:
+            S3().cp(
+                S3Storage("s3://b/pre", client=client),
+                LocalStorage("missing/../out"),
+                recursive=True,
+                transfer_config=_SYNC,
+            )
+        assert isinstance(excinfo.value.__cause__, FileExistsError)
+        assert calls == []
+        assert (tmp_path / "missing").is_dir()
+
 
 class TestGlacierGate:
     def _download(

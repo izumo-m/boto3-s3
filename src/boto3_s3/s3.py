@@ -1413,15 +1413,15 @@ class S3:
         )
         # aws-cli's _validate_path_args only creates the dest dir when it does
         # not already exist, testing and creating the path as typed -
-        # ensure_directory does both on the construction-time anchor (sep-less,
-        # so an existing *file* counts as existing; consistent with the plan
-        # if the process chdir'd since). An existing-file dest then skips
-        # makedirs and fails per item like aws (rc 1) instead of crashing up
-        # front; an empty listing transfers nothing and exits 0. (sync's guard
-        # differs: unconditional, bare makedirs.)
+        # ensure_directory does both on the construction-time anchor
+        # (consistent with the plan if the process chdir'd since). An existing
+        # *file* written without a trailing separator counts as existing: it
+        # skips makedirs and fails per item like aws (rc 1) instead of
+        # crashing up front, and an empty listing transfers nothing and exits
+        # 0. (sync's guard is the same call, not gated on recursive.)
         if recursive and isinstance(dest_storage, LocalStorage):
             try:
-                dest_storage.ensure_directory(exist_ok=True)
+                dest_storage.ensure_directory()
             except OSError as exc:
                 raise translate_os_error(exc, operation=operation, key=None) from exc
         client = client_provider.get_client()

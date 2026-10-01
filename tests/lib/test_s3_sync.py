@@ -25,7 +25,13 @@ from boto3.s3.transfer import TransferConfig
 from boto3_s3 import GlobFilter
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3.comparator import ParallelFilter, SyncPair
-from boto3_s3.exceptions import BatchError, CancelledError, NotFoundError, ValidationError
+from boto3_s3.exceptions import (
+    BatchError,
+    CancelledError,
+    NotFoundError,
+    TransportError,
+    ValidationError,
+)
 from boto3_s3.localstorage import LocalStorage
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
@@ -716,6 +722,28 @@ class TestSyncDownload:
         )
         assert (tmp_path / "sub" / "new").is_dir()
         assert not (tmp_path / "new").exists()
+
+    def test_an_existing_file_written_with_a_trailing_separator_fails_the_creation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The typed path keeps the separator abspath strips. `out/` over an
+        # existing file does not exist as typed, so the creation is attempted
+        # and fails before anything is listed - aws-cli's rc 255 (`[Errno 17]
+        # File exists: 'out/'`, measured). Written `out`, the same file passes
+        # the check and every item fails instead.
+        (tmp_path / "out").write_bytes(b"keep")
+        monkeypatch.chdir(tmp_path)
+        client, calls = make_recording_client([])
+        with pytest.raises(TransportError) as excinfo:
+            S3().sync(
+                S3Storage("s3://bucket/d", client=client),
+                LocalStorage("out" + os.sep),
+                transfer_config=_SERIAL,
+            )
+        assert isinstance(excinfo.value.__cause__, FileExistsError)
+        assert excinfo.value.operation == "sync"
+        assert calls == []
+        assert (tmp_path / "out").read_bytes() == b"keep"
 
     def test_directory_bucket_source_is_rejected_after_dest_dir_creation(
         self, tmp_path: Path

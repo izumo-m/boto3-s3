@@ -518,19 +518,28 @@ of a path before the filesystem sees it, so the typed path is already the
 lexical one — and there the AWS CLI refuses that source as missing up front,
 as this does. An empty path does not exist.
 
-### ensure_directory(*, exist_ok=False)
+### ensure_directory()
 
 Creates the location as a directory unless `exists()` already finds it, the
-way the AWS CLI prepares a directory destination: `os.makedirs` on the same
-typed, construction-anchored path `exists()` tests, not on `abspath`. The
+way the AWS CLI prepares a directory destination: a bare `os.makedirs` on the
+same typed, construction-anchored path `exists()` tests, not on `abspath`. The
 recursive `cp` / `mv` and `sync` call it for a local destination before
-anything is enumerated. Where the typed path and `abspath` name different
-places — `..` after a symlinked directory, as under `exists()` — the outcome
-is the AWS CLI's: a destination the kernel finds is not created lexically, so
-a `sync` warns "File does not exist." for the lexical directory (exit code 2),
-and one the kernel does not find is created where the kernel resolves it. An
-existing file passes, and the transfer then fails per item. `exist_ok` is
-`os.makedirs`'s own flag; an `OSError` propagates.
+anything is enumerated. The typed path keeps what `abspath` folds away — a
+trailing separator, a `..` — and each of these comes out as it does on the
+AWS CLI:
+
+- an existing file written without a trailing separator exists, so nothing is
+  created and the transfer fails per item; written `out/` it does not exist as
+  typed, and the creation fails (`[Errno 17] File exists`);
+- `..` after a component that does not exist creates that component on the
+  way (`missing/../out` leaves `missing/` behind) and then fails if the result
+  already exists; after a component that is a file it fails (`[Errno 20]`);
+- `..` after a symlinked directory names the link target's parent: a
+  destination the kernel finds there is not created lexically, so a `sync`
+  warns "File does not exist." for the lexical directory (exit code 2), and
+  one the kernel does not find is created where the kernel resolves it.
+
+An `OSError` propagates; the operations translate it.
 
 ### relative_path(filename, start=os.path.curdir)
 

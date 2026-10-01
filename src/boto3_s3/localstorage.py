@@ -1496,11 +1496,12 @@ class LocalStorage(Storage):
         """The construction-time absolute form of `path`.
 
         The anchor every scan, `get_fileinfo`, and transfer plan resolves
-        against (see `__init__`); directory creation in the operations uses
-        it too, so a relative `path` keeps meaning the same directory even if
-        the process chdir's after construction. The operations' source
-        existence check asks `exists` instead, which resolves the path the
-        way the kernel does rather than lexically.
+        against (see `__init__`), so a relative `path` keeps meaning the same
+        directory even if the process chdir's after construction. The
+        operations' source existence check and destination directory creation
+        ask `exists` / `ensure_directory` instead, which hand the path to the
+        kernel as typed (anchored at the same working directory) rather than
+        in this lexical form.
         """
         return self._abspath
 
@@ -1527,24 +1528,27 @@ class LocalStorage(Storage):
             return False
         return os.path.exists(self._unnormalized)
 
-    def ensure_directory(self, *, exist_ok: bool = False) -> None:
+    def ensure_directory(self) -> None:
         """Create the location as a directory unless it exists, as aws-cli's pre-check does.
 
         aws-cli's ``_validate_path_args`` creates a directory destination
-        with ``os.path.exists`` / ``os.makedirs`` on the path as typed, so
-        this tests `exists` and creates the same typed, construction-anchored
+        with a bare ``os.path.exists`` / ``os.makedirs`` on the path as typed,
+        so this tests `exists` and creates the same typed, construction-anchored
         path - not the lexical ``abspath`` form the transfer then writes
-        under. The two differ only once ``..`` follows a symlinked directory
-        (see `exists`), and there aws-cli's outcome is this one: a
-        destination the kernel finds is not created lexically, so a ``sync``
-        warns about the missing lexical directory exactly as aws-cli does,
-        and one the kernel does not find is created where the kernel resolves
-        it. An existing file passes (the transfer fails per item). ``exist_ok``
-        is ``os.makedirs``'s; an ``OSError`` propagates for the caller to
-        translate.
+        under. The typed path keeps what ``abspath`` folds away - a trailing
+        separator, a ``..`` - and the kernel reads those: an existing *file*
+        written ``out/`` does not exist as typed and fails the creation
+        (written ``out`` it exists, and the transfer fails per item instead);
+        ``missing/../out`` creates ``missing/`` on the way and then fails on
+        an existing ``out``; and behind a symlinked directory ``..`` names the
+        link target's parent, so a destination the kernel finds there is not
+        created lexically (a ``sync`` then warns about the missing lexical
+        directory) and one it does not find is created where the kernel
+        resolves it. Each of these is aws-cli's own outcome, measured. An
+        ``OSError`` propagates for the caller to translate.
         """
         if not self.exists():
-            os.makedirs(self._unnormalized, exist_ok=exist_ok)
+            os.makedirs(self._unnormalized)
 
     @property
     def fsync(self) -> bool:

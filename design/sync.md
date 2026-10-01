@@ -247,12 +247,17 @@ mtime rule (full float precision; `delta = dest.mtime - src.mtime`):
   `os.path.exists` is False) and gives rc 2 (not a hard error).
 - s3local: the dest dir is created **before scanning** (aws-cli does it at the
   validation stage; the dir remains even for an empty sync). It is a
-  bare exists check, not `exist_ok` - if the dest exists as a **file** it passes
-  straight through, then each item fails with `[Errno 20]` and gives rc 1.
+  bare exists check, not `exist_ok` - if the dest exists as a **file** (written
+  without a trailing separator) it passes straight through, then each item
+  fails with `[Errno 20]` and gives rc 1.
   Test and creation both use the path as typed (`LocalStorage.ensure_directory`),
-  as aws-cli's do: for `lsub/../out` with `lsub` a symlinked directory the
-  kernel's answer decides, nothing is created lexically, and the destination
-  walk warns about the missing lexical directory (rc 2, measured on aws-cli).
+  as aws-cli's do, so what `abspath` would fold away decides the outcome the
+  way it does there (all measured on aws-cli): `out/` over an existing file
+  fails the creation (`[Errno 17]`, rc 255); `missing/../out` creates
+  `missing/` and then fails on an existing `out`; and for `lsub/../out` with
+  `lsub` a symlinked directory the kernel's answer decides - nothing is
+  created lexically, and the destination walk warns about the missing lexical
+  directory (rc 2). The recursive cp / mv use the same call.
 - `sync s3://b/p s3://b/p` (identical path) makes every pair identical -> silent
   rc 0 (there is no onto-itself guard like mv's).
 - An S3 Express directory bucket (`--x-s3`) on either side is rejected with
