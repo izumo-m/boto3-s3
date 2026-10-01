@@ -468,10 +468,13 @@ separator, the one backend whose `format` roots are not `/`-separated.
 itself.
 
 `path` is the location, taken as given; `os.PathLike` is accepted. An empty
-string is not a location — `validate` rejects it with `ValidationError`,
-since Python's own path functions and the AWS CLI both treat `""` as a path
-that does not exist, while `os.path.abspath` alone would silently make it the
-working directory (`pathlib.Path("")` is `"."` and passes). It is
+string is not a location — `validate` rejects it with `ValidationError`:
+Python's own path functions treat `""` as a path that does not exist, while
+`os.path.abspath` alone would silently make it the working directory
+(`pathlib.Path("")` is `"."` and passes). The AWS CLI reports an empty source
+as missing and fails on an empty directory destination, but reads an empty
+destination of a single download as the working directory; the `boto3-s3`
+command passes `"."` for that one case, and a library caller says `"."`. It is
 absolutized once, at construction, against the then-current working directory.
 Every scan, `get_fileinfo`, `open` and transfer plan anchors on that absolute
 form, so a relative `path` keeps meaning the same directory if the process

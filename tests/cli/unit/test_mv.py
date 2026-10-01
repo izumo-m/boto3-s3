@@ -16,6 +16,7 @@ touching the rc. ``--expected-size`` does not exist on mv (Unknown options,
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -447,6 +448,19 @@ class TestSuccessShapes:
         assert [call.operation for call in calls] == ["PutObject"]
         assert not src.exists()
         assert "move: " in capsys.readouterr().out
+
+    def test_an_empty_destination_of_a_single_download_is_the_working_directory(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # As for cp: aws-cli moves the object into the cwd (rc 0, measured),
+        # where this command failed before touching anything (rc 1).
+        monkeypatch.chdir(tmp_path)
+        client, calls = make_recording_client([_head_response()])
+        ctx = Context(client_factory=lambda _args: client, transfer_config=_SYNC)
+        rc = cli.main(["mv", "s3://b/p/seed", "", "--dryrun"], ctx=ctx)
+        assert rc == 0
+        assert capsys.readouterr().out == f"(dryrun) move: s3://b/p/seed to .{os.sep}seed\n"
+        assert [call.operation for call in calls] == ["HeadObject"]
 
     def test_dryrun_move_line(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         src = tmp_path / "a.txt"

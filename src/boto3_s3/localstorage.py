@@ -1532,11 +1532,13 @@ class LocalStorage(Storage):
         """Reject an empty path (``Storage.validate``).
 
         ``""`` is not a location: Python's own path functions treat it as a
-        path that does not exist (``os.path.exists("")`` is ``False``) and
-        aws-cli refuses it the same way, while ``os.path.abspath`` alone
-        would silently make it the working directory - a ``sync`` with
-        ``delete_filter`` onto ``""`` then deleted the working directory's
-        files. Construction stays permissive, like every backend's; the
+        path that does not exist (``os.path.exists("")`` is ``False``), while
+        ``os.path.abspath`` alone would silently make it the working
+        directory - a ``sync`` with ``delete_filter`` onto ``""`` then deleted
+        the working directory's files. aws-cli refuses it as a source and as a
+        directory destination; the one place it means the working directory
+        there, the destination of a single download, the CLI layer spells as
+        ``"."`` itself. Construction stays permissive, like every backend's; the
         operations call this before use. ``os.PathLike`` never yields ``""``
         (``pathlib.Path("")`` is ``"."``).
         """

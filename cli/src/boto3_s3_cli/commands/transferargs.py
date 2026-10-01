@@ -795,7 +795,13 @@ def resolve_locations(
     if src_type == "local":
         return _local(src), _s3(dest, client)
     if dest_type == "local":
-        return _s3(src, client), _local(dest)
+        # aws-cli reads an empty destination of a single download as the
+        # working directory (its local_format absolutizes "" to the cwd, which
+        # is a directory); the library refuses "" as no location at all, so
+        # the CLI spells out what aws-cli means. A dir_op never gets here with
+        # "": pre-creating the destination already failed it (rc 255, like
+        # aws-cli), and an empty source is refused as missing before that.
+        return _s3(src, client), _local(dest or os.curdir)
     source_client = client
     if args.source_region:
         source_args = argparse.Namespace(**vars(args))

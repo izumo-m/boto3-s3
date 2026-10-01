@@ -24,7 +24,7 @@ from boto3.s3.transfer import TransferConfig
 
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
-from tests.utils.fakes3 import MTIME, client_error
+from tests.utils.fakes3 import MTIME, client_error, get_response, head_response
 from tests.utils.harness import built_client_ctx
 from tests.utils.host import skip_if_chmod_is_inert
 from tests.utils.recorder import ApiCall, make_recording_client
@@ -400,6 +400,33 @@ class TestSuccessShapes:
         captured = capsys.readouterr()
         assert rc == 0
         assert captured.out == f"(dryrun) upload: .{os.sep}a.txt to s3://bucket/k\n"
+        assert calls == []
+
+    def test_an_empty_destination_of_a_single_download_is_the_working_directory(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws-cli absolutizes "" to the cwd, a directory, so the object lands
+        # there under its own name (rc 0, measured). The library refuses ""
+        # as no location at all, so the command has to say "." itself: it
+        # failed this with `A local path must not be empty.` (rc 1).
+        monkeypatch.chdir(tmp_path)
+        ctx, calls = _recording_ctx([head_response(), get_response()])
+        rc = cli.main(["cp", "s3://bucket/p/seed", "", "--no-progress"], ctx=ctx)
+        assert rc == 0
+        assert capsys.readouterr().out == f"download: s3://bucket/p/seed to .{os.sep}seed\n"
+        assert [call.operation for call in calls] == ["HeadObject", "GetObject"]
+        assert Path("seed").read_bytes() == b"payload"
+
+    def test_an_empty_destination_of_a_recursive_download_is_refused_like_aws(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A dir_op pre-creates its destination, and makedirs("") is aws-cli's
+        # own pre-pipeline failure (rc 255, measured) - "" never becomes ".".
+        monkeypatch.chdir(tmp_path)
+        ctx, calls = _recording_ctx([])
+        rc = cli.main(["cp", "s3://bucket/p/", "", "--recursive"], ctx=ctx)
+        assert rc == 255
+        assert "[Errno 2] No such file or directory: ''" in capsys.readouterr().err
         assert calls == []
 
     def test_quiet_suppresses_success_output(

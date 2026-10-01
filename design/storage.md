@@ -237,10 +237,11 @@ A few more members come with working defaults a custom backend normally keeps:
   block); an operation — or the CLI at its parity point — calls this to reject
   a malformed location loudly before use. `S3Storage` overrides it with the
   aws-cli-parity checks (unsupported ARN forms, a key with no bucket),
-  `LocalStorage` rejects an empty path (`""` is no location to Python or to
-  the AWS CLI, only `abspath` would make it the working directory); a
-  custom backend that can detect a malformed location overrides it likewise.
-  Idempotent.
+  `LocalStorage` rejects an empty path (`""` is no location to Python, only
+  `abspath` would make it the working directory; aws-cli agrees except for
+  the destination of a single download, which the CLI layer turns into `"."`
+  before the library sees it); a custom backend that can detect a malformed
+  location overrides it likewise. Idempotent.
 
 Errors raised from these should map to the library taxonomy
 ([`exceptions.md`](./exceptions.md)); the engine renders their message verbatim.
