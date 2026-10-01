@@ -57,7 +57,8 @@ signer botocore uses. With `awscrt` installed — the `crt` extra — signing go
 through the CRT signer, which rejects `0` and negative values with a bare
 `AssertionError`; that is not a `Boto3S3Error` and is not translated into one.
 Without `awscrt` the same values are signed and returned, carrying
-`X-Amz-Expires=0` or a negative count.
+`X-Amz-Expires=0` or a negative count — as they are for a directory bucket
+with or without it, since the S3 Express signature has no CRT implementation.
 
 `method` selects the operation the URL authorizes: `"get_object"`, the default,
 signs a download URL, and `"put_object"` signs an upload URL. Those two values

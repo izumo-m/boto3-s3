@@ -213,9 +213,11 @@ versioned bucket) cannot be mapped back to submission order.
   orphan is then the source of a copy of the same run, and the delete and the
   copy race. They race on aws-cli too - its `DeleteObject` and `CopyObject` go
   out on separate s3transfer worker threads, the delete a few milliseconds
-  ahead when the orphan sorts first, a head start a fast endpoint always
-  honors (50 of 50 runs on a local MinIO lose the object) and a slower one
-  need not. Here the delete sits in the buffer until the deleter closes -
+  ahead when the orphan sorts first - a head start a fast endpoint usually
+  honors (on a local MinIO: every run with only such names, about half the
+  runs once another transfer ran alongside, none for a name that sorts ahead
+  of the nested prefix and is therefore copied first) and a slower one need
+  not. Here the delete sits in the buffer until the deleter closes -
   which `sync`'s `ExitStack` does before the transferrer has drained, the
   deleter being entered later - so the final flush races the in-flight copies
   and the copy usually wins. Either way the outcome is execution order under

@@ -1537,10 +1537,13 @@ class S3Storage(Storage):
 
         A FIFO, a socket or a device is refused up front with
         ``ValidationError`` (naming the local path in ``key``), in the words
-        the transfer lanes warn such a source away with: the request body has
-        to be sized and rewound, which none of them can do - a FIFO would
-        block the open until a writer appears and then fail botocore's
-        ``tell()`` mid-request with a bare ``OSError``.
+        the transfer lanes warn such a source away with. None is a regular
+        file whose size says how long its content is, and a FIFO or a socket
+        cannot be rewound for a retry - a FIFO would block the open until a
+        writer appears and then fail botocore's ``tell()`` mid-request with a
+        bare ``OSError``. A device that happens to size and seek
+        (``/dev/null``) is refused with the rest, as aws-cli's transfer skips
+        it.
         """
         target_key = self._resolve_key(key)
         source = os.fspath(path)

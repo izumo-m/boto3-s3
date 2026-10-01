@@ -537,8 +537,9 @@ class TransferOptions(TypedDict, total=False):
     library translates them to S3 API PascalCase internally. Options that do not
     apply to a given transfer direction are ignored by the library. ``aws s3``
     ignores most of them the same way, but rejects ``checksum_algorithm`` on a
-    download, ``checksum_mode`` on an upload and the ``sse_c_copy_source`` pair
-    off the copy route as usage errors - a check the CLI layer owns
+    download, ``checksum_mode`` off a download (an upload and an S3-to-S3 copy
+    alike) and the ``sse_c_copy_source`` pair off the copy route as usage
+    errors - a check the CLI layer owns
     (docs/cli/aws-differences.md section 4). An
     *unknown* key, by contrast, is rejected eagerly by ``cp`` / ``mv`` /
     ``sync`` (``ValidationError``): a typo'd option never passes silently.

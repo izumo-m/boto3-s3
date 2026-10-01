@@ -242,6 +242,15 @@ afterwards. The source check is a bare existence test too: a local source that
 is a file passes it, the directory-style walk then enumerates nothing and emits
 one `WARNED` record, and the run completes with warnings rather than raising.
 
+Both local checks ask about the path as typed (`exists` and
+`ensure_directory` of [`LocalStorage`](../storage.md#localstorage)), as the AWS
+CLI's do, while the walk works on the absolutized form. The two name
+different places only when `..` follows a symlinked directory, and there the
+outcome is the AWS CLI's, hazard included: a source the kernel finds but the
+absolutized form does not is admitted, walked as missing (a warning, exit code
+2 on the command) and so contributes nothing — which under a delete filter
+means everything at the destination is deleted.
+
 Only a caller-constructed `S3Storage` carrying no client reaches that late
 client build. The client for a bare `s3://…` string argument is built during
 resolution instead — before the cancel-token poll, the destination-directory

@@ -138,12 +138,14 @@ is emitted, the `FAILED` record included, so a cancel from that callback
 raises `CancelledError` in place of the `BatchError` the failure would
 otherwise become.
 
-`capture_response=True` attaches the delete response to each successful
+`capture_response=True` attaches the delete response to a successful
 record's `extra_info` under the key `"delete"`, with `ResponseMetadata`
 removed. Both routes produce the single-object `DeleteObject` shape — the
 batched route reconstructs it from the batch response — so the wire form does
 not show through. Failed and dry-run records keep `extra_info` at `None`,
-which is also what every record carries when `capture_response` is `False`.
+which is also what every record carries when `capture_response` is `False`,
+and what a batched success carries when the response did not list its key
+under `Deleted[]` ([Captured responses](../misc.md#captured-responses)).
 
 Raises:
 

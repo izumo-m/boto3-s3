@@ -432,7 +432,12 @@ The contract:
   `>>` redirected stdout's `.buffer`: it reports `seekable()` but every write
   lands at its end, so the view hides `seek` and the parts arrive in order
   instead of scrambling) and any stream under the CRT engine are written in
-  order from their current position. To read a download back, rewind it
+  order from their current position. The append cue is the `mode` string, plus
+  the descriptor's `O_APPEND` flag where `fcntl` can read it - POSIX only:
+  measured on Windows, `os.fdopen(os.open(p, O_APPEND), "wb")` goes
+  unrecognized and scrambles, and a `cmd` `>>` redirect is no append stream at
+  all (seekable, positioned at the end, written from offset 0). To read a
+  download back, rewind it
   (`seek(0)`) or use `getvalue()`. A non-seekable sink works just as well —
   `sys.stdout`, a pipe, a write-only wrapper like the `gzip` one above — there
   is nothing to rewind; the bytes land wherever the stream sends them (the

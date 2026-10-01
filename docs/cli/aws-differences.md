@@ -86,12 +86,15 @@ inside the other** (`sync s3://bkt/p/dir/ s3://bkt/p/ --delete`, or the other
 way round). An object there is at once the source of a copy and a key the
 destination has and the source does not, so the run both copies it and deletes
 it, and which request reaches S3 first is a matter of timing on either tool.
-In the form shown, `aws` sends the delete from one worker thread a few
-milliseconds ahead of the copy on another and, against a fast endpoint, loses
-the object every time (`copy failed: ... (NoSuchKey)`, exit code 1 — 50 runs of
-50 on a local MinIO), while this command sends its deletes in a batch once the
-listing is read and usually keeps the copy, and sometimes does not; in the
-other form both tools end either way from run to run. Neither outcome is
+In the form shown, `aws` sends the delete and the copy from separate worker
+threads. For an object whose name sorts after the nested prefix the delete
+goes out a few milliseconds first, and against a fast endpoint the object is
+then usually lost (`copy failed: ... (NoSuchKey)`, exit code 1) — every run of
+a batch on a local MinIO with only such names, about half of them once other
+transfers ran alongside — while one whose name sorts before it is copied
+first. This command sends its deletes in a batch once the listing is read and
+usually keeps the copy, and sometimes does not; in the other form both tools
+end either way from run to run. Neither outcome is
 promised by either tool, so such a run is not something the two can be
 compared on. Do not pass `--delete` when one side of a same-bucket sync
 contains the other.
@@ -264,13 +267,17 @@ run comes out differently, listed in section 1.
   library's own write path, which finishes before the tagging write goes out
   (an annotation write that fails part way does not withhold it: the tags are
   still written, as `aws` had already written them by then).
-  The same requests are sent, and the console lines and the exit code agree. So
-  does the destination whenever the tagging write succeeds, and whenever it
-  fails and the rollback delete that follows it succeeds — both tools then
-  leave no object at all. **They part when that rollback delete fails too**:
-  both report the copy as a success (exit code 0, the destination left as the
-  copy produced it, untagged), but the object `aws` leaves carries no
-  annotations, never having got that far, while the one left here carries them.
+  The console lines and the exit code agree, and so does what is left at the
+  destination — with every write succeeding, and with any combination of an
+  annotation write, the tagging write and the rollback delete that follows a
+  failed tagging write being refused (each measured). What differs is the
+  order, and two things only this command sends. When an annotation write
+  fails, the transfer library's failure clean-up sends an
+  `AbortMultipartUpload` for the upload it has already completed, which the
+  service refuses and nobody sees. And when the tagging write fails, the
+  annotations were written here before the object is rolled back, where `aws`
+  — its rollback succeeding — never writes them; if the rollback fails too,
+  `aws` goes on to write them and the object left behind is the same one.
 - **A plain-HTTP endpoint given only by the environment still reaches the CRT
   engine.** Under `preferred_transfer_client = crt`, `aws` decides whether its
   CRT client speaks TLS from `--endpoint-url` alone, so an endpoint supplied
@@ -307,6 +314,12 @@ run comes out differently, listed in section 1.
   output to learn what moved would under-count. This belongs to the
   rendering accidents above, so this command keeps the complete record instead
   of copying it.
+- **A `mv` between two spellings of one Outposts object is refused here.** An
+  Outposts access point's key can be set off from the ARN with `:` or with `/`.
+  `aws` compares its two arguments as text, takes
+  `mv s3://<arn>:k s3://<arn>/k` for a move between two objects and sends it —
+  onto itself. This command recognizes the one object and refuses the run like
+  any other self-move (`Cannot mv a file onto itself: ...`).
 - **Copying a directory without `--recursive`.** A `cp` or `mv` whose local
   source is a directory fails — exit code 1 on both tools, the source left in
   place — unless a filter excludes the source (`--exclude 'd/'`, its

@@ -1079,8 +1079,9 @@ Raises: opening or stat'ing the local file translates as a local error — a
 missing file is `NotFoundError`, an unreadable one `AccessDeniedError`, naming
 the local path in `key` with `bucket` unset — and no request is made. A FIFO,
 a socket or a device is refused the same way, before it is opened, with
-`ValidationError`: the body of a single `PutObject` has to be sized and
-rewound, which none of them can do. The
+`ValidationError`, as the transfer routes skip such a source: it is not a
+regular file whose size says how long its content is, and a FIFO or a socket
+cannot be rewound for a retry either. The
 `PutObject` itself translates as a botocore error carrying `bucket` / `key`,
 including a failure botocore hits while reading the body mid-request, which it
 reports as one of its own.
@@ -1129,7 +1130,11 @@ a stream that cannot seek, a binary stream in append mode (`open(p, "ab")`, a
 `>>` redirected stdout's `.buffer`: it reports `seekable()` but every write
 lands at its end, so it gets a write-only view and the parts arrive in order),
 and any stream under the CRT engine are written in order from their current
-position.
+position. Append mode is read from the stream's `mode` string and, on POSIX
+only, from the descriptor's `O_APPEND` flag; Windows cannot be asked for the
+flag, so a stream that appends under another `mode` string is not recognized
+there, and a `>>` redirect from `cmd` — which appends nothing, it only starts
+at the end — is an ordinary seekable stream.
 
 Of the four contract operations only `open` is implemented. `get_fileinfo` and
 `delete` keep `Storage`'s base implementations and raise `NotImplementedError`

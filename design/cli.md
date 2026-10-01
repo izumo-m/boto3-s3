@@ -1594,9 +1594,9 @@ outside the local rc-1 catch: it translates botocore's construction-time errors
 into the library taxonomy so they reach the exit-code mapping instead of escaping
 as a traceback. The translation knows `NoCredentialsError` /
 `NoRegionError` -> `ConfigurationError` = 253 (aws's dedicated handlers), but
-neither arises at construction - credentials are first resolved when a request
-is signed, and an absent region falls back to us-east-1 - so what construction
-raises is every
+neither arises at construction - the credential chain is walked there, and a
+chain that finds nothing raises nothing until the first request is signed; an
+absent region falls back to us-east-1 - so what construction raises is every
 other `BotoCoreError` -> `InvalidConfigError` = 255 (aws's
 `GeneralExceptionHandler`), including `ProfileNotFound` for a bad `--profile`
 **and `PartialCredentialsError`** (e.g. an access key with no secret) - aws has

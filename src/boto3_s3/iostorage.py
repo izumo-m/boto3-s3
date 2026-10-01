@@ -16,6 +16,8 @@ redirected stdout's ``.buffer``) is written through a write-only view instead:
 it reports ``seekable()`` and takes ``seek``, but every write lands at its end,
 so s3transfer's positioned, parallel download would append the ranged parts in
 completion order - the view hides ``seek`` and the download runs in order.
+(The descriptor's flag can be read on POSIX only; on Windows the ``mode``
+string is the whole cue - `_is_append_mode`.)
 The transfer ``close``s every fileobj ``open`` returns (the open
 route flushes a real backend's writer that way), so each ``IOStorage`` *writer*
 view absorbs that ``close`` into a flush and each reader view's ``close`` is a
@@ -148,7 +150,11 @@ def _is_append_mode(stream: Any) -> bool:
     ``open(p, "ab")``), and otherwise the descriptor's flags where the platform
     can read them (``fcntl``'s ``F_GETFL``): a ``>>`` redirected stdout's
     ``.buffer`` has mode ``"wb"`` and only the flag reveals it. A stream with no
-    descriptor (``BytesIO``) is not append-only.
+    descriptor (``BytesIO``) is not append-only. Windows has no ``fcntl``, so
+    there the mode string is the whole cue: a descriptor opened ``O_APPEND``
+    under another mode goes unrecognized (measured: its multipart download
+    scrambles), and a ``cmd`` ``>>`` redirect is not append-only in the first
+    place - the shell seeks to the end and the stream writes at offsets.
     """
     mode = getattr(stream, "mode", None)
     if isinstance(mode, str) and "a" in mode:

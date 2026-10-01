@@ -238,8 +238,9 @@ class RmCommand(Command):
             # rc 1, by position rather than by type: aws's rm runs inside the
             # same `CommandResultRecorder` cp/mv/sync do, which turns whatever
             # escapes the pipeline into an ErrorResult. So a listing entry the
-            # response left incomplete (KeyError) and a timestamp the local
-            # calendar cannot hold (OverflowError) report as `fatal error:
+            # response left incomplete and a timestamp the local calendar
+            # cannot hold - `MalformedResponseError` here, a bare KeyError /
+            # OverflowError on aws-cli - report as `fatal error:
             # 'LastModified'` / `fatal error: date value out of range` at rc 1,
             # measured, rather than reaching the dispatcher's 255.
             # `SystemExit` is a BaseException and still passes, like there.

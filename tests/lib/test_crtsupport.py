@@ -680,8 +680,9 @@ class TestCrtRegionPosture:
     """Where the CRT client's region comes from (design/crt.md section 6).
 
     boto3 reads it off the built client; aws-cli resolves its own region chain,
-    which yields ``None`` where botocore invents ``aws-global`` - and ``None``
-    is what awscrt refuses. `CLIENT_REGION` keeps boto3's source; any other
+    which yields ``None`` where the client carries the ``aws-global``
+    pseudo-region (the regional mode the CLI pins) - and ``None`` is what
+    awscrt refuses. `CLIENT_REGION` keeps boto3's source; any other
     value is the caller's declaration and rides verbatim.
     """
 

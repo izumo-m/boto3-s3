@@ -2531,12 +2531,14 @@ class S3:
         neither bucket nor key existence is checked, and ``expires_in`` is
         not range-validated here (aws-cli passes any integer through; S3
         enforces its 604800-second maximum only when the URL is *used*) -
-        though with awscrt installed botocore signs every SigV4 variant
-        through the CRT signer, which refuses ``0`` and negative values with
-        awscrt's own bare ``AssertionError``, left untranslated
-        (docs/reference/operations/presign.md). An empty
-        bucket or key fails botocore's client-side parameter validation ->
-        `ValidationError`. ``method`` selects the signed operation -
+        though with awscrt installed botocore signs SigV4 and SigV4A through
+        the CRT signer, which refuses ``0`` and negative values with awscrt's
+        own bare ``AssertionError``, left untranslated
+        (docs/reference/operations/presign.md). A directory bucket is the
+        exception: its S3 Express signature has no CRT implementation, so
+        such a value is signed there whether awscrt is installed or not. An
+        empty bucket or key fails botocore's client-side parameter validation
+        -> `ValidationError`. ``method`` selects the signed operation -
         aws-cli only ever signs ``get_object``; ``put_object`` is this
         library's permissive superset, and any other value is refused with
         `ValidationError` before ``target`` is resolved or anything is

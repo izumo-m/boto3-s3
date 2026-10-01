@@ -146,10 +146,13 @@ re-raised to you on the next non-empty `flush()` or `close()`.
 `S3Deleter` never raises `BatchError`. If you want one, build it from
 `succeeded` / `failed` after `close()`.
 
-With `capture_response=True`, each successful key's `OpResult.extra_info` gains
+With `capture_response=True`, a successful key's `OpResult.extra_info` gains
 a `"delete"` slot holding a single-object-shaped response, regardless of which
-wire form was used. One limitation: if the same key was submitted twice in one
-batch, both records share a single slot.
+wire form was used. A success the batch response does not list under
+`Deleted[]` — an endpoint that leaves a key out, or answers quietly although
+asked not to — is still a success, with `extra_info` left at `None`, so read
+the slot defensively. One more limitation: if the same key was submitted twice
+in one batch, both records share a single slot.
 
 ## 4. Differences from `aws s3`
 

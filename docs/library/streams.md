@@ -57,6 +57,16 @@ stdout's `.buffer` — every write lands at its end, so it is written in order
 rather than at offsets that would scramble a multipart download), and any
 stream under the CRT engine are written in order from where they stand.
 
+Append mode is recognized from the stream's `mode` string and, on POSIX, from
+the descriptor's own flag — which is how the `>>` redirect is caught, its
+`mode` being `"wb"`. Windows gives no way to ask a descriptor, so there only
+the `mode` string counts: a descriptor opened with `O_APPEND` under another
+mode is written at offsets and comes out scrambled, and a `>>` redirect from
+`cmd` is not an append stream at all — just a seekable one positioned at the
+end, written from offset 0 like any other, over what the file held. Open the
+file with `"ab"` yourself, or use the CRT engine, when you need appending
+there.
+
 Either way, reading a download back needs a rewind.
 
 ```python

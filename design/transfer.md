@@ -245,21 +245,28 @@ chain:
   so its PutObjectTagging goes out ahead of its PutObjectAnnotation calls,
   while here the annotations ride upstream s3transfer's native write path
   inside the CompleteMultipartUpload task, which finishes before any
-  subscriber's `on_done` - so the tagging write goes out last. The same
-  requests are sent, and the console lines and the exit code are the same; only
-  the order differs, and so does the destination in exactly one corner. An
+  subscriber's `on_done` - so the tagging write goes out last. The console
+  lines, the exit code and the object left at the destination are the same in
+  every failure corner (the four combinations of an annotation write, the
+  tagging write and the rollback delete being denied, measured against the
+  pinned aws-cli); the order differs, and so does the request set, below. An
   annotation write that fails part way (the copy completed; upstream's
   `S3CopyFailedError`, re-worded above) does not withhold the tagging write:
   `_SetTags` recognizes that failure (`_annotation_copy_failure_type`) and
   still sends PutObjectTagging, since aws-cli had already sent its own before
   the annotation write failed - the reported error stays the annotation
-  failure unless the tagging write fails and takes over. When
-  the tagging write fails and the rollback delete succeeds, both tools leave no
-  destination object. When the rollback delete fails too (the bullet above,
-  rc 0 on both), the surviving object carries the copied annotations here and
-  carries none on aws-cli, which had not written them yet - aws-cli's
-  annotations subscriber sees a future already settled with the tagging failure
-  and writes nothing. Moving the write point would mean giving up upstream's
+  failure unless the tagging write fails and takes over. Upstream's failure
+  cleanup then also sends an AbortMultipartUpload for the upload it already
+  completed (refused by the service, unseen), a request aws-cli never sends.
+  When the tagging write fails and the rollback delete succeeds, both tools
+  leave no destination object - aws-cli without having written the
+  annotations (its annotations subscriber sees a future already settled with
+  the tagging failure), this library after having written them. When the
+  rollback delete fails too (the bullet above, rc 0 on both), the delete's
+  own exception escapes aws-cli's tags subscriber before it settles the
+  future, so its annotations subscriber sees a success and writes them: the
+  surviving object carries the copied annotations and no tags on both tools.
+  Moving the write point would mean giving up upstream's
   native path, which is what carries the annotations at all; recorded for the
   reader in [`aws-differences.md`](../docs/cli/aws-differences.md).
 - **Annotations** (aws-cli 2.35.6+, S3 Object Annotations): every mode short
