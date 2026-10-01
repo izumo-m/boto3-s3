@@ -142,7 +142,7 @@ class BatchError(Boto3S3Error):
         self.warned: int = warned
         self.skipped: int = skipped
 
-    def __reduce__(self) -> tuple[Any, ...]:
+    def __reduce__(self) -> str | tuple[Any, ...]:
         """Pickle with the counts, which ``BaseException``'s default cannot rebuild.
 
         An exception pickles as ``cls(*args)`` plus its ``__dict__``, and the
@@ -151,6 +151,10 @@ class BatchError(Boto3S3Error):
         as this failure. The module-level functions are meant to be handed to
         a ``ProcessPoolExecutor``, whose worker sends a failure back pickled.
         """
+        if type(self).__init__ is not BatchError.__init__:
+            # A subclass with a constructor of its own knows how its arguments
+            # map; leave it the default it had.
+            return super().__reduce__()
         rebuild = functools.partial(
             type(self),
             succeeded=self.succeeded,

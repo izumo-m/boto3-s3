@@ -45,6 +45,13 @@ CATEGORY_NAMES = [
 ]
 
 
+class _OwnConstructorBatchError(ex.BatchError):
+    """A BatchError subclass whose constructor takes the message alone."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, succeeded=0, failed=1, warned=0, skipped=0)
+
+
 class TestRootExceptionClass:
     def test_boto3_s3_error_inherits_from_exception(self) -> None:
         assert issubclass(ex.Boto3S3Error, Exception)
@@ -143,6 +150,14 @@ class TestBatchError:
         assert str(back) == "2 of 3 transfers failed"
         assert (back.succeeded, back.failed, back.warned, back.skipped) == (1, 2, 4, 8)
         assert (back.operation, back.bucket, back.key) == ("cp", None, None)
+
+    def test_a_subclass_with_its_own_constructor_keeps_the_default_pickling(self) -> None:
+        # Rebuilding through the counts would call such a constructor with
+        # keywords it does not take; it round-tripped before the counts were
+        # carried, and still does.
+        back = pickle.loads(pickle.dumps(_OwnConstructorBatchError("boom")))
+        assert type(back) is _OwnConstructorBatchError
+        assert (str(back), back.failed) == ("boom", 1)
 
     def test_re_exported(self) -> None:
         assert boto3_s3.BatchError is ex.BatchError
