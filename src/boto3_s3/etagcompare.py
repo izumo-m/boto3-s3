@@ -68,6 +68,7 @@ import os
 from typing import TYPE_CHECKING
 
 from boto3_s3.comparator import READ_CHUNK, ContentComparison
+from boto3_s3.exceptions import InvalidConfigError, ValidationError
 from boto3_s3.types import S3FileInfo
 
 if TYPE_CHECKING:
@@ -115,6 +116,14 @@ class EtagComparison(ContentComparison):
       explicit value and does not consult ``s3``.
     - ``EtagComparison()`` uses ``DEFAULT_PART_SIZE`` (boto3's 8 MiB).
 
+    A part size has to be a positive integer. An explicit ``part_size`` that
+    is not one raises ``ValidationError``, and a profile whose
+    ``multipart_chunksize`` is zero or negative raises ``InvalidConfigError``
+    (the setting aws-cli itself refuses) - both at construction, where the
+    mistake is, rather than as an arithmetic error from the first multipart
+    ETag a sync meets. Anything from 1 up is accepted and adjusted per file
+    (the module docstring's floor, ceiling and part limit).
+
     When ``check_size`` is true (the default) a pair whose two sides have
     known, differing sizes is treated as differing (copy) before any ETag work.
     For an s3-to-s3 pair this is a correctness safeguard, not just a shortcut:
@@ -147,8 +156,21 @@ class EtagComparison(ContentComparison):
         part_size: int | None = None,
         check_size: bool = True,
     ) -> None:
-        if part_size is None and s3 is not None:
+        if part_size is not None:
+            # The type is checked with the range: a float (8.0, from arithmetic)
+            # would be held here and only fail in the first multipart read.
+            if (
+                not isinstance(part_size, int)  # pyright: ignore[reportUnnecessaryIsInstance]
+                or part_size < 1
+            ):
+                raise ValidationError(f"part_size must be a positive integer (got {part_size!r})")
+        elif s3 is not None:
             part_size = s3.aws_config().get_size("s3.multipart_chunksize", DEFAULT_PART_SIZE)
+            if part_size < 1:
+                # aws-cli's own check of this setting, in its words.
+                raise InvalidConfigError(
+                    f"Value for multipart_chunksize must be a positive integer: {part_size}"
+                )
         self.part_size = DEFAULT_PART_SIZE if part_size is None else part_size
         self.check_size = check_size
 

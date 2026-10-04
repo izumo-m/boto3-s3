@@ -421,7 +421,10 @@ would chunk that file — grown until the file fits S3's 10000-part limit, then
 clamped into S3's 5 MiB to 5 GiB part bounds (s3transfer's
 `ChunksizeAdjuster`). A `part_size` below 5 MiB is therefore raised to at
 least 5 MiB, and for a file too large for 10000 parts it grows from the value
-given, not from 5 MiB.
+given, not from 5 MiB. The request itself has to be a positive integer: an
+explicit `part_size` that is not one raises `ValidationError`, and a profile
+whose `multipart_chunksize` is zero or negative raises `InvalidConfigError`,
+both when the strategy is constructed.
 The value must still reproduce the boundaries the object was uploaded with:
 supplying that upload's `multipart_chunksize` is the reliable way, and a
 multipart object uploaded with a different one reconstructs to a different ETag
