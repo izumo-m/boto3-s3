@@ -99,6 +99,23 @@ promised by either tool, so such a run is not something the two can be
 compared on. Do not pass `--delete` when one side of a same-bucket sync
 contains the other.
 
+A second arrangement of the same kind is **a `sync --delete` download into a
+case-insensitive directory** (the Windows and macOS defaults) **where a new
+object and a file to be deleted differ only in case** — `A.txt` in the bucket,
+`a.txt` on disk and not in the bucket. There the two names are one file, so
+the run both writes it and removes it. Both tools remove a local file the
+moment they reach it and download on worker threads. When the name to delete
+sorts first (`A.txt` on disk, `a.txt` new), the delete is over before the
+download is even started and the file is always there afterwards. When the
+new name sorts first (`A.txt` new, `a.txt` on disk), the two race: a delete
+that comes first removes the old file and the new one is then written, while
+a download that finishes first has its file removed by the delete. On a
+Windows host with only those two entries `aws` ended without the file in 6
+runs of 60 and this command in 13 (a `download failed` line, exit code 1);
+with 1500 other objects to download in between, every run of both ended
+without the file and with exit code 0. Give the names one spelling before
+syncing with `--delete` onto such a directory.
+
 ## 2. Behavior differences
 
 The first two can leave you with something wrong without saying so, one on each

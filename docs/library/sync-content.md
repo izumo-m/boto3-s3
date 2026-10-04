@@ -146,11 +146,12 @@ visible side effects are worth knowing:
   new entry that needs an orphan file's name as a directory (`a` to delete,
   `a/b` to create) is transferred before `a` is gone and fails; running the
   sync again creates it. On a case-insensitive filesystem (the macOS and
-  Windows defaults) there is a silent form: an orphan that differs from a new
-  entry only in case (`A.txt` to delete, `a.txt` to create) can be deleted
-  after the new file has arrived, when the decision takes longer than the
-  transfer, which removes the new file with nothing reported as failed. Keep
-  `delete_filter` unwrapped for such a destination.
+  Windows defaults) an orphan and a new entry that differ only in case are one
+  file, and whether it survives is a matter of timing — already on the plain
+  lane when the new name sorts first, as on `aws s3`, and with the wrapper in
+  the other order too (`A.txt` to delete, `a.txt` to create), when the
+  decision takes longer than the transfer; nothing is reported as failed
+  then.
 
 If a decision raises, the sync aborts as it would serially: decisions not yet
 started are cancelled, running ones are awaited, and the exception surfaces.

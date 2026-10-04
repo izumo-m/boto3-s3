@@ -167,11 +167,12 @@ class ParallelFilter(Generic[_T]):
     tree lists a file under its second name and fails that delete, a new
     entry that needs an orphan file's name as a directory (``a`` to delete,
     ``a/b`` to create) is transferred first and fails, and on a
-    case-insensitive filesystem an orphan differing only in case from a new
-    entry (``A.txt`` / ``a.txt``) can be deleted after the new file has landed
-    - when its decision outlasts the transfer - removing it with nothing
-    recorded as failed. Leave ``delete_filter`` unwrapped over a
-    case-insensitive local destination.
+    case-insensitive filesystem - where an orphan and a new entry differing
+    only in case are one file, whose survival is a matter of timing on the
+    plain lane too when the new entry sorts first, as it is for aws-cli - the
+    order in which the orphan sorts first (``A.txt`` to delete, ``a.txt`` to
+    create) becomes a race as well: a decision that outlasts the transfer
+    removes the new file with nothing recorded as failed.
 
     ``executor`` is **required** and owned by the caller: ``S3.sync`` neither
     creates nor shuts it down. Reuse across ``sync`` calls, and sharing one pool

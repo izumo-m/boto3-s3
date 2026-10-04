@@ -464,16 +464,20 @@ orphan *file's* name as a directory - `a` to delete, `a/b` to create, which
 the serial lane handles in that order because `a` sorts first - is submitted
 while `a` still exists and fails (`[Errno 20]`); the orphan is then deleted,
 so the run ends in `BatchError` with neither present, and the next run
-creates `a/b`. And on a case-insensitive filesystem an orphan that differs
-from a new entry only in case - `A.txt` to delete, `a.txt` to create - can be
-deleted after the new file has landed, which removes the new file: both
-operations are recorded as succeeded and the name is absent until the next
-run. This one is a race between the delete decision and the transfer (a
-decision that answers at once still deletes first; one slower than the
-download loses), and it fails silently, so a delete lane over a
-case-insensitive local destination should stay unwrapped. The second shape
-needs no race: it fails even when the decision is instant. The wrapped filter
-must be thread-safe;
+creates `a/b`. And on a case-insensitive filesystem an orphan and a new
+entry that differ only in case are one file, which the run both removes and
+writes, so whichever lands last decides whether it is there. That race is not
+the wrapper's: the plain lane has it, as aws-cli does, when the new entry
+sorts first (`A.txt` new, `a.txt` orphan) - the download runs on a worker and
+the delete inline, and a download that finishes first has its file removed
+(docs/cli/aws-differences.md section 1 has the measurements on both tools).
+What the wrapper adds is the other order (`A.txt` orphan, `a.txt` new), which
+the plain lane settles before the download is submitted and a pooled decision
+no longer does: a decision slower than the download removes the new file,
+both operations recorded as succeeded (measured, ten runs each: a predicate
+answering at once kept the file every time, one taking half a second lost it
+every time). The second shape needs no race: it fails even when the decision
+is instant. The wrapped filter must be thread-safe;
 `ChecksumComparison` and `EtagComparison` are (read-only over their fields; a
 botocore client is safe to share for concurrent calls).
 

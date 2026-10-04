@@ -689,12 +689,13 @@ delete ([`./operations/sync.md`](./operations/sync.md#s3sync)); a new
 entry that needs an orphan file's name as a directory — `a` to delete, `a/b`
 to create — is transferred while `a` is still there and fails, after which `a`
 is deleted and the run raises `BatchError` (running it again creates `a/b`);
-and on a case-insensitive filesystem an orphan that differs from a new entry
-only in case — `A.txt` to delete, `a.txt` to create — can be deleted after the
-new file has arrived, when the decision takes longer than the transfer, which
-removes the new file while both operations are recorded as succeeded. Because
-that last case fails silently, leave `delete_filter` unwrapped when the
-destination is a case-insensitive local directory. A stateful predicate
+and on a case-insensitive filesystem, where an orphan and a new entry that
+differ only in case are one file and its survival is a matter of timing even
+on the plain lane when the new entry sorts first (as it is for `aws s3`;
+[`../cli/aws-differences.md`](../cli/aws-differences.md)), wrapping makes it
+so in the other order too — `A.txt` to delete, `a.txt` to create — where a
+decision that takes longer than the transfer removes the new file while both
+operations are recorded as succeeded. A stateful predicate
 can observe the concurrency. Otherwise what changes is ordering, in the ways
 below and no others.
 

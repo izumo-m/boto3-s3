@@ -139,10 +139,11 @@ advance while decisions are still outstanding, which re-introduces the overlap
 the no-read-ahead walk above removes — the self-aliasing local tree behaves as
 `aws s3` does on the default, inline lane — and lets a new entry be
 transferred before an orphan file whose name it needs as a directory is
-deleted, so that transfer fails; on a case-insensitive filesystem an orphan
-differing only in case from a new entry can be deleted after the new file has
-arrived (when its decision outlasts the transfer), removing it without a
-failure. The wrapper's contract, including
+deleted, so that transfer fails; on a case-insensitive filesystem, where an
+orphan and a new entry differing only in case are one file whose survival is
+already a matter of timing when the new entry sorts first, wrapping extends
+that to the order in which the orphan sorts first. The wrapper's contract,
+including
 pool ownership, is in [`../comparator.md`](../comparator.md).
 
 `pair_filter` replaces all three lanes with a single
