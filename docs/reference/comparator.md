@@ -677,10 +677,15 @@ future per entry.
 **What wrapping changes.** For a stateless predicate the decisions themselves
 are unchanged: the same entries are acted on and the run ends the same way,
 only faster — with one exception: a wrapped `delete_filter` on a local
-destination lets that side's listing advance while delete decisions are still
-outstanding, so a tree that aliases itself through a symlinked directory can
-list one file under both names and fail the second delete
-([`./operations/sync.md`](./operations/sync.md#s3sync)). A stateful predicate
+destination lets the pair loop advance while delete decisions are still
+outstanding, so anything that relied on an orphan being gone before a later
+entry is handled no longer holds. A tree that aliases itself through a
+symlinked directory can list one file under both names and fail the second
+delete ([`./operations/sync.md`](./operations/sync.md#s3sync)); and a new
+entry that needs an orphan file's name as a directory — `a` to delete, `a/b`
+to create — is transferred while `a` is still there and fails, after which `a`
+is deleted and the run raises `BatchError` (running it again creates `a/b`).
+A stateful predicate
 can observe the concurrency. Otherwise what changes is ordering, in the ways
 below and no others.
 

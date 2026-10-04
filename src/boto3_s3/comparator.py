@@ -160,7 +160,13 @@ class ParallelFilter(Generic[_T]):
     parallelizing ``create_filter`` makes the
     ``--case-conflict`` "first key wins" order non-deterministic (a library-only
     knob, so no ``aws s3`` parity is at stake). The result set and the exit are
-    otherwise unchanged.
+    otherwise unchanged, with one exception: a wrapped ``delete_filter`` on a
+    local (or custom) destination, where a delete is a synchronous removal. The
+    pair loop moves on while delete decisions are still outstanding, so a later
+    pair can no longer count on an earlier orphan being gone - a self-aliasing
+    tree lists a file under its second name and fails that delete, and a new
+    entry that needs an orphan file's name as a directory (``a`` to delete,
+    ``a/b`` to create) is transferred first and fails.
 
     ``executor`` is **required** and owned by the caller: ``S3.sync`` neither
     creates nor shuts it down. Reuse across ``sync`` calls, and sharing one pool

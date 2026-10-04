@@ -137,7 +137,9 @@ non-deterministic. A stateful predicate can observe the concurrency and can
 therefore decide differently. Wrapping `delete_filter` also lets the pair loop
 advance while decisions are still outstanding, which re-introduces the overlap
 the no-read-ahead walk above removes — the self-aliasing local tree behaves as
-`aws s3` does on the default, inline lane. The wrapper's contract, including
+`aws s3` does on the default, inline lane — and lets a new entry be
+transferred before an orphan file whose name it needs as a directory is
+deleted, so that transfer fails. The wrapper's contract, including
 pool ownership, is in [`../comparator.md`](../comparator.md).
 
 `pair_filter` replaces all three lanes with a single

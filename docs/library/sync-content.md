@@ -139,10 +139,13 @@ visible side effects are worth knowing:
 - **Case conflicts.** Parallelizing `create_filter` makes which entry wins a
   case-insensitive collision non-deterministic, because that check depends on
   the order entries arrive in. `update_filter` never touches it.
-- **A self-aliasing local destination.** A wrapped `delete_filter` lets a local
-  destination's listing advance while delete decisions are still outstanding,
-  so a tree that reaches one directory under two names through a symlink can
-  list a file under both and fail the second delete.
+- **A local destination whose deletes must come first.** A wrapped
+  `delete_filter` lets the run move on while delete decisions are still
+  outstanding. A tree that reaches one directory under two names through a
+  symlink can then list a file under both and fail the second delete, and a
+  new entry that needs an orphan file's name as a directory (`a` to delete,
+  `a/b` to create) is transferred before `a` is gone and fails; running the
+  sync again creates it.
 
 If a decision raises, the sync aborts as it would serially: decisions not yet
 started are cancelled, running ones are awaited, and the exception surfaces.
