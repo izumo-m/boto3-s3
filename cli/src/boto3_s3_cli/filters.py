@@ -84,17 +84,26 @@ if sys.platform == "win32":
         sigma, where ``str.lower`` does otherwise (447 code points differ on
         Windows 11, measured) - so only the call itself reproduces it, and it
         equals ``ntpath.normcase`` on Python 3.14 for every code point. Being
-        one-to-one, it keeps the length, so the destination is sized like the
-        source and one call does it.
+        one-to-one, it keeps the length (no code point changed it on the host
+        measured), so the destination is sized like the source and one call
+        does it; should a Windows table ever answer otherwise, the size is
+        asked for and the call repeated, the way CPython's own wrapper does.
         """
         if not text:
             return text
+        lcmap = _lcmap_string_ex()
         invariant_locale, lowercase = "", 0x100  # LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE
         units = len(text.encode("utf-16-le", "surrogatepass")) // 2
-        buffer = ctypes.create_unicode_buffer(units)
-        written = _lcmap_string_ex()(
-            invariant_locale, lowercase, text, units, buffer, units, None, None, None
-        )
+        size = units
+        buffer = ctypes.create_unicode_buffer(size)
+        written = lcmap(invariant_locale, lowercase, text, units, buffer, size, None, None, None)
+        if written <= 0 and ctypes.get_last_error() == 122:  # ERROR_INSUFFICIENT_BUFFER
+            size = lcmap(invariant_locale, lowercase, text, units, None, 0, None, None, None)
+            if size > 0:
+                buffer = ctypes.create_unicode_buffer(size)
+                written = lcmap(
+                    invariant_locale, lowercase, text, units, buffer, size, None, None, None
+                )
         if written <= 0:
             raise ctypes.WinError(ctypes.get_last_error())
         return ctypes.wstring_at(buffer, written)
