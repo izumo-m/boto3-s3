@@ -588,14 +588,17 @@ runs first.
   `GetObjectAttributes` reported for a `COMPOSITE` one. Which endpoint the
   fetch addresses is taken from `pair.transfer_type`: the `dest` location for
   `UPLOAD`, the `src` location for anything else.
+- neither side `S3FileInfo`: the pair is copied.
 
 A `COMPOSITE` checksum is recognized by the response's `ChecksumType` or by a
 part count appended to the value (`<digest>-<n>`), whichever the endpoint
 sends: some send the digest bare and name the kind only in `ChecksumType`.
 The digests are compared without the count; a count that is present has to
 agree as well — with the other side's on an s3-to-s3 pair, with the number of
-parts listed on an upload or download.
-- neither side `S3FileInfo`: the pair is copied.
+parts listed on an upload or download. Reading `ChecksumType` needs boto3 1.36
+or later ([`../compatibility.md`](../compatibility.md)); under an older one a
+bare `COMPOSITE` digest is not recognized and the object is copied on every
+run.
 
 **What reads as indeterminate**, and is therefore copied rather than skipped:
 an object carrying no native checksum; an algorithm outside `crc32`, `crc32c`,

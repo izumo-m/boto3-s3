@@ -394,7 +394,10 @@ strategy in `ParallelFilter` (section 10) to run those concurrently.
   because endpoints differ in which they send: MinIO's `GetObjectAttributes`
   returns the digest bare with `ChecksumType: COMPOSITE` where its
   `HeadObject` appends the count (measured). The digest is compared without
-  the count, and a count that is present must agree too.
+  the count, and a count that is present must agree too. `ChecksumType` is in
+  botocore's S3 model from 1.36.0 (absent in 1.35.99, measured); an older SDK
+  drops the element, so only the suffixed form is recognized there
+  (docs/compatibility.md).
 - **Indeterminate -> copy.** An object with no native checksum, a mismatched
   algorithm or kind across an s3->s3 pair, an unknown algorithm, a CRC32C / CRC64NVME
   checksum beyond `pure_max_size` when `awscrt` is unavailable, or any
