@@ -54,23 +54,14 @@ if TYPE_CHECKING:
 
 
 if sys.platform == "win32":
+    import ctypes
+    import functools
 
-    def _lcmap_lower(text: str) -> str:
-        """Windows' locale-invariant lower-casing (``LCMapStringEx``), through ctypes.
-
-        What ``ntpath.normcase`` calls from Python 3.12 on. The mapping is the
-        operating system's one-to-one table, not Unicode's full case mapping:
-        it leaves U+0130, the Kelvin sign and U+1E9E alone and has no final
-        sigma, where ``str.lower`` does otherwise (447 code points differ on
-        Windows 11, measured) - so only the call itself reproduces it, and it
-        equals ``ntpath.normcase`` on Python 3.14 for every code point.
-        """
-        if not text:
-            return text
-        import ctypes
-
-        lcmap = ctypes.WinDLL("kernel32", use_last_error=True).LCMapStringEx
-        lcmap.argtypes = [
+    @functools.lru_cache(maxsize=1)
+    def _lcmap_string_ex() -> Any:
+        """``kernel32.LCMapStringEx``, bound once (the binding costs more than the call)."""
+        function = ctypes.WinDLL("kernel32", use_last_error=True).LCMapStringEx
+        function.argtypes = [
             ctypes.c_wchar_p,  # locale name
             ctypes.c_uint32,  # flags
             ctypes.c_wchar_p,  # source
@@ -81,14 +72,29 @@ if sys.platform == "win32":
             ctypes.c_void_p,
             ctypes.c_void_p,
         ]
-        lcmap.restype = ctypes.c_int
+        function.restype = ctypes.c_int
+        return function
+
+    def _lcmap_lower(text: str) -> str:
+        """Windows' locale-invariant lower-casing (``LCMapStringEx``), through ctypes.
+
+        What ``ntpath.normcase`` calls from Python 3.12 on. The mapping is the
+        operating system's one-to-one table, not Unicode's full case mapping:
+        it leaves U+0130, the Kelvin sign and U+1E9E alone and has no final
+        sigma, where ``str.lower`` does otherwise (447 code points differ on
+        Windows 11, measured) - so only the call itself reproduces it, and it
+        equals ``ntpath.normcase`` on Python 3.14 for every code point. Being
+        one-to-one, it keeps the length, so the destination is sized like the
+        source and one call does it.
+        """
+        if not text:
+            return text
         invariant_locale, lowercase = "", 0x100  # LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE
         units = len(text.encode("utf-16-le", "surrogatepass")) // 2
-        size = lcmap(invariant_locale, lowercase, text, units, None, 0, None, None, None)
-        if size <= 0:
-            raise ctypes.WinError(ctypes.get_last_error())
-        buffer = ctypes.create_unicode_buffer(size)
-        written = lcmap(invariant_locale, lowercase, text, units, buffer, size, None, None, None)
+        buffer = ctypes.create_unicode_buffer(units)
+        written = _lcmap_string_ex()(
+            invariant_locale, lowercase, text, units, buffer, units, None, None, None
+        )
         if written <= 0:
             raise ctypes.WinError(ctypes.get_last_error())
         return ctypes.wstring_at(buffer, written)
@@ -115,7 +121,10 @@ def _windows_normcase(text: str) -> str:
     back to ``str.lower`` itself.
     """
     if sys.platform == "win32" and sys.version_info < (3, 12):
-        return _lcmap_lower(text.replace("/", "\\"))
+        text = text.replace("/", "\\")
+        # The two mappings part only outside ASCII, and str.lower is far
+        # cheaper than a system call per key.
+        return text.lower() if text.isascii() else _lcmap_lower(text)
     return ntpath.normcase(text)
 
 
@@ -147,10 +156,12 @@ class _CaseFoldMatcher:
         self._matcher = matcher
 
     def included(self, compare_key: str, full_key: str | None = None) -> bool:
-        return self._matcher.included(
-            _fold_to_key_space(compare_key),
-            _fold_to_key_space(full_key) if full_key is not None else None,
-        )
+        # The full key is not passed on: only relative patterns are delegated
+        # (`_needs_joined` keeps anchored and drive-carrying ones), and those
+        # match the compare key alone - folding a second string per entry
+        # would buy nothing.
+        del full_key
+        return self._matcher.included(_fold_to_key_space(compare_key))
 
 
 class AppendFilterAction(argparse.Action):
