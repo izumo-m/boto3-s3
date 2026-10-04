@@ -1090,8 +1090,12 @@ class TestZonelessStamp:
             storage, _ = _storage(pages)
             with pytest.raises(MalformedResponseError) as exc_info:
                 list(storage.scan(S3ScanOptions(recursive=True)))
-        assert isinstance(exc_info.value.__cause__, ValueError)
-        assert "10000" in str(exc_info.value)
+        if sys.platform == "linux":
+            # The step's own error (glibc reads the calendar a day ahead and
+            # CPython then refuses the year); another libc may fail the read
+            # itself, so only the kind of outcome is held elsewhere.
+            assert isinstance(exc_info.value.__cause__, ValueError)
+            assert "10000" in str(exc_info.value)
 
     @pytest.mark.skipif(sys.platform == "win32", reason="Windows' localtime ends at the year 3000")
     def test_the_microsecond_before_the_last_day_is_kept(self) -> None:
@@ -1119,7 +1123,7 @@ class TestZonelessStamp:
             with pytest.raises(MalformedResponseError) as exc_info:
                 list(storage.scan(S3ScanOptions(recursive=True)))
         assert (exc_info.value.bucket, exc_info.value.key) == ("bucket", "prefix/far.txt")
-        assert isinstance(exc_info.value.__cause__, (OverflowError, ValueError))
+        assert isinstance(exc_info.value.__cause__, (OverflowError, ValueError, OSError))
 
 
 class TestScanErrorMapping:
