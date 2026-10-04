@@ -2027,9 +2027,11 @@ class S3:
         # A custom side must support sorted enumeration (the merge-join) plus the
         # I/O the route uses; reject up front before any listing (gate below).
         # A pair_filter judges the orphans too, so it asks for the delete lane's
-        # capabilities even though it may decide to delete nothing.
+        # capabilities even though it may decide to delete nothing. The lane is
+        # on for anything but the literal False (below), so that is the test
+        # here too - not truthiness, which a callable is free to define.
         producers.require_open_sync_capabilities(
-            plan, delete=bool(delete_filter) or pair_filter is not None, operation="sync"
+            plan, delete=delete_filter is not False or pair_filter is not None, operation="sync"
         )
 
         # no_overwrite is an orthogonal write-guard (an option, so callers can

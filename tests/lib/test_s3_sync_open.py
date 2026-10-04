@@ -199,6 +199,26 @@ class TestSyncS3openDownload:
         assert "DELETE" in str(excinfo.value)
         assert calls == []
 
+    def test_a_falsy_callable_delete_filter_still_needs_the_capability(self) -> None:
+        # The delete lane is on for anything but the literal False; a callable
+        # object that happens to be falsy (an empty container with __call__)
+        # must not slip past the gate and fail on its first orphan instead.
+        class _KeepSet(set[str]):
+            def __call__(self, info: FileInfo) -> bool:
+                return info.key in self
+
+        dest = _NoDeleteMem({}, location="mem://data/")
+        client, calls = make_recording_client([])
+        with pytest.raises(ValidationError) as excinfo:
+            S3().sync(
+                S3Storage("s3://b/src/", client=client),
+                dest,
+                delete_filter=_KeepSet(),
+                transfer_config=_SERIAL,
+            )
+        assert "DELETE" in str(excinfo.value)
+        assert calls == []
+
     def test_no_delete_does_not_require_delete_capability(self) -> None:
         # Without --delete the custom destination needs no DELETE; the sync runs.
         store: dict[str, bytes] = {}
