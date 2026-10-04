@@ -382,6 +382,11 @@ class CompositeSet:
     it beat the single ``UnionRegex`` it replaces. Prefixes are tested
     first since directory excludes (``dir/*``) dominate real exclude lists,
     so a matching key short-circuits soonest.
+
+    A closure does not pickle, so the instance pickles as its four pattern
+    groups and rebuilds the predicate on the other side (``__reduce__``) -
+    without that a compiled ``GlobFilter`` over a mixed list could not cross
+    into a ``ProcessPoolExecutor`` worker, where every other matcher can.
     """
 
     def __init__(
@@ -394,6 +399,8 @@ class CompositeSet:
         lits = frozenset(literals)
         sufs = tuple(suffixes)
         prefs = tuple(prefixes)
+        general = tuple(general)
+        self._groups = (lits, sufs, prefs, general)
         # Bind the folded predicate as an instance attribute (not a method):
         # an instance-level callable is invoked directly, so the captured
         # tuples/frozenset are read as closure cells rather than via
@@ -409,6 +416,9 @@ class CompositeSet:
                 key.startswith(prefs) or key.endswith(sufs) or key in lits
             )
         self.matches = matches
+
+    def __reduce__(self) -> tuple[type[CompositeSet], tuple[object, ...]]:
+        return type(self), self._groups
 
 
 class _NeverMatch:

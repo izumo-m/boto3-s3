@@ -13,6 +13,7 @@ Three layers:
 from __future__ import annotations
 
 import ntpath
+import pickle
 import posixpath
 from dataclasses import FrozenInstanceError
 
@@ -641,3 +642,49 @@ class TestGlobFilter:
     def test_missing_compare_key_raises(self) -> None:
         with pytest.raises(ValueError, match="compare_key"):
             GlobFilter().exclude("*")(FileInfo(key="a.txt"))
+
+
+class TestPickle:
+    """Every matcher ``compile`` can return survives a pickle round trip.
+
+    The operations are handed to a ``ProcessPoolExecutor`` with their
+    ``filter=`` argument, so a compiled ``GlobFilter`` has to cross the process
+    boundary whatever shapes its patterns have. ``CompositeSet`` folds its
+    test into a closure, which does not pickle; it travels as its pattern
+    groups instead.
+    """
+
+    _KEYS = ("a.tmp", "build/x", "src/main.py", "notes", "x[1].log", "deep/build/x", "")
+
+    @pytest.mark.parametrize(
+        "rules",
+        [
+            [],
+            [("exclude", "*")],
+            [("exclude", "*"), ("include", "*.py")],
+            [("include", "*"), ("exclude", "build/*")],
+            [("exclude", "*.tmp"), ("exclude", "build/*")],  # CompositeSet, no regex
+            [("exclude", "*.tmp"), ("exclude", "build/*"), ("exclude", "x[[]1].log")],  # with one
+            [("exclude", "*.tmp"), ("exclude", "build/*"), ("exclude", "notes")],
+            [("exclude", "*.tmp"), ("include", "a.*"), ("exclude", "s?c/*")],  # Sequential
+            [("exclude", "/abs/*"), ("exclude", "*.tmp")],  # Anchored
+        ],
+    )
+    def test_a_compiled_filter_decides_the_same_after_a_round_trip(
+        self, rules: list[tuple[str, str]]
+    ) -> None:
+        keep = GlobFilter()
+        for kind, pattern in rules:
+            getattr(keep, kind)(pattern)
+        keep.compile()
+        again = pickle.loads(pickle.dumps(keep))
+        infos = [FileInfo(key=key, compare_key=key) for key in self._KEYS]
+        assert [again(info) for info in infos] == [keep(info) for info in infos]
+
+    def test_a_composite_set_round_trips_with_its_regex_branch(self) -> None:
+        matcher = CompositeSet(["notes"], [".tmp"], ["build/"], ["s?c/*"])
+        again = pickle.loads(pickle.dumps(matcher))
+        assert [again.matches(key) for key in self._KEYS] == [
+            matcher.matches(key) for key in self._KEYS
+        ]
+        assert again.matches("src/main.py") is True  # the regex branch survived
