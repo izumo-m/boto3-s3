@@ -1,4 +1,4 @@
-"""``--exclude`` / ``--include`` handling shared by rm / cp / mv / sync.
+r"""``--exclude`` / ``--include`` handling shared by rm / cp / mv / sync.
 
 aws-cli evaluates the two options as ONE ordered rule list (its
 ``AppendFilter`` action appends both to a shared ``filters`` dest) with
@@ -23,8 +23,10 @@ side's pattern bite the other side's entries), and the full path of a
 single-object command's local source is aws's ``local_format`` form - a
 trailing separator when it is a directory, so ``cp d s3://b/k --exclude d``
 does not exclude it and ``--exclude 'd/'`` does. Matching is host-aware
-exactly like aws-cli: case-insensitive on Windows (its ``fnmatch`` normcases
-both sides), byte-exact elsewhere.
+exactly like aws-cli: on Windows its ``fnmatch`` normcases both the path and
+the pattern, which lower-cases them by Windows' own rule and makes ``/`` and
+``\`` one separator - in an S3 key as well as in a pattern
+(``_windows_normcase``); elsewhere it is byte-exact.
 
 As an optimization, ``compile_filter`` delegates to the ``boto3_s3.globsieve``
 engine - a relative pattern matched against each entry's ``compare_key`` -
@@ -36,8 +38,10 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import ntpath
 import os
 import re
+import sys
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -49,15 +53,94 @@ if TYPE_CHECKING:
     from boto3_s3.types import FileFilter, FileInfo
 
 
+if sys.platform == "win32":
+
+    def _lcmap_lower(text: str) -> str:
+        """Windows' locale-invariant lower-casing (``LCMapStringEx``), through ctypes.
+
+        What ``ntpath.normcase`` calls from Python 3.12 on. The mapping is the
+        operating system's one-to-one table, not Unicode's full case mapping:
+        it leaves U+0130, the Kelvin sign and U+1E9E alone and has no final
+        sigma, where ``str.lower`` does otherwise (447 code points differ on
+        Windows 11, measured) - so only the call itself reproduces it, and it
+        equals ``ntpath.normcase`` on Python 3.14 for every code point.
+        """
+        if not text:
+            return text
+        import ctypes
+
+        lcmap = ctypes.WinDLL("kernel32", use_last_error=True).LCMapStringEx
+        lcmap.argtypes = [
+            ctypes.c_wchar_p,  # locale name
+            ctypes.c_uint32,  # flags
+            ctypes.c_wchar_p,  # source
+            ctypes.c_int,  # source length, in UTF-16 units
+            ctypes.c_wchar_p,  # destination
+            ctypes.c_int,  # destination size
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        lcmap.restype = ctypes.c_int
+        invariant_locale, lowercase = "", 0x100  # LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE
+        units = len(text.encode("utf-16-le", "surrogatepass")) // 2
+        size = lcmap(invariant_locale, lowercase, text, units, None, 0, None, None, None)
+        if size <= 0:
+            raise ctypes.WinError(ctypes.get_last_error())
+        buffer = ctypes.create_unicode_buffer(size)
+        written = lcmap(invariant_locale, lowercase, text, units, buffer, size, None, None, None)
+        if written <= 0:
+            raise ctypes.WinError(ctypes.get_last_error())
+        return ctypes.wstring_at(buffer, written)
+
+
+def _windows_normcase(text: str) -> str:
+    r"""``ntpath.normcase`` as the Python aws-cli bundles runs it on Windows.
+
+    aws-cli's ``fnmatch.fnmatch`` puts the path and the pattern through
+    ``os.path.normcase`` before matching. On Windows that turns every ``/``
+    into ``\`` - so the two are one separator, in an S3 key that holds a
+    literal backslash as much as in a pattern - and lower-cases with Windows'
+    own locale-invariant mapping (``LCMapStringEx``), which differs from
+    ``str.lower`` for a few hundred code points. Measured against ``aws.exe``
+    2.36.40 by real deletion: ``rm --recursive --exclude "a/b"`` keeps the key
+    ``a``, and ``--exclude "k*"`` does not keep a key starting with the
+    Kelvin sign.
+
+    The stdlib function is that mapping from Python 3.12 on, the version
+    aws-cli ships; on a Windows host running 3.10 or 3.11 it still lower-cases
+    with ``str.lower``, so the system call is made directly there. Drop that
+    branch once the supported floor reaches 3.12. Off Windows this is only
+    reached by tests that simulate the host, where ``ntpath.normcase`` falls
+    back to ``str.lower`` itself.
+    """
+    if sys.platform == "win32" and sys.version_info < (3, 12):
+        return _lcmap_lower(text.replace("/", "\\"))
+    return ntpath.normcase(text)
+
+
+def _fold_to_key_space(text: str) -> str:
+    r"""``_windows_normcase``, with the one separator spelled ``/`` again.
+
+    The delegated engine matches in the ``/``-separated key space
+    (``compare_key``), so both sides come back to it after the fold; nothing
+    but the separator's spelling differs from the ``\`` form aws-cli matches
+    in, as long as no pattern holds a ``[`` (``_needs_joined``).
+    """
+    return _windows_normcase(text).replace("\\", "/")
+
+
 class _CaseFoldMatcher:
-    """Lower-case keys before matching - the Windows case-insensitive wrapper.
+    """Fold keys before matching - the Windows wrapper around the delegated engine.
 
     aws-cli matches with ``fnmatch.fnmatch``, which ``os.path.normcase``s both
-    the path and the pattern; on Windows that lower-cases, so the filter is
-    case-insensitive there (overview.md section 3: case sensitivity is matched to
-    aws-cli per OS). The library matchers stay byte-exact (the permissive
-    building block); this CLI-layer wrapper folds both keys at match time while
-    ``compile_filter`` lower-cases the patterns at compile time.
+    the path and the pattern; on Windows that lower-cases and unifies the two
+    separators (``_windows_normcase``), so the filter is case-insensitive
+    there and a ``\\`` in a key is a separator (overview.md section 3: case
+    sensitivity is matched to aws-cli per OS). The library matchers stay
+    byte-exact (the permissive building block); this CLI-layer wrapper folds
+    the keys at match time while ``compile_filter`` folds the patterns at
+    compile time.
     """
 
     def __init__(self, matcher: Matcher) -> None:
@@ -65,7 +148,8 @@ class _CaseFoldMatcher:
 
     def included(self, compare_key: str, full_key: str | None = None) -> bool:
         return self._matcher.included(
-            compare_key.lower(), full_key.lower() if full_key is not None else None
+            _fold_to_key_space(compare_key),
+            _fold_to_key_space(full_key) if full_key is not None else None,
         )
 
 
@@ -164,6 +248,7 @@ def _needs_joined(
     dest_base: str,
     both_s3: bool,
     dir_op: bool,
+    fold: bool = False,
 ) -> bool:
     """Whether only the joined matching reproduces aws-cli for this command.
 
@@ -190,6 +275,11 @@ def _needs_joined(
       so the pattern matches full paths, which ``compare_key`` cannot express;
     - (Windows) a pattern carries a drive: ``ntpath.join`` merges or keeps it
       against the base's drive, which needs the real base;
+    - (Windows, ``fold``) a pattern holds a ``[``: aws-cli matches in the
+      backslash-separated form its normcase produces, the delegated engine in
+      the ``/``-separated key space, and a character class is where the two
+      spellings of the separator can part (a range such as ``[+-9]`` spans
+      ``/`` and not the backslash);
     - both sides are s3 and one base sits under the other: that side's entries
       also start with the other side's base, so the other side's joined patterns
       can match them across sides (equal bases - rm's ``dest = src`` - are fine:
@@ -203,6 +293,8 @@ def _needs_joined(
         if globsieve.is_anchored(p.pattern):
             return True
         if os.sep == "\\" and os.path.splitdrive(p.pattern)[0]:
+            return True
+        if fold and "[" in p.pattern:
             return True
     if both_s3:
         src_dir = src_base if src_base.endswith("/") else f"{src_base}/"
@@ -228,8 +320,10 @@ class _JoinedFilter:
     per-side ``os.sep`` rewrite, collapsed the way ``globsieve`` does), against
     the entry's full path in aws's form: ``bucket/key`` for an s3 entry (the
     bucket read from its stamped ``storage``), the absolute ``/``-folded path
-    for a local one. On Windows the joined pattern and the key are both
-    lower-cased (aws normcases). A hand-built ``FileInfo`` without a stamped
+    for a local one. On Windows (``fold``) the joined pattern and the path
+    both go through ``_windows_normcase`` instead, exactly as aws-cli's
+    ``fnmatch`` normcases its two arguments: lower-cased by Windows' rule,
+    every separator a backslash. A hand-built ``FileInfo`` without a stamped
     ``storage`` falls back to its bare ``key``.
     """
 
@@ -254,9 +348,8 @@ class _JoinedFilter:
         for p in patterns:
             branches: list[str] = []
             for base in dict.fromkeys(bases):
-                joined = os.path.join(base, p.pattern).replace(os.sep, "/")
-                if fold:
-                    joined = joined.lower()
+                joined = os.path.join(base, p.pattern)
+                joined = _windows_normcase(joined) if fold else joined.replace(os.sep, "/")
                 branches.append(f"(?:{fnmatch.translate(joined)})")
             items.append((p.kind, re.compile("|".join(branches))))
         self._items = items
@@ -271,7 +364,7 @@ class _JoinedFilter:
             if single is not None and path.rstrip("/") == single.rstrip("/"):
                 path = single
         if self._fold:
-            path = path.lower()
+            path = _windows_normcase(path)
         included = True
         for kind, regex in self._items:
             if regex.match(path) is not None:
@@ -306,6 +399,7 @@ def compile_filter(
         dest_base=dest_base,
         both_s3=isinstance(src, S3Storage) and isinstance(dest, S3Storage),
         dir_op=dir_op,
+        fold=fold,
     ):
         local_single = None
         if not dir_op and isinstance(src, LocalStorage):
@@ -321,11 +415,12 @@ def compile_filter(
             local_single = src.format(dir_op=False)[0].replace(os.sep, "/")
         return _JoinedFilter(patterns, (src_base, dest_base), fold, local_single=local_single)
     # On Windows aws-cli's fnmatch normcases both the pattern and the key, so the
-    # filter is case-insensitive. Lower-case the patterns at compile time and the
-    # keys at match time (via _CaseFoldMatcher) to reproduce that; on POSIX
-    # os.name != "nt", so matching stays byte-exact.
+    # filter is case-insensitive and its two separators are one. Fold the
+    # patterns at compile time and the keys at match time (via
+    # _CaseFoldMatcher) to reproduce that; on POSIX os.name != "nt", so
+    # matching stays byte-exact.
     if fold:
-        patterns = [GlobPattern(p.kind, p.pattern.lower()) for p in patterns]
+        patterns = [GlobPattern(p.kind, _fold_to_key_space(p.pattern)) for p in patterns]
     matcher = globsieve.compile(patterns)
     return _as_file_filter(_CaseFoldMatcher(matcher) if fold else matcher)
 

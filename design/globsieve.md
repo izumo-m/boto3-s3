@@ -246,9 +246,13 @@ pattern reaches the match `/`-form either way**:
   to this engine only for the plain relative case where the two coincide - so
   what this engine sees from the CLI is always a `/`-form relative pattern
   against the `/`-form `compare_key`. On Windows aws-cli `normcase`s both
-  sides, making the match **case-insensitive**; `cli/src/boto3_s3_cli/filters.py`
-  reproduces this by lower-casing patterns at compile and keys at match
-  (`os.name == "nt"`), and stays byte-exact on POSIX.
+  sides, which makes the match **case-insensitive** and makes `/` and `\` one
+  separator - in an S3 key holding a literal backslash too;
+  `cli/src/boto3_s3_cli/filters.py` reproduces this by folding patterns at
+  compile and keys at match (`os.name == "nt"`) with that same `normcase` -
+  Windows' own lower-casing, which is not `str.lower` - and stays byte-exact
+  on POSIX. A pattern holding a `[` is not delegated there: a character class
+  is where the two spellings of the separator can part.
 - **library**: a `GlobFilter` matches a relative pattern against the `/`-form
   `compare_key` (written `/`-form or in the host separator - `compile` folds
   it) and an absolute one

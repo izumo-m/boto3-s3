@@ -569,7 +569,8 @@ family — are silently ignored on a download rather than rejected.
 ## 5. Filtering on Windows
 
 `--exclude` / `--include` patterns match case-insensitively on Windows, matching
-`aws`. A backslash in a pattern is treated as a separator there, so
-`logs\*.txt` matches `logs/x.txt`; on Linux and macOS a backslash stays a
-literal character. The `boto3-s3` Python library does not apply the
-case-insensitive rule — that tightening belongs to this command.
+`aws`. A backslash is treated as a separator there, in a pattern and in an S3
+key alike: `logs\*.txt` matches `logs/x.txt`, and `logs/*` matches a key
+spelled `logs\x.txt`. On Linux and macOS a backslash stays a literal
+character. The `boto3-s3` Python library applies neither rule — that
+tightening belongs to this command.
