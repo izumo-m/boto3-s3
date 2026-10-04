@@ -214,7 +214,8 @@ def _byte_ordered(
     backend that declares ``SORTABLE_SCAN`` and breaks the promise, or an
     S3-compatible endpoint whose ``ListObjectsV2`` does not sort - would
     *silently* mis-pair: phantom src-only / dest-only pairs, and with the delete
-    lane on, the deletion of entries that exist on both sides. Continuing on
+    lane on, the deletion from the destination of entries the source has too
+    (the source is never deleted from). Continuing on
     such a stream is data loss, so this raises a ``ValidationError`` naming the
     offending side and key pair, aborting the run at the first descent instead.
     The check runs unconditionally (it is not an ``assert``): the failure it
@@ -280,7 +281,8 @@ class Comparator:
         Raises ``ValidationError`` from the pull that first sees a key smaller
         than the one before it on the same side (the order guard,
         ``_byte_ordered``): the merge cannot pair an unordered stream, and
-        continuing would delete entries present on both sides. Detection is as
+        continuing would delete destination entries the source has too.
+        Detection is as
         late as the descent itself, so pairs already yielded stand - the caller
         keeps whatever it did with them - but the offending entry is never
         paired and nothing after it is read.

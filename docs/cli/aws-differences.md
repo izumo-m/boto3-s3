@@ -174,15 +174,16 @@ run comes out differently, listed in section 1.
   return, and what the local walk sorts to match. Against an S3-compatible
   endpoint whose `ListObjectsV2` hands back keys out of order, `aws` keeps
   merging and exits 0, pairing keys that do not belong together; with
-  `--delete` that means deleting a key present on **both** sides and then
-  copying it again (measured). Here the descent is caught as the stream is
-  read, and the run ends with one line — `fatal error: source sync stream is
+  `--delete` that means deleting from the destination a key the source has
+  too — the source is never touched — and then copying it again (measured).
+  Here the descent is caught as the stream is read, and the run ends with one
+  line — `fatal error: source sync stream is
   not byte-ordered by compare_key (...)`, or `destination` for the other
   side — and exit code 1. Transfers and deletions already reported before that
   point stand on both tools; nothing past it happens here. This is deliberately
   not mirrored, for the same reason as the swallowed per-item failure above:
-  mirroring would mean deleting data that is present on both sides. Reaching it
-  takes such an endpoint — S3 Express directory buckets, whose listings promise
+  mirroring would mean deleting destination data that the source still has.
+  Reaching it takes such an endpoint — S3 Express directory buckets, whose listings promise
   no order, are refused by `sync` up front on both tools.
 - **A download stamps an old object on a different second.** Both tools give
   the downloaded file the object's `LastModified`, and for every timestamp

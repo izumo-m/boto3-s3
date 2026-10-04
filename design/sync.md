@@ -270,7 +270,8 @@ mtime rule (full float precision; `delta = dest.mtime - src.mtime`):
   resolution; only a caller-made `S3Storage` without a client has its client
   built after this check): directory buckets drop `ListObjectsV2`'s
   lexicographic guarantee, so the merge-join could pair keys wrongly and
-  `delete_filter` could remove keys present on both sides. The CLI rejects the
+  `delete_filter` could remove from the destination keys the source has too.
+  The CLI rejects the
   same paths at its own validation stage (rc 252); the library guard is the
   backstop for direct callers.
 - opens3 / s3open (a custom backend on one side, the other always S3 - the open
