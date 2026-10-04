@@ -392,6 +392,60 @@ class TestComposite:
         assert _upload_filter(client, check_size=False)(pair) is True
 
 
+def _sha256_composite(data: bytes, sizes: list[int]) -> str:
+    """The bare COMPOSITE sha256 digest (no part count), computed independently."""
+    combined = b""
+    off = 0
+    for s in sizes:
+        combined += hashlib.sha256(data[off : off + s]).digest()
+        off += s
+    return _b64(hashlib.sha256(combined).digest())
+
+
+class TestCompositeForms:
+    """The two spellings of a COMPOSITE value: ``<digest>-<n>`` and the bare digest.
+
+    ``HeadObject`` appends the part count; MinIO's ``GetObjectAttributes``
+    returns the digest bare and says COMPOSITE in ``ChecksumType`` alone
+    (measured). Read as a FULL_OBJECT value, the bare form never matches the
+    whole-file hash, so an unchanged multipart object would be copied on every
+    run.
+    """
+
+    def _upload(self, tmp_path: Path, resp: Any, data: bytes = _DATA) -> bool:
+        p = _write(tmp_path, data)
+        pair = _pair(
+            TransferType.UPLOAD,
+            src=local_info(native_key(p), size=len(data)),
+            dest=_s3(size=len(data)),
+        )
+        return _upload_filter(_FakeClient({"obj": resp}), check_size=False)(pair)
+
+    def test_a_bare_value_marked_composite_matches(self, tmp_path: Path) -> None:
+        resp = _composite_resp("sha256", _sha256_composite(_DATA, _PARTS), _PARTS)
+        assert self._upload(tmp_path, resp) is False
+
+    def test_a_bare_composite_value_still_tells_changed_content(self, tmp_path: Path) -> None:
+        resp = _composite_resp("sha256", _sha256_composite(_DATA, _PARTS), _PARTS)
+        changed = b"X" + _DATA[1:]
+        assert self._upload(tmp_path, resp, changed) is True
+
+    def test_a_part_count_alone_marks_a_composite(self, tmp_path: Path) -> None:
+        # An endpoint that predates ChecksumType: the suffix is the only sign.
+        value = f"{_sha256_composite(_DATA, _PARTS)}-{len(_PARTS)}"
+        resp = _composite_resp("sha256", value, _PARTS)
+        del resp["Checksum"]["ChecksumType"]
+        assert self._upload(tmp_path, resp) is False
+
+    def test_a_part_count_that_disagrees_with_the_listing_copies(self, tmp_path: Path) -> None:
+        resp = _composite_resp("sha256", f"{_sha256_composite(_DATA, _PARTS)}-9", _PARTS)
+        assert self._upload(tmp_path, resp) is True
+
+    def test_a_part_count_that_is_no_number_copies(self, tmp_path: Path) -> None:
+        resp = _composite_resp("sha256", f"{_sha256_composite(_DATA, _PARTS)}-x", _PARTS)
+        assert self._upload(tmp_path, resp) is True
+
+
 # -- s3 -> s3 (COPY) -----------------------------------------------------------
 
 
@@ -459,6 +513,28 @@ class TestCopyDirect:
         assert len(src.calls) == 1
         assert len(dest.calls) == 1
 
+    def test_a_part_count_on_one_side_only_still_compares(self) -> None:
+        # The same COMPOSITE digest, spelled with the count by one endpoint and
+        # bare by the other: the same object.
+        f = self._copy(
+            _composite_resp("sha256", "ZZZ-3", [10, 10, 10]),
+            _composite_resp("sha256", "ZZZ", [10, 10, 10]),
+        )
+        assert f(self._pair()) is False
+
+    def test_differing_part_counts_copy(self) -> None:
+        f = self._copy(
+            _composite_resp("sha256", "ZZZ-3", [10, 10, 10]),
+            _composite_resp("sha256", "ZZZ-4", [10, 10, 5, 5]),
+        )
+        assert f(self._pair()) is True
+
+    def test_a_composite_digest_against_a_full_object_one_copies(self) -> None:
+        # Equal text, different kinds: a digest of part digests says nothing
+        # about a digest of the whole object.
+        f = self._copy(_composite_resp("sha256", "ZZZ", [10, 10, 10]), _full("sha256", "ZZZ"))
+        assert f(self._pair()) is True
+
 
 # -- indeterminate -> copy on errors -------------------------------------------
 
@@ -521,6 +597,79 @@ class TestClientErrorIndeterminate:
             dest=_s3(size=len(_DATA)),
         )
         assert _upload_filter(client)(pair) is True
+
+
+class TestPartListingIndeterminate:
+    """A part listing that cannot be relied on reads as indeterminate (copy).
+
+    The part split has to be known exactly to reproduce a COMPOSITE checksum;
+    a listing short of that is neither followed forever nor allowed to stop
+    the run.
+    """
+
+    def _upload(self, tmp_path: Path, client: _FakeClient) -> bool:
+        p = _write(tmp_path)
+        pair = _pair(
+            TransferType.UPLOAD,
+            src=local_info(native_key(p), size=len(_DATA)),
+            dest=_s3(size=len(_DATA)),
+        )
+        return _upload_filter(client)(pair)
+
+    def test_a_marker_that_does_not_advance_copies(self, tmp_path: Path) -> None:
+        # An endpoint that ignores PartNumberMarker answers every page alike;
+        # following its marker would ask for the same page forever.
+        page = {
+            "Checksum": {"ChecksumSHA256": "ABC-2", "ChecksumType": "COMPOSITE"},
+            "ObjectParts": {
+                "Parts": [{"PartNumber": 1, "Size": 500}],
+                "IsTruncated": True,
+                "NextPartNumberMarker": 1,
+            },
+        }
+        client = _FakeClient({"obj": page})
+        assert self._upload(tmp_path, client) is True
+        assert len(client.calls) == 2  # the first page, and the one that repeated its marker
+
+    @pytest.mark.parametrize("marker", ["x", 0, -1])
+    def test_a_marker_that_cannot_continue_the_listing_copies(
+        self, tmp_path: Path, marker: object
+    ) -> None:
+        page = {
+            "Checksum": {"ChecksumSHA256": "ABC-2", "ChecksumType": "COMPOSITE"},
+            "ObjectParts": {
+                "Parts": [{"PartNumber": 1, "Size": 500}],
+                "IsTruncated": True,
+                "NextPartNumberMarker": marker,
+            },
+        }
+        client = _FakeClient({"obj": page})
+        assert self._upload(tmp_path, client) is True
+        assert len(client.calls) == 1
+
+    def test_a_part_without_a_size_copies(self, tmp_path: Path) -> None:
+        page = {
+            "Checksum": {"ChecksumSHA256": "ABC-2", "ChecksumType": "COMPOSITE"},
+            "ObjectParts": {"Parts": [{"PartNumber": 1}, {"PartNumber": 2, "Size": 524}]},
+        }
+        assert self._upload(tmp_path, _FakeClient({"obj": page})) is True
+
+    def test_a_later_page_part_without_a_size_copies(self, tmp_path: Path) -> None:
+        def respond(kw: dict[str, Any]) -> Any:
+            if kw.get("PartNumberMarker"):
+                return {"ObjectParts": {"Parts": [{"PartNumber": 2}], "IsTruncated": False}}
+            return {
+                "Checksum": {"ChecksumSHA256": "ABC-2", "ChecksumType": "COMPOSITE"},
+                "ObjectParts": {
+                    "Parts": [{"PartNumber": 1, "Size": 500}],
+                    "IsTruncated": True,
+                    "NextPartNumberMarker": 1,
+                },
+            }
+
+        client = _FakeClient({"obj": respond})
+        assert self._upload(tmp_path, client) is True
+        assert len(client.calls) == 2
 
 
 class TestBotoCoreErrorAborts:
@@ -708,7 +857,8 @@ class TestHelperUnits:
         sizes = (500, 524)
         with open(p, "rb") as fh:
             got = _composite_b64(fh, "crc32c", sizes)
-        assert got == _composite_golden(_DATA, list(sizes), "crc32c")
+        # The digest alone: the "-N" a response may append is the caller's.
+        assert got == _composite_golden(_DATA, list(sizes), "crc32c").rsplit("-", 1)[0]
 
     def test_can_compute_always_for_stdlib(self) -> None:
         for algo in ("crc32", "sha1", "sha256"):

@@ -389,12 +389,21 @@ strategy in `ParallelFilter` (section 10) to run those concurrently.
   sizes for a `COMPOSITE` one (a SHA-style multipart). **s3->s3** compares the
   two objects' stored checksums directly (a `GetObjectAttributes` on each, no
   bytes read).
+- **Telling a `COMPOSITE` checksum.** By the response's `ChecksumType`, or by
+  a part count appended to the value (`<digest>-<n>`) - either is enough,
+  because endpoints differ in which they send: MinIO's `GetObjectAttributes`
+  returns the digest bare with `ChecksumType: COMPOSITE` where its
+  `HeadObject` appends the count (measured). The digest is compared without
+  the count, and a count that is present must agree too.
 - **Indeterminate -> copy.** An object with no native checksum, a mismatched
-  algorithm across an s3->s3 pair, an unknown algorithm, a CRC32C / CRC64NVME
+  algorithm or kind across an s3->s3 pair, an unknown algorithm, a CRC32C / CRC64NVME
   checksum beyond `pure_max_size` when `awscrt` is unavailable, or any
   `GetObjectAttributes` **`ClientError`** (a 404, a denied
   `s3:GetObjectAttributes`, an SSE-C object that needs a key) is treated as
-  differing - the strategy never skips on an indeterminate compare. A
+  differing - the strategy never skips on an indeterminate compare. So is a
+  `COMPOSITE` object whose part listing cannot be relied on: a part with no
+  size, or a truncated page whose continuation marker does not advance (which
+  is not followed - it would ask for the same page forever). A
   `BotoCoreError` (no credentials, an unreachable endpoint, a timeout) is not
   per-object: it aborts the sync, translated to the library taxonomy
   (silently "copy everything" would mask a broken environment).

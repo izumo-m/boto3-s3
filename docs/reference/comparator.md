@@ -575,8 +575,9 @@ that is an [`S3FileInfo`](./results.md#s3fileinfo) and the `check_size` step
 runs first.
 
 - both sides `S3FileInfo`: each object's stored checksum is fetched and the two
-  are compared by algorithm and value string. No bytes are read, and the
-  `ObjectParts` pagination is skipped since the value strings compare directly.
+  are compared by algorithm, kind (`FULL_OBJECT` or `COMPOSITE`) and digest. No
+  bytes are read, and the `ObjectParts` pagination is skipped since the stored
+  digests compare directly.
 - exactly one side `S3FileInfo`: that side's checksum is fetched and the
   readable side's bytes are read through its `storage`
   ([`./storage.md`](./storage.md)) and hashed with the same algorithm —
@@ -584,14 +585,23 @@ runs first.
   `GetObjectAttributes` reported for a `COMPOSITE` one. Which endpoint the
   fetch addresses is taken from `pair.transfer_type`: the `dest` location for
   `UPLOAD`, the `src` location for anything else.
+
+A `COMPOSITE` checksum is recognized by the response's `ChecksumType` or by a
+part count appended to the value (`<digest>-<n>`), whichever the endpoint
+sends: some send the digest bare and name the kind only in `ChecksumType`.
+The digests are compared without the count; a count that is present has to
+agree as well — with the other side's on an s3-to-s3 pair, with the number of
+parts listed on an upload or download.
 - neither side `S3FileInfo`: the pair is copied.
 
 **What reads as indeterminate**, and is therefore copied rather than skipped:
 an object carrying no native checksum; an algorithm outside `crc32`, `crc32c`,
 `crc64nvme`, `sha1` and `sha256`; a `crc32c` / `crc64nvme` object past
 `pure_max_size` with no `awscrt`; a `COMPOSITE` object whose part sizes could
-not be read in full; two S3 sides whose stored checksums use different
-algorithms; a readable side whose `storage` or `compare_key` is `None`; a
+not be read in full (no part listing, a part without a size, a continuation
+marker that does not move past the page it came with); two S3 sides whose
+stored checksums use different algorithms or are of different kinds; a
+readable side whose `storage` or `compare_key` is `None`; a
 readable side longer than the sum of the parts, an appended tail the per-part
 digests would not otherwise see; and any `ClientError` from a
 `GetObjectAttributes` call — a 404, a denied `s3:GetObjectAttributes`, an

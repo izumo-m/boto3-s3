@@ -192,14 +192,20 @@ class ChecksumComparison(ContentComparison):
         key = readable.compare_key
         if storage is None or key is None:
             return True  # cannot open the readable side -> treat as differing (copy)
+        part_sizes = remote_checksum.part_sizes
+        if part_sizes is not None and remote_checksum.part_count not in (
+            None,
+            str(len(part_sizes)),
+        ):
+            # The value's own part count disagrees with the part listing: the
+            # two describe different objects, so nothing read here could match.
+            return True
         try:
             with storage.open(key, "rb") as fh:
-                if remote_checksum.part_sizes is not None:
+                if part_sizes is not None:
                     # None = the readable side outruns the parts sum (an appended
                     # tail): definitely different content, whatever the digests say.
-                    readable_value = _composite_b64(
-                        fh, remote_checksum.algorithm, remote_checksum.part_sizes
-                    )
+                    readable_value = _composite_b64(fh, remote_checksum.algorithm, part_sizes)
                 else:
                     readable_value = _whole_b64(fh, remote_checksum.algorithm)
         except OSError as exc:
@@ -217,12 +223,17 @@ class ChecksumComparison(ContentComparison):
     def _copy_differs(self, src: FileInfo, dest: FileInfo) -> bool:
         """s3-to-s3: compare the two objects' stored checksums (no bytes read).
 
-        The stored value strings are compared directly, so the COMPOSITE part
-        sizes are not needed (``need_parts=False`` skips that pagination).
+        The stored digests are compared directly, so the COMPOSITE part sizes
+        are not needed (``need_parts=False`` skips that pagination). Two
+        checksums are comparable only when they are the same algorithm and the
+        same kind (a COMPOSITE digest and a FULL_OBJECT one say nothing about
+        each other); a part count is compared where both responses spell one.
         """
         a = self._remote_checksum(self._src_storage, src.key, need_parts=False)
         b = self._remote_checksum(self._dest_storage, dest.key, need_parts=False)
-        if a is None or b is None or a.algorithm != b.algorithm:
+        if a is None or b is None or a.algorithm != b.algorithm or a.composite != b.composite:
+            return True
+        if None not in (a.part_count, b.part_count) and a.part_count != b.part_count:
             return True
         return a.value != b.value
 
@@ -240,11 +251,24 @@ class ChecksumComparison(ContentComparison):
 
 @dataclass(frozen=True, slots=True)
 class _RemoteChecksum:
-    """An object's native checksum as read from GetObjectAttributes."""
+    """An object's native checksum as read from GetObjectAttributes.
+
+    ``value`` is the base64 digest alone. A COMPOSITE (multipart) checksum is
+    a digest of the parts' digests, and responses spell it two ways: with the
+    part count appended (``<base64>-<n>``, as ``HeadObject`` does) or bare, the
+    kind told by ``ChecksumType`` alone (measured: MinIO's
+    ``GetObjectAttributes``). Both arrive here in one shape: ``composite``
+    says which kind the digest is, ``part_count`` holds the appended count
+    when the response carried one (``None`` otherwise; kept as the text it
+    came in, so a suffix that is no number just equals no real count), and
+    ``part_sizes`` the part byte sizes when they were asked for.
+    """
 
     algorithm: str  # crc32 / crc32c / crc64nvme / sha1 / sha256
-    value: str  # base64 digest, with a "-N" suffix for a COMPOSITE multipart object
-    part_sizes: tuple[int, ...] | None  # part byte sizes for a COMPOSITE object, else None
+    value: str
+    composite: bool
+    part_count: str | None
+    part_sizes: tuple[int, ...] | None
 
 
 def _fetch_remote(
@@ -253,13 +277,14 @@ def _fetch_remote(
     """GetObjectAttributes -> the object's checksum, or ``None`` (indeterminate).
 
     ``None`` means "cannot compare, copy": no checksum on the object, a COMPOSITE
-    object whose parts could not be read, or any ``ClientError`` anywhere in the
-    read (a 404, a denied ``s3:GetObjectAttributes``, an SSE-C object needing a
-    key, a failure mid part-size pagination, ...) - a per-object rejection never
-    aborts the sync. A ``BotoCoreError`` (no credentials, an unreachable
-    endpoint, a read timeout) is not per-object: it raises, translated to the
-    library taxonomy. ``need_parts=False`` (an s3-to-s3 compare, which
-    uses the value string directly) skips the COMPOSITE part-size pagination.
+    object whose part listing cannot be relied on (`_part_sizes`), or any
+    ``ClientError`` anywhere in the read (a 404, a denied
+    ``s3:GetObjectAttributes``, an SSE-C object needing a key, a failure mid
+    part-size pagination, ...) - a per-object rejection never aborts the sync.
+    A ``BotoCoreError`` (no credentials, an unreachable endpoint, a read
+    timeout) is not per-object: it raises, translated to the library taxonomy.
+    ``need_parts=False`` (an s3-to-s3 compare, which compares the stored
+    digests directly) skips the COMPOSITE part-size pagination.
     """
     from botocore.exceptions import BotoCoreError, ClientError
 
@@ -280,18 +305,29 @@ def _fetch_remote(
                 break
         if algorithm is None or value is None:
             return None
+        # A composite (multipart) checksum is told by the response's
+        # ChecksumType, or by a part count appended to the value ("base64-N" -
+        # the standard base64 alphabet plus '=' padding never contains '-', so
+        # a '-' is always that suffix). Either sign is enough: a response may
+        # carry the type and no suffix (MinIO's GetObjectAttributes), or - from
+        # an endpoint older than ChecksumType - the suffix and no type.
+        digest, dash, suffix = value.rpartition("-")
+        part_count: str | None = None
+        if dash:
+            value, part_count = digest, suffix
+        composite = bool(dash) or checksum.get("ChecksumType") == "COMPOSITE"
         part_sizes: tuple[int, ...] | None = None
-        # A composite (multipart) checksum is reported as "base64-N" (the part
-        # count suffix); a full-object checksum has no suffix. The standard base64
-        # alphabet plus '=' padding never contains '-', so the substring test
-        # reliably tells the two apart on real S3 responses - the model's
-        # ChecksumType would be marginally more robust, but S3's aws-cli
-        # customizations carry no COMPOSITE handling to mirror.
-        if need_parts and "-" in value:
+        if need_parts and composite:
             part_sizes = _part_sizes(client, bucket, key, resp, request_payer)
             if part_sizes is None:
                 return None
-        return _RemoteChecksum(algorithm=algorithm, value=value, part_sizes=part_sizes)
+        return _RemoteChecksum(
+            algorithm=algorithm,
+            value=value,
+            composite=composite,
+            part_count=part_count,
+            part_sizes=part_sizes,
+        )
     except ClientError:
         return None
     except BotoCoreError as exc:
@@ -336,31 +372,47 @@ def _get_object_attributes(client: Any, **kwargs: Any) -> Any:
 def _part_sizes(
     client: Any, bucket: str, key: str, first: Any, request_payer: str | None
 ) -> tuple[int, ...] | None:
-    """The COMPOSITE object's part byte sizes, in order (paginated past 1000)."""
+    """The COMPOSITE object's part byte sizes, in order (paginated past 1000).
+
+    ``None`` when the listing cannot be trusted to describe the object - no
+    ``ObjectParts`` at all, a part without a usable ``Size``, a truncated page
+    with no marker to continue from or with one that does not move past the
+    page just read (following it would ask for the same page forever), or no
+    parts in the end. The caller reads that as indeterminate (copy): a part
+    split that is not known exactly cannot reproduce the checksum.
+    """
     parts_info: Any = first.get("ObjectParts")
     if not parts_info:
         return None
     extra: dict[str, Any] = {"RequestPayer": request_payer} if request_payer else {}
-    sizes: list[int] = [int(p["Size"]) for p in parts_info.get("Parts", [])]
-    truncated: Any = parts_info.get("IsTruncated", False)
-    marker: Any = parts_info.get("NextPartNumberMarker")
-    while truncated:
-        if not marker:
-            return None  # truncated but no marker (malformed) -> indeterminate -> copy
+    sizes: list[int] = []
+    followed = 0  # the marker the page in hand was asked with (0: the first page)
+    while True:
+        parts: list[Any] = parts_info.get("Parts") or []
+        try:
+            sizes.extend(int(part["Size"]) for part in parts)
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not parts_info.get("IsTruncated", False):
+            break
+        try:
+            marker = int(parts_info.get("NextPartNumberMarker") or 0)
+        except (TypeError, ValueError):
+            return None
+        if marker <= followed:
+            return None
+        followed = marker
         resp: Any = _get_object_attributes(
             client,
             Bucket=bucket,
             Key=key,
             ObjectAttributes=["ObjectParts"],
-            PartNumberMarker=int(marker),
+            PartNumberMarker=marker,
             **extra,
         )
         parts_info = resp.get("ObjectParts") or {}
-        sizes.extend(int(p["Size"]) for p in parts_info.get("Parts", []))
-        truncated = parts_info.get("IsTruncated", False)
-        marker = parts_info.get("NextPartNumberMarker")
     # An empty part list is degenerate (S3 multipart objects have >= 1 part);
-    # treat it as indeterminate rather than hashing a "-0" that cannot match.
+    # treat it as indeterminate rather than hashing a digest that cannot match.
     return tuple(sizes) if sizes else None
 
 
@@ -396,12 +448,14 @@ def _whole_b64(fh: BinaryIO, algorithm: str) -> str:
 
 
 def _composite_b64(fh: BinaryIO, algorithm: str, part_sizes: tuple[int, ...]) -> str | None:
-    """The base64 ``COMPOSITE`` checksum + ``"-N"`` at the exact part boundaries.
+    """The base64 ``COMPOSITE`` checksum at the exact part boundaries.
 
-    ``base64(ALGO(concat of each part's raw ALGO digest)) + "-<n>"`` - the
+    ``base64(ALGO(concat of each part's raw ALGO digest))`` - the
     checksum-of-checksums S3 forms for a multipart upload, with the part split
     taken from GetObjectAttributes' ``ObjectParts`` (so it is exact, not guessed),
-    read from the stream ``fh``. Both length mismatches read as differing: a
+    read from the stream ``fh``. The part count some responses append to the
+    value (``-<n>``) is not part of the digest; it is ``len(part_sizes)``, and
+    comparing it is the caller's. Both length mismatches read as differing: a
     readable side shorter than the parts sum hashes short (a truncated final
     part), and one *longer* returns ``None`` - the remote object is exactly the
     parts sum long, so an appended tail means different content even though the
@@ -424,7 +478,7 @@ def _composite_b64(fh: BinaryIO, algorithm: str, part_sizes: tuple[int, ...]) ->
     top = _new_hasher(algorithm)
     assert top is not None
     top.update(bytes(combined))
-    return base64.b64encode(top.digest()).decode("ascii") + f"-{len(part_sizes)}"
+    return base64.b64encode(top.digest()).decode("ascii")
 
 
 class _IntCrc:
