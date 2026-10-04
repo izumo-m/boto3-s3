@@ -16,8 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `S3FileInfo.etag` now holds the ETag exactly as S3 returned it, quotes included (it used to be stripped), so a multipart download's `If-Match` is the response's own text as with `aws s3`; `EtagComparison.content_differs` takes an ETag in either form.
 - `get_file` no longer fails on a long multi-byte destination name, and `put_file` refuses a FIFO, socket or device instead of hanging or leaking an `OSError`.
 - `LocalStorage` gained `exists()` and `ensure_directory()`, which ask about the path as typed the way `aws s3`'s pre-checks do; an empty local path is now rejected instead of meaning the working directory.
-- The module-level functions (`boto3_s3.cp` and the rest) can now be handed to a `ProcessPoolExecutor`, and a `BatchError` they raise there comes back with its counts.
+- The module-level functions (`boto3_s3.cp` and the rest) can now be handed to a `ProcessPoolExecutor` - with a compiled `GlobFilter` as `filter=`, too - and a `BatchError` they raise there comes back with its counts.
 - Under `use_threads=False`, a transfer cut short by Ctrl-C is now recorded as cancelled rather than as done, and a `mv` no longer deletes its source after it, wherever the interrupt lands.
+- `ChecksumComparison` now recognizes a multipart (`COMPOSITE`) checksum that arrives without its part count (as MinIO's `GetObjectAttributes` sends it) instead of copying such objects on every run, and a broken part listing no longer hangs or stops the sync.
+- `EtagComparison` now refuses a `part_size` that is not a positive integer when it is constructed.
+- A timestamp an S3-compatible endpoint sends without a zone is now read as local time, as `aws s3` reads it, instead of ending a sync with `TypeError`.
 - Added `is_s3express_accesspoint_path`.
 
 ## [0.11.1] - 2026-09-07
