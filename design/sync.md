@@ -457,14 +457,19 @@ same as the bare filter, only faster. The one exception is a wrapped
 `delete_filter` on a local (or custom) destination, whose deletes are
 synchronous: the pair loop advances while delete decisions are still
 outstanding, so whatever relied on an orphan being gone before a later pair
-acts no longer holds. Two shapes do. It re-opens the overlap the
-no-read-ahead walk closes (section 5), so a self-aliasing tree can list a file
-under its second name and fail that delete. And a new entry that needs an
+acts no longer holds. Three shapes do (all measured). It re-opens the overlap
+the no-read-ahead walk closes (section 5), so a self-aliasing tree can list a
+file under its second name and fail that delete. A new entry that needs an
 orphan *file's* name as a directory - `a` to delete, `a/b` to create, which
 the serial lane handles in that order because `a` sorts first - is submitted
 while `a` still exists and fails (`[Errno 20]`); the orphan is then deleted,
 so the run ends in `BatchError` with neither present, and the next run
-creates `a/b`. The wrapped filter must be thread-safe;
+creates `a/b`. And on a case-insensitive filesystem an orphan that differs
+from a new entry only in case - `A.txt` to delete, `a.txt` to create - is
+deleted after the new file has landed, which removes the new file: both
+operations are recorded as succeeded and the name is absent until the next
+run. That last one fails silently, so a delete lane over a case-insensitive
+local destination should stay unwrapped. The wrapped filter must be thread-safe;
 `ChecksumComparison` and `EtagComparison` are (read-only over their fields; a
 botocore client is safe to share for concurrent calls).
 

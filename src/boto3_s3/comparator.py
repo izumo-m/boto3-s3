@@ -164,9 +164,13 @@ class ParallelFilter(Generic[_T]):
     local (or custom) destination, where a delete is a synchronous removal. The
     pair loop moves on while delete decisions are still outstanding, so a later
     pair can no longer count on an earlier orphan being gone - a self-aliasing
-    tree lists a file under its second name and fails that delete, and a new
+    tree lists a file under its second name and fails that delete, a new
     entry that needs an orphan file's name as a directory (``a`` to delete,
-    ``a/b`` to create) is transferred first and fails.
+    ``a/b`` to create) is transferred first and fails, and on a
+    case-insensitive filesystem an orphan differing only in case from a new
+    entry (``A.txt`` / ``a.txt``) is deleted after the new file has landed,
+    removing it with nothing recorded as failed. Leave ``delete_filter``
+    unwrapped over a case-insensitive local destination.
 
     ``executor`` is **required** and owned by the caller: ``S3.sync`` neither
     creates nor shuts it down. Reuse across ``sync`` calls, and sharing one pool
