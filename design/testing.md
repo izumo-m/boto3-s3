@@ -111,12 +111,15 @@ stops differing is pruned); base files are POSIX captures and are never
 written from Windows - the platform-independent kinds (ls/rm/mb/rb/presign/
 website, verified against `aws.exe` unchanged) skip Windows capture
 entirely. One scenario has no Windows golden by design:
-`cp_case_conflict_warn` (`undefined_on_case_insensitive_dest`) - aws's own
-twin-download rename race makes its outcome undefined on a case-insensitive
-destination (its warn text says as much), so the golden tiers stand down
-there and e2e pins only ours' deterministic rc 0. Where aws itself is
-nondeterministic no defined rc exists to match, so this does not breach the
-exit-code charter.
+`cp_case_conflict_warn` (`undefined_on_case_insensitive_dest`) - the
+twin-download rename race makes the outcome undefined on a case-insensitive
+destination (aws's warn text says as much), so the golden tiers stand down
+there. The race is s3transfer's Windows rename (a remove, then a rename), a
+path both tools share, and both lose it: over 150 runs each on a Windows host
+aws ended at rc 1 67 times and at rc 2 three times, boto3-s3 twice and once.
+So e2e holds ours only to the outcomes the race allows (rc 0, 1 or 2) and to
+its warning. Where aws itself is nondeterministic no defined rc exists to
+match, so this does not breach the exit-code charter.
 
 ### Endpoint policy (MinIO goldens, occasional real-AWS verification)
 
