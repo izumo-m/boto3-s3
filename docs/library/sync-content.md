@@ -147,9 +147,10 @@ visible side effects are worth knowing:
   `a/b` to create) is transferred before `a` is gone and fails; running the
   sync again creates it. On a case-insensitive filesystem (the macOS and
   Windows defaults) there is a silent form: an orphan that differs from a new
-  entry only in case (`A.txt` to delete, `a.txt` to create) is deleted after
-  the new file has arrived, which removes the new file with nothing reported
-  as failed. Keep `delete_filter` unwrapped for such a destination.
+  entry only in case (`A.txt` to delete, `a.txt` to create) can be deleted
+  after the new file has arrived, when the decision takes longer than the
+  transfer, which removes the new file with nothing reported as failed. Keep
+  `delete_filter` unwrapped for such a destination.
 
 If a decision raises, the sync aborts as it would serially: decisions not yet
 started are cancelled, running ones are awaited, and the exception surfaces.

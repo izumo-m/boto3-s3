@@ -597,8 +597,9 @@ The digests are compared without the count; a count that is present has to
 agree as well — with the other side's on an s3-to-s3 pair, with the number of
 parts listed on an upload or download. Reading `ChecksumType` needs boto3 1.36
 or later ([`../compatibility.md`](../compatibility.md)); under an older one a
-bare `COMPOSITE` digest is not recognized and the object is copied on every
-run.
+bare `COMPOSITE` digest is taken for a `FULL_OBJECT` one, so an upload or
+download of that object is copied on every run (two S3 sides that both send
+it bare still compare equal).
 
 **What reads as indeterminate**, and is therefore copied rather than skipped:
 an object carrying no native checksum; an algorithm outside `crc32`, `crc32c`,
@@ -689,11 +690,11 @@ entry that needs an orphan file's name as a directory — `a` to delete, `a/b`
 to create — is transferred while `a` is still there and fails, after which `a`
 is deleted and the run raises `BatchError` (running it again creates `a/b`);
 and on a case-insensitive filesystem an orphan that differs from a new entry
-only in case — `A.txt` to delete, `a.txt` to create — is deleted after the new
-file has arrived, which removes the new file while both operations are
-recorded as succeeded. Because that last case fails silently, leave
-`delete_filter` unwrapped when the destination is a case-insensitive local
-directory. A stateful predicate
+only in case — `A.txt` to delete, `a.txt` to create — can be deleted after the
+new file has arrived, when the decision takes longer than the transfer, which
+removes the new file while both operations are recorded as succeeded. Because
+that last case fails silently, leave `delete_filter` unwrapped when the
+destination is a case-insensitive local directory. A stateful predicate
 can observe the concurrency. Otherwise what changes is ordering, in the ways
 below and no others.
 

@@ -140,8 +140,9 @@ the no-read-ahead walk above removes — the self-aliasing local tree behaves as
 `aws s3` does on the default, inline lane — and lets a new entry be
 transferred before an orphan file whose name it needs as a directory is
 deleted, so that transfer fails; on a case-insensitive filesystem an orphan
-differing only in case from a new entry is deleted after the new file has
-arrived, removing it without a failure. The wrapper's contract, including
+differing only in case from a new entry can be deleted after the new file has
+arrived (when its decision outlasts the transfer), removing it without a
+failure. The wrapper's contract, including
 pool ownership, is in [`../comparator.md`](../comparator.md).
 
 `pair_filter` replaces all three lanes with a single

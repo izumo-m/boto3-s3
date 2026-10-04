@@ -168,9 +168,10 @@ class ParallelFilter(Generic[_T]):
     entry that needs an orphan file's name as a directory (``a`` to delete,
     ``a/b`` to create) is transferred first and fails, and on a
     case-insensitive filesystem an orphan differing only in case from a new
-    entry (``A.txt`` / ``a.txt``) is deleted after the new file has landed,
-    removing it with nothing recorded as failed. Leave ``delete_filter``
-    unwrapped over a case-insensitive local destination.
+    entry (``A.txt`` / ``a.txt``) can be deleted after the new file has landed
+    - when its decision outlasts the transfer - removing it with nothing
+    recorded as failed. Leave ``delete_filter`` unwrapped over a
+    case-insensitive local destination.
 
     ``executor`` is **required** and owned by the caller: ``S3.sync`` neither
     creates nor shuts it down. Reuse across ``sync`` calls, and sharing one pool

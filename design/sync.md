@@ -465,11 +465,15 @@ the serial lane handles in that order because `a` sorts first - is submitted
 while `a` still exists and fails (`[Errno 20]`); the orphan is then deleted,
 so the run ends in `BatchError` with neither present, and the next run
 creates `a/b`. And on a case-insensitive filesystem an orphan that differs
-from a new entry only in case - `A.txt` to delete, `a.txt` to create - is
+from a new entry only in case - `A.txt` to delete, `a.txt` to create - can be
 deleted after the new file has landed, which removes the new file: both
 operations are recorded as succeeded and the name is absent until the next
-run. That last one fails silently, so a delete lane over a case-insensitive
-local destination should stay unwrapped. The wrapped filter must be thread-safe;
+run. This one is a race between the delete decision and the transfer (a
+decision that answers at once still deletes first; one slower than the
+download loses), and it fails silently, so a delete lane over a
+case-insensitive local destination should stay unwrapped. The second shape
+needs no race: it fails even when the decision is instant. The wrapped filter
+must be thread-safe;
 `ChecksumComparison` and `EtagComparison` are (read-only over their fields; a
 botocore client is safe to share for concurrent calls).
 
