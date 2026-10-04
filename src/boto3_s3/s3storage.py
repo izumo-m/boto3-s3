@@ -35,7 +35,7 @@ import stat as stat_module
 import sys
 from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import closing, contextmanager, suppress
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from importlib.metadata import version
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
@@ -387,6 +387,9 @@ def s3_request(
         raise request_failure(exc, operation=operation, bucket=bucket, key=key) from exc
 
 
+# The instant naive stamps are counted from (`aware_stamp`).
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
 # Years a listing timestamp can carry without its local-zone rendering being
 # able to leave datetime's range: everything strictly inside the first and the
 # last calendar year is more than a day from either end, further than any zone's
@@ -440,15 +443,31 @@ def aware_stamp(
     aws-cli reads such a stamp as local time (its ``.astimezone(tzlocal())``
     presumes the system zone for a naive value) and carries on, so that is the
     reading here, converted to UTC: the instant aws-cli compares, stamps a
-    download with and prints. Where the conversion itself fails - a stamp at
-    the edge of ``datetime``'s range, or on Windows any below the epoch -
-    aws-cli dies on it, and it is reported the way
-    `reject_unrepresentable_stamp` reports the aware case.
+    download with and prints.
+
+    The instant is taken through ``timestamp()`` rather than ``astimezone()``.
+    The two agree except for a wall-clock time the local zone skips (the hour
+    a daylight-saving change jumps over), which ``astimezone()`` places an
+    hour earlier before Python 3.12 than from it; ``timestamp()`` gives the
+    3.12 reading on every version, and aws-cli runs on a later one (measured
+    under ``TZ=America/New_York``: ``2025-03-09T02:30:00`` is 07:30Z for
+    aws-cli). Only whole seconds go through the float, the microseconds are
+    put back exactly.
+
+    Where the conversion itself fails - a stamp at the edge of ``datetime``'s
+    range, or on Windows any below the epoch - aws-cli dies on it, and it is
+    reported the way `reject_unrepresentable_stamp` reports the aware case.
+    The far edge is a whole day wide: aws-cli's Python looks a day past a
+    naive value while placing it, so a zone-less stamp from
+    ``9999-12-31T00:00:00`` on overflows there in every zone (measured), and
+    the same step is taken here.
     """
     if mtime.utcoffset() is not None:
         return mtime
     try:
-        return mtime.astimezone(timezone.utc)
+        seconds = int(mtime.replace(microsecond=0).timestamp())
+        _ = mtime + timedelta(days=1)  # the day-ahead step; overflows in the last day
+        return _EPOCH + timedelta(seconds=seconds, microseconds=mtime.microsecond)
     except (OverflowError, ValueError, OSError) as exc:
         raise MalformedResponseError(str(exc), operation=operation, bucket=bucket, key=key) from exc
 
@@ -1527,13 +1546,19 @@ class S3Storage(Storage):
         # closing(): the body holds its HTTP connection until it is released,
         # whether the download finished or a local failure abandoned it.
         with closing(cast("BinaryIO", response["Body"])) as body:
+            # The stamp is read before a byte is written: a response whose
+            # stamp cannot be read fails the call with the destination still
+            # as it was, not after the file has been replaced.
+            stamp: datetime | None = response.get("LastModified")
+            mtime = stamp and aware_stamp(
+                stamp, operation=_GET_FILE_OPERATION, bucket=self._bucket, key=target_key
+            )
             self._write_body_atomically(body, dest, key=target_key)
         etag = response.get("ETag")
-        stamp: datetime | None = response.get("LastModified")
         return S3FileInfo(
             key=target_key,
             size=response.get("ContentLength"),
-            mtime=stamp and aware_stamp(stamp, bucket=self._bucket, key=target_key),
+            mtime=mtime,
             etag=etag,
             storage_class=response.get("StorageClass"),
             head=strip_response_metadata(response, drop_body=True),

@@ -1045,6 +1045,55 @@ class TestZonelessStamp:
         assert info.mtime.timestamp() == self._NAIVE.timestamp()
 
     @_needs_tzset
+    def test_a_wall_clock_time_the_zone_skips_is_read_as_aws_cli_reads_it(self) -> None:
+        # 02:30 on the day New York's clocks jump from 02:00 to 03:00 does not
+        # exist. aws-cli, on Python 3.14, places it at 07:30Z (measured: a
+        # download is stamped 1741505400); `astimezone()` on a naive value
+        # says 06:30Z before Python 3.12, which is why the instant is taken
+        # through `timestamp()`.
+        gap = datetime(2025, 3, 9, 2, 30)
+        with _local_zone("America/New_York"):
+            storage, _ = _storage([{"Contents": [_stamped("prefix/a.txt", gap)]}])
+            [entry] = storage.scan(S3ScanOptions(recursive=True))
+        assert entry.mtime == datetime(2025, 3, 9, 7, 30, tzinfo=timezone.utc)
+
+    def test_the_microseconds_survive_the_reading(self) -> None:
+        precise = datetime(2025, 1, 1, 12, 0, 0, 123457)
+        storage, _ = _storage([{"Contents": [_stamped("prefix/a.txt", precise)]}])
+        [entry] = storage.scan(S3ScanOptions(recursive=True))
+        assert entry.mtime is not None
+        assert entry.mtime.microsecond == 123457
+        assert entry.mtime.replace(microsecond=0).timestamp() == (
+            precise.replace(microsecond=0).timestamp()
+        )
+
+    def test_the_last_day_of_the_range_is_malformed_in_every_zone(self) -> None:
+        # aws-cli's Python looks a day past a naive value while placing it, so
+        # a zone-less stamp from 9999-12-31T00:00:00 on ends its run whatever
+        # the zone (measured under UTC, Asia/Tokyo and America/New_York: `ls`
+        # at rc 255 from that second on, rc 0 one microsecond before).
+        pages = [{"Contents": [_stamped("prefix/far.txt", datetime(9999, 12, 31, 0, 0, 0))]}]
+        storage, _ = _storage(pages)
+        with pytest.raises(MalformedResponseError):
+            list(storage.scan(S3ScanOptions(recursive=True)))
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Windows' localtime ends at the year 3000")
+    def test_the_microsecond_before_the_last_day_is_kept(self) -> None:
+        stamp = datetime(9999, 12, 30, 23, 59, 59, 999999)
+        storage, _ = _storage([{"Contents": [_stamped("prefix/far.txt", stamp)]}])
+        with _local_zone("UTC"):
+            [entry] = storage.scan(S3ScanOptions(recursive=True))
+        assert entry.mtime == stamp.replace(tzinfo=timezone.utc)
+
+    def test_a_bucket_creation_date_gets_the_same_reading(self) -> None:
+        pages = [{"Buckets": [{"Name": "alpha", "CreationDate": self._NAIVE}]}]
+        storage, _ = _storage(pages, url="s3://")
+        [bucket] = storage.list_buckets()
+        assert bucket.mtime is not None
+        assert bucket.mtime.utcoffset() == timedelta(0)
+        assert bucket.mtime.timestamp() == self._NAIVE.timestamp()
+
+    @_needs_tzset
     def test_a_zoneless_stamp_the_conversion_cannot_hold_is_malformed(self) -> None:
         # The reading itself can fail at the edge of datetime's range; aws-cli
         # dies on the same conversion.
@@ -1765,6 +1814,33 @@ class TestGetFile:
             "ETag": '"abc"',
             "StorageClass": "STANDARD_IA",
         }
+
+    def test_a_zoneless_stamp_comes_back_aware(self, tmp_path: Path) -> None:
+        # The listing's reading of a stamp with no zone (TestZonelessStamp):
+        # local time, kept as aware UTC.
+        naive = datetime(2025, 1, 1, 12, 0, 0)
+        client, _ = make_recording_client([dict(_get_response(b"x", LastModified=naive))])
+        info = S3Storage("s3://bucket/prefix/", client=client).get_file(tmp_path / "f", key="f")
+        assert info.mtime is not None
+        assert info.mtime.utcoffset() == timedelta(0)
+        assert info.mtime.timestamp() == naive.timestamp()
+
+    def test_a_stamp_that_cannot_be_read_fails_before_the_file_is_touched(
+        self, tmp_path: Path
+    ) -> None:
+        # The stamp is judged before a byte is written: the call fails with the
+        # destination as it was, and names its operation like every other
+        # get_file failure.
+        dest = tmp_path / "f"
+        dest.write_bytes(b"what was there")
+        unreadable = datetime(9999, 12, 31, 12, 0, 0)  # zone-less, in the range's last day
+        client, _ = make_recording_client([dict(_get_response(b"new", LastModified=unreadable))])
+        with pytest.raises(MalformedResponseError) as exc_info:
+            S3Storage("s3://bucket/prefix/", client=client).get_file(dest, key="f")
+        error = exc_info.value
+        assert (error.operation, error.bucket, error.key) == ("get_file", "bucket", "prefix/f")
+        assert dest.read_bytes() == b"what was there"
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["f"]  # no temp file left
 
     @pytest.mark.parametrize(
         ("url", "key", "expected"),
