@@ -446,27 +446,32 @@ def aware_stamp(
     download with and prints.
 
     The instant is taken through ``timestamp()`` rather than ``astimezone()``.
-    The two agree except for a wall-clock time the local zone skips (the hour
-    a daylight-saving change jumps over), which ``astimezone()`` places an
-    hour earlier before Python 3.12 than from it; ``timestamp()`` gives the
-    3.12 reading on every version, and aws-cli runs on a later one (measured
-    under ``TZ=America/New_York``: ``2025-03-09T02:30:00`` is 07:30Z for
-    aws-cli). Only whole seconds go through the float, the microseconds are
-    put back exactly.
+    The two agree except for a wall-clock time the local zone skips (the gap
+    a daylight-saving change, or any other change of offset, jumps over),
+    which ``astimezone()`` places earlier by the gap's length before Python
+    3.12 than from it; ``timestamp()`` gives the 3.12 reading on every
+    version, and aws-cli runs on a later one (measured under
+    ``TZ=America/New_York``: ``2025-03-09T02:30:00`` is 07:30Z for aws-cli).
+    Only whole seconds go through the float, the microseconds are put back
+    exactly.
 
-    Where the conversion itself fails - a stamp at the edge of ``datetime``'s
-    range, or on Windows any below the epoch - aws-cli dies on it, and it is
-    reported the way `reject_unrepresentable_stamp` reports the aware case.
-    The far edge is a whole day wide: aws-cli's Python looks a day past a
-    naive value while placing it, so a zone-less stamp from
-    ``9999-12-31T00:00:00`` on overflows there in every zone (measured), and
-    the same step is taken here.
+    Where the conversion itself fails, aws-cli dies on it, and it is reported
+    the way `reject_unrepresentable_stamp` reports the aware case. That
+    includes a failure of a step whose answer is not otherwise needed:
+    aws-cli's Python places a naive value by solving for it on both sides of
+    a possible fold, and the second solution reads the local calendar a day
+    ahead. So a zone-less stamp in the last day of ``datetime``'s range
+    (``9999-12-31T00:00:00`` on) ends an aws-cli run in every zone, and on
+    Windows so does one within a day of where its ``localtime`` stops, as
+    well as any below the epoch (all measured). The same second call is made
+    here, for its exception alone.
     """
     if mtime.utcoffset() is not None:
         return mtime
     try:
-        seconds = int(mtime.replace(microsecond=0).timestamp())
-        _ = mtime + timedelta(days=1)  # the day-ahead step; overflows in the last day
+        whole = mtime.replace(microsecond=0)
+        seconds = int(whole.timestamp())
+        whole.replace(fold=1).timestamp()  # the far side of a fold: a day ahead
         return _EPOCH + timedelta(seconds=seconds, microseconds=mtime.microsecond)
     except (OverflowError, ValueError, OSError) as exc:
         raise MalformedResponseError(str(exc), operation=operation, bucket=bucket, key=key) from exc

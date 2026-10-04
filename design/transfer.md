@@ -583,12 +583,16 @@ dest-existence check for download. We ported the same three faces:
   the instant aws-cli compares (measured against aws-cli under `TZ=UTC`,
   `TZ=Asia/Tokyo` and `TZ=America/New_York`). Two details follow aws-cli's
   bundled Python rather than the host's. A wall-clock time the zone skips (the
-  hour a daylight-saving change jumps over) is placed where Python 3.12 and
-  later place it - `astimezone()` on a naive value says an hour earlier before
-  3.12, so the instant is taken through `timestamp()`, which agrees on every
-  version. And a zone-less stamp in the last day of `datetime`'s range
-  (`9999-12-31T00:00:00` on) is a `MalformedResponseError` in every zone,
-  because that Python looks a day ahead of a naive value while placing it.
+  gap a change of offset jumps over - an hour for most daylight-saving
+  changes, half an hour or a whole day in some zones) is placed where Python
+  3.12 and later place it - `astimezone()` on a naive value says earlier by
+  the gap's length before 3.12, so the instant is taken through `timestamp()`,
+  which agrees on every version. And that Python places a naive value by
+  solving for it on both sides of a possible fold, the second solution reading
+  the local calendar a day ahead; the same second call is made here for its
+  failure alone, so a zone-less stamp in the last day of `datetime`'s range
+  (`9999-12-31T00:00:00` on) is a `MalformedResponseError` in every zone, and
+  on Windows so is one within a day of where `localtime` stops.
 - **a single-object HEAD missing `ContentLength` or `LastModified` ends the
   run** the same way: aws-cli's `_list_single_object` reads those two by
   subscript (`ContentLength` first) and `ETag` with a default, so

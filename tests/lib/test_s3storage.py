@@ -1067,15 +1067,31 @@ class TestZonelessStamp:
             precise.replace(microsecond=0).timestamp()
         )
 
-    def test_the_last_day_of_the_range_is_malformed_in_every_zone(self) -> None:
-        # aws-cli's Python looks a day past a naive value while placing it, so
-        # a zone-less stamp from 9999-12-31T00:00:00 on ends its run whatever
-        # the zone (measured under UTC, Asia/Tokyo and America/New_York: `ls`
-        # at rc 255 from that second on, rc 0 one microsecond before).
+    def test_the_last_day_of_the_range_is_malformed(self) -> None:
+        # aws-cli's Python places a naive value by solving for it on both
+        # sides of a possible fold, and the second solution reads the local
+        # calendar a day ahead - so a zone-less stamp from 9999-12-31T00:00:00
+        # on ends its run (measured under UTC, Asia/Tokyo and
+        # America/New_York: `ls` at rc 255 from that second on, rc 0 one
+        # microsecond before).
         pages = [{"Contents": [_stamped("prefix/far.txt", datetime(9999, 12, 31, 0, 0, 0))]}]
         storage, _ = _storage(pages)
         with pytest.raises(MalformedResponseError):
             list(storage.scan(S3ScanOptions(recursive=True)))
+
+    @_needs_tzset
+    @pytest.mark.parametrize("zone", ["UTC", "Asia/Tokyo", "America/New_York"])
+    def test_the_last_day_is_malformed_whatever_the_zone(self, zone: str) -> None:
+        # East of UTC and at UTC the stamp's own instant is in range; only the
+        # day-ahead step leaves it. The error is the one that step raises, the
+        # year running out, as it is for aws-cli.
+        pages = [{"Contents": [_stamped("prefix/far.txt", datetime(9999, 12, 31, 0, 0, 0))]}]
+        with _local_zone(zone):
+            storage, _ = _storage(pages)
+            with pytest.raises(MalformedResponseError) as exc_info:
+                list(storage.scan(S3ScanOptions(recursive=True)))
+        assert isinstance(exc_info.value.__cause__, ValueError)
+        assert "10000" in str(exc_info.value)
 
     @pytest.mark.skipif(sys.platform == "win32", reason="Windows' localtime ends at the year 3000")
     def test_the_microsecond_before_the_last_day_is_kept(self) -> None:
