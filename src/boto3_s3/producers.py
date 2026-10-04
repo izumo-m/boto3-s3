@@ -32,10 +32,11 @@ from boto3_s3.localstorage import LocalStorage, to_native_path
 from boto3_s3.s3storage import (
     S3Storage,
     attribute_failure,
-    # The one out-of-module caller of these two: the required-element read and
-    # the local-zone band belong with the backend that reads S3 responses,
-    # while aws-cli runs the same reads on the single-object HEAD this module
-    # owns.
+    # The one out-of-module caller of these three: the required-element read,
+    # the aware reading of a stamp and the local-zone band belong with the
+    # backend that reads S3 responses, while aws-cli runs the same reads on
+    # the single-object HEAD this module owns.
+    aware_stamp,
     read_required,
     reject_unrepresentable_stamp,
     s3_request,
@@ -769,7 +770,12 @@ def head_single(
     # aws is lenient there too.
     bucket = src_storage.bucket
     size: int = read_required(head, "ContentLength", operation=operation, bucket=bucket, key=key)
-    mtime = read_required(head, "LastModified", operation=operation, bucket=bucket, key=key)
+    mtime = aware_stamp(
+        read_required(head, "LastModified", operation=operation, bucket=bucket, key=key),
+        operation=operation,
+        bucket=bucket,
+        key=key,
+    )
     etag = head.get("ETag")
     # aws-cli converts the HeadObject stamp to the local zone as the last thing
     # `_list_single_object` does, so a stamp the local calendar cannot hold

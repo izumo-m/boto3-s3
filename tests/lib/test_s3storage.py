@@ -1001,6 +1001,62 @@ class TestListingTimestampRepresentability:
             s3storage.reject_unrepresentable_stamp(datetime(1960, 1, 1, tzinfo=timezone.utc))
 
 
+class TestZonelessStamp:
+    """A timestamp with no zone is read as local time, the way aws-cli reads it.
+
+    Every form S3 sends carries a zone. An endpoint that leaves it off
+    (``2025-01-01T00:00:00``) makes botocore hand back a naive ``datetime``,
+    which aws-cli's ``parse(...).astimezone(tzlocal())`` takes as local time
+    and compares, stamps and prints from there (measured against the pinned
+    aws through a 127.0.0.1 fake, ``TZ=UTC`` and ``TZ=Asia/Tokyo``). Kept
+    naive, the value could not be set against the local side's aware one: a
+    sync with one key on both sides ended on ``TypeError``.
+    """
+
+    _NAIVE = datetime(2025, 1, 1, 0, 0, 0)
+
+    def test_a_listing_entry_gets_the_local_reading_as_aware_utc(self) -> None:
+        storage, _ = _storage([{"Contents": [_stamped("prefix/a.txt", self._NAIVE)]}])
+        [entry] = storage.scan(S3ScanOptions(recursive=True))
+        assert entry.mtime is not None
+        assert entry.mtime.utcoffset() == timedelta(0)
+        # `timestamp()` of a naive value is the stdlib's own local-time reading.
+        assert entry.mtime.timestamp() == self._NAIVE.timestamp()
+
+    @_needs_tzset
+    def test_the_reading_follows_the_local_zone(self) -> None:
+        with _local_zone("Asia/Tokyo"):
+            storage, _ = _storage([{"Contents": [_stamped("prefix/a.txt", self._NAIVE)]}])
+            [entry] = storage.scan(S3ScanOptions(recursive=True))
+        assert entry.mtime == datetime(2024, 12, 31, 15, tzinfo=timezone.utc)
+
+    def test_a_stamp_that_carries_a_zone_is_kept_as_it_is(self) -> None:
+        east = datetime(2025, 1, 1, 9, tzinfo=timezone(timedelta(hours=9)))
+        storage, _ = _storage([{"Contents": [_stamped("prefix/a.txt", east)]}])
+        [entry] = storage.scan(S3ScanOptions(recursive=True))
+        assert entry.mtime is east
+
+    def test_a_head_gets_the_same_reading(self) -> None:
+        head = {"ContentLength": 7, "LastModified": self._NAIVE}
+        storage, _ = _storage(url="s3://bucket/prefix/obj.txt", head_response=head)
+        info = storage.get_fileinfo()
+        assert info is not None and info.mtime is not None
+        assert info.mtime.utcoffset() == timedelta(0)
+        assert info.mtime.timestamp() == self._NAIVE.timestamp()
+
+    @_needs_tzset
+    def test_a_zoneless_stamp_the_conversion_cannot_hold_is_malformed(self) -> None:
+        # The reading itself can fail at the edge of datetime's range; aws-cli
+        # dies on the same conversion.
+        pages = [{"Contents": [_stamped("prefix/far.txt", datetime(1, 1, 1))]}]
+        with _local_zone("Asia/Tokyo"):
+            storage, _ = _storage(pages)
+            with pytest.raises(MalformedResponseError) as exc_info:
+                list(storage.scan(S3ScanOptions(recursive=True)))
+        assert (exc_info.value.bucket, exc_info.value.key) == ("bucket", "prefix/far.txt")
+        assert isinstance(exc_info.value.__cause__, (OverflowError, ValueError))
+
+
 class TestScanErrorMapping:
     def test_client_error_404_maps_to_not_found(self) -> None:
         error = ClientError(

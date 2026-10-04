@@ -35,7 +35,7 @@ import stat as stat_module
 import sys
 from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import closing, contextmanager, suppress
-from datetime import datetime
+from datetime import datetime, timezone
 from importlib.metadata import version
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
@@ -423,6 +423,36 @@ def read_required(
         raise MalformedResponseError(str(exc), operation=operation, bucket=bucket, key=key) from exc
 
 
+def aware_stamp(
+    mtime: datetime,
+    *,
+    operation: str | None = None,
+    bucket: str | None = None,
+    key: str | None = None,
+) -> datetime:
+    """A response timestamp as the aware value ``FileInfo.mtime`` promises.
+
+    Every form S3 itself sends carries a zone, and botocore parses it into an
+    aware ``datetime``; that value is returned as it is. A text with no zone
+    at all (an S3-compatible endpoint's ``2025-01-01T00:00:00``) parses naive,
+    and a naive ``mtime`` cannot be set against the other side's aware one -
+    sync's size-and-time judgment would end the run on the subtraction.
+    aws-cli reads such a stamp as local time (its ``.astimezone(tzlocal())``
+    presumes the system zone for a naive value) and carries on, so that is the
+    reading here, converted to UTC: the instant aws-cli compares, stamps a
+    download with and prints. Where the conversion itself fails - a stamp at
+    the edge of ``datetime``'s range, or on Windows any below the epoch -
+    aws-cli dies on it, and it is reported the way
+    `reject_unrepresentable_stamp` reports the aware case.
+    """
+    if mtime.utcoffset() is not None:
+        return mtime
+    try:
+        return mtime.astimezone(timezone.utc)
+    except (OverflowError, ValueError, OSError) as exc:
+        raise MalformedResponseError(str(exc), operation=operation, bucket=bucket, key=key) from exc
+
+
 def reject_unrepresentable_stamp(
     mtime: datetime | None,
     *,
@@ -512,7 +542,9 @@ def _page_to_infos(
             )
     for obj in page.get("Contents", []):
         key: str = read_required(obj, "Key", bucket=bucket)
-        mtime: datetime = read_required(obj, "LastModified", bucket=bucket, key=key)
+        mtime = aware_stamp(
+            read_required(obj, "LastModified", bucket=bucket, key=key), bucket=bucket, key=key
+        )
         reject_unrepresentable_stamp(mtime, bucket=bucket, key=key)
         size: int = read_required(obj, "Size", bucket=bucket, key=key)
         etag = obj.get("ETag")
@@ -600,13 +632,15 @@ def _page_to_bucket_infos(page: ListBucketsOutputTypeDef, storage: Storage) -> I
     bucket entry missing one stops the listing at that bucket with
     `MalformedResponseError` naming the element - the buckets ahead of it are
     already delivered, this being a generator its caller yields straight
-    through. The date needs no local-zone check here: nothing but the ``ls``
-    rendering consumes it, and that conversion is aws-cli's own
-    (``output.format_entry``).
+    through. The date is made aware like any other stamp (`aware_stamp`) but
+    needs no local-zone check here: nothing but the ``ls`` rendering consumes
+    it, and that conversion is aws-cli's own (``output.format_entry``).
     """
     for entry in page.get("Buckets", []):
         name_hint = entry.get("Name")
-        creation: datetime = read_required(entry, "CreationDate", bucket=name_hint)
+        creation = aware_stamp(
+            read_required(entry, "CreationDate", bucket=name_hint), bucket=name_hint
+        )
         name: str = read_required(entry, "Name", bucket=name_hint)
         yield S3FileInfo(
             key=name,
@@ -1412,7 +1446,11 @@ class S3Storage(Storage):
         # response missing one is a MalformedResponseError naming it instead
         # of an entry with the value unset.
         size: int = read_required(head, "ContentLength", bucket=self._bucket, key=target_key)
-        mtime: datetime = read_required(head, "LastModified", bucket=self._bucket, key=target_key)
+        mtime = aware_stamp(
+            read_required(head, "LastModified", bucket=self._bucket, key=target_key),
+            bucket=self._bucket,
+            key=target_key,
+        )
         etag = head.get("ETag")
         # aws-cli converts the HeadObject stamp to the local zone as it reads the
         # response (filegenerator's single-object branch), so an unrepresentable
@@ -1491,10 +1529,11 @@ class S3Storage(Storage):
         with closing(cast("BinaryIO", response["Body"])) as body:
             self._write_body_atomically(body, dest, key=target_key)
         etag = response.get("ETag")
+        stamp: datetime | None = response.get("LastModified")
         return S3FileInfo(
             key=target_key,
             size=response.get("ContentLength"),
-            mtime=response.get("LastModified"),
+            mtime=stamp and aware_stamp(stamp, bucket=self._bucket, key=target_key),
             etag=etag,
             storage_class=response.get("StorageClass"),
             head=strip_response_metadata(response, drop_body=True),

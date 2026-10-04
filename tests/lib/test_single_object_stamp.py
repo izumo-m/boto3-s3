@@ -18,7 +18,7 @@ helper is the S3 backend suite's (same conversion, same POSIX-only skip).
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import pytest
@@ -64,6 +64,32 @@ class TestSingleObjectHeadRaisingOutsideTheBotoFamily:
         assert error.__cause__ is boom
         assert (error.operation, error.bucket, error.key) == ("cp", "b", "d/a.txt")
         assert ops(calls) == ["HeadObject"]
+
+
+class TestSingleObjectZonelessStamp:
+    """A HEAD stamp with no zone gets the listing's reading: local time, kept as aware UTC.
+
+    aws-cli's ``_list_single_object`` runs the same ``astimezone(tzlocal())``
+    over the HeadObject stamp as the listing does over its entries, so a naive
+    one is local time there too (``TestZonelessStamp`` in the S3 backend
+    suite has the listing side).
+    """
+
+    def test_the_source_entry_carries_an_aware_stamp(self, tmp_path: Path) -> None:
+        naive = datetime(2025, 1, 1, 12, 0, 0)
+        client, _ = make_recording_client([head_response(LastModified=naive), get_response()])
+        records: list[OpResult] = []
+        S3().cp(
+            S3Storage("s3://b/d/a.txt", client=client),
+            str(tmp_path / "out.bin"),
+            transfer_config=_SYNC,
+            on_result=records.append,
+        )
+        [record] = records
+        assert record.outcome is OpOutcome.SUCCEEDED
+        assert record.src_info is not None and record.src_info.mtime is not None
+        assert record.src_info.mtime.utcoffset() == timedelta(0)
+        assert record.src_info.mtime.timestamp() == naive.timestamp()
 
 
 class TestSingleObjectRequiredElements:

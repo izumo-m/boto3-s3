@@ -370,7 +370,9 @@ of host OS.
 time. Both are populated for `FILE` entries. A `DIRECTORY` entry may leave
 either `None` — an S3 common prefix leaves both — and a `BUCKET` entry carries
 the bucket's creation date as `mtime` with `size` left `None`. These are
-invariants the producers enforce, not the field types.
+invariants the producers enforce, not the field types. An S3-compatible
+endpoint that sends a timestamp with no zone has it read as local time, the
+way `aws s3` reads it, and the entry still carries the aware UTC value.
 
 `compare_key` is the relative form of the entry's key, the key space filters
 match against and the axis `sync` merge-joins on: for a local scan, the key

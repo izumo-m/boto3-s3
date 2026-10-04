@@ -573,6 +573,15 @@ dest-existence check for download. We ported the same three faces:
   same banding the local side uses); every other year skips it. A single blind
   delete is exempt because aws issues no HeadObject for it - `rm s3://bkt/key`
   stays rc 0 on both tools.
+- **an S3-side timestamp with no zone is local time.** S3 always sends a zone;
+  an S3-compatible endpoint that leaves it off (`2025-01-01T00:00:00`) makes
+  botocore return a naive `datetime`, and aws-cli's same `astimezone(tzlocal())`
+  presumes the system zone for it. `s3storage.aware_stamp` gives every stamp a
+  response supplies that reading (listing entries, the single-object HEAD,
+  `get_fileinfo`, bucket creation dates) and keeps it as aware UTC, so the
+  `FileInfo.mtime` contract holds and sync's size-and-time judgment compares
+  the instant aws-cli compares (measured against aws-cli under `TZ=UTC` and
+  `TZ=Asia/Tokyo`).
 - **a single-object HEAD missing `ContentLength` or `LastModified` ends the
   run** the same way: aws-cli's `_list_single_object` reads those two by
   subscript (`ContentLength` first) and `ETag` with a default, so
