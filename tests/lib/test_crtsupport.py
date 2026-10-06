@@ -649,6 +649,77 @@ class TestCreateCrtTransferManager:
         assert crtsupport.create_crt_transfer_manager(FakeClient(), config) is not None  # pyright: ignore[reportArgumentType]
 
 
+class TestSingletonPinNormalization:
+    """The endpoint and Config pins compare what botocore resolves, not the spelling.
+
+    A second client spelled differently but shaping the same URL used to be
+    sent to classic for nothing - silently, with the CRT engine's throughput
+    lost (measured: ``Config()`` against ``Config(s3={})``, a trailing slash
+    on an explicit endpoint).
+    """
+
+    @pytest.mark.parametrize(
+        ("first", "second"),
+        [
+            ({"s3_config": None}, {"s3_config": {}}),
+            ({"s3_config": None}, {"s3_config": {"addressing_style": "auto"}}),
+            (
+                {"s3_config": {"addressing_style": "auto", "use_accelerate_endpoint": False}},
+                {"s3_config": None},
+            ),
+            ({"endpoint": "http://127.0.0.1:9000"}, {"endpoint": "http://127.0.0.1:9000/"}),
+            ({"endpoint": "http://127.0.0.1:9000"}, {"endpoint": "HTTP://127.0.0.1:9000"}),
+            ({"endpoint": "http://minio.local:9000"}, {"endpoint": "http://MINIO.local:9000"}),
+        ],
+        ids=[
+            "none-vs-empty",
+            "none-vs-auto",
+            "defaults-vs-none",
+            "trailing-slash",
+            "scheme-case",
+            "host-case",
+        ],
+    )
+    def test_an_equivalent_spelling_rides_the_singleton(
+        self, stubs: CrtStubs, first: dict[str, Any], second: dict[str, Any]
+    ) -> None:
+        assert crtsupport.create_crt_transfer_manager(FakeClient(**first), None) is not None  # pyright: ignore[reportArgumentType]
+        assert crtsupport.create_crt_transfer_manager(FakeClient(**second), None) is not None  # pyright: ignore[reportArgumentType]
+        assert len(stubs.create_kwargs) == 1
+
+    def test_a_flag_left_none_matches_one_set_false(self, stubs: CrtStubs) -> None:
+        assert crtsupport.create_crt_transfer_manager(FakeClient(), None) is not None  # pyright: ignore[reportArgumentType]
+        spelled = FakeClient()
+        spelled.meta.config.use_fips_endpoint = False
+        spelled.meta.config.use_dualstack_endpoint = False
+        assert crtsupport.create_crt_transfer_manager(spelled, None) is not None  # pyright: ignore[reportArgumentType]
+        assert len(stubs.create_kwargs) == 1
+
+    @pytest.mark.parametrize(
+        ("first", "second"),
+        [
+            ({"s3_config": None}, {"s3_config": {"addressing_style": "path"}}),
+            ({"s3_config": None}, {"s3_config": {"use_arn_region": False}}),
+            ({"s3_config": None}, {"s3_config": {"us_east_1_regional_endpoint": "regional"}}),
+            ({"endpoint": "http://127.0.0.1:9000"}, {"endpoint": "http://127.0.0.1:9000/base"}),
+            ({"endpoint": "http://127.0.0.1:9000"}, {"endpoint": "http://localhost:9000"}),
+            ({"endpoint": "http://127.0.0.1:9000"}, {"endpoint": "https://127.0.0.1:9000"}),
+        ],
+        ids=["path-style", "arn-region", "regional", "endpoint-path", "another-host", "scheme"],
+    )
+    def test_a_different_setting_still_falls_back(
+        self, stubs: CrtStubs, first: dict[str, Any], second: dict[str, Any]
+    ) -> None:
+        assert crtsupport.create_crt_transfer_manager(FakeClient(**first), None) is not None  # pyright: ignore[reportArgumentType]
+        assert crtsupport.create_crt_transfer_manager(FakeClient(**second), None) is None  # pyright: ignore[reportArgumentType]
+
+    def test_a_fips_flag_set_true_still_falls_back(self, stubs: CrtStubs) -> None:
+        assert crtsupport.create_crt_transfer_manager(FakeClient(), None) is not None  # pyright: ignore[reportArgumentType]
+        fips = FakeClient()
+        fips.meta.config.use_fips_endpoint = True
+        assert crtsupport.create_crt_transfer_manager(fips, None) is None  # pyright: ignore[reportArgumentType]
+
+
 class _RefreshingCreds:
     """A lazily refreshed credentials stand-in: resolving it is counted, and may fail."""
 

@@ -63,6 +63,7 @@ from __future__ import annotations
 import enum
 import logging
 import threading
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Final, Literal
 from urllib.parse import urlsplit
 
@@ -646,7 +647,22 @@ def _initialize(
     )
 
 
-def _serializer_config_shape(client: S3Client) -> tuple[Any, Any, Any]:
+# The `s3` Config facets botocore reads at these values when they are absent:
+# a client naming one of them explicitly shapes the same URL as a client that
+# leaves it out, so `_serializer_config_shape` drops them before comparing.
+_S3_CONFIG_DEFAULTS: dict[str, Any] = {
+    "addressing_style": "auto",
+    "use_accelerate_endpoint": False,
+    "use_dualstack_endpoint": False,
+    "use_arn_region": True,
+    "us_east_1_regional_endpoint": "legacy",
+}
+
+# Marks a key `_S3_CONFIG_DEFAULTS` has no default for: its value is always compared.
+_NO_DEFAULT: Final = object()
+
+
+def _serializer_config_shape(client: S3Client) -> tuple[tuple[tuple[str, Any], ...], bool, bool]:
     """The client-Config facets the shared serializer / CRT client bake in.
 
     The ``s3`` dict (addressing style, accelerate/dualstack, us-east-1
@@ -654,13 +670,46 @@ def _serializer_config_shape(client: S3Client) -> tuple[Any, Any, Any]:
     shape URL resolution outside the ``s3`` dict. Compared by
     `_is_compatible_request` so a later client with different URL-shaping
     settings falls back to classic instead of riding the first client's.
+
+    Compared as what botocore resolves, not as the caller spelled it: a
+    missing ``s3`` dict, an empty one and one naming only defaults
+    (``addressing_style='auto'``) shape the same URL, and a flag left
+    ``None`` reads as ``False`` - taken verbatim, ``Config()`` against
+    ``Config(s3={})`` sent the second client to classic for nothing
+    (measured). botocore merges the config file's ``[s3]`` keys into the
+    dict before it reaches here, so a value that came from the file compares
+    like one the caller passed.
     """
     config: Any = client.meta.config
-    return (
-        getattr(config, "s3", None),
-        getattr(config, "use_fips_endpoint", None),
-        getattr(config, "use_dualstack_endpoint", None),
+    s3: Mapping[str, Any] = getattr(config, "s3", None) or {}
+    explicit = tuple(
+        sorted(
+            (key, value)
+            for key, value in s3.items()
+            if _S3_CONFIG_DEFAULTS.get(key, _NO_DEFAULT) != value
+        )
     )
+    return (
+        explicit,
+        bool(getattr(config, "use_fips_endpoint", None)),
+        bool(getattr(config, "use_dualstack_endpoint", None)),
+    )
+
+
+def _endpoint_key(endpoint: str | None) -> tuple[str, str, str] | None:
+    """An endpoint as botocore joins it into a request URL, for the pin.
+
+    botocore lowercases the scheme, matches the host without regard to case
+    and drops a trailing slash when it joins the path (measured:
+    ``http://127.0.0.1:9000``, ``http://127.0.0.1:9000/`` and
+    ``HTTP://127.0.0.1:9000`` all request ``http://127.0.0.1:9000/b/k``), so
+    two spellings differing only there dial the same host and share the
+    singleton; a path stays (``/base`` is another endpoint).
+    """
+    if endpoint is None:
+        return None
+    parts = urlsplit(endpoint)
+    return (parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"))
 
 
 def _is_compatible_request(
@@ -714,7 +763,9 @@ def _is_compatible_request(
         return False
     if _resolve_region(client, region) != crt_s3_client.region:
         return False
-    if _resolve_endpoint(client, endpoint) != crt_s3_client.endpoint_url:
+    if _endpoint_key(_resolve_endpoint(client, endpoint)) != _endpoint_key(
+        crt_s3_client.endpoint_url
+    ):
         return False
     if _derive_verify(client) != crt_s3_client.verify:
         return False

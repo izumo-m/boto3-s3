@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A timestamp an S3-compatible endpoint sends without a zone is now read as local time, as `aws s3` reads it, instead of ending a sync with `TypeError`.
 - Added `is_s3express_accesspoint_path`.
 - The CRT transfer engine no longer resolves a lazily refreshed credential (an assumed role, an SSO token) before the transfer, so a refresh failure is the item's and a dryrun completes, as with `aws s3`; it now also runs on boto3 1.34 to 1.41 with the `crt` extra (it failed with `ImportError`), and a CA bundle it cannot use raises `InvalidConfigError` instead of the bare error.
+- A second client whose `Config` or endpoint is spelled differently but resolves the same (`Config(s3={})` after `Config()`, a trailing slash) now shares the CRT engine instead of silently running classic.
 
 ## [0.11.1] - 2026-09-07
 

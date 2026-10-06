@@ -88,7 +88,14 @@ also read as `'auto'`) with the same rules as boto3.
   the first client's `verify` and the shared serializer its
   `Config`, so a differing later client must not silently ride those) also
   drops to classic (the same shape as boto3's region/credentials-mismatch
-  fallback). The credentials half of that check matches by object before it
+  fallback). The endpoint and `Config` pins compare what botocore resolves,
+  not the spelling: a missing `s3` dict, an empty one and one naming only
+  defaults (`addressing_style='auto'`) are one shape, a flag left `None`
+  reads as `False`, and an endpoint's scheme and host case and trailing
+  slash are ignored as botocore ignores them when it joins the URL - taken
+  verbatim, `Config()` against `Config(s3={})` or a trailing `/` sent the
+  second client to classic for nothing (measured 2026-10-06), with the CRT
+  engine's throughput silently lost. The credentials half of that check matches by object before it
   compares by value: a client whose credentials object is the one the
   singleton's delegate wraps - every client of one session shares it - has
   the same identity by construction and is admitted without resolving it,
