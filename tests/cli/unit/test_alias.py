@@ -208,14 +208,20 @@ class TestAliasGlobals:
         import io
         import sys
 
-        alias_file.write_text("[command s3]\ny = ls --endpoint-url http://[\u00e9]\n", "utf-8")
+        # The alias file is read in the locale's codec, as aws reads it, so
+        # it is written in that codec too - with a character the Windows code
+        # pages can spell as one character, like UTF-8 can.
+        try:
+            alias_file.write_text("[command s3]\ny = ls --endpoint-url http://[\u00d7]\n")
+        except UnicodeEncodeError:
+            pytest.skip("the locale's codec cannot spell the test character")
         raw = io.BytesIO()
         stream = io.TextIOWrapper(raw, encoding="utf-8", newline="", write_through=True)
         monkeypatch.setattr(sys, "stderr", stream)
         monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "ascii")
         assert cli.main(["y", "s3://bkt"], ctx=unused_ctx()) == 255
         assert raw.getvalue() == (
-            b"boto3-s3: [ERROR]: 'ascii' codec can't encode character '\\xe9' "
+            b"boto3-s3: [ERROR]: 'ascii' codec can't encode character '\\xd7' "
             b"in position 20: ordinal not in range(128)\n"
         )
 
