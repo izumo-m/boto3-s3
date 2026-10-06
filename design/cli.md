@@ -210,21 +210,31 @@ solidified design is added here.
   `lss` offers `ls` while `web` offers nothing). The name displayed for the
   positional is `<subcommand>` (help page included), while the error prefix
   says a bare `subcommand` - argparse names a positional after its dest,
-  exactly as aws's does. Two residual differences remain, both outside that
+  exactly as aws's does. Three residual differences remain, all outside that
   mapping:
   - **Ambiguous-abbreviation candidates.** `--c could match ...` lists the
     same options aws lists, in our option-registration order rather than
     aws's (`--c`, `--cli`, `--n`, `--no`). Matching the order would mean
     declaring the globals in aws's order, which reshuffles the help page.
-  - **Ambiguous abbreviations as option values** (Python 3.10 / 3.11 only).
-    A value that ambiguously abbreviates one of the command's own options -
-    `--exclude --ss` against cp's `--sse*` family - is rejected there as an
-    ambiguous option, where aws takes it as the value. Argparse raises that
-    one while *classifying* the token stream, a pass that runs to completion
-    before any value is consumed; 3.12 moved the check to the point of use,
-    which a consumed token never reaches. Closing it would mean overriding
-    the classification too (`_parse_optional` / `_get_option_tuples`), far
-    more private argparse surface than a corner input is worth.
+  - **Ambiguous abbreviations met before their turn** (Python 3.10 / 3.11
+    only). Argparse raises the ambiguity there while *classifying* the token
+    stream, a pass that runs to completion before anything is consumed; 3.12
+    moved the check to the point of use. So below 3.12 an ambiguous
+    abbreviation anywhere on the line is the run's report. A value that
+    ambiguously abbreviates one of the command's own options -
+    `--exclude --ss` against cp's `--sse*` family - is rejected where aws
+    takes it as the value; an earlier parse error loses to a later ambiguity
+    (`ls --output bad --no-c` blames `--no-c`); and so does a `--version`
+    ahead of one (`ls --version --c` is rc 252 where aws prints its version).
+    Closing it would mean overriding the classification too
+    (`_parse_optional` / `_get_option_tuples`), far more private argparse
+    surface than a corner input is worth.
+  - **Colored usage** (below Python 3.14). On a terminal, or under
+    `FORCE_COLOR`, Python 3.14's argparse colors the usage block an error
+    report closes with, and aws's build runs on 3.14. Here that comes from
+    the host interpreter and from nowhere else: on 3.14 a report is colored
+    as aws's is, on an older one never. The interpreter's color machinery is
+    not backported for a difference only a terminal shows.
 - **Counted option values.** aws declares `--exclude` / `--include` with
   `nargs=1` and `mb`'s `--tags` with `nargs=2`, which both words a missing
   value by the count (`expected 1 argument`, `expected 2 arguments`) and lets

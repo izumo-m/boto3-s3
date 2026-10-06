@@ -68,15 +68,20 @@ read the same credentials and config files, so configuring credentials with
 unresolved-region report points at `aws configure` for the same reason.
 `aws` drops the envelope when the profile you named does not exist in any
 config file, keeping the exit code, and so does this command. Where the two
-part is `--cli-error-format` and `AWS_CLI_ERROR_FORMAT`: `aws` acts on them,
-this command accepts every value and ignores it. Set either to `enhanced` in
+part is the error format — `--cli-error-format`, `AWS_CLI_ERROR_FORMAT` and
+the profile key `cli_error_format`: `aws` acts on all three, this command
+accepts every value and ignores it. Set one to `enhanced` in
 that dropped-envelope situation and `aws` puts the envelope back, where here
-it stays dropped; set either to `legacy` and `aws` drops the envelope
+it stays dropped; set one to `legacy` and `aws` drops the envelope
 everywhere, where here the report is unchanged; and `json`, `yaml`, `text` and
 `table` re-render the report itself on `aws` — into a JSON object, a YAML
 mapping, a tab-separated line, an ASCII table — where here it keeps its usual
-one-line form. Whichever of those values is set, the exit code is the same on
-both tools.
+one-line form. A value outside that list, in the variable or the profile, is
+an error on neither tool: `aws` falls back to `enhanced`, and when the failure
+it is reporting is a global option that did not parse it says so first, in a
+line of its own (`Invalid cli_error_format: 'x'. Using 'enhanced' format.`)
+that this command never prints. Whichever value is set, the exit code is the
+same on both tools.
 
 **Ordering**, as promised above: with concurrent transfers, result lines — and
 `delete:` lines against transfer lines — interleave freely, on either tool.
@@ -205,11 +210,12 @@ run comes out differently, listed in section 1.
   `aws` v2 — uploads, deletes, bucket configuration writes, the annotation
   writes a `--copy-props all` multipart copy sends — as long as the installed
   botocore can compute it, which takes awscrt (the `crt` extra). Without
-  awscrt the installed botocore's own default, `CRC32`, is sent instead; `aws`
-  always bundles awscrt. Both algorithms are valid and neither changes the
-  result or the exit code; what differs is the checksum type left on an
-  uploaded object (a full-object CRC64NVME against a composite CRC32). An
-  explicit `--checksum-algorithm` makes the two agree regardless.
+  awscrt the installed botocore's own default stands instead — `CRC32` from
+  botocore 1.36 on, and no default checksum at all below it, where an upload
+  carries `Content-MD5`; `aws` always bundles awscrt. None of these changes
+  the result or the exit code; what differs is the checksum left on an
+  uploaded object (a full-object CRC64NVME against a composite CRC32, or
+  none). An explicit `--checksum-algorithm` makes the two agree regardless.
 - **Output back-pressure.** `aws` queues result lines without limit, so a stalled
   reader grows memory. Here the queue is bounded: a reader that falls far enough
   behind slows the transfer instead. No result line is ever dropped.
@@ -228,7 +234,10 @@ run comes out differently, listed in section 1.
   values and their meanings are the same, the typography is not. `--debug`
   traces come from the installed boto3/botocore rather than aws's bundled copy,
   and credentials appearing in them are masked here — `aws` prints them in
-  full.
+  full. A help page that cannot be written ends differently as well: `aws`
+  hands its page to a pager process and exits 0 whatever becomes of it, while
+  this command writes the page itself, so `help > /dev/full`, or a reader that
+  closes at once, is exit code 120 here.
 - **Deletes never ride the CRT engine.** With
   `preferred_transfer_client = crt`, `aws` routes each `rm` — and each S3-side
   `sync --delete` — through its CRT client, while here they keep their
@@ -379,11 +388,17 @@ run comes out differently, listed in section 1.
   `boto3-s3-cli/<v> boto3-s3/<v> boto3/<v> botocore/<v> Python/<v>
   <System>/<release>` — and has no `exe/<machine>` install-source token to
   report. Anything keying on the `aws-cli/<version>` token will not match.
-- **Two argument-parsing corners.** When an abbreviated option is ambiguous,
-  the candidates are listed in a different order than `aws` lists them; and on
-  Python 3.10 and 3.11 only, a value that itself ambiguously abbreviates one of
-  the command's options (`--exclude --ss`) is rejected here where `aws` takes
-  it as the value. Both affect the error text, not which options exist;
+- **Three argument-parsing corners.** When an abbreviated option is ambiguous,
+  the candidates are listed in a different order than `aws` lists them. On
+  Python 3.10 and 3.11 only, an ambiguous abbreviation is reported wherever it
+  sits on the command line, ahead of everything else: a value that itself
+  ambiguously abbreviates one of the command's options (`--exclude --ss`) is
+  rejected here where `aws` takes it as the value, an error earlier on the
+  line gives way to it, and so does a `--version` before it
+  (`ls --version --c` exits 252 here and prints the version on `aws`). And on
+  a terminal `aws` colors the usage block that closes a usage error, which
+  this command does only when it runs on Python 3.14 or later — the coloring
+  is the interpreter's. None of the three changes which options exist;
   [`../../design/cli.md`](../../design/cli.md) section 2 records why.
 - **Interactive prompt.** `--cli-auto-prompt` needs the `autoprompt` extra, and
   its completions are not the same as aws's: values of every option that has a
@@ -571,8 +586,8 @@ invalid one is still an error, and `--query` is still compiled as a JMESPath
 expression and rejected if malformed.
 
 Having no effect here is not the same as having no effect on `aws`:
-`--cli-error-format` — and its `AWS_CLI_ERROR_FORMAT` spelling — does change
-how `aws` renders an error report, so a script reading `aws`'s `json` or
+`--cli-error-format` — like `AWS_CLI_ERROR_FORMAT` and the profile key
+`cli_error_format` — does change how `aws` renders an error report, so a script reading `aws`'s `json` or
 `text` error output gets this command's usual one-line report instead
 (section 1).
 
