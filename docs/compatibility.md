@@ -17,7 +17,7 @@ bound, so a newer `boto3` is picked up as it is.
 
 | Feature | Needs |
 | --- | --- |
-| the CRT transfer engine | boto3 >= 1.34.6, plus the `crt` extra: the engine needs awscrt >= 0.19.18 (boto3's own minimum), which the extra brings from that release on (1.34.0 to 1.34.5 pin one below it). An endpoint on a non-standard port (MinIO's 9000, say) additionally needs the awscrt the extra brings from boto3 1.40.12 (older ones dial the standard port only). Below 1.42.0 the `[s3]` keys the transfer manager reads (`multipart_chunksize`) do not reach the engine — `target_bandwidth` still does — and the warning that says so shows under `--debug` only |
+| the CRT transfer engine | boto3 >= 1.34.6, plus the `crt` extra: the engine needs awscrt >= 0.19.18 (boto3's own minimum), and the extra's awscrt is pinned by botocore, whose 1.34.6 is the first to pin one at that minimum — boto3 1.34.6 is the first that cannot resolve to an older botocore. An endpoint on a non-standard port (MinIO's 9000, say) additionally needs the awscrt botocore 1.40.12 and later pin (boto3 >= 1.40.12 for the same reason; older ones dial the standard port only). Below boto3 1.42.0 the `[s3]` keys the transfer manager reads (`multipart_chunksize`) do not reach the engine — `target_bandwidth` still does — and the warning that says so shows under `--debug` only |
 | S3 Express directory buckets (a bucket name ending `--x-s3`) | boto3 >= 1.33.2 |
 | `ls --bucket-name-prefix` / `--bucket-region` | boto3 >= 1.35.42 |
 | `no_overwrite` / `--no-overwrite` on upload | boto3 >= 1.36.0 |
