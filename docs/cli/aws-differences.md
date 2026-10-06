@@ -550,10 +550,12 @@ run comes out differently, listed in section 1.
   `REQUESTS_CA_BUNDLE` is honored here whichever transfer engine runs, while
   `aws` honors it on its classic engine only (its CRT transfers ignore it).
   That last one can change a run's outcome: under
-  `preferred_transfer_client = crt`, a `REQUESTS_CA_BUNDLE` that points at a
-  file the CRT cannot use fails the command here (exit code 255,
-  `AWS_ERROR_INVALID_ARGUMENT`) where `aws`, never reading it on that engine,
-  transfers (measured).
+  `preferred_transfer_client = crt`, a `REQUESTS_CA_BUNDLE` the CRT cannot
+  read or use — a missing path, a file that is not a PEM bundle — fails the
+  command here at exit code 255 with awscrt's or the operating system's own
+  message, where `aws`, never reading it on that engine, runs the command as
+  if the variable were unset (measured on `cp`, `rm`, `sync` and their
+  dryruns).
 
 Differences that depend on which dependencies are installed — the CRT engine,
 CRT-family checksums, conditional writes, and more — are in

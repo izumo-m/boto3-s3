@@ -1052,10 +1052,11 @@ class S3:
         """
         config = transfer_config if transfer_config is not None else self._transfer_config
         if not crtsupport.selects_crt(config):
-            # The no-op a classic selection makes of the call below, taken here
-            # so the CRT-only boto3 name is imported on the CRT lane alone -
-            # floor boto3 predates the CRT engine and carries no such name,
-            # and every transfer command owing aws parity calls this.
+            # The no-op a classic selection makes of the call below, taken
+            # here so the selection - and the MissingDependencyException an
+            # explicit 'crt' without a usable awscrt raises from it - stays
+            # outside the classifying seam below, which would turn that
+            # documented pass-through into a ConfigurationError.
             return
         # Construction failures classified exactly as the transfer engine's
         # seam classifies them (`transfer.crt_engine_errors`); no operation is

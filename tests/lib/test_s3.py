@@ -786,8 +786,8 @@ class TestMaterializeCrtEngine:
     def test_the_crt_lane_builds_without_the_crt_only_boto3_name(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # boto3 1.34 to 1.41 run the CRT engine (their crt extra brings an
-        # awscrt at boto3's own floor) but carry no InvalidCrtTransferConfigError
+        # boto3 1.34.6 to 1.41 run the CRT engine (from 1.34.6 the crt extra's
+        # awscrt meets boto3's own minimum) but carry no InvalidCrtTransferConfigError
         # - it arrived with 1.42's CRT-aware TransferConfig. Importing it on
         # the CRT lane failed every CRT transfer there with ImportError.
         import boto3.exceptions

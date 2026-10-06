@@ -2942,7 +2942,7 @@ class TestCrtEngineErrors:
         assert info.value.__cause__ is raised
 
     def test_the_seam_needs_no_crt_only_boto3_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # boto3 1.34 to 1.41 run the CRT engine without InvalidCrtTransferConfigError
+        # boto3 1.34.6 to 1.41 run the CRT engine without InvalidCrtTransferConfigError
         # (it arrived in 1.42.0); an unconditional import failed every CRT
         # transfer there with ImportError before the first byte moved.
         import boto3.exceptions

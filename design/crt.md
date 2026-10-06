@@ -531,9 +531,12 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   `InvalidCrtTransferConfigError` itself exists from boto3 1.42.0 only, so the
   seam looks it up rather than importing it: boto3 1.34 to 1.41 run the CRT
   engine without it (an unconditional import failed every CRT transfer there
-  with `ImportError`, 2026-10-06), and the engine's floor is 1.34.0, the first
-  release whose `crt` extra pins an awscrt at boto3's own minimum
-  (docs/compatibility.md).
+  with `ImportError`, 2026-10-06). The engine's floor is boto3 1.34.6, the
+  first release whose `crt` extra brings an awscrt at boto3's own minimum
+  (the extra's awscrt follows botocore's patch release: 1.34.0 to 1.34.5
+  pin 0.19.17, one below it), and the awscrt the extra brings before boto3
+  1.40.12 dials the standard port only, so a custom-port endpoint is refused
+  there (docs/compatibility.md records both).
 - **Explicit crt x lock contention**: aws forces the CRT construction; boto3 -
   and the library default - silently falls back to classic. When the
   construction succeeds the two are indistinguishable in output and rc

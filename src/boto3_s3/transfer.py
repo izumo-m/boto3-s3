@@ -602,12 +602,12 @@ def _crt_config_error_type() -> type[Exception] | None:
     """boto3's ``InvalidCrtTransferConfigError``, or None on a boto3 without it.
 
     The name arrived in boto3 1.42.0 with the CRT-aware ``TransferConfig``
-    (``UNSET_DEFAULT``), while the CRT engine is usable from boto3 1.34.0 -
-    the first release whose ``crt`` extra pins an awscrt at boto3's own floor
-    (docs/compatibility.md) - so the CRT lane runs on eight minor releases
-    that cannot import it, where an unconditional import failed every CRT
-    transfer with ``ImportError``. Only a boto3 that validates the config can
-    raise it, so its absence means there is nothing to catch.
+    (``UNSET_DEFAULT``), while the CRT engine is usable from boto3 1.34.6 -
+    the first release whose ``crt`` extra brings an awscrt at boto3's own
+    minimum (docs/compatibility.md) - so the CRT lane runs on eight minor
+    releases that cannot import it, where an unconditional import failed
+    every CRT transfer with ``ImportError``. Only a boto3 that validates the
+    config can raise it, so its absence means there is nothing to catch.
     """
     try:
         from boto3.exceptions import InvalidCrtTransferConfigError
