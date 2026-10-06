@@ -490,6 +490,17 @@ run comes out differently, listed in section 1.
   `[s3]` section's `us_east_1_regional_endpoint` and the profile's
   `sts_regional_endpoints` are already `regional`. What does differ is an invalid or empty value: an error here
   (exit code 255) where `aws` runs as if the variable were unset.
+- **A malformed instance-metadata endpoint is judged by the installed
+  Python.** Whether `AWS_EC2_METADATA_SERVICE_ENDPOINT` (or the profile key
+  `ec2_metadata_service_endpoint`) is a usable URL is botocore's check, and
+  that check leans on the interpreter's URL parser, whose rules have moved
+  between Python releases. A value only some releases refuse — a scheme that
+  starts with a digit (`1http://…`, taken below Python 3.11), a bracketed
+  host that is not an IPv6 address (taken by older patch releases) — ends
+  every run at 255 on `aws` and may run normally here, or the reverse,
+  depending on the Python this command is installed under. Every endpoint
+  that is a well-formed URL, and every one that plainly is not, is treated
+  alike on both.
 - **`sts_regional_endpoints` is validated.** The installed botocore still
   validates this config key (and `AWS_STS_REGIONAL_ENDPOINTS`); `aws` v2's
   bundled botocore dropped it. An invalid value is an error here (exit
