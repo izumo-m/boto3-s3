@@ -144,6 +144,40 @@ class TestAlgorithmPin:
     def test_the_url_and_path_branches(self, name: str, expected: str | None) -> None:
         assert _guess_content_type(name) == expected
 
+    def test_a_name_urlparse_refuses_fails_the_item(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # 3.14's guess_type parses the name as a URL first, and urlparse
+        # refuses an unmatched bracket after a scheme-like prefix with
+        # ValueError. A local path never starts that way, but an open-route
+        # key can; inside aws's queued subscriber that is the item's failure,
+        # so it is here too, not the run's.
+        from boto3_s3 import S3, BatchError, OpResult, S3Storage
+        from boto3_s3.transferconfig import TransferConfig
+        from tests.utils.recorder import make_recording_client
+
+        with pytest.raises(ValueError):
+            _guess_content_type("scheme://[unmatched/a.txt")
+        refused = ValueError("Invalid IPv6 URL")
+        monkeypatch.setattr(
+            transfer, "_guess_content_type", lambda _name: (_ for _ in ()).throw(refused)
+        )
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "a.txt").write_text("a")
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        with pytest.raises(BatchError):
+            S3().cp(
+                str(src),
+                S3Storage("s3://b/p/", client=client),
+                recursive=True,
+                transfer_config=TransferConfig(use_threads=False),
+                on_result=results.append,
+            )
+        assert len(results) == 1 and results[0].error is not None
+        assert str(results[0].error) == "Invalid IPv6 URL"
+
     @pytest.mark.skipif(
         sys.version_info < (3, 13), reason="the host's guess_type is the older algorithm"
     )

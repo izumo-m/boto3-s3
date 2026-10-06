@@ -1380,15 +1380,17 @@ class Transferrer:
                 name = item.src_info.key or item.dest_key or ""
             try:
                 guessed = _guess_content_type(name)
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 # A host overlay the guess reads failed to load (a mime.types
-                # that exists but cannot be read, say). aws guesses inside
-                # s3transfer's queued subscriber, so the error fails that item
-                # - `upload failed: ... [Errno 13] Permission denied:
-                # '/etc/mime.types'` - and the run goes on, a sync's deletes
-                # included; raised here it ended the run as one fatal error.
-                # Nothing was submitted, so the item's fileobj is released
-                # the way a submit-time failure releases it.
+                # that exists but cannot be read, say), or urlparse refused
+                # the name (an unmatched `[` after a scheme-like prefix). aws
+                # guesses inside s3transfer's queued subscriber, so either
+                # error fails that item - `upload failed: ... [Errno 13]
+                # Permission denied: '/etc/mime.types'` - and the run goes
+                # on, a sync's deletes included; raised here it ended the run
+                # as one fatal error. Nothing was submitted, so the item's
+                # fileobj is released the way a submit-time failure releases
+                # it.
                 self._close_item_fileobjs(item)
                 self._record_failure(item, exc)
                 return None
