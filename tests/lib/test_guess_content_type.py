@@ -65,6 +65,102 @@ class TestFrozenTable:
         assert _guess_content_type(name) == expected
 
 
+class TestUnreadableOverlay:
+    """A knownfiles entry that exists but cannot be read fails the item, not the run.
+
+    aws guesses the type inside s3transfer's queued subscriber, so an
+    `OSError` from `mimetypes.init` reading `/etc/mime.types` is that item's
+    `upload failed: ... [Errno 13] Permission denied: '/etc/mime.types'` and
+    the run goes on - every item fails the same way, and a sync still
+    deletes. Raised out of the submit loop, it ended the run as one
+    `fatal error:` and leaked a bare `PermissionError` from the library
+    (measured against aws 2.36.40 in a mount namespace, 2026-10-06).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _unreadable_mime_types(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        overlay = tmp_path / "mime.types"
+        overlay.write_text("text/x-probe probe\n")
+        monkeypatch.setattr(transfer, "_mime_db", None)
+        monkeypatch.setattr(mimetable, "KNOWNFILES", [str(overlay)])
+
+        def refuse(self: mimetypes.MimeTypes, filename: str, strict: bool = True) -> None:
+            raise PermissionError(13, "Permission denied", filename)
+
+        monkeypatch.setattr(mimetypes.MimeTypes, "read", refuse)
+        self.overlay = overlay
+
+    def _tree(self, tmp_path: Path) -> Path:
+        src = tmp_path / "src"
+        src.mkdir(parents=True)
+        (src / "a.txt").write_text("a")
+        (src / "b.json").write_text("{}")
+        return src
+
+    def test_every_item_fails_with_the_os_error_and_the_run_goes_on(self, tmp_path: Path) -> None:
+        from boto3_s3 import S3, BatchError, OpOutcome, OpResult, S3Storage
+        from boto3_s3.transferconfig import TransferConfig
+        from tests.utils.recorder import make_recording_client
+
+        client, calls = make_recording_client([])
+        results: list[OpResult] = []
+        with pytest.raises(BatchError) as info:
+            S3().cp(
+                str(self._tree(tmp_path)),
+                S3Storage("s3://b/p/", client=client),
+                recursive=True,
+                transfer_config=TransferConfig(use_threads=False),
+                on_result=results.append,
+            )
+        assert info.value.failed == 2
+        assert [r.outcome for r in results] == [OpOutcome.FAILED, OpOutcome.FAILED]
+        for result in results:
+            assert result.error is not None
+            assert str(result.error) == f"[Errno 13] Permission denied: '{self.overlay}'"
+        assert calls == []
+
+    def test_an_explicit_content_type_or_no_guess_never_reads_the_overlay(
+        self, tmp_path: Path
+    ) -> None:
+        from boto3_s3 import S3, OpOutcome, OpResult, S3Storage
+        from boto3_s3.transferconfig import TransferConfig
+        from tests.utils.recorder import make_recording_client
+
+        for case, options in enumerate(({"content_type": "text/x-a"}, {"guess_mime_type": False})):
+            client, calls = make_recording_client([{}, {}])
+            results: list[OpResult] = []
+            S3().cp(
+                str(self._tree(tmp_path / f"case{case}")),
+                S3Storage("s3://b/p/", client=client),
+                recursive=True,
+                transfer_config=TransferConfig(use_threads=False),
+                on_result=results.append,
+                **options,
+            )
+            assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED, OpOutcome.SUCCEEDED]
+            assert [c.operation for c in calls] == ["PutObject", "PutObject"]
+
+    def test_a_stream_source_fails_the_item_and_releases_nothing_twice(self) -> None:
+        import io
+
+        from boto3_s3 import S3, BatchError, IOStorage, OpResult, S3Storage
+        from boto3_s3.transferconfig import TransferConfig
+        from tests.utils.recorder import make_recording_client
+
+        client, _ = make_recording_client([])
+        buf = io.BytesIO(b"x")
+        results: list[OpResult] = []
+        with pytest.raises(BatchError):
+            S3().cp(
+                IOStorage(buf),
+                S3Storage("s3://b/k", client=client),
+                transfer_config=TransferConfig(use_threads=False),
+                on_result=results.append,
+            )
+        assert len(results) == 1 and results[0].error is not None
+        assert not buf.closed
+
+
 class TestHostOverlays:
     def test_a_local_mime_types_file_still_applies(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

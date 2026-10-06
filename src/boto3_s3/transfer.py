@@ -531,7 +531,11 @@ def _guess_content_type(path: str) -> str | None:
     entry is in an undecodable encoding (bpo-9291) - here from the registry read
     the first call performs, where aws takes it from its own lazy
     ``mimetypes.init``; strict (IANA-only) matching is kept deliberately, like
-    aws.
+    aws. Any other failure to load the host overlays - an ``OSError`` from a
+    ``knownfiles`` entry that exists but cannot be read - propagates, and the
+    submit records it as the item's failure, where aws's queued subscriber
+    lets it land; the store stays unbuilt, so every later item retries and
+    fails the same way, as aws's does.
     """
     try:
         return _mime_types().guess_type(path)[0]
@@ -1320,7 +1324,20 @@ class Transferrer:
                 # single "" source - same basename). A stream item carries no
                 # src_info and stays guess-free (no filename, aws parity).
                 name = item.src_info.key or item.dest_key or ""
-            guessed = _guess_content_type(name)
+            try:
+                guessed = _guess_content_type(name)
+            except OSError as exc:
+                # A host overlay the guess reads failed to load (a mime.types
+                # that exists but cannot be read, say). aws guesses inside
+                # s3transfer's queued subscriber, so the error fails that item
+                # - `upload failed: ... [Errno 13] Permission denied:
+                # '/etc/mime.types'` - and the run goes on, a sync's deletes
+                # included; raised here it ended the run as one fatal error.
+                # Nothing was submitted, so the item's fileobj is released
+                # the way a submit-time failure releases it.
+                self._close_item_fileobjs(item)
+                self._record_failure(item, exc)
+                return None
             if guessed is not None:
                 extra_args["ContentType"] = guessed
         subscribers, counted = self._common_subscribers(item)
