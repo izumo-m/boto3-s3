@@ -481,6 +481,34 @@ def validate_profile(args: argparse.Namespace) -> None:
         raise InvalidConfigError(str(exc)) from exc
 
 
+def build_credential_chain(args: argparse.Namespace) -> None:
+    """Build botocore's credential provider chain, at aws's startup slot.
+
+    aws reaches for the chain while it is still starting up - the
+    ``session-initialized`` handler that installs the credential cache - so
+    whatever botocore raises while building it (a non-integer IMDS timeout or
+    attempt count, an unknown IMDS endpoint mode, a malformed IMDS endpoint)
+    stops the run there, ahead of the help token and every command layer. The
+    dispatcher calls this at that slot when its config scan says the build
+    could fail (``ConfigScan.credential_chain_suspect``).
+
+    Opening a session the way the run's own will be opened is what builds it
+    (`_inject_credential_cache`), with the same ``ProfileNotFound`` swallow
+    aws applies; everything else propagates raw, for the dispatcher to report
+    through aws's general handler. The session is discarded - a run that gets
+    past this opens its own - so the one thing opening it does to the process
+    is undone: ``SSLKEYLOGFILE`` goes back into the environment, because what
+    follows may be an external alias, whose child process must still receive
+    it (`_drop_tls_key_log`).
+    """
+    key_log = os.environ.get("SSLKEYLOGFILE")
+    try:
+        _open_botocore_session(args)
+    finally:
+        if key_log is not None:
+            os.environ["SSLKEYLOGFILE"] = key_log
+
+
 def build_session(args: argparse.Namespace) -> Boto3Session:
     """Build and validate the one boto3 session owned by a CLI `S3` command.
 

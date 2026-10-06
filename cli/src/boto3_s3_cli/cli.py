@@ -1160,6 +1160,29 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
             )
             _write_error(message, rc=_GENERAL_ERROR_RC)
             return _GENERAL_ERROR_RC
+    # The next `session-initialized` handler that can stop a run installs the
+    # credential cache, and reaching for the provider chain there makes
+    # botocore build it - which is where the IMDS settings are converted and
+    # validated (a non-integer `metadata_service_timeout` or
+    # `metadata_service_num_attempts`, an unknown
+    # `ec2_metadata_service_endpoint_mode`, a malformed
+    # `ec2_metadata_service_endpoint`; environment variable and config key
+    # alike). A bad one therefore settles the run here, at aws's general rc
+    # 255 with botocore's own text: behind the two gates above and ahead of
+    # the help token and every command layer (measured:
+    # `AWS_METADATA_SERVICE_TIMEOUT=abc aws s3 help` is rc 255). The scan only
+    # says whether the build *could* fail; the failure is botocore's own,
+    # raised by building the chain for real, so every configuration that
+    # passes keeps the SDK unimported on the informational exits.
+    if _config_scan.credential_chain_suspect(clientfactory.resolve_profile(head)):
+        try:
+            clientfactory.build_credential_chain(head)
+        except AssertionError:
+            raise
+        except Exception as exc:
+            rc = _exit_code_for_unexpected(exc)
+            _write_error(exc, rc=rc)
+            return rc
     try:
         return _resolve_command(
             tokens, head, ctx, aliases, suppress_usage_errors=suppress_usage_errors

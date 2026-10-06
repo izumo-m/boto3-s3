@@ -31,6 +31,7 @@ credentials file every section does).
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from typing import NamedTuple, TypeAlias
 
@@ -54,6 +55,29 @@ _TIMESTAMP_FORMATS = ("wire", "iso8601")
 # table declares; anything else is the rc-255 report `cli` renders.
 BINARY_FORMAT_KEY = "cli_binary_format"
 _BINARY_FORMATS = ("base64", "raw-in-base64-out")
+
+
+# What botocore reads while it *builds* the credential provider chain (its
+# `create_credential_resolver` and the IMDS fetcher that constructs), each as
+# (environment variable, config key): two values it converts with `int`, the
+# endpoint mode it checks against its two modes, and the endpoint it checks
+# for being a URL.
+_CHAIN_INTEGER_SETTINGS = (
+    ("AWS_METADATA_SERVICE_TIMEOUT", "metadata_service_timeout"),
+    ("AWS_METADATA_SERVICE_NUM_ATTEMPTS", "metadata_service_num_attempts"),
+)
+_CHAIN_ENDPOINT_MODE_SETTING = (
+    "AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE",
+    "ec2_metadata_service_endpoint_mode",
+)
+_CHAIN_ENDPOINT_SETTING = ("AWS_EC2_METADATA_SERVICE_ENDPOINT", "ec2_metadata_service_endpoint")
+_IMDS_ENDPOINT_MODES = ("ipv4", "ipv6")
+# An endpoint that is plainly a URL botocore accepts: http(s), a DNS-shaped
+# host or a bracketed IPv6 literal, an optional port, an optional path.
+# Anything else is left to botocore's own check.
+_PLAIN_ENDPOINT_RE = re.compile(
+    r"https?://(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?)(:[0-9]+)?(/[!-~]*)?",
+)
 
 
 class _UnparseableError(Exception):
@@ -135,6 +159,55 @@ class ConfigScan(NamedTuple):
         if value is None or value in _BINARY_FORMATS:
             return None
         return value
+
+    def credential_chain_suspect(self, profile: str | None) -> bool:
+        """Whether building botocore's credential provider chain could fail.
+
+        aws builds that chain during startup (its ``session-initialized``
+        handler that installs the credential cache asks the session for it),
+        and botocore converts and validates four settings while it does: a
+        non-integer ``metadata_service_timeout`` /
+        ``metadata_service_num_attempts``, an unknown
+        ``ec2_metadata_service_endpoint_mode`` and a malformed
+        ``ec2_metadata_service_endpoint`` each raise there, which stops the
+        run before the help token and every command layer.
+
+        This answers only *whether one of them might*, so the dispatcher
+        builds the chain for real - importing the SDK - for exactly the
+        configurations that could fail, and botocore raises its own error
+        with its own wording. Each setting is read the way botocore's chain
+        for it reads: the environment variable when present, an empty value
+        included, else ``profile``'s config key (nothing for an undeclared
+        profile, whose ``ProfileNotFound`` aws swallows at this step). The
+        two integers are tried with the very ``int`` botocore applies; the
+        endpoint is only matched against the plainly valid shape, since a
+        wrong guess in either direction costs nothing but timing - a suspect
+        that botocore accepts just loads the SDK early, and a miss surfaces
+        where it always did, at the client build.
+        """
+        scoped = self.scoped(profile)
+
+        def setting(env_var: str, key: str) -> ConfigValue | None:
+            if env_var in os.environ:
+                return os.environ[env_var]
+            return scoped.get(key)
+
+        for names in _CHAIN_INTEGER_SETTINGS:
+            value = setting(*names)
+            if value is not None:
+                try:
+                    int(value)  # pyright: ignore[reportArgumentType]
+                except (TypeError, ValueError):
+                    return True
+        mode = setting(*_CHAIN_ENDPOINT_MODE_SETTING)
+        if mode is not None and (
+            not isinstance(mode, str) or mode.lower() not in _IMDS_ENDPOINT_MODES
+        ):
+            return True
+        endpoint = setting(*_CHAIN_ENDPOINT_SETTING)
+        return endpoint is not None and (
+            not isinstance(endpoint, str) or _PLAIN_ENDPOINT_RE.fullmatch(endpoint) is None
+        )
 
 
 def env_profile() -> str | None:

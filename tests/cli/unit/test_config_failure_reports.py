@@ -1163,3 +1163,206 @@ class TestCliHistoryIsNotRead:
         monkeypatch.setenv("AWS_CLI_HISTORY_FILE", str(config.parent))
         assert cli.main(["bogus"]) == 252
         assert capsys.readouterr().err == _ENVELOPED_INVALID_CHOICE
+
+
+class TestCredentialChainSettings:
+    """A setting botocore rejects while building the credential chain ends the run early.
+
+    aws builds the provider chain during startup - its `session-initialized`
+    handler that installs the credential cache asks the session for it - and
+    botocore converts and validates the IMDS settings while it does. A bad
+    one is therefore aws's general rc 255, with botocore's own text, ahead of
+    the help token and every command layer and behind the timestamp and
+    binary-format gates. Every expectation was measured against the pinned
+    aws-cli; this CLI used to build the chain only inside the command, so
+    `help` paged at rc 0 and a usage error kept its 252.
+    """
+
+    _SETTINGS: ClassVar[list[tuple[str, str, str, str]]] = [
+        (
+            "AWS_METADATA_SERVICE_TIMEOUT",
+            "metadata_service_timeout",
+            "abc",
+            "invalid literal for int() with base 10: 'abc'",
+        ),
+        (
+            "AWS_METADATA_SERVICE_NUM_ATTEMPTS",
+            "metadata_service_num_attempts",
+            "1.5",
+            "invalid literal for int() with base 10: '1.5'",
+        ),
+        (
+            "AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE",
+            "ec2_metadata_service_endpoint_mode",
+            "bogus",
+            "Invalid EC2 Instance Metadata endpoint mode: bogus "
+            "Valid endpoint modes (case-insensitive): ('ipv4', 'ipv6').",
+        ),
+        (
+            "AWS_EC2_METADATA_SERVICE_ENDPOINT",
+            "ec2_metadata_service_endpoint",
+            "not_a_url",
+            "Invalid endpoint EC2 Instance Metadata endpoint: not_a_url",
+        ),
+    ]
+    _ARGVS: ClassVar[list[list[str]]] = [
+        ["help"],
+        ["ls", "help"],
+        ["bogus"],
+        ["ls", "--bogus"],
+        ["ls", "--page-size"],
+        [],
+    ]
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, config: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config.write_text("[default]\nregion = us-east-1\n")
+        for env_var, _key, _value, _report in self._SETTINGS:
+            monkeypatch.delenv(env_var, raising=False)
+
+    @pytest.mark.parametrize("argv", _ARGVS)
+    @pytest.mark.parametrize(("env_var", "key", "value", "report"), _SETTINGS)
+    def test_a_bad_environment_value_beats_help_and_every_usage_error(
+        self,
+        env_var: str,
+        key: str,
+        value: str,
+        report: str,
+        argv: list[str],
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setenv(env_var, value)
+        assert cli.main(argv) == 255
+        captured = capsys.readouterr()
+        assert captured.err == f"boto3-s3: [ERROR]: {report}\n"
+        assert captured.out == ""
+
+    @pytest.mark.parametrize(("env_var", "key", "value", "report"), _SETTINGS)
+    def test_the_config_key_is_read_like_the_variable(
+        self,
+        env_var: str,
+        key: str,
+        value: str,
+        report: str,
+        config: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        config.write_text(f"[default]\nregion = us-east-1\n{key} = {value}\n")
+        assert cli.main(["help"]) == 255
+        assert capsys.readouterr().err == f"boto3-s3: [ERROR]: {report}\n"
+
+    def test_an_empty_variable_is_a_value_too(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # botocore's environment read is present-wins, so the empty string is
+        # what `int` is handed (measured: rc 255 on `aws s3 help`).
+        monkeypatch.setenv("AWS_METADATA_SERVICE_NUM_ATTEMPTS", "")
+        assert cli.main(["help"]) == 255
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: invalid literal for int() with base 10: ''\n"
+        )
+
+    def test_the_variable_shadows_a_bad_config_key(
+        self, config: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        config.write_text("[default]\nmetadata_service_timeout = abc\n")
+        monkeypatch.setenv("AWS_METADATA_SERVICE_TIMEOUT", "5")
+        assert cli.main(["help"]) == 0
+
+    def test_an_undeclared_profile_hides_its_config_keys_but_not_the_variable(
+        self, config: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The chain is built for the bound profile. One no file declares has
+        # no keys to read - aws swallows the ProfileNotFound of this step -
+        # so the help page still shows; the environment is read before the
+        # profile and still stops the run (measured, both).
+        config.write_text("[default]\nmetadata_service_timeout = abc\n")
+        assert cli.main(["--profile", "nope", "help"]) == 0
+        capsys.readouterr()
+        monkeypatch.setenv("AWS_METADATA_SERVICE_TIMEOUT", "abc")
+        assert cli.main(["--profile", "nope", "help"]) == 255
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: invalid literal for int() with base 10: 'abc'\n"
+        )
+
+    def test_the_selected_profile_s_key_is_the_one_read(
+        self, config: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        config.write_text(
+            "[default]\nregion = us-east-1\n[profile p]\nmetadata_service_timeout = abc\n"
+        )
+        assert cli.main(["help"]) == 0
+        capsys.readouterr()
+        assert cli.main(["--profile", "p", "help"]) == 255
+
+    def test_the_earlier_gates_and_the_version_still_win(
+        self, config: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setenv("AWS_METADATA_SERVICE_TIMEOUT", "abc")
+        assert cli.main(["--version"]) == 0
+        assert cli.main(["ls", "--endpoint-url", "bad"]) == 252
+        capsys.readouterr()
+        config.write_text("[default]\ncli_timestamp_format = bogus\n")
+        assert cli.main(["help"]) == 253
+        assert capsys.readouterr().err == _TIMESTAMP_REPORT.format("bogus")
+        config.write_text("[default]\ncli_binary_format = bogus\n")
+        assert cli.main(["help"]) == 255
+        assert capsys.readouterr().err == "boto3-s3: [ERROR]: 'bogus'\n"
+
+    def test_a_suspect_botocore_accepts_changes_nothing_but_the_timing(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The scan guesses; botocore decides. An endpoint outside the plainly
+        # valid shape that botocore nevertheless takes (it checks the host,
+        # not the scheme) builds the chain early and the run goes on - and
+        # the session opened for that must not cost the process its
+        # SSLKEYLOGFILE, which an external alias's child still has to see.
+        from boto3_s3_cli import configfiles
+
+        monkeypatch.setenv("AWS_EC2_METADATA_SERVICE_ENDPOINT", "ftp://metadata.example")
+        monkeypatch.setenv("SSLKEYLOGFILE", "/nonexistent/keys.log")
+        assert configfiles.scan().credential_chain_suspect(None) is True
+        assert cli.main(["help"]) == 0
+        assert capsys.readouterr().err == ""
+        assert os.environ["SSLKEYLOGFILE"] == "/nonexistent/keys.log"
+
+    @pytest.mark.parametrize(
+        ("env", "body", "suspect"),
+        [
+            ({}, "", False),
+            ({"AWS_METADATA_SERVICE_TIMEOUT": "5"}, "", False),
+            ({"AWS_METADATA_SERVICE_TIMEOUT": " 5 "}, "", False),
+            ({"AWS_METADATA_SERVICE_TIMEOUT": "5.0"}, "", True),
+            ({"AWS_METADATA_SERVICE_TIMEOUT": ""}, "", True),
+            ({"AWS_METADATA_SERVICE_NUM_ATTEMPTS": "x"}, "", True),
+            ({}, "metadata_service_num_attempts = 3\n", False),
+            ({}, "metadata_service_num_attempts = three\n", True),
+            ({}, "metadata_service_timeout =\n  a = b\n", True),
+            ({"AWS_METADATA_SERVICE_TIMEOUT": "5"}, "metadata_service_timeout = abc\n", False),
+            ({"AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE": "IPv6"}, "", False),
+            ({"AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE": "dual"}, "", True),
+            ({}, "ec2_metadata_service_endpoint_mode = ipv4\n", False),
+            ({"AWS_EC2_METADATA_SERVICE_ENDPOINT": "http://169.254.169.254"}, "", False),
+            ({"AWS_EC2_METADATA_SERVICE_ENDPOINT": "http://[fd00:ec2::254]/"}, "", False),
+            ({"AWS_EC2_METADATA_SERVICE_ENDPOINT": "http://localhost:1338"}, "", False),
+            ({"AWS_EC2_METADATA_SERVICE_ENDPOINT": "http://localhost:1338/latest/"}, "", False),
+            ({"AWS_EC2_METADATA_SERVICE_ENDPOINT": "169.254.169.254"}, "", True),
+            ({"AWS_EC2_METADATA_SERVICE_ENDPOINT": "http://a b"}, "", True),
+            ({}, "ec2_metadata_service_endpoint = not a url\n", True),
+        ],
+    )
+    def test_what_sends_the_dispatcher_to_build_the_chain(
+        self,
+        env: dict[str, str],
+        body: str,
+        suspect: bool,
+        config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from boto3_s3_cli import configfiles
+
+        config.write_text(f"[default]\n{body}")
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+        assert configfiles.scan().credential_chain_suspect(None) is suspect
