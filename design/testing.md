@@ -500,6 +500,10 @@ resolve-every-symbol case guards the three-way `__all__` / `TYPE_CHECKING` /
   and temporary-file cleanup are covered by `TestCopyPropsAllCpCommand` and
   the library transfer tests because MinIO cannot serve those operations.
 
+- **Endpoint fidelity, in full**: every known way MinIO answers differently
+  from real S3 - including the two gaps above - and the test-side change made
+  for each is tabulated in [`endpoint-fidelity.md`](./endpoint-fidelity.md).
+
 ## 8. Running the suite on Windows (WSL2 host)
 
 Windows is a supported OS (overview.md section 2); the suite runs there on a

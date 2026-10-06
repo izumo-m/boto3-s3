@@ -211,6 +211,9 @@ Neither design nor promises to users - how to work on the project. Read with
 - [`testing.md`](./testing.md) - the test structure (5 tiers, golden
   contracts, e2e gate, enforcement of the exit code charter) and the
   operational definition of the output parity criterion.
+- [`endpoint-fidelity.md`](./endpoint-fidelity.md) - how the S3-compatible
+  test endpoint (MinIO) answers differently from real S3, the test-side
+  change made for each gap, and the survey of replacement endpoints.
 - [`benchmark.md`](./benchmark.md) - the local performance benchmarks
   (E2E differential against the pinned aws-cli, in-process stubbed-S3
   timings, startup-adjusted comparison, regression flags).
