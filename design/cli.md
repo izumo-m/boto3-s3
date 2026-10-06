@@ -139,13 +139,24 @@ solidified design is added here.
   `ConfigScan.credential_chain_suspect` decides whether the build *would*
   fail, with botocore's own tests applied without importing it - the very
   `int` it converts with, its two modes, a verbatim copy of its endpoint
-  check (pinned against the installed botocore by test) - and for exactly
-  those configurations the dispatcher builds the chain for real
-  (`clientfactory.build_credential_chain`), so the report is botocore's own
-  and every configuration that passes keeps the informational exits
-  SDK-free (section 7). The copy has to be exact in both directions: a
-  refusal it misses leaves `help` at rc 0 where aws exits 255, and a
-  suspicion botocore does not share loads the SDK ahead of the help page.
+  check (pinned against the installed botocore by test) - read in
+  botocore's order, and for those configurations the dispatcher builds the
+  chain for real (`clientfactory.build_credential_chain`), so the report is
+  botocore's own and a configuration that passes keeps the informational
+  exits SDK-free (section 7). The order is part of the copy: under a
+  profile no file declares, botocore's first read that misses the
+  environment raises the `ProfileNotFound` aws swallows, and nothing it
+  would have read afterwards is examined, the endpoint - checked last -
+  least of all. The copy has to hold in both directions: a refusal it
+  misses leaves `help` at rc 0 where aws exits 255, and a suspicion
+  botocore does not share loads the SDK ahead of the help page. What it
+  copies is the installed botocore on the host interpreter, though, not
+  aws's: botocore's endpoint check rests on `urlsplit`, whose rules moved
+  between Python releases (a digit-led scheme is one below 3.11; bracketed
+  hosts are validated only by later patch releases), so an endpoint only
+  some releases refuse follows the host here, as it does at the client
+  build - the gate does not pin it the way `validate_endpoint_url` pins
+  the same `urlsplit` property for this CLI's own `--endpoint-url` check.
 - The first `--` stops the globals pass (argparse semantics, verified
   identical on 3.10 and aws's bundled 3.14) and the marker survives in the
   remainder for stage 2's parse to honor, so the tail stays positional all
@@ -1711,10 +1722,11 @@ The key implementation points are:
   imports botocore and the library's `TransferConfig` at module top; awscrt
   stays behind `crtsupport`'s in-function imports.
 - The credential-chain gate (section 1) is the one startup step that
-  reaches the SDK ahead of the help token, and it does so only in a run
-  that then fails: the config scan applies botocore's own tests to the IMDS
-  settings without importing it, so the chain is built early exactly when
-  botocore refuses to build it - which is not an informational exit.
+  reaches the SDK ahead of the help token, and it is meant to do so only
+  in a run that then fails - which is not an informational exit: the
+  config scan applies botocore's own tests to the IMDS settings, in
+  botocore's order, without importing it, and a randomized comparison
+  against really building the chain holds the two together.
 - `prompt_toolkit` and the prompt-side modules of the `autoprompt` package
   are imported only when `--cli-auto-prompt` fires; the package's pure
   mode-resolution module, `autoprompt.resolve`, is imported with `cli` itself

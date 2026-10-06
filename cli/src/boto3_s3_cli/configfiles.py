@@ -60,18 +60,24 @@ _BINARY_FORMATS = ("base64", "raw-in-base64-out")
 
 # What botocore reads while it *builds* the credential provider chain (its
 # `create_credential_resolver` and the IMDS fetcher that constructs), each as
-# (environment variable, config key): two values it converts with `int`, the
-# endpoint mode it checks against its two modes, and the endpoint it checks
-# for being a URL.
+# (environment variable, config key) and in the order it reads them: two
+# values it converts with `int`, the endpoint it later checks for being a
+# URL, the endpoint mode it checks against its two modes, and a boolean it
+# cannot fail on. The order matters for one case, an undeclared profile (see
+# `ConfigScan.credential_chain_suspect`). One more boolean, `imds_use_ipv6`,
+# is read between the last two when no mode is set; it is left out because
+# only a declared profile can get that far without a mode, and for a
+# declared profile no read can fail.
 _CHAIN_INTEGER_SETTINGS = (
     ("AWS_METADATA_SERVICE_TIMEOUT", "metadata_service_timeout"),
     ("AWS_METADATA_SERVICE_NUM_ATTEMPTS", "metadata_service_num_attempts"),
 )
+_CHAIN_ENDPOINT_SETTING = ("AWS_EC2_METADATA_SERVICE_ENDPOINT", "ec2_metadata_service_endpoint")
 _CHAIN_ENDPOINT_MODE_SETTING = (
     "AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE",
     "ec2_metadata_service_endpoint_mode",
 )
-_CHAIN_ENDPOINT_SETTING = ("AWS_EC2_METADATA_SERVICE_ENDPOINT", "ec2_metadata_service_endpoint")
+_CHAIN_V1_DISABLED_SETTING = ("AWS_EC2_METADATA_V1_DISABLED", "ec2_metadata_v1_disabled")
 _IMDS_ENDPOINT_MODES = ("ipv4", "ipv6")
 # botocore's own test for that endpoint (its `is_valid_uri`), which the IMDS
 # fetcher applies to a configured one: no tab, CR or LF anywhere, and a host
@@ -108,6 +114,10 @@ _IPV6_ADDRZ_RE = re.compile(r"^\[" + _IPV6_PAT + r"(?:" + _ZONE_ID_PAT + r")?\]$
 
 class _UnparseableError(Exception):
     """Internal marker for what botocore turns into ``ConfigParseError``."""
+
+
+class _UndeclaredProfileError(Exception):
+    """Internal marker for a read botocore answers with ``ProfileNotFound``."""
 
 
 class ConfigScan(NamedTuple):
@@ -199,42 +209,61 @@ class ConfigScan(NamedTuple):
         run before the help token and every command layer.
 
         This answers only *whether one of them would*, so the dispatcher
-        builds the chain for real - importing the SDK - for exactly the
+        builds the chain for real - importing the SDK - for the
         configurations that fail, and botocore raises its own error with its
-        own wording. Each setting is read the way botocore's chain for it
-        reads: the environment variable when present, an empty value
-        included, else ``profile``'s config key (nothing for an undeclared
-        profile, whose ``ProfileNotFound`` aws swallows at this step). The
-        tests are botocore's own, applied without it: the very ``int`` it
-        converts the two integers with, its two endpoint modes, and its
-        endpoint check (`_imds_endpoint_refused`).
+        own wording. The tests are botocore's own, applied without it: the
+        very ``int`` it converts the two integers with, its two endpoint
+        modes, and its endpoint check (`_imds_endpoint_refused`).
 
-        Both ways of guessing wrong are visible, which is why the tests are
-        copies and not approximations: a setting botocore refuses that this
-        lets through leaves the help page and every usage error on their own
-        outcome where aws stops at rc 255, and one botocore accepts that this
-        suspects loads the SDK ahead of an informational exit.
+        The settings are read the way botocore reads them, and in its order.
+        Each is the environment variable when present, an empty value
+        included, else ``profile``'s config key. For a profile no file
+        declares, that second read is where botocore raises
+        ``ProfileNotFound`` - which aws swallows at this step, abandoning the
+        build - so whatever botocore would have read *after* the first
+        setting missing from the environment is never looked at, however
+        broken (measured: ``AWS_PROFILE=nope`` with a non-integer
+        ``AWS_METADATA_SERVICE_NUM_ATTEMPTS`` and no
+        ``AWS_METADATA_SERVICE_TIMEOUT`` still pages ``help`` at rc 0, on
+        aws as here). The endpoint is checked last of all, when the fetcher
+        is constructed, so under such a profile it counts only if every
+        setting ahead of that construction came from the environment.
+
+        Both ways of guessing wrong are visible, which is why this copies
+        botocore rather than approximating it: a setting botocore refuses
+        that this lets through leaves the help page and every usage error on
+        their own outcome where aws stops at rc 255, and one botocore
+        accepts that this suspects loads the SDK ahead of an informational
+        exit.
         """
+        declared = self.declares(profile)
         scoped = self.scoped(profile)
 
-        def setting(env_var: str, key: str) -> ConfigValue | None:
+        def setting(names: tuple[str, str]) -> ConfigValue | None:
+            env_var, key = names
             if env_var in os.environ:
                 return os.environ[env_var]
+            if not declared:
+                raise _UndeclaredProfileError
             return scoped.get(key)
 
-        for names in _CHAIN_INTEGER_SETTINGS:
-            value = setting(*names)
-            if value is not None:
-                try:
-                    int(value)  # pyright: ignore[reportArgumentType]
-                except (TypeError, ValueError):
-                    return True
-        mode = setting(*_CHAIN_ENDPOINT_MODE_SETTING)
-        if mode is not None and (
-            not isinstance(mode, str) or mode.lower() not in _IMDS_ENDPOINT_MODES
-        ):
-            return True
-        endpoint = setting(*_CHAIN_ENDPOINT_SETTING)
+        try:
+            for names in _CHAIN_INTEGER_SETTINGS:
+                value = setting(names)
+                if value is not None:
+                    try:
+                        int(value)  # pyright: ignore[reportArgumentType]
+                    except (TypeError, ValueError):
+                        return True
+            endpoint = setting(_CHAIN_ENDPOINT_SETTING)
+            mode = setting(_CHAIN_ENDPOINT_MODE_SETTING)
+            if mode is not None and (
+                not isinstance(mode, str) or mode.lower() not in _IMDS_ENDPOINT_MODES
+            ):
+                return True
+            setting(_CHAIN_V1_DISABLED_SETTING)
+        except _UndeclaredProfileError:
+            return False
         return endpoint is not None and (
             not isinstance(endpoint, str) or _imds_endpoint_refused(endpoint)
         )
