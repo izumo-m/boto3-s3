@@ -202,12 +202,21 @@ class _RegionalS3Section:
         ``'_RegionalS3Section' object has no attribute 'set_default_provider'``
         where aws - whose bundled botocore has no defaults modes at all -
         simply ran (measured for every valid mode, config key and env var
-        alike). Delegating leaves botocore's own bookkeeping intact; the value
-        it writes for that key is ``regional``, which is what `provide` pins
-        anyway, so the pin still decides. A wrapped provider that has no such
-        method fails exactly as the unwrapped one would, with the wording
-        botocore itself would produce.
+        alike). Delegating leaves botocore's own bookkeeping intact, and a
+        wrapped provider that has no such method fails exactly as the
+        unwrapped one would, with the wording botocore itself would produce.
+
+        The one key not passed on is the pinned one. Smart defaults write
+        exactly that key, and letting the write through puts back the override
+        entry `_pin_regional_s3_endpoint` took out - so on a degenerate
+        ``s3 =`` line botocore again assigns into what is still a string
+        (``'str' object does not support item assignment``), where aws, which
+        has neither the key nor the defaults modes, reports its usual
+        ``'str' object has no attribute 'get'`` (measured, rc 255 on both).
+        Nothing is lost by dropping it: `provide` pins the value regardless.
         """
+        if key == "us_east_1_regional_endpoint":
+            return
         self._section_provider.set_default_provider(key, default_provider)
 
 

@@ -1825,7 +1825,43 @@ class TestDefaultsMode:
 
         section = clientfactory._RegionalS3Section(_ProvideOnly())  # pyright: ignore[reportPrivateUsage]
         with pytest.raises(AttributeError, match="_ProvideOnly"):
-            section.set_default_provider("us_east_1_regional_endpoint", ConstantProvider("legacy"))
+            section.set_default_provider("addressing_style", ConstantProvider("path"))
+
+    def test_the_pinned_key_is_not_written_back_into_the_section(self) -> None:
+        # The key smart defaults actually write is the pinned one. Passing
+        # that write on would restore the override entry the pin removed -
+        # the entry that makes botocore assign into a degenerate `s3 =`.
+        from botocore.configprovider import ConstantProvider
+
+        session = clientfactory.build_session(_parse([]))._session  # pyright: ignore[reportPrivateUsage]
+        provider = session.get_component("config_store").get_config_provider("s3")
+        provider.set_default_provider("us_east_1_regional_endpoint", ConstantProvider("legacy"))
+        wrapped = provider._section_provider  # pyright: ignore[reportPrivateUsage]
+        assert "us_east_1_regional_endpoint" not in wrapped._override_providers
+        assert provider.provide()["us_east_1_regional_endpoint"] == "regional"
+
+    @pytest.mark.parametrize("mode", _MODES)
+    @pytest.mark.parametrize("source", ["config", "env"])
+    def test_a_degenerate_s3_line_fails_as_it_does_without_a_mode(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, source: str
+    ) -> None:
+        """A valid mode must not change the report of a string-valued `s3 =`.
+
+        aws - no defaults modes, no such key - reports botocore's
+        `'str' object has no attribute 'get'` with or without a mode
+        (measured, rc 255). With the smart-defaults write passed through, the
+        report here became `'str' object does not support item assignment`.
+        """
+        config = tmp_path / "config"
+        if source == "config":
+            config.write_text(f"[default]\nregion = us-east-1\ndefaults_mode = {mode}\ns3 =\n")
+        else:
+            config.write_text("[default]\nregion = us-east-1\ns3 =\n")
+            monkeypatch.setenv("AWS_DEFAULTS_MODE", mode)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        with pytest.raises(AttributeError) as excinfo:
+            clientfactory.build_client(_parse(["--region", "us-east-1"]))
+        assert str(excinfo.value) == "'str' object has no attribute 'get'"
 
 
 class TestS3ErrorMsgRegistration:
