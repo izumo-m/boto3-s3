@@ -1629,7 +1629,11 @@ the same reason: aws resolves them inside its handler chain, so an
 `--endpoint-url` whose netloc `urlsplit` refuses (`http://[::1:9000` -> a bare
 `ValueError`) is its general report at 255 on both tools, and a `--query` too
 deep to compile is the ParamValidation 252 (its `_resolve_query` catches bare
-`Exception`; both measured). The
+`Exception`; both measured). `main` closes the same chain around the
+dispatcher itself: whatever its own steps raise that no step claims - an
+alias whose `--endpoint-url` value `urlsplit` refuses, say - is reported
+through the same mapping, `AssertionError` excepted, as aws's entry point
+reports whatever escapes its driver. The
 rc-255 special case is the rm-stage failure of `rb --force` (section 5.4). Note that even among direct descendants of the same
 `S3Command`, **website / presign have no local catch**: website's server
 rejection is plainly 254 (section 5.6), and presign never reaches the server in the

@@ -188,6 +188,16 @@ class TestAliasGlobals:
         )
         assert seen == ["eu-west-1", "eu-west-1"]
 
+    def test_a_value_the_resolution_cannot_take_is_reported_not_raised(
+        self, alias_file: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # urlsplit rejects this netloc with a bare ValueError, which no step
+        # of the alias layer claims. aws reports it through its entry point's
+        # general handler (measured, rc 255); here it left as a traceback.
+        alias_file.write_text("[command s3]\nx = ls --endpoint-url http://[::1\n")
+        assert cli.main(["x", "s3://bkt"], ctx=unused_ctx()) == 255
+        assert capsys.readouterr().err == "boto3-s3: [ERROR]: Invalid IPv6 URL\n"
+
     @pytest.mark.parametrize("option", ["--debug", "--profile p"])
     def test_debug_and_profile_are_refused(
         self, alias_file: Path, option: str, capsys: pytest.CaptureFixture[str]

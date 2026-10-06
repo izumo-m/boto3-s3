@@ -859,6 +859,20 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
         # either, aws lets the error escape its entry point as well.
         _write_error(exc, rc=_GENERAL_ERROR_RC)
         return _GENERAL_ERROR_RC
+    except AssertionError:
+        # An internal-invariant violation, kept loud (see `_run_command`).
+        raise
+    except Exception as exc:
+        # The rest of that chain: whatever escapes aws's driver - not only a
+        # command - reaches its entry point's handlers and is reported there,
+        # never as a traceback. A command's failures are settled inside
+        # `_run_command`; this is the same mapping for the dispatcher's own
+        # steps, where an exception no step claims can still be raised by the
+        # user's input (an alias whose `--endpoint-url` value `urlsplit`
+        # rejects with a bare ValueError - measured as rc 255 on aws).
+        rc = _exit_code_for_unexpected(exc)
+        _write_error(exc, rc=rc)
+        return rc
 
 
 def _main(argv: list[str] | None, ctx: Context | None) -> int:

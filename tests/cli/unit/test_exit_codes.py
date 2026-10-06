@@ -2271,3 +2271,30 @@ class TestUnknownOptionsWaitForTheValues:
         assert capsys.readouterr().err == (
             "boto3-s3: [ERROR]: An error occurred (ParamValidation): Unknown options: --bogus\n"
         )
+
+
+class TestTheEntryPointBackstop:
+    """Nothing the dispatcher itself raises leaves as a traceback.
+
+    aws's entry point hands whatever escapes its driver to its handler chain;
+    a command's failures are settled in `_run_command`, and `main` applies
+    the same mapping to the dispatcher's own steps.
+    """
+
+    def test_an_unclaimed_exception_is_the_general_report(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        def explode(*args: object, **kwargs: object) -> int:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(cli, "_dispatch", explode)
+        assert cli.main(["ls", "s3://b/"]) == 255
+        assert capsys.readouterr().err == "boto3-s3: [ERROR]: boom\n"
+
+    def test_an_assertion_stays_loud(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def explode(*args: object, **kwargs: object) -> int:
+            raise AssertionError("an invariant")
+
+        monkeypatch.setattr(cli, "_dispatch", explode)
+        with pytest.raises(AssertionError, match="an invariant"):
+            cli.main(["ls", "s3://b/"])
