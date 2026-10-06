@@ -2898,10 +2898,34 @@ class TestCrtEngineErrors:
         assert info.value.__cause__ is raised
         assert info.value.operation == "sync"
 
-    def test_an_unreachable_sts_is_a_transport_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from botocore.exceptions import EndpointConnectionError
+    @staticmethod
+    def _transport_errors() -> list[Exception]:
+        from botocore.exceptions import (
+            ConnectTimeoutError,
+            EndpointConnectionError,
+            ProxyConnectionError,
+            ReadTimeoutError,
+            SSLError,
+        )
 
-        raised = EndpointConnectionError(endpoint_url="http://127.0.0.1:9/")
+        errors: list[Exception] = [
+            EndpointConnectionError(endpoint_url="http://127.0.0.1:9/"),
+            # These four derive from botocore's vendored requests' IOError:
+            # OSErrors, which the seam must not read as a wrong setting.
+            SSLError(endpoint_url="https://127.0.0.1:9/", error="handshake"),
+            ConnectTimeoutError(endpoint_url="https://sts/"),
+            ReadTimeoutError(endpoint_url="https://sts/"),
+            ProxyConnectionError(proxy_url="http://127.0.0.1:9"),
+        ]
+        return errors
+
+    @pytest.mark.parametrize("index", range(5))
+    def test_an_unreachable_sts_is_a_transport_error(
+        self, monkeypatch: pytest.MonkeyPatch, index: int
+    ) -> None:
+        raised = self._transport_errors()[index]
+        if index > 0:
+            assert isinstance(raised, OSError)
         transferrer = self._transferrer_whose_engine_raises(monkeypatch, raised)
         with pytest.raises(TransportError) as info:
             transferrer._get_manager()

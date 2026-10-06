@@ -77,6 +77,7 @@ from importlib.metadata import version
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote, urlparse
 
+from botocore.exceptions import BotoCoreError, ClientError
 from s3transfer import copies as s3transfer_copies
 from s3transfer.compat import seekable
 from s3transfer.copies import CopySubmissionTask
@@ -640,6 +641,13 @@ def crt_engine_errors(operation: str | None) -> Generator[None, None, None]:
         try:
             yield
         except AssertionError:
+            raise
+        except (ClientError, BotoCoreError):
+            # The boto family ahead of the OSError clause: four of botocore's
+            # transport errors (SSLError, the connect / read timeouts,
+            # ProxyConnectionError) derive from its vendored requests'
+            # IOError, and they are an unreachable STS - a TransportError
+            # from `s3_errors` - not a setting that is wrong.
             raise
         except RecursionError as exc:
             # A redirect loop inside a credential resolution: the request
