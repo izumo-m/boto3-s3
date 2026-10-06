@@ -1378,14 +1378,19 @@ class Transferrer:
                 item, IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), item.src_path)
             )
             return None
+        name = ""
         if self._options.get("guess_mime_type", True) and "ContentType" not in extra_args:
             name = item.src_path or ""
             if not name and item.src_info is not None:
                 # An open-route item has no local path but its entry does have a
                 # filename: guess from the source key (the destination key for a
                 # single "" source - same basename). A stream item carries no
-                # src_info and stays guess-free (no filename, aws parity).
+                # src_info and stays guess-free (no filename, aws parity) - its
+                # empty name never opens the store below, so an overlay the
+                # host cannot read is no concern of a stream upload, exactly as
+                # aws's stream submitter, which attaches no guessing subscriber.
                 name = item.src_info.key or item.dest_key or ""
+        if name:
             try:
                 guessed = _guess_content_type(name)
             except (OSError, ValueError) as exc:

@@ -228,12 +228,19 @@ class TestUnreadableOverlay:
         overlay.write_text("text/x-probe probe\n")
         monkeypatch.setattr(transfer, "_mime_db", None)
         monkeypatch.setattr(mimetable, "KNOWNFILES", [str(overlay)])
+        # MimeTypes() runs the stdlib's own init() when nothing has yet, which
+        # would read the host's knownfiles through the refusing `read` below
+        # and name /etc/mime.types first; the frozen store never needs it.
+        monkeypatch.setattr(mimetypes, "inited", True)
 
         def refuse(self: mimetypes.MimeTypes, filename: str, strict: bool = True) -> None:
             raise PermissionError(13, "Permission denied", filename)
 
         monkeypatch.setattr(mimetypes.MimeTypes, "read", refuse)
         self.overlay = overlay
+        # OSError renders the filename with repr(), so the expectation is built
+        # the same way (a Windows path's backslashes double there).
+        self.expected_message = str(PermissionError(13, "Permission denied", str(overlay)))
 
     def _tree(self, tmp_path: Path) -> Path:
         src = tmp_path / "src"
@@ -261,7 +268,7 @@ class TestUnreadableOverlay:
         assert [r.outcome for r in results] == [OpOutcome.FAILED, OpOutcome.FAILED]
         for result in results:
             assert result.error is not None
-            assert str(result.error) == f"[Errno 13] Permission denied: '{self.overlay}'"
+            assert str(result.error) == self.expected_message
         assert calls == []
 
     def test_an_explicit_content_type_or_no_guess_never_reads_the_overlay(
@@ -285,25 +292,28 @@ class TestUnreadableOverlay:
             assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED, OpOutcome.SUCCEEDED]
             assert [c.operation for c in calls] == ["PutObject", "PutObject"]
 
-    def test_a_stream_source_fails_the_item_and_releases_nothing_twice(self) -> None:
+    def test_a_stream_source_never_reads_the_overlay(self) -> None:
+        # A stream has no name to guess from, and aws's stream submitter
+        # attaches no guessing subscriber at all: the upload goes through,
+        # untyped, whatever state the host's mime.types is in.
         import io
 
-        from boto3_s3 import S3, BatchError, IOStorage, OpResult, S3Storage
+        from boto3_s3 import S3, IOStorage, OpOutcome, OpResult, S3Storage
         from boto3_s3.transferconfig import TransferConfig
         from tests.utils.recorder import make_recording_client
 
-        client, _ = make_recording_client([])
-        buf = io.BytesIO(b"x")
+        client, calls = make_recording_client([{}])
         results: list[OpResult] = []
-        with pytest.raises(BatchError):
-            S3().cp(
-                IOStorage(buf),
-                S3Storage("s3://b/k", client=client),
-                transfer_config=TransferConfig(use_threads=False),
-                on_result=results.append,
-            )
-        assert len(results) == 1 and results[0].error is not None
-        assert not buf.closed
+        S3().cp(
+            IOStorage(io.BytesIO(b"x")),
+            S3Storage("s3://b/k", client=client),
+            transfer_config=TransferConfig(use_threads=False),
+            on_result=results.append,
+        )
+        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED]
+        [put] = calls
+        assert put.operation == "PutObject"
+        assert "ContentType" not in put.params
 
 
 class TestHostOverlays:
