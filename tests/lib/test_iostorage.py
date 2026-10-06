@@ -140,10 +140,12 @@ class TestNonSeekableSource:
 
     def test_a_tarfile_member_keeps_the_pass_through_view(self, tmp_path: Path) -> None:
         # A tarfile member reads through a BufferedReader whose `fileno` is
-        # forwarded to a wrapped object that has none (AttributeError), and a
-        # stream-mode member's `seekable` is forwarded the same way. Neither
-        # answer is a reason to hide anything: both uploaded on both engines
-        # before the check existed, and must still reach the engine untouched.
+        # forwarded to a wrapped object that has none (AttributeError) while
+        # its `seekable` answers True: it uploaded on both engines before the
+        # check existed and must still reach the engine untouched. A
+        # stream-mode member's `seekable` is forwarded the same way and never
+        # answered - s3transfer's own probe failed such a member on both
+        # engines - so that one is read through the view, which uploads.
         import tarfile
 
         payload = os.urandom(70000)
@@ -166,7 +168,65 @@ class TestNonSeekableSource:
             with pytest.raises(AttributeError):
                 streamed.seekable()
             reader = IOStorage(streamed).open("k", "rb")
+            assert not hasattr(reader, "seek")
             assert reader.read() == payload
+
+    def test_a_stream_mode_tarfile_member_uploads_on_the_classic_engine(
+        self, tmp_path: Path
+    ) -> None:
+        import tarfile
+
+        archive = tmp_path / "a.tar"
+        with tarfile.open(archive, "w") as tar:
+            info = tarfile.TarInfo("member.bin")
+            info.size = 5
+            tar.addfile(info, io.BytesIO(b"tarry"))
+        client, calls = make_recording_client([{"ETag": '"e"'}])
+        results: list[OpResult] = []
+        with tarfile.open(archive, "r|") as stream_tar:
+            streamed = stream_tar.extractfile(next(iter(stream_tar)))
+            assert streamed is not None
+            S3().cp(
+                IOStorage(streamed),
+                S3Storage("s3://b/k", client=client),
+                transfer_config=_SYNC,
+                on_result=results.append,
+            )
+        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED]
+        assert [c.operation for c in calls] == ["PutObject"]
+
+    def test_a_download_into_a_gzip_over_a_write_only_sink_succeeds(self) -> None:
+        # The append cue asks a destination for its descriptor: a GzipFile
+        # over a write-only sink forwards `fileno` to an object that has none
+        # (AttributeError), which escaped `open` and failed the cp before any
+        # byte landed - the sibling of the upload-side check.
+        import gzip
+
+        class _Sink:
+            def __init__(self) -> None:
+                self.chunks: list[bytes] = []
+
+            def write(self, data: bytes) -> int:
+                self.chunks.append(bytes(data))
+                return len(data)
+
+            def flush(self) -> None:
+                pass
+
+        sink = _Sink()
+        with gzip.GzipFile(fileobj=sink, mode="wb") as gz:  # pyright: ignore[reportArgumentType]
+            with pytest.raises(AttributeError):
+                gz.fileno()
+            client, _ = make_recording_client([head_response(), get_response()])
+            results: list[OpResult] = []
+            S3().cp(
+                S3Storage("s3://b/d/a.txt", client=client),
+                IOStorage(gz),
+                transfer_config=_SYNC,
+                on_result=results.append,
+            )
+            assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED]
+        assert gzip.decompress(b"".join(sink.chunks)) == b"payload"
 
     def test_a_tarfile_member_uploads_on_the_classic_engine(self, tmp_path: Path) -> None:
         import tarfile

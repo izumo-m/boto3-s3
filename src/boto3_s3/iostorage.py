@@ -167,7 +167,11 @@ def _is_append_mode(stream: Any) -> bool:
         return False
     try:
         fd = fileno()
-    except (OSError, ValueError):  # io.UnsupportedOperation is both
+    except Exception:
+        # io.UnsupportedOperation (a BytesIO), or a `fileno` forwarded to a
+        # wrapped object that has none - a GzipFile over a write-only sink
+        # raises AttributeError: no descriptor to read the flags from, so
+        # not append-only, as every such stream was before this cue existed.
         return False
     try:
         return bool(fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_APPEND)
@@ -190,22 +194,32 @@ def _cannot_seek(stream: Any) -> bool:
     (measured: 4176 bytes of a 9 MiB `subprocess` pipe) while classic fails.
     The descriptor's type settles both: a FIFO, a character device (a
     console) or a socket cannot be positioned whatever ``seekable()`` says,
-    and ``os.fstat`` reports a Windows pipe as a FIFO too (measured). A
-    stream without ``seekable`` or ``fileno``, or one that cannot answer
-    either - a closed stream (``ValueError``), a tarfile member, whose
-    ``BufferedReader`` forwards both to a wrapped object that has neither
-    (``AttributeError``), a ``BytesIO``'s ``fileno``
-    (``io.UnsupportedOperation``) - is left to the engines exactly as it was
-    handed over, which is what every such stream got before this check
-    existed; only a positive answer hides anything.
+    and ``os.fstat`` reports a Windows pipe as a FIFO too (measured).
+
+    What cannot answer is handled by what the engines would do with it. A
+    closed stream raises ``ValueError`` from ``seekable()`` and is left as
+    it is: the transfer reports the closed stream as it already does, where
+    the view would leave the CRT lane's failure wordless (measured). A
+    stream whose ``seekable`` raises anything else cannot be asked twice -
+    a stream-mode tarfile member's ``BufferedReader`` forwards ``seekable``
+    to a wrapped object that has none (``AttributeError``), and s3transfer's
+    own ``seekable()`` probe would fail the item the same way - so it is
+    read through the view, which both engines then upload. A stream without
+    ``fileno``, or whose ``fileno`` cannot answer (a ``BytesIO``'s
+    ``io.UnsupportedOperation``; a regular tarfile member, whose wrapped
+    object has ``seekable`` but no ``fileno``, ``AttributeError``), is left
+    as it is: ``seekable()`` already answered True, and there is no
+    descriptor to say otherwise.
     """
     seekable = getattr(stream, "seekable", None)
     if seekable is not None:
         try:
             if not seekable():
                 return True
-        except Exception:
+        except ValueError:
             return False
+        except Exception:
+            return True
     fileno = getattr(stream, "fileno", None)
     if fileno is None:
         return False
