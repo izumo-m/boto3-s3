@@ -1116,15 +1116,51 @@ def _create_client(
     from boto3_s3_cli import proxytunnel
 
     proxytunnel.pin_connect_request()
+    # `legacy` is the one mode the installed botocore takes and aws's refuses.
+    # Judging it only once the client exists would put the refusal behind
+    # everything botocore checks *after* its own mode validation - the
+    # endpoint above all (measured: `retry_mode = legacy` with an invalid
+    # endpoint URL is the mode's report on aws). So for the length of this
+    # build the session answers with a mode the installed botocore refuses
+    # too, which makes it raise at the point where it validates modes - aws's
+    # point - while anything it checks earlier still wins as it does there.
+    mode = _session_retry_mode(botocore_session)
+    refused_here = mode == "legacy"
+    if refused_here:
+        botocore_session.set_config_variable("retry_mode", _REFUSED_RETRY_MODE)
     try:
         client = session.client(service, **kwargs)  # pyright: ignore[reportUnknownMemberType]
     except InvalidRetryModeError:
-        _reject_unsupported_retry_mode(botocore_session.get_config_variable("retry_mode"))
+        _reject_unsupported_retry_mode(
+            mode if refused_here else _session_retry_mode(botocore_session)
+        )
         raise
+    finally:
+        if refused_here:
+            botocore_session.set_config_variable("retry_mode", mode)
     retries = cast("dict[str, Any] | None", client.meta.config.retries) or {}
     _reject_unsupported_retry_mode(retries.get("mode"))
     _reject_empty_ca_bundle(kwargs.get("verify"))
     return client
+
+
+# What the session's retry mode is swapped for while a client is built from a
+# `legacy` configuration (`_create_client`): any value outside botocore's own
+# vocabulary does, and this one says why it is there if it ever shows.
+_REFUSED_RETRY_MODE = "legacy (not an aws v2 retry mode)"
+
+
+def _session_retry_mode(botocore_session: BotocoreSession) -> Any:
+    """The retry mode the session's config chain answers with, ``None`` if it cannot.
+
+    A chain that cannot answer (the scoped config of an undeclared profile)
+    is botocore's to report, from inside the client build and at its own
+    position, so the failure is not raised from this read.
+    """
+    try:
+        return botocore_session.get_config_variable("retry_mode")
+    except Exception:
+        return None
 
 
 def _reject_empty_ca_bundle(verify: Any) -> None:

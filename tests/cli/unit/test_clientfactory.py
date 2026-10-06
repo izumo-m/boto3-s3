@@ -1617,6 +1617,38 @@ class TestConfigErrorOrder:
         with pytest.raises(InvalidConfigError, match='Value provided to "max_attempts"'):
             clientfactory.build_client(_parse([]))
 
+    @pytest.mark.parametrize("source", ["config", "env"])
+    @pytest.mark.parametrize("endpoint", ["http://a b/", "http://[::1]:x/"])
+    def test_a_legacy_retry_mode_outranks_an_invalid_endpoint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str, endpoint: str
+    ) -> None:
+        # The installed botocore takes `legacy`, so a mode judged only after
+        # the client exists loses to everything botocore checks behind its own
+        # mode validation - the endpoint first of all (measured: aws reports
+        # the mode, this CLI reported `Invalid endpoint`).
+        self._config(
+            tmp_path, monkeypatch, "[default]\nretry_mode = legacy\n" if source == "config" else ""
+        )
+        if source == "env":
+            monkeypatch.setenv("AWS_RETRY_MODE", "legacy")
+        with pytest.raises(InvalidConfigError) as excinfo:
+            clientfactory.build_client(_parse(["--endpoint-url", endpoint]))
+        assert str(excinfo.value) == (
+            'Invalid value provided to "mode": "legacy" must be one of: "standard" or "adaptive"'
+        )
+
+    def test_a_refused_legacy_build_leaves_the_session_s_mode_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The mode is swapped only for the length of the build; what the
+        # session answers afterwards is what the configuration says.
+        self._config(tmp_path, monkeypatch, "[default]\nretry_mode = legacy\n")
+        args = _parse([])
+        session = clientfactory.build_session(args)
+        with pytest.raises(InvalidConfigError, match='"legacy"'):
+            clientfactory.build_client(args, session=session)
+        assert session._session.get_config_variable("retry_mode") == "legacy"  # pyright: ignore[reportPrivateUsage]
+
     @pytest.mark.parametrize(
         ("body", "expected"),
         [
