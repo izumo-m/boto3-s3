@@ -203,16 +203,17 @@ class TestAliasGlobals:
     ) -> None:
         # Measured on the pinned aws-cli: the alias's value names a character
         # `ascii` lacks, the general report cannot be written, and the run
-        # ends at rc 255 on the codec's own message (position 15 there, five
+        # ends at rc 255 on the codec's own message (position 23 there, five
         # less for the shorter program name).
         import io
         import sys
 
+        # A fullwidth `@` in the netloc is what every supported Python's
+        # urlsplit refuses (its NFKC check), with the netloc in the message.
         # The alias file is read in the locale's codec, as aws reads it, so
-        # it is written in that codec too - with a character the Windows code
-        # pages can spell as one character, like UTF-8 can.
+        # it is written in that codec too - which not every codec can do.
         try:
-            alias_file.write_text("[command s3]\ny = ls --endpoint-url http://[\u00d7]\n")
+            alias_file.write_text("[command s3]\ny = ls --endpoint-url http://a\uff20b\n")
         except UnicodeEncodeError:
             pytest.skip("the locale's codec cannot spell the test character")
         raw = io.BytesIO()
@@ -221,8 +222,8 @@ class TestAliasGlobals:
         monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "ascii")
         assert cli.main(["y", "s3://bkt"], ctx=unused_ctx()) == 255
         assert raw.getvalue() == (
-            b"boto3-s3: [ERROR]: 'ascii' codec can't encode character '\\xd7' "
-            b"in position 20: ordinal not in range(128)\n"
+            b"boto3-s3: [ERROR]: 'ascii' codec can't encode character '\\uff20' "
+            b"in position 28: ordinal not in range(128)\n"
         )
 
     @pytest.mark.parametrize("option", ["--debug", "--profile p"])
