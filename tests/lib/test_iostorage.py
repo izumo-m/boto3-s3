@@ -56,6 +56,110 @@ class TestBinaryPassthrough:
         assert IOStorage(buf).open("anything", "rb", size=999).read() == b"x"
 
 
+class _ClaimsSeekable:
+    """A pipe-backed reader that reports ``seekable()`` True, like a Windows pipe."""
+
+    def __init__(self, fd: int) -> None:
+        self._raw = os.fdopen(fd, "rb")
+
+    def read(self, amt: int | None = None) -> bytes:
+        return self._raw.read() if amt is None else self._raw.read(amt)
+
+    def seekable(self) -> bool:
+        return True
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        return 0
+
+    def tell(self) -> int:
+        return 0
+
+    def fileno(self) -> int:
+        return self._raw.fileno()
+
+    def close(self) -> None:
+        self._raw.close()
+
+
+class TestNonSeekableSource:
+    """A source that cannot be positioned is read through a read-only view.
+
+    The CRT lane hands the fileobj to botocore, whose content-length probe
+    calls ``tell`` / ``seek`` whenever both exist: a POSIX pipe answers
+    ``OSError(ESPIPE)`` (the upload failed ``[Errno 29] Illegal seek``), and a
+    Windows pipe answers with meaningless positions and stored a truncated
+    object as a success. Hiding everything but ``read`` - stdin's view, aws's
+    ``NonSeekableStream`` - sends both engines down their buffered path.
+    """
+
+    def test_a_pipe_gets_the_read_only_view(self) -> None:
+        r, w = os.pipe()
+        os.write(w, b"piped")
+        os.close(w)
+        with os.fdopen(r, "rb") as pipe:
+            reader = IOStorage(pipe).open("k", "rb")
+            assert not hasattr(reader, "seek")
+            assert not hasattr(reader, "tell")
+            assert reader.read() == b"piped"
+            reader.close()
+            assert not pipe.closed
+
+    def test_a_fifo_that_claims_seekable_still_gets_the_view(self) -> None:
+        # Windows pipes report seekable() True; the descriptor's type decides.
+        r, w = os.pipe()
+        os.write(w, b"claimed")
+        os.close(w)
+        stream = _ClaimsSeekable(r)
+        try:
+            reader = IOStorage(stream).open("k", "rb")  # pyright: ignore[reportArgumentType]
+            assert not hasattr(reader, "seek")
+            assert reader.read() == b"claimed"
+        finally:
+            stream.close()
+
+    def test_a_regular_file_keeps_the_pass_through_view(self, tmp_path: Path) -> None:
+        path = tmp_path / "f.bin"
+        path.write_bytes(b"regular")
+        with path.open("rb") as handle:
+            reader = IOStorage(handle).open("k", "rb")
+            assert reader.seekable()
+            assert reader.tell() == 0
+
+    def test_a_memory_stream_keeps_the_pass_through_view(self) -> None:
+        # BytesIO: seekable, and fileno() raises UnsupportedOperation.
+        reader = IOStorage(io.BytesIO(b"mem")).open("k", "rb")
+        assert reader.seekable()
+
+    def test_a_closed_stream_is_left_to_the_transfer(self) -> None:
+        # seekable() raises ValueError on a closed stream: nothing is hidden,
+        # the transfer reports the closed stream as it already does.
+        buf = io.BytesIO(b"x")
+        buf.close()
+        reader = IOStorage(buf).open("k", "rb")
+        assert hasattr(reader, "seek")
+
+    def test_a_pipe_uploads_on_the_classic_engine(self) -> None:
+        r, w = os.pipe()
+        os.write(w, b"from a pipe")
+        os.close(w)
+        client, calls = make_recording_client(
+            [{"ETag": '"e"'}]  # one PutObject
+        )
+        results: list[OpResult] = []
+        with os.fdopen(r, "rb") as pipe:
+            S3().cp(
+                IOStorage(pipe),
+                S3Storage("s3://b/k", client=client),
+                transfer_config=_SYNC,
+                on_result=results.append,
+            )
+        # The recorder never reads the body, so no bytes are counted; the
+        # outcome and the single PutObject are the point (the CRT lane's
+        # behaviour needs a live engine: tests/cli/e2e).
+        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED]
+        assert [c.operation for c in calls] == ["PutObject"]
+
+
 class TestAppendModeStream:
     """A binary stream that appends every write, behind ``IOStorage``.
 

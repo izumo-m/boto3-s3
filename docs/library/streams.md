@@ -37,7 +37,10 @@ goes out on your own `flush()` or on the interpreter's at exit.
 ## 1. Text streams are encoded for you
 
 A binary stream — `io.BytesIO`, a file opened `"rb"` or `"wb"`, a `gzip` writer,
-a pipe — is used as it is. A text stream is wrapped with a codec:
+a pipe — is used as it is; one that cannot be positioned (a pipe, a socket) is
+read through a view that offers `read` only, so an upload buffers it the way
+`aws s3 cp - s3://...` buffers stdin, on either engine. A text stream is
+wrapped with a codec:
 
 ```python
 IOStorage(io.StringIO("hello"), encoding="utf-8")   # utf-8 is the default

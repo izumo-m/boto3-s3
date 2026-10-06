@@ -1122,7 +1122,12 @@ class IOStorage(Storage):
 both directions, chosen per `open` call, with no listing and no deletion.
 
 `stream` is the caller's file-like object. A binary stream is used as it is,
-behind a close-suppressing view. A text stream — recognized either as an
+behind a close-suppressing view — except one that cannot be positioned (a
+pipe, a socket, a console: `seekable()` answers False, or `os.fstat` reports
+its descriptor as a FIFO, character device or socket, which a Windows pipe is
+even though it claims to seek), which an upload reads through a view that
+offers nothing but `read`, so both transfer engines take their buffered path
+instead of probing it with `seek` / `tell`. A text stream — recognized either as an
 `io.TextIOBase` or by carrying an `encoding` attribute, which covers
 `codecs.open`'s reader/writer and a text-mode `SpooledTemporaryFile` — is
 wrapped with an incremental codec instead, encoding on read for an upload and

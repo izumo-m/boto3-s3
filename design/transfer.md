@@ -461,6 +461,14 @@ The caller's stream is never closed by `IOStorage`.
   the byte count it reads, so an understated hint would truncate the object) -
   if unspecified, the engine buffers up to the threshold to decide
   (s3transfer's non-seekable handling = the same implementation as aws).
+  A source that cannot be positioned - a pipe, a socket, a console, a
+  Windows pipe that answers `seekable()` True all the same - reaches the
+  engine through `IOStorage`'s read-only view (`_cannot_seek`, decided on
+  `seekable()` and the descriptor's type), the view `StdioStorage` gives
+  stdin: with `seek` / `tell` exposed, the CRT lane's botocore
+  content-length probe called them and a POSIX pipe failed the item with
+  `[Errno 29] Illegal seek` while a Windows pipe stored a truncated object as
+  a success (measured 2026-10-06).
 - **download**: provides neither size nor etag -> s3transfer self-probes with
   HeadObject before GetObject (exactly aws's stream wire shape). Directory
   creation and the mtime stamp are not performed (section 5 is for path destinations

@@ -42,6 +42,7 @@ from __future__ import annotations
 import codecs
 import io
 import os
+import stat
 import sys
 from typing import IO, TYPE_CHECKING, Any, ClassVar, Literal, cast
 
@@ -174,12 +175,53 @@ def _is_append_mode(stream: Any) -> bool:
         return False
 
 
+def _cannot_seek(stream: Any) -> bool:
+    """Whether a binary source must be read through `_NonSeekable`.
+
+    A stream that answers ``seekable()`` False - a POSIX pipe, a socket file
+    - still carries ``seek`` and ``tell``, and the CRT lane hands the stream
+    to botocore, whose content-length probe calls them when both exist and
+    expects ``io.UnsupportedOperation`` where a pipe raises
+    ``OSError(ESPIPE)``: the upload fails with ``[Errno 29] Illegal seek``
+    (classic asks ``seekable()`` first and takes its buffered path). A
+    Windows pipe is worse: it answers ``seekable()`` True and lets ``tell``
+    and ``seek`` succeed with meaningless positions, so the probe computes a
+    wrong length and the CRT lane stores a truncated object as a success
+    (measured: 4176 bytes of a 9 MiB `subprocess` pipe) while classic fails.
+    The descriptor's type settles both: a FIFO, a character device (a
+    console) or a socket cannot be positioned whatever ``seekable()`` says,
+    and ``os.fstat`` reports a Windows pipe as a FIFO too (measured). A
+    stream without ``seekable`` or ``fileno`` is left to the engines, which
+    already take the buffered path for a read-only object.
+    """
+    seekable = getattr(stream, "seekable", None)
+    if seekable is not None:
+        try:
+            if not seekable():
+                return True
+        except (OSError, ValueError):
+            # A closed stream (ValueError) or one that cannot answer: not a
+            # reason to hide anything - the transfer reports it on its own.
+            return False
+    fileno = getattr(stream, "fileno", None)
+    if fileno is None:
+        return False
+    try:
+        mode = os.fstat(fileno()).st_mode
+    except (OSError, ValueError):
+        # io.UnsupportedOperation (a BytesIO's fileno) is both.
+        return False
+    return stat.S_ISFIFO(mode) or stat.S_ISCHR(mode) or stat.S_ISSOCK(mode)
+
+
 class _NonSeekable:
     """Read-only binary view that hides ``seek`` (aws-cli's ``NonSeekableStream``).
 
     Some streams that are not truly seekable still report ``seekable() == True``
-    (Windows stdin); exposing only ``read`` forces s3transfer's buffered
-    non-seekable upload path.
+    (Windows stdin, a Windows pipe); exposing only ``read`` forces the buffered
+    non-seekable upload path on both engines - s3transfer's, and botocore's
+    chunked body on the CRT lane. `StdioStorage` applies it to stdin
+    unconditionally, `IOStorage` to any source `_cannot_seek` recognizes.
     """
 
     def __init__(self, fileobj: Any) -> None:
@@ -284,7 +326,10 @@ class IOStorage(Storage):
     A binary stream is used as-is behind a close-suppressing view
     (`_Uncloseable`) - except one in append mode, written through a write-only
     view (`_SequentialWriter`) so a multipart download lands in order rather
-    than in completion order; a text stream - recognized as an
+    than in completion order, and one that cannot be positioned (a pipe, a
+    socket, a console - `_cannot_seek`), read through a read-only view
+    (`_NonSeekable`) so both engines take their buffered upload path instead
+    of probing it with ``seek`` / ``tell``; a text stream - recognized as an
     ``io.TextIOBase`` or by its ``encoding`` attribute (``codecs.open``'s
     ``StreamReaderWriter``, a text-mode ``SpooledTemporaryFile``) - is wrapped
     with ``encoding`` (default utf-8). The caller's stream is never closed by
@@ -321,7 +366,8 @@ class IOStorage(Storage):
         A single endpoint takes no key. A text stream is adapted to bytes via the
         configured ``encoding`` (encode on ``"rb"``, decode on ``"wb"``). A
         binary stream in append mode is written through a write-only view, so
-        the download runs in order (`_is_append_mode`).
+        the download runs in order (`_is_append_mode`); one that cannot be
+        positioned is read through a read-only view (`_cannot_seek`).
         """
         stream = self._stream
         assert stream is not None  # plain IOStorage always holds a stream
@@ -334,6 +380,8 @@ class IOStorage(Storage):
             return cast("BinaryIO", adapter)
         if mode == "wb" and _is_append_mode(stream):
             return cast("BinaryIO", _SequentialWriter(stream))
+        if mode == "rb" and _cannot_seek(stream):
+            return cast("BinaryIO", _NonSeekable(stream))
         return cast("BinaryIO", _Uncloseable(stream))
 
     @override
