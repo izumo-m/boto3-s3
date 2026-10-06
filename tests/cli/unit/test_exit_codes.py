@@ -2170,3 +2170,104 @@ class TestClosedStandardStreams:
         monkeypatch.setattr(sys, "stderr", None)
         for parser in _every_built_parser():
             parser._print_message("page\n", None)  # pyright: ignore[reportPrivateUsage]
+
+
+class TestUnknownOptionsWaitForTheValues:
+    """Leftover tokens are reported after the option values are expanded.
+
+    aws's command layer parses, then expands every argument's value - the
+    paramfile load, the integer coercion, the shorthand parse - and only then
+    raises ``Unknown options`` for what the parse left over, right before the
+    command body runs (its ``BasicCommand.__call__``). So a value that fails
+    to expand wins over a leftover token, in exit code as well as text, while
+    everything the command body checks still loses to it. All measured on the
+    pinned aws-cli; this CLI used to report the leftovers first.
+    """
+
+    _INT = "boto3-s3: [ERROR]: invalid literal for int() with base 10: 'abc'\n"
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["presign", "s3://b/k", "--expires-in", "abc", "--bogus"],
+            ["presign", "s3://b/k", "--expires-in", "abc", "extra-positional"],
+            ["ls", "s3://b/", "EXTRA", "--page-size", "abc"],
+            ["rm", "s3://b/k", "--page-size", "abc", "--bogus"],
+            ["cp", "f", "s3://b/k", "--page-size", "abc", "--bogus"],
+            ["sync", "d", "s3://b/p", "--progress-frequency", "abc", "--bogus"],
+        ],
+    )
+    def test_a_failed_integer_coercion_wins_at_255(
+        self, argv: list[str], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert cli.main(argv, ctx=unused_ctx()) == 255
+        assert capsys.readouterr().err == self._INT
+
+    @pytest.mark.parametrize(
+        ("argv", "report"),
+        [
+            (
+                ["presign", "file:///nonexistent/p", "--bogus"],
+                "Error parsing parameter 'path': Unable to load paramfile file:///nonexistent/p",
+            ),
+            (
+                ["mb", "file:///nonexistent/p", "--bogus"],
+                "Error parsing parameter 'path': Unable to load paramfile file:///nonexistent/p",
+            ),
+            (
+                ["ls", "s3://b/", "--page-size", "file:///nonexistent/p", "--bogus"],
+                "Error parsing parameter '--page-size': Unable to load paramfile",
+            ),
+            (
+                ["cp", "f", "s3://b/k", "--metadata", "a", "--bogus"],
+                "Error parsing parameter '--metadata': Expected: '=', received: 'EOF'",
+            ),
+        ],
+    )
+    def test_a_failed_paramfile_or_shorthand_wins_at_252(
+        self, argv: list[str], report: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert cli.main(argv, ctx=unused_ctx()) == 252
+        err = capsys.readouterr().err
+        assert err.startswith(f"boto3-s3: [ERROR]: An error occurred (ParamValidation): {report}")
+        assert "Unknown options" not in err
+
+    @pytest.mark.parametrize(
+        ("argv", "leftovers"),
+        [
+            (["ls", "s3://b/", "--bogus"], "--bogus"),
+            (["ls", "s3://b/", "extra", "--bogus"], "extra,--bogus"),
+            (["mb", "not-an-s3-uri", "--bogus"], "--bogus"),
+            (["cp", "local-a", "local-b", "--bogus"], "--bogus"),
+            (["presign", "s3://b/k", "--bogus", "--expires-in", "60"], "--bogus"),
+        ],
+    )
+    def test_the_leftovers_still_beat_the_command_body(
+        self, argv: list[str], leftovers: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The report sits ahead of the client build and of every path check
+        # the command body makes (aws: before `_run_main`), so the client
+        # factory is never reached.
+        assert cli.main(argv, ctx=unused_ctx()) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            f"Unknown options: {leftovers}\n"
+        )
+
+    def test_a_command_that_never_builds_its_s3_still_rejects_them(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The report is made where every command builds its `S3`; the
+        # dispatcher repeats the check after the command returns, so a
+        # command that returned early cannot accept the tokens silently.
+        from boto3_s3_cli.commands.ls import LsCommand
+
+        class _EarlyReturn(LsCommand):
+            def run(self, args: argparse.Namespace, ctx: Context) -> int:
+                return 0
+
+        monkeypatch.setattr(cli, "_load_command", lambda name: _EarlyReturn)
+        assert cli.main(["ls", "s3://b/", "--bogus"], ctx=unused_ctx()) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): Unknown options: --bogus\n"
+        )

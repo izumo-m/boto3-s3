@@ -23,7 +23,7 @@ from boto3_s3 import (
 )
 from boto3_s3_cli import alias, configfiles, globalargs
 from boto3_s3_cli.autoprompt import resolve
-from boto3_s3_cli.commands.base import Command, Context
+from boto3_s3_cli.commands.base import Command, Context, reject_unknown_options
 
 if TYPE_CHECKING:
     from _typeshed import SupportsWrite
@@ -1393,18 +1393,23 @@ def _run_command(
             )
     except SystemExit as exc:
         return 0 if not exc.code else _PARAM_VALIDATION_ERROR_RC
-    if extras:
-        # aws-cli wording again ("," with no space) - exercised by the ported
-        # test_errors_out_with_extra_arguments.
-        if not suppress_usage_errors:
-            _write_error(f"Unknown options: {','.join(extras)}", rc=_PARAM_VALIDATION_ERROR_RC)
-        return _PARAM_VALIDATION_ERROR_RC
+    # What the leaf parse could not place is parked, not reported: aws expands
+    # every argument's value before it raises `Unknown options`, so the report
+    # belongs to the command's own sequence (`reject_unknown_options`, run
+    # from `Context.s3`) - exercised by the ported
+    # test_errors_out_with_extra_arguments.
+    args.unknown_options = extras
 
     if getattr(args, "debug", False):
         _enable_debug_logging()
 
     try:
-        return command.run(args, ctx)
+        rc = command.run(args, ctx)
+        # Every command builds its `S3`, which is where the leftovers are
+        # reported; one that returned without doing so must still not accept
+        # them silently.
+        reject_unknown_options(args)
+        return rc
     except Boto3S3Error as exc:
         rc = exit_code_for(exc)
         if not (suppress_usage_errors and rc == _PARAM_VALIDATION_ERROR_RC):

@@ -78,7 +78,15 @@ class Context:
         self.auto_prompter: AutoPrompter | None = auto_prompter
 
     def s3(self, args: argparse.Namespace) -> S3:
-        """Build the command's `S3`, adapting an injected client factory if present."""
+        """Build the command's `S3`, adapting an injected client factory if present.
+
+        Every command calls this once its own parse layer is done - the
+        paramfile expansions, the integer coercions, the shorthand parse - and
+        before anything else, which is the slot aws's ``_run_main`` occupies.
+        aws reports the tokens its leaf parse could not place at exactly that
+        boundary, so this is where `reject_unknown_options` runs.
+        """
+        reject_unknown_options(args)
         if self._s3_factory is not None:
             return self._s3_factory(args)
 
@@ -140,6 +148,25 @@ class Context:
         if self._service_client_factory_injected:
             return self.service_client_factory(service, args, region=region)
         return build_service_client(service, args, region=region, session=s3.session)
+
+
+def reject_unknown_options(args: argparse.Namespace) -> None:
+    """Raise aws's ``Unknown options`` usage error for what the leaf parse left over.
+
+    The dispatcher parks those tokens on the namespace (``unknown_options``)
+    instead of reporting them on the spot, because aws does not either: its
+    ``BasicCommand.__call__`` first expands every argument's value - paramfile
+    load, integer coercion, shorthand and JSON parse - and only then raises
+    for the remainder, right before the command body runs. A value that fails
+    to expand therefore wins over an unknown option (measured:
+    ``presign s3://b/k --expires-in abc --bogus`` is the ``int()`` failure's
+    255, not this report's 252), while everything the command body checks
+    still loses to it. The wording is aws's customizations command layer's:
+    joined with "," and no space.
+    """
+    extras: list[str] | None = getattr(args, "unknown_options", None)
+    if extras:
+        raise ValidationError(f"Unknown options: {','.join(extras)}")
 
 
 def parse_integer_option(value: object, *, operation: str) -> int | None:

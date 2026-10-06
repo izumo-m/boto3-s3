@@ -141,6 +141,7 @@ The orderings worth knowing, because the answer is not the one you would guess:
 | --- | --- | --- |
 | `mb` / `rb` with both a bad path and a bad `--profile` | 255 | the profile error is detected before the path is validated |
 | a non-integer `--page-size`, `--expires-in` or `--progress-frequency`, with a bad path too | 255 | the number is parsed before the path is validated |
+| the same non-integer value, with an option the subcommand does not have too | 255 | option values are converted before the unknown option is reported; alone, the unknown option is 252 |
 | `cp --expected-size` with a non-integer | 1 when uploading a stream (0 under `--dryrun`), 0 otherwise | the value is read only on the streaming route, and never on a dry run |
 | `rb --force` whose object deletion fails | 255 | the bucket removal never runs |
 | a region set to an empty value, with a bad path or option pairing too | 255 without an endpoint URL; with one (`--endpoint-url` or the environment) the path or option check's own code, 252 or 1 | every subcommand builds its S3 client before it validates paths, and an empty region has no endpoint to derive; an explicit endpoint sidesteps the derivation and the build succeeds (a region merely *unset* builds fine either way, so those checks keep their own codes) |

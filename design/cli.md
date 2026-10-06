@@ -1042,10 +1042,18 @@ both directions (each step preempting every later one, and losing to every
 earlier one):
 
 1. **The parse layer** - `--query`, `--endpoint-url`, the paramfile
-   expansions, the integer coercions, the session profile. aws settles all of
-   it before `_run_main` runs at all, so it beats everything below (`cp ...
-   --page-size abc` is the coercion's 255, `--profile nosuch` the profile's,
-   even when the client of step 2 cannot be built).
+   expansions, the integer coercions, the tokens the leaf parse left over,
+   the session profile. aws settles all of it before `_run_main` runs at
+   all, so it beats everything below (`cp ... --page-size abc` is the
+   coercion's 255, `--profile nosuch` the profile's, even when the client of
+   step 2 cannot be built). The leftover tokens are reported from inside
+   this sequence, not by the dispatcher that found them: aws expands every
+   argument's value first and raises `Unknown options` only then, so
+   `--page-size abc --bogus` is still the coercion's 255 while a bad profile
+   loses to the unknown option (both measured). The dispatcher parks the
+   tokens on the namespace and `Context.s3` - the `_run_main` slot of every
+   command, the single-path ones included - raises for them
+   (`reject_unknown_options`).
 2. **The S3 client** - aws's `S3Command._run_main`, which every `aws s3`
    subcommand inherits. Built in `classify_paths` (cp / mv / sync) and right
    after `ctx.s3(args)` in rm's `run()`. The only shape that fails here is an
