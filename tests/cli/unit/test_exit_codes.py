@@ -2099,3 +2099,74 @@ class TestTopLevelGlobalsStripping:
         # token is a protected positional, not the help-token rule).
         assert cli.main(["--region", "us-east-2", "--", "help"]) == 252
         assert "Found invalid choice 'help'" in capsys.readouterr().err
+
+
+class TestClosedStandardStreams:
+    """``--version`` and the help token when a standard stream is closed.
+
+    A descriptor closed before the interpreter starts leaves ``sys.stdout`` /
+    ``sys.stderr`` ``None``. Measured on the pinned aws-cli: ``--version >&-``
+    exits 0 with the version line on stderr (its argparse, Python 3.14's,
+    falls back to stderr and drops a write that fails), with both closed it
+    still exits 0, and a help page requested with stdout closed is written
+    nowhere, rc 0. This CLI replayed the version line onto the missing stream
+    and left as a traceback at rc 1.
+    """
+
+    @pytest.mark.parametrize("argv", [["--version"], ["ls", "--version"], ["--version", "bogus"]])
+    def test_the_version_line_falls_back_to_stderr(
+        self, argv: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(sys, "stdout", None)
+        assert cli.main(argv) == 0
+        assert capsys.readouterr().err.startswith("boto3-s3-cli/")
+
+    def test_the_version_line_is_dropped_when_both_are_closed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sys, "stdout", None)
+        monkeypatch.setattr(sys, "stderr", None)
+        assert cli.main(["--version"]) == 0
+
+    def test_a_version_line_that_cannot_be_written_is_dropped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class _Refusing:
+            def write(self, text: str) -> int:
+                raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(sys, "stdout", _Refusing())
+        assert cli.main(["--version"]) == 0
+
+    @pytest.mark.parametrize("argv", [["help"], ["ls", "help"]])
+    def test_a_help_page_is_written_nowhere_when_stdout_is_closed(
+        self, argv: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(sys, "stdout", None)
+        assert cli.main(argv) == 0
+        assert capsys.readouterr().err == ""
+
+    @pytest.mark.parametrize("argv", [["help"], ["ls", "help"]])
+    def test_a_help_page_with_both_closed_still_exits_zero(
+        self, argv: list[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sys, "stdout", None)
+        monkeypatch.setattr(sys, "stderr", None)
+        assert cli.main(argv) == 0
+
+    def test_every_parser_prints_the_way_python_3_14_does(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The pin itself, off the host Python: a missing stream falls back to
+        # stderr, and a failing one is dropped rather than raised.
+        class _Refusing:
+            def write(self, text: str) -> int:
+                raise OSError(28, "No space left on device")
+
+        for parser in _every_built_parser():
+            parser._print_message("page\n", None)  # pyright: ignore[reportPrivateUsage]
+            assert capsys.readouterr().err == "page\n"
+            parser._print_message("page\n", _Refusing())  # pyright: ignore[reportPrivateUsage]
+        monkeypatch.setattr(sys, "stderr", None)
+        for parser in _every_built_parser():
+            parser._print_message("page\n", None)  # pyright: ignore[reportPrivateUsage]

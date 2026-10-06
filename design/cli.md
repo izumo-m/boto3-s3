@@ -88,8 +88,8 @@ solidified design is added here.
   against the globals alone (`--e` is `--endpoint-url`, never ambiguous with
   `--expires-in`), and a leftover option-form token ahead of the subcommand
   flows down to the leaf parser (`--expires-in=120 presign s3://b/k` is
-  rc 0). The parse itself settles two outcomes even earlier, replayed from
-  the captured output: a global that fails to parse (invalid choice, missing
+  rc 0). The parse itself settles two outcomes on the spot, written by the
+  parser as it exits: a global that fails to parse (invalid choice, missing
   value) is the run's error - beating the invalid-subcommand rejection and
   any unknown option anywhere in argv - and a parse-time `--version` prints
   and exits 0 even beside an invalid subcommand (both measured). Help is
@@ -231,6 +231,16 @@ solidified design is added here.
   (`--exclude -- a b` is the missing value, as on aws) and why the
   ambiguous-abbreviation residual above survives on 3.10 / 3.11.
   `--grants` (`nargs='+'`) needs no marker: its pattern is version-stable.
+- **Missing standard streams.** A descriptor closed before startup leaves
+  `sys.stdout` / `sys.stderr` `None`, and what argparse does about that is
+  again the interpreter's: 3.14 falls back to stderr for a missing stream
+  and drops a write that fails, where 3.10 raises. `_print_message` is
+  pinned to the 3.14 form on every parser, and `_VersionAction` writes the
+  same way, so `--version >&-` puts its line on stderr and exits 0 as on aws
+  (measured), with both streams closed included. A help page is the one
+  exception to the fallback: aws hands it to a renderer that writes to
+  descriptor 1 itself, so with stdout closed it is written nowhere, rc 0,
+  and `_print_help` skips the write.
 - **Negative-number classification.** The other place aws's behaviour comes
   from its interpreter rather than its code. argparse asks
   `_negative_number_matcher` whether a dash-led token that matches no option

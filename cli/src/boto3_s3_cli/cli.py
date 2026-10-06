@@ -12,7 +12,7 @@ import sys
 from collections.abc import Generator, Iterable
 from contextlib import AbstractContextManager, contextmanager
 from difflib import get_close_matches
-from typing import NoReturn, TextIO, cast
+from typing import TYPE_CHECKING, NoReturn, TextIO, cast
 
 from boto3_s3 import (
     Boto3S3Error,
@@ -24,6 +24,9 @@ from boto3_s3 import (
 from boto3_s3_cli import alias, configfiles, globalargs
 from boto3_s3_cli.autoprompt import resolve
 from boto3_s3_cli.commands.base import Command, Context
+
+if TYPE_CHECKING:
+    from _typeshed import SupportsWrite
 
 # Loggers a masked stderr handler is attached to under --debug, via the
 # library's boto3-faithful set_stream_logger (credential masking on by default -
@@ -433,10 +436,39 @@ class _ParamValidationArgumentParser(argparse.ArgumentParser):
                 return f"argument {option}: expected 1 argument"
         return message
 
+    def _print_message(self, message: str, file: SupportsWrite[str] | None = None) -> None:
+        """Write a page the way Python 3.14's argparse does, on every Python.
+
+        Two things differ below 3.12, and both only show once a standard
+        stream is unusable: the stream given may be absent (a closed
+        descriptor leaves ``sys.stdout`` ``None``), which 3.14 answers by
+        falling back to stderr, and the write itself may fail, which 3.14
+        drops instead of raising. Without them a help page requested with
+        both streams closed is a traceback and rc 1 on the floor Python,
+        where aws - and this CLI on a newer one - exits 0.
+        """
+        if message:
+            stream = file or sys.stderr
+            with contextlib.suppress(AttributeError, OSError):
+                stream.write(message)
+
     def error(self, message: str) -> NoReturn:
         report = f"{self._aws_error_message(message)}\n\n{self.format_usage()}"
         _write_error(report, rc=_PARAM_VALIDATION_ERROR_RC)
         self.exit(2)
+
+
+def _print_help(parser: argparse.ArgumentParser) -> None:
+    """Print a help page to stdout - and nowhere else when stdout is closed.
+
+    aws hands its help page to a renderer that writes to descriptor 1 on its
+    own, so with stdout closed the page is written nowhere and the run still
+    exits 0 (measured). argparse would instead fall back to stderr for a
+    missing stdout, which is right for the version line (`_VersionAction`)
+    and wrong here.
+    """
+    if sys.stdout is not None:
+        parser.print_help(sys.stdout)
 
 
 def _find_command_token(tokens: list[str]) -> int:
@@ -1013,28 +1045,16 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
     # downstream, the invalid-subcommand error included (measured: `s3 bogus
     # --output bad` blames --output, `s3 ls -h --output bad` blames --output
     # rather than the unknown -h, `s3 bogus --version` prints the version).
-    # Those two exits are replayed from the capture; falling through to the
-    # command scan would blame the subcommand first.
-    pre_stdout, pre_stderr = io.StringIO(), io.StringIO()
+    # Both exits end the run right here, written by the parser itself: the
+    # report through `_write_error` like every other one (so the codec, the
+    # envelope and its degraded forms apply to it unchanged), the version line
+    # by its action. A zero exit can only be --version - the globals parser
+    # declares no help option.
     try:
-        with (
-            contextlib.redirect_stdout(pre_stdout),
-            contextlib.redirect_stderr(pre_stderr),
-        ):
+        with _silencer(suppress_usage_errors):
             head, remainder = _build_globals_parser().parse_known_args(argv)
     except SystemExit as exc:
-        if not exc.code:
-            # --version fired - the globals parser's only zero-exit action
-            # (it declares no help option).
-            sys.stdout.write(pre_stdout.getvalue())
-            return 0
-        if not suppress_usage_errors:
-            # Replayed onto the real stream, so the codec `_write_error`
-            # applies to a live report has to be applied here too - the
-            # capture buffer it was written into could not take it.
-            _set_preferred_output_encoding(sys.stderr)
-            sys.stderr.write(pre_stderr.getvalue())
-        return _PARAM_VALIDATION_ERROR_RC
+        return 0 if not exc.code else _PARAM_VALIDATION_ERROR_RC
     tokens = remainder[1:] if argv[:1] == ["--"] else remainder
     # Deferred so importing `cli` does not drag the client builders in; the
     # module itself reaches the AWS SDK only from inside its functions, so the
@@ -1170,7 +1190,7 @@ def _resolve_command(
     of the user's arguments, which is what makes alias-to-alias chains work.
     """
     if tokens == ["help"]:
-        _build_stage1_parser().print_help()
+        _print_help(_build_stage1_parser())
         return 0
 
     index = _find_command_token(tokens)
@@ -1270,25 +1290,15 @@ def _run_alias(
             _write_error(exc, rc=rc)
             return rc
     expanded = alias.split_value(name, value)
-    # Same capture-and-replay as the top-level pass: a global in the value can
-    # fail to parse (rc 252, silenced on the on-partial trial like any other
-    # usage error) or be a `--version` that prints and exits 0 (measured).
-    pre_stdout, pre_stderr = io.StringIO(), io.StringIO()
+    # The same two exits as the top-level pass: a global in the value can fail
+    # to parse (rc 252, silenced on the on-partial trial like any other usage
+    # error) or be a `--version` that prints and exits 0 (measured).
     parser = _build_globals_parser()
     try:
-        with (
-            contextlib.redirect_stdout(pre_stdout),
-            contextlib.redirect_stderr(pre_stderr),
-        ):
+        with _silencer(suppress_usage_errors):
             parsed, remainder = parser.parse_known_args(expanded)
     except SystemExit as exc:
-        if not exc.code:
-            sys.stdout.write(pre_stdout.getvalue())
-            return 0
-        if not suppress_usage_errors:
-            _set_preferred_output_encoding(sys.stderr)
-            sys.stderr.write(pre_stderr.getvalue())
-        return _PARAM_VALIDATION_ERROR_RC
+        return 0 if not exc.code else _PARAM_VALIDATION_ERROR_RC
     _apply_alias_globals(name, parser, parsed, head)
     tokens = remainder + arguments
     if name in _COMMAND_TABLE:
@@ -1370,7 +1380,7 @@ def _run_command(
         # page, rc 0 - even where a normal parse would fail or run a listing.
         # The globals are already stripped, so a `help` wrapped in globals
         # still pages (aws: `s3 presign help --region us-east-1` pages).
-        _build_command_parser(name, command).print_help()
+        _print_help(_build_command_parser(name, command))
         return 0
     # The top-level pass's namespace carries every parsed global (either side
     # of the subcommand - all consumed there) plus their defaults; the leaf

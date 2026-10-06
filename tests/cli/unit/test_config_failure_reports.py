@@ -906,6 +906,23 @@ class TestOutputEncodingIsApplied:
             b"in position 41: ordinal not in range(128)\n"
         )
 
+    def test_a_top_level_parse_failure_is_written_the_same_way(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A global that fails to parse is reported by the same writer as
+        # every other report, so the same drop-the-envelope retry applies:
+        # the position is the bare message's (aws names 56 for this argv,
+        # five less for its shorter program name). Replayed out of a capture
+        # buffer, as it used to be, the report failed once, enveloped, and
+        # named a position 37 characters further in.
+        raw = self._stderr_bytes(monkeypatch)
+        monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "ascii")
+        assert cli.main(["ls", "--output", "b\u00e9d"]) == 255
+        assert raw.getvalue() == (
+            b"boto3-s3: [ERROR]: 'ascii' codec can't encode character '\\xe9' "
+            b"in position 61: ordinal not in range(128)\n"
+        )
+
     def test_a_codec_that_swallows_it_reports_nothing_at_255(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
