@@ -30,7 +30,9 @@ from boto3_s3.exceptions import (
     AccessDeniedError,
     CancelledError,
     ConfigurationError,
+    InvalidConfigError,
     NotFoundError,
+    TransportError,
     ValidationError,
 )
 from boto3_s3.localstorage import LocalStorage
@@ -2843,6 +2845,121 @@ class TestEngineSelection:
         config = TransferConfig(preferred_transfer_client="crt")
         manager = self._transferrer(TransferType.UPLOAD, config)._get_manager()
         assert isinstance(manager, TransferManager)
+
+
+class TestCrtEngineErrors:
+    """What building the CRT engine raises is classified at the seam.
+
+    The engine is built by third-party code (boto3's config validation,
+    awscrt's client factory, a credential resolution), and
+    `transfer.crt_engine_errors` gives each failure the category
+    design/exceptions.md names for its cause - awscrt's bare region assertion
+    alone passes through, for the CLI's single conversion site.
+    """
+
+    @staticmethod
+    def _transferrer_whose_engine_raises(
+        monkeypatch: pytest.MonkeyPatch, exc: BaseException
+    ) -> Transferrer:
+        from boto3_s3 import crtsupport
+
+        def fake_create(_client: Any, _config: Any, **_kwargs: Any) -> Any:
+            raise exc
+
+        monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", fake_create)
+        client, _ = make_recording_client([])
+        config = TransferConfig(preferred_transfer_client="crt")
+        return Transferrer(TransferType.UPLOAD, client, transfer_config=config, operation="sync")
+
+    @pytest.mark.parametrize(
+        ("raised", "expected"),
+        [
+            (FileNotFoundError(2, "No such file or directory", "/ca.pem"), InvalidConfigError),
+            (IsADirectoryError(21, "Is a directory", "/ca"), InvalidConfigError),
+            (PermissionError(13, "Permission denied", "/ca.pem"), InvalidConfigError),
+            (
+                RuntimeError("34 (AWS_ERROR_INVALID_ARGUMENT): An invalid argument."),
+                InvalidConfigError,
+            ),
+            (
+                ClientError({"Error": {"Code": "AccessDenied", "Message": "denied"}}, "AssumeRole"),
+                AccessDeniedError,
+            ),
+        ],
+        ids=["missing-ca", "directory-ca", "unreadable-ca", "unparsable-ca", "refused-assume-role"],
+    )
+    def test_a_construction_failure_keeps_its_category(
+        self, monkeypatch: pytest.MonkeyPatch, raised: Exception, expected: type[Any]
+    ) -> None:
+        transferrer = self._transferrer_whose_engine_raises(monkeypatch, raised)
+        with pytest.raises(expected) as info:
+            transferrer._get_manager()
+        assert str(info.value) == str(raised)
+        assert info.value.__cause__ is raised
+        assert info.value.operation == "sync"
+
+    def test_an_unreachable_sts_is_a_transport_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from botocore.exceptions import EndpointConnectionError
+
+        raised = EndpointConnectionError(endpoint_url="http://127.0.0.1:9/")
+        transferrer = self._transferrer_whose_engine_raises(monkeypatch, raised)
+        with pytest.raises(TransportError) as info:
+            transferrer._get_manager()
+        assert info.value.__cause__ is raised
+
+    def test_boto3s_crt_config_rejection_is_a_validation_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from boto3.exceptions import InvalidCrtTransferConfigError
+
+        raised = InvalidCrtTransferConfigError("The following transfer config options are invalid")
+        transferrer = self._transferrer_whose_engine_raises(monkeypatch, raised)
+        with pytest.raises(ValidationError) as info:
+            transferrer._get_manager()
+        assert info.value.__cause__ is raised
+
+    def test_the_seam_needs_no_crt_only_boto3_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # boto3 1.34 to 1.41 run the CRT engine without InvalidCrtTransferConfigError
+        # (it arrived in 1.42.0); an unconditional import failed every CRT
+        # transfer there with ImportError before the first byte moved.
+        import boto3.exceptions
+
+        from boto3_s3 import crtsupport
+
+        monkeypatch.delattr(boto3.exceptions, "InvalidCrtTransferConfigError", raising=False)
+        sentinel = object()
+        monkeypatch.setattr(
+            crtsupport, "create_crt_transfer_manager", lambda _c, _cfg, **_k: sentinel
+        )
+        client, _ = make_recording_client([])
+        config = TransferConfig(preferred_transfer_client="crt")
+        assert (
+            Transferrer(TransferType.UPLOAD, client, transfer_config=config)._get_manager()
+            is sentinel
+        )
+        # And a failure there is still classified, with nothing to look up.
+        transferrer = self._transferrer_whose_engine_raises(
+            monkeypatch, FileNotFoundError(2, "No such file or directory", "/ca.pem")
+        )
+        with pytest.raises(InvalidConfigError):
+            transferrer._get_manager()
+
+    def test_awscrts_region_assertion_passes_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        transferrer = self._transferrer_whose_engine_raises(monkeypatch, AssertionError())
+        with pytest.raises(AssertionError):
+            transferrer._get_manager()
+
+    def test_a_redirect_loop_inside_a_resolution_is_the_base_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # RecursionError is a RuntimeError, but not a configuration problem:
+        # the request failing, as request_failure reports it everywhere else.
+        from boto3_s3.exceptions import Boto3S3Error
+
+        transferrer = self._transferrer_whose_engine_raises(monkeypatch, RecursionError("maximum"))
+        with pytest.raises(Boto3S3Error) as info:
+            transferrer._get_manager()
+        assert type(info.value) is Boto3S3Error
 
 
 class TestCrtSubscriberCompat:

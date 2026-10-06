@@ -22,7 +22,7 @@ import pytest
 # the library defers this import so it stays SDK-free.
 s3transfer_crt = pytest.importorskip("s3transfer.crt")
 from botocore import UNSIGNED  # noqa: E402
-from botocore.exceptions import MissingDependencyException  # noqa: E402
+from botocore.exceptions import ClientError, MissingDependencyException  # noqa: E402
 
 from boto3_s3 import crtsupport  # noqa: E402
 from boto3_s3.transferconfig import TransferConfig  # noqa: E402
@@ -647,6 +647,68 @@ class TestCreateCrtTransferManager:
         # boto3 only validates the explicit-'crt' config, not 'auto'.
         config = TransferConfig(max_bandwidth=1_000_000)
         assert crtsupport.create_crt_transfer_manager(FakeClient(), config) is not None  # pyright: ignore[reportArgumentType]
+
+
+class _RefreshingCreds:
+    """A lazily refreshed credentials stand-in: resolving it is counted, and may fail."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.resolutions = 0
+        self._fail = fail
+
+    def get_frozen_credentials(self) -> Any:
+        self.resolutions += 1
+        if self._fail:
+            raise ClientError(
+                {"Error": {"Code": "AccessDenied", "Message": "not authorized"}}, "AssumeRole"
+            )
+        return SimpleNamespace(access_key="AK", secret_key="SK", token=None)
+
+
+class TestCredentialsIdentity:
+    """The credentials half of the compatibility check matches by object first.
+
+    One session's clients share one credentials object, and aws-cli's factory
+    wraps it unresolved - a refresh that fails (an expired SSO token, a refused
+    AssumeRole) lands inside the delegate, per item, and a dryrun never
+    triggers it. boto3's frozen comparison resolves it ahead of every
+    transfer instead, so the check recognizes the singleton's own object
+    without resolving and keeps the comparison for any other.
+    """
+
+    def test_the_object_the_engine_was_built_with_is_never_resolved(self, stubs: CrtStubs) -> None:
+        creds = _RefreshingCreds(fail=True)
+        first = crtsupport.create_crt_transfer_manager(FakeClient(creds=creds), None)  # pyright: ignore[reportArgumentType]
+        second = crtsupport.create_crt_transfer_manager(FakeClient(creds=creds), None)  # pyright: ignore[reportArgumentType]
+        assert first is not None and second is not None
+        assert creds.resolutions == 0
+        assert len(stubs.manager_kwargs) == 2
+
+    def test_another_object_is_compared_by_value(self, stubs: CrtStubs) -> None:
+        built_with = _RefreshingCreds()
+        assert (
+            crtsupport.create_crt_transfer_manager(FakeClient(creds=built_with), None) is not None
+        )  # pyright: ignore[reportArgumentType]
+        same_identity = _RefreshingCreds()
+        assert (
+            crtsupport.create_crt_transfer_manager(FakeClient(creds=same_identity), None)
+            is not None
+        )  # pyright: ignore[reportArgumentType]
+        # The newcomer is frozen, the singleton's resolved through its delegate.
+        assert (same_identity.resolutions, built_with.resolutions) == (1, 1)
+        other = FakeClient(creds=make_creds("OTHERKEY"))
+        assert crtsupport.create_crt_transfer_manager(other, None) is None  # pyright: ignore[reportArgumentType]
+
+    def test_resolving_another_object_raises_what_botocore_raised(self, stubs: CrtStubs) -> None:
+        # boto3-faithful here: the engine seams classify it (transfer.crt_engine_errors).
+        assert (
+            crtsupport.create_crt_transfer_manager(FakeClient(creds=_RefreshingCreds()), None)
+            is not None
+        )  # pyright: ignore[reportArgumentType]
+        with pytest.raises(ClientError):
+            crtsupport.create_crt_transfer_manager(
+                FakeClient(creds=_RefreshingCreds(fail=True)), None
+            )  # pyright: ignore[reportArgumentType]
 
 
 class TestFioOptions:

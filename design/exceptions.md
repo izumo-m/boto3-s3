@@ -176,6 +176,8 @@ taxonomy ([`storage.md`](./storage.md) section 2).
 | a post-parse option-value conversion failure (`--page-size abc`, the CLI timeouts) | `InvalidValueError` |
 | `ParamValidationError` / invalid argument / violated precondition (stdin absent, case-conflict `error` mode) | `ValidationError` |
 | a transfer argument s3transfer refuses synchronously at hand-over (`InvalidCrtTransferConfigError` at the manager build, the CRT engine's `ValueError` for a checksum algorithm awscrt cannot compute) | `ValidationError` |
+| a CA bundle awscrt cannot read (`FileNotFoundError` / `IsADirectoryError` / `PermissionError`) or parse (its `RuntimeError`) while the CRT engine is built (`transfer.crt_engine_errors`, at the transfer engine's seam and `S3.materialize_crt_engine`) | `InvalidConfigError` |
+| a credential the CRT engine's compatibility check resolves for a client whose credentials object is not the one the engine was built with (a refused `AssumeRole`, an unreachable STS); the engine's own client, and every client of the same session, is admitted without resolving | the request's category (`AccessDeniedError` / `TransportError` / ...), through `s3_errors` |
 | an SDK floor missing a capability (`no_overwrite` on an old botocore) | `ConfigurationError` |
 | `CancelToken.cancel()` | `CancelledError` |
 

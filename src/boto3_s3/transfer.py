@@ -69,7 +69,8 @@ import mimetypes
 import os
 import tempfile
 import threading
-from collections.abc import Mapping
+from collections.abc import Generator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib.metadata import version
 from typing import TYPE_CHECKING, Any, cast
@@ -89,6 +90,7 @@ from boto3_s3.exceptions import (
     Boto3S3Error,
     CancelledError,
     ConfigurationError,
+    InvalidConfigError,
     ValidationError,
 )
 from boto3_s3.localstorage import LocalStorage, translate_os_error
@@ -535,6 +537,63 @@ def _guess_content_type(path: str) -> str | None:
         return _mime_types().guess_type(path)[0]
     except UnicodeDecodeError:
         return None
+
+
+def _crt_config_error_type() -> type[Exception] | None:
+    """boto3's ``InvalidCrtTransferConfigError``, or None on a boto3 without it.
+
+    The name arrived in boto3 1.42.0 with the CRT-aware ``TransferConfig``
+    (``UNSET_DEFAULT``), while the CRT engine is usable from boto3 1.34.0 -
+    the first release whose ``crt`` extra pins an awscrt at boto3's own floor
+    (docs/compatibility.md) - so the CRT lane runs on eight minor releases
+    that cannot import it, where an unconditional import failed every CRT
+    transfer with ``ImportError``. Only a boto3 that validates the config can
+    raise it, so its absence means there is nothing to catch.
+    """
+    try:
+        from boto3.exceptions import InvalidCrtTransferConfigError
+    except ImportError:
+        return None
+    return InvalidCrtTransferConfigError
+
+
+@contextmanager
+def crt_engine_errors(operation: str | None) -> Generator[None, None, None]:
+    """Classify what building the CRT transfer engine raises.
+
+    ``crtsupport.create_crt_transfer_manager`` runs third-party construction
+    code, and each failure keeps the category design/exceptions.md gives its
+    cause: boto3's explicit-'crt' config validation
+    (``InvalidCrtTransferConfigError``: classic-only tuning set, a caller
+    argument) is a ``ValidationError``; a CA bundle the CRT cannot read
+    (``FileNotFoundError`` / ``IsADirectoryError`` / ``PermissionError`` from
+    awscrt reading the path) or cannot parse (awscrt's own ``RuntimeError``,
+    ``AWS_ERROR_INVALID_ARGUMENT``) is a setting present but unusable, an
+    ``InvalidConfigError``; the botocore family - a refreshable credential the
+    compatibility check had to resolve for a client holding a credentials
+    object other than the singleton's, the serializer's client build - goes
+    through `s3_errors`. awscrt's bare ``AssertionError`` on an unresolved
+    region passes through untouched: the CLI converts it at its one call
+    site, and the library documents it as the programming-error family.
+    boto3's ``MissingDependencyException`` never reaches this seam - the
+    engine selection raises it ahead, and keeps its documented pass-through.
+    """
+    with s3_errors(operation=operation):
+        try:
+            yield
+        except AssertionError:
+            raise
+        except RecursionError as exc:
+            # A redirect loop inside a credential resolution: the request
+            # failing, as everywhere else (`request_failure`'s last resort).
+            raise translate_boto_error(exc, operation=operation) from exc
+        except (OSError, RuntimeError) as exc:
+            raise InvalidConfigError(str(exc), operation=operation) from exc
+        except Exception as exc:
+            invalid_config = _crt_config_error_type()
+            if invalid_config is not None and isinstance(exc, invalid_config):
+                raise ValidationError(str(exc), operation=operation) from exc
+            raise
 
 
 def _extract_etag(response: Mapping[str, Any]) -> str | None:
@@ -1608,10 +1667,11 @@ class Transferrer:
         # The run's client is the route-selected one (an S3Storage may carry its
         # own), so the S3-level endpoint pin only applies to the client it built.
         endpoint = crtsupport.caller_endpoint(self._client, self._crt_endpoint)
-        # Deferred: absent on floor boto3 (pre-CRT); reached only on the CRT lane.
-        from boto3.exceptions import InvalidCrtTransferConfigError
-
-        try:
+        # Every construction failure is classified at this seam
+        # (`crt_engine_errors`): design/exceptions.md carves out exactly one
+        # pass-through (MissingDependencyException, raised by selects_crt
+        # above), and none of these is it.
+        with crt_engine_errors(self._operation):
             return crtsupport.create_crt_transfer_manager(
                 self._client,
                 self._transfer_config,
@@ -1622,13 +1682,6 @@ class Transferrer:
                 region=self._crt_region,
                 sign_requests=self._crt_sign_requests,
             )
-        except InvalidCrtTransferConfigError as exc:
-            # boto3's explicit-'crt' validation (classic-only TransferConfig
-            # options set): a caller-argument problem, kept inside the taxonomy
-            # like the copy_props ValueError above - design/exceptions.md carves
-            # out exactly one pass-through (MissingDependencyException), and
-            # this is not it.
-            raise ValidationError(str(exc), operation=self._operation) from exc
 
     def _create_classic_manager(self) -> Any:
         """Build the classic s3transfer manager, honoring threaded execution config."""

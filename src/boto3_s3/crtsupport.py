@@ -35,7 +35,12 @@ client (design/crt.md):
 - **compatibility**: the singleton additionally pins the derived endpoint and
   the signed/unsigned mode; a later client that disagrees falls back to
   classic, same as boto3's region/credentials mismatch. The credentials half
-  of that check has one opt-out, ``allow_absent_credentials``, for a caller
+  of that check recognizes the credentials object the singleton's delegate
+  wraps without resolving it (one session's clients share it), so a
+  refreshable credential is first resolved inside the delegate, per request,
+  as aws-cli's factory lets it be - boto3's value comparison, kept for a
+  client holding another object, would resolve it ahead of the transfer. It
+  also has one opt-out, ``allow_absent_credentials``, for a caller
   that wants aws-cli's posture rather than boto3's (see
   `create_crt_transfer_manager`); ``boto3-s3-cli`` is the caller that sets it
   and the default keeps every library caller boto3-faithful.
@@ -155,6 +160,7 @@ class _CrtS3Client:
         process_lock: Any,
         region: str | None,
         endpoint_url: str | None,
+        credentials: Any | None,
         cred_wrapper: Any | None,
         verify: Any,
         s3_config: Any,
@@ -165,6 +171,10 @@ class _CrtS3Client:
         self.process_lock = process_lock
         self.region = region
         self.endpoint_url = endpoint_url
+        # The botocore credentials object the delegate below wraps (None when
+        # the client signs nothing, or resolved none): the identity
+        # `_is_compatible_request` recognizes by object, before any resolving.
+        self.credentials = credentials
         # None = this CRT client signs nothing (the client resolved as
         # unsigned, or the caller declared `sign_requests=False`), which is
         # also the signing mode `_is_compatible_request` pins on.
@@ -619,6 +629,9 @@ def _initialize(
     cred_wrapper = _credentials_wrapper(client, sign_requests)
     if cred_wrapper is not None:
         create_kwargs["crt_credentials_provider"] = cred_wrapper.to_crt_credentials_provider()
+    # The object the wrapper holds, kept beside it for the identity
+    # short-circuit (`_is_compatible_request`); neither resolves it here.
+    credentials = _client_credentials(client) if cred_wrapper is not None else None
     _add_fio_options(create_kwargs, config, create_s3_crt_client)
     crt_client = create_s3_crt_client(**create_kwargs)
     return serializer, _CrtS3Client(
@@ -626,6 +639,7 @@ def _initialize(
         lock,
         region,
         endpoint_url,
+        credentials,
         cred_wrapper,
         create_kwargs["verify"],
         _serializer_config_shape(client),
@@ -681,6 +695,20 @@ def _is_compatible_request(
     already records the mode it was created in, so a later request whose
     declaration disagrees falls back to classic rather than transferring
     under the first one's signing mode.
+
+    The credentials half compares by object before it compares by value: a
+    client whose credentials object is the very one the singleton's delegate
+    wraps - every client of one session shares it - has the same identity by
+    construction, and nothing is resolved to say so. That matters for a
+    refreshable credential (an assumed role, an SSO token): boto3's frozen
+    comparison, kept for a client holding another object, resolves it on the
+    spot, so a refresh that fails - the token expired, STS unreachable -
+    fails the whole run before any transfer, where aws-cli's factory, which
+    never resolves ahead of the transfer, lets it fail inside the delegate
+    per item and lets a dryrun complete (measured: `cp --dryrun` rc 0 there,
+    and the per-item ``AWS_AUTH_CREDENTIALS_PROVIDER_DELEGATE_FAILURE`` on a
+    live upload). The resolution a value comparison performs raises whatever
+    botocore raises; the engine seams classify it (`transfer.crt_engine_errors`).
     """
     if crt_s3_client is None:
         return False
@@ -704,6 +732,8 @@ def _is_compatible_request(
         # "no credentials" matches a singleton that resolves none either, and
         # the transfer proceeds into the CRT delegate exactly like aws-cli's.
         return allow_absent_credentials and _resolves_no_credentials(crt_s3_client.cred_wrapper)
+    if boto3_creds is crt_s3_client.credentials:
+        return True
     return _compare_identity(boto3_creds.get_frozen_credentials(), crt_s3_client.cred_wrapper)
 
 

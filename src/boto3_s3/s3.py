@@ -61,7 +61,7 @@ from boto3_s3.iostorage import IOStorage
 from boto3_s3.localstorage import LocalStorage, to_native_path, translate_os_error
 from boto3_s3.s3storage import S3Storage, request_failure, s3_errors
 from boto3_s3.storage import Location, Storage
-from boto3_s3.transfer import TransferItem, Transferrer
+from boto3_s3.transfer import TransferItem, Transferrer, crt_engine_errors
 from boto3_s3.types import (
     CancelMode,
     CancelToken,
@@ -1057,10 +1057,10 @@ class S3:
             # floor boto3 predates the CRT engine and carries no such name,
             # and every transfer command owing aws parity calls this.
             return
-        # Deferred: absent on floor boto3 (pre-CRT), like the transfer engine's.
-        from boto3.exceptions import InvalidCrtTransferConfigError
-
-        try:
+        # Construction failures classified exactly as the transfer engine's
+        # seam classifies them (`transfer.crt_engine_errors`); no operation is
+        # in scope here, so the errors carry none.
+        with crt_engine_errors(operation=None):
             crtsupport.materialize_crt_engine(
                 client,
                 config,
@@ -1071,10 +1071,6 @@ class S3:
                 region=self._crt_region,
                 sign_requests=self._crt_sign_requests,
             )
-        except InvalidCrtTransferConfigError as exc:
-            # boto3's explicit-'crt' config validation, kept inside the taxonomy
-            # exactly as the transfer engine does (design/exceptions.md).
-            raise ValidationError(str(exc)) from exc
 
     def resolve(self, loc: Location) -> Storage:
         """Resolve a ``Location`` to a ``Storage`` (the URL-interpretation seam).

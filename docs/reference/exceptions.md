@@ -307,7 +307,11 @@ AWS configuration (a `ConfigParseError`, say). It is also the class for a
 malformed `endpoint_url` — one passed to `S3`, or one taken from
 `AWS_ENDPOINT_URL` / `AWS_ENDPOINT_URL_S3` when a default client is built —
 and for a malformed or empty region, both of which botocore rejects with a
-`ValueError` that the client builders convert here.
+`ValueError` that the client builders convert here. The CRT transfer engine
+raises it when it is built — at the first transfer, or from
+[`materialize_crt_engine`](./s3.md#materialize_crt_engineclient--transfer_confignone)
+— around a CA bundle it cannot read (a missing path, a directory, a file it
+may not open) or cannot parse.
 
 ```python
 class InvalidConfigError(ConfigurationError): ...

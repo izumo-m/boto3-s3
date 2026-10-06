@@ -13,11 +13,12 @@ from typing import Any, cast
 import boto3
 import pytest
 from botocore.config import Config
-from botocore.exceptions import ProfileNotFound
+from botocore.exceptions import ClientError, ProfileNotFound
 
 from boto3_s3 import (
     CLIENT_REGION,
     S3,
+    AccessDeniedError,
     BatchError,
     Boto3S3Error,
     CancelledError,
@@ -781,6 +782,79 @@ class TestMaterializeCrtEngine:
         config = TransferConfig(preferred_transfer_client="classic")
         # The no-op it is on the classic lane: no raise, nothing constructed.
         S3(transfer_config=config).materialize_crt_engine(client)  # pyright: ignore[reportArgumentType]
+
+    def test_the_crt_lane_builds_without_the_crt_only_boto3_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # boto3 1.34 to 1.41 run the CRT engine (their crt extra brings an
+        # awscrt at boto3's own floor) but carry no InvalidCrtTransferConfigError
+        # - it arrived with 1.42's CRT-aware TransferConfig. Importing it on
+        # the CRT lane failed every CRT transfer there with ImportError.
+        import boto3.exceptions
+
+        from boto3_s3 import crtsupport
+
+        monkeypatch.delattr(boto3.exceptions, "InvalidCrtTransferConfigError", raising=False)
+        built: list[Any] = []
+        monkeypatch.setattr(
+            crtsupport, "materialize_crt_engine", lambda _c, config, **_k: built.append(config)
+        )
+        client = SimpleNamespace(meta=SimpleNamespace(endpoint_url=None))
+        config = TransferConfig(preferred_transfer_client="crt")
+        S3(transfer_config=config).materialize_crt_engine(client)  # pyright: ignore[reportArgumentType]
+        assert built == [config]
+
+    @pytest.mark.parametrize(
+        ("raised", "expected"),
+        [
+            (
+                FileNotFoundError(2, "No such file or directory", "/ca/missing.pem"),
+                InvalidConfigError,
+            ),
+            (
+                RuntimeError("34 (AWS_ERROR_INVALID_ARGUMENT): An invalid argument was passed."),
+                InvalidConfigError,
+            ),
+            (
+                ClientError({"Error": {"Code": "AccessDenied", "Message": "denied"}}, "AssumeRole"),
+                AccessDeniedError,
+            ),
+        ],
+        ids=["missing-ca-bundle", "unparsable-ca-bundle", "refused-assume-role"],
+    )
+    def test_a_construction_failure_is_classified(
+        self, monkeypatch: pytest.MonkeyPatch, raised: Exception, expected: type[Boto3S3Error]
+    ) -> None:
+        # awscrt reads the CA bundle path itself (OSError) and parses it in C
+        # (RuntimeError); resolving a credential the compatibility check has
+        # to compare by value raises the botocore family. None of them is the
+        # documented pass-through, so each keeps its category and its text.
+        from boto3_s3 import crtsupport
+
+        def fake(_client: Any, _config: Any, **_kwargs: Any) -> None:
+            raise raised
+
+        monkeypatch.setattr(crtsupport, "materialize_crt_engine", fake)
+        client = SimpleNamespace(meta=SimpleNamespace(endpoint_url=None))
+        config = TransferConfig(preferred_transfer_client="crt")
+        with pytest.raises(expected) as info:
+            S3(transfer_config=config).materialize_crt_engine(client)  # pyright: ignore[reportArgumentType]
+        assert str(info.value) == str(raised)
+        assert info.value.__cause__ is raised
+
+    def test_awscrts_region_assertion_passes_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The CLI converts awscrt's bare AssertionError at its one call site
+        # (aws's empty rc-255 report), so the library must hand it over as is.
+        from boto3_s3 import crtsupport
+
+        def fake(_client: Any, _config: Any, **_kwargs: Any) -> None:
+            raise AssertionError
+
+        monkeypatch.setattr(crtsupport, "materialize_crt_engine", fake)
+        client = SimpleNamespace(meta=SimpleNamespace(endpoint_url=None))
+        config = TransferConfig(preferred_transfer_client="crt")
+        with pytest.raises(AssertionError):
+            S3(transfer_config=config).materialize_crt_engine(client)  # pyright: ignore[reportArgumentType]
 
 
 class TestModuleLevelConvenienceSignatures:

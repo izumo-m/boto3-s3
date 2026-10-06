@@ -88,12 +88,24 @@ also read as `'auto'`) with the same rules as boto3.
   the first client's `verify` and the shared serializer its
   `Config`, so a differing later client must not silently ride those) also
   drops to classic (the same shape as boto3's region/credentials-mismatch
-  fallback). The credentials half of that check carries one caller opt-in,
-  `allow_absent_credentials` (section 4, "Entering the CRT engine without
-  credentials"); it is off by default, so every library caller keeps boto3's
-  rule. On an explicit `'crt'` it also ports
-  boto3's `_validate_crt_transfer_config` (which rejects an explicit setting of a
-  CRT-unsupported option).
+  fallback). The credentials half of that check matches by object before it
+  compares by value: a client whose credentials object is the one the
+  singleton's delegate wraps - every client of one session shares it - has
+  the same identity by construction and is admitted without resolving it,
+  which keeps a refreshable credential unresolved until the delegate needs
+  it (section 4, "Entering the CRT engine without credentials"); boto3's
+  frozen comparison is kept for a client holding another object. The half
+  also carries one caller opt-in,
+  `allow_absent_credentials` (section 4, same heading); it is off by default,
+  so every library caller keeps boto3's rule. On an explicit `'crt'` it also
+  ports boto3's `_validate_crt_transfer_config` (which rejects an explicit
+  setting of a CRT-unsupported option). Whatever the construction raises is
+  classified at the seams that call it (`transfer.crt_engine_errors`, used
+  by the transfer engine and by `S3.materialize_crt_engine`): that validation
+  error is a `ValidationError`, a CA bundle awscrt cannot read or parse is an
+  `InvalidConfigError`, a credential resolution's failure keeps its botocore
+  category, and awscrt's bare `AssertionError` on an unresolved region passes
+  through (section 6).
 - **Deriving the connection parameters (a documented improvement over boto3)**:
   because the library uses a connection model in which the caller holds the
   client (the S3 connection model in [`overview.md`](./overview.md)), it derives
@@ -359,6 +371,24 @@ measured byte-for-byte. A download or a sync fails earlier, at the botocore
 listing / HeadObject call, with `fatal error: Unable to locate credentials` on
 both tools.
 
+A credential that resolves *lazily* - an assumed role, an SSO token, a web
+identity - is the same surface one step later: aws-cli's factory wraps the
+session's credentials object unresolved, so a refresh that fails (the token
+expired, STS unreachable or refusing) lands inside the delegate, per item
+(`upload failed: ... AWS_AUTH_CREDENTIALS_PROVIDER_DELEGATE_FAILURE`, rc 1),
+a download or sync fails at its botocore call (`fatal error:`, rc 1), and a
+`--dryrun` never resolves it at all (rc 0). boto3's compatibility check would
+resolve it ahead of the transfer - `get_frozen_credentials()` on every
+request - and the refresh failure would then fail the whole run before any
+item, the dryrun included (measured 2026-10-06 on the pinned aws: rc 1 / 0
+there against rc 254 / 255 here before the identity rule). The library
+therefore matches the credentials half by object first: the singleton
+records the credentials object its delegate wraps, and a client holding that
+same object is admitted without resolving anything, which is every client of
+one session, the CLI's included. A client holding another object still gets
+boto3's value comparison, and a resolution that fails there surfaces through
+the seam's classification (section 6) rather than as the bare botocore error.
+
 ### Where the CRT region comes from
 
 boto3 takes the CRT client's region from the built client
@@ -475,6 +505,28 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
     boto3 does (faithful). This is a deliberate exception to the backend-exception
     translation at the library boundary (exceptions.md section 1) - to reproduce boto3's
     behavior.
+- **Construction failures are classified, one excepted**: the engine is
+  built by third-party code, and what it raises reaches the library's caller
+  through `transfer.crt_engine_errors` - at the transfer engine's seam and at
+  `S3.materialize_crt_engine` alike. A CA bundle awscrt cannot read
+  (`FileNotFoundError` / `IsADirectoryError` / `PermissionError`, from its
+  own `open` of the path) or cannot parse (its `RuntimeError`,
+  `AWS_ERROR_INVALID_ARGUMENT`) is an `InvalidConfigError`; boto3's
+  `InvalidCrtTransferConfigError` a `ValidationError`; the botocore family a
+  credential resolution raises keeps its category (an `AccessDeniedError`
+  for a refused `AssumeRole`, a `TransportError` for an unreachable STS).
+  The CLI's rc 255 for an unusable bundle is unchanged: `InvalidConfigError`
+  maps to aws's general-handler code, and the text is the exception's own
+  (measured 16 ways, 2026-10-06: `aws: [ERROR]: 34 (AWS_ERROR_INVALID_ARGUMENT)
+  ...` on both). The one exception is awscrt's bare `AssertionError` on an
+  unresolved region, which passes through untouched for the CLI's single
+  conversion site (section 4, "Where the CRT region comes from").
+  `InvalidCrtTransferConfigError` itself exists from boto3 1.42.0 only, so the
+  seam looks it up rather than importing it: boto3 1.34 to 1.41 run the CRT
+  engine without it (an unconditional import failed every CRT transfer there
+  with `ImportError`, 2026-10-06), and the engine's floor is 1.34.0, the first
+  release whose `crt` extra pins an awscrt at boto3's own minimum
+  (docs/compatibility.md).
 - **Explicit crt x lock contention**: aws forces the CRT construction; boto3 -
   and the library default - silently falls back to classic. When the
   construction succeeds the two are indistinguishable in output and rc
