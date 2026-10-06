@@ -55,9 +55,13 @@ MASK_REVEAL_LEN = 4
 # Value terminator for matches taken from URLs, headers, and the repr() of a
 # headers dict: a run of characters that are not whitespace, a separator, or a
 # quote. Stops at whitespace, the leading backslash of an escaped ``\r\n``, the
-# ``&`` query boundary, the ``,`` Authorization-component boundary, and the
-# ``'`` / ``"`` that close a value inside a dict repr.
-_VALUE = r"[^\s\\&,'\"]+"
+# ``&`` query boundary, the ``,`` Authorization-component boundary, the
+# ``'`` / ``"`` that close a value inside a dict repr, and the ``<`` / ``>``
+# of a logged XML body: an object key written ``Signature=x`` inside a
+# DeleteObjects body would otherwise be masked through to the body's end,
+# every later ``<Key>`` with it. No real signature, token or key carries
+# either character (hex, base64, base64url, a JWT, percent-encoding).
+_VALUE = r"[^\s\\&,'\"<>]+"
 
 # Access Key ID literal (AWS long-term ``AKIA`` / temporary ``ASIA``).
 _ACCESS_KEY_ID_RE = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}")
@@ -98,8 +102,9 @@ _AWS_ACCESS_KEY_ID_PARAM_RE = re.compile(
 # instead spells it ``x-amz-security-token``, covered above); the word
 # boundary keeps
 # ``XSecurityToken``-style superstrings unmatched, and the quote-or-separator
-# anchor keeps XML ``<SessionToken>`` to its own pattern.
-_TOKEN_VALUE = r"[^\s'\"&,\\}]+"
+# anchor keeps XML ``<SessionToken>`` to its own pattern. ``<`` / ``>`` end
+# the value for the same reason as in ``_VALUE``.
+_TOKEN_VALUE = r"[^\s'\"&,\\}<>]+"
 _SECURITY_TOKEN_RE = re.compile(
     rf"(?P<key>(?:x-amz-(?:security|s3session)-token|\bSecurityToken)['\"]?\s*[:=]\s*(?:b?['\"])?)"
     rf"(?P<val>{_TOKEN_VALUE})",
@@ -265,13 +270,14 @@ def _mask_proxy_userinfo(m: re.Match[str]) -> str:
 
 # Proxy-Authorization header value (defensive: it surfaces only in an
 # ``http.client`` wire dump, which this project does not emit). The quoted form
-# is the dict repr; the plain form is the raw ``name: value`` header line.
+# is the dict repr; the plain form is the raw ``name: value`` header line,
+# whose value ends at the line, an escape, or the ``<`` of a logged body.
 _PROXY_AUTH_QUOTED_RE = re.compile(
     r"(?P<key>['\"]?Proxy-Authorization['\"]?\s*[:=]\s*b?['\"])[^'\"]*",
     re.IGNORECASE,
 )
 _PROXY_AUTH_PLAIN_RE = re.compile(
-    r"(?P<key>Proxy-Authorization\s*:\s*)[^\r\n\\]*",
+    r"(?P<key>Proxy-Authorization\s*:\s*)[^\r\n\\<>]*",
     re.IGNORECASE,
 )
 

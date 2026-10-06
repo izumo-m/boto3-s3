@@ -263,6 +263,38 @@ class TestMaskTextNotation:
         note = "'Metadata': {'note': 'AWS account:123456789012'}"
         assert m.mask_text(note) == note
 
+    @pytest.mark.parametrize(
+        "trigger",
+        [
+            "Signature=1",
+            "Signature: approved",
+            "X-Amz-Signature=1",
+            "AWSAccessKeyId=x",
+            "SecurityToken=t",
+            "x-amz-security-token:t",
+            "WebIdentityToken=w",
+            "SAMLAssertion=s",
+            "TokenCode=1",
+            "x-amz-server-side-encryption-customer-key:k",
+            "Proxy-Authorization: x",
+        ],
+    )
+    def test_a_value_stops_at_the_next_xml_element(self, trigger: str) -> None:
+        # The SigV2 rule's sibling: a keyed value pattern used to run through
+        # the `<` of a logged XML body, so an object key written like a
+        # secret's name in a DeleteObjects body masked every later key of the
+        # batch with it (and the Proxy-Authorization line form ran to the
+        # record's end). The value itself still masks - up to the element.
+        body = (
+            f"'body': b'<Delete><Object><Key>om/{trigger}.txt</Key></Object>"
+            "<Object><Key>om/b.txt</Key></Object><Object><Key>om/c.txt</Key></Object>"
+            "<Quiet>true</Quiet></Delete>'"
+        )
+        masked = m.mask_text(body)
+        assert "<Object><Key>om/b.txt</Key></Object>" in masked
+        assert "<Object><Key>om/c.txt</Key></Object>" in masked
+        assert "<Quiet>true</Quiet></Delete>'" in masked
+
     def test_credentials_body_access_key_id_follows_the_id_rule(self) -> None:
         # The id beside the secrets in an STS / metadata / SSO credentials body:
         # an AWS-shaped one keeps its tail, one of another shape (what an

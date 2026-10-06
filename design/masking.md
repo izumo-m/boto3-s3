@@ -153,6 +153,14 @@ and how s3transfer logs a task's kwargs (`'SSECustomerKey': '...'`), including
 `b'...'` - and the plain `name: value` line form (the canonical request
 `botocore.auth` logs, and an older botocore's request repr).
 
+A keyed value runs to whitespace, a separator (`&`, `,`), a quote, an escape,
+or the `<` / `>` of a logged XML body - no real signature, token or key carries
+any of those - so an object key or a metadata value that happens to be spelled
+like a secret's name (`om/Signature=1.txt` in a DeleteObjects body) is masked
+up to the next element and no further; the later keys of that batch stay
+readable. A text-shaped SigV2 header is kept apart from the real one by the
+signature's shape instead (the table's SigV2 row).
+
 | Target | Example (input -> output) | Notation |
 |---|---|---|
 | Access Key ID (`AKIA`/`ASIA`, leading `Credential=`/`X-Amz-Credential=`, `AWSAccessKeyId=`) | `Credential=AKIA...MPLE/2026...` -> `Credential=***MPLE/2026...` | `***` + last 4. Scope (after `/` or `%2F`) preserved |
