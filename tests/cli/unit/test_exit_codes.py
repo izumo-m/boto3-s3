@@ -13,6 +13,7 @@ the three global resolutions that run before any command layer.
 from __future__ import annotations
 
 import argparse
+import io
 import sys
 from pathlib import Path
 from typing import Any
@@ -2290,6 +2291,27 @@ class TestTheEntryPointBackstop:
         monkeypatch.setattr(cli, "_dispatch", explode)
         assert cli.main(["ls", "s3://b/"]) == 255
         assert capsys.readouterr().err == "boto3-s3: [ERROR]: boom\n"
+
+    def test_a_report_the_codec_cannot_write_is_the_codec_s_report(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The report raises inside the clause that was making it, where the
+        # `UnicodeError` clause beside it cannot reach; aws's entry point
+        # reports the codec error at rc 255, and so must this one (it left as
+        # a traceback at rc 1).
+        def explode(*args: object, **kwargs: object) -> int:
+            raise ValueError("caf\u00e9")
+
+        raw = io.BytesIO()
+        stream = io.TextIOWrapper(raw, encoding="utf-8", newline="", write_through=True)
+        monkeypatch.setattr(sys, "stderr", stream)
+        monkeypatch.setattr(cli, "_dispatch", explode)
+        monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "ascii")
+        assert cli.main(["ls", "s3://b/"]) == 255
+        assert raw.getvalue() == (
+            b"boto3-s3: [ERROR]: 'ascii' codec can't encode character '\\xe9' "
+            b"in position 22: ordinal not in range(128)\n"
+        )
 
     def test_an_assertion_stays_loud(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def explode(*args: object, **kwargs: object) -> int:

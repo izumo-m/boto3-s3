@@ -198,6 +198,27 @@ class TestAliasGlobals:
         assert cli.main(["x", "s3://bkt"], ctx=unused_ctx()) == 255
         assert capsys.readouterr().err == "boto3-s3: [ERROR]: Invalid IPv6 URL\n"
 
+    def test_that_report_survives_a_codec_that_cannot_write_it(
+        self, alias_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Measured on the pinned aws-cli: the alias's value names a character
+        # `ascii` lacks, the general report cannot be written, and the run
+        # ends at rc 255 on the codec's own message (position 15 there, five
+        # less for the shorter program name).
+        import io
+        import sys
+
+        alias_file.write_text("[command s3]\ny = ls --endpoint-url http://[\u00e9]\n", "utf-8")
+        raw = io.BytesIO()
+        stream = io.TextIOWrapper(raw, encoding="utf-8", newline="", write_through=True)
+        monkeypatch.setattr(sys, "stderr", stream)
+        monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "ascii")
+        assert cli.main(["y", "s3://bkt"], ctx=unused_ctx()) == 255
+        assert raw.getvalue() == (
+            b"boto3-s3: [ERROR]: 'ascii' codec can't encode character '\\xe9' "
+            b"in position 20: ordinal not in range(128)\n"
+        )
+
     @pytest.mark.parametrize("option", ["--debug", "--profile p"])
     def test_debug_and_profile_are_refused(
         self, alias_file: Path, option: str, capsys: pytest.CaptureFixture[str]

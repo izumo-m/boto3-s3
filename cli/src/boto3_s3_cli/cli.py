@@ -871,7 +871,17 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
         # user's input (an alias whose `--endpoint-url` value `urlsplit`
         # rejects with a bare ValueError - measured as rc 255 on aws).
         rc = _exit_code_for_unexpected(exc)
-        _write_error(exc, rc=rc)
+        try:
+            _write_error(exc, rc=rc)
+        except UnicodeError as unwritable:
+            # The codec cannot represent this report either. A raise inside
+            # this clause is out of the `UnicodeError` clause's reach, so the
+            # same second step is taken here: the codec error is the report,
+            # at rc 255 and unguarded (measured: an alias whose endpoint
+            # value carries a character `ascii` lacks is the codec's own
+            # message at 255 on aws).
+            _write_error(unwritable, rc=_GENERAL_ERROR_RC)
+            return _GENERAL_ERROR_RC
         return rc
 
 
