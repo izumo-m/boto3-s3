@@ -40,8 +40,8 @@ their area but are not indexed here.
   gate it, the local / S3 / stream backends, and the local walk's override
   seams.
 - [`misc.md`](./misc.md) — the tuned session, the AWS config-file reader,
-  masked debug logging, access-point path resolution, batch deletion, and
-  `__version__`.
+  masked debug logging, the CRT engine resolution (`boto3_s3.crtsupport`),
+  access-point path resolution, batch deletion, and `__version__`.
 
 ## Symbol index
 

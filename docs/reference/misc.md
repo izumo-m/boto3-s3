@@ -3,8 +3,9 @@
 The public symbols that stand outside the `S3` object and its options, results
 and filters: the tuned session factory and the timestamp parser it installs,
 the AWS config-file reader and the sections it hands out, the masked
-debug-logging entry point, the access-point path resolver, the batch-deletion
-driver and its batch limit, and the package version. The narrative
+debug-logging entry point, the CRT engine resolution the command shares, the
+access-point path resolver, the batch-deletion driver and its batch limit,
+and the package version. The narrative
 counterparts are [`../library/s3-object.md`](../library/s3-object.md) for the
 session and the config reader,
 [`../library/logging.md`](../library/logging.md) for masked logging, and
@@ -316,6 +317,52 @@ exception traceback attached to a record is masked on the same handler too.
 `ContinuationToken` / `NextToken` and the `-md5` / `KeyMD5` companions of SSE-C
 keys are deliberately left visible. The pattern-by-pattern table is
 [`../../design/masking.md`](../../design/masking.md) section 4.1.
+
+## crtsupport
+
+`boto3_s3.crtsupport` is the CRT transfer-engine resolution the library and the
+`boto3-s3` command share: boto3's own rules for whether
+`TransferConfig.preferred_transfer_client` selects the CRT engine, and the
+process-wide CRT client the engine runs on, derived from the client in hand.
+`S3` applies it on its own — a transfer that selects the engine builds it, and
+[`materialize_crt_engine`](./s3.md#materialize_crt_engineclient--transfer_confignone)
+builds it ahead of a run — so an application needs none of these names unless
+it ports `aws s3`'s own engine decision, as the command does. The mechanism is
+[`../../design/crt.md`](../../design/crt.md); the module is reachable only by
+its own path (`from boto3_s3 import crtsupport`) and imports no awscrt or
+`s3transfer.crt` until a function that needs them runs. Its stable surface is
+its `__all__`:
+
+- `CLIENT_REGION` and `CrtRegion` — the region declaration `S3(crt_region=...)`
+  takes, [documented with `S3`](./s3.md#crtregion).
+- `has_minimum_crt_version()` — whether awscrt is importable at boto3's minimum
+  version for the engine; `has_crt_s3transfer()` — whether the installed
+  s3transfer exposes the CRT surface the engine needs (it arrived in 0.8.0,
+  above the supported floor); `is_optimized_for_system()` — awscrt's own
+  answer to whether this host is one the CRT is tuned for, `False` without a
+  usable awscrt.
+- `should_use_crt(preferred)` — boto3's `_should_use_crt` over an
+  already-extracted preference (`'auto'` needs an optimized host; an explicit
+  `'crt'` without a usable awscrt or CRT-capable s3transfer raises botocore's
+  `MissingDependencyException`, the one documented pass-through);
+  `selects_crt(config)` — the same answer read off a `TransferConfig`, with
+  `None` and a missing preference as boto3's `'auto'` and `'classic'` settled
+  before any dependency is probed.
+- `PROCESS_LOCK_NAME` (`"boto3-s3"`) — the cross-process lock scope this
+  application's CRT clients share, separate from boto3's and aws-cli's;
+  `acquire_process_lock()` — claims it, `False` when another process holds
+  it.
+- `create_crt_transfer_manager(client, config, ...)` — builds, or reuses, the
+  process-wide CRT client for `client` and returns an s3transfer
+  `CRTTransferManager`, or `None` where boto3 would fall back to classic (the
+  lock held elsewhere, a client incompatible with the one the engine was built
+  for). The keyword arguments — `endpoint`, `session`,
+  `allow_absent_credentials`, `allow_lockless`, `region`, `sign_requests` —
+  are the postures [`S3`](./s3.md#s3) declares and threads through; the
+  failures it raises are classified at `S3`'s seams, not here.
+  `materialize_crt_engine(client, config, ...)` — the same construction with
+  the result dropped, after `selects_crt`; `caller_endpoint(client, endpoint)`
+  — keeps an application-level endpoint only for the client built from it.
 
 ## S3PathResolver
 

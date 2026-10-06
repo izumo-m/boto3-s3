@@ -19,7 +19,8 @@ differently. Those are a corrupted ranged download, a transfer whose connection
 dies below the HTTP layer, a download body cut mid-stream, a listing an
 S3-compatible endpoint returns unsorted, a recursive delete whose listing dies
 part way, a plain-HTTP
-endpoint taken from the environment under the CRT engine, an `aws` plugin the
+endpoint named anywhere but `--endpoint-url` under the CRT engine, a
+`REQUESTS_CA_BUNDLE` the CRT engine cannot use, an `aws` plugin the
 config file loads through `cli_legacy_plugin_path`, a `cli_history` directory
 `aws` cannot create, the modification time a download stamps for an object
 older than the local zone's present rules, a `--copy-props all` copy whose
@@ -296,14 +297,16 @@ run comes out differently, listed in section 1.
   annotations were written here before the object is rolled back, where `aws`
   — its rollback succeeding — never writes them; if the rollback fails too,
   `aws` goes on to write them and the object left behind is the same one.
-- **A plain-HTTP endpoint given only by the environment still reaches the CRT
-  engine.** Under `preferred_transfer_client = crt`, `aws` decides whether its
-  CRT client speaks TLS from `--endpoint-url` alone, so an endpoint supplied
-  by `AWS_ENDPOINT_URL_S3` instead leaves TLS on: a `http://` endpoint is
-  dialed over TLS and the transfer dies with `AWS_IO_SOCKET_CLOSED`. Here the
-  scheme is read off the endpoint the client actually resolved, environment
-  variable included, so the same run transfers — the exit code and the
-  resulting S3 state differ, in the direction of working. Pass
+- **A plain-HTTP endpoint named anywhere but `--endpoint-url` still reaches
+  the CRT engine.** Under `preferred_transfer_client = crt`, `aws` decides
+  whether its CRT client speaks TLS from `--endpoint-url` alone, so an
+  endpoint supplied any other way — `AWS_ENDPOINT_URL_S3` or
+  `AWS_ENDPOINT_URL`, the profile's `endpoint_url`, a `[services]` block's
+  `s3 = endpoint_url` — leaves TLS on: a `http://` endpoint is dialed over
+  TLS and the transfer dies with `AWS_IO_SOCKET_CLOSED` (all four measured).
+  Here the scheme is read off the endpoint the client actually resolved,
+  whichever of those named it, so the same run transfers — the exit code and
+  the resulting S3 state differ, in the direction of working. Pass
   `--endpoint-url` and the two agree again
   ([`../../design/crt.md`](../../design/crt.md) section 3 records the
   measurement).
@@ -546,6 +549,11 @@ run comes out differently, listed in section 1.
   identically, and `--no-verify-ssl` disables verification on both;
   `REQUESTS_CA_BUNDLE` is honored here whichever transfer engine runs, while
   `aws` honors it on its classic engine only (its CRT transfers ignore it).
+  That last one can change a run's outcome: under
+  `preferred_transfer_client = crt`, a `REQUESTS_CA_BUNDLE` that points at a
+  file the CRT cannot use fails the command here (exit code 255,
+  `AWS_ERROR_INVALID_ARGUMENT`) where `aws`, never reading it on that engine,
+  transfers (measured).
 
 Differences that depend on which dependencies are installed — the CRT engine,
 CRT-family checksums, conditional writes, and more — are in
