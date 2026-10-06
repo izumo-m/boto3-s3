@@ -15,7 +15,6 @@ import os
 from typing import cast
 
 from boto3_s3_cli import configfiles
-from boto3_s3_cli.globalargs import PROFILE_ENV_VARS
 
 # The flags take no value, so a raw-argv membership test is exact. They are
 # also declared on the parser so argparse accepts them on the normal off-mode
@@ -45,10 +44,19 @@ def resolve_auto_prompt_mode(raw_argv: list[str], scan: configfiles.ConfigScan) 
     ``help``/``--version`` -> off; ``--no-cli-auto-prompt`` -> off;
     ``--cli-auto-prompt`` -> on; else ``AWS_CLI_AUTO_PROMPT`` env -> profile
     ``cli_auto_prompt`` -> ``off``. The value is lowercased and anything other
-    than ``on`` / ``on-partial`` behaves as off (aws's else branch). The profile
-    whose config section is read is chosen by ``_active_profile``, which prefers
-    ``--profile`` - a charter-exempt deviation from aws, which at this stage
-    resolves the profile from the environment only (see its docstring).
+    than ``on`` / ``on-partial`` behaves as off (aws's else branch).
+
+    The profile whose section is read is the one the *environment* names
+    (``configfiles.env_profile``), never ``--profile``: aws resolves the mode
+    before it binds ``--profile`` to its session, so the setting under
+    ``[profile X]`` is not read on ``--profile X`` and the one under the
+    environment's profile - ``[default]`` when it names none - is. An
+    environment profile no file declares reads as nothing set, the
+    ``ProfileNotFound`` aws catches into ``off``; an empty ``AWS_PROFILE=``
+    names such a profile. Reading from ``--profile`` instead is not a UI
+    nicety: the mode decides non-interactive runs too (measured: with
+    ``cli_auto_prompt = on`` under ``[profile X]``, ``--profile X`` on a
+    terminal-less run executed the command on aws and stopped at rc 255 here).
 
     *scan* is the dispatcher's snapshot of the config files, so the setting is
     read through botocore's own rules - the credentials file merged in, an
@@ -68,7 +76,7 @@ def resolve_auto_prompt_mode(raw_argv: list[str], scan: configfiles.ConfigScan) 
         return "on"
     value: configfiles.ConfigValue | None = os.environ.get(_AUTO_PROMPT_ENV)
     if value is None:
-        value = scan.scoped(_active_profile(raw_argv)).get(_AUTO_PROMPT_CONFIG_KEY)
+        value = scan.scoped(configfiles.env_profile()).get(_AUTO_PROMPT_CONFIG_KEY)
     # The cast is what lets a map reach `.lower()` and raise there, as aws's
     # call does; screening it out instead would answer "off" for a config that
     # stops aws dead.
@@ -77,32 +85,3 @@ def resolve_auto_prompt_mode(raw_argv: list[str], scan: configfiles.ConfigScan) 
     # *return* too, honoring the documented on / on-partial / off domain
     # (design/autoprompt.md) instead of handing callers raw config text.
     return mode if mode in ("on", "on-partial") else "off"
-
-
-def _active_profile(raw_argv: list[str]) -> str:
-    """The profile whose config to consult: ``--profile`` > env > ``default``.
-
-    The env ordering is ``PROFILE_ENV_VARS`` (the single home of aws's
-    AWS_PROFILE > AWS_DEFAULT_PROFILE rule). Unlike
-    ``clientfactory.resolve_profile`` (present-wins, because opening a session
-    with an empty profile must fail like aws), an *empty* env value falls
-    through here - this soft read only chooses which config section to consult
-    for an interactive, charter-exempt setting.
-
-    Deviation from aws: at auto-prompt resolution aws has not yet applied
-    ``--profile`` to the session, so it reads ``cli_auto_prompt`` from the
-    env-derived profile only. We prefer ``--profile`` here, so a
-    ``cli_auto_prompt`` set only under a ``[profile X]`` section fires the prompt
-    on ``--profile X`` for us but not for aws. Intentional usability preference,
-    admissible because the auto-prompt UI is charter-exempt.
-    """
-    for i, arg in enumerate(raw_argv):
-        if arg == "--profile" and i + 1 < len(raw_argv):
-            return raw_argv[i + 1]
-        if arg.startswith("--profile="):
-            return arg.split("=", 1)[1]
-    for name in PROFILE_ENV_VARS:
-        value = os.environ.get(name)
-        if value:
-            return value
-    return "default"

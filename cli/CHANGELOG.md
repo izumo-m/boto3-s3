@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- A profile's `cli_auto_prompt` is now read like `aws` reads it: from the profile the environment selects, no longer from the one `--profile` names.
+
 ## [0.8.1] - 2026-09-07
 
 - The default request checksum is now `CRC64NVME` like `aws` wherever the installed botocore can compute it; without awscrt, botocore's `CRC32` stays.

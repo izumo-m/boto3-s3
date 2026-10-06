@@ -517,14 +517,57 @@ class TestAutoPromptModeResolution:
         config = tmp_path / "config"
         config.write_text("[default]\ncli_auto_prompt = off\n[profile foo]\ncli_auto_prompt = on\n")
         monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
-        # --profile foo reads [profile foo] -> on
+        # The environment's profile reads [profile foo] -> on
+        monkeypatch.setenv("AWS_PROFILE", "foo")
         on = _FakePrompter(["--version"])
-        assert cli.main(["--profile", "foo", "cp", "s3://a"], ctx=Context(auto_prompter=on)) == 0
-        assert on.seen == ["--profile", "foo", "cp", "s3://a"]
+        assert cli.main(["cp", "s3://a"], ctx=Context(auto_prompter=on)) == 0
+        assert on.seen == ["cp", "s3://a"]
         # default profile reads [default] -> off
+        monkeypatch.delenv("AWS_PROFILE")
         off = _FakePrompter(["--version"])
         assert cli.main(["cp"], ctx=Context(auto_prompter=off)) == 252
         assert off.seen is None
+
+    @pytest.mark.parametrize("flag", [["--profile", "foo"], ["--profile=foo"]])
+    def test_profile_flag_does_not_choose_the_section(
+        self, flag: list[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """aws resolves the mode before it binds ``--profile`` to its session.
+
+        So the section read is the environment's (``[default]`` when it names
+        none), on ``--profile foo`` too - measured in both directions on the
+        pinned aws-cli: the setting under ``[profile foo]`` stays unread, and
+        the one under ``[default]`` still decides.
+        """
+        monkeypatch.delenv("AWS_CLI_AUTO_PROMPT", raising=False)
+        config = tmp_path / "config"
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        config.write_text("[default]\ncli_auto_prompt = off\n[profile foo]\ncli_auto_prompt = on\n")
+        unread = _FakePrompter(["--version"])
+        assert cli.main([*flag, "cp"], ctx=Context(auto_prompter=unread)) == 252
+        assert unread.seen is None
+        config.write_text("[default]\ncli_auto_prompt = on\n[profile foo]\ncli_auto_prompt = off\n")
+        decides = _FakePrompter(["--version"])
+        assert cli.main([*flag, "cp"], ctx=Context(auto_prompter=decides)) == 0
+        assert decides.seen == [*flag, "cp"]
+
+    @pytest.mark.parametrize("profile", ["", "undeclared"])
+    def test_environment_profile_no_file_declares_reads_as_off(
+        self, profile: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """aws catches the ``ProfileNotFound`` of this read into ``off``.
+
+        An empty ``AWS_PROFILE=`` names a profile too (the environment read is
+        present-wins), so ``[default]`` is not what it falls back to.
+        """
+        monkeypatch.delenv("AWS_CLI_AUTO_PROMPT", raising=False)
+        config = tmp_path / "config"
+        config.write_text("[default]\ncli_auto_prompt = on\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        monkeypatch.setenv("AWS_PROFILE", profile)
+        prompter = _FakePrompter(["--version"])
+        assert cli.main(["cp"], ctx=Context(auto_prompter=prompter)) == 252
+        assert prompter.seen is None
 
     def test_env_takes_precedence_over_config(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -712,6 +755,36 @@ class TestNestedConfigBlock:
     ) -> None:
         assert cli.main(["ls", "s3://bucket/p/"]) == 255
         assert capsys.readouterr().err == self._REPORT
+
+    @pytest.mark.parametrize("flag", [["--profile", "other"], ["--profile", ""]])
+    def test_a_profile_flag_does_not_move_the_read(
+        self,
+        nested: None,
+        flag: list[str],
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # aws lowercases the value before `--profile` is bound, so the block
+        # under the environment's profile stops the run whatever the flag
+        # names (measured: rc 255 with this report on `--profile other`, a
+        # declared profile, and on an empty `--profile ""`).
+        (tmp_path / "config").write_text(
+            "[default]\nregion = us-east-1\ncli_auto_prompt =\n    a = b\n[profile other]\n"
+        )
+        assert cli.main([*flag, "ls", "s3://bucket/p/"]) == 255
+        assert capsys.readouterr().err == self._REPORT
+
+    def test_a_block_under_the_flag_s_profile_is_not_read(
+        self, nested: None, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The other direction: the block sits under the profile only the flag
+        # names, so the resolution never sees it and the run goes on to its
+        # own outcome - here the usage error of the incomplete command.
+        (tmp_path / "config").write_text(
+            "[default]\nregion = us-east-1\n[profile other]\ncli_auto_prompt =\n    a = b\n"
+        )
+        assert cli.main(["--profile", "other", "cp"]) == 252
+        assert "'dict' object has no attribute 'lower'" not in capsys.readouterr().err
 
     def test_the_help_token_does_not_escape_it(
         self, nested: None, capsys: pytest.CaptureFixture[str]

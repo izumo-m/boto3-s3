@@ -248,16 +248,21 @@ the profile config comes from the dispatcher's own config scan, which
 merged in key by key, and an indented block parsed into the map botocore makes
 of it, [`cli.md`](./cli.md) section 1). So this setting is read under
 botocore's own rules while the pre-parse path stays SDK-free - which is an
-implementation detail, not an import guarantee for usage-error paths. The
-active profile is `--profile` > `AWS_PROFILE` > `AWS_DEFAULT_PROFILE` >
-`default`.
+implementation detail, not an import guarantee for usage-error paths.
 
-Consulting `--profile` here is a deliberate deviation from aws-cli: at
-auto-prompt resolution aws has not yet applied `--profile` to the session, so it
-reads `cli_auto_prompt` from the env-derived profile only. Preferring `--profile`
-means a `cli_auto_prompt` set only under a `[profile X]` section fires the prompt
-on `--profile X` for us but not for aws - an intentional usability preference,
-admissible because the auto-prompt UI is charter-exempt.
+The profile whose section is read is the one the **environment** names
+(`configfiles.env_profile`: `AWS_PROFILE` > `AWS_DEFAULT_PROFILE`, present-wins,
+else `default`) - never `--profile`. aws resolves the mode before it binds
+`--profile` to its session, so a `cli_auto_prompt` set under `[profile X]` is
+not read on `--profile X`, and the one under the environment's profile is. A
+profile the environment names and no file declares reads as nothing set (aws
+catches that read's `ProfileNotFound` into `off`), an empty `AWS_PROFILE=`
+included. The rule is aws's rather than a friendlier one because the mode is
+not a UI matter alone: it decides what a non-interactive run does (measured:
+with `cli_auto_prompt = on` under `[profile X]`, `--profile X` without a
+terminal runs the command on aws, and stopped at rc 255 when this read
+followed the flag), and the block-valued `AttributeError` above has to fire
+for the same profile aws fires it for.
 
 **Difference when prompt_toolkit is absent** (section 6): an explicit flag gets the
 install guidance + 252. The env/config-driven case **silently falls back to
