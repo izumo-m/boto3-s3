@@ -439,7 +439,7 @@ class _ParamValidationArgumentParser(argparse.ArgumentParser):
     def _print_message(self, message: str, file: SupportsWrite[str] | None = None) -> None:
         """Write a page the way Python 3.14's argparse does, on every Python.
 
-        Two things differ below 3.12, and both only show once a standard
+        Two things differ on Python 3.10, and both only show once a standard
         stream is unusable: the stream given may be absent (a closed
         descriptor leaves ``sys.stdout`` ``None``), which 3.14 answers by
         falling back to stderr, and the write itself may fail, which 3.14

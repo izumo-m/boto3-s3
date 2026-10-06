@@ -70,18 +70,23 @@ unresolved-region report points at `aws configure` for the same reason.
 config file, keeping the exit code, and so does this command. Where the two
 part is the error format — `--cli-error-format`, `AWS_CLI_ERROR_FORMAT` and
 the profile key `cli_error_format`: `aws` acts on all three, this command
-accepts every value and ignores it. Set one to `enhanced` in
-that dropped-envelope situation and `aws` puts the envelope back, where here
-it stays dropped; set one to `legacy` and `aws` drops the envelope
-everywhere, where here the report is unchanged; and `json`, `yaml`, `text` and
-`table` re-render the report itself on `aws` — into a JSON object, a YAML
-mapping, a tab-separated line, an ASCII table — where here it keeps its usual
-one-line form. A value outside that list, in the variable or the profile, is
-an error on neither tool: `aws` falls back to `enhanced`, and when the failure
-it is reporting is a global option that did not parse it says so first, in a
-line of its own (`Invalid cli_error_format: 'x'. Using 'enhanced' format.`)
-that this command never prints. Whichever value is set, the exit code is the
-same on both tools.
+accepts every value and ignores it. On `aws`, `enhanced` puts the envelope
+back in that dropped-envelope situation (as the option or the variable — the
+profile key would have to come from the profile that does not exist),
+`legacy` drops the envelope, and `json`, `yaml`, `text` and `table` re-render
+the report itself — into a JSON object, a YAML mapping, a tab-separated line,
+an ASCII table — where here the report keeps its usual one-line form
+throughout. `aws` applies the setting from the point where it has read it:
+the reports it makes before that — `--profile` without a value, `--debug=1`,
+the two auto-prompt flags together — never change, and the option, unlike the
+variable and the profile key, does not reach a failure of the very parse that
+reads it (`ls --output bad --cli-error-format legacy` keeps its envelope). A
+value outside that list, in the variable or the profile, is an error on
+neither tool: `aws` falls back to `enhanced`, and says so in a line of its
+own (`Invalid cli_error_format: 'x'. Using 'enhanced' format.`) ahead of a
+usage error in its top-level options — a global that does not parse, a bad
+`--endpoint-url` or `--query` — which this command never prints. Whichever
+value is set, the exit code is the same on both tools.
 
 **Ordering**, as promised above: with concurrent transfers, result lines — and
 `delete:` lines against transfer lines — interleave freely, on either tool.
@@ -390,12 +395,15 @@ run comes out differently, listed in section 1.
   report. Anything keying on the `aws-cli/<version>` token will not match.
 - **Three argument-parsing corners.** When an abbreviated option is ambiguous,
   the candidates are listed in a different order than `aws` lists them. On
-  Python 3.10 and 3.11 only, an ambiguous abbreviation is reported wherever it
-  sits on the command line, ahead of everything else: a value that itself
-  ambiguously abbreviates one of the command's options (`--exclude --ss`) is
-  rejected here where `aws` takes it as the value, an error earlier on the
-  line gives way to it, and so does a `--version` before it
-  (`ls --version --c` exits 252 here and prints the version on `aws`). And on
+  Python 3.10 and 3.11 only, an ambiguous abbreviation is reported by the
+  parse that meets it before that parse reports anything else, wherever the
+  abbreviation sits: a value that itself ambiguously abbreviates one of the
+  command's options (`--exclude --ss`) is rejected here where `aws` takes it
+  as the value, another error of the same parse gives way to it
+  (`ls --output bad --no-c`), and so does a `--version` before it
+  (`ls --version --c` exits 252 here and prints the version on `aws`). What
+  is settled earlier — `--profile` without a value, `--debug=1`, the two
+  auto-prompt flags together — still comes first, as on `aws`. And on
   a terminal `aws` colors the usage block that closes a usage error, which
   this command does only when it runs on Python 3.14 or later — the coloring
   is the interpreter's. None of the three changes which options exist;

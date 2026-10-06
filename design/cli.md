@@ -223,12 +223,15 @@ solidified design is added here.
     only). Argparse raises the ambiguity there while *classifying* the token
     stream, a pass that runs to completion before anything is consumed; 3.12
     moved the check to the point of use. So below 3.12 an ambiguous
-    abbreviation anywhere on the line is the run's report. A value that
-    ambiguously abbreviates one of the command's own options -
+    abbreviation anywhere in a parse's token stream is that parse's report.
+    A value that ambiguously abbreviates one of the command's own options -
     `--exclude --ss` against cp's `--sse*` family - is rejected where aws
-    takes it as the value; an earlier parse error loses to a later ambiguity
-    (`ls --output bad --no-c` blames `--no-c`); and so does a `--version`
-    ahead of one (`ls --version --c` is rc 252 where aws prints its version).
+    takes it as the value; another error of the same parse loses to the
+    ambiguity (`ls --output bad --no-c` blames `--no-c`); and so does a
+    `--version` ahead of one (`ls --version --c` is rc 252 where aws prints
+    its version). What an earlier step settles is untouched - the
+    preliminary `--profile` / `--debug` scan and the auto-prompt pair still
+    report first, on every Python.
     Closing it would mean overriding the classification too
     (`_parse_optional` / `_get_option_tuples`), far more private argparse
     surface than a corner input is worth.

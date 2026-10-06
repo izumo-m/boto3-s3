@@ -61,8 +61,8 @@ Two of those parse loosely rather than strictly.
 `true` (case-insensitively), and `AWS_CLI_AUTO_PROMPT` accepts `on` and
 `on-partial` — anything else counts as off. The profile key behind that
 variable, `cli_auto_prompt`, is read the way `aws` reads it: from the profile
-the environment selects (`AWS_PROFILE`, else `default`), not from the one
-`--profile` names.
+the environment selects (`AWS_PROFILE`, then `AWS_DEFAULT_PROFILE`, else
+`default`), not from the one `--profile` names.
 
 Three variables the installed SDK would otherwise act on are ignored here,
 because `aws` cannot see them either: `SSLKEYLOGFILE` (its frozen interpreter
