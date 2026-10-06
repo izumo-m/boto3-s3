@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import io
 import os
+import random
 import sys
 from pathlib import Path
 from typing import ClassVar
@@ -1313,19 +1314,104 @@ class TestCredentialChainSettings:
     def test_a_suspect_botocore_accepts_changes_nothing_but_the_timing(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # The scan guesses; botocore decides. An endpoint outside the plainly
-        # valid shape that botocore nevertheless takes (it checks the host,
-        # not the scheme) builds the chain early and the run goes on - and
-        # the session opened for that must not cost the process its
-        # SSLKEYLOGFILE, which an external alias's child still has to see.
+        # The scan decides when the chain is built early; botocore decides
+        # whether the run stops. Should the two ever disagree - the scan
+        # suspecting what botocore takes - the run goes on, and the session
+        # opened for the check must not cost the process its SSLKEYLOGFILE,
+        # which an external alias's child still has to see.
         from boto3_s3_cli import configfiles
 
-        monkeypatch.setenv("AWS_EC2_METADATA_SERVICE_ENDPOINT", "ftp://metadata.example")
+        monkeypatch.setattr(
+            configfiles.ConfigScan, "credential_chain_suspect", lambda self, profile: True
+        )
         monkeypatch.setenv("SSLKEYLOGFILE", "/nonexistent/keys.log")
-        assert configfiles.scan().credential_chain_suspect(None) is True
         assert cli.main(["help"]) == 0
         assert capsys.readouterr().err == ""
         assert os.environ["SSLKEYLOGFILE"] == "/nonexistent/keys.log"
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "http://a..b",
+            "http://a-.b",
+            "http://a.-b",
+            "http://" + "x" * 64,
+            "http://" + "y" * 256,
+            "http://[::1::2]",
+            "http://[1.2.3.4]",
+            "http://[1:2:3]",
+            "http://[:]",
+            "http://a_b",
+            "http://",
+            "http://a/\tb",
+        ],
+    )
+    def test_an_endpoint_botocore_refuses_stops_help_and_usage_errors(
+        self, endpoint: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Shapes that look like URLs and that botocore's host test still
+        # refuses (measured on aws: rc 255 on `help`, on an unknown
+        # subcommand and on an unknown option alike). A scan that only knew
+        # the plainly valid shape let every one of them through.
+        monkeypatch.setenv("AWS_EC2_METADATA_SERVICE_ENDPOINT", endpoint)
+        for argv in (["help"], ["bogus"], ["ls", "--bogus"]):
+            assert cli.main(argv) == 255
+            assert capsys.readouterr().out == ""
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "",
+            "HTTP://169.254.169.254",
+            "ftp://metadata.example",
+            "http://169.254.169.254/latest/",
+            "http://metadata.example.",
+            "http://[fd00:ec2::254]",
+            "http://[fe80::1%25eth0]:80",
+            "http://user:pw@metadata.example:1338/x?y#z",
+        ],
+    )
+    def test_an_endpoint_botocore_takes_leaves_help_sdk_free(
+        self, endpoint: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The other direction: botocore checks the host, not the scheme, and
+        # ignores an empty value altogether, so none of these may send the
+        # dispatcher to the SDK ahead of the help token.
+        from boto3_s3_cli import configfiles
+
+        monkeypatch.setenv("AWS_EC2_METADATA_SERVICE_ENDPOINT", endpoint)
+        assert configfiles.scan().credential_chain_suspect(None) is False
+
+    def test_the_endpoint_test_is_botocore_s_own(self) -> None:
+        """The scan's copy of botocore's endpoint check, against the original.
+
+        The patterns are copied because the scan must not import the SDK; a
+        botocore that changes them has to fail here, not drift.
+        """
+        from botocore import compat, utils
+
+        from boto3_s3_cli import configfiles
+
+        assert configfiles._IPV6_ADDRZ_RE.pattern == compat.IPV6_ADDRZ_RE.pattern  # pyright: ignore[reportPrivateUsage]
+        assert configfiles._UNSAFE_URL_CHARS == compat.UNSAFE_URL_CHARS  # pyright: ignore[reportPrivateUsage]
+
+        def botocore_refuses(endpoint: str) -> bool:
+            if not endpoint:
+                return False  # the IMDS fetcher ignores an empty custom endpoint
+            try:
+                return not utils.is_valid_uri(endpoint)
+            except Exception:
+                return True
+
+        pieces = ["http://", "HTTP://", "ftp://", "//", "", "a", "A", "1", "-", ".", "..", "_", ":"]
+        pieces += ["::", "[", "]", "%25", "eth0", "/", "?", "@", " ", "\t", "\u00e9", "fd00", "254"]
+        pieces += ["x" * 63, "x" * 64, "y" * 250, ":80", ":x", "[::1]", "[1.2.3.4]", "[:]", "ffff"]
+        rng = random.Random(8)
+        for _ in range(4000):
+            endpoint = "".join(rng.choice(pieces) for _ in range(rng.randint(1, 6)))
+            assert configfiles._imds_endpoint_refused(endpoint) is botocore_refuses(endpoint), repr(  # pyright: ignore[reportPrivateUsage]
+                endpoint
+            )
 
     @pytest.mark.parametrize(
         ("env", "body", "suspect"),
@@ -1349,7 +1435,9 @@ class TestCredentialChainSettings:
             ({"AWS_EC2_METADATA_SERVICE_ENDPOINT": "http://localhost:1338/latest/"}, "", False),
             ({"AWS_EC2_METADATA_SERVICE_ENDPOINT": "169.254.169.254"}, "", True),
             ({"AWS_EC2_METADATA_SERVICE_ENDPOINT": "http://a b"}, "", True),
+            ({"AWS_EC2_METADATA_SERVICE_ENDPOINT": ""}, "", False),
             ({}, "ec2_metadata_service_endpoint = not a url\n", True),
+            ({}, "ec2_metadata_service_endpoint =\n  a = b\n", True),
         ],
     )
     def test_what_sends_the_dispatcher_to_build_the_chain(

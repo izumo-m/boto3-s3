@@ -34,6 +34,7 @@ import os
 import re
 from collections.abc import Mapping
 from typing import NamedTuple, TypeAlias
+from urllib.parse import urlsplit
 
 from boto3_s3_cli.globalargs import PROFILE_ENV_VARS
 
@@ -72,12 +73,37 @@ _CHAIN_ENDPOINT_MODE_SETTING = (
 )
 _CHAIN_ENDPOINT_SETTING = ("AWS_EC2_METADATA_SERVICE_ENDPOINT", "ec2_metadata_service_endpoint")
 _IMDS_ENDPOINT_MODES = ("ipv4", "ipv6")
-# An endpoint that is plainly a URL botocore accepts: http(s), a DNS-shaped
-# host or a bracketed IPv6 literal, an optional port, an optional path.
-# Anything else is left to botocore's own check.
-_PLAIN_ENDPOINT_RE = re.compile(
-    r"https?://(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?)(:[0-9]+)?(/[!-~]*)?",
+# botocore's own test for that endpoint (its `is_valid_uri`), which the IMDS
+# fetcher applies to a configured one: no tab, CR or LF anywhere, and a host
+# that is either DNS-shaped - at most 255 characters, labels of 1 to 63
+# letters, digits and inner hyphens, one trailing dot allowed - or, between
+# brackets, an RFC 3986 IPv6 literal with an optional zone id. The patterns
+# are botocore's verbatim and are the same in the copy aws bundles; they are
+# kept here because the scan must not import the SDK.
+_UNSAFE_URL_CHARS = frozenset("\t\r\n")
+_DNS_HOST_RE = re.compile(
+    r"^((?!-)[A-Z\d-]{1,63}(?<!-)\.)*((?!-)[A-Z\d-]{1,63}(?<!-))$", re.IGNORECASE
 )
+_IPV4_PAT = r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}"
+_HEX_PAT = "[0-9A-Fa-f]{1,4}"
+_LS32_PAT = f"(?:{_HEX_PAT}:{_HEX_PAT}|{_IPV4_PAT})"
+_IPV6_PAT = "(?:" + "|".join(
+    variation % {"hex": _HEX_PAT, "ls32": _LS32_PAT}
+    for variation in (
+        "(?:%(hex)s:){6}%(ls32)s",
+        "::(?:%(hex)s:){5}%(ls32)s",
+        "(?:%(hex)s)?::(?:%(hex)s:){4}%(ls32)s",
+        "(?:(?:%(hex)s:)?%(hex)s)?::(?:%(hex)s:){3}%(ls32)s",
+        "(?:(?:%(hex)s:){0,2}%(hex)s)?::(?:%(hex)s:){2}%(ls32)s",
+        "(?:(?:%(hex)s:){0,3}%(hex)s)?::%(hex)s:%(ls32)s",
+        "(?:(?:%(hex)s:){0,4}%(hex)s)?::%(ls32)s",
+        "(?:(?:%(hex)s:){0,5}%(hex)s)?::%(hex)s",
+        "(?:(?:%(hex)s:){0,6}%(hex)s)?::",
+    )
+) + ")"  # fmt: skip
+_UNRESERVED_PAT = r"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._!\-~"
+_ZONE_ID_PAT = "(?:%25|%)(?:[" + _UNRESERVED_PAT + "]|%[a-fA-F0-9]{2})+"
+_IPV6_ADDRZ_RE = re.compile(r"^\[" + _IPV6_PAT + r"(?:" + _ZONE_ID_PAT + r")?\]$")
 
 
 class _UnparseableError(Exception):
@@ -172,18 +198,22 @@ class ConfigScan(NamedTuple):
         ``ec2_metadata_service_endpoint`` each raise there, which stops the
         run before the help token and every command layer.
 
-        This answers only *whether one of them might*, so the dispatcher
+        This answers only *whether one of them would*, so the dispatcher
         builds the chain for real - importing the SDK - for exactly the
-        configurations that could fail, and botocore raises its own error
-        with its own wording. Each setting is read the way botocore's chain
-        for it reads: the environment variable when present, an empty value
+        configurations that fail, and botocore raises its own error with its
+        own wording. Each setting is read the way botocore's chain for it
+        reads: the environment variable when present, an empty value
         included, else ``profile``'s config key (nothing for an undeclared
         profile, whose ``ProfileNotFound`` aws swallows at this step). The
-        two integers are tried with the very ``int`` botocore applies; the
-        endpoint is only matched against the plainly valid shape, since a
-        wrong guess in either direction costs nothing but timing - a suspect
-        that botocore accepts just loads the SDK early, and a miss surfaces
-        where it always did, at the client build.
+        tests are botocore's own, applied without it: the very ``int`` it
+        converts the two integers with, its two endpoint modes, and its
+        endpoint check (`_imds_endpoint_refused`).
+
+        Both ways of guessing wrong are visible, which is why the tests are
+        copies and not approximations: a setting botocore refuses that this
+        lets through leaves the help page and every usage error on their own
+        outcome where aws stops at rc 255, and one botocore accepts that this
+        suspects loads the SDK ahead of an informational exit.
         """
         scoped = self.scoped(profile)
 
@@ -206,8 +236,34 @@ class ConfigScan(NamedTuple):
             return True
         endpoint = setting(*_CHAIN_ENDPOINT_SETTING)
         return endpoint is not None and (
-            not isinstance(endpoint, str) or _PLAIN_ENDPOINT_RE.fullmatch(endpoint) is None
+            not isinstance(endpoint, str) or _imds_endpoint_refused(endpoint)
         )
+
+
+def _imds_endpoint_refused(endpoint: str) -> bool:
+    """Whether botocore refuses *endpoint* as the IMDS endpoint.
+
+    The IMDS fetcher uses a configured endpoint only when it is non-empty,
+    and then requires botocore's ``is_valid_uri`` of it: the DNS-shaped host
+    test or, failing that, the bracketed-IPv6 one, with the checks in
+    botocore's order. Whatever makes botocore's own code raise instead of
+    answer - ``urlsplit`` rejecting the netloc, the empty host it then
+    indexes - is a refusal as well, since the chain build fails either way.
+    """
+    if not endpoint:
+        return False
+    if _UNSAFE_URL_CHARS.intersection(endpoint):
+        return True
+    try:
+        hostname = urlsplit(endpoint).hostname
+        if hostname is None:
+            return True
+        dns_host = hostname[:-1] if hostname[-1] == "." else hostname
+        if len(hostname) <= 255 and _DNS_HOST_RE.match(dns_host) is not None:
+            return False
+        return _IPV6_ADDRZ_RE.match(f"[{hostname}]") is None
+    except (ValueError, IndexError):
+        return True
 
 
 def env_profile() -> str | None:

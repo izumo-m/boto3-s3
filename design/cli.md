@@ -136,13 +136,16 @@ solidified design is added here.
   botocore's own text, behind the two gates above and ahead of the help
   token and every command layer (measured:
   `AWS_METADATA_SERVICE_TIMEOUT=abc aws s3 help` is 255).
-  `ConfigScan.credential_chain_suspect` only decides whether the build
-  *could* fail - the two integers with the very `int` botocore applies, the
-  endpoint against the plainly valid shape - and for exactly those
-  configurations the dispatcher builds the chain for real
+  `ConfigScan.credential_chain_suspect` decides whether the build *would*
+  fail, with botocore's own tests applied without importing it - the very
+  `int` it converts with, its two modes, a verbatim copy of its endpoint
+  check (pinned against the installed botocore by test) - and for exactly
+  those configurations the dispatcher builds the chain for real
   (`clientfactory.build_credential_chain`), so the report is botocore's own
   and every configuration that passes keeps the informational exits
-  SDK-free (section 7).
+  SDK-free (section 7). The copy has to be exact in both directions: a
+  refusal it misses leaves `help` at rc 0 where aws exits 255, and a
+  suspicion botocore does not share loads the SDK ahead of the help page.
 - The first `--` stops the globals pass (argparse semantics, verified
   identical on 3.10 and aws's bundled 3.14) and the marker survives in the
   remainder for stage 2's parse to honor, so the tail stays positional all
@@ -1704,11 +1707,11 @@ The key implementation points are:
 - `runtimeconfig.py` loads only on a transfer path (post-dispatch), so it
   imports botocore and the library's `TransferConfig` at module top; awscrt
   stays behind `crtsupport`'s in-function imports.
-- The credential-chain gate (section 1) is the one startup step that does
-  reach the SDK ahead of the help token, and only for a configuration whose
-  IMDS settings could make botocore's chain build fail - which the config
-  scan decides without the SDK. A run that botocore then rejects is not an
-  informational exit; one it accepts has merely loaded the SDK early.
+- The credential-chain gate (section 1) is the one startup step that
+  reaches the SDK ahead of the help token, and it does so only in a run
+  that then fails: the config scan applies botocore's own tests to the IMDS
+  settings without importing it, so the chain is built early exactly when
+  botocore refuses to build it - which is not an informational exit.
 - `prompt_toolkit` and the prompt-side modules of the `autoprompt` package
   are imported only when `--cli-auto-prompt` fires; the package's pure
   mode-resolution module, `autoprompt.resolve`, is imported with `cli` itself

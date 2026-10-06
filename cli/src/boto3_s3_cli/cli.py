@@ -1180,10 +1180,11 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
     # alike). A bad one therefore settles the run here, at aws's general rc
     # 255 with botocore's own text: behind the two gates above and ahead of
     # the help token and every command layer (measured:
-    # `AWS_METADATA_SERVICE_TIMEOUT=abc aws s3 help` is rc 255). The scan only
-    # says whether the build *could* fail; the failure is botocore's own,
-    # raised by building the chain for real, so every configuration that
-    # passes keeps the SDK unimported on the informational exits.
+    # `AWS_METADATA_SERVICE_TIMEOUT=abc aws s3 help` is rc 255). The scan
+    # says whether the build would fail, by botocore's own tests; the failure
+    # is botocore's own, raised by building the chain for real, so every
+    # configuration that passes keeps the SDK unimported on the informational
+    # exits.
     if _config_scan.credential_chain_suspect(clientfactory.resolve_profile(head)):
         try:
             clientfactory.build_credential_chain(head)
