@@ -138,6 +138,58 @@ class TestNonSeekableSource:
         reader = IOStorage(buf).open("k", "rb")
         assert hasattr(reader, "seek")
 
+    def test_a_tarfile_member_keeps_the_pass_through_view(self, tmp_path: Path) -> None:
+        # A tarfile member reads through a BufferedReader whose `fileno` is
+        # forwarded to a wrapped object that has none (AttributeError), and a
+        # stream-mode member's `seekable` is forwarded the same way. Neither
+        # answer is a reason to hide anything: both uploaded on both engines
+        # before the check existed, and must still reach the engine untouched.
+        import tarfile
+
+        payload = os.urandom(70000)
+        archive = tmp_path / "a.tar"
+        with tarfile.open(archive, "w") as tar:
+            info = tarfile.TarInfo("member.bin")
+            info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload))
+        with tarfile.open(archive) as tar:
+            member = tar.extractfile("member.bin")
+            assert member is not None
+            with pytest.raises(AttributeError):
+                member.fileno()
+            reader = IOStorage(member).open("k", "rb")
+            assert hasattr(reader, "seek")
+            assert reader.read() == payload
+        with tarfile.open(archive, "r|") as stream_tar:
+            streamed = stream_tar.extractfile(next(iter(stream_tar)))
+            assert streamed is not None
+            with pytest.raises(AttributeError):
+                streamed.seekable()
+            reader = IOStorage(streamed).open("k", "rb")
+            assert reader.read() == payload
+
+    def test_a_tarfile_member_uploads_on_the_classic_engine(self, tmp_path: Path) -> None:
+        import tarfile
+
+        archive = tmp_path / "a.tar"
+        with tarfile.open(archive, "w") as tar:
+            info = tarfile.TarInfo("member.bin")
+            info.size = 5
+            tar.addfile(info, io.BytesIO(b"tarry"))
+        client, calls = make_recording_client([{"ETag": '"e"'}])
+        results: list[OpResult] = []
+        with tarfile.open(archive) as tar:
+            member = tar.extractfile("member.bin")
+            assert member is not None
+            S3().cp(
+                IOStorage(member),
+                S3Storage("s3://b/k", client=client),
+                transfer_config=_SYNC,
+                on_result=results.append,
+            )
+        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED]
+        assert [c.operation for c in calls] == ["PutObject"]
+
     def test_a_pipe_uploads_on_the_classic_engine(self) -> None:
         r, w = os.pipe()
         os.write(w, b"from a pipe")

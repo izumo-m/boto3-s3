@@ -191,25 +191,27 @@ def _cannot_seek(stream: Any) -> bool:
     The descriptor's type settles both: a FIFO, a character device (a
     console) or a socket cannot be positioned whatever ``seekable()`` says,
     and ``os.fstat`` reports a Windows pipe as a FIFO too (measured). A
-    stream without ``seekable`` or ``fileno`` is left to the engines, which
-    already take the buffered path for a read-only object.
+    stream without ``seekable`` or ``fileno``, or one that cannot answer
+    either - a closed stream (``ValueError``), a tarfile member, whose
+    ``BufferedReader`` forwards both to a wrapped object that has neither
+    (``AttributeError``), a ``BytesIO``'s ``fileno``
+    (``io.UnsupportedOperation``) - is left to the engines exactly as it was
+    handed over, which is what every such stream got before this check
+    existed; only a positive answer hides anything.
     """
     seekable = getattr(stream, "seekable", None)
     if seekable is not None:
         try:
             if not seekable():
                 return True
-        except (OSError, ValueError):
-            # A closed stream (ValueError) or one that cannot answer: not a
-            # reason to hide anything - the transfer reports it on its own.
+        except Exception:
             return False
     fileno = getattr(stream, "fileno", None)
     if fileno is None:
         return False
     try:
         mode = os.fstat(fileno()).st_mode
-    except (OSError, ValueError):
-        # io.UnsupportedOperation (a BytesIO's fileno) is both.
+    except Exception:
         return False
     return stat.S_ISFIFO(mode) or stat.S_ISCHR(mode) or stat.S_ISSOCK(mode)
 
