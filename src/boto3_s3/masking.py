@@ -78,9 +78,9 @@ _SIGNATURE_RE = re.compile(
 # Leading Access Key ID of a Credential value (``Credential=`` /
 # ``X-Amz-Credential=``); the signing scope after the ``/`` (header form) or the
 # percent-encoded ``%2F`` (presigned-query form) is non-secret and kept, so the
-# value stops at ``/`` and ``%``.
+# value stops at ``/`` and ``%`` - and at ``<`` / ``>`` like ``_VALUE``.
 _CREDENTIAL_RE = re.compile(
-    r"(?P<key>(?:X-Amz-Credential|Credential)=)(?P<val>[^\s\\&,/'\"%]+)",
+    r"(?P<key>(?:X-Amz-Credential|Credential)=)(?P<val>[^\s\\&,/'\"%<>]+)",
     re.IGNORECASE,
 )
 # SigV2 ``AWSAccessKeyId=`` query parameter (id with no scope).

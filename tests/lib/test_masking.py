@@ -277,6 +277,7 @@ class TestMaskTextNotation:
             "TokenCode=1",
             "x-amz-server-side-encryption-customer-key:k",
             "Proxy-Authorization: x",
+            "Credential=AKIDX",
         ],
     )
     def test_a_value_stops_at_the_next_xml_element(self, trigger: str) -> None:
@@ -294,6 +295,16 @@ class TestMaskTextNotation:
         assert "<Object><Key>om/b.txt</Key></Object>" in masked
         assert "<Object><Key>om/c.txt</Key></Object>" in masked
         assert "<Quiet>true</Quiet></Delete>'" in masked
+
+    def test_a_credential_value_stops_at_the_next_xml_element(self) -> None:
+        # The credential value already stopped at the scope's `/`, which
+        # happened to fall inside `</Key>`: the key's closing tag lost its
+        # `<`, and a key without a later `/` would have run on. It stops at
+        # the element now, like every other bare-run value.
+        body = "'body': b'<Delete><Object><Key>om/Credential=AKIDX.txt</Key></Object></Delete>'"
+        assert m.mask_text(body) == (
+            "'body': b'<Delete><Object><Key>om/Credential=***</Key></Object></Delete>'"
+        )
 
     def test_credentials_body_access_key_id_follows_the_id_rule(self) -> None:
         # The id beside the secrets in an STS / metadata / SSO credentials body:
