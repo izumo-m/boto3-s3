@@ -126,6 +126,7 @@ import pytest
 from boto3.s3.transfer import TransferConfig
 from s3transfer.copies import CopySubmissionTask
 
+from boto3_s3 import transfer
 from boto3_s3.localstorage import LocalStorage
 from boto3_s3_cli.commands.base import Context
 from tests.utils.harness import CliResult, default_checksum_algorithm, run_cli_in_process
@@ -525,9 +526,19 @@ class TestCPCommand:
     def test_cp_succeeds_with_mimetype_errors(self, tmp_path: Path) -> None:
         full_path = str(tmp_path / "foo.txt")
         (tmp_path / "foo.txt").write_text("mycontent")
-        with mock.patch("mimetypes.MimeTypes.guess_type") as mock_guess_type:
-            # This should throw a UnicodeDecodeError.
-            mock_guess_type.side_effect = lambda x: b"\xe2".decode("ascii")
+        # aws's guard covers the Windows-registry read its lazy mimetypes.init
+        # performs (bpo-9291: an entry in an undecodable encoding). This
+        # library reads the registry when it builds its own frozen store and
+        # guesses with its own port of the algorithm, so the error is raised
+        # at that read - with this process's cached store cleared first, or
+        # the read would not run at all.
+        with (
+            mock.patch.object(transfer, "_mime_db", None),
+            mock.patch(
+                "mimetypes.MimeTypes.read_windows_registry",
+                side_effect=UnicodeDecodeError("ascii", b"\xe2", 0, 1, "ordinal not in range"),
+            ),
+        ):
             _, calls = _run_cmd(
                 [{"ETag": '"c8afdb36c52cf4727836669019e69222"'}],
                 ["cp", full_path, "s3://bucket/key.txt"],
