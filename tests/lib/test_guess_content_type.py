@@ -14,7 +14,11 @@ at once in probes/fixA/p2-all-extension-content-type.py).
 from __future__ import annotations
 
 import mimetypes
+import ntpath
+import os
+import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -63,6 +67,113 @@ class TestFrozenTable:
     )
     def test_guessed_type(self, name: str, expected: str | None) -> None:
         assert _guess_content_type(name) == expected
+
+
+class _NtPathOs:
+    """``transfer.os`` as a Windows host sees it: ``os.path`` is ``ntpath``, the rest real."""
+
+    path = ntpath
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(os, name)
+
+
+class TestAlgorithmPin:
+    """The guess runs CPython 3.14's algorithm whatever interpreter hosts it.
+
+    aws's bundled 3.14 splits a file path with the host's ``os.path`` and only
+    a scheme-prefixed name with ``posixpath``; interpreters before 3.13 split
+    every name with ``posixpath``, so on Windows a name that is all extension
+    (``C:\\d\\.json``) kept ``.json`` and went up typed where aws sends it
+    untyped (measured against aws.exe under Python 3.10, 8 of 12 names).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _frozen_layers_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(transfer, "_mime_db", None)
+        monkeypatch.setattr(mimetable, "KNOWNFILES", [])
+        monkeypatch.setattr(
+            mimetypes.MimeTypes, "read_windows_registry", lambda self, strict=True: None
+        )
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            (r"C:\d\.json", None),
+            (r"C:\d\.tar.gz", None),
+            (r"C:\d\..txt", None),
+            (r"C:\d\a.json", "application/json"),
+            (r"C:\d\b.TGZ", "application/x-tar"),
+            (r"\\srv\share\.txt", None),
+            (r"\\srv\share\a.txt", "text/plain"),
+            (r"C:\dir.d\x", None),
+            (r"C:\dir.d\x.png", "image/png"),
+        ],
+    )
+    def test_a_windows_path_splits_with_ntpath(
+        self, monkeypatch: pytest.MonkeyPatch, name: str, expected: str | None
+    ) -> None:
+        monkeypatch.setattr(transfer, "os", _NtPathOs())
+        assert _guess_content_type(name) == expected
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            # A scheme-like prefix: the URL branch, split with posixpath.
+            ("notes:a.txt", "text/plain"),
+            ("http://h/p.png?x=1", "image/png"),
+            ("http://h/p.png#frag", "image/png"),
+            # One character is a drive letter, not a scheme: the file branch.
+            ("c:a.txt", "text/plain"),
+            # data: URLs answer their media type.
+            ("data:image/png;base64,xx", "image/png"),
+            ("data:text/plain;charset=utf-8,abc", "text/plain"),
+            ("data:,abc", "text/plain"),
+            ("data:nocomma", None),
+            # Plain paths, extension case, aliases and encodings.
+            ("/tmp/a.b/c", None),
+            ("f.JPG", "image/jpeg"),
+            # An encoding suffix peels case-sensitively: ".GZ" is a type, ".gz" an encoding.
+            ("f.tar.GZ", "application/gzip"),
+            ("f.gz", None),
+            ("f.svgz", "image/svg+xml"),
+            (".bashrc", None),
+            ("", None),
+        ],
+    )
+    def test_the_url_and_path_branches(self, name: str, expected: str | None) -> None:
+        assert _guess_content_type(name) == expected
+
+    @pytest.mark.skipif(
+        sys.version_info < (3, 13), reason="the host's guess_type is the older algorithm"
+    )
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "a.txt",
+            "f.TGZ",
+            "f.tar.gz",
+            "f.gz",
+            ".json",
+            "..txt",
+            "dir.d/x",
+            "notes:a.txt",
+            "http://h/p.png?x=1",
+            "data:image/png;base64,xx",
+            "data:,abc",
+            "c:a.txt",
+            "",
+            "/abs/.hidden",
+            "/abs/dir.d/.hidden.txt",
+            "f.svgz",
+            "f.Z",
+            "f.bz2",
+            "f.tbz2",
+        ],
+    )
+    def test_matches_the_host_interpreter_from_3_13(self, name: str) -> None:
+        # From 3.13 the stdlib runs the same algorithm, so it is the oracle.
+        assert _guess_content_type(name) == transfer._mime_types().guess_type(name)[0]
 
 
 class TestUnreadableOverlay:

@@ -67,14 +67,15 @@ import io
 import logging
 import mimetypes
 import os
+import posixpath
 import tempfile
 import threading
-from collections.abc import Generator, Mapping
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib.metadata import version
 from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from s3transfer import copies as s3transfer_copies
 from s3transfer.compat import seekable
@@ -525,22 +526,75 @@ def _mime_types() -> mimetypes.MimeTypes:
 
 
 def _guess_content_type(path: str) -> str | None:
-    """``mimetypes`` guess with aws-cli's Windows-registry guard.
+    """The ``Content-Type`` aws guesses for *path*: CPython 3.14's ``guess_type``.
+
+    The tables are frozen (`_mime_types`) and so is the algorithm, a port of
+    3.14's ``MimeTypes.guess_type`` / ``guess_file_type``: a name with a
+    scheme-like prefix of two or more characters takes the URL branch (a
+    ``data:`` URL is read for its media type, anything else is split with
+    ``posixpath`` after ``urlparse`` dropped its query and fragment), every
+    other name is a file path, split with the host's ``os.path`` after its
+    drive is removed. The interpreter aws-cli bundles runs exactly that,
+    while a host interpreter before 3.13 split every name with
+    ``posixpath``, so on Windows ``C:\\d\\.json`` kept ``.json`` as its
+    extension and went up as ``application/json`` where aws sends the name
+    untyped - it is all extension to ``ntpath`` (measured 2026-10-06 against
+    aws.exe: 8 of 12 names differed under Python 3.10). Strict (IANA-only)
+    matching, like aws.
 
     The guess can raise ``UnicodeDecodeError`` on Windows when a registry MIME
     entry is in an undecodable encoding (bpo-9291) - here from the registry read
     the first call performs, where aws takes it from its own lazy
-    ``mimetypes.init``; strict (IANA-only) matching is kept deliberately, like
-    aws. Any other failure to load the host overlays - an ``OSError`` from a
-    ``knownfiles`` entry that exists but cannot be read - propagates, and the
-    submit records it as the item's failure, where aws's queued subscriber
-    lets it land; the store stays unbuilt, so every later item retries and
-    fails the same way, as aws's does.
+    ``mimetypes.init``. Any other failure to load the host overlays - an
+    ``OSError`` from a ``knownfiles`` entry that exists but cannot be read -
+    propagates, and the submit records it as the item's failure, where
+    aws's queued subscriber lets it land; the store stays unbuilt, so every
+    later item retries and fails the same way, as aws's does.
     """
     try:
-        return _mime_types().guess_type(path)[0]
+        db = _mime_types()
+        parts = urlparse(path)
+        if parts.scheme and len(parts.scheme) > 1:
+            if parts.scheme == "data":
+                return _data_url_type(parts.path)
+            return _guess_file_type(db, parts.path, posixpath.splitext)
+        return _guess_file_type(db, os.path.splitdrive(path)[1], os.path.splitext)
     except UnicodeDecodeError:
         return None
+
+
+def _guess_file_type(
+    db: mimetypes.MimeTypes, path: str, splitext: Callable[[str], tuple[str, str]]
+) -> str | None:
+    """CPython 3.14's ``MimeTypes._guess_file_type``, strict, the type alone.
+
+    Multi-suffix aliases (``.tgz`` -> ``.tar.gz``) are looked up without
+    regard to case, an encoding suffix (``.gz``) is peeled case-sensitively,
+    and the type is looked up by the lowercased extension that remains.
+    """
+    base, ext = splitext(path)
+    while (ext_lower := ext.lower()) in db.suffix_map:
+        base, ext = splitext(base + db.suffix_map[ext_lower])
+    if ext in db.encodings_map:
+        base, ext = splitext(base)
+    return db.types_map[True].get(ext.lower())
+
+
+def _data_url_type(url: str) -> str | None:
+    """CPython 3.14's ``data:`` branch of ``guess_type`` over the URL's path.
+
+    ``data:[<mediatype>][;base64],<data>``: the media type before the first
+    ``;`` or ``,``, ``text/plain`` when it is absent or carries a parameter
+    with no type, and no answer at all when there is no ``,``.
+    """
+    comma = url.find(",")
+    if comma < 0:
+        return None
+    semi = url.find(";", 0, comma)
+    media_type = url[:semi] if semi >= 0 else url[:comma]
+    if "=" in media_type or "/" not in media_type:
+        return "text/plain"
+    return media_type
 
 
 def _crt_config_error_type() -> type[Exception] | None:

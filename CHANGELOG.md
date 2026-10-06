@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A second client whose `Config` or endpoint is spelled differently but resolves the same (`Config(s3={})` after `Config()`, a trailing slash) now shares the CRT engine instead of silently running classic.
 - An upload from an `IOStorage` over a pipe or socket now works on the CRT engine (it failed with `Illegal seek`, and on Windows stored a truncated object).
 - A `mime.types` the host has but cannot read now fails each upload it would have typed, as `aws s3` does, instead of ending the run with a bare `PermissionError`.
+- The `Content-Type` guess now runs the algorithm of the interpreter `aws` bundles on every host, so on Windows under Python 3.10 to 3.12 a file whose name is all extension (`.json`) is uploaded untyped as `aws s3` uploads it.
 
 ## [0.11.1] - 2026-09-07
 
