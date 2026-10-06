@@ -2908,15 +2908,14 @@ class TestCrtEngineErrors:
             SSLError,
         )
 
-        errors: list[Exception] = [
-            EndpointConnectionError(endpoint_url="http://127.0.0.1:9/"),
-            # These four derive from botocore's vendored requests' IOError:
-            # OSErrors, which the seam must not read as a wrong setting.
-            SSLError(endpoint_url="https://127.0.0.1:9/", error="handshake"),
-            ConnectTimeoutError(endpoint_url="https://sts/"),
-            ReadTimeoutError(endpoint_url="https://sts/"),
-            ProxyConnectionError(proxy_url="http://127.0.0.1:9"),
-        ]
+        errors: list[Exception] = []
+        errors.append(EndpointConnectionError(endpoint_url="http://127.0.0.1:9/"))
+        # These four derive from botocore's vendored requests' IOError:
+        # OSErrors, which the seam must not read as a wrong setting.
+        errors.append(SSLError(endpoint_url="https://127.0.0.1:9/", error="handshake"))
+        errors.append(ConnectTimeoutError(endpoint_url="https://sts/"))
+        errors.append(ReadTimeoutError(endpoint_url="https://sts/"))
+        errors.append(ProxyConnectionError(proxy_url="http://127.0.0.1:9"))
         return errors
 
     @pytest.mark.parametrize("index", range(5))
