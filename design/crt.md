@@ -486,8 +486,8 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   delegate's `AWS_AUTH_CREDENTIALS_PROVIDER_DELEGATE_FAILURE` with its
   unraisable block, measured identical to aws's), and the `[s3]` tuning keys'
   reach. What batching leaves is one set of attempts per batch where aws has
-  one per key, so a batch that dies without an answer is re-sent key by key on
-  the same client (deleter.md section 3) - which can give a key more attempts
+  one per key, so a batch request that fails as a whole is re-sent key by key
+  on the same client (deleter.md section 3) - which can give a key more attempts
   than aws does, never fewer - plus the batch differences deleter.md section 4
   records for both engines.
 - **A plain-HTTP endpoint named only by the environment**: aws decides its CRT

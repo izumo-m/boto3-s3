@@ -144,24 +144,20 @@ the CRT client retries on its own policy whatever that says), and abandoning
 the run — `close(flush=False)`, or an immediate-mode cancel — after which the
 keys not yet re-sent are recorded with the batch's own error.
 
-If the batch request itself fails with an answer that is final for its keys
-— a missing bucket, a refusal — **every key in that batch** is recorded as
-failed and the deleter continues with the following batches. So a wrong bucket
-name fails everything, and the counts show it. A batch request that fails
-any other way decides nothing for its keys: each is sent again as a
-`DeleteObject` of its own on the same client — the request `aws s3` sends —
-whatever the retry policy, and takes that request's outcome. That covers a
-request that died without any response, and one the client spent its
-attempts on with a passing fault or a failed connection (a 5xx or throttling
-answer, a refused connection); on the CRT client, which re-sends server
-errors itself and then reports its own error, it is any failure but an
-answer the CRT does not retry. One batch request has one set of attempts,
-where `aws s3` gives each key its own, so a key can get more attempts here
-than there — never fewer. On botocore a re-sent key that dies without a
-response again is dropped without a record, as `aws s3` drops it; on the CRT
-client it is a failure carrying the CRT's own error, as `aws s3` reports it.
-A key the run is abandoned before re-sending is dropped without a record if
-its batch died without a response, and keeps the batch's error otherwise.
+If the batch request itself fails — an error the service answered with, a
+dropped connection, anything the request raised — that decides nothing for its
+keys: each is sent again as a `DeleteObject` of its own on the same client,
+the request `aws s3` sends, whatever the retry policy, and takes that
+request's outcome. The deleter then continues with the following batches. A
+wrong bucket name still fails everything, each key on its own request, and the
+counts show it. One batch request has one set of attempts, where `aws s3`
+gives each key its own, so a key can get more attempts here than there —
+never fewer. On botocore a re-sent key that dies without a response is
+dropped without a record, as `aws s3` drops it; on the CRT client it is a
+failure carrying the CRT's own error, as `aws s3` reports it. A key the run is
+abandoned before re-sending is dropped without a record if its batch died
+without a response (on the CRT client: with the CRT's own error), and keeps
+the batch's error otherwise.
 
 Success on the batch route is normally read as "not in the response's error
 list". If the response carries an error the deleter cannot pin on any key it
@@ -176,9 +172,10 @@ there. S3 answers only for the keys you sent, so in practice this never fires;
 it is a guard, and it logs a warning as well.
 
 An exception the delete request itself raises that is not a botocore error —
-botocore choking on a malformed response, a redirect loop — fails the keys of
-that request all the same, as a plain `Boto3S3Error` carrying the original as
-`__cause__`. Anything outside that — a genuine programming error, or an
+botocore choking on a malformed response, a redirect loop — is that request
+failing all the same: a batch's keys are sent again one by one, and a single
+key's request fails the key, as a plain `Boto3S3Error` carrying the original
+as `__cause__`. Anything outside that — a genuine programming error, or an
 `on_result` callback that raises — is not turned into per-key results. It is
 re-raised to you on the next non-empty `flush()` or `close()`.
 
@@ -210,10 +207,9 @@ Three consequences of batching:
   The individual requests of a batch go out up to ten at a time, and once the
   run is abandoned no further one is started.
 - **A batch request has one set of attempts.** Each of `aws`'s per-key
-  requests has its own, so a batch that fails as a whole without a final
-  answer — no response, or a passing fault once the attempts are spent — is
-  sent again key by key (see [Failures](#3-failures)); a key can end up with
-  more attempts than `aws` gives it, never fewer. An endpoint that fails
+  requests has its own, so a batch request that fails as a whole is sent
+  again key by key (see [Failures](#3-failures)); a key can end up with more
+  attempts than `aws` gives it, never fewer. An endpoint that fails
   requests often enough to defeat `aws`'s can therefore leave these deletes
   succeeding where `aws` leaves the objects in place — dropping the keys
   silently or failing them, depending on how the endpoint fails.

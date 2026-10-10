@@ -196,8 +196,12 @@ ordering relative to transfers is not deterministic.
 - **Deletes are batched.** Orphans on an S3 destination are removed with S3's
   batch delete API rather than one call per key, so the deletions surface
   together on flush. For a run that enumerates to the end, the final state and
-  the outcome are the same, though a key that fails to delete reports an error
-  naming `DeleteObjects` rather than `DeleteObject`. If a listing fails part
+  the outcome are the same unless the endpoint keeps failing requests — a
+  batch has one set of attempts where `aws s3` gives each key its own, so the
+  keys of a batch that fails as a whole are sent again one by one and can end
+  up deleted where `aws s3` gives up on them — and a key the batch response
+  fails reports an error naming `DeleteObjects` rather than `DeleteObject`
+  (see [`deleter.md`](./deleter.md)). If a listing fails part
   way, orphans still waiting in the unsent batch — up to 999 — are dropped,
   undeleted and unreported, where `aws s3 sync` would already have removed
   them.

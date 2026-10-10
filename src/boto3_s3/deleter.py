@@ -579,28 +579,29 @@ class S3Deleter:
         except AssertionError:
             raise  # a test double's guard or an invariant, never a request outcome
         except Exception as exc:
-            # Request-level failure: every key in this batch failed with the
-            # same cause - translated by s3_errors, or wrapped by
-            # request_failure when the request raised outside the boto family -
-            # unless the cause says nothing final about the keys (below), in
-            # which case each goes out on its own; later batches still run.
-            # What the deleter's own code raises after the request (a
-            # programming error) still propagates and re-raises at the
-            # caller's next non-empty flush() or close().
+            # Request-level failure - translated by s3_errors, or wrapped by
+            # request_failure when the request raised outside the boto family.
+            # It decides nothing for the keys: aws-cli sends each of them as a
+            # DeleteObject of its own, with attempts of its own, so each goes
+            # out on that route of the same client and takes that request's
+            # outcome - a delete, a failure (a wrong bucket fails every key,
+            # each in aws-cli's own words), or on botocore a loss. Measured: a
+            # server failing the first three deletes with InternalError, or
+            # with Throttling, leaves aws deleting both keys of a two-key run
+            # at rc 0, and a single 429 fails one key and deletes the other.
+            # The re-send goes out whatever the retry policy - the batch was
+            # no key's own request - so a key gets more attempts than aws-cli
+            # gives it, never fewer. Later batches still run. What the
+            # deleter's own code raises after the request (a programming
+            # error) still propagates and re-raises at the caller's next
+            # non-empty flush() or close().
             failure = request_failure(exc, operation=self._operation, bucket=self._bucket)
             logger.debug("delete_objects failed for s3://%s: %s", self._bucket, failure)
             if lost_like_aws(failure) or (self._crt is not None and died_without_answer(failure)):
                 # Died without a response - on botocore, or on the CRT client
-                # once its own retries were spent. That says nothing about the
-                # per-key DeleteObject aws-cli sends for each of these keys -
-                # a batch past the read timeout, an endpoint that drops only
-                # the batch call, a flaky connection that ran through the one
-                # request's attempts where each of aws-cli's requests has
-                # attempts of its own - so each key goes out on that route of
-                # the same client, where its own outcome (a delete, a failure,
-                # or on botocore a loss) is decided as aws-cli's is. A key an
-                # abandoned run leaves unsent gets no record, like aws-cli's
-                # never-started future.
+                # once its own retries were spent: a key an abandoned run
+                # leaves unsent gets no record, like aws-cli's never-started
+                # future.
                 self._send_singly(
                     batch,
                     errors,
@@ -609,21 +610,11 @@ class S3Deleter:
                     purpose="resending a DeleteObjects request that died without a response",
                     not_sent=lambda index, _info: lost.__setitem__(index, True),
                 )
-                return
-            failures = {info.key: failure for _, info in batch}
-            if isinstance(failure, TransportError):
-                # The request as a whole met a fault the service asks to have
-                # retried, or a connection that failed, and the client spent
-                # its attempts on it: one request's attempts, where each of
-                # aws-cli's per-key requests has its own (measured: a server
-                # failing the first three deletes with InternalError leaves
-                # aws deleting both keys at rc 0). So each key goes out again
-                # on the per-key route, whatever the retry policy - the batch
-                # was no key's own request - and takes that request's outcome;
-                # a key the run is abandoned before re-sending keeps this
-                # error.
-                self._resend(batch, failures, errors, deletes, lost)
-                return
+            else:
+                # An answer, or a failure before one: a key left unsent keeps
+                # the batch's error, as a transient per-key fault's does.
+                self._resend(batch, {info.key: failure for _, info in batch}, errors, deletes, lost)
+            return
         else:
             failures, unattributable = self._translate_errors(
                 response.get("Errors", []), [info for _, info in batch]
@@ -661,8 +652,8 @@ class S3Deleter:
         """Send the batch's transiently failed keys again, one ``DeleteObject`` each.
 
         Also the route of every key of a batch request that failed as a whole
-        with a transient fault (`_run_delete_objects`), which is re-sent
-        whatever the retry policy. Otherwise:
+        with an answer or before one (`_run_delete_objects`), re-sent whatever
+        the retry policy. Otherwise:
         the service answered each of these keys with a fault it asks the
         caller to retry (InternalError, SlowDown, ...). aws-cli, sending one
         DeleteObject per key, has its client - botocore, or the CRT - retry
@@ -705,12 +696,14 @@ class S3Deleter:
     ) -> None:
         """Send each entry as a ``DeleteObject`` of its own, several at a time.
 
-        The per-key route of a batch: the keys XML 1.0 cannot carry, and the
-        re-sends of transient per-key failures. Either can be most of a
-        batch - a prefix of keys holding a carriage return, an endpoint
-        throttling every key - so the requests run `_RESEND_CONCURRENCY` at a
-        time (aws-cli's own concurrency for its per-key deletes; each may sit
-        through the client's backoff) instead of in line on the one worker.
+        The per-key route of a batch: the keys XML 1.0 cannot carry, the
+        re-sends of transient per-key failures, and every key of a batch
+        request that failed as a whole. Any of them can be most of a batch - a
+        prefix of keys holding a carriage return, an endpoint throttling every
+        key - so the requests run `_RESEND_CONCURRENCY` at a time (aws-cli's
+        own concurrency for its per-key deletes on its classic client; each
+        may sit through the client's backoff) instead of in line on the one
+        worker.
 
         No further request is started once the run is abandoned -
         ``close(flush=False)`` for any reason but a graceful cancel (which
@@ -766,11 +759,12 @@ class S3Deleter:
     ) -> None:
         """Delete one key through aws-cli's per-key route, on the run's client.
 
-        Taken by a key the batch cannot carry, and by a key the batch response
+        Taken by a key the batch cannot carry, by a key the batch response
         reported a transient fault for - the request the client's retry policy
-        covers, which a per-key entry of a 200 response never reaches. A
-        request that died without a response is lost as aws-cli loses it
-        (`drop_like_aws`), which only a botocore failure can be.
+        covers, which a per-key entry of a 200 response never reaches - and by
+        every key of a batch request that failed as a whole. A request that
+        died without a response is lost as aws-cli loses it (`drop_like_aws`),
+        which only a botocore failure can be.
         """
         kwargs: dict[str, Any] = {"Bucket": self._bucket, "Key": info.key}
         if self._request_payer is not None:

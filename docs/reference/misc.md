@@ -759,8 +759,8 @@ on its own policy whatever that setting says, so on it the key is always sent
 again. Abandoning the run —
 `close(flush=False)`, or a cancel in immediate mode — starts no further
 re-sends either: the ones already out finish, and the rest are recorded with
-the batch's error. A `DeleteObjects` request that fails as a whole with such
-a fault sends its keys the same way, as described below.
+the batch's error. A `DeleteObjects` request that fails as a whole sends its
+keys the same way, whatever the policy, as described below.
 
 Successes on the batch route are synthesized as the submitted keys minus the
 keys in `Errors[]`. An entry that cannot be attributed to a submitted key,
@@ -777,31 +777,27 @@ makes that entry positive per-key evidence. These synthesized failures count in
 `failed` and can become `first_error`. S3 answers only for the keys the request
 carried, so this is a guard rather than a behavior a real run reaches.
 
-A request-level failure — the `delete_objects` call itself failing with an
-answer final for its keys: a missing bucket, a refusal, a request botocore
-rejects before sending — is recorded as the failure of **every** key that
-call carried, with the same translated exception, and the following batches
-still run. A wrong bucket name therefore fails everything and shows up in the
-counts. Any other request-level failure sends each of the call's keys again as
-a `DeleteObject` of its own on the same client, whatever the retry policy,
-and each key takes that request's outcome: a call that died without any
-response, and one the client spent its attempts on with a transient fault —
-a [`TransportError`](./exceptions.md#transporterror): a 5xx or throttling
-answer, a refused or failed connection. On the CRT client that second kind
-reaches the deleter as the CRT's own error, which it raises once it has spent
-its retries on a dropped or refused connection or on a server error answer
-it kept getting (a 500, a 503, a `RequestTimeout`); only an answer the CRT
-does not retry (`AccessDenied`, a missing bucket) fails the batch's keys as
-above. One batch request's attempts are not the attempts `aws s3` gives each
+A request-level failure — the `delete_objects` call itself failing, whatever
+the failure: an error the service answered with, a dropped or refused
+connection, anything else the call raised — decides nothing for its keys:
+each is sent again as a `DeleteObject` of its own on the same client,
+whatever the retry policy, and takes that request's outcome, and the
+following batches still run. A wrong bucket name therefore still fails
+everything, each key with its own request's error, and shows up in the
+counts. One batch request's attempts are not the attempts `aws s3` gives each
 key, so a key can get more attempts than `aws s3` gives it, never fewer. A
-key the run is abandoned before re-sending is dropped without a record if its
-call died without a response, and keeps the call's error otherwise. Keys of the same
+key the run is abandoned before re-sending is dropped without a record if
+its call died without a response — on the CRT client, failed with the CRT's
+own error, which it raises once it has spent its retries on a dropped
+connection or on a server error it kept getting — and keeps the call's error
+otherwise. Keys of the same
 dispatch that took the per-key fallback route are unaffected by it: there, that
 call's own success or translated exception is the key's result directly.
 
 An exception a request of either route raises outside the botocore family —
-botocore choking on a malformed response, a redirect loop — fails the keys of
-that request the same way, as a plain
+botocore choking on a malformed response, a redirect loop — is the request
+failing the same way: a batch's keys are sent again one by one, and a single
+key's request fails the key, as a plain
 [`Boto3S3Error`](./exceptions.md#boto3s3error) carrying the original as
 `__cause__`. Anything else — an `AssertionError`, a
 programming error in the deleter's own response handling, or an `on_result`

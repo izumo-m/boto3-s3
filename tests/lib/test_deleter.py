@@ -785,15 +785,60 @@ class TestResults:
         assert fake.single_calls == []
         assert [type(r.error) for r in results] == [TransportError]
 
-    def test_a_request_level_answer_that_is_not_transient_fails_every_key(self) -> None:
-        fake = _FakeS3Client(script=[_client_error("NoSuchBucket", 404)])
+    @pytest.mark.parametrize(("code", "status"), [("Throttling", 400), ("TooManyRequests", 429)])
+    def test_so_is_any_other_request_level_answer(self, code: str, status: int) -> None:
+        # Measured: Throttling on the first three deletes leaves aws deleting
+        # both keys at rc 0, a single 429 fails one key and deletes the other -
+        # the batch's answer was no key's own.
+        fake = _FakeS3Client(
+            script=[_client_error(code, status)],
+            single_script=[_client_error(code, status, "DeleteObject"), {}],
+        )
         results: list[OpResult] = []
         deleter = _deleter(fake, on_result=results.append)
         deleter.submit(_info("a"))
         deleter.submit(_info("b"))
         deleter.close()
-        assert fake.single_calls == []
+        assert len(fake.single_calls) == 2
+        assert sorted(r.outcome.value for r in results) == ["failed", "succeeded"]
+
+    def test_a_resent_key_carries_its_own_requests_slot(self) -> None:
+        fake = _FakeS3Client(
+            script=[_client_error("InternalError", 500)],
+            single_script=[
+                {
+                    "DeleteMarker": True,
+                    "VersionId": "v1",
+                    "ResponseMetadata": {"HTTPStatusCode": 204},
+                }
+            ],
+        )
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append, capture_response=True)
+        deleter.submit(_info("a"))
+        deleter.close()
+        assert results[0].extra_info == {"delete": {"DeleteMarker": True, "VersionId": "v1"}}
+
+    def test_a_wrong_bucket_fails_each_key_in_aws_words(self) -> None:
+        # Each key's own request fails the same way, so every key still fails
+        # - with the line aws-cli prints for it, the DeleteObject one.
+        fake = _FakeS3Client(
+            script=[_client_error("NoSuchBucket", 404)],
+            single_script=[
+                _client_error("NoSuchBucket", 404, "DeleteObject"),
+                _client_error("NoSuchBucket", 404, "DeleteObject"),
+            ],
+        )
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append)
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
+        deleter.close()
         assert [type(r.error) for r in results] == [NotFoundError, NotFoundError]
+        assert [str(r.error) for r in results] == [
+            "An error occurred (NoSuchBucket) when calling the DeleteObject operation: boom"
+        ] * 2
+        assert sorted(cast("Any", r.error).key for r in results) == ["a", "b"]
 
     def test_a_client_told_not_to_retry_does_not_resend_the_key(self) -> None:
         # One attempt per request (AWS_MAX_ATTEMPTS=1, max_attempts=0) is the
@@ -1027,25 +1072,24 @@ class TestResults:
         assert deleter.failed == 2
         assert deleter.first_error is results[0].error
 
-    def test_request_level_client_error_fails_whole_batch(self) -> None:
-        boom = _client_error("AccessDenied", 403)
-        fake = _FakeS3Client(script=[boom])
+    def test_a_request_level_client_error_is_each_keys_own_request_s(self) -> None:
+        boom = _client_error("AccessDenied", 403, "DeleteObject")
+        fake = _FakeS3Client(script=[_client_error("AccessDenied", 403)], single_script=[boom])
         results: list[OpResult] = []
         deleter = _deleter(fake, batch_size=10, on_result=results.append)
         deleter.submit(_info("a"))
-        deleter.submit(_info("b"))
         deleter.close()  # must not raise: the failure is recorded per key
-        assert [r.outcome for r in results] == [OpOutcome.FAILED, OpOutcome.FAILED]
+        assert [r.outcome for r in results] == [OpOutcome.FAILED]
         error = results[0].error
         assert isinstance(error, AccessDeniedError)
-        # The full ClientError text (what aws-cli prints), matching the shape
-        # of the synthesized per-key messages.
+        # The full ClientError text of the key's own request (what aws-cli
+        # prints for it).
         assert str(error) == (
-            "An error occurred (AccessDenied) when calling the DeleteObjects operation: boom"
+            "An error occurred (AccessDenied) when calling the DeleteObject operation: boom"
         )
-        assert results[1].error is error  # same translated instance for the batch
         assert error.__cause__ is boom
-        assert (deleter.succeeded, deleter.failed) == (0, 2)
+        assert error.key == "a"
+        assert (deleter.succeeded, deleter.failed) == (0, 1)
         assert deleter.first_error is error
 
     def test_request_raising_outside_the_boto_family_fails_the_batch(self) -> None:
@@ -1055,24 +1099,24 @@ class TestResults:
         # per-key DeleteObject runs as an s3transfer task, which records any of
         # them as that key's failure - `delete failed: s3://b/k 'Credentials'`
         # at rc 1, measured against the pinned aws (2.36.40) through a
-        # 127.0.0.1 fake - so the deleter fails every key of the request the
-        # same way instead of re-raising from flush() / close().
+        # 127.0.0.1 fake - so the deleter sends each key of the request on its
+        # own, as it does for any failed batch, instead of re-raising from
+        # flush() / close(); here each key's request fails the same way.
         boom = KeyError("Credentials")
-        fake = _FakeS3Client(script=[boom])
+        fake = _FakeS3Client(script=[boom], single_script=[KeyError("Credentials")] * 2)
         results: list[OpResult] = []
         deleter = _deleter(fake, batch_size=10, on_result=results.append, operation="delete")
         deleter.submit(_info("a"))
         deleter.submit(_info("b"))
         deleter.close()  # must not raise: the failure is recorded per key
         assert [r.outcome for r in results] == [OpOutcome.FAILED, OpOutcome.FAILED]
-        error = results[0].error
-        assert type(error) is Boto3S3Error
-        assert str(error) == "'Credentials'"  # str(KeyError), what aws's line carries
-        assert error.__cause__ is boom
-        assert (error.operation, error.bucket, error.key) == ("delete", "bucket", None)
-        assert results[1].error is error
+        for result in results:
+            error = result.error
+            assert type(error) is Boto3S3Error
+            assert str(error) == "'Credentials'"  # str(KeyError), what aws's line carries
+            assert isinstance(error.__cause__, KeyError)
+            assert (error.operation, error.bucket) == ("delete", "bucket")
         assert (deleter.succeeded, deleter.failed) == (0, 2)
-        assert deleter.first_error is error
 
     def test_request_raising_outside_the_boto_family_fails_the_single_key(self) -> None:
         # The DeleteObject fallback route records the same way, keyed.
@@ -1168,7 +1212,10 @@ class TestResults:
         assert isinstance(results[0].error, TransportError)
 
     def test_later_batches_run_after_request_failure(self) -> None:
-        fake = _FakeS3Client(script=[_client_error(), {}])
+        fake = _FakeS3Client(
+            script=[_client_error(), {}],
+            single_script=[_client_error("AccessDenied", 403, "DeleteObject")],
+        )
         results: list[OpResult] = []
         deleter = _deleter(fake, batch_size=1, on_result=results.append)
         deleter.submit(_info("a"))
@@ -1325,7 +1372,8 @@ class TestResults:
         assert (deleter.succeeded, deleter.failed) == (1, 2)
 
     def test_credentials_error_maps_to_configuration_error(self) -> None:
-        fake = _FakeS3Client(script=[NoCredentialsError()])
+        # The key's own request meets the same missing credentials.
+        fake = _FakeS3Client(script=[NoCredentialsError()], single_script=[NoCredentialsError()])
         results: list[OpResult] = []
         deleter = _deleter(fake, on_result=results.append)
         deleter.submit(_info("a"))
@@ -1451,9 +1499,10 @@ class TestCrtRoute:
         assert [str(r.error) for r in results] == ["AWS_IO_SOCKET_CLOSED: socket is closed."] * 2
         assert deleter.failed == 2
 
-    def test_an_answer_the_crt_hands_back_fails_every_key(self, built: list[Any]) -> None:
+    def test_an_answer_the_crt_hands_back_is_kept_by_an_unsent_key(self, built: list[Any]) -> None:
         # The CRT's own S3ResponseError is an answer (an error document inside
-        # a 200 it will not retry), not a death: no key goes out on its own.
+        # a 200 it will not retry), not a death: a key the abandoned run
+        # never re-sends keeps it, where a dead batch's key gets no record.
         awscrt_s3 = pytest.importorskip("awscrt.s3")
         answer = awscrt_s3.S3ResponseError(
             code=14370,
@@ -1466,22 +1515,38 @@ class TestCrtRoute:
         )
         fake = _FakeS3Client(script=[answer])
         results: list[OpResult] = []
-        deleter = _deleter(fake, on_result=results.append, transfer_config=_CRT)
+        deleter = _deleter(fake, batch_size=2, on_result=results.append, transfer_config=_CRT)
+        deleter._abandoned = True  # pyright: ignore[reportPrivateUsage]
         deleter.submit(_info("a"))
         deleter.submit(_info("b"))
-        deleter.close()
+        deleter.close(flush=False)
         assert fake.single_calls == []
         assert [r.outcome for r in results] == [OpOutcome.FAILED] * 2
 
-    def test_an_error_answer_to_the_batch_fails_every_key(self, built: list[Any]) -> None:
-        # An answer is the batch request's own outcome, as on botocore: no
-        # key goes out again on its own.
-        fake = _FakeS3Client(script=[_client_error("NoSuchBucket", 404)])
+    def test_a_dead_batch_leaves_an_unsent_key_without_a_record(self, built: list[Any]) -> None:
+        awscrt_exceptions = pytest.importorskip("awscrt.exceptions")
+        fake = _FakeS3Client(script=[awscrt_exceptions.from_code(1051)])
+        results: list[OpResult] = []
+        deleter = _deleter(fake, batch_size=2, on_result=results.append, transfer_config=_CRT)
+        deleter._abandoned = True  # pyright: ignore[reportPrivateUsage]
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
+        deleter.close(flush=False)
+        assert fake.single_calls == []
+        assert results == []
+
+    def test_an_error_answer_to_the_batch_sends_each_key_too(self, built: list[Any]) -> None:
+        # As on botocore: the batch's answer was no key's own.
+        fake = _FakeS3Client(
+            script=[_client_error("NoSuchBucket", 404)],
+            single_script=[_client_error("NoSuchBucket", 404, "DeleteObject")],
+        )
         results: list[OpResult] = []
         deleter = _deleter(fake, on_result=results.append, transfer_config=_CRT)
         deleter.submit(_info("a"))
         deleter.close()
-        assert fake.single_calls == []
+        ((sender, _, _),) = built
+        assert [op for op, _ in sender.calls] == ["DeleteObjects", "DeleteObject"]
         assert [type(r.error) for r in results] == [NotFoundError]
 
     def test_a_key_whose_own_delete_dies_fails_too(self, built: list[Any]) -> None:

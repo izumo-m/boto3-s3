@@ -226,12 +226,12 @@ comes out differently, listed in section 1.
   (AccessDenied) when calling the DeleteObjects operation: <message>` — the
   plural operation name, and never the `(reached max retries: N)` suffix —
   because the line is composed from that batch response's own per-key error
-  rather than written by botocore; a batch request failing as a whole with an
-  answer final for its keys (a missing bucket, a refusal) gets botocore's own
-  line for `DeleteObjects`, the plural name again. `aws`'s reads `... when
-  calling the DeleteObject operation: <message>`, with that suffix where
-  botocore spent the request's attempts (`AWS_MAX_ATTEMPTS=1` gives
-  `(reached max retries: 0)`; its CRT client's line never carries one).
+  rather than written by botocore, where `aws`'s reads `... when calling the
+  DeleteObject operation: <message>`, with that suffix where botocore spent
+  the request's attempts (`AWS_MAX_ATTEMPTS=1` gives `(reached max retries:
+  0)`; its CRT client's line never carries one). A batch request that fails as
+  a whole — a missing bucket, a refusal, a server error — is not one of these:
+  its keys are sent again one by one (below), so their lines are aws's.
   (A key the batch reports with a fault the service
   asks to have retried — `InternalError`, `SlowDown`, `ServiceUnavailable`,
   `RequestTimeout` — is the exception: it is sent again as a `DeleteObject`
@@ -257,20 +257,22 @@ comes out differently, listed in section 1.
 
   One batch request also has one set of attempts, where each of `aws`'s
   per-key requests has its own, so **an endpoint that keeps failing requests**
-  — dropping connections, or answering with server errors — can end
-  differently too. A batch that fails as a whole that way — without an
-  answer, or with a transient fault once the client has spent its attempts —
-  is sent again key by key, each key taking its own `DeleteObject`'s outcome,
-  which can give a key more attempts than `aws` gives it, never fewer. An
-  endpoint failing often enough to defeat `aws`'s per-key requests can
-  therefore leave this command deleting objects, with their `delete:` lines,
-  that `aws` leaves in place: dropped connections make `aws` lose such a key
-  without a line at exit code 0 on the classic engine (measured: six dropped
-  requests for two keys) and report it at exit code 1 under the CRT
-  (measured: twelve), and repeated server errors make it report the key at
-  exit code 1 (measured on the classic engine: six `InternalError` answers
-  for two keys, where three leave both tools deleting both). A delete that
-  keeps failing ends the same on both tools, in the same words.
+  — dropping connections, answering with server errors or throttling — can
+  end differently too. A batch request that fails as a whole, whatever the
+  failure, is sent again key by key, each key taking its own `DeleteObject`'s
+  outcome, whatever the retry setting says (the batch was no key's own
+  request, so even under `AWS_MAX_ATTEMPTS=1` each key still gets the one
+  attempt `aws` gives it). A key can so get more attempts than `aws` gives
+  it, never fewer, and an endpoint failing often enough to defeat `aws`'s
+  per-key requests can leave this command deleting objects, with their
+  `delete:` lines, that `aws` leaves in place: dropped connections make `aws`
+  lose such a key without a line at exit code 0 on the classic engine
+  (measured: six dropped requests for two keys) and report it at exit code 1
+  under the CRT (measured: twelve), and server errors make it report the key
+  at exit code 1 (measured on the classic engine: six `InternalError`
+  answers for two keys, or a single 429 — where three `InternalError` or
+  `Throttling` answers leave both tools deleting both). A delete that keeps
+  failing ends the same on both tools, in the same words.
 
   Under the CRT engine (`preferred_transfer_client = crt`) the batches ride
   the CRT client, as `aws`'s per-key deletes ride its own — `rm` and a
@@ -279,9 +281,8 @@ comes out differently, listed in section 1.
   `[s3]` keys that tune the CRT client apply to them as they do on `aws`. The
   CRT re-sends a server error answer itself (a 500, a 503, a
   `RequestTimeout`), and once its attempts are spent it reports its own error
-  rather than the answer; such a batch is sent again key by key as on the
-  classic engine, and an answer it does not retry — `AccessDenied`, a missing
-  bucket — fails every key of the batch, as there.
+  rather than the answer; either way the batch's keys are sent again key by
+  key, as on the classic engine.
 - **A plain-HTTP endpoint named anywhere but `--endpoint-url` still reaches
   the CRT engine.** Under `preferred_transfer_client = crt`, `aws` decides
   whether its CRT client speaks TLS from `--endpoint-url` alone, so an

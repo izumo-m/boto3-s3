@@ -376,11 +376,12 @@ itself mirrors aws-cli's `ResultProcessor`):
 
 Three more are in the result text itself rather than in its rendering:
 
-- **A batched delete's per-key failure line** names the `DeleteObjects`
-  operation - and, composed from a batch response's own `Errors[]` entry,
-  never carries the `(reached max retries: N)` suffix - where aws's line names
+- **A batched delete's per-key failure line**, composed from a batch
+  response's own `Errors[]` entry, names the `DeleteObjects` operation and
+  never carries the `(reached max retries: N)` suffix, where aws's line names
   `DeleteObject` and, on its classic client, carries the suffix botocore
-  appends once the request's attempts are spent. It follows from the
+  appends once the request's attempts are spent. (A batch request failing as
+  a whole sends its keys on their own, whose lines are aws's.) It follows from the
   accepted batching ([`deleter.md`](./deleter.md) section 4): the line is
   composed from the batch response's own `Errors[]` entry rather than by
   botocore. It reaches the batching routes alone - `rm --recursive`, an S3-side
