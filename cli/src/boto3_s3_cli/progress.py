@@ -232,7 +232,20 @@ class TransferPrinter:
         # generator close.
         self._finished = True
         self._queue.put(_SHUTDOWN)
-        thread.join()
+        try:
+            thread.join()
+        except BaseException:
+            # Interrupted - a Ctrl-C - while the printer is still writing what
+            # was queued. Left running, the daemon thread can be caught
+            # mid-write by interpreter shutdown, which then aborts the process
+            # (`Fatal Python error: _enter_buffered_busy`, rc 134; aws's printer
+            # is an ordinary thread the interpreter waits for). Stop its output
+            # and let it reach the shutdown marker before the interrupt goes
+            # on; a second interrupt still propagates, for a printer wedged on
+            # a stalled stream.
+            self._output_dead = True
+            thread.join()
+            raise
         # Discard anything that slipped in around the flag flip, freeing any
         # producer already blocked on a full queue; later stray puts find a
         # queue with room and simply go unread.

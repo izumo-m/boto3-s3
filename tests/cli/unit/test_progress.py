@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -46,6 +48,42 @@ def _progress(key: str, done: int, total: int | None) -> TransferProgress:
     return TransferProgress(
         transfer_type=TransferType.UPLOAD, compare_key=key, bytes_done=done, bytes_total=total
     )
+
+
+class TestFinishInterrupted:
+    def test_the_printer_thread_is_gone_before_the_interrupt_goes_on(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A Ctrl-C landing in finish()'s join left the daemon printer
+        # writing, and interpreter shutdown caught mid-write aborted the
+        # process (rc 134, 1 in 10 runs measured).
+        printer = TransferPrinter(progress=False)
+        render = printer._render_result  # pyright: ignore[reportPrivateUsage]
+
+        def slow_render(record: Any) -> None:
+            time.sleep(0.01)  # still writing when the interrupt lands
+            render(record)
+
+        monkeypatch.setattr(printer, "_render_result", slow_render)
+        printer.__enter__()
+        for i in range(200):
+            printer.on_result(_result(OpOutcome.SUCCEEDED, key=f"k{i}", src=f"s3://b/k{i}"))
+        thread = printer._thread  # pyright: ignore[reportPrivateUsage]
+        assert thread is not None
+        real_join = thread.join
+        interrupted: list[bool] = []
+
+        def join(timeout: float | None = None) -> None:
+            if not interrupted:
+                interrupted.append(True)
+                raise KeyboardInterrupt
+            real_join(timeout)
+
+        monkeypatch.setattr(thread, "join", join)
+        with pytest.raises(KeyboardInterrupt):
+            printer.finish()
+        assert interrupted == [True]
+        assert not thread.is_alive()
 
 
 class TestResultLines:
