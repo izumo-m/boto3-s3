@@ -878,10 +878,11 @@ order (section 5.7), its deletes riding the engine that order builds:
 the S3 client is built right after the session profile - before the fileb
 positional decode and before the path check above, so an empty region is 255
 ahead of both - and the `[s3]` runtime config is read and the transfer engine
-materialized right after that path check, before the bucket-less form below.
-An invalid `[s3]` value is therefore 255 for every rm form, `--quiet` included
-(the report comes from the error handler, not the result printer), while still
-losing to the path-type 252. A CRT selection builds the CRT client there, and
+materialized right after that path check and the normalization that follows
+it (section 5.7: the refused ARN forms, the keyless trailing `/`), before the
+bucket-less form below. An invalid `[s3]` value is therefore 255 for every rm
+form, `--quiet` included (the report comes from the error handler, not the
+result printer), while still losing to the path-type and refused-ARN 252s. A CRT selection builds the CRT client there, and
 the resolved `TransferConfig` is threaded into `S3.rm`, whose deletes ride
 that client - batched - as aws's ride its manager ([`crt.md`](./crt.md)
 sections 4 and 6), so the `[s3]` keys that tune the CRT client reach them on
@@ -1119,12 +1120,17 @@ earlier one):
    region-less environment.
 3. **The fileb positional decode** (rm only, section 5.2) - aws's
    `_convert_path_args`.
-4. **All path validation** - aws's `add_paths`: the path-type gate, streaming,
-   mv's onto-itself guard and resolver, the checksum / SSE-C pairings, the
-   missing local source, the `s3local` destination pre-create, sync's
-   directory-bucket rejection. Which of these a command runs, and in what
-   relative order, is the one thing the family does not share; each is recorded
-   with its command.
+4. **All path validation** - aws's `add_paths`: the path-type gate, then
+   `_normalize_s3_trailing_slash` over the paths in order
+   (`transferargs.normalize_s3_path`: its `find_bucket_key` refuses the S3
+   Object Lambda and Outposts bucket ARNs - 252 ahead of every check after it
+   - and a keyless `s3://` path gains the trailing `/` every later step
+   re-reads, which turns an Outposts `.../accesspoint/ap:` into the key `/`),
+   then streaming, mv's onto-itself guard and resolver, the checksum / SSE-C
+   pairings, the missing local source, the `s3local` destination pre-create,
+   sync's directory-bucket rejection. Which of the checks after the
+   normalization a command runs, and in what relative order, is the one thing
+   the family does not share; each is recorded with its command.
 5. **The `[s3]` runtime config and the transfer manager** - aws's
    `_get_transfer_manager`: `transferargs.resolve_transfer_config` (an invalid
    `[s3]` value is 255) then `transferargs.materialize_transfer_engine`, which
@@ -1448,7 +1454,7 @@ after all of that):
 1. Integer-option conversion (255; part of the shared head above)
 2. Route type: local->local is usage 252 (`usage: boto3-s3 sync <LocalPath>
    <S3Uri> or <S3Uri> <LocalPath> or <S3Uri> <S3Uri>` + `Error: Invalid argument
-   type`)
+   type`), then the refused ARN forms (252, the normalization of section 5.7)
 3. If `-` is on either side, 252 (the wording stays "cp commands" - same as mv)
 4. Checksum path type 252 (the cp / mv-shared `validate_checksum_paths_type` -
    aws-cli `_validate_path_args` applies to sync too)

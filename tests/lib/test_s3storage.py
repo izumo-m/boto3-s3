@@ -1774,6 +1774,17 @@ class TestResolveRouting:
         storage = LocalStorage("some/path")
         assert S3().resolve(storage) is storage
 
+    def test_resolve_reads_a_string_the_way_the_transfer_commands_do(self) -> None:
+        # aws's _normalize_s3_trailing_slash: a keyless URI is the bucket root,
+        # and an Outposts access point closed with ":" re-reads as the key "/".
+        arn = "arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-1/accesspoint/ap"
+        resolved = S3().resolve(f"s3://{arn}:")
+        assert isinstance(resolved, S3Storage)
+        assert (resolved.bucket, resolved.key) == (arn, "/")
+        root = S3().resolve("s3://b")
+        assert isinstance(root, S3Storage)
+        assert (root.bucket, root.key, root.uri) == ("b", "", "s3://b/")
+
 
 class TestOpen:
     """``S3Storage.open`` - a ``GetObject`` read convenience (``"rb"`` only);

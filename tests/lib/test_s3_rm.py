@@ -411,6 +411,26 @@ class TestRmBucketRootSweep:
         results = _rm("s3://b/", client)
         assert [r.compare_key for r in results] == ["m/"]
 
+    def test_an_outposts_access_point_closed_with_a_colon_reads_as_the_key_slash(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws's rm appends "/" to a keyless argument and re-reads it; the
+        # Outposts pattern eats the ":" before it, so "...:accesspoint/ap:"
+        # names the key "/" (measured: prefix "/" recursive, a blind delete of
+        # "/" otherwise) - never the whole access point. A string argument
+        # reads that way; an S3Storage is the location it was built as.
+        arn = "arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-1/accesspoint/ap"
+        client = _FakeS3Client([{"Contents": [_obj("/x", 3)]}])
+        s3 = S3()
+        monkeypatch.setattr(s3, "client", lambda: client)
+        results: list[OpResult] = []
+        s3.rm(f"s3://{arn}:", recursive=True, dryrun=True, on_result=results.append)
+        assert client.list_calls[0]["Prefix"] == "/"
+        assert [r.src for r in results] == [f"s3://{arn}//x"]
+        results.clear()
+        s3.rm(f"s3://{arn}:", dryrun=True, on_result=results.append)
+        assert [r.src for r in results] == [f"s3://{arn}:/"]
+
 
 class TestRmTargetValidation:
     def test_service_root_is_rejected(self) -> None:

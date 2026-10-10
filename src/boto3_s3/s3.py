@@ -1100,12 +1100,19 @@ class S3:
         ``LocalStorage`` (aws-cli's rule: only ``s3://`` is special). Override to
         add schemes such as ``http://``, deferring the rest to
         ``super().resolve(loc)``.
+
+        The string is read the way ``aws s3 cp`` / ``mv`` / ``sync`` read their
+        arguments, after ``_normalize_s3_trailing_slash``
+        (``S3Storage.normalize_s3_uri``): a keyless URI is the bucket root.
+        That changes the location for one spelling - an Outposts access point
+        ARN set off with ``:`` and no key (``.../accesspoint/ap:``), which aws
+        reads as the key ``/``.
         """
         if isinstance(loc, Storage):
             return loc
         text = os.fspath(loc)
         if text.startswith("s3://"):
-            return S3Storage(text, client=self.client())
+            return S3Storage(S3Storage.normalize_s3_uri(text), client=self.client())
         return LocalStorage(text)
 
     def aws_config(self) -> AwsConfig:
@@ -2308,6 +2315,10 @@ class S3:
         deletes', and a delete that dies without a response is lost on
         botocore and reported on the CRT, as on aws.
         """
+        if isinstance(target, (str, os.PathLike)):
+            # A string reads as aws s3 rm reads its argument - the same
+            # keyless normalization `resolve` applies for cp / mv / sync.
+            target = S3Storage.normalize_s3_uri(os.fspath(target))
         storage = self._resolve_s3_target(target, operation="rm")
         config = transfer_config if transfer_config is not None else self._transfer_config
         _raise_if_cancelled(cancel_token, "rm")

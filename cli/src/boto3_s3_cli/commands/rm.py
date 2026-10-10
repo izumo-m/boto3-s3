@@ -169,6 +169,10 @@ class RmCommand(Command):
         if not target.startswith("s3://"):
             # aws check_path_type: rm takes S3 paths only -> rc 252.
             raise ValidationError(usage.single_uri_usage("rm"), operation="rm")
+        # Next in aws's add_paths: the refused ARN forms (252, ahead of the
+        # [s3] config and the engine below) and the keyless trailing "/" whose
+        # re-read gives an Outposts "...:accesspoint/ap:" the key "/".
+        target = transferargs.normalize_s3_path(target)
 
         # rm is an S3TransferCommand in aws, so it reads and validates [s3] and
         # builds a transfer manager exactly like cp - after the path check above
@@ -195,10 +199,9 @@ class RmCommand(Command):
                 sys.stderr.write(f"fatal error: {usage.invalid_bucket_name_message()}\n")
             return 1
 
-        # Outside the fatal-catch below: rejected ARN forms (S3 Object Lambda /
-        # Outposts bucket) raise ValidationError through main -> rc 252,
-        # matching aws; the bucket-less blind single delete flows through
-        # build_s3_storage's carve-out instead of failing validation.
+        # The refused ARN forms already failed at aws's slot above; the
+        # bucket-less blind single delete flows through build_s3_storage's
+        # carve-out instead of failing validation.
         storage = transferargs.build_s3_storage(target, client=client, page_size=page_size)
 
         # The target is both filter sides (aws sets dest = src for rm).

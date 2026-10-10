@@ -485,6 +485,12 @@ def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) ->
     dest_type = identify_type(dest)
     if src_type == "local" and dest_type == "local":
         raise ValidationError(usage.two_path_usage(operation), operation=operation)
+    # aws's add_paths runs _normalize_s3_trailing_slash right after the
+    # path-type check and ahead of every other path validation: the refused
+    # ARN forms beat the stream, checksum, missing-source, directory-creation,
+    # same-path and SSE-C checks below, src before dest.
+    src = normalize_s3_path(src)
+    dest = normalize_s3_path(dest)
     return TransferPaths(
         page_size,
         progress_frequency,
@@ -496,6 +502,31 @@ def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) ->
         s3,
         client,
     )
+
+
+def normalize_s3_path(path: str) -> str:
+    """One path argument as aws's ``_normalize_s3_trailing_slash`` leaves it.
+
+    aws runs this over cp / mv / sync / rm's paths right after the path-type
+    check. Its ``find_bucket_key`` refuses the S3 Object Lambda and Outposts
+    *bucket* ARNs first (rc 252, whatever else is wrong with the run), then a
+    keyless ``s3://`` path gains the trailing ``/`` that makes it the bucket
+    root, and every later step re-reads the result. The re-read changes one
+    spelling: an Outposts access point ARN set off with ``:`` and no key
+    (``.../accesspoint/ap:``) becomes ``.../accesspoint/ap:/``, whose key is
+    ``/`` - so ``rm --recursive`` lists under ``/`` and a single download
+    heads the key ``/``, not the whole access point. A local path, and the
+    bucket-less forms the commands handle on their own (``s3://``,
+    ``s3:///k``), pass unchanged.
+    """
+    if not path.startswith("s3://"):
+        return path
+    bucket, _key = S3Storage.split_bucket_key(S3Storage.strip_scheme(path))
+    if bucket:
+        # The ARN rejections are all S3Storage.validate checks here; its other
+        # one (a key without a bucket) needs no bucket to apply to.
+        S3Storage(path).validate()
+    return S3Storage.normalize_s3_uri(path)
 
 
 def create_local_dest_dir(dest: str, *, operation: str) -> None:
@@ -1003,6 +1034,7 @@ __all__ = [
     "identify_type",
     "is_s3express_path",
     "materialize_transfer_engine",
+    "normalize_s3_path",
     "path_storage",
     "resolve_case_conflict",
     "resolve_locations",

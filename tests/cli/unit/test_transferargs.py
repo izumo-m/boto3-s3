@@ -118,6 +118,104 @@ class TestBuildS3Storage:
         assert (storage.bucket, storage.key) == (arn, "")
 
 
+_OBJECT_LAMBDA = "s3://arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/olap"
+_OUTPOSTS_BUCKET = (
+    "s3://arn:aws:s3-outposts:us-west-2:123456789012:outpost/op-01234567890123456/bucket/b"
+)
+_OUTPOSTS_AP = (
+    "arn:aws:s3-outposts:us-west-2:123456789012:outpost/op-01234567890123456/accesspoint/ap"
+)
+
+
+class TestNormalizeS3Path:
+    """aws's ``_normalize_s3_trailing_slash`` on one argument."""
+
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            ("s3://b", "s3://b/"),
+            ("s3://b/", "s3://b/"),
+            ("s3://b/k", "s3://b/k"),
+            ("s3://", "s3://"),
+            ("s3:///k", "s3:///k"),
+            ("local/dir", "local/dir"),
+            ("-", "-"),
+            (f"s3://{_OUTPOSTS_AP}", f"s3://{_OUTPOSTS_AP}/"),
+            # The ":" closing the access point is eaten by the re-read, so the
+            # appended "/" becomes the key.
+            (f"s3://{_OUTPOSTS_AP}:", f"s3://{_OUTPOSTS_AP}:/"),
+        ],
+    )
+    def test_keyless_paths_gain_the_bucket_root_slash(self, path: str, expected: str) -> None:
+        assert transferargs.normalize_s3_path(path) == expected
+
+    @pytest.mark.parametrize(
+        ("path", "match"),
+        [
+            (f"{_OBJECT_LAMBDA}/k", "S3 Object Lambda"),
+            (_OBJECT_LAMBDA, "S3 Object Lambda"),
+            (f"{_OUTPOSTS_BUCKET}/k", "Outpost Bucket ARNs"),
+        ],
+    )
+    def test_refused_arns_fail_here(self, path: str, match: str) -> None:
+        with pytest.raises(ValidationError, match=match):
+            transferargs.normalize_s3_path(path)
+
+
+class TestRefusedArnsComeFirst:
+    """aws refuses the unsupported ARNs right after the path-type check.
+
+    Measured against the pinned aws: every other path check of cp / mv / sync
+    / rm loses to it - the missing local source, the pre-created download
+    directory, the stream rules, mv's same-path guard, the checksum and SSE-C
+    pairings, sync's directory-bucket refusal - and so does rm's ``[s3]``
+    config.
+    """
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["cp", "nosuch", f"{_OBJECT_LAMBDA}/k"],
+            ["mv", "nosuch", f"{_OUTPOSTS_BUCKET}/k"],
+            ["sync", "nosuch", f"{_OBJECT_LAMBDA}/p"],
+            ["cp", f"{_OBJECT_LAMBDA}/p", "out", "--recursive"],
+            ["sync", f"{_OUTPOSTS_BUCKET}/p", "out"],
+            ["mv", f"{_OBJECT_LAMBDA}/p", "out", "--recursive"],
+            ["cp", "-", f"{_OBJECT_LAMBDA}/k", "--recursive"],
+            ["cp", f"{_OBJECT_LAMBDA}/k", "-", "--no-overwrite"],
+            ["mv", f"{_OBJECT_LAMBDA}/k", f"{_OBJECT_LAMBDA}/k"],
+            ["cp", "f", f"{_OBJECT_LAMBDA}/k", "--checksum-mode", "ENABLED"],
+            ["cp", "f", f"{_OBJECT_LAMBDA}/k", "--sse-c", "AES256"],
+            ["sync", f"{_OBJECT_LAMBDA}/k", "s3://bkt--usw2-az1--x-s3/"],
+            ["cp", f"{_OBJECT_LAMBDA}/k", f"{_OUTPOSTS_BUCKET}/k"],
+        ],
+    )
+    def test_the_arn_refusal_wins(
+        self, argv: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tests.utils.harness import client_ctx, run_cli_in_process
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "f").write_bytes(b"x")
+        result = run_cli_in_process(argv, ctx=client_ctx(object()))
+        assert result.rc == 252, result.stderr
+        assert "S3 Object Lambda" in result.stderr or "Outpost Bucket ARNs" in result.stderr
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["f"]
+
+    @pytest.mark.parametrize("path", [f"{_OBJECT_LAMBDA}/k", f"{_OUTPOSTS_BUCKET}/k"])
+    def test_rm_refuses_the_arn_before_reading_the_s3_config(
+        self, path: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tests.utils.harness import client_ctx, run_cli_in_process
+
+        config = tmp_path / "config"
+        config.write_text("[default]\ns3 =\n  multipart_threshold = nope\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        result = run_cli_in_process(["rm", path, "--recursive"], ctx=client_ctx(object()))
+        assert result.rc == 252, result.stderr
+        assert "Invalid size value" not in result.stderr
+
+
 class TestParamfile:
     """aws applies file:// (text) / fileb:// (binary) paramfile resolution to s3 args."""
 
