@@ -263,7 +263,7 @@ comes out differently, listed in section 1.
   per-key delete futures and prints nothing after the interrupt (measured:
   ten deletes in flight, at most one line), while a batch request already out
   here cannot be cancelled: it completes, and the lines of the keys it carried
-  - up to a thousand - print before `cancelled: ctrl-c received`, as do those
+  — up to a thousand — print before `cancelled: ctrl-c received`, as do those
   of the per-key requests already out. A per-key request not yet started is
   not sent and prints nothing, as on `aws`. (Under the CRT engine see the
   entry below.)
