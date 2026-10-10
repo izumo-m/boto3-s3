@@ -35,13 +35,11 @@ lines, error text and warnings are aws's own, with this command's name
 substituted for `aws` — the error prefix is `boto3-s3:`, not `aws:`, and usage
 lines read `boto3-s3 <subcommand>` where aws's read `aws s3 <subcommand>`. That
 is exactly what makes parsing fragile: the wording is aws's to change, and it
-does change from one `aws` release to the next. Fourteen of section 2's entries
+does change from one `aws` release to the next. Thirteen of section 2's entries
 cover the text that differs on purpose — the progress display, help pages and
 `--debug` traces, a `rm` that cannot reach its credentials under the CRT
 engine, the failure lines of a batched delete, the closing line of a Ctrl-C
-`aws` cannot attribute to a cancelled classic transfer, the `move:` lines an
-interrupted `mv` on `aws` can leave out for sources it has already deleted, the
-failure line of a
+`aws` cannot attribute to a cancelled classic transfer, the failure line of a
 directory copied without `--recursive`, the invalid-bucket-name reports this
 command writes itself, the `--version` line, two argument-parsing corners, the
 history warning `aws` writes and this command has not, the messages the
@@ -295,17 +293,6 @@ comes out differently, listed in section 1.
   interrupt landing in the CRT engine's transfer drain is a different shape
   with no divergence at all: the CRT manager swallows it on both tools, which
   print their per-item failure lines and no closing line.)
-- **An interrupted `mv` on `aws` can delete a source it never reported.** A
-  recursive `mv` copies each object and then deletes its source, printing one
-  `move:` line for the pair. Interrupt one and `aws` can finish with sources
-  deleted for which no `move:` line was ever printed — measured, nine of them
-  in each of four runs — while here every source that is deleted is reported.
-  Neither tool deletes a source whose copy has not succeeded, and which objects
-  a given interrupt catches is not reproducible on either tool; what differs is
-  that aws's record can come out short of what it did, so a script reading its
-  output to learn what moved would under-count. This belongs to the
-  rendering accidents above, so this command keeps the complete record instead
-  of copying it.
 - **A `mv` between two spellings of one Outposts object is refused here.** An
   Outposts access point's key can be set off from the ARN with `:` or with `/`.
   `aws` compares its two arguments as text, takes

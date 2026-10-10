@@ -1303,10 +1303,17 @@ normal return is **2** if the warned count > 0, else 0.
 relative to cwd = aws-cli `relative_path`, the s3 side is `s3://...`), a `(dryrun) `
 prefix, failure `<transfer_type> failed: <src> to <dest> <err>` (stderr), warning `warning:
 <body>` (stderr, the body assembled by the library with aws-cli wording). A
-CANCELLED record (an item revoked by a fatal elsewhere - opresult.md) prints
-**nothing** and counts as nothing: aws surfaces only the run's single
-`fatal error:` line and drops its cancelled items from output and counts
-(measured against the pinned aws-cli). Progress
+CANCELLED record (an item revoked by a fatal elsewhere or a Ctrl-C -
+opresult.md) prints **nothing**, and **nothing after it prints or counts
+either** except the NOTICE advisories: aws's `ResultProcessor` disables
+every handler once it has processed the first error result - the
+`CtrlCResult` / fatal `ErrorResult` a cancelled classic future mints, which is
+what a CANCELLED record is - and only drains the queue after it, so the run
+shows its single closing line and none of the results queued behind it (a
+fatal mid-listing prints zero per-item lines for the cancelled set, and an
+interrupted `mv` can delete sources whose `move:` lines never print - nine
+in each of four measured runs). NOTICE lines bypass that processor on aws
+(written straight to stderr) and keep printing. Progress
 is `Completed <done>/<total> (<speed>/s) with <n> file(s) remaining`, overwritten
 with `\r` (**no isatty gate** = mixed into a pipe too, as in aws. Goldens mask
 it). The suppression matrix is the same shape as rm: `--quiet` = no printer at

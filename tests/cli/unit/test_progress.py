@@ -113,6 +113,33 @@ class TestResultLines:
         assert (captured.out, captured.err) == ("", "")
         assert printer.failed == 0
 
+    def test_nothing_after_the_first_cancelled_record_is_printed_or_counted(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's ResultProcessor disables its handlers once it has processed
+        # the first error result (the CtrlCResult / fatal ErrorResult a
+        # cancelled future mints) and only drains the queue after it - which
+        # is how an interrupted `mv` there can delete a source whose `move:`
+        # line never prints. The case-conflict notices bypass the processor
+        # on aws, so they still print.
+        with TransferPrinter() as printer:
+            printer.on_result(
+                _result(OpOutcome.SUCCEEDED, key="a", src="s3://b/a", dest="s3://c/a")
+            )
+            printer.on_result(_result(OpOutcome.CANCELLED, key="b", error=RuntimeError("ctrl-c")))
+            printer.on_result(
+                _result(OpOutcome.SUCCEEDED, key="c", src="s3://b/c", dest="s3://c/c")
+            )
+            printer.on_result(_result(OpOutcome.FAILED, key="d", error=RuntimeError("boom")))
+            printer.on_result(_result(OpOutcome.WARNED, key="e", error=RuntimeError("warned")))
+            printer.on_progress(_progress("f", 5, 10))
+            printer.on_result(_result(OpOutcome.NOTICE, key="g", error=RuntimeError("notice")))
+        captured = capsys.readouterr()
+        assert captured.out == "upload: s3://b/a to s3://c/a\n"
+        assert captured.err == "notice\n"
+        assert (printer.failed, printer.warned) == (0, 0)
+        assert "f" not in printer._inflight  # pyright: ignore[reportPrivateUsage]
+
     def test_cancelled_backfills_untransferred_remainder(self) -> None:
         # A queued-then-cancelled transfer closes its meter share like a
         # failed one, so the byte progress still reaches the expected total -
