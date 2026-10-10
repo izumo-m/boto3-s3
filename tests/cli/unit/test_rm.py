@@ -23,6 +23,7 @@ from boto3_s3_cli.commands.base import Context
 from boto3_s3_cli.commands.rm import _DeletePrinter
 from tests.utils.fakes3 import client_error
 from tests.utils.harness import (
+    bucket_name_report,
     built_client_ctx,
     client_ctx,
     run_cli_in_process,
@@ -422,11 +423,9 @@ class TestExitCodeShape:
         ):
             result = run_cli_in_process(argv, ctx=built_client_ctx())
             assert result.rc == 1, argv
-            # Synthesized, so it stops before botocore's regex tail - the one
-            # truncation this surface has (docs/cli/aws-differences.md).
-            assert result.stderr == (
-                'fatal error: Parameter validation failed:\nInvalid bucket name ""\n'
-            )
+            # Written before any request, in botocore's own words (regex tail
+            # included), as aws's listing reports it.
+            assert result.stderr == f"fatal error: {bucket_name_report('')}\n"
 
 
 class TestFilterWiring:

@@ -22,7 +22,13 @@ from boto3_s3 import Boto3S3Error
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
 from tests.utils.fakes3 import client_error
-from tests.utils.harness import client_ctx, run_cli_in_process, run_recorded, unused_ctx
+from tests.utils.harness import (
+    bucket_name_report,
+    client_ctx,
+    run_cli_in_process,
+    run_recorded,
+    unused_ctx,
+)
 from tests.utils.recorder import make_recording_client
 
 _MTIME = dt.datetime(2026, 1, 2, tzinfo=dt.timezone.utc)
@@ -165,9 +171,7 @@ class TestPostStartErrors:
         client, calls = make_recording_client([])
         result = run_cli_in_process(["rb", "s3://"], ctx=client_ctx(client))
         assert result.rc == 1
-        assert result.stderr == (
-            'remove_bucket failed: s3:// Parameter validation failed:\nInvalid bucket name ""\n'
-        )
+        assert result.stderr == f"remove_bucket failed: s3:// {bucket_name_report('')}\n"
         assert calls == []
 
 

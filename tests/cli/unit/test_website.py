@@ -16,7 +16,7 @@ import pytest
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
 from tests.utils.fakes3 import client_error
-from tests.utils.harness import built_client_ctx, client_ctx, unused_ctx
+from tests.utils.harness import bucket_name_report, built_client_ctx, client_ctx, unused_ctx
 
 
 class _FakeWebsiteClient:
@@ -180,7 +180,7 @@ class TestWebsiteExitCodeShape:
         client = _FakeWebsiteClient()
         rc = cli.main(["website", "s3:///k", "--index-document", "i.html"], ctx=client_ctx(client))
         assert rc == 252
-        assert 'Parameter validation failed:\nInvalid bucket name "/k"\n' in capsys.readouterr().err
+        assert f"{bucket_name_report('/k')}\n" in capsys.readouterr().err
         assert client.calls == []
 
     def test_bucketless_key_schemeless_folds_into_the_bucket_name(
@@ -189,7 +189,7 @@ class TestWebsiteExitCodeShape:
         client = _FakeWebsiteClient()
         rc = cli.main(["website", "/k", "--index-document", "i.html"], ctx=client_ctx(client))
         assert rc == 252
-        assert 'Parameter validation failed:\nInvalid bucket name "/k"\n' in capsys.readouterr().err
+        assert f"{bucket_name_report('/k')}\n" in capsys.readouterr().err
         assert client.calls == []
 
     def test_extra_positional_is_unknown_options_252(

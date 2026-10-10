@@ -1,11 +1,9 @@
 """aws-parity usage / error strings shared across subcommands.
 
 These strings are aws's own bytes: the output parity charter binds them, and
-the parity tests compare them against what the pinned aws writes.
-``invalid_bucket_name_message`` is the one exception - a simplified form, and
-a **recorded deviation** from that charter rather than free text (its
-docstring). Each wording has exactly one home here and the commands
-interpolate only their own name or value.
+the parity tests compare them against what the pinned aws writes. Each
+wording has exactly one home here and the commands interpolate only their own
+name or value.
 """
 
 from __future__ import annotations
@@ -40,22 +38,25 @@ def two_path_usage(command: str) -> str:
 
 
 def invalid_bucket_name_message(name: str = "") -> str:
-    """A simplified form of botocore's client-side bad-bucket-name rejection.
+    """botocore's client-side bad-bucket-name report, for the names refused here.
 
-    botocore raises a ``ParamValidationError`` whose str form is ``"Parameter
-    validation failed:"`` + newline + a report, and aws prints that report in
-    full (it continues ``: Bucket name must match the regex ...``). We reproduce
-    only the leading ``Invalid bucket name "<name>"`` line, dropping the
-    botocore-version-fragile regex tail. That truncation is a **recorded
-    deviation** from the output parity charter, not a free choice
-    (design/aws-cli-option-handling.md section 6,
-    docs/cli/aws-differences.md section 2).
-
-    It reaches only the reports synthesized here - the URIs the commands refuse
-    before a request is built (``mb s3://`` / ``mb s3:///key`` / ``rb s3://`` /
-    ``rm s3://``, and a ``website`` URI carrying a key). A name that reaches
-    botocore's own check is never routed through this function, so both tools
-    print botocore's full report for it, tail included (measured). The rc is
-    unaffected either way: ``mb`` / ``rb`` / ``rm`` 1, ``website`` 252.
+    The commands refuse a few URIs before any request is built (``mb s3://`` /
+    ``mb s3:///key`` / ``rb s3://`` / ``rm s3://``, and a ``website`` name the
+    bucket/key split would disturb). aws sends those names to botocore, whose
+    ``validate_bucket_name`` raises a ``ParamValidationError`` - ``"Parameter
+    validation failed:"``, a newline, and ``Invalid bucket name "<name>": Bucket
+    name must match the regex ...`` - and prints its str form whole. The report
+    is built by that same botocore function, so it reads exactly as it does for
+    a name that reaches botocore's own check (the installed botocore's wording).
+    The rc is the caller's: ``mb`` / ``rb`` / ``rm`` 1, ``website`` 252.
     """
+    from botocore.exceptions import ParamValidationError
+    from botocore.handlers import validate_bucket_name
+
+    try:
+        validate_bucket_name({"Bucket": name})
+    except ParamValidationError as exc:
+        return str(exc)
+    # A guard only: every name the callers pass fails both of botocore's
+    # patterns.
     return f'Parameter validation failed:\nInvalid bucket name "{name}"'

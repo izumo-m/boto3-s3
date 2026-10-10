@@ -64,6 +64,24 @@ SIGNATURE_TOKEN = "<SIGNATURE>"
 REGION_TOKEN = "<REGION>"
 
 
+def bucket_name_report(name: str) -> str:
+    """botocore's client-side bad-bucket-name report for *name*, as aws prints it.
+
+    The bytes the pinned aws writes (measured: ``aws s3 mb s3://``, ``aws s3
+    website s3://bkt/key``) - the ``ParamValidationError`` text with the regex
+    tail. A literal, not botocore's function, so a test pins the wording rather
+    than restating the code under test.
+    """
+    return (
+        "Parameter validation failed:\n"
+        f'Invalid bucket name "{name}": Bucket name must match the regex '
+        '"^[a-zA-Z0-9.\\-_]{1,255}$" or be an ARN matching the regex '
+        '"^arn:(aws).*:(s3|s3-object-lambda):[a-z\\-0-9]*:[0-9]{12}:accesspoint[/:]'
+        "[a-zA-Z0-9\\-.]{1,63}$|^arn:(aws).*:s3-outposts:[a-z\\-0-9]+:[0-9]{12}:"
+        'outpost[/:][a-zA-Z0-9\\-]{1,63}[/:]accesspoint[/:][a-zA-Z0-9\\-]{1,63}$"'
+    )
+
+
 class CliResult(NamedTuple):
     """Outcome of one CLI invocation (in-process or subprocess)."""
 

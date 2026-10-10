@@ -37,16 +37,16 @@ lines, error text and warnings are aws's own, with this command's name
 substituted for `aws` — the error prefix is `boto3-s3:`, not `aws:`, and usage
 lines read `boto3-s3 <subcommand>` where aws's read `aws s3 <subcommand>`. That
 is exactly what makes parsing fragile: the wording is aws's to change, and it
-does change from one `aws` release to the next. Twelve of section 2's entries
+does change from one `aws` release to the next. Eleven of section 2's entries
 cover the text that differs on purpose — the progress display, help pages and
 `--debug` traces, the failure lines of a batched delete, the closing line of a Ctrl-C
 `aws` cannot attribute to a cancelled classic transfer, the failure line of a
-directory copied without `--recursive`, the invalid-bucket-name reports this
-command writes itself, the `--version` line, three argument-parsing corners, the
-history warning `aws` writes and this command has not, the messages the
-installed botocore itself writes, the element a listing entry missing two
-required ones is blamed on, and the request a failing stream download is
-blamed on under a non-default checksum-validation setting. The interactive prompt
+directory copied without `--recursive`, the `--version` line, three
+argument-parsing corners, the history warning `aws` writes and this command
+has not, the messages the installed botocore itself writes, the element a
+listing entry missing two required ones is blamed on, and the request a
+failing stream download is blamed on under a non-default checksum-validation
+setting. The interactive prompt
 (`--cli-auto-prompt`) is outside parity altogether, its output included. And
 the ordering of concurrent output is not reproducible on either tool (below).
 
@@ -366,14 +366,6 @@ comes out differently, listed in section 1.
   line: `aws` prints `(dryrun) upload: d/ to s3://bkt/` — the
   trailing-separator form, with the destination key folded away — where this
   command prints `(dryrun) upload: ./d to s3://bkt/d`.
-- **Some invalid bucket names report one line.** For a name that reaches
-  botocore's own check, both tools print botocore's full report, ending in the
-  regex the name must match — `mb s3://in!valid` is byte for byte aws's. The
-  report stops after `Invalid bucket name "<name>"` only on the URIs this
-  command refuses up front, before a request is built: the ones naming no
-  bucket at all (`mb s3://`, `mb s3:///key`, `rb s3://`, `rm s3://`) and a
-  `website` URI carrying a key (`website s3://bkt/key`). The exit code is the
-  same either way — 1 for `mb` / `rb` / `rm`, 252 for `website`.
 - **The `--version` line.** `aws` names itself and its interpreter; this
   command names the four packages that decide its behavior —
   `boto3-s3-cli/<v> boto3-s3/<v> boto3/<v> botocore/<v> Python/<v>
@@ -447,10 +439,10 @@ comes out differently, listed in section 1.
   several mistakes at once — an out-of-range `max_attempts` (`0`, `-1`)
   together with an invalid `retry_mode`, or either of them beside a broken
   `[s3]` section — reports the same one of them on both tools. The
-  invalid-bucket-name report above belongs to the same SDK-owned family: the
-  two copies word it identically today, and it is because that wording is
-  theirs to change that the reports this command writes itself stop before the
-  regex tail.
+  invalid-bucket-name report belongs to the same SDK-owned family, including
+  the ones for names this command refuses before any request (`mb s3://`,
+  `website s3://bkt/key`): it asks the installed botocore to word them. The two
+  copies word that report identically today.
 - **A listing entry missing two required elements is blamed on a different
   one.** When a service returns an entry without `Key` *and* without
   `LastModified` or `Size`, `ls` stops and quotes the name of an element it

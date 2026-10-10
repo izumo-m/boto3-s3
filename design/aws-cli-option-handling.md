@@ -428,14 +428,6 @@ The rest sit outside the pipeline:
   through its engines — under CRT an untranslated `Unknown Error Code` —
   because mirroring that rendering would cost the clear errno report
   (decided 2026-08-01).
-- **The invalid-bucket-name report is truncated** to botocore's leading
-  `Invalid bucket name "<name>"` line, dropping the regex tail aws prints
-  after it (`usage.py`; the tail is botocore-version-fragile). It reaches only
-  the reports this command synthesizes rather than lets botocore raise - the
-  bucket-less URIs mb / rb / rm refuse up front, and the key-carrying website
-  URIs - because a name that reaches botocore's own check carries botocore's
-  own text on both tools, tail included (measured 2026-08-12). The exit code
-  is unaffected - mb / rb / rm 1, website 252.
 - **A message botocore itself writes is the installed botocore's wording**,
   where aws prints its bundled fork's. This is not class 2: the same aws
   version installed from PyPI still carries the fork, so the difference is ours
