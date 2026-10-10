@@ -9,6 +9,7 @@ so the async behaviors are tested deterministically.
 from __future__ import annotations
 
 import contextlib
+import functools
 import logging
 import threading
 import time
@@ -1417,7 +1418,11 @@ class TestResults:
         assert exc_info.value.operation == "rm"
 
 
-_CRT = TransferConfig(preferred_transfer_client="crt")
+@functools.cache
+def _crt() -> TransferConfig:
+    # Built on first use, not at import: the SDK floor's TransferConfig has no
+    # `preferred_transfer_client`, and the sdk-floor CI job collects this module.
+    return TransferConfig(preferred_transfer_client="crt")
 
 
 class TestCrtRoute:
@@ -1433,7 +1438,7 @@ class TestCrtRoute:
     def test_the_batch_rides_the_crt_client(self, built: list[Any]) -> None:
         fake = _FakeS3Client()
         results: list[OpResult] = []
-        deleter = _deleter(fake, on_result=results.append, transfer_config=_CRT)
+        deleter = _deleter(fake, on_result=results.append, transfer_config=_crt())
         deleter.submit(_info("a"))
         deleter.submit(_info("b"))
         deleter.close()
@@ -1461,7 +1466,7 @@ class TestCrtRoute:
 
     def test_a_key_the_batch_cannot_carry_rides_it_too(self, built: list[Any]) -> None:
         fake = _FakeS3Client()
-        deleter = _deleter(fake, transfer_config=_CRT, request_payer="requester")
+        deleter = _deleter(fake, transfer_config=_crt(), request_payer="requester")
         deleter.submit(_info("k\x01"))
         deleter.close()
         ((sender, _, _),) = built
@@ -1477,7 +1482,7 @@ class TestCrtRoute:
         awscrt_exceptions = pytest.importorskip("awscrt.exceptions")
         fake = _FakeS3Client(script=[awscrt_exceptions.from_code(1051)], single_script=[{}, {}])
         results: list[OpResult] = []
-        deleter = _deleter(fake, on_result=results.append, transfer_config=_CRT)
+        deleter = _deleter(fake, on_result=results.append, transfer_config=_crt())
         deleter.submit(_info("a"))
         deleter.submit(_info("b"))
         deleter.close()
@@ -1493,7 +1498,7 @@ class TestCrtRoute:
         dead = awscrt_exceptions.from_code(1051)
         fake = _FakeS3Client(script=[dead], single_script=[dead, dead])
         results: list[OpResult] = []
-        deleter = _deleter(fake, on_result=results.append, transfer_config=_CRT)
+        deleter = _deleter(fake, on_result=results.append, transfer_config=_crt())
         deleter.submit(_info("a"))
         deleter.submit(_info("b"))
         deleter.close()
@@ -1516,7 +1521,7 @@ class TestCrtRoute:
         )
         fake = _FakeS3Client(script=[answer], single_script=[{}, {}])
         results: list[OpResult] = []
-        deleter = _deleter(fake, batch_size=2, on_result=results.append, transfer_config=_CRT)
+        deleter = _deleter(fake, batch_size=2, on_result=results.append, transfer_config=_crt())
         deleter.submit(_info("a"))
         deleter.submit(_info("b"))
         deleter.close()
@@ -1528,7 +1533,7 @@ class TestCrtRoute:
         awscrt_exceptions = pytest.importorskip("awscrt.exceptions")
         fake = _FakeS3Client(script=[awscrt_exceptions.from_code(1051)])
         results: list[OpResult] = []
-        deleter = _deleter(fake, batch_size=2, on_result=results.append, transfer_config=_CRT)
+        deleter = _deleter(fake, batch_size=2, on_result=results.append, transfer_config=_crt())
         deleter._abandoned = True  # pyright: ignore[reportPrivateUsage]
         deleter.submit(_info("a"))
         deleter.submit(_info("b"))
@@ -1543,7 +1548,7 @@ class TestCrtRoute:
             single_script=[_client_error("NoSuchBucket", 404, "DeleteObject")],
         )
         results: list[OpResult] = []
-        deleter = _deleter(fake, on_result=results.append, transfer_config=_CRT)
+        deleter = _deleter(fake, on_result=results.append, transfer_config=_crt())
         deleter.submit(_info("a"))
         deleter.close()
         ((sender, _, _),) = built
@@ -1554,7 +1559,7 @@ class TestCrtRoute:
         awscrt_exceptions = pytest.importorskip("awscrt.exceptions")
         fake = _FakeS3Client(single_script=[awscrt_exceptions.from_code(1051)])
         results: list[OpResult] = []
-        deleter = _deleter(fake, on_result=results.append, transfer_config=_CRT)
+        deleter = _deleter(fake, on_result=results.append, transfer_config=_crt())
         deleter.submit(_info("k\x01"))
         deleter.close()
         assert [r.outcome for r in results] == [OpOutcome.FAILED]
@@ -1569,7 +1574,7 @@ class TestCrtRoute:
             config=SimpleNamespace(retries={"total_max_attempts": 1, "mode": "standard"})
         )
         results: list[OpResult] = []
-        deleter = _deleter(fake, on_result=results.append, transfer_config=_CRT)
+        deleter = _deleter(fake, on_result=results.append, transfer_config=_crt())
         deleter.submit(_info("a"))
         deleter.submit(_info("b"))
         deleter.close()
@@ -1581,7 +1586,7 @@ class TestCrtRoute:
         session = cast("Any", object())
         _deleter(
             _FakeS3Client(),
-            transfer_config=_CRT,
+            transfer_config=_crt(),
             operation="rm",
             session=session,
             crt_endpoint="http://e",
@@ -1591,7 +1596,7 @@ class TestCrtRoute:
             crt_sign_requests=False,
         ).close()
         ((_, config, kwargs),) = built
-        assert config is _CRT
+        assert config is _crt()
         assert kwargs == {
             "operation": "rm",
             "session": session,
@@ -1603,7 +1608,7 @@ class TestCrtRoute:
         }
 
     def test_a_rehearsal_builds_no_engine(self, built: list[Any]) -> None:
-        _deleter(_FakeS3Client(), transfer_config=_CRT, dryrun=True).close()
+        _deleter(_FakeS3Client(), transfer_config=_crt(), dryrun=True).close()
         assert built == []
 
 
@@ -1634,7 +1639,7 @@ class TestCrtDeleteSender:
         session = cast("Any", object())
         got = crt_delete_sender(
             cast("Any", client),
-            _CRT,
+            _crt(),
             operation="rm",
             session=session,
             crt_endpoint="http://e",
@@ -1647,7 +1652,7 @@ class TestCrtDeleteSender:
         assert calls == [
             (
                 client,
-                _CRT,
+                _crt(),
                 {
                     "endpoint": "http://e",
                     "session": session,
@@ -1670,7 +1675,7 @@ class TestCrtDeleteSender:
             lambda _client, _config, **kwargs: endpoints.append(kwargs["endpoint"]),
         )
         client = SimpleNamespace(meta=SimpleNamespace(endpoint_url="http://other"))
-        crt_delete_sender(cast("Any", client), _CRT, operation="rm", crt_endpoint="http://e")
+        crt_delete_sender(cast("Any", client), _crt(), operation="rm", crt_endpoint="http://e")
         assert endpoints == [None]
 
     def test_an_explicit_crt_without_awscrt_raises_like_a_transfer(
@@ -1683,7 +1688,7 @@ class TestCrtDeleteSender:
 
         monkeypatch.setattr(crtsupport, "should_use_crt", missing)
         with pytest.raises(MissingDependencyException):
-            crt_delete_sender(cast("Any", object()), _CRT, operation="rm")
+            crt_delete_sender(cast("Any", object()), _crt(), operation="rm")
 
     def test_a_construction_failure_is_classified_like_a_transfers(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1697,7 +1702,7 @@ class TestCrtDeleteSender:
         monkeypatch.setattr(crtsupport, "create_crt_request_sender", unreadable)
         client = SimpleNamespace(meta=SimpleNamespace(endpoint_url=None))
         with pytest.raises(InvalidConfigError) as exc_info:
-            crt_delete_sender(cast("Any", client), _CRT, operation="rm")
+            crt_delete_sender(cast("Any", client), _crt(), operation="rm")
         assert exc_info.value.operation == "rm"
 
 
