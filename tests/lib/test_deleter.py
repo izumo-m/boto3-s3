@@ -773,17 +773,21 @@ class TestResults:
         assert len(fake.single_calls) == 2
         assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED] * 2
 
-    def test_a_key_not_resent_keeps_the_batch_error(self) -> None:
-        # Abandoned before the re-sends start: the key is recorded with the
-        # request's own error, as a per-key transient fault is.
-        fake = _FakeS3Client(script=[_client_error("InternalError", 500)])
+    def test_a_key_not_resent_gets_no_record(self) -> None:
+        # Abandoned before the re-sends start: the batch's answer was no key's
+        # own, and aws-cli prints nothing for a key whose request never
+        # started (measured: Ctrl-C with the per-key requests still queued
+        # prints no line for them) - so no record, and no count.
+        fake = _FakeS3Client(script=[_client_error("AccessDenied", 403)])
         results: list[OpResult] = []
-        deleter = _deleter(fake, batch_size=1, on_result=results.append)
+        deleter = _deleter(fake, batch_size=2, on_result=results.append)
         deleter._abandoned = True  # pyright: ignore[reportPrivateUsage]
         deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
         deleter.close(flush=False)
         assert fake.single_calls == []
-        assert [type(r.error) for r in results] == [TransportError]
+        assert results == []
+        assert (deleter.succeeded, deleter.failed) == (0, 0)
 
     @pytest.mark.parametrize(("code", "status"), [("Throttling", 400), ("TooManyRequests", 429)])
     def test_so_is_any_other_request_level_answer(self, code: str, status: int) -> None:
@@ -890,7 +894,8 @@ class TestResults:
         # close(flush=False) - the body raised, Ctrl-C - waits for what is in
         # flight, and that used to mean every re-send of the batch, one after
         # another. The re-sends already out finish; the rest are not started
-        # and keep the error the batch reported for them.
+        # and get no record, as aws-cli prints nothing for a key whose request
+        # never started.
         keys = [f"k{i:02d}" for i in range(30)]
         fake = _FakeS3Client(
             script=[{"Errors": [{"Key": k, "Code": "SlowDown", "Message": "msg"} for k in keys]}]
@@ -923,15 +928,13 @@ class TestResults:
         resent = {call["Key"] for call in fake.single_calls}
         by_key = {r.src.rsplit("/", 1)[-1]: r for r in results if r.src is not None}
         assert {k for k, r in by_key.items() if r.outcome is OpOutcome.SUCCEEDED} == resent
-        left = [by_key[k] for k in keys if k not in resent]
-        assert len(left) == 20
-        assert all(type(r.error) is TransportError for r in left)
-        assert all("DeleteObjects operation" in str(r.error) for r in left)
+        assert set(by_key) == resent
+        assert (deleter.succeeded, deleter.failed) == (10, 0)
 
     def test_an_immediate_cancel_starts_no_further_resends(self) -> None:
         # The other way to abandon a run: the token switched to IMMEDIATE
         # while the batch is re-sending. Same outcome as close(flush=False) -
-        # the requests out finish, the rest keep the batch's error.
+        # the requests out finish, the rest get no record.
         keys = [f"k{i:02d}" for i in range(30)]
         fake = _FakeS3Client(
             script=[{"Errors": [{"Key": k, "Code": "SlowDown", "Message": "msg"} for k in keys]}]
@@ -958,10 +961,8 @@ class TestResults:
         release.set()
         deleter.close()
         assert len(fake.single_calls) == 10
-        failed = [r for r in results if r.outcome is OpOutcome.FAILED]
-        assert len(results) == 30
-        assert len(failed) == 20
-        assert all("DeleteObjects operation" in str(r.error) for r in failed)
+        assert len(results) == 10
+        assert all(r.outcome is OpOutcome.SUCCEEDED for r in results)
 
     def test_resends_fall_back_in_line_when_no_thread_can_be_started(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1109,6 +1110,7 @@ class TestResults:
         deleter.submit(_info("a"))
         deleter.submit(_info("b"))
         deleter.close()  # must not raise: the failure is recorded per key
+        assert len(fake.single_calls) == 2
         assert [r.outcome for r in results] == [OpOutcome.FAILED, OpOutcome.FAILED]
         for result in results:
             error = result.error
@@ -1499,10 +1501,9 @@ class TestCrtRoute:
         assert [str(r.error) for r in results] == ["AWS_IO_SOCKET_CLOSED: socket is closed."] * 2
         assert deleter.failed == 2
 
-    def test_an_answer_the_crt_hands_back_is_kept_by_an_unsent_key(self, built: list[Any]) -> None:
-        # The CRT's own S3ResponseError is an answer (an error document inside
-        # a 200 it will not retry), not a death: a key the abandoned run
-        # never re-sends keeps it, where a dead batch's key gets no record.
+    def test_an_answer_the_crt_hands_back_sends_each_key_too(self, built: list[Any]) -> None:
+        # The CRT's own S3ResponseError (an error document inside a 200 it
+        # will not retry) decides nothing for the keys either.
         awscrt_s3 = pytest.importorskip("awscrt.s3")
         answer = awscrt_s3.S3ResponseError(
             code=14370,
@@ -1513,15 +1514,15 @@ class TestCrtRoute:
             body=b"<Error><Code>AccessDenied</Code></Error>",
             operation_name="DeleteObjects",
         )
-        fake = _FakeS3Client(script=[answer])
+        fake = _FakeS3Client(script=[answer], single_script=[{}, {}])
         results: list[OpResult] = []
         deleter = _deleter(fake, batch_size=2, on_result=results.append, transfer_config=_CRT)
-        deleter._abandoned = True  # pyright: ignore[reportPrivateUsage]
         deleter.submit(_info("a"))
         deleter.submit(_info("b"))
-        deleter.close(flush=False)
-        assert fake.single_calls == []
-        assert [r.outcome for r in results] == [OpOutcome.FAILED] * 2
+        deleter.close()
+        ((sender, _, _),) = built
+        assert [op for op, _ in sender.calls] == ["DeleteObjects", "DeleteObject", "DeleteObject"]
+        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED] * 2
 
     def test_a_dead_batch_leaves_an_unsent_key_without_a_record(self, built: list[Any]) -> None:
         awscrt_exceptions = pytest.importorskip("awscrt.exceptions")

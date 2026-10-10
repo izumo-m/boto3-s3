@@ -626,10 +626,10 @@ For the delete lanes of `rm` and `sync`, `GRACEFUL` discards the deleter's
 unsent buffer and drains the batch already dispatched; `IMMEDIATE` additionally
 cancels a dispatched batch that has not started, and starts none of the
 per-key requests a started batch still had to send (its XML-incompatible keys,
-its re-sends of transient failures). A batch whose S3 request has started
-otherwise completes and delivers its per-key records first. Discarded
-buffered entries, the entries of a cancelled batch and an XML-incompatible key
-left unsent produce no records
+its re-sends). A batch whose S3 request has started otherwise completes and
+delivers its per-key records first. Discarded buffered entries, the entries of
+a cancelled batch and a key whose own request was left unsent produce no
+records
 ([`../../design/deleter.md`](../../design/deleter.md)).
 
 For `ls`, both modes behave identically: cancellation stops entry delivery,

@@ -118,7 +118,7 @@ already started — it completes and delivers its results. Buffered entries not
 yet sent are dropped without records, and immediate mode may also cancel a
 dispatched batch that has not begun. One kind of entry inside a started batch
 can still go unsent: a key the batch sends as a request of its own (one XML
-cannot carry) that had not gone out when the run was abandoned — by
+cannot carry, or a re-send) that had not gone out when the run was abandoned — by
 `close(flush=False)` for anything but a graceful cancel, or by an immediate
 one. It is dropped without a record, like a buffered entry.
 
@@ -142,7 +142,8 @@ A batch's re-sends go out up to ten at a time. Two things switch them off: a
 botocore client configured not to retry at all (a single attempt per request;
 the CRT client retries on its own policy whatever that says), and abandoning
 the run — `close(flush=False)`, or an immediate-mode cancel — after which the
-keys not yet re-sent are recorded with the batch's own error.
+keys not yet re-sent get no record, as `aws s3` prints nothing for a key whose
+request never started.
 
 If the batch request itself fails — an error the service answered with, a
 dropped connection, anything the request raised — that decides nothing for its
@@ -155,9 +156,8 @@ gives each key its own, so a key can get more attempts here than there —
 never fewer. On botocore a re-sent key that dies without a response is
 dropped without a record, as `aws s3` drops it; on the CRT client it is a
 failure carrying the CRT's own error, as `aws s3` reports it. A key the run is
-abandoned before re-sending is dropped without a record if its batch died
-without a response (on the CRT client: with the CRT's own error), and keeps
-the batch's error otherwise.
+abandoned before re-sending gets no record, like an entry still in the
+buffer.
 
 Success on the batch route is normally read as "not in the response's error
 list". If the response carries an error the deleter cannot pin on any key it

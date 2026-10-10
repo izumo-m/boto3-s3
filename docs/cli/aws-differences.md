@@ -17,7 +17,7 @@ state, the same returned values, the same error conditions, and the same exit
 code**, bar the entries in section 2 that say outright that the run comes out
 differently. Those are a corrupted ranged download, a download body cut
 mid-stream, a recursive delete whose listing dies part way or whose endpoint
-keeps failing its requests, a plain-HTTP
+fails its batch requests, a plain-HTTP
 endpoint named anywhere but `--endpoint-url` under the CRT engine, a
 `REQUESTS_CA_BUNDLE` the CRT engine cannot use, an `aws` plugin that imports
 `awscli` modules, a `cli_history` directory
@@ -256,9 +256,9 @@ comes out differently, listed in section 1.
   that enumerates to the end is unaffected.
 
   One batch request also has one set of attempts, where each of `aws`'s
-  per-key requests has its own, so **an endpoint that keeps failing requests**
-  — dropping connections, answering with server errors or throttling — can
-  end differently too. A batch request that fails as a whole, whatever the
+  per-key requests has its own, so **an endpoint that fails requests** —
+  dropping connections, answering with an error — can end differently too,
+  even when it fails just one. A batch request that fails as a whole, whatever the
   failure, is sent again key by key, each key taking its own `DeleteObject`'s
   outcome, whatever the retry setting says (the batch was no key's own
   request, so even under `AWS_MAX_ATTEMPTS=1` each key still gets the one
@@ -268,11 +268,12 @@ comes out differently, listed in section 1.
   `delete:` lines, that `aws` leaves in place: dropped connections make `aws`
   lose such a key without a line at exit code 0 on the classic engine
   (measured: six dropped requests for two keys) and report it at exit code 1
-  under the CRT (measured: twelve), and server errors make it report the key
+  under the CRT (measured: twelve), and error answers make it report the key
   at exit code 1 (measured on the classic engine: six `InternalError`
-  answers for two keys, or a single 429 — where three `InternalError` or
-  `Throttling` answers leave both tools deleting both). A delete that keeps
-  failing ends the same on both tools, in the same words.
+  answers for two keys, or a single 429 or 403, or a single 500 under
+  `AWS_MAX_ATTEMPTS=1` — where three `InternalError` or `Throttling` answers
+  leave both tools deleting both). A delete that keeps failing ends the same
+  on both tools, in the same words.
 
   Under the CRT engine (`preferred_transfer_client = crt`) the batches ride
   the CRT client, as `aws`'s per-key deletes ride its own — `rm` and a

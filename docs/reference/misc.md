@@ -651,7 +651,8 @@ in-flight batch finishes.
 producer). The work runs on one worker thread (thread name prefix
 `boto3-s3-deleter`), spawned lazily at the first dispatch. The per-key
 `DeleteObject` requests of a batch — the keys the XML round trip cannot carry,
-and the re-sends of transient failures — are the exception: when a batch has
+the re-sends of transient failures, and the keys of a batch request that
+failed as a whole — are the exception: when a batch has
 more than one, they go out from up to ten short-lived threads of their own
 (prefix `boto3-s3-deleter-resend`), so the client, and any handler registered
 on it, is called concurrently there.
@@ -758,8 +759,8 @@ the key is recorded with the batch's own per-key error. The CRT client retries
 on its own policy whatever that setting says, so on it the key is always sent
 again. Abandoning the run —
 `close(flush=False)`, or a cancel in immediate mode — starts no further
-re-sends either: the ones already out finish, and the rest are recorded with
-the batch's error. A `DeleteObjects` request that fails as a whole sends its
+re-sends either: the ones already out finish, and the rest get no record, as
+the AWS CLI prints nothing for a key whose request never started. A `DeleteObjects` request that fails as a whole sends its
 keys the same way, whatever the policy, as described below.
 
 Successes on the batch route are synthesized as the submitted keys minus the
@@ -786,11 +787,7 @@ following batches still run. A wrong bucket name therefore still fails
 everything, each key with its own request's error, and shows up in the
 counts. One batch request's attempts are not the attempts `aws s3` gives each
 key, so a key can get more attempts than `aws s3` gives it, never fewer. A
-key the run is abandoned before re-sending is dropped without a record if
-its call died without a response — on the CRT client, failed with the CRT's
-own error, which it raises once it has spent its retries on a dropped
-connection or on a server error it kept getting — and keeps the call's error
-otherwise. Keys of the same
+key the run is abandoned before re-sending gets no record. Keys of the same
 dispatch that took the per-key fallback route are unaffected by it: there, that
 call's own success or translated exception is the key's result directly.
 
@@ -811,9 +808,8 @@ A cancelled [`CancelToken`](./results.md#canceltoken) stops further batches
 from being dispatched. A batch whose request has already started completes and
 delivers its per-key results — a graceful cancel drains all of it, while an
 immediate one (like `close(flush=False)` for any other reason) starts none of
-the batch's remaining per-key requests: a transient failure not re-sent keeps
-the batch's error, and an XML-incompatible key, or a key of a batch that died
-without a response, not sent gets no record.
+the batch's remaining per-key requests, and a key left unsent that way gets
+no record.
 Buffered entries that were never sent are
 discarded without results, and
 [`CancelMode.IMMEDIATE`](./results.md#cancelmode) may additionally cancel a
@@ -841,8 +837,8 @@ starts no further ones: a key not yet sent is dropped without a record, like
 an entry still in the buffer. Under the CRT engine the batches ride the CRT
 client `aws s3`'s per-key deletes ride, so the retry policy and error text are
 that client's on both; one batch request has one set of attempts where each of
-`aws s3`'s requests has its own, which is why a batch that dies without an
-answer is sent again key by key. Deleting a
+`aws s3`'s requests has its own, which is why a batch request that fails as
+a whole is sent again key by key. Deleting a
 specific `VersionId` is not provided, as `aws s3 rm` does not offer it either.
 
 ## S3_DELETE_BATCH

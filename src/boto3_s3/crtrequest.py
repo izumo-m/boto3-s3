@@ -37,7 +37,7 @@ from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
-__all__ = ["CrtRequestSender", "died_without_answer"]
+__all__ = ["CrtRequestSender"]
 
 # Where the serializer client leaves the request it built, for the after-call
 # hook to hand back.
@@ -285,24 +285,3 @@ def _special_case_error(body: bytes) -> bool:
     except ETree.ParseError:
         return True
     return root.tag == "Error"
-
-
-def died_without_answer(exc: BaseException) -> bool:
-    """Whether a request sent here failed without an HTTP error answer.
-
-    That is awscrt's own error, raised once the CRT client has spent its
-    retries - a connection dropped or timed out, a server error it kept
-    getting, a credentials delegate that failed - rather than an S3 error
-    answer, which `CrtRequestSender.call` raises as botocore's error (or, below
-    a 301, as awscrt's ``S3ResponseError``). A failure the library wrapped
-    (`s3storage.request_failure`) is judged by its cause.
-    """
-    from boto3_s3.exceptions import Boto3S3Error
-
-    seen = exc.__cause__ if isinstance(exc, Boto3S3Error) else exc
-    try:
-        from awscrt.exceptions import AwsCrtError
-        from awscrt.s3 import S3ResponseError
-    except ImportError:
-        return False
-    return isinstance(seen, AwsCrtError) and not isinstance(seen, S3ResponseError)
