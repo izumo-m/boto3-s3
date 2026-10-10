@@ -16,7 +16,6 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -47,65 +46,6 @@ def _progress(key: str, done: int, total: int | None) -> TransferProgress:
     return TransferProgress(
         transfer_type=TransferType.UPLOAD, compare_key=key, bytes_done=done, bytes_total=total
     )
-
-
-class TestStopDeletes:
-    def test_only_delete_records_stop_after_a_ctrl_c(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # A delete batch in flight at a Ctrl-C reports its keys afterwards,
-        # which aws never prints; the transfers keep reporting (aws's CRT
-        # manager swallows an interrupt in its drain and its transfers go on).
-        with TransferPrinter(progress=False) as printer:
-            printer.stop_deletes()
-            printer.on_result(
-                _result(
-                    OpOutcome.SUCCEEDED,
-                    transfer_type=TransferType.DELETE,
-                    src="s3://b/gone",
-                    dest=None,
-                )
-            )
-            printer.on_result(
-                _result(
-                    OpOutcome.SUCCEEDED,
-                    transfer_type=TransferType.COPY,
-                    src="s3://b/a.txt",
-                    dest="s3://b/c",
-                )
-            )
-        assert capsys.readouterr().out == "copy: s3://b/a.txt to s3://b/c\n"
-
-
-class TestFinishTransferHooksTheInterrupt:
-    def test_a_ctrl_c_stops_the_delete_lines_of_the_run(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        from contextlib import contextmanager
-
-        from boto3_s3_cli import interrupts
-        from boto3_s3_cli.commands.transferargs import finish_transfer
-
-        @contextmanager
-        def arrived_at_once(callback: Any) -> Any:
-            callback()
-            yield
-
-        monkeypatch.setattr(interrupts, "on_interrupt", arrived_at_once)
-        printer = TransferPrinter(progress=False)
-
-        def run() -> None:
-            printer.on_result(
-                _result(
-                    OpOutcome.SUCCEEDED,
-                    transfer_type=TransferType.DELETE,
-                    src="s3://b/x",
-                    dest=None,
-                )
-            )
-
-        assert finish_transfer(printer, quiet=False, run=run) == 0
-        assert capsys.readouterr().out == ""
 
 
 class TestResultLines:

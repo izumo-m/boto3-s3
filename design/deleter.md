@@ -303,6 +303,15 @@ that - so a key never gets fewer attempts than aws-cli gives it.
   unescaped is read with the CR normalized to LF, which would either strand
   the entry (failing the batch closed) or pin it on a sibling key that differs
   only by CR/LF - a delete reported for the key that was refused.
+- A Ctrl-C (or any abandonment) cannot cancel a request already out: a batch
+  in flight completes and reports every key it carried, and the CLI prints
+  those lines before its closing `cancelled: ctrl-c received`, where aws-cli,
+  whose per-key futures are cancelled, prints nothing after the interrupt.
+  Stopping the lines at the signal instead needs a SIGINT hook that must not
+  take the printer's lock, must stay out of an ignored SIGINT, and must not
+  apply under the CRT engine (whose manager swallows the interrupt and goes
+  on reporting on aws) - tried and withdrawn as not worth that machinery, so
+  the extra lines are an accepted batching difference.
 - Failure messages are unified to the full `str(ClientError)`
   (`An error occurred (...) ...`), the same shape as the string aws-cli emits on
   a failure line (so the CLI layer can use it as-is when composing

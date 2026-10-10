@@ -36,7 +36,6 @@ from boto3_s3_cli import (
     clientfactory,
     filters,
     globalargs,
-    interrupts,
     paramfile,
     runtimeconfig,
     shorthand,
@@ -962,7 +961,7 @@ def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], 
     line) before the exit code is derived.
     """
     try:
-        with printer, interrupts.on_interrupt(printer.stop_deletes):
+        with printer:
             run()
     except BatchError:
         # Per-item failure lines were already streamed by the printer.

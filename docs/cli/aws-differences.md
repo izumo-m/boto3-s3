@@ -259,6 +259,15 @@ comes out differently, listed in section 1.
   would have removed survive**. Re-running the command deletes them, and a run
   that enumerates to the end is unaffected.
 
+  A **Ctrl-C** while deletes are in flight shows it too. `aws` cancels its
+  per-key delete futures and prints nothing after the interrupt (measured:
+  ten deletes in flight, at most one line), while a batch request already out
+  here cannot be cancelled: it completes, and the lines of the keys it carried
+  - up to a thousand - print before `cancelled: ctrl-c received`, as do those
+  of the per-key requests already out. A per-key request not yet started is
+  not sent and prints nothing, as on `aws`. (Under the CRT engine see the
+  entry below.)
+
   One batch request also has one set of attempts, where each of `aws`'s
   per-key requests has its own, so **an endpoint that fails requests** —
   dropping connections, answering with an error — can end differently too,

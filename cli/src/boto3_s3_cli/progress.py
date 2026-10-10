@@ -76,7 +76,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TextIO
 
-from boto3_s3 import OpOutcome, TransferType
+from boto3_s3 import OpOutcome
 from boto3_s3.localstorage import LocalStorage
 from boto3_s3_cli.output import human_readable_size, uni_write
 
@@ -196,9 +196,6 @@ class TransferPrinter:
         # drains the queue after it: nothing later is printed or counted, a
         # success that completed (an mv's source already deleted) included.
         self._stopped = False
-        # Set by `stop_deletes` when a Ctrl-C arrives: delete records stop
-        # printing from then on (see there).
-        self._deletes_stopped = False
         # printer-thread-only state (no lock: one thread owns them)
         self._progress_length = 0
         self._output_dead = False
@@ -309,30 +306,10 @@ class TransferPrinter:
         if not self._finished:
             self._queue.put(snapshot)
 
-    def stop_deletes(self) -> None:
-        """Print no further delete record: a Ctrl-C arrived (`interrupts.on_interrupt`).
-
-        aws cancels its per-key delete futures at a Ctrl-C and its result
-        processor drops everything after the first cancelled one. A batch of
-        deletes in flight here still completes and reports its keys, up to a
-        whole batch of them, before the interrupt reaches the command. The
-        transfers keep their own stop rule - the first cancelled record - since
-        aws's CRT manager swallows an interrupt in its drain and its transfers
-        go on reporting.
-        """
-        with self._lock:
-            self._deletes_stopped = True
-
     def on_result(self, result: OpResult) -> None:
         """Reconcile terminal counters and enqueue the result shape aws-cli prints."""
         record: _ResultRecord | None = None
         with self._lock:
-            if (
-                self._deletes_stopped
-                and result.transfer_type is TransferType.DELETE
-                and result.outcome is not OpOutcome.NOTICE
-            ):
-                return
             if self._stopped and result.outcome is not OpOutcome.NOTICE:
                 # aws's processor has disabled its handlers (`_stopped`). A
                 # NOTICE never went through them: aws writes those straight
