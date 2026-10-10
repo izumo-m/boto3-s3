@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An incomplete listing, bucket or HeadObject response, or a timestamp the host cannot represent, now raises `MalformedResponseError` instead of the bare `KeyError` / `OverflowError`.
 - Log masking now also hides a legacy SigV2 `Authorization` header whose access key id is not AWS-shaped (an S3-compatible endpoint's, say), and such an id in a credentials response body.
 - A failed S3 request is now a `Boto3S3Error` whatever botocore raised inside it; a listing, a HEAD or a single-object call could leak a bare `KeyError` / `RecursionError` / `ValueError`.
-- A batched delete now retries a key S3 reports with a transient error (as `aws s3`'s per-key deletes are retried) instead of failing it.
+- A batched delete now re-sends on its own a key S3 reports with a transient error, and every key of a batch request that failed transiently or died without a response, as `aws s3`'s per-key deletes are retried, instead of failing them.
 - A listing failure's `operation` now names the operation that was listing (`ls` / `rm` / `cp` / `mv`, as `sync` already did); a direct `get_fileinfo` or `list_buckets` call leaves it unset.
 - `S3FileInfo.etag` now holds the ETag exactly as S3 returned it, quotes included (it used to be stripped), so a multipart download's `If-Match` is the response's own text as with `aws s3`; `EtagComparison.content_differs` takes an ETag in either form.
 - `get_file` no longer fails on a long multi-byte destination name, and `put_file` refuses a FIFO, socket or device instead of hanging or leaking an `OSError`.

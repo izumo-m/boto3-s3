@@ -325,9 +325,10 @@ classic; the CRT client is a process-wide singleton, so the transfer that
 follows reuses whatever was built).
 
 For rm this construction comes ahead of everything the run does: the deletes
-ride the engine (section 6), but the library builds it later - the recursive
-route with its deleter, just before the listing; the single-key route just
-before its request; a dryrun never. Paying it at aws's slot is what makes the failure surfaces
+ride the engine (section 6), but the library builds it later - the listing
+routes (recursive, and the keyless folder-marker sweep) with their deleter,
+just before the listing; the single-key route just before its request; a
+dryrun never. Paying it at aws's slot is what makes the failure surfaces
 identical - the alternative, synthesizing awscrt's assertion ourselves, would
 rest the parity on a hand-written mirror of a third-party `assert`.
 

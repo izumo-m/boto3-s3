@@ -132,10 +132,12 @@ own error rather than as the answer - so only an answer the CRT does not retry
 for its keys - a batch past the read timeout, an endpoint that drops only the
 batch call, a flaky connection that ran through the one batch request's
 attempts while each of aws-cli's per-key requests has attempts of its own
-(measured: a server dropping the first six deletes of two keys leaves aws at
-rc 0) - so every key of it goes out again on the per-key route of the same
-client, whatever the retry policy, and takes that request's outcome. A key
-can so get more attempts than aws-cli gives it, never fewer. A per-key
+(measured on the CRT engine: a server dropping the first six deletes of two
+keys leaves aws deleting both at rc 0) - so every key of it goes out again on
+the per-key route of the same client, whatever the retry policy, and takes
+that request's outcome. A key can so get more attempts than aws-cli gives
+it, never fewer. The same holds for a batch that failed as a whole with a
+transient fault (below). A per-key
 `DeleteObject` that dies this way on botocore leaves its key with no record
 and no count: aws-cli's classic completion handler loses each such failure
 ([`opresult.md`](./opresult.md), `lost_like_aws`), so `rm --recursive`
@@ -174,8 +176,8 @@ versioned bucket) cannot be mapped back to submission order.
   The message has the same shape as the str() of a botocore `ClientError`:
   `An error occurred ({Code}) when calling the DeleteObjects operation: {Message}`.
   The request-level path also uses the full `str(ClientError)`, so both paths
-  read alike (the only difference is that the request-level path gains a retry
-  suffix when retries are exhausted). It carries `operation` / `bucket` / `key`
+  read alike (the only difference is that the request-level path can gain
+  botocore's retry suffix). It carries `operation` / `bucket` / `key`
   attributes.
 - **a transient per-key failure** (an `Errors[]` entry whose code the table
   files under `TransportError`): the key is sent again as an individual
@@ -198,10 +200,9 @@ versioned bucket) cannot be mapped back to submission order.
   retry policy. The per-key request puts the key back under that policy, and
   when the attempts are spent the recorded error is the `DeleteObject`
   failure - aws-cli's own line for the key, singular operation name and (on
-  botocore) retry suffix included. It is not a fallback for a failed batch: a
-  `DeleteObjects` request failing as a whole with an answer was retried by the
-  client already and fails every key it carried (below); one that died without
-  a response re-sends its keys on the per-key route instead (above).
+  botocore) retry suffix included. A batch request that failed as a whole
+  with such a fault sends its keys the same way (below), and one that died
+  without a response re-sends them on the per-key route too (above).
 - **an unattributable `Errors[]` entry** (a missing `Key`, or a spelling that
   does not match the submitted key): logs a WARNING (the trace stays) and
   **fails the rest of that batch closed**. Such an entry means the response no
@@ -224,14 +225,23 @@ versioned bucket) cannot be mapped back to submission order.
   `DeleteObjects` at all, section 4), so this is a fail-closed defense rather
   than an observable behavior.
 - **request-level failure** (the `delete_objects` call itself failing with an
-  answer - a service error, on botocore a refused connection; one that died
-  without a response, which on the CRT client includes a retried server error
-  once spent, re-sends its keys instead, above): records
+  answer that is final for its keys - `NoSuchBucket`, `AccessDenied`, a
+  client-side validation error): records
   the `Boto3S3Error` raised by `s3storage.s3_errors` (which translates via
   `translate_boto_error`) as a failure for **every key** in that batch, and
   continues with subsequent batches
   (`NoSuchBucket` and the like fail across all batches alike and show up in the
-  counts).
+  counts). A failure that is not final for the keys sends each of them again
+  as its own `DeleteObject` on the same client, which then decides it: one
+  that died without a response (above), and a transient one - a
+  `TransportError`: a 5xx or throttling answer, a refused or failed
+  connection - which the client already spent the batch request's attempts
+  on, where each of aws-cli's per-key requests has its own (measured: a
+  server failing the first three deletes with `InternalError` leaves aws
+  deleting both keys at rc 0, and so does this). That re-send goes out
+  whatever the retry policy, since the batch was no key's own request; a key
+  the run is abandoned before re-sending keeps the batch's error, as a
+  transient per-key fault's does.
 - **the request raising outside the boto family** (botocore reading a
   response that lacks an element it needs - an S3 Express `CreateSession`
   reply without `Credentials`, a `KeyError` - or a redirect loop ending in
@@ -297,7 +307,10 @@ versioned bucket) cannot be mapped back to submission order.
   carries the `(reached max retries: N)` suffix, where aws - issuing one
   `DeleteObject` per key - names the singular one and, on its classic client,
   carries the suffix botocore appends once the request's attempts are spent
-  (its CRT client's error carries none). The
+  (its CRT client's error carries none). A batch request failing as a whole
+  with an answer final for its keys is recorded with botocore's own line for
+  `DeleteObjects` - the plural name again, with the suffix where botocore
+  spent the request's attempts. The
   non-batched single-key delete keeps `DeleteObject` and matches aws byte for
   byte, so the difference is confined to the batched routes
   (`rm --recursive`, an S3-side `sync --delete`, `rb --force`). Recorded for

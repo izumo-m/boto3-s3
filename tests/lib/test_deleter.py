@@ -741,18 +741,59 @@ class TestResults:
         assert fake.single_calls == []
         assert [r.outcome for r in results] == [OpOutcome.FAILED]
 
-    def test_a_transient_request_level_failure_is_not_retried_per_key(self) -> None:
-        # The whole request failing is botocore's to retry, and it already
-        # has: every key of the batch fails with that error, none goes out
-        # again one by one.
+    def test_a_transient_request_level_failure_is_resent_per_key(self) -> None:
+        # botocore spent the batch request's attempts; each of aws-cli's
+        # per-key requests has its own (measured: a server failing the first
+        # three deletes with InternalError leaves aws deleting both keys at
+        # rc 0), so each key goes out again and takes that request's outcome.
+        fake = _FakeS3Client(
+            script=[_client_error("InternalError", 500)],
+            single_script=[{}, _client_error("AccessDenied", 403, "DeleteObject")],
+        )
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append)
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
+        deleter.close()
+        assert sorted(call["Key"] for call in fake.single_calls) == ["a", "b"]
+        assert sorted(r.outcome.value for r in results) == ["failed", "succeeded"]
+
+    def test_so_is_one_under_a_client_told_not_to_retry(self) -> None:
+        # The batch was no key's own request: aws-cli still sends each key
+        # once, so the re-send is that one attempt, not a retry.
+        fake = _FakeS3Client(script=[_client_error("SlowDown", 503)], single_script=[{}, {}])
+        fake.meta = SimpleNamespace(  # type: ignore[attr-defined]
+            config=SimpleNamespace(retries={"total_max_attempts": 1, "mode": "standard"})
+        )
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append)
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
+        deleter.close()
+        assert len(fake.single_calls) == 2
+        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED] * 2
+
+    def test_a_key_not_resent_keeps_the_batch_error(self) -> None:
+        # Abandoned before the re-sends start: the key is recorded with the
+        # request's own error, as a per-key transient fault is.
         fake = _FakeS3Client(script=[_client_error("InternalError", 500)])
+        results: list[OpResult] = []
+        deleter = _deleter(fake, batch_size=1, on_result=results.append)
+        deleter._abandoned = True  # pyright: ignore[reportPrivateUsage]
+        deleter.submit(_info("a"))
+        deleter.close(flush=False)
+        assert fake.single_calls == []
+        assert [type(r.error) for r in results] == [TransportError]
+
+    def test_a_request_level_answer_that_is_not_transient_fails_every_key(self) -> None:
+        fake = _FakeS3Client(script=[_client_error("NoSuchBucket", 404)])
         results: list[OpResult] = []
         deleter = _deleter(fake, on_result=results.append)
         deleter.submit(_info("a"))
         deleter.submit(_info("b"))
         deleter.close()
         assert fake.single_calls == []
-        assert [type(r.error) for r in results] == [TransportError, TransportError]
+        assert [type(r.error) for r in results] == [NotFoundError, NotFoundError]
 
     def test_a_client_told_not_to_retry_does_not_resend_the_key(self) -> None:
         # One attempt per request (AWS_MAX_ATTEMPTS=1, max_attempts=0) is the
@@ -1111,15 +1152,18 @@ class TestResults:
         assert results == []
         assert (deleter.succeeded, deleter.failed) == (0, 0)
 
-    def test_a_refused_connection_still_fails_the_batch(self) -> None:
+    def test_a_refused_connection_still_fails_the_key(self) -> None:
         # EndpointConnectionError carries no response attribute at all, so
         # aws-cli's check answers normally and the key fails there too
         # (`delete failed: ... Could not connect to the endpoint URL`, rc 1).
-        fake = _FakeS3Client(script=[EndpointConnectionError(endpoint_url="http://h/")])
+        # The batch's refusal sends the key again on its own, refused as well.
+        refused = EndpointConnectionError(endpoint_url="http://h/")
+        fake = _FakeS3Client(script=[refused], single_script=[refused])
         results: list[OpResult] = []
         deleter = _deleter(fake, on_result=results.append)
         deleter.submit(_info("a"))
         deleter.close()
+        assert len(fake.single_calls) == 1
         assert [r.outcome for r in results] == [OpOutcome.FAILED]
         assert isinstance(results[0].error, TransportError)
 
@@ -1136,12 +1180,15 @@ class TestResults:
     def test_request_level_request_timeout_maps_to_transport_error(self) -> None:
         # The shared code table wins over the 4xx status fallback, so both
         # delivery paths (request-level and per-key) classify RequestTimeout
-        # the same way.
-        fake = _FakeS3Client(script=[_client_error("RequestTimeout", 400)])
+        # the same way - and the request-level one re-sends the key, whose own
+        # request fails the same way here.
+        timeout = _client_error("RequestTimeout", 400)
+        fake = _FakeS3Client(script=[timeout], single_script=[timeout])
         results: list[OpResult] = []
         deleter = _deleter(fake, on_result=results.append)
         deleter.submit(_info("a"))
         deleter.close()
+        assert len(fake.single_calls) == 1
         assert isinstance(results[0].error, TransportError)
 
     def test_error_entry_without_key_fails_the_unconfirmed_keys(

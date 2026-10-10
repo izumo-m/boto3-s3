@@ -884,7 +884,11 @@ An invalid `[s3]` value is therefore 255 for every rm form, `--quiet` included
 losing to the path-type 252. A CRT selection builds the CRT client there, and
 the resolved `TransferConfig` is threaded into `S3.rm`, whose deletes ride
 that client - batched - as aws's ride its manager ([`crt.md`](./crt.md)
-sections 4 and 6).
+sections 4 and 6), so the `[s3]` keys that tune the CRT client reach them on
+both tools. On the classic engine the numeric keys stay inert for deletes:
+the deleter paces itself (one batch in flight, its per-key requests ten at a
+time), where aws's classic deletes are paced by `max_concurrent_requests` and
+its queue size. Neither is observable in rc or output.
 
 The target has 3 forms
 (determined from aws-cli `filegenerator.py` plus the real
