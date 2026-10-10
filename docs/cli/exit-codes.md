@@ -156,15 +156,13 @@ All of this matches `aws s3`, including the orderings above.
 
 ## 3. Where this differs from `aws s3`
 
-Three cases where the codes are deliberately not identical:
+Two cases where the codes are deliberately not identical:
 
 - **The CRT transfer engine without the `crt` extra** exits 253; a CRT-only
   `--checksum-algorithm` without it fails per item at exit code 1 instead.
   `aws` v2 bundles awscrt, so neither situation can arise there.
 - **A corrupted ranged download** exits 0 here and 1 under `aws`. See
   [`aws-differences.md`](./aws-differences.md) for how to get that check back.
-- **A listing an S3-compatible endpoint returns unsorted** stops `sync` here
-  at exit code 1, where `aws` keeps merging and exits 0.
 
 A few other paths settle on different codes too — a download body cut
 mid-stream, a plain-HTTP

@@ -88,10 +88,10 @@ The reading flags nest: `SORTABLE_SCAN` implies `SCAN` implies
 
 **`SORTABLE_SCAN` is not optional for `sync`.** Its pairing walks both listings
 in UTF-8 byte order; an unsorted listing manufactures pairs that do not exist
-and, with `delete_filter`, deletes objects that were never orphans. Declaring
-the flag and then yielding out of order does not do that silently: the merge
-raises `ValidationError` at the first key smaller than the one before it and the
-run stops there. `sync` is the only order-sensitive consumer — recursive `cp`
+and, with `delete_filter`, deletes objects that were never orphans. Nothing
+checks the promise: `sync` merges such a listing the way `aws s3 sync` merges
+an unsorted one from an S3-compatible endpoint, mis-pairing as it goes, so the
+order is yours to get right. `sync` is the only order-sensitive consumer — recursive `cp`
 and `mv` take entries in whatever order you yield them, so a plain `SCAN`
 backend needs no ordering guarantee at all.
 

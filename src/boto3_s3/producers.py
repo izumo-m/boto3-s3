@@ -837,7 +837,8 @@ def require_open_sync_capabilities(
 
     ``sync`` merge-joins two byte-ordered listings, so a custom side must
     declare ``SORTABLE_SCAN`` (an unsorted side would manufacture phantom
-    new/delete pairs - with ``--delete``, destination corruption). On top of
+    new/delete pairs - with ``--delete``, destination corruption, as on
+    aws-cli's merge, which this one follows step for step). On top of
     that: an ``opens3`` source needs ``OPEN_READ``; an ``s3open`` destination
     needs ``OPEN_WRITE`` plus ``DELETE`` when ``delete`` removes orphans (the
     ``opens3`` orphans are S3, deleted without the custom side).

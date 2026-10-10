@@ -53,7 +53,6 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Generic, TypeVar
 
-from boto3_s3.exceptions import ValidationError
 from boto3_s3.types import FileInfo, S3FileInfo, TransferType
 
 if TYPE_CHECKING:
@@ -126,9 +125,8 @@ class DestOnlyPair:
 
 # What `Comparator.compare` yields: each merge-joined entry as exactly one of
 # the three pair shapes, telling by type which side(s) hold it. Per entry, not
-# per key - the order guard admits equal consecutive keys, so a custom backend
-# that yields a key twice gets a pair per occurrence; the built-in scans never
-# duplicate a key.
+# per key - a custom backend that yields a key twice gets a pair per
+# occurrence; the built-in scans never duplicate a key.
 MergedPair = SrcOnlyPair | SyncPair | DestOnlyPair
 
 # The update judgment: a predicate over the both-sides pair, `True` = copy.
@@ -200,44 +198,6 @@ class ParallelFilter(Generic[_T]):
     executor: Executor
 
 
-def _byte_ordered(
-    entries: Iterable[tuple[str, FileInfo]], side: str
-) -> Iterator[tuple[str, FileInfo]]:
-    """Pass-through that kills the run when a side descends by ``compare_key``.
-
-    ``Comparator.compare``'s merge-join assumes both sides arrive in UTF-8
-    byte order (what a ``SORTABLE_SCAN`` backend promises; ``str``
-    code-point order equals UTF-8 byte order for Unicode scalar values - a
-    surrogateescaped local name sits outside that equivalence, but both the
-    walk's sort and this guard use the same ``str`` order, so the two stay
-    consistent with each other). A source that yields out of order - a custom
-    backend that declares ``SORTABLE_SCAN`` and breaks the promise, or an
-    S3-compatible endpoint whose ``ListObjectsV2`` does not sort - would
-    *silently* mis-pair: phantom src-only / dest-only pairs, and with the delete
-    lane on, the deletion from the destination of entries the source has too
-    (the source is never deleted from). Continuing on
-    such a stream is data loss, so this raises a ``ValidationError`` naming the
-    offending side and key pair, aborting the run at the first descent instead.
-    The check runs unconditionally (it is not an ``assert``): the failure it
-    catches is destructive rather than a mere internal-invariant bug, and it
-    must not evaporate under ``-O`` or leak a bare ``AssertionError`` past a
-    consumer's error handling. The cost is one string comparison per entry.
-
-    Equal consecutive keys pass (only a strict descent is rejected), so a
-    backend repeating a key stays the ``Comparator`` docstring's
-    pair-per-occurrence case rather than a failure.
-    """
-    prev: str | None = None
-    for key, info in entries:
-        if prev is not None and key < prev:
-            raise ValidationError(
-                f"{side} sync stream is not byte-ordered by compare_key "
-                f"({prev!r} then {key!r}); a SORTABLE_SCAN backend must yield ascending keys"
-            )
-        prev = key
-        yield key, info
-
-
 @dataclass(frozen=True)
 class Comparator:
     """Merge-join two key-ordered listing streams into ``MergedPair``s.
@@ -245,15 +205,16 @@ class Comparator:
     The classic sorted-merge (aws-cli ``Comparator.call``): advance whichever
     side holds the smaller key, pair equal keys, and flush the survivor once
     one side is exhausted.
-    Inputs must be ascending by compare key - what a ``SORTABLE_SCAN``
+    Inputs are expected ascending by compare key - what a ``SORTABLE_SCAN``
     backend's ``scan(sort=True)`` promises (S3 byte order; the local walk sorts
-    to match) - and
-    the merge itself never compares sizes or times: that is the lane filters'
+    to match) - but are not checked: an unordered one mis-pairs exactly as
+    aws-cli's merge mis-pairs it (``compare``). The merge itself never
+    compares sizes or times: that is the lane filters'
     job (a ``PairFilter`` for the ``SyncPair``s, ``create_filter`` /
     ``delete_filter`` for the one-sided shapes). Every input entry becomes one
-    pair, which is one pair per key only while each side's keys are unique: the
-    order guard admits equal consecutive keys, so a custom backend repeating a
-    key yields a pair per occurrence (the built-in scans never repeat one).
+    pair, which is one pair per key only while each side's keys are unique: a
+    custom backend repeating a key yields a pair per occurrence (the built-in
+    scans never repeat one).
     ``transfer_type`` is
     stamped onto every emitted pair verbatim - context, not a judgment, and
     neither validated nor interpreted here; ``S3.sync`` puts the run's
@@ -278,18 +239,15 @@ class Comparator:
         ``(compare_key, info)`` streams, lazily consumed - pairing streams
         page-by-page listings without materializing either side.
 
-        Raises ``ValidationError`` from the pull that first sees a key smaller
-        than the one before it on the same side (the order guard,
-        ``_byte_ordered``): the merge cannot pair an unordered stream, and
-        continuing would delete destination entries the source has too.
-        Detection is as
-        late as the descent itself, so pairs already yielded stand - the caller
-        keeps whatever it did with them - but the offending entry is never
-        paired and nothing after it is read.
+        An input that is not ascending is merged all the same, step for step
+        as aws-cli's ``Comparator.call`` merges it: each step compares only the
+        two entries in hand, so a key that arrives out of order on one side
+        surfaces as a ``SrcOnlyPair`` and a ``DestOnlyPair`` instead of one
+        ``SyncPair`` - which ``sync``'s delete lane then acts on, deleting the
+        destination's copy of a key the source has too, exactly as aws-cli
+        does against an S3-compatible endpoint whose listing does not sort.
         """
         transfer_type = self.transfer_type
-        src_entries = _byte_ordered(src_entries, "source")
-        dest_entries = _byte_ordered(dest_entries, "destination")
         src_iter = iter(src_entries)
         dest_iter = iter(dest_entries)
         src = next(src_iter, None)

@@ -117,13 +117,15 @@ pair (`PairFilter = Callable[[SyncPair], bool]`, True = copy).
   `SrcOnlyPair`, `file_at_src_and_dest` -> `SyncPair`, `file_not_at_src` ->
   `DestOnlyPair`. The merge emits one pair **per entry**, which is one pair per
   key only while each side's keys are unique. The `SORTABLE_SCAN` order contract
-  is enforced at merge time: a strict descent on either side raises
-  `ValidationError` naming the side and the key pair, and the enforcement is
-  unconditional (a plain comparison, not a `__debug__` assert, so `python -O`
-  does not remove it). Equal consecutive keys are accepted, so a custom
-  `SORTABLE_SCAN` backend that yields a key twice produces a pair per occurrence
-  rather than one merged pair; the built-in local and S3 scans never duplicate a
-  key, so this is a custom-backend concern.
+  is not checked at merge time: an unordered side is merged step for step as
+  aws-cli's `Comparator.call` merges it (each step compares only the two
+  entries in hand), so the mis-pairing an S3-compatible endpoint's unsorted
+  `ListObjectsV2` causes - with `--delete`, a destination key the source has
+  too deleted and then copied again - is aws-cli's own, measured against a
+  listing mutated in flight. A custom `SORTABLE_SCAN` backend that yields a key
+  twice produces a pair per occurrence rather than one merged pair; the
+  built-in local and S3 scans never duplicate a key, so this is a
+  custom-backend concern.
 - `create_filter` is the new (`SrcOnlyPair`) lane: `True` (default) copies every new
   entry, `False` none, a `FileFilter` only those it keeps (matched against the
   source `FileInfo` / compare key, the same shape as `rm`'s `filter`). aws-cli

@@ -351,9 +351,10 @@ gates raise is built from this.
 
 `ScanOptions.sort` requests entries in UTF-8 byte order of their `compare_key`
 ([`./options.md`](./options.md)). **A backend declaring `SORTABLE_SCAN` must
-honor `sort=True`; nothing else promises any order.** The promise is checked as
-`sync` consumes it: a stream that descends raises `ValidationError` from the
-merge rather than mis-pairing ([`./comparator.md`](./comparator.md)).
+honor `sort=True`; nothing else promises any order.** The promise is not
+checked: a stream that breaks it is merged the way the AWS CLI merges an
+unsorted listing, mis-pairing — and with deletes on, removing destination
+entries the source has too ([`./comparator.md`](./comparator.md)).
 
 `sync` is the only operation that sets `sort=True` — its merge-join walks both
 listings in ascending key order ([`./comparator.md`](./comparator.md)) — and it

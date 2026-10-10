@@ -1,37 +1,31 @@
-"""An unsorted side of a sync: the merge-join's order guard.
+"""An unsorted side of a sync: merged the way aws-cli merges it.
 
-``Comparator.compare`` merge-joins two streams that must ascend by compare
-key. A side that descends - a custom backend that declares ``SORTABLE_SCAN``
-and breaks the promise, or an S3-compatible endpoint whose ``ListObjectsV2``
-does not sort (real S3 and MinIO both do) - would mis-pair, and the delete
-lane would then remove entries that exist on *both* sides. aws-cli keeps
-merging on such a stream and does exactly that (measured against a listing
-mutated in flight): it deletes a both-sides key right before re-copying it.
-That is silent data loss, so this is a deliberate divergence - the guard kills
-the run at the first descent with a library ``ValidationError``, which the CLI
-renders as one ``fatal error:`` line at rc 1.
+``Comparator.compare`` merge-joins two streams that are expected to ascend by
+compare key. A side that does not - an S3-compatible endpoint whose
+``ListObjectsV2`` does not sort (real S3 and MinIO both do), or a custom
+backend that declares ``SORTABLE_SCAN`` and breaks the promise - is merged all
+the same, one comparison of the two entries in hand per step, exactly as
+aws-cli's ``Comparator.call`` merges it. The mis-pairing that follows is
+aws-cli's own: with ``--delete`` it deletes from the destination a key the
+source has too and copies it again (measured against a listing mutated in
+flight).
 
-The pins here: the error is a real classified exception (not the ``assert``
-this used to be, which escaped the CLI as a bare ``AssertionError`` and a raw
-traceback - `finish_transfer` re-raises that class by design), it names the
-offending side and key pair, it survives ``python -O``, and nothing is
-transferred or deleted after the descent is seen.
+The pins here: the pairing equals a step-for-step port of aws-cli's merge on
+arbitrary unordered input, and ``S3.sync`` then acts on every pair - both
+loss shapes, from either side.
 """
 
 from __future__ import annotations
 
 import os
-import subprocess
-import sys
-import textwrap
+import random
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 from boto3.s3.transfer import TransferConfig
 
-from boto3_s3.comparator import Comparator, MergedPair
-from boto3_s3.exceptions import ValidationError
+from boto3_s3.comparator import Comparator, DestOnlyPair, MergedPair, SrcOnlyPair, SyncPair
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.types import FileInfo, TransferType
@@ -47,8 +41,52 @@ def _entries(*keys: str) -> list[tuple[str, FileInfo]]:
     return [(key, FileInfo(key=key, size=10, mtime=_TIME)) for key in keys]
 
 
-def _pairs(src: list[tuple[str, FileInfo]], dest: list[tuple[str, FileInfo]]) -> list[MergedPair]:
-    return list(Comparator(_KIND).compare(iter(src), iter(dest)))
+def _shapes(pairs: list[MergedPair]) -> list[tuple[str, str]]:
+    names = {SrcOnlyPair: "src", SyncPair: "both", DestOnlyPair: "dest"}
+    return [(names[type(pair)], pair.compare_key) for pair in pairs]
+
+
+def _aws_merge(src: list[str], dest: list[str]) -> list[tuple[str, str]]:
+    """aws-cli's ``Comparator.call`` state machine, step for step.
+
+    Each step takes a fresh entry from a side only when the previous step
+    consumed that side's entry, compares the two in hand, and reports one
+    shape; once a side runs dry the other drains.
+    """
+    out: list[tuple[str, str]] = []
+    src_iter, dest_iter = iter(src), iter(dest)
+    src_done = dest_done = False
+    src_take = dest_take = True
+    src_key = dest_key = ""
+    while True:
+        if not src_done and src_take:
+            try:
+                src_key = next(src_iter)
+            except StopIteration:
+                src_done = True
+        if not dest_done and dest_take:
+            try:
+                dest_key = next(dest_iter)
+            except StopIteration:
+                dest_done = True
+        if not src_done and not dest_done:
+            src_take = dest_take = True
+            if src_key == dest_key:
+                out.append(("both", src_key))
+            elif src_key < dest_key:
+                dest_take = False
+                out.append(("src", src_key))
+            else:
+                src_take = False
+                out.append(("dest", dest_key))
+        elif not src_done:
+            src_take = True
+            out.append(("src", src_key))
+        elif not dest_done:
+            dest_take = True
+            out.append(("dest", dest_key))
+        else:
+            return out
 
 
 def _write(root: Path, rel: str, body: bytes, *, mtime: datetime) -> None:
@@ -58,105 +96,31 @@ def _write(root: Path, rel: str, body: bytes, *, mtime: datetime) -> None:
     os.utime(target, (mtime.timestamp(), mtime.timestamp()))
 
 
-class TestOrderGuardError:
-    """The failure itself: classified, exact, and self-describing."""
+class TestMergeMatchesAwsCli:
+    def test_a_descending_source_is_merged_not_refused(self) -> None:
+        pairs = list(Comparator(_KIND).compare(iter(_entries("b", "a")), iter(_entries("a", "b"))))
+        # The source's "a" arrives after the merge has passed it on the
+        # destination side, so it is both destination-only and source-only.
+        assert _shapes(pairs) == [("dest", "a"), ("both", "b"), ("src", "a")]
 
-    def test_descending_source_key_is_a_validation_error(self) -> None:
-        with pytest.raises(ValidationError) as excinfo:
-            _pairs(_entries("b", "a"), _entries("a", "b"))
-        message = str(excinfo.value)
-        assert "source sync stream is not byte-ordered by compare_key" in message
-        # Both halves of the violating pair are named, in the order seen.
-        assert "'b' then 'a'" in message
-
-    def test_descending_destination_key_is_a_validation_error(self) -> None:
-        with pytest.raises(ValidationError) as excinfo:
-            _pairs(_entries("a", "b"), _entries("c", "a"))
-        message = str(excinfo.value)
-        assert "destination sync stream is not byte-ordered by compare_key" in message
-        assert "'c' then 'a'" in message
-
-    def test_error_class_is_exactly_validation_error(self) -> None:
-        # pytest.raises accepts subclasses, so the class is pinned by identity:
-        # a refinement (InvalidValueError, an rc-255 CLI mapping) would change
-        # the exit code this failure reports outside the transfer span.
-        with pytest.raises(ValidationError) as excinfo:
-            _pairs(_entries("b", "a"), _entries("a"))
-        assert type(excinfo.value) is ValidationError
-
-    def test_error_is_not_an_assertion_error(self) -> None:
-        # The CLI's transfer seam re-raises AssertionError untouched (an
-        # internal-invariant bug crashes loudly), so this failure must not be
-        # one: it has to reach the `fatal error:` translation instead.
-        with pytest.raises(ValidationError) as excinfo:
-            _pairs(_entries("b", "a"), _entries("a"))
-        assert not isinstance(excinfo.value, AssertionError)
+    @pytest.mark.parametrize("seed", range(200))
+    def test_unordered_input_pairs_as_aws_clis_merge_pairs_it(self, seed: int) -> None:
+        rng = random.Random(seed)
+        alphabet = "abcdef"
+        src = [rng.choice(alphabet) for _ in range(rng.randint(0, 7))]
+        dest = [rng.choice(alphabet) for _ in range(rng.randint(0, 7))]
+        pairs = list(Comparator(_KIND).compare(iter(_entries(*src)), iter(_entries(*dest))))
+        assert _shapes(pairs) == _aws_merge(src, dest)
 
 
-class TestOrderGuardBoundaries:
-    """What the guard must *not* reject, and how far it lets a run get."""
+class TestUnsortedListingSync:
+    """``S3.sync`` acts on every pair an unsorted listing produces."""
 
-    def test_equal_consecutive_keys_are_not_a_descent(self) -> None:
-        # Only a strict descent is a violation: a backend repeating a key stays
-        # the documented pair-per-occurrence case, not a failure.
-        pairs = _pairs(_entries("a", "a", "b"), _entries("a"))
-        assert [pair.compare_key for pair in pairs] == ["a", "a", "b"]
-
-    def test_ordered_streams_pair_untouched(self) -> None:
-        pairs = _pairs(_entries("a", "b", "c"), _entries("a", "c"))
-        assert [type(pair).__name__ for pair in pairs] == [
-            "SyncPair",
-            "SrcOnlyPair",
-            "SyncPair",
-        ]
-
-    def test_pairs_before_the_descent_survive_and_the_rest_is_unread(self) -> None:
-        # Detection is as late as the descent itself: pairs already yielded
-        # stand (the caller acted on them), the offending entry is never paired,
-        # and nothing past it is pulled from the input.
-        src = iter(_entries("a", "b", "a", "z"))
-        stream = Comparator(_KIND).compare(src, iter(_entries("a", "b")))
-        assert [next(stream).compare_key for _ in range(2)] == ["a", "b"]
-        with pytest.raises(ValidationError):
-            next(stream)
-        assert [key for key, _info in src] == ["z"], "the stream was read past the descent"
-
-    def test_guard_is_not_compiled_out_under_python_dash_o(self) -> None:
-        # It used to be an `assert` behind `if __debug__`, so `-O` removed it
-        # and the mis-pairing went silent. Asserts are gone in the child, so it
-        # reports through stdout rather than assert.
-        script = textwrap.dedent("""
-            from boto3_s3.comparator import Comparator
-            from boto3_s3.exceptions import ValidationError
-            from boto3_s3.types import FileInfo, TransferType
-
-            src = [(k, FileInfo(key=k)) for k in ("b", "a")]
-            dest = [("a", FileInfo(key="a"))]
-            try:
-                list(Comparator(TransferType.UPLOAD).compare(iter(src), iter(dest)))
-            except ValidationError as exc:
-                if "not byte-ordered" in str(exc):
-                    print("GUARD-ACTIVE")
-            """)
-        done = subprocess.run(
-            [sys.executable, "-O", "-c", script],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert done.returncode == 0, done.stderr
-        assert "GUARD-ACTIVE" in done.stdout
-
-
-class TestUnsortedListingStopsTheRun:
-    """``S3.sync``: an unsorted listing acts on nothing more once seen."""
-
-    def test_unsorted_s3_source_stops_the_delete_lane(self, tmp_path: Path) -> None:
+    def test_unsorted_s3_source_deletes_then_downloads_again(self, tmp_path: Path) -> None:
         # The measured shape (a proxy reversing ListObjectsV2 Contents): the
-        # reversed source makes the still-present k1/k3 look destination-only,
-        # so they are deleted before the second source pull reveals the descent.
-        # Everything after that must not happen - no k2/k4 download, and the
-        # genuine orphan (zold) is not deleted either.
+        # reversed source makes the local k1 / k3 look destination-only, so
+        # they are deleted, and the rest of the source then downloads them
+        # back alongside the others; the genuine orphan goes last.
         out = tmp_path / "out"
         for name in ("k1.txt", "k3.txt"):
             _write(out, name, b"xx", mtime=MTIME - timedelta(hours=1))
@@ -164,34 +128,46 @@ class TestUnsortedListingStopsTheRun:
         page = listing(
             ("d/k5.txt", 7), ("d/k4.txt", 7), ("d/k3.txt", 7), ("d/k2.txt", 7), ("d/k1.txt", 7)
         )
-        client, calls = make_recording_client([page, get_response()])
-        with pytest.raises(ValidationError) as excinfo:
-            S3().sync(
-                S3Storage("s3://bucket/d", client=client),
-                str(out),
-                delete_filter=True,
-                transfer_config=_SERIAL,
-            )
-        assert "source sync stream is not byte-ordered" in str(excinfo.value)
-        assert ops(calls) == ["ListObjectsV2", "GetObject"]
-        assert calls[1].params["Key"] == "d/k5.txt"
-        assert sorted(path.name for path in out.iterdir()) == ["k5.txt", "zold.txt"]
+        client, calls = make_recording_client([page] + [get_response() for _ in range(5)])
+        S3().sync(
+            S3Storage("s3://bucket/d", client=client),
+            str(out),
+            delete_filter=True,
+            transfer_config=_SERIAL,
+        )
+        assert ops(calls) == ["ListObjectsV2"] + ["GetObject"] * 5
+        assert [call.params["Key"] for call in calls[1:]] == [
+            "d/k5.txt",
+            "d/k4.txt",
+            "d/k3.txt",
+            "d/k2.txt",
+            "d/k1.txt",
+        ]
+        assert sorted(path.name for path in out.iterdir()) == [
+            "k1.txt",
+            "k2.txt",
+            "k3.txt",
+            "k4.txt",
+            "k5.txt",
+        ]
 
-    def test_unsorted_s3_destination_never_deletes_a_both_sides_key(self, tmp_path: Path) -> None:
-        # aws's loss shape, from the destination side: with the descent ignored,
-        # the merge drains the destination as orphans and deletes `a.txt` - a key
-        # the source still holds and just uploaded. The unflushed delete batch is
-        # abandoned by the abort, so nothing reaches the wire.
+    def test_unsorted_s3_destination_deletes_a_key_the_source_has(self, tmp_path: Path) -> None:
+        # aws's loss shape from the destination side: the merge uploads a.txt,
+        # then drains the destination as orphans and deletes a.txt as well -
+        # a key the source still holds.
         src = tmp_path / "src"
         _write(src, "a.txt", b"xx", mtime=MTIME - timedelta(hours=1))
         page = listing(("d/m.txt", 2), ("d/a.txt", 2))
-        client, calls = make_recording_client([page, {}])
-        with pytest.raises(ValidationError) as excinfo:
-            S3().sync(
-                str(src),
-                S3Storage("s3://bucket/d", client=client),
-                delete_filter=True,
-                transfer_config=_SERIAL,
-            )
-        assert "destination sync stream is not byte-ordered" in str(excinfo.value)
-        assert ops(calls) == ["ListObjectsV2", "PutObject"]
+        client, calls = make_recording_client([page, {}, {}])
+        S3().sync(
+            str(src),
+            S3Storage("s3://bucket/d", client=client),
+            delete_filter=True,
+            transfer_config=_SERIAL,
+        )
+        assert ops(calls) == ["ListObjectsV2", "PutObject", "DeleteObjects"]
+        assert calls[1].params["Key"] == "d/a.txt"
+        assert [entry["Key"] for entry in calls[2].params["Delete"]["Objects"]] == [
+            "d/m.txt",
+            "d/a.txt",
+        ]

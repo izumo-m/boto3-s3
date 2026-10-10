@@ -2010,7 +2010,8 @@ class S3:
         # An S3 Express directory bucket lists in unspecified order
         # (`ListObjectsV2` drops the lexicographic guarantee), which would feed
         # the sorted merge-join unsorted input - `delete_filter` could then
-        # remove from the destination keys the source has too. aws-cli rejects
+        # remove from the destination keys the source has too, as aws-cli's
+        # merge would for any unsorted listing. aws-cli rejects
         # sync outright on either side
         # (`_validate_not_s3_express_bucket_for_sync`), after creating the
         # local destination directory as above; so does the CLI layer, making

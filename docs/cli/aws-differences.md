@@ -16,9 +16,7 @@ Under the same arguments and configuration you get **the same resulting S3
 state, the same returned values, the same error conditions, and the same exit
 code**, bar the entries in section 2 that say outright that the run comes out
 differently. Those are a corrupted ranged download, a download body cut
-mid-stream, a listing an
-S3-compatible endpoint returns unsorted, a recursive delete whose listing dies
-part way, a plain-HTTP
+mid-stream, a recursive delete whose listing dies part way, a plain-HTTP
 endpoint named anywhere but `--endpoint-url` under the CRT engine, a
 `REQUESTS_CA_BUNDLE` the CRT engine cannot use, an `aws` plugin the
 config file loads through `cli_legacy_plugin_path`, a `cli_history` directory
@@ -129,13 +127,10 @@ syncing with `--delete` onto such a directory.
 
 ## 2. Behavior differences
 
-The first two can leave you with something wrong without saying so, one on each
-side: a corrupted ranged download is a silent success here, and a transfer
-whose connection dies is a silent success on `aws`. One more case is silent on
-`aws`'s side — an unsorted listing — but it takes an S3-compatible endpoint
-that returns one to reach at all. The rest are visible, or
-make no difference to the result — except the ones that say outright that the
-run comes out differently, listed in section 1.
+The first can leave you with something wrong without saying so: a corrupted
+ranged download is a silent success here. The rest are visible, or make no
+difference to the result — except the ones that say outright that the run
+comes out differently, listed in section 1.
 
 - **Corrupted ranged downloads are not detected by the classic engine.** For a
   single-object download at or above the multipart threshold, `aws` verifies the
@@ -158,21 +153,6 @@ run comes out differently, listed in section 1.
   break and prints that same underlying error. This lives in the installed
   `botocore` / `s3transfer` rather than in either tool's own code — the same
   split as the default checksum algorithm below — so no option here changes it.
-- **An unsorted listing stops `sync` here and not on `aws`.** `sync` pairs its
-  two sides by walking both listings in key order — what real S3 and MinIO
-  return, and what the local walk sorts to match. Against an S3-compatible
-  endpoint whose `ListObjectsV2` hands back keys out of order, `aws` keeps
-  merging and exits 0, pairing keys that do not belong together; with
-  `--delete` that means deleting from the destination a key the source has
-  too — the source is never touched — and then copying it again (measured).
-  Here the descent is caught as the stream is read, and the run ends with one
-  line — `fatal error: source sync stream is
-  not byte-ordered by compare_key (...)`, or `destination` for the other
-  side — and exit code 1. Transfers and deletions already reported before that
-  point stand on both tools; nothing past it happens here. This is deliberately
-  not mirrored: mirroring would mean deleting destination data that the source
-  still has. Reaching it takes such an endpoint — S3 Express directory buckets,
-  whose listings promise no order, are refused by `sync` up front on both tools.
 - **A download stamps an old object on a different second.** Both tools give
   the downloaded file the object's `LastModified`, and for every timestamp
   today's zone rules cover they agree to the second. They part on one old

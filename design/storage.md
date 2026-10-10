@@ -298,11 +298,10 @@ The reading members form a lattice: `SORTABLE_SCAN` implies `SCAN` implies
 `GET_FILEINFO`. `sync`'s merge-join walks both listings in UTF-8 byte order, so a
 custom `sync` side **must** declare `SORTABLE_SCAN` — an unsorted listing would
 manufacture phantom pairs and, with `--delete`, corrupt the destination. The
-promise is checked as the merge consumes it rather than taken on trust: the
-first strict descent on either side raises `ValidationError` and ends the run
-(`comparator._byte_ordered`; the check is unconditional, so `python -O` keeps
-it), which is also what an S3-compatible endpoint returning an unsorted
-`ListObjectsV2` runs into.
+promise is taken on trust: the merge follows aws-cli's step for step and does
+not check the order, so a backend that breaks it - like an S3-compatible
+endpoint returning an unsorted `ListObjectsV2`, on which aws-cli mis-pairs the
+same way - gets aws-cli's mis-pairing ([`sync.md`](./sync.md) section 3).
 **`sync` is the only order-sensitive consumer**: recursive `cp` / `mv` take the
 backend's entries in whatever order `scan` yields them (they never pass
 `ScanOptions(sort=True)`), so a plain `SCAN` side needs no ordering guarantee

@@ -77,13 +77,14 @@ chooses the key it joins on.
 backend promises for a scan requested with `ScanOptions(sort=True)`
 ([`./storage.md`](./storage.md)); S3 listings arrive in that order and the local
 walk sorts to match. Given ordered inputs the output is ordered too: emitted
-pairs ascend by `compare_key`. A merge-join cannot pair an unordered stream —
-the same key would surface as a `SrcOnlyPair` and a `DestOnlyPair` instead of
-one `SyncPair`, which under `sync`'s delete lane means deleting an entry that
-exists on both sides — so rather than mis-pair, the join refuses: the first
-strict descent on either side raises `ValidationError` (below). This is also
-why `sync` requires `SORTABLE_SCAN` of a custom backend and rejects S3 Express
-directory buckets outright.
+pairs ascend by `compare_key`. The order is not checked. An unordered stream is
+merged step for step the way the AWS CLI merges one, each step comparing only
+the two entries in hand, so a key that arrives out of order surfaces as a
+`SrcOnlyPair` and a `DestOnlyPair` instead of one `SyncPair` — which under
+`sync`'s delete lane means deleting an entry that exists on both sides, as
+`aws s3 sync` does against an S3-compatible endpoint whose listing does not
+sort. This is why `sync` requires `SORTABLE_SCAN` of a custom backend and
+rejects S3 Express directory buckets outright.
 
 Both streams are consumed lazily and only one entry of each is held at a time,
 so page-by-page listings pair without either side being materialized. Draining
@@ -93,18 +94,8 @@ leaves the rest of both inputs unconsumed; releasing whatever they hold open is
 the caller's business, which is what `sync` does with its two listing
 generators.
 
-Raises: a `ValidationError` from the pull that first sees a key smaller than the
-one before it on the same side. The message names the side (`source` /
-`destination`) and the offending key pair. It guards against a backend that
-declares `SORTABLE_SCAN` and then yields out of order, and against an
-S3-compatible endpoint whose `ListObjectsV2` does not sort. The check is a plain
-comparison rather than an `assert`, so it is in force under `python -O` too —
-the failure it catches is destructive, not a mere internal-invariant bug. Equal
-consecutive keys pass; only a strict descent is rejected. Detection is as late
-as the descent itself, so pairs already yielded stand — whatever the caller did
-with them stays done — while the offending entry is never paired and nothing
-past it is read. Anything the input iterables raise propagates unchanged —
-`compare` catches nothing.
+Raises: nothing of its own. Anything the input iterables raise propagates
+unchanged — `compare` catches nothing.
 
 ## SyncPair
 

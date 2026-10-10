@@ -17,8 +17,6 @@ from __future__ import annotations
 import functools
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
 from boto3_s3.comparator import (
     Comparator,
     DestOnlyPair,
@@ -29,7 +27,6 @@ from boto3_s3.comparator import (
     any_of,
     compare_size_time,
 )
-from boto3_s3.exceptions import ValidationError
 from boto3_s3.types import FileInfo, TransferType
 
 _TIME = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
@@ -135,24 +132,21 @@ def _both(transfer_type: TransferType, src: FileInfo, dest: FileInfo, **flags: b
     )
 
 
-class TestComparatorOrderGuard:
-    """Order guard: an unsorted ``SORTABLE_SCAN`` side raises a
-    ``ValidationError`` instead of silently mis-pairing (and, with ``--delete``,
-    deleting files present on both sides). The full battery - the exact class,
-    the ``-O`` survival, and what a sync stops doing once the descent is seen -
-    is in ``test_sync_unsorted_listing.py``."""
+class TestComparatorUnorderedInput:
+    """An unsorted side is merged, not refused - aws-cli's merge does the same.
+    The step-for-step comparison against a port of aws-cli's merge, and what a
+    sync then does, are in ``test_sync_unsorted_listing.py``."""
 
-    def test_descending_source_is_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="not byte-ordered"):
-            _pairs(_entries("b", "a"), _entries("a", "b"))
+    def test_descending_dest_mis_pairs_like_aws(self) -> None:
+        pairs = _pairs(_entries("a", "b"), _entries("c", "a"))
+        assert [(p.compare_key, type(p)) for p in pairs] == [
+            ("a", SrcOnlyPair),
+            ("b", SrcOnlyPair),
+            ("c", DestOnlyPair),
+            ("a", DestOnlyPair),
+        ]
 
-    def test_descending_dest_is_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="not byte-ordered"):
-            _pairs(_entries("a", "b"), _entries("c", "a"))
-
-    def test_ordered_streams_pass_untouched(self) -> None:
-        # No false positive: correctly byte-ordered sides pair normally -
-        # every key, in order, as its correct pair shape.
+    def test_ordered_streams_pair_normally(self) -> None:
         pairs = _pairs(_entries("a", "b", "c"), _entries("a", "c"))
         assert [(p.compare_key, type(p)) for p in pairs] == [
             ("a", SyncPair),
