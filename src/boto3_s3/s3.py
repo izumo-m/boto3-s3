@@ -24,6 +24,7 @@ from __future__ import annotations
 import functools
 import inspect
 import os
+import threading
 import time
 from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import Executor, Future
@@ -247,6 +248,66 @@ def _emit_result(
 def _raise_if_cancelled(cancel_token: CancelToken | None, operation: str) -> None:
     if cancel_token is not None and cancel_token.cancelled:
         raise CancelledError(f"{operation} was cancelled", operation=operation)
+
+
+class _HeldInterrupt:
+    """The Ctrl-C `_send_through_interrupt` held back until its request settled."""
+
+    def __init__(self) -> None:
+        self.interrupt: KeyboardInterrupt | None = None
+
+    def raise_if_held(self) -> None:
+        if self.interrupt is not None:
+            raise self.interrupt
+
+
+def _send_through_interrupt(send: Callable[[], Any], held: _HeldInterrupt) -> Any:
+    """Run one request to its end on a worker, waiting for it through a Ctrl-C.
+
+    aws sends a single rm's DeleteObject on its transfer manager's worker; a
+    Ctrl-C reaches the main thread, whose manager shutdown waits for that
+    request before the run ends, so the delete's own line is still printed
+    (measured: ``delete: s3://b/k``, then the closing line). Sent inline,
+    the request would be abandoned mid-flight - the server still deletes the
+    object, and nothing reports it. So the request runs on a daemon worker
+    and this thread waits; a first interrupt is parked in *held* for the
+    caller to raise once it has recorded the outcome, and a second one stops
+    the wait, as a second Ctrl-C stops aws's shutdown. The request's own
+    result or exception is returned or raised here.
+
+    The wait is on an event the worker sets, not ``Thread.join``: on Python
+    3.10 to 3.12 a join interrupted while the thread still runs marks the
+    thread finished, and every later join returns at once.
+    """
+    outcome: list[tuple[bool, Any]] = []
+    settled = threading.Event()
+
+    def run() -> None:
+        try:
+            outcome.append((True, send()))
+        except BaseException as exc:  # handed to the waiting thread
+            outcome.append((False, exc))
+        finally:
+            settled.set()
+
+    try:
+        threading.Thread(target=run, name="boto3-s3-rm-single", daemon=True).start()
+    except KeyboardInterrupt as interrupt:
+        # Landed in start()'s wait for the thread to come up: the request is
+        # already on its way, so it is waited for like one interrupted below.
+        held.interrupt = interrupt
+    while True:
+        try:
+            settled.wait()
+            break
+        except KeyboardInterrupt as interrupt:
+            if held.interrupt is not None:
+                raise
+            held.interrupt = interrupt
+    ok, value = outcome[0]
+    if ok:
+        return value
+    raise value
 
 
 @contextmanager
@@ -2476,15 +2537,21 @@ class S3:
         # Built ahead of the request for the same reason: an engine that
         # cannot be built is not this key failing to delete.
         crt = crt_delete_sender(client, transfer_config, operation="rm", **self._crt_postures())
-        try:
+
+        def send() -> Any:
             if crt is None:
-                response = storage.delete(info, request_payer=request_payer)
-            else:
-                params: dict[str, Any] = {"Bucket": storage.bucket, "Key": key}
-                if request_payer is not None:
-                    params["RequestPayer"] = request_payer
-                with s3_request(operation="rm", bucket=storage.bucket, key=key):
-                    response = crt.call("DeleteObject", params)
+                return storage.delete(info, request_payer=request_payer)
+            params: dict[str, Any] = {"Bucket": storage.bucket, "Key": key}
+            if request_payer is not None:
+                params["RequestPayer"] = request_payer
+            with s3_request(operation="rm", bucket=storage.bucket, key=key):
+                return crt.call("DeleteObject", params)
+
+        # A Ctrl-C while the request is out waits for it and is raised once
+        # its outcome is recorded, as aws's run reports the in-flight delete.
+        held = _HeldInterrupt()
+        try:
+            response = _send_through_interrupt(send, held)
         except AssertionError:
             raise  # a test double's guard or an invariant, never a request outcome
         except Exception as exc:
@@ -2501,6 +2568,7 @@ class S3:
                 # loses it - no line, rc 0 (`lost_like_aws`) - so no record and
                 # no BatchError. On the CRT client the failure is awscrt's
                 # error, which is reported, as aws-cli's CRT client reports it.
+                held.raise_if_held()
                 return
             _emit_result(
                 on_result,
@@ -2510,6 +2578,7 @@ class S3:
                 error=failure,
                 src=src,
             )
+            held.raise_if_held()
             _raise_if_cancelled(cancel_token, "rm")
             raise BatchError(
                 "1 of 1 deletes failed",
@@ -2531,6 +2600,7 @@ class S3:
             extra_info=extra_info,
             src=src,
         )
+        held.raise_if_held()
 
     # -- bucket / signing -------------------------------------------------
 

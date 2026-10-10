@@ -17,6 +17,10 @@ aws-cli parity facts asserted here:
 from __future__ import annotations
 
 import datetime as dt
+import signal
+import sys
+import threading
+import time
 from typing import Any
 
 import pytest
@@ -388,6 +392,84 @@ class TestRmRecursive:
         assert (exc_info.value.succeeded, exc_info.value.failed) == (1, 1)
         outcomes = {r.compare_key: r.outcome for r in results}
         assert outcomes == {"a": OpOutcome.FAILED, "b": OpOutcome.SUCCEEDED}
+
+
+def _interrupt_main_once_it_waits() -> None:
+    """Send the main thread a real SIGINT once it waits on the single delete.
+
+    A real signal, not a patched wait: the interrupt has to land the way a
+    Ctrl-C does - in the wait - for the test to see what the interpreter
+    does with it (Python 3.10 to 3.12 mark a thread finished when a
+    ``Thread.join`` on it is interrupted).
+    """
+    main = threading.main_thread().ident
+    assert main is not None
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        frame = sys._current_frames().get(main)  # pyright: ignore[reportPrivateUsage]
+        names: list[str] = []
+        while frame is not None:
+            names.append(frame.f_code.co_name)
+            frame = frame.f_back
+        # Condition.wait under Event.wait, called by the helper itself (not
+        # the wait inside Thread.start).
+        if names[:3] == ["wait", "wait", "_send_through_interrupt"]:
+            break
+        time.sleep(0.005)
+    signal.pthread_kill(main, signal.SIGINT)
+    time.sleep(0.05)  # let the main thread take it inside the wait
+
+
+@pytest.mark.skipif(not hasattr(signal, "pthread_kill"), reason="POSIX signal delivery")
+class TestRmSingleKeyInterrupted:
+    """aws's single delete rides a transfer-manager worker that a Ctrl-C waits
+    for, so the in-flight delete is still reported (measured: ``delete:
+    s3://b/k`` before the closing line)."""
+
+    def test_a_ctrl_c_waits_for_the_delete_and_records_it(self) -> None:
+        class _InterruptedClient(_FakeS3Client):
+            def delete_object(self, **kwargs: Any) -> dict[str, Any]:
+                _interrupt_main_once_it_waits()
+                return super().delete_object(**kwargs)
+
+        client = _InterruptedClient()
+        results: list[OpResult] = []
+        with pytest.raises(KeyboardInterrupt):
+            S3().rm(S3Storage("s3://b/k", client=client), on_result=results.append)
+        assert client.delete_object_calls == [{"Bucket": "b", "Key": "k"}]
+        assert [(r.compare_key, r.outcome) for r in results] == [("k", OpOutcome.SUCCEEDED)]
+
+    def test_a_failed_delete_is_recorded_before_the_interrupt(self) -> None:
+        class _InterruptedClient(_FakeS3Client):
+            def delete_object(self, **kwargs: Any) -> dict[str, Any]:
+                _interrupt_main_once_it_waits()
+                return super().delete_object(**kwargs)
+
+        client = _InterruptedClient(
+            delete_object_error=client_error("AccessDenied", 403, "DeleteObject")
+        )
+        results: list[OpResult] = []
+        with pytest.raises(KeyboardInterrupt):
+            S3().rm(S3Storage("s3://b/k", client=client), on_result=results.append)
+        assert [r.outcome for r in results] == [OpOutcome.FAILED]
+
+    def test_a_second_ctrl_c_stops_waiting(self) -> None:
+        release = threading.Event()
+
+        class _StallingClient(_FakeS3Client):
+            def delete_object(self, **kwargs: Any) -> dict[str, Any]:
+                _interrupt_main_once_it_waits()
+                _interrupt_main_once_it_waits()
+                release.wait(10)
+                return super().delete_object(**kwargs)
+
+        results: list[OpResult] = []
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                S3().rm(S3Storage("s3://b/k", client=_StallingClient()), on_result=results.append)
+            assert results == []
+        finally:
+            release.set()
 
 
 class TestRmBucketRootSweep:
