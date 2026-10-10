@@ -51,19 +51,18 @@ Engine choices (parity-driven):
   short of ``all`` sends ``AnnotationDirective=EXCLUDE`` so the copy carries
   none (aws-cli's default; an explicit ``metadata_directive`` bypasses the
   chain, and a pre-annotations SDK sends no directive), while
-  ``copy_props=ALL`` carries them - riding
-  s3transfer >= 0.19's native write path on a multipart copy, the preload
-  `AnnotationCopyMode`s staging the source payloads up front and ``DEFERRED``
-  letting s3transfer read them post-copy. A write that fails part way keeps
-  the copied object and reports aws-cli's own wording
-  (`_align_annotation_copy_error`), not upstream's.
+  ``copy_props=ALL`` carries them - on a multipart copy through
+  `_SetAnnotations`, aws-cli's subscriber ported, which writes them after
+  the copy behind the tagging write; the preload `AnnotationCopyMode`s stage
+  the source payloads up front and ``DEFERRED`` reads them post-copy. A
+  write that fails part way keeps the copied object and reports aws-cli's
+  ``AnnotationCopyError`` wording.
 """
 
 from __future__ import annotations
 
 import errno
 import functools
-import io
 import logging
 import mimetypes
 import os
@@ -78,7 +77,6 @@ from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote, urlparse
 
 from botocore.exceptions import BotoCoreError, ClientError
-from s3transfer import copies as s3transfer_copies
 from s3transfer.compat import seekable
 from s3transfer.copies import CopySubmissionTask
 from s3transfer.exceptions import CancelledError as S3TransferCancelledError
@@ -120,11 +118,6 @@ if TYPE_CHECKING:
     from boto3.s3.transfer import TransferConfig
     from boto3.session import Session
     from mypy_boto3_s3 import S3Client
-
-    # Runtime imports of this name are local to the annotation-copy alignment:
-    # the floor s3transfer predates the class (and the write path that raises
-    # it), and the module must stay importable there.
-    from s3transfer.exceptions import S3CopyFailedError
 
     from boto3_s3.storage import Storage
 
@@ -423,12 +416,10 @@ def conditional_write_unsupported_reason(client: S3Client, *, is_copy: bool) -> 
 
 
 # Feature-level degradation (docs/compatibility.md): S3 object
-# annotations reached botocore's S3 model in 1.43.31 and upstream s3transfer's
-# copy handling in 0.19. Both are introspected by member presence
-# (version-agnostic); the versions below only name the hint in the refusal
-# message for `copy_props=ALL`.
+# annotations reached botocore's S3 model in 1.43.31, introspected by member
+# presence (version-agnostic); the version below only names the hint in the
+# refusal message for `copy_props=ALL`.
 _ANNOTATIONS_MIN_BOTOCORE = "1.43.31"
-_ANNOTATIONS_MIN_S3TRANSFER = "0.19.0"
 
 
 def _copy_annotations_param_supported(client: S3Client) -> bool:
@@ -453,22 +444,16 @@ def _annotation_directive_blacklisted() -> bool:
 def annotations_copy_unsupported_reason(client: S3Client) -> str | None:
     """Why the installed SDK cannot honor ``copy_props=ALL``, or ``None``.
 
-    `CopyPropsMode.ALL` copies S3 object annotations: the botocore S3 model
-    must know them on CopyObject, and the multipart carryover rides
-    s3transfer's own `AnnotationDirective` handling (>= 0.19). Both are
-    introspected directly (version-agnostic); the message names the minimum
-    versions as a hint. Returns ``None`` when the mode is supported.
+    `CopyPropsMode.ALL` copies S3 object annotations, which the botocore S3
+    model must know - introspected directly (version-agnostic); the message
+    names the minimum version as a hint. The multipart carryover is this
+    module's own (`_SetAnnotations`, aws-cli's subscriber), so the installed
+    s3transfer does not matter. Returns ``None`` when the mode is supported.
     """
     if not _copy_annotations_param_supported(client):
         return (
             f"copy_props=ALL requires botocore >= {_ANNOTATIONS_MIN_BOTOCORE} "
             f"(S3 object annotations); the installed botocore is {version('botocore')}."
-        )
-    if not _annotation_directive_blacklisted():
-        return (
-            f"copy_props=ALL requires s3transfer >= {_ANNOTATIONS_MIN_S3TRANSFER} "
-            "(annotation carryover on multipart copies); the installed "
-            f"s3transfer is {version('s3transfer')}."
         )
     return None
 
@@ -1040,6 +1025,17 @@ class Transferrer:
         self._session = session
         self._manager: Any = None
         self._capture: _ResponseCapture | None = None
+        # `copy_props=ALL`'s multipart annotation writes pin the destination
+        # by its CompleteMultipartUpload response, which s3transfer discards:
+        # the classic manager of such a run is handed this stand-in for the
+        # client, which keeps that one response (`_CopyCompletions`). Only
+        # where the chain runs - an explicit metadata_directive disables it,
+        # and nothing would then take the responses back out.
+        self._completions: _CopyCompletions | None = (
+            _CopyCompletions(client)
+            if self._copy_props is CopyPropsMode.ALL and not self._options.get("metadata_directive")
+            else None
+        )
         self._lock = threading.Lock()
         self._futures_lock = threading.Lock()
         self._futures: set[Any] = set()
@@ -1665,20 +1661,19 @@ class Transferrer:
             return [metadata, tags, exclude], self._source_client
         # CopyPropsMode.ALL - annotations carried instead of excluded (the
         # constructor already refused the mode on an incapable SDK).
+        assert self._completions is not None
         annotations = _SetAnnotations(
             item,
             source_client=self._source_client,
+            dest_client=self._client,
+            completions=self._completions,
             multipart_threshold=self._multipart_threshold,
             mode=self._annotation_copy_mode,
             options=self._options,
             temp_dir=getattr(self._transfer_config, "annotation_temp_dir", None),
             operation=self._operation,
         )
-        return [
-            metadata,
-            tags,
-            annotations,
-        ], annotations.source_client
+        return [metadata, tags, annotations], self._source_client
 
     # -- engine internals ----------------------------------------------------
 
@@ -1748,8 +1743,6 @@ class Transferrer:
         # The copy tables are inert for CRT (it has no copy path) but keeping
         # one alignment site means the classic fallback never sees them unpatched.
         _allow_inline_mpu_tagging()
-        _align_annotation_put_args()
-        _align_annotation_copy_error()
         # The run's client is the route-selected one (an S3Storage may carry its
         # own), so the S3-level endpoint pin only applies to the client it built.
         endpoint = crtsupport.caller_endpoint(self._client, self._crt_endpoint)
@@ -1773,8 +1766,6 @@ class Transferrer:
         """Build the classic s3transfer manager, honoring threaded execution config."""
         _allow_if_none_match()
         _allow_inline_mpu_tagging()
-        _align_annotation_put_args()
-        _align_annotation_copy_error()
         config: Any = self._transfer_config
         if config is None:
             # The library's own defaults, not s3transfer's bare ones: an omitted
@@ -1795,7 +1786,8 @@ class Transferrer:
         # restore the client, because it may be shared and unregistering could
         # disrupt a concurrent transfer. Run parallel operations with one client
         # per thread (design/s3.md thread-safety note).
-        return TransferManager(self._client, config=config, executor_cls=executor_cls)
+        client: Any = self._completions if self._completions is not None else self._client
+        return TransferManager(client, config=config, executor_cls=executor_cls)
 
     @property
     def _multipart_threshold(self) -> int:
@@ -2588,20 +2580,65 @@ class _ExcludeAnnotationDirective:
         future.meta.call_args.extra_args["AnnotationDirective"] = "EXCLUDE"
 
 
+class _CopyCompletions:
+    """The copy manager's client, keeping each CompleteMultipartUpload response.
+
+    `copy_props=ALL`'s multipart annotation writes pin the new object by the
+    ETag and VersionId of the CompleteMultipartUpload that created it (aws-cli's
+    subscriber reads them off its fork's future result), and upstream
+    s3transfer discards that response. So the classic manager of such a run is
+    handed this stand-in: the one call is delegated and its response kept per
+    ``(Bucket, Key)`` until `_SetAnnotations` takes it; every other attribute
+    is the real client's. Nothing is registered on the client's events, so a
+    client the caller shares is left as it was.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+        self._responses: dict[tuple[Any, Any], Mapping[str, Any]] = {}
+        self._lock = threading.Lock()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
+    def complete_multipart_upload(self, **kwargs: Any) -> Any:
+        response = self._client.complete_multipart_upload(**kwargs)
+        with self._lock:
+            self._responses[(kwargs.get("Bucket"), kwargs.get("Key"))] = response
+        return response
+
+    def take(self, bucket: str, key: str) -> Mapping[str, Any] | None:
+        """Hand over (and forget) the response of ``bucket`` / ``key``'s completion."""
+        with self._lock:
+            return self._responses.pop((bucket, key), None)
+
+
 class _SetAnnotations:
-    """`copy-props all`: stage and carry S3 object annotations.
+    """`copy-props all`: carry S3 object annotations onto a multipart copy (aws subscriber port).
 
     A single-part CopyObject carries annotations server-side (the directive
-    default is COPY), so nothing is sent - the same wire behavior as aws-cli.
-    A multipart copy preloads every paginated source payload before submission
-    in the memory and tempfile modes. A per-copy source-client adapter then
-    serves those bytes to s3transfer's post-complete annotation writer, keeping
-    its destination ETag/VersionId pinning and partial-write error handling.
-    The deferred mode retains s3transfer's post-copy reads through
-    `_PaginatingAnnotationClient`, which only completes the name listing
-    (s3transfer's single-shot ``list_object_annotations`` would drop every
-    page after the first). `Transferrer` refuses `copy_props=ALL` up
-    front on an SDK that cannot honor the native write path.
+    default is COPY), so nothing is sent - aws-cli's wire behavior. A
+    multipart copy carries none, so they are read from the source and written
+    onto the destination after the copy completes, from this subscriber's
+    ``on_done`` - aws-cli's ``SetAnnotationsSubscriber``. Registered after
+    `_SetTags`, it sees the outcome the post-copy tagging write left: a
+    tagging failure that rolled the object back has already settled the
+    future, so nothing is written; a rollback that failed too escapes
+    `_SetTags` and leaves the future a success, so the annotations are
+    written - aws-cli's order and request set in every corner.
+
+    The reads follow ``annotation_copy_mode``: the memory and tempfile modes
+    list every page and read every payload in ``on_queued``, before the
+    destination exists (aws-cli's timing - a source read failure leaves no
+    destination); the library-only ``DEFERRED`` reads them in ``on_done``
+    instead, after the copy, keeping a source read failure's destination.
+    Source ``VersionId`` and request-payer parameters are pinned on the
+    reads. Each write is pinned to the new object by the
+    CompleteMultipartUpload response's ETag (``ObjectIfMatch``) and
+    ``VersionId``, as aws-cli pins it - kept for it by `_CopyCompletions`,
+    since s3transfer discards that response. A write that
+    fails does not stop the others, and any failure settles the future with
+    aws-cli's ``AnnotationCopyError`` wording, the destination kept.
     """
 
     def __init__(
@@ -2609,6 +2646,8 @@ class _SetAnnotations:
         item: TransferItem,
         *,
         source_client: Any,
+        dest_client: Any,
+        completions: _CopyCompletions,
         multipart_threshold: int,
         mode: AnnotationCopyMode,
         options: TransferOptions,
@@ -2617,40 +2656,49 @@ class _SetAnnotations:
     ) -> None:
         self._item = item
         self._source_client = source_client
+        self._dest_client = dest_client
+        self._completions = completions
         self._multipart_threshold = multipart_threshold
         self._mode = mode
         self._options = options
         self._temp_dir = temp_dir
         self._operation = operation
+        self._multipart = False
         self._store: _MemoryAnnotationStore | _TempfileAnnotationStore | None = None
-        self._preloaded_client = _PreloadedAnnotationClient(source_client, self)
-        self._paginating_client = _PaginatingAnnotationClient(source_client, operation=operation)
-
-    @property
-    def source_client(self) -> Any:
-        """The pagination-completing adapter for deferred reads, otherwise the cache adapter."""
-        if self._mode is AnnotationCopyMode.DEFERRED:
-            return self._paginating_client
-        return self._preloaded_client
 
     def on_queued(self, future: Any, **kwargs: Any) -> None:
         size = self._item.size or 0
         if size < self._multipart_threshold:
             return
+        self._multipart = True
         if self._mode is not AnnotationCopyMode.DEFERRED:
-            self._preload()
-        future.meta.call_args.extra_args["AnnotationDirective"] = "COPY"
+            self._read_source()
 
     def on_done(self, future: Any, **kwargs: Any) -> None:
-        self.close()
+        if not self._multipart:
+            return
+        bucket = future.meta.call_args.bucket
+        key = future.meta.call_args.key
+        completed = self._completions.take(bucket, key)
+        try:
+            if _outcome(future) is not None:
+                return  # the copy (or the tagging write before this) failed
+            if self._store is None:
+                try:
+                    self._read_source()
+                except Exception as exc:
+                    future.set_exception(exc)
+                    return
+            self._write(future, bucket, key, completed or {})
+        finally:
+            self.close()
 
-    def _preload(self) -> None:
-        """Read every source annotation into the selected pre-copy store.
+    def _read_source(self) -> None:
+        """Read every source annotation into the selected store.
 
-        List all pages and collect every name before fetching payloads, matching
-        aws-cli's ordering. Source `VersionId` and request-payer parameters are
-        pinned on the reads. Any failure closes and discards the partial store
-        before the exception prevents multipart destination creation.
+        List all pages and collect every name before fetching payloads,
+        aws-cli's order. Any failure closes and discards the partial store
+        before the exception propagates.
         """
         if self._mode is AnnotationCopyMode.PRELOAD_TEMPFILE:
             store: _MemoryAnnotationStore | _TempfileAnnotationStore = _TempfileAnnotationStore(
@@ -2693,20 +2741,60 @@ class _SetAnnotations:
             self.close()
             raise
 
-    def annotation_names(self) -> list[str]:
+    def _write(self, future: Any, bucket: str, key: str, completed: Mapping[str, Any]) -> None:
+        """Write the staged annotations onto the destination, aws-cli's loop."""
         store = self._store
         assert store is not None
-        return store.names()
-
-    def annotation_payload(self, name: str) -> bytes:
-        store = self._store
-        assert store is not None
-        return store.read(name)
+        params = requestparams.map_put_object_annotation_params(self._options)
+        etag = completed.get("ETag")
+        version_id = completed.get("VersionId")
+        if etag is not None:
+            params["ObjectIfMatch"] = etag
+        if version_id is not None:
+            params["VersionId"] = version_id
+        written: list[str] = []
+        failed: list[tuple[str, str]] = []
+        for name in store.names():
+            try:
+                self._dest_client.put_object_annotation(
+                    Bucket=bucket,
+                    Key=key,
+                    AnnotationName=name,
+                    AnnotationPayload=store.read(name),
+                    **params,
+                )
+                written.append(name)
+            except Exception as exc:
+                failed.append((name, str(exc)))
+        if failed:
+            future.set_exception(_AnnotationCopyError(bucket, key, written, failed))
 
     def close(self) -> None:
         store, self._store = self._store, None
         if store is not None:
             store.close()
+
+
+class _AnnotationCopyError(Exception):
+    """A completed multipart copy that could not carry every annotation.
+
+    aws-cli's ``AnnotationCopyError``, word for word (measured): names written
+    join with ``", "`` and collapse to ``(none)`` when the first write already
+    failed, failures join with ``"; "`` as ``name: message``, both in the
+    source listing's order.
+    """
+
+    def __init__(
+        self, bucket: str, key: str, written: list[str], failed: list[tuple[str, str]]
+    ) -> None:
+        written_names = ", ".join(written) or "(none)"
+        failed_descriptions = "; ".join(f"{name}: {message}" for name, message in failed)
+        super().__init__(
+            f"Failed to copy all annotations to s3://{bucket}/{key}. "
+            f"The object was copied successfully and was not deleted. "
+            f"Annotations written: {written_names}. "
+            f"Annotations that failed: {failed_descriptions}."
+        )
 
 
 class _MemoryAnnotationStore:
@@ -2752,100 +2840,6 @@ class _TempfileAnnotationStore:
     def close(self) -> None:
         self._payloads.clear()
         self._file.close()
-
-
-class _PreloadedAnnotationClient:
-    """Source-client adapter serving s3transfer's annotation reads from a preload."""
-
-    def __init__(self, source_client: Any, preloader: _SetAnnotations) -> None:
-        self._source_client = source_client
-        self._preloader = preloader
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._source_client, name)
-
-    def list_object_annotations(self, **kwargs: Any) -> dict[str, Any]:
-        return {
-            "Annotations": [{"AnnotationName": name} for name in self._preloader.annotation_names()]
-        }
-
-    def get_object_annotation(self, **kwargs: Any) -> dict[str, Any]:
-        name = kwargs["AnnotationName"]
-        return {"AnnotationPayload": io.BytesIO(self._preloader.annotation_payload(name))}
-
-
-class _PaginatingAnnotationClient:
-    """Source-client adapter completing s3transfer's single-shot annotation list.
-
-    The deferred mode keeps s3transfer's post-complete annotation reads on the
-    source client, but s3transfer calls ``list_object_annotations`` once and
-    never follows ``NextContinuationToken`` - a source with more annotations
-    than one page would silently lose the tail. aws-cli's subscriber collects
-    the names with a paginator; this adapter restores that by merging every
-    page into the single response s3transfer expects. Names are small, so the
-    merge does not defeat the mode's point (payload reads stay lazy per-name
-    pass-throughs on the underlying client). Both intercepted reads
-    pre-translate under the source bucket/key from the call's own params, so a
-    deferred-read failure is attributed to the source like the preload path's
-    (`_record_failure` would otherwise re-tag it with the copy destination).
-    """
-
-    def __init__(self, source_client: Any, *, operation: str) -> None:
-        self._source_client = source_client
-        self._operation = operation
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._source_client, name)
-
-    def list_object_annotations(self, **kwargs: Any) -> dict[str, Any]:
-        with s3_errors(
-            operation=self._operation, bucket=kwargs.get("Bucket"), key=kwargs.get("Key")
-        ):
-            annotations: list[dict[str, Any]] = []
-            for page in self._source_client.get_paginator("list_object_annotations").paginate(
-                **kwargs
-            ):
-                annotations.extend(page.get("Annotations", []))
-            return {"Annotations": annotations}
-
-    def get_object_annotation(self, **kwargs: Any) -> Any:
-        with s3_errors(
-            operation=self._operation, bucket=kwargs.get("Bucket"), key=kwargs.get("Key")
-        ):
-            return self._source_client.get_object_annotation(**kwargs)
-
-
-class _AnnotationWriteWatcher:
-    """Destination-client stand-in recording each PutObjectAnnotation outcome.
-
-    Upstream s3transfer writes the annotations inside its CompleteMultipartUpload
-    task and keeps the per-name outcomes only as formatted text inside the
-    ``S3CopyFailedError`` it raises, so aws-cli's wording cannot be rebuilt from
-    that exception. Standing in for the destination client for the duration of
-    that one call records the same two lists upstream builds - the names written,
-    in write order, and ``(name, message)`` for the ones that failed - without
-    changing anything it sends: the write is delegated untouched and a failure is
-    re-raised, leaving upstream's loop to decide that it continues and raises at
-    the end. Every other attribute is the real client's.
-    """
-
-    def __init__(self, client: Any) -> None:
-        self._client = client
-        self.written: list[str] = []
-        self.failed: list[tuple[str, str]] = []
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._client, name)
-
-    def put_object_annotation(self, **kwargs: Any) -> Any:
-        name = kwargs.get("AnnotationName", "")
-        try:
-            response = self._client.put_object_annotation(**kwargs)
-        except Exception as exc:
-            self.failed.append((name, str(exc)))
-            raise
-        self.written.append(name)
-        return response
 
 
 class _SetMetadataDirectiveProps:
@@ -2942,163 +2936,6 @@ def _allow_inline_mpu_tagging() -> None:
         pass
 
 
-def _align_annotation_put_args() -> None:
-    """Drop ``ChecksumAlgorithm`` from s3transfer's PutObjectAnnotation args.
-
-    ``copy_props=ALL`` rides upstream's native annotation write path (section 4
-    of design/transfer.md), which forwards ``PUT_OBJECT_ANNOTATION_ARGS`` from
-    the copy's ``extra_args``. aws-cli writes annotations from its own
-    subscriber and maps only ``RequestPayer`` there, so a run that also passes
-    ``--checksum-algorithm`` would put an extra checksum header on every
-    PutObjectAnnotation that aws does not send. Removed EAFP-style for the same
-    reason as `_allow_inline_mpu_tagging`: the table is process-shared.
-    (``ExpectedBucketOwner``, the other extra, has no ``aws s3`` option behind
-    it and never reaches the copy's ``extra_args``.)
-
-    Being process-shared also bounds what these patches may do: they stay
-    inert for a plain s3transfer caller in the same process unless it passes
-    the affected argument itself (here, ``ChecksumAlgorithm`` on an annotated
-    copy). A patch that would flip such a caller's *default* behavior is out -
-    which is why upstream's ``PRESERVED_METADATA_FIELDS`` is left untouched
-    and the explicit-COPY multipart case is handled per request instead
-    (`Transferrer._submit_copy`'s directive flip).
-    """
-    put_args: list[str] | None = getattr(CopySubmissionTask, "PUT_OBJECT_ANNOTATION_ARGS", None)
-    if put_args is None:
-        return
-    try:
-        put_args.remove("ChecksumAlgorithm")
-    except ValueError:
-        pass
-
-
-# The S3CopyFailedError subclass a partial annotation write raises, built on
-# first use: the floor s3transfer predates the base class (and the write path).
-# Built under the lock: two workers failing at once would otherwise each
-# define a class, and the one whose definition lost the assignment would raise
-# a type `_is_annotation_copy_failure` no longer recognizes (its item's
-# oversized tags would then go unwritten). The window is a few bytecodes
-# under the GIL; a free-threaded build widens it.
-_annotation_copy_failure_cls: type[S3CopyFailedError] | None = None
-_annotation_copy_failure_lock = threading.Lock()
-
-
-def _annotation_copy_failure_type() -> type[S3CopyFailedError]:
-    """The exception type `_annotation_copy_error` builds.
-
-    A subclass of the ``S3CopyFailedError`` upstream raises - the taxonomy
-    translation and the exit code see the base class, unchanged - that marks
-    the one copy failure whose object *was* written: the copy completed and
-    only annotation writes failed. `_SetTags` reads the mark to keep aws-cli's
-    destination state (its tags-first subscribers had already written the
-    tags when the annotation write failed).
-    """
-    global _annotation_copy_failure_cls
-    with _annotation_copy_failure_lock:
-        if _annotation_copy_failure_cls is None:
-            from s3transfer.exceptions import S3CopyFailedError
-
-            class AnnotationCopyFailedError(S3CopyFailedError):
-                """A completed copy that could not carry every annotation."""
-
-            _annotation_copy_failure_cls = AnnotationCopyFailedError
-        return _annotation_copy_failure_cls
-
-
-def _is_annotation_copy_failure(exc: BaseException) -> bool:
-    """Whether ``exc`` is a partial annotation write's failure (the copy completed)."""
-    # Never built means never raised: nothing to import on a floor s3transfer.
-    cls = _annotation_copy_failure_cls
-    return cls is not None and isinstance(exc, cls)
-
-
-def _annotation_copy_error(
-    bucket: str, key: str, written: list[str], failed: list[tuple[str, str]]
-) -> S3CopyFailedError:
-    """Word a partial annotation-write failure the way aws-cli does.
-
-    aws-cli raises its own ``AnnotationCopyError`` from the subscriber that
-    writes the annotations; riding upstream's native write path instead
-    (section 4 of design/transfer.md) surfaces s3transfer's own text, which
-    lists the names as Python reprs, carries each error as an exception repr,
-    and omits the sentence stating that the copied object was kept. Only the
-    text is rebuilt: the exception type upstream raises is reused, so the
-    taxonomy translation, the exit code, and the untouched destination are
-    exactly what they were.
-
-    The shape is measured against aws, not inferred: names written join with
-    ``", "`` and collapse to ``(none)`` when the first write already failed,
-    failures join with ``"; "`` as ``name: message``, and both keep the order
-    the source listing gave.
-    """
-    written_names = ", ".join(written) or "(none)"
-    failed_descriptions = "; ".join(f"{name}: {message}" for name, message in failed)
-    return _annotation_copy_failure_type()(
-        f"Failed to copy all annotations to s3://{bucket}/{key}. "
-        f"The object was copied successfully and was not deleted. "
-        f"Annotations written: {written_names}. "
-        f"Annotations that failed: {failed_descriptions}."
-    )
-
-
-def _align_annotation_copy_error() -> None:
-    """Give upstream's annotation write path aws-cli's failure wording.
-
-    The wording cannot be repaired downstream: s3transfer formats the succeeded
-    and failed names into its ``S3CopyFailedError`` message and keeps no
-    structured record of them, and the per-name errors survive only as reprs
-    inside that string. So the outcomes are recorded where they happen, by
-    wrapping the destination client the write loop uses
-    (`_AnnotationWriteWatcher`) for the length of one ``_apply_annotations``
-    call and re-raising with `_annotation_copy_error`'s text.
-
-    Like the other alignments this patches a process-shared object, so it stays
-    inert for a plain s3transfer caller: the wrapping and the re-wording happen
-    only when the copy carries this module's own annotation subscriber. Both
-    lookups are `getattr` guards - the write path is upstream-private, and an
-    s3transfer that reshapes or drops it degrades to upstream's own wording
-    rather than failing at manager build (a version without it cannot run
-    ``copy_props=ALL`` at all; `annotations_copy_unsupported_reason` refuses
-    the mode up front there).
-
-    Re-entrant by identity rather than a flag: our replacement is defined in
-    this module, so a second call recognizes it and stops. Two threads building
-    their first manager at once can both read the original and both install a
-    wrapper around it, but never a wrapper around a wrapper - the marker is the
-    installed function itself, which only becomes visible once it is in place.
-
-    The replaced exception is not chained: it is the same failure carrying a
-    worse message, and the per-annotation errors it was built from were already
-    swallowed by upstream's write loop, so there is nothing underneath to keep.
-    """
-    task_cls: Any = getattr(s3transfer_copies, "CopyCompleteMultipartUploadTask", None)
-    original = getattr(task_cls, "_apply_annotations", None)
-    if original is None or original.__module__ == __name__:
-        return
-    from s3transfer.exceptions import S3CopyFailedError
-
-    def _apply_annotations(
-        task: Any, client: Any, call_args: Any, *args: Any, **kwargs: Any
-    ) -> Any:
-        if not any(
-            isinstance(sub, _SetAnnotations)
-            for sub in getattr(call_args, "subscribers", None) or ()
-        ):
-            return original(task, client, call_args, *args, **kwargs)
-        watcher = _AnnotationWriteWatcher(client)
-        try:
-            return original(task, watcher, call_args, *args, **kwargs)
-        except S3CopyFailedError:
-            if not watcher.failed:
-                # Some other write failure upstream words itself; leave it be.
-                raise
-            raise _annotation_copy_error(
-                call_args.bucket, call_args.key, watcher.written, watcher.failed
-            ) from None
-
-    task_cls._apply_annotations = _apply_annotations
-
-
 def _mpu_inline_tagging_supported() -> bool:
     """Whether s3transfer forwards an inline ``Tagging`` header to
     CreateMultipartUpload.
@@ -3169,17 +3006,8 @@ class _SetTags:
         tag_set = future.meta.user_context.get(_POST_TAGGING_KEY)
         if not tag_set:
             return
-        exc = _outcome(future)
-        if exc is not None:
-            if not _is_annotation_copy_failure(exc):
-                return  # the copy itself failed; nothing to tag or roll back
-            # The object was copied and only its annotation writes failed:
-            # aws-cli's tags-first subscribers had already written the tags by
-            # then, so the tagging write still goes out here (after the
-            # annotations, upstream's write path having run inside the
-            # complete task) and the destination ends up as aws leaves it -
-            # the annotation failure stays the reported error, unless the
-            # tagging write fails and its own error takes over below.
+        if _outcome(future) is not None:
+            return  # the copy itself failed; nothing to tag or roll back
         bucket = future.meta.call_args.bucket
         key = future.meta.call_args.key
         try:

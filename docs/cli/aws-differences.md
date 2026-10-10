@@ -21,8 +21,7 @@ endpoint named anywhere but `--endpoint-url` under the CRT engine, a
 `REQUESTS_CA_BUNDLE` the CRT engine cannot use, an `aws` plugin that imports
 `awscli` modules, a `cli_history` directory
 `aws` cannot create, the modification time a download stamps for an object
-older than the local zone's present rules, a `--copy-props all` copy whose
-oversized tag write and its rollback both fail, an invalid `AWS_DEFAULTS_MODE`
+older than the local zone's present rules, an invalid `AWS_DEFAULTS_MODE`
 or `sts_regional_endpoints` value, the `PYTHON*` environment
 variables, and three failures the interpreter decides rather than
 either tool: a stdout that cannot take a streamed object, an error report that
@@ -246,26 +245,6 @@ comes out differently, listed in section 1.
   without being deleted and without a record: **up to 999 objects that `aws`
   would have removed survive**. Re-running the command deletes them, and a run
   that enumerates to the end is unaffected.
-- **A big tag set is written at a different point of a `--copy-props all`
-  copy.** For an S3-to-S3 copy above the multipart threshold whose source tags
-  do not fit the create call's header — roughly 2 KiB once percent-encoded —
-  both tools fall back to a `PutObjectTagging` after the copy, and both carry
-  the source's object annotations over. `aws` sends that tagging write first
-  and the annotation writes after it; here the annotations ride the transfer
-  library's own write path, which finishes before the tagging write goes out
-  (an annotation write that fails part way does not withhold it: the tags are
-  still written, as `aws` had already written them by then).
-  The console lines and the exit code agree, and so does what is left at the
-  destination — with every write succeeding, and with any combination of an
-  annotation write, the tagging write and the rollback delete that follows a
-  failed tagging write being refused (each measured). What differs is the
-  order, and two things only this command sends. When an annotation write
-  fails, the transfer library's failure clean-up sends an
-  `AbortMultipartUpload` for the upload it has already completed, which the
-  service refuses and nobody sees. And when the tagging write fails, the
-  annotations were written here before the object is rolled back, where `aws`
-  — its rollback succeeding — never writes them; if the rollback fails too,
-  `aws` goes on to write them and the object left behind is the same one.
 - **A plain-HTTP endpoint named anywhere but `--endpoint-url` still reaches
   the CRT engine.** Under `preferred_transfer_client = crt`, `aws` decides
   whether its CRT client speaks TLS from `--endpoint-url` alone, so an

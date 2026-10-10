@@ -143,6 +143,13 @@ def map_get_object_annotation_params(options: TransferOptions) -> dict[str, Any]
     return params
 
 
+def map_put_object_annotation_params(options: TransferOptions) -> dict[str, Any]:
+    """API params for a post-copy annotation write (aws-cli maps only RequestPayer)."""
+    params: dict[str, Any] = {}
+    _set_request_payer_param(params, options)
+    return params
+
+
 def map_delete_object_params(options: TransferOptions) -> dict[str, Any]:
     """API params for the copy-props rollback delete (and mv's source delete)."""
     params: dict[str, Any] = {}

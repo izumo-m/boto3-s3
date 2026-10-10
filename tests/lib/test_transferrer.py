@@ -28,6 +28,7 @@ from botocore.exceptions import (
     EndpointConnectionError,
     ReadTimeoutError,
 )
+from s3transfer import copies as s3transfer_copies
 from s3transfer.copies import CopySubmissionTask
 
 from boto3_s3 import transfer
@@ -611,17 +612,23 @@ class TestCopy:
     def test_upstream_copy_tables_keep_their_defaults_for_third_parties(self) -> None:
         # The alignment patches are process-shared, so they are bounded to
         # changes that stay inert for a plain s3transfer caller in the same
-        # process: the annotation table only loses an argument aws never maps,
-        # and the preserved-metadata table - whose emptying would flip such a
-        # caller's default multipart-copy behavior - stays upstream's own (the
-        # explicit-COPY case is handled per request by _submit_copy instead).
+        # process: the preserved-metadata table - whose emptying would flip
+        # such a caller's default multipart-copy behavior - stays upstream's
+        # own (the explicit-COPY case is handled per request by _submit_copy
+        # instead).
         _run(TransferType.COPY, [self._item()], [{}], source_responses=[])
         preserved = getattr(CopySubmissionTask, "PRESERVED_METADATA_FIELDS", None)
         if preserved is not None:  # absent on the s3transfer floor
             assert "ContentType" in preserved
+        # The annotation writes are this library's own now, so upstream's
+        # annotation table and write path are left exactly as shipped.
         put_args = getattr(CopySubmissionTask, "PUT_OBJECT_ANNOTATION_ARGS", None)
         if put_args is not None:
-            assert "ChecksumAlgorithm" not in put_args
+            assert "ChecksumAlgorithm" in put_args
+        task_cls: Any = getattr(s3transfer_copies, "CopyCompleteMultipartUploadTask", None)
+        apply_annotations = getattr(task_cls, "_apply_annotations", None)
+        if apply_annotations is not None:
+            assert apply_annotations.__module__ == "s3transfer.copies"
 
     def test_multipart_metadata_injected_from_cached_head(self) -> None:
         head = {"ContentType": "text/html", "Metadata": {"a": "b"}}
@@ -852,10 +859,6 @@ class TestCopy:
                 {"CopyPartResult": {"ETag": '"p1"'}},
                 {"CopyPartResult": {"ETag": '"p2"'}},
                 {"ETag": '"dest-etag"'},
-                # The real wire outcome: the upload id was already completed,
-                # so s3transfer's cleanup abort gets NoSuchUpload (404) - and
-                # must swallow it without disturbing the recorded failure.
-                client_error("NoSuchUpload", 404, "AbortMultipartUpload"),
             ],
             source_responses=[
                 {},
@@ -869,12 +872,13 @@ class TestCopy:
         )
 
         assert ops(source_calls)[-1] == "ListObjectAnnotations"
+        # The read runs after the copy completed, outside s3transfer's tasks:
+        # the destination stays and nothing aborts the finished upload.
         assert ops(calls) == [
             "CreateMultipartUpload",
             "UploadPartCopy",
             "UploadPartCopy",
             "CompleteMultipartUpload",
-            "AbortMultipartUpload",
         ]
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
@@ -1067,21 +1071,24 @@ class TestCopy:
         assert transferrer.succeeded == 1
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
 
-    def _all_with_oversized_tags_and_a_failing_annotation(
+    def _all_with_oversized_tags(
         self, dest_tail: list[dict[str, Any] | BaseException]
     ) -> tuple[list[ApiCall], list[OpResult], Transferrer]:
         """A `copy_props=ALL` multipart copy whose tags do not fit the create
-        header and whose second annotation write is denied; ``dest_tail`` is
-        what the destination answers after upstream's failure cleanup."""
+        header and which carries two annotations; ``dest_tail`` is what the
+        destination answers after CompleteMultipartUpload.
+
+        aws-cli registers its tags subscriber ahead of its annotations one, so
+        after the copy the tagging write goes out first and the annotation
+        writes follow - unless the tagging failure has already settled the
+        future.
+        """
         big = "v" * 3000
         responses: list[dict[str, Any] | BaseException] = [
             {"UploadId": "u"},
             {"CopyPartResult": {"ETag": '"p1"'}},
             {"CopyPartResult": {"ETag": '"p2"'}},
             {"ETag": '"dest-etag"'},
-            {},  # PutObjectAnnotation ann1
-            client_error("AccessDenied", 403, "PutObjectAnnotation"),  # ann2
-            {},  # AbortMultipartUpload (upstream's failure cleanup)
             *dest_tail,
         ]
         source_responses: list[dict[str, Any] | BaseException] = [
@@ -1105,35 +1112,74 @@ class TestCopy:
         )
         return calls, results, transferrer
 
-    def test_a_partial_annotation_failure_still_writes_the_oversized_tags(self) -> None:
-        # aws-cli's tags-first subscribers had written the tags before its
-        # annotation write failed; here the annotations ride upstream's write
-        # path inside the complete task, so the tagging write must not be
-        # withheld by that failure - the destination ends up the same (tagged,
-        # ann1 written), and the annotation failure stays the reported error.
-        calls, results, transferrer = self._all_with_oversized_tags_and_a_failing_annotation(
-            [{}]  # PutObjectTagging
+    def test_the_completion_response_is_kept_only_while_annotations_need_it(self) -> None:
+        # Taken by the annotations subscriber on the item's terminal; a run
+        # whose metadata_directive disables the chain keeps none at all.
+        _, _, transferrer = self._all_with_oversized_tags([{}, {}, {}])
+        completions = transferrer._completions  # pyright: ignore[reportPrivateUsage]
+        assert completions is not None
+        assert completions._responses == {}  # pyright: ignore[reportPrivateUsage]
+        client, _ = make_recording_client([])
+        bypassed = Transferrer(
+            TransferType.COPY,
+            client,
+            options=TransferOptions(copy_props=CopyPropsMode.ALL, metadata_directive="REPLACE"),
         )
+        assert bypassed._completions is None  # pyright: ignore[reportPrivateUsage]
+
+    def test_the_tagging_write_goes_out_before_the_annotation_writes(self) -> None:
+        calls, results, transferrer = self._all_with_oversized_tags([{}, {}, {}])
         assert ops(calls)[-4:] == [
-            "PutObjectAnnotation",
-            "PutObjectAnnotation",
-            "AbortMultipartUpload",
+            "CompleteMultipartUpload",
             "PutObjectTagging",
+            "PutObjectAnnotation",
+            "PutObjectAnnotation",
         ]
+        assert transferrer.succeeded == 1
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+
+    def test_a_partial_annotation_failure_keeps_the_tagged_object(self) -> None:
+        # The tags are already on; ann2's write is denied: the object is kept
+        # (no rollback, no abort of the completed upload) and aws-cli's
+        # AnnotationCopyError is the reported failure.
+        calls, results, transferrer = self._all_with_oversized_tags(
+            [{}, {}, client_error("AccessDenied", 403, "PutObjectAnnotation")]
+        )
+        assert ops(calls)[-3:] == ["PutObjectTagging", "PutObjectAnnotation", "PutObjectAnnotation"]
         assert "DeleteObject" not in ops(calls)
+        assert "AbortMultipartUpload" not in ops(calls)
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
-        assert "Annotations that failed: ann2" in str(results[0].error)
+        assert "Annotations written: ann1. Annotations that failed: ann2" in str(results[0].error)
 
-    def test_a_tagging_failure_after_the_annotation_failure_rolls_back(self) -> None:
-        # The tagging write's own failure takes over, rollback included - the
-        # state aws-cli reaches when its (earlier) tagging write fails.
-        calls, results, _ = self._all_with_oversized_tags_and_a_failing_annotation(
+    def test_a_tagging_failure_rolls_back_before_any_annotation_is_written(self) -> None:
+        calls, results, _ = self._all_with_oversized_tags(
             [client_error("AccessDenied", 403, "PutObjectTagging"), {}]
         )
-        assert ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
+        assert ops(calls)[-3:] == ["CompleteMultipartUpload", "PutObjectTagging", "DeleteObject"]
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
         assert "PutObjectTagging" in str(results[0].error)
+
+    def test_a_failed_rollback_leaves_a_success_that_still_gets_its_annotations(self) -> None:
+        # The rollback's own error escapes the tags subscriber before it
+        # settles the future (aws-cli's shape), so the annotations subscriber
+        # sees a success and writes them: annotations, no tags, rc 0.
+        calls, results, transferrer = self._all_with_oversized_tags(
+            [
+                client_error("AccessDenied", 403, "PutObjectTagging"),
+                client_error("AccessDenied", 403, "DeleteObject"),
+                {},
+                {},
+            ]
+        )
+        assert ops(calls)[-4:] == [
+            "PutObjectTagging",
+            "DeleteObject",
+            "PutObjectAnnotation",
+            "PutObjectAnnotation",
+        ]
+        assert transferrer.succeeded == 1
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
 
     def test_post_copy_tagging_failure_rolls_back_the_destination(self) -> None:
         big = "v" * 3000
@@ -3225,10 +3271,9 @@ class TestAnnotationsCopySupport:
     """The copy_props=ALL SDK gate (design/transfer.md section 4).
 
     Annotations need botocore's S3 model (CopyObject.AnnotationDirective,
-    1.43.31) and s3transfer's own multipart handling (the directive in
-    CopySubmissionTask.CREATE_MULTIPART_ARGS_BLACKLIST, 0.19); below either,
-    ALL must be refused with a clear message. The installed dev SDK satisfies
-    both, so the s3transfer side is exercised by trimming the blacklist.
+    1.43.31); below it ALL must be refused with a clear message. The
+    multipart carryover is this library's own subscriber, so s3transfer's
+    version does not enter into it.
     """
 
     def _capable_client(self) -> Any:
@@ -3244,7 +3289,9 @@ class TestAnnotationsCopySupport:
         assert reason is not None
         assert "1.43.31" in reason and "botocore" in reason
 
-    def test_reason_names_min_s3transfer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_an_s3transfer_without_annotation_handling_is_enough(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from s3transfer.copies import CopySubmissionTask
 
         trimmed = [
@@ -3253,9 +3300,7 @@ class TestAnnotationsCopySupport:
             if arg != "AnnotationDirective"
         ]
         monkeypatch.setattr(CopySubmissionTask, "CREATE_MULTIPART_ARGS_BLACKLIST", trimmed)
-        reason = annotations_copy_unsupported_reason(self._capable_client())
-        assert reason is not None
-        assert "0.19" in reason and "s3transfer" in reason
+        assert annotations_copy_unsupported_reason(self._capable_client()) is None
 
     def test_transferrer_rejects_all_on_old_botocore(self) -> None:
         client = model_only_client(set(), member="AnnotationDirective")
@@ -3371,66 +3416,6 @@ class TestAnnotationsCopySupport:
                     {"copy_props": CopyPropsMode.ALL, "annotation_copy_mode": "preload"},
                 ),
             )
-
-
-class TestAnnotationErrorWordingScope:
-    """`_align_annotation_copy_error` patches a process-shared s3transfer
-    method; its docstring promises the re-wording fires only for a copy that
-    carries this library's own `_SetAnnotations` subscriber. Both halves of
-    that promise are pinned here by driving the patched
-    `CopyCompleteMultipartUploadTask._apply_annotations` directly: a plain
-    s3transfer caller in the same process keeps upstream's own wording, and a
-    subscriber-carrying copy gets aws-cli's AnnotationCopyError text."""
-
-    class _Source:
-        def list_object_annotations(self, **kwargs: Any) -> dict[str, Any]:
-            return {"Annotations": [{"AnnotationName": "ann-a"}]}
-
-        def get_object_annotation(self, **kwargs: Any) -> dict[str, Any]:
-            return {"AnnotationPayload": io.BytesIO(b"payload")}
-
-    class _DenyingDest:
-        def put_object_annotation(self, **kwargs: Any) -> None:
-            raise client_error("AccessDenied", 403, "PutObjectAnnotation")
-
-    def _drive(self, subscribers: list[Any]) -> str:
-        from types import SimpleNamespace
-
-        from s3transfer.copies import CopyCompleteMultipartUploadTask
-
-        try:
-            from s3transfer.exceptions import S3CopyFailedError
-        except ImportError:
-            pytest.skip("the floor s3transfer predates the annotation write path")
-
-        transfer._align_annotation_copy_error()  # pyright: ignore[reportPrivateUsage]
-        call_args = SimpleNamespace(
-            extra_args={"AnnotationDirective": "COPY"},
-            copy_source={"Bucket": "srcb", "Key": "k"},
-            bucket="dstb",
-            key="k",
-            source_client=self._Source(),
-            subscribers=subscribers,
-        )
-        apply = CopyCompleteMultipartUploadTask._apply_annotations  # pyright: ignore[reportPrivateUsage]
-        with pytest.raises(S3CopyFailedError) as excinfo:
-            apply(object(), self._DenyingDest(), call_args, None, None, None)
-        return str(excinfo.value)
-
-    def test_a_plain_s3transfer_caller_keeps_upstreams_wording(self) -> None:
-        message = self._drive(subscribers=[])
-        assert "Succeeded: []" in message  # upstream's own repr wording
-        assert "The object was copied successfully" not in message
-
-    def test_a_subscriber_carrying_copy_gets_awss_wording(self) -> None:
-        subscriber = object.__new__(transfer._SetAnnotations)  # pyright: ignore[reportPrivateUsage]
-        message = self._drive(subscribers=[subscriber])
-        assert message == (
-            "Failed to copy all annotations to s3://dstb/k. The object was "
-            "copied successfully and was not deleted. Annotations written: "
-            "(none). Annotations that failed: ann-a: An error occurred "
-            "(AccessDenied) when calling the PutObjectAnnotation operation: stub."
-        )
 
 
 class _BackpressureFuture(_FakeCrtFuture):

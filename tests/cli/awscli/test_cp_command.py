@@ -54,16 +54,13 @@ Adaptation rules (on top of the ls/rm ports' - see their module docstrings):
   riding CreateMultipartUpload) holds verbatim: the engine removes upstream
   s3transfer >= 0.19's ``Tagging`` create-blacklist entry at manager build
   (``_allow_inline_mpu_tagging``), realigning with aws-cli's bundled table.
-- ``--copy-props all``'s multipart annotation carryover reads every source
-  annotation before creating the upload, in aws-cli's order (the CLI's
-  ``PRELOAD_MEMORY`` staging), but writes them through upstream
-  s3transfer >= 0.19's native ``_apply_annotations`` instead of aws-cli's
-  SetAnnotationsSubscriber (design/transfer.md section 4). The
-  TestCopyPropsAllCpCommand port therefore keeps aws-cli's canned order,
-  adding only the best-effort ``AbortMultipartUpload`` s3transfer sends after a
-  failed annotation write. ``get_object_annotation_response`` wraps the
-  payload in ``io.BytesIO`` (the engine calls ``.read()``) where aws-cli
-  builds a ``StreamingBody``.
+- ``--copy-props all``'s multipart annotation carryover is aws-cli's
+  SetAnnotationsSubscriber, ported: every source annotation is read before
+  the upload is created (the CLI's ``PRELOAD_MEMORY`` staging) and written
+  after the copy, behind the tagging write (design/transfer.md section 4), so
+  the TestCopyPropsAllCpCommand port keeps aws-cli's canned order verbatim.
+  ``get_object_annotation_response`` wraps the payload in ``io.BytesIO`` (the
+  engine calls ``.read()``) where aws-cli builds a ``StreamingBody``.
 - ``mock.patch`` targets translate: ``os.utime`` is an identical seam;
   ``mimetypes.guess_type`` becomes ``mimetypes.MimeTypes.guess_type``, the
   datastore method (the guess runs on boto3-s3's own ``MimeTypes``, built from
@@ -124,7 +121,6 @@ from unittest import mock
 
 import pytest
 from boto3.s3.transfer import TransferConfig
-from s3transfer.copies import CopySubmissionTask
 
 from boto3_s3 import transfer
 from boto3_s3.localstorage import LocalStorage
@@ -1521,25 +1517,20 @@ class TestCopyPropsDefaultCpCommand:
 def _annotations_sdk_supported() -> bool:
     # --copy-props all needs the annotations SDK (the engine refuses it up
     # front otherwise, design/transfer.md section 4): botocore's CopyObject must
-    # know AnnotationDirective and s3transfer must handle it on multipart.
+    # know AnnotationDirective.
     import botocore.session
 
     model = botocore.session.get_session().get_service_model("s3")
     members = getattr(model.operation_model("CopyObject").input_shape, "members", {})
-    if "AnnotationDirective" not in members:
-        return False
-    return "AnnotationDirective" in CopySubmissionTask.CREATE_MULTIPART_ARGS_BLACKLIST
+    return "AnnotationDirective" in members
 
 
 @pytest.mark.skipif(
     not _annotations_sdk_supported(),
-    reason="requires the S3 annotations SDK (botocore >= 1.43.31, s3transfer >= 0.19)",
+    reason="requires the S3 annotations SDK (botocore >= 1.43.31)",
 )
 class TestCopyPropsAllCpCommand:
-    # aws-cli: TestCopyPropsAllCpCommand. The multipart annotation writes ride
-    # s3transfer's native _apply_annotations here - the canned responses
-    # follow the module docstring's adaptation rule (design/transfer.md
-    # section 4 records the deviations).
+    # aws-cli: TestCopyPropsAllCpCommand.
     DEST_ETAG = '"dest-etag"'
     DEST_VERSION_ID = "dest-version-id"
     PAYLOAD = b"annotation-payload"
@@ -1667,20 +1658,14 @@ class TestCopyPropsAllCpCommand:
             *self.mp_copy_responses_with_dest_identity(),
             {},  # PutObjectAnnotation ann1 succeeds
             _client_error("AccessDenied", 403, "PutObjectAnnotation"),
-            # The write failure surfaces inside the CompleteMultipartUpload
-            # task, so s3transfer's failure cleanup fires a best-effort
-            # AbortMultipartUpload against the already-completed upload (a
-            # NoSuchUpload no-op on real S3; aws-cli's subscriber fails after
-            # the future resolves and never aborts).
-            {},
         ]
         result, calls = _run_cmd(responses, copy_command(copy_props="all"), expected_rc=1)
         # The destination object is not deleted on partial annotation failure,
-        # and the line is worded as aws-cli's AnnotationCopyError: the names
-        # written, then each failure as "name: message". Upstream s3transfer
-        # words the same failure with Python reprs, so the engine records the
-        # per-name outcomes and re-raises with this text.
+        # nor the completed upload aborted, and the line is worded as aws-cli's
+        # AnnotationCopyError: the names written, then each failure as
+        # "name: message".
         assert "DeleteObject" not in _operations(calls)
+        assert "AbortMultipartUpload" not in _operations(calls)
         assert (
             f"copy failed: s3://{SOURCE_BUCKET}/{SOURCE_KEY} "
             f"to s3://{TARGET_BUCKET}/{TARGET_KEY} "
@@ -1703,7 +1688,6 @@ class TestCopyPropsAllCpCommand:
             *self.mp_copy_responses_with_dest_identity(),
             _client_error("AccessDenied", 403, "PutObjectAnnotation"),
             _client_error("AccessDenied", 403, "PutObjectAnnotation"),
-            {},  # the best-effort AbortMultipartUpload (see above)
         ]
         result, calls = _run_cmd(responses, copy_command(copy_props="all"), expected_rc=1)
         assert "DeleteObject" not in _operations(calls)
@@ -1729,7 +1713,6 @@ class TestCopyPropsAllCpCommand:
             {},  # PutObjectAnnotation ann1 succeeds
             {},  # PutObjectAnnotation ann2 succeeds
             _client_error("AccessDenied", 403, "PutObjectAnnotation"),
-            {},  # the best-effort AbortMultipartUpload (see above)
         ]
         result, _ = _run_cmd(responses, copy_command(copy_props="all"), expected_rc=1)
         assert (

@@ -552,8 +552,8 @@ payloads in one auto-deleting temporary file per copy instead. Only the payload
 currently being read or written is held in memory.
 [`TransferConfig.annotation_temp_dir`](#transferconfig) selects the directory.
 
-`DEFERRED` uses s3transfer's native post-copy reads: the payloads are listed
-and fetched after the multipart copy has completed. It avoids the preload
+`DEFERRED` reads after the copy instead: the payloads are listed and fetched
+once the multipart copy has completed, just before they are written. It avoids the preload
 storage and the startup delay, at the price of a different failure state — a
 source read that fails leaves the completed destination object in place.
 
@@ -628,8 +628,11 @@ destination is deleted on a best-effort basis and the item is reported as
 failed — except when the cleanup itself also fails, where the item is reported
 successful with the destination left carrying no tags, as `aws s3` reports it.
 `ALL` additionally
-requires an SDK that models S3 object annotations — botocore 1.43.31 or newer
-and s3transfer 0.19 or newer. On an older SDK the transfer engine refuses `ALL`
+requires an SDK that models S3 object annotations — botocore 1.43.31 or newer.
+A multipart copy under `ALL` writes the annotations after the copy, behind that
+post-copy tag write, as `aws s3` does: a tag write whose failure deleted the
+destination leaves no annotation written, and an annotation write that fails
+leaves the copied object in place. On an older SDK the transfer engine refuses `ALL`
 up front with [`ConfigurationError`](./exceptions.md#configurationerror), unless
 `metadata_directive` has disabled the chain so that the annotations path is
 never reached; every other mode degrades silently there

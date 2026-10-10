@@ -217,7 +217,7 @@ chain:
 | `none` | ReplaceMetadataDirective + ReplaceTaggingDirective + ExcludeAnnotationDirective | Carries nothing over (sets the directive to REPLACE). s3transfer excludes the directive from CreateMultipartUpload via a blacklist |
 | `metadata-directive` | SetMetadataDirectiveProps + ReplaceTaggingDirective + ExcludeAnnotationDirective | Injects 7 properties (CacheControl / ContentDisposition / ContentEncoding / ContentLanguage / ContentType / Expires / Metadata) from the source HeadObject. Tags are not carried over |
 | `default` (the default) | SetMetadataDirectiveProps + SetTags + ExcludeAnnotationDirective | The above + tags. GetObjectTagging -> percent-encode, and if it is ~2 KiB or under use the `Tagging` header on CreateMultipartUpload (aws-cli's wire shape - see the s3transfer adaptation below), otherwise PutObjectTagging after the transfer succeeds (**on failure, roll back by best-effort deleting the dest** and treat the transfer as failed) |
-| `all` | SetMetadataDirectiveProps + SetTags + SetAnnotations | The above + S3 object annotations (aws-cli 2.35.6+). Single-part copies carry them server-side. Multipart copies stage reads according to `annotation_copy_mode`, then use s3transfer >= 0.19's native destination write path - see below |
+| `all` | SetMetadataDirectiveProps + SetTags + SetAnnotations | The above + S3 object annotations (aws-cli 2.35.6+). Single-part copies carry them server-side. Multipart copies stage reads according to `annotation_copy_mode` and write them after the copy, behind the tagging write (aws-cli's SetAnnotationsSubscriber) - see below |
 
 - The single-shot path reuses the first HeadObject response
   (`TransferItem.head`) and **does not HEAD twice** (the same as aws-cli's reuse
@@ -243,36 +243,19 @@ chain:
   the source. This mirrors aws-cli's own double-failure outcome rather than
   being a gap to close - the exit-code charter (overview.md section 3) is what
   requires reproducing it, not just tolerating it.
-- **Where that tagging write sits relative to the annotation writes**
-  (`all`, multipart, a tag set too large for the create header - recorded, not
-  fixed): aws-cli writes both from `on_done` subscribers registered tags-first,
-  so its PutObjectTagging goes out ahead of its PutObjectAnnotation calls,
-  while here the annotations ride upstream s3transfer's native write path
-  inside the CompleteMultipartUpload task, which finishes before any
-  subscriber's `on_done` - so the tagging write goes out last. The console
-  lines, the exit code and the object left at the destination are the same in
-  every failure corner (every combination of an annotation write, the
-  tagging write and the rollback delete being denied, measured against the
-  pinned aws-cli); the order differs, and so does the request set, below. An
-  annotation write that fails part way (the copy completed; upstream's
-  `S3CopyFailedError`, re-worded above) does not withhold the tagging write:
-  `_SetTags` recognizes that failure (`_annotation_copy_failure_type`) and
-  still sends PutObjectTagging, since aws-cli had already sent its own before
-  the annotation write failed - the reported error stays the annotation
-  failure unless the tagging write fails and takes over. Upstream's failure
-  cleanup then also sends an AbortMultipartUpload for the upload it already
-  completed (refused by the service, unseen), a request aws-cli never sends.
-  When the tagging write fails and the rollback delete succeeds, both tools
-  leave no destination object - aws-cli without having written the
-  annotations (its annotations subscriber sees a future already settled with
-  the tagging failure), this library after having written them. When the
-  rollback delete fails too (the bullet above, rc 0 on both), the delete's
-  own exception escapes aws-cli's tags subscriber before it settles the
-  future, so its annotations subscriber sees a success and writes them: the
-  surviving object carries the copied annotations and no tags on both tools.
-  Moving the write point would mean giving up upstream's
-  native path, which is what carries the annotations at all; recorded for the
-  reader in [`aws-differences.md`](../docs/cli/aws-differences.md).
+- **The tagging write and the annotation writes** (`all`, multipart, a tag
+  set too large for the create header) go out in aws-cli's order, because
+  both are `on_done` subscribers registered tags-first, as aws-cli's are:
+  PutObjectTagging, then the PutObjectAnnotation calls. A tagging failure
+  whose rollback delete succeeds settles the future first, so no annotation
+  is written and no destination is left; a rollback that fails too escapes
+  `_SetTags` before it settles the future (the bullet above), so
+  `_SetAnnotations` sees a success and writes them - the surviving object
+  carries the copied annotations and no tags, on both tools. An annotation
+  write that fails leaves the tagged object in place. Every failure corner -
+  every combination of an annotation write, the tagging write and the
+  rollback delete being denied - sends the same requests in the same order
+  as the pinned aws-cli.
 - **Annotations** (aws-cli 2.35.6+, S3 Object Annotations): every mode short
   of `all` appends `_ExcludeAnnotationDirective` (aws-cli's
   ExcludeAnnotationDirectiveSubscriber), sending `AnnotationDirective=EXCLUDE`
@@ -299,34 +282,35 @@ chain:
     selects its directory; `None` uses Python's OS-standard temporary directory
     selection. Only the payload currently being read or written is held in
     memory, and the file is closed on success, failure, or cancellation.
-  - `DEFERRED` preserves s3transfer's native behavior: list/get after the
-    multipart copy completes. It avoids preload storage and startup delay, but
-    a source read failure leaves the completed destination in place.
+  - `DEFERRED` (no aws-cli counterpart) lists and reads in `on_done`, after
+    the multipart copy completes and just before the writes. It avoids
+    preload storage and startup delay, but a source read failure leaves the
+    completed destination in place.
 
-  Both preload modes hand a per-copy source-client adapter to upstream
-  s3transfer >= 0.19, so its `_apply_annotations` still performs
-  PutObjectAnnotation with `ObjectIfMatch` pinned to the new ETag. A partial
-  destination write failure names succeeded/failed annotations and performs
-  **no destination rollback** - aws-cli's AnnotationCopyError outcome, and its
-  wording too: the reported sentence is rebuilt to aws's
-  (`_align_annotation_copy_error`), because upstream keeps the per-name
-  outcomes only as formatted text inside the exception it raises, so they are
-  recorded as each PutObjectAnnotation returns or fails and re-worded from
-  that record. The exception type upstream raises is reused, so the taxonomy
-  translation and the exit code are unchanged; only the text moves.
-  s3transfer additionally attempts a harmless AbortMultipartUpload after the
-  upload has already completed. When the source HeadObject supplied a
-  `VersionId`, preload list/get calls pin it like aws-cli. The boto3-s3 CLI
-  always selects `PRELOAD_MEMORY` internally and exposes no additional CLI
-  option.
+  The writes are aws-cli's SetAnnotationsSubscriber, ported
+  (`_SetAnnotations.on_done`): after a successful copy, one
+  PutObjectAnnotation per staged name in the source listing's order, mapping
+  only `RequestPayer` (aws-cli's request-param mapper), pinned by
+  `ObjectIfMatch` to the new object's ETag and by its `VersionId`. Those two
+  come from the CompleteMultipartUpload response, which aws-cli's fork hands
+  back as the future's result and upstream s3transfer discards, so the
+  classic manager of an `all` run is given a stand-in for its client
+  (`_CopyCompletions`) that delegates every call and keeps that one
+  response per destination key - nothing is registered on the client's
+  events. A write that fails does not stop the others; any failure settles
+  the future with aws-cli's `AnnotationCopyError` sentence (names written,
+  then `name: message` per failure) and **no destination rollback**. When
+  the source HeadObject supplied a `VersionId`, the list/get calls pin it
+  like aws-cli. The boto3-s3 CLI always selects `PRELOAD_MEMORY` internally
+  and exposes no additional CLI option.
 
-  `copy_props=ALL` on an SDK that cannot honor the native write path is refused
+  `copy_props=ALL` on an SDK without the annotations model is refused
   at `Transferrer` construction
   with a `ConfigurationError` (CLI rc 253); the probe behind that gate is
   public: **`annotations_copy_unsupported_reason(client)`** returns the
-  rejection wording (naming botocore >= 1.43.31 / s3transfer >= 0.19 as the
-  hint) or `None`, introspecting the model and s3transfer directly,
-  version-agnostic. The gate only runs when `metadata_directive` is unset -
+  rejection wording (naming botocore >= 1.43.31 as the hint) or `None`,
+  introspecting the model directly, version-agnostic; the installed
+  s3transfer does not enter into it, the writes being this library's own. The gate only runs when `metadata_directive` is unset -
   an explicit `--metadata-directive` disables the whole copy-props chain
   (the bullet above) before the annotations path is ever reached, so
   `cp ... --metadata-directive REPLACE --copy-props all` is accepted at rc 0
@@ -334,7 +318,7 @@ chain:
   never touches `AnnotationDirective` on that path either).
 - **Upstream s3transfer >= 0.19 adaptation** (aws-cli bundles a fork that
   predates this, so the port diverges from aws-cli's subscribers in two
-  guarded spots, realigns two of upstream's tables and one of its methods at
+  guarded spots, realigns one of upstream's tables at
   manager build - the same idempotent-mutation pattern as the IfNoneMatch
   patch - and flips one request parameter per copy):
   upstream 0.19 grew its own multipart copy-props handling -
@@ -369,31 +353,17 @@ chain:
   copy whose size was never provided skips the flip - upstream then sizes it
   with its HeadObject probe and applies its own preservation, a path aws-cli
   cannot produce (it always provides the size).
-  **`ChecksumAlgorithm` is removed from `PUT_OBJECT_ANNOTATION_ARGS`**
-  (`_align_annotation_put_args`): `all`'s annotation writes ride upstream's
-  native path, which would forward the copy's checksum algorithm onto every
-  PutObjectAnnotation, while aws-cli maps only `RequestPayer` there.
-  **The annotation write path is wrapped so a partial failure reads as aws's**
-  (`_align_annotation_copy_error`): upstream formats the succeeded and failed
-  names straight into its own exception message and keeps no structured record
-  of them, so the destination client is stood in for during that one call to
-  capture each outcome, and the exception is re-raised with aws-cli's
-  `AnnotationCopyError` sentence. Like the table patches it is
-  process-shared and stays inert for a plain s3transfer caller - the wrapping
-  and the re-wording happen only for a copy carrying this module's own
-  annotation subscriber - and both lookups are `getattr` guards, so an upstream
-  that reshapes or drops the private write path degrades to upstream's own
-  wording rather than failing at manager build.
   s3transfer 0.19's own
   `TaggingDirective`-driven tag copy is deliberately not used: it has no
   destination rollback when the tagging write fails. Its post-complete
-  tag/annotation hooks stay inert here (outside `all`'s deliberate
-  `AnnotationDirective=COPY` ride above): `_apply_tags` writes only on a
+  tag/annotation hooks stay inert here: `_apply_tags` writes only on a
   `TaggingDirective` of COPY, or REPLACE with a non-empty `Tagging` - `none` /
   `metadata-directive` leave REPLACE with no `Tagging`, which parses to an
   empty tag set and returns without a write, and `default` leaves no directive
-  at all - and `_apply_annotations` fires only on the `AnnotationDirective=COPY`
-  that `all` alone sends (the other modes send EXCLUDE).
+  at all - and `_apply_annotations` fires only on an `AnnotationDirective` of
+  COPY, which no mode sends (`all` sends none, its annotations being written
+  by `_SetAnnotations`; the other modes send EXCLUDE). Upstream's annotation
+  table and write path are left exactly as shipped.
 
 ## 5. download's incidental processing
 

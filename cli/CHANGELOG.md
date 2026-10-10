@@ -5,6 +5,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `--copy-props all` writes a multipart copy's oversized tags and its annotations in `aws`'s order, with `aws`'s requests only.
 - The `[plugins]` section is now loaded like `aws` loads it: a plugin that cannot be imported or initialized stops every command (exit code 255), and a plugin's handlers on SDK events run.
 - `--sse aws:kms` now signs an MRAP, Outposts or S3 Express target with plain SigV4 like `aws`, `--no-sign-request` included (it used the endpoint's own signer, or sent the request unsigned).
 - More `aws` parity where `aws` misbehaves: a transfer or delete whose connection is closed or times out before any response prints nothing and does not fail the run, `sync` carries on through an unsorted listing, `--delete` included, and a run cut short by Ctrl-C or a fatal error prints no result line after its first cancelled transfer (exit codes changed).
