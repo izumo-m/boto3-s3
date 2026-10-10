@@ -547,6 +547,12 @@ numbers in the bold item labels below are that document's.
      credentials` and sends nothing). `--sse AES256` and `--sse-c AES256`
      upload anonymously on both, and `mv`'s path-resolver clients stay
      anonymous throughout, since they name no `signature_version` of their own.
+     aws's per-client config does not look at the target either, so under
+     `--sse aws:kms` the four targets above sign plain SigV4 too, with the
+     client's region in the scope, signed run or unsigned - the
+     endpoint's own SigV4a / `sigv4-s3express` choice is overridden on both
+     tools (`_requests_kms_signing`; measured in a network namespace with no
+     route out, reading the signed request from `--debug`).
      **The gate is shaped after botocore's endpoint rules, not after aws-cli's
      resolver regexes**, because the two answer different questions - the
      regexes say which spellings `mv` can resolve to an underlying bucket

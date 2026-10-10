@@ -960,16 +960,25 @@ def _sends_unsigned_requests(args: argparse.Namespace) -> bool:
     rc 255 profile report; ``--sse AES256`` and ``--sse-c AES256`` upload
     anonymously on both.
 
-    ``--sse`` belongs to the transfer family alone, hence the ``getattr``, and
-    the comparison is aws's own exact string - ``aws:kms:dsse`` gets no
-    per-client config there either.
+    Which runs get that per-client config is `_requests_kms_signing`.
 
     This governs the *botocore* client alone, which is aws's own split: its
     CRT factory reads ``--no-sign-request`` directly and never the client, so
     the same KMS run transfers anonymously on the CRT lane. `build_s3`
     declares that separately (``crt_sign_requests``).
     """
-    return bool(args.no_sign_request) and getattr(args, "sse", None) != "aws:kms"
+    return bool(args.no_sign_request) and not _requests_kms_signing(args)
+
+
+def _requests_kms_signing(args: argparse.Namespace) -> bool:
+    """Whether aws would hand this run's S3 clients ``signature_version='s3v4'``.
+
+    aws's ``ClientFactory.create_client`` does so for ``--sse aws:kms`` and
+    nothing else - aws's own exact string, so ``aws:kms:dsse`` does not - and
+    for the source client of an S3-to-S3 copy as for the destination's.
+    ``--sse`` belongs to the transfer family alone, hence the ``getattr``.
+    """
+    return getattr(args, "sse", None) == "aws:kms"
 
 
 def build_client(
@@ -1037,8 +1046,17 @@ def build_client(
     # where the UNSIGNED signature waiting in the session default client config
     # is what must reach the client - a per-client signature_version, this pin
     # included, beats it in botocore's merge.
+    # `--sse aws:kms` is the exception to both stand-downs: aws's
+    # `ClientFactory.create_client` passes `Config(signature_version='s3v4')`
+    # for it whatever the target, so an MRAP, Outposts or S3 Express target
+    # signs plain SigV4 there too, with or without `--no-sign-request`
+    # (measured offline on the pinned aws: `AWS4-HMAC-SHA256` with the
+    # client's region in the scope, where the resolution would have chosen
+    # SigV4a / `sigv4-s3express`).
     overrides: dict[str, Any] = {}
-    if not _includes_endpoint_auth_path(args) and not _sends_unsigned_requests(args):
+    if _requests_kms_signing(args) or (
+        not _includes_endpoint_auth_path(args) and not _sends_unsigned_requests(args)
+    ):
         overrides["signature_version"] = "s3v4"
     # The timeouts arrive as raw strings (see globalargs.add_common_arguments)
     # and are coerced here, aws-cli-style: int() with a 0 -> None ("no timeout")

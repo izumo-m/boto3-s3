@@ -5,6 +5,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `--sse aws:kms` now signs an MRAP, Outposts or S3 Express target with plain SigV4 like `aws`, `--no-sign-request` included (it used the endpoint's own signer, or sent the request unsigned).
 - More `aws` parity where `aws` misbehaves: a transfer or delete whose connection is closed or times out before any response prints nothing and does not fail the run, and `sync` carries on through an unsorted listing, `--delete` included (exit codes changed).
 - A profile's `cli_auto_prompt` is now read like `aws` reads it: from the profile the environment selects, no longer from the one `--profile` names.
 - More `aws` parity at startup: `--version` with stdout closed no longer ends in a traceback, and runs carrying two mistakes at once (an unknown option beside a bad option value, an unusable instance-metadata setting, `retry_mode = legacy` beside a bad endpoint) now report the one `aws` reports (exit codes changed in those corners).

@@ -1174,6 +1174,29 @@ def _provider_client(session: Any, service: str = "sts") -> Any:
     return session.create_client(service)
 
 
+class _RequestStoppedError(Exception):
+    """Raised from ``before-send`` once the signed request has been seen."""
+
+
+def _authorization_sent(client: Any, bucket: str) -> str:
+    """The ``Authorization`` header a PutObject is signed with, sent nowhere.
+
+    ``before-send`` fires on the finished, signed request; raising there ends
+    the call before any connection is made.
+    """
+    seen: list[str] = []
+
+    def capture(request: Any, **_kwargs: Any) -> None:
+        value = request.headers.get("Authorization", b"")
+        seen.append(value.decode() if isinstance(value, bytes) else value)
+        raise _RequestStoppedError
+
+    client.meta.events.register("before-send.s3.PutObject", capture)
+    with pytest.raises(_RequestStoppedError):
+        client.put_object(Bucket=bucket, Key="k", Body=b"x", ServerSideEncryption="aws:kms")
+    return seen[0]
+
+
 class TestNoSignRequestPosture:
     """``--no-sign-request`` is the session's posture, and ``--sse aws:kms`` beats it.
 
@@ -1239,6 +1262,40 @@ class TestNoSignRequestPosture:
     def test_sse_aws_kms_pins_the_signature_the_way_aws_does(self) -> None:
         args = _parse_transfer([*self._KMS_ARGV, "--sse", "aws:kms"])
         assert clientfactory.build_client(args).meta.config.signature_version == "s3v4"
+
+    @pytest.mark.parametrize(
+        ("target", "bucket"),
+        [
+            (
+                "s3://arn:aws:s3::123456789012:accesspoint/mfzwi23gnjvgw.mrap/k",
+                "arn:aws:s3::123456789012:accesspoint/mfzwi23gnjvgw.mrap",
+            ),
+            (
+                "s3://arn:aws:s3-outposts:us-west-2:123456789012:outpost/op-01234567890123456/"
+                "accesspoint/myap/k",
+                "arn:aws:s3-outposts:us-west-2:123456789012:outpost/op-01234567890123456/"
+                "accesspoint/myap",
+            ),
+            ("s3://mybkt--usw2-az1--x-s3/k", "mybkt--usw2-az1--x-s3"),
+        ],
+        ids=["mrap", "outposts", "express"],
+    )
+    @pytest.mark.parametrize("unsigned", [False, True], ids=["signed", "no-sign-request"])
+    def test_sse_aws_kms_signs_plain_sigv4_whatever_the_target(
+        self, monkeypatch: pytest.MonkeyPatch, target: str, bucket: str, unsigned: bool
+    ) -> None:
+        # aws's per-client config does not look at the target: an MRAP,
+        # Outposts or S3 Express target signs plain SigV4 under --sse aws:kms,
+        # with the client's region in the scope (measured offline on the
+        # pinned aws), where the endpoint's own resolution - SigV4a,
+        # sigv4-s3express - signs every other signed run.
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+        argv = ["./local.txt", target, "--region", "us-west-2", "--sse", "aws:kms"]
+        args = _parse_transfer([*argv, "--no-sign-request"] if unsigned else argv)
+        authorization = _authorization_sent(clientfactory.build_client(args), bucket)
+        assert authorization.startswith("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/")
+        assert "/us-west-2/" in authorization
 
     @pytest.mark.parametrize(
         "extra",
