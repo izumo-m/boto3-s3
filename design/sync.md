@@ -121,8 +121,11 @@ pair (`PairFilter = Callable[[SyncPair], bool]`, True = copy).
   aws-cli's `Comparator.call` merges it (each step compares only the two
   entries in hand), so the mis-pairing an S3-compatible endpoint's unsorted
   `ListObjectsV2` causes - with `--delete`, a destination key the source has
-  too deleted and then copied again - is aws-cli's own, measured against a
-  listing mutated in flight. A custom `SORTABLE_SCAN` backend that yields a key
+  too both deleted and copied - is aws-cli's own, measured against a listing
+  mutated in flight. Which of the two requests reaches the service first is
+  timing on both tools (aws-cli sends them from separate workers, this
+  library batches its deletes), so whether the key survives differs from run
+  to run on either - measured, a key lost in 4 of 6 runs on each. A custom `SORTABLE_SCAN` backend that yields a key
   twice produces a pair per occurrence rather than one merged pair; the
   built-in local and S3 scans never duplicate a key, so this is a
   custom-backend concern.

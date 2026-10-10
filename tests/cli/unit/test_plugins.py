@@ -145,6 +145,70 @@ class TestReports:
         assert capsys.readouterr().err == ""
 
 
+class TestRegistrationChecks:
+    """aws's emitter checks each registration as it is made, so a plugin aws
+    refuses ends every invocation while the plugins load - ``--version``
+    included - with botocore's own wording at rc 255 (measured)."""
+
+    @pytest.mark.parametrize(
+        ("body", "message"),
+        [
+            (
+                "def _h():\n    pass\n"
+                "def awscli_initialize(cli):\n    cli.register('before-call.s3', _h)\n",
+                "must accept keyword arguments (**kwargs)",
+            ),
+            (
+                "def awscli_initialize(cli):\n    cli.register('before-call.s3', 42)\n",
+                "Event handler 42 must be callable.",
+            ),
+            (
+                "def _h(**kwargs):\n    pass\n"
+                "def awscli_initialize(cli):\n"
+                "    cli.register('before-call.s3', _h, unique_id='x', unique_id_uses_count=True)\n"
+                "    cli.register('before-call.s3', _h, unique_id='x')\n",
+                "Initial registration of unique id x was specified to not use a counter.",
+            ),
+            (
+                "def _h(**kwargs):\n    pass\n"
+                "def awscli_initialize(cli):\n"
+                "    cli.register('before-call.s3', _h, unique_id='x')\n"
+                "    cli.unregister('before-call.s3', unique_id='x', unique_id_uses_count=True)\n",
+                "Subsequent unregister calls to unique id must specify use of a counter",
+            ),
+        ],
+        ids=["no-kwargs", "not-callable", "register-counter", "unregister-counter"],
+    )
+    def test_a_refused_registration_ends_the_run(
+        self, config: Path, capsys: pytest.CaptureFixture[str], body: str, message: str
+    ) -> None:
+        _write_plugin(config, "bs3plug_bad.py", body)
+        _write_config(config, "mine = bs3plug_bad")
+        assert cli.main(["--version"]) == 255
+        err = capsys.readouterr().err
+        assert err.startswith("boto3-s3: [ERROR]: ")
+        assert message in err
+
+    def test_a_repeated_unique_id_is_recorded_once_by_botocore(self, config: Path) -> None:
+        # The duplicate registration is no error (and no second handler):
+        # the replay leaves botocore to drop it exactly as aws's emitter does.
+        _write_plugin(
+            config,
+            "bs3plug_dup.py",
+            "def _h(**kwargs):\n    pass\n"
+            "def awscli_initialize(cli):\n"
+            "    cli.register('before-call.s3', _h, unique_id='x')\n"
+            "    cli.register('before-call.s3', _h, unique_id='x')\n",
+        )
+        _write_config(config, "mine = bs3plug_dup")
+        plugins.load(configfiles.scan().plugins)
+        from botocore.hooks import HierarchicalEmitter
+
+        emitter = HierarchicalEmitter()
+        plugins.attach(emitter)
+        assert len(list(emitter._handlers.prefix_search("before-call.s3"))) == 1  # pyright: ignore[reportPrivateUsage]
+
+
 class TestAttach:
     def test_a_plugin_handler_fires_on_the_sessions_requests(
         self, config: Path, monkeypatch: pytest.MonkeyPatch

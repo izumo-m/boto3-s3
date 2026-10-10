@@ -727,9 +727,9 @@ class TestCopy:
         assert calls[0].operation == "CopyObject"
         assert "AnnotationDirective" not in calls[0].params
 
-    def test_all_multipart_default_preloads_then_uses_native_write_path(self) -> None:
-        # Reads are completed before submission. s3transfer >= 0.19 still owns
-        # the post-complete writes and pins ObjectIfMatch to the new ETag.
+    def test_all_multipart_default_preloads_then_writes_after_the_copy(self) -> None:
+        # Reads are completed before submission; the writes follow the copy and
+        # pin ObjectIfMatch / VersionId to the new object, as aws-cli's do.
         responses: list[dict[str, Any] | Exception] = [
             {"UploadId": "u"},
             {"CopyPartResult": {"ETag": '"p1"'}},
@@ -772,9 +772,7 @@ class TestCopy:
     def test_annotation_write_drops_the_copy_checksum_algorithm(self) -> None:
         # --checksum-algorithm rides the copy calls, but aws writes
         # annotations from its own subscriber and maps only RequestPayer onto
-        # PutObjectAnnotation - upstream's native path would forward the
-        # copy's ChecksumAlgorithm there (_align_annotation_put_args removes
-        # it from the table; this pins the wire).
+        # PutObjectAnnotation; so does `_SetAnnotations` (this pins the wire).
         responses: list[dict[str, Any] | Exception] = [
             {"UploadId": "u"},
             {"CopyPartResult": {"ETag": '"p1"'}},

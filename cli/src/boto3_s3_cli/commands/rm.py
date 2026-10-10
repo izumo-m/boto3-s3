@@ -214,6 +214,9 @@ class RmCommand(Command):
                 dryrun=args.dryrun,
                 request_payer=args.request_payer,
                 on_result=printer,
+                # The engine aws would carry these deletes on, which decides
+                # how one that dies without a response is reported.
+                transfer_config=transfer_config,
             )
         except BatchError:
             # Per-key failure lines were already streamed by the printer.

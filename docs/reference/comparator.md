@@ -232,8 +232,9 @@ default rule is replaced rather than combined. The content strategies
 [`ChecksumComparison`](#checksumcomparison) are `PairFilter`s of this kind.
 
 Contract of a call: it is invoked once per `SyncPair` that reaches the update
-lane, on `sync`'s calling thread and in ascending `compare_key` order, unless
-the filter was wrapped in `ParallelFilter`. Its argument always has both sides
+lane, on `sync`'s calling thread and in the merge's order - ascending
+`compare_key` whenever both listings arrive in key order - unless the filter
+was wrapped in `ParallelFilter`. Its argument always has both sides
 populated. Returning `False` drops the pair silently — no transfer is submitted
 and no `on_result` record is emitted for it. Raising aborts the run: the
 exception propagates out of `sync` rather than being recorded as a per-item
@@ -271,10 +272,12 @@ a callback that wants it for the update pairs must call
 [`AwsCliComparison`](#awsclicomparison) itself.
 
 Contract of a call: it is invoked once per pair the `Comparator` emits,
-serially, on `sync`'s calling thread, in ascending `compare_key` order — across
-all three shapes, one interleaved stream. Callers may rely on that order; it is
-what lets one callback keep a streaming cursor or journal over the whole pair
-stream. Raising aborts the run rather than being recorded as a per-item failure.
+serially, on `sync`'s calling thread, in the merge's order — across all three
+shapes, one interleaved stream, ascending by `compare_key` whenever both
+listings arrive in key order (an S3-compatible endpoint that does not sort
+breaks that, as it breaks the pairing - [`Comparator`](#comparator)). Callers
+may rely on that order for ordered listings; it is what lets one callback keep
+a streaming cursor or journal over the whole pair stream. Raising aborts the run rather than being recorded as a per-item failure.
 The visibility `filter` still runs first on both sides, so a pruned key never
 arrives.
 

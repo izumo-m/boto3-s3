@@ -332,17 +332,23 @@ def lost_like_aws(exc: BaseException) -> bool:
 
     aws-cli's per-item completion handler (its ``DoneResultSubscriber``) asks
     whether a failure is S3's conditional-write rejection by evaluating
-    ``exception.response.get("Error", {}).get("Code")``. botocore's transport
-    family - a connection refused or closed, a connect or read timeout, every
-    ``HTTPClientError`` - carries ``response = None``, so that expression
-    raises ``AttributeError``, which s3transfer's callback runner logs at
-    debug level and swallows: the item gets no result line, counts as neither
-    done nor failed, and the run exits 0 when nothing else failed (measured on
-    every per-item route - cp / mv / sync / rm, single and recursive). The
-    operations mirror it on the routes aws-cli sends through that handler -
-    the transfer engine's terminal, the S3 deleter, the blind single-key rm -
-    by dropping the item when this answers True, and this logs the dropped
-    failure at debug level the way s3transfer logs aws-cli's.
+    ``exception.response.get("Error", {}).get("Code")``. botocore's
+    ``HTTPClientError`` family - a connection closed before the response, a
+    read timeout - carries ``response = None``, so that expression raises
+    ``AttributeError``, which s3transfer's callback runner logs at debug level
+    and swallows: the item gets no result line, counts as neither done nor
+    failed, and the run exits 0 when nothing else failed (measured on cp, mv,
+    recursive cp and rm). A refused connection or a connect timeout is
+    botocore's ``ConnectionError`` family instead, with no ``response``
+    attribute at all, and a download's read timeout reaches the handler as
+    s3transfer's ``RetriesExceededError`` after its own retries - both
+    ordinary failures on aws-cli. The operations mirror the loss on the routes
+    aws-cli sends through that handler with a botocore client - the transfer
+    engine's terminal, the S3 deleter's per-key requests, the blind
+    single-key rm, the deletes only where the run's engine is classic
+    (`deleter.deletes_ride_crt`) - by dropping the item when this answers
+    True, and this logs the dropped failure at debug level the way s3transfer
+    logs aws-cli's.
 
     The expression is aws-cli's own, evaluated on the exception aws-cli would
     hold: a family error this library raised from a botocore one (`s3_errors`,

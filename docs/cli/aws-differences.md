@@ -105,6 +105,12 @@ promised by either tool, so such a run is not something the two can be
 compared on. Do not pass `--delete` when one side of a same-bucket sync
 contains the other.
 
+The same holds for **a `sync --delete` against an S3-compatible endpoint whose
+listing is not in key order**: both tools pair such a listing the same way,
+and that pairing can copy a key and delete it in one run, so whether the key
+survives is timing on either tool (measured: lost in four of six runs on
+each). Real S3 and MinIO list in key order.
+
 A second arrangement of the same kind is **a `sync --delete` download into a
 case-insensitive directory** (the Windows and macOS defaults) **where a new
 object and a file to be deleted differ only in case** — `A.txt` in the bucket,

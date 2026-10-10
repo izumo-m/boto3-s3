@@ -52,8 +52,16 @@ def rm(
     on_result: ResultCallback | None = None,
     cancel_token: CancelToken | None = None,
     capture_response: bool = False,
+    transfer_config: TransferConfig | None = None,
 ) -> None: ...
 ```
+
+`transfer_config` (this instance's when `None`) moves no bytes: `rm` always
+deletes through the client. Its engine choice is the one `aws s3 rm` would
+carry the deletes on, which decides how a delete that dies without a response
+is reported — dropped without a record on the classic engine, as `aws s3`
+drops it, and a `FAILED` record where the CRT engine is selected
+([`../results.md`](../results.md)).
 
 `target` names what to delete: an `"s3://bucket/key"` string (the `s3://`
 scheme is optional, so `"bucket/key"` works too), an `os.PathLike[str]`

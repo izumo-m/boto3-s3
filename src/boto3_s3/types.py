@@ -398,8 +398,8 @@ class CopyPropsMode(enum.Enum):
     """Which source object properties to propagate on an S3-to-S3 copy.
 
     `ALL` additionally carries S3 object annotations and needs an SDK with the
-    annotations model - botocore >= 1.43.31 and s3transfer >= 0.19; on an older
-    SDK the transfer engine refuses it up front with a `ConfigurationError`
+    annotations model - botocore >= 1.43.31; on an older SDK the transfer
+    engine refuses it up front with a `ConfigurationError`
     (every other mode degrades silently there, design/transfer.md section 4).
     Multipart annotation staging is selected separately by
     `AnnotationCopyMode`.

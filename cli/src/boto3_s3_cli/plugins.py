@@ -31,6 +31,7 @@ must stay SDK-free (design/imports.md).
 
 from __future__ import annotations
 
+import inspect
 import os
 import sys
 from collections.abc import Mapping
@@ -48,31 +49,134 @@ class PluginEmitter:
 
     It records each ``register`` / ``register_first`` / ``register_last`` /
     ``unregister`` call, in order, for `attach` to replay onto a botocore
-    session's emitter. Nothing is listening yet while plugins initialize -
+    session's emitter - and checks each one as it is made, the way aws's
+    emitter (botocore's ``HierarchicalEmitter``) does, so a registration aws
+    refuses ends the run while the plugins load, ``--version`` included
+    (measured): a handler that is not callable, one that does not accept
+    ``**kwargs``, and a ``unique_id`` registered or unregistered with and
+    without its counter in turn - each with botocore's own wording. Those
+    checks are reproduced rather than delegated so the informational exits
+    stay SDK-free. Nothing is listening yet while plugins initialize -
     aws-cli's own handlers do not exist here - so ``emit`` answers with no
     responses and ``emit_until_response`` with none.
     """
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+        # unique_id -> the count botocore keeps for it (None: registered
+        # without a counter), mirroring its `_unique_id_handlers`.
+        self._unique_ids: dict[Any, int | None] = {}
 
-    def register(self, *args: Any, **kwargs: Any) -> None:
-        self.calls.append(("register", args, kwargs))
+    def register(
+        self,
+        event_name: Any,
+        handler: Any,
+        unique_id: Any = None,
+        unique_id_uses_count: bool = False,
+    ) -> None:
+        self._verify_and_record("register", event_name, handler, unique_id, unique_id_uses_count)
 
-    def register_first(self, *args: Any, **kwargs: Any) -> None:
-        self.calls.append(("register_first", args, kwargs))
+    def register_first(
+        self,
+        event_name: Any,
+        handler: Any,
+        unique_id: Any = None,
+        unique_id_uses_count: bool = False,
+    ) -> None:
+        self._verify_and_record(
+            "register_first", event_name, handler, unique_id, unique_id_uses_count
+        )
 
-    def register_last(self, *args: Any, **kwargs: Any) -> None:
-        self.calls.append(("register_last", args, kwargs))
+    def register_last(
+        self,
+        event_name: Any,
+        handler: Any,
+        unique_id: Any = None,
+        unique_id_uses_count: bool = False,
+    ) -> None:
+        self._verify_and_record(
+            "register_last", event_name, handler, unique_id, unique_id_uses_count
+        )
 
-    def unregister(self, *args: Any, **kwargs: Any) -> None:
-        self.calls.append(("unregister", args, kwargs))
+    def unregister(
+        self,
+        event_name: Any,
+        handler: Any = None,
+        unique_id: Any = None,
+        unique_id_uses_count: bool = False,
+    ) -> None:
+        if unique_id is not None and unique_id in self._unique_ids:
+            count = self._unique_ids[unique_id]
+            if unique_id_uses_count:
+                if count is None:
+                    raise ValueError(
+                        f"Initial registration of unique id {unique_id} was specified to "
+                        "use a counter. Subsequent unregister calls to unique "
+                        "id must specify use of a counter as well."
+                    )
+                if count == 1:
+                    del self._unique_ids[unique_id]
+                else:
+                    self._unique_ids[unique_id] = count - 1
+            else:
+                if count:
+                    raise ValueError(
+                        f"Initial registration of unique id {unique_id} was specified "
+                        "to not use a counter. Subsequent unregister calls "
+                        "to unique id must specify not to use a counter as "
+                        "well."
+                    )
+                del self._unique_ids[unique_id]
+        self.calls.append(
+            ("unregister", (event_name, handler, unique_id, unique_id_uses_count), {})
+        )
 
     def emit(self, *_args: Any, **_kwargs: Any) -> list[tuple[Any, Any]]:
         return []
 
     def emit_until_response(self, *_args: Any, **_kwargs: Any) -> tuple[Any, Any]:
         return None, None
+
+    def _verify_and_record(
+        self,
+        method: str,
+        event_name: Any,
+        handler: Any,
+        unique_id: Any,
+        unique_id_uses_count: bool,
+    ) -> None:
+        """botocore's ``_verify_and_register`` and its unique-id bookkeeping."""
+        if not callable(handler):
+            raise ValueError(f"Event handler {handler} must be callable.")
+        try:
+            accepts_kwargs = inspect.getfullargspec(handler)[2]
+        except TypeError:
+            # botocore's `_verify_accept_kwargs` lets a callable it cannot
+            # inspect through.
+            accepts_kwargs = True
+        if not accepts_kwargs:
+            raise ValueError(f"Event handler {handler} must accept keyword arguments (**kwargs)")
+        if unique_id is not None and unique_id in self._unique_ids:
+            count = self._unique_ids[unique_id]
+            if unique_id_uses_count:
+                if not count:
+                    raise ValueError(
+                        f"Initial registration of  unique id {unique_id} was "
+                        "specified to use a counter. Subsequent register "
+                        "calls to unique id must specify use of a counter "
+                        "as well."
+                    )
+                self._unique_ids[unique_id] = count + 1
+            elif count:
+                raise ValueError(
+                    f"Initial registration of unique id {unique_id} was "
+                    "specified to not use a counter. Subsequent "
+                    "register calls to unique id must specify not to "
+                    "use a counter as well."
+                )
+        elif unique_id is not None:
+            self._unique_ids[unique_id] = 1 if unique_id_uses_count else None
+        self.calls.append((method, (event_name, handler, unique_id, unique_id_uses_count), {}))
 
 
 # The registrations this run's plugins made (`load`), replayed by `attach`.

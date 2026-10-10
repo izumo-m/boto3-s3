@@ -490,6 +490,7 @@ S3Deleter(
     operation: str = "delete",
     capture_response: bool = False,
     dryrun: bool = False,
+    transfer_config: TransferConfig | None = None,
 )
 ```
 
@@ -502,6 +503,13 @@ lifetime: do not `storage.close()` before the deleter is closed.
 
 `request_payer` is forwarded as the `RequestPayer` request parameter on both
 the batch and the per-key route; `None` omits it.
+
+`transfer_config` names the engine the deleting operation runs on (`None` is
+boto3's `'auto'`). Nothing is sent through it; its choice decides how a
+per-key request that dies without a response is reported — dropped without a
+record on the classic engine, as `aws s3` drops it, and a failure where the
+CRT engine is selected, as `aws s3`'s CRT client reports it. A batch request
+that dies that way is sent again one key at a time either way.
 
 `on_result` is a [`ResultCallback`](./results.md#resultcallback) receiving one
 [`OpResult`](./results.md#opresult) per dispatched entry — see

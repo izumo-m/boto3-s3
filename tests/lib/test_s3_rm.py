@@ -219,6 +219,26 @@ class TestRmSingleKey:
         assert _rm("s3://b/k", client) == []
         assert client.delete_object_calls == [{"Bucket": "b", "Key": "k"}]
 
+    def test_on_the_crt_engine_that_delete_fails_instead(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws's CRT client reports it: `delete failed: ... AWS_IO_SOCKET_CLOSED`,
+        # rc 1 (measured with preferred_transfer_client = crt).
+        from boto3.s3.transfer import TransferConfig
+
+        from boto3_s3 import crtsupport
+
+        monkeypatch.setattr(crtsupport, "should_use_crt", lambda _preferred: True)
+        client = _FakeS3Client(delete_object_error=ConnectionClosedError(endpoint_url="http://h/"))
+        results: list[OpResult] = []
+        with pytest.raises(BatchError):
+            S3().rm(
+                S3Storage("s3://b/k", client=client),
+                on_result=results.append,
+                transfer_config=TransferConfig(preferred_transfer_client="crt"),
+            )
+        assert [r.outcome for r in results] == [OpOutcome.FAILED]
+
     def test_excluded_by_matcher_is_silent(self) -> None:
         client = _FakeS3Client()
         keep = GlobFilter().exclude("*").compile()

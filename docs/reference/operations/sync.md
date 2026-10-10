@@ -210,7 +210,8 @@ still gated.
 ### When the decisions are made
 
 A lane filter that is **not** wrapped in `ParallelFilter` is called on `sync`'s
-calling thread, one entry at a time, in ascending compare-key order. With none
+calling thread, one entry at a time, in ascending compare-key order (given
+listings in key order - [`../comparator.md`](../comparator.md)). With none
 of them wrapped, the lanes that are on interleave their calls into a single
 ascending stream over the pairs they judge — a lane switched off, as
 `delete_filter` is by default, is offered nothing at all. `pair_filter`, which

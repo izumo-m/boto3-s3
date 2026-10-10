@@ -62,13 +62,18 @@ discarded after acceptance, or lost the way `aws s3` loses them:
   round trip cannot carry) that had not gone out when the run was abandoned
   ([`../../design/deleter.md`](../../design/deleter.md));
 - an item whose request died without any response — botocore's
-  closed-connection and read-timeout errors — on a transfer, a batched
-  delete, or a single-key `rm`. It produces no record and is in no count,
-  because `aws s3` loses it too: its per-item completion handler fails on the
-  missing response, so the item prints no line and the run exits 0 when
-  nothing else failed. A refused connection or a service error response is
-  an ordinary `FAILED` record. The dropped failure is logged at debug level
-  on the `boto3_s3.s3storage` logger.
+  closed-connection and read-timeout errors — on a transfer, a per-key
+  delete, or a single-key `rm`, on the classic engine. It produces no record
+  and is in no count, because `aws s3` loses it too: its per-item completion
+  handler fails on the missing response, so the item prints no line and the
+  run exits 0 when nothing else failed. A refused connection, a download's
+  read timeout (s3transfer retries it and then fails), a service error
+  response, and a delete whose run selects the CRT engine (which carries
+  `aws s3`'s deletes there) are ordinary `FAILED` records. A batched
+  `DeleteObjects` that dies this way is not itself lost: its keys are sent
+  again one `DeleteObject` each, the request `aws s3` sends, and each takes
+  its own outcome. The dropped failure is logged at debug level on the
+  `boto3_s3.s3storage` logger.
 
 `WARNED` and `NOTICE` sit outside that rule in the other direction as well.
 Being advisories rather than outcomes, they are not tied one-to-one to an item:

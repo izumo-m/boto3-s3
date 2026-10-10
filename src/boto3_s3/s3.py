@@ -48,7 +48,7 @@ from boto3_s3.comparator import (
     SrcOnlyPair,
     SyncPair,
 )
-from boto3_s3.deleter import S3Deleter
+from boto3_s3.deleter import S3Deleter, deletes_ride_crt
 from boto3_s3.exceptions import (
     BatchError,
     Boto3S3Error,
@@ -705,8 +705,10 @@ class _SyncDeletes:
         on_result: ResultCallback | None,
         cancel_token: CancelToken | None,
         capture_response: bool = False,
+        transfer_config: TransferConfig | None = None,
     ) -> None:
         self._dest = dest_storage
+        self._transfer_config = transfer_config
         self._request_payer = request_payer
         self._dryrun = dryrun
         self._on_result = on_result
@@ -757,6 +759,7 @@ class _SyncDeletes:
                         cancel_token=self._cancel_token,
                         operation="sync",
                         capture_response=self._capture_response,
+                        transfer_config=self._transfer_config,
                     )
                 )
             self._deleter.submit(info)
@@ -2108,6 +2111,7 @@ class S3:
             on_result=on_result,
             cancel_token=cancel_token,
             capture_response=capture_response,
+            transfer_config=transfer_config,
         )
         with ExitStack() as stack:
             stack.enter_context(transferrer)
@@ -2227,6 +2231,7 @@ class S3:
         on_result: ResultCallback | None = None,
         cancel_token: CancelToken | None = None,
         capture_response: bool = False,
+        transfer_config: TransferConfig | None = None,
     ) -> None:
         """Delete objects under ``target`` with ``aws s3 rm`` semantics.
 
@@ -2269,8 +2274,14 @@ class S3:
         mode discards the unsent buffer and drains the in-flight delete batch;
         immediate mode also cancels an unstarted batch future. Both raise
         `CancelledError` after worker cleanup.
+
+        ``transfer_config`` (this instance's when ``None``) moves no bytes here:
+        its engine choice is the one ``aws s3 rm`` would carry the deletes on,
+        which decides how a delete that dies without a response is reported -
+        lost on the classic engine, a failure on the CRT (`deletes_ride_crt`).
         """
         storage = self._resolve_s3_target(target, operation="rm")
+        config = transfer_config if transfer_config is not None else self._transfer_config
         _raise_if_cancelled(cancel_token, "rm")
         if not storage.bucket and (recursive or not storage.key):
             # rm has no bucket-listing mode (scan is object listing only), so a
@@ -2297,6 +2308,7 @@ class S3:
                 capture_response=capture_response,
                 on_result=on_result,
                 cancel_token=cancel_token,
+                lose_responseless=not deletes_ride_crt(config),
             )
             _raise_if_cancelled(cancel_token, "rm")
             return
@@ -2339,6 +2351,7 @@ class S3:
             cancel_token=cancel_token,
             operation="rm",
             capture_response=capture_response,
+            transfer_config=config,
         ) as deleter:
             # cancel_token on the scan too (like ls): the prefetch producer
             # stops between page pulls instead of fetching pages nobody reads.
@@ -2389,6 +2402,7 @@ class S3:
         capture_response: bool,
         on_result: ResultCallback | None,
         cancel_token: CancelToken | None,
+        lose_responseless: bool,
     ) -> None:
         """The blind single-key path (no listing; aws ``_list_single_object``).
 
@@ -2426,9 +2440,10 @@ class S3:
             # request_failure the way the deleter wraps it (aws's task records
             # both alike).
             failure = request_failure(exc, operation="rm", bucket=storage.bucket, key=key)
-            if lost_like_aws(failure):
-                # Died without a response: aws-cli's task loses it - no line,
-                # rc 0 (`lost_like_aws`) - so no record and no BatchError.
+            if lose_responseless and lost_like_aws(failure):
+                # Died without a response: aws-cli's classic task loses it -
+                # no line, rc 0 (`lost_like_aws`) - so no record and no
+                # BatchError. Its CRT client reports it (`deletes_ride_crt`).
                 return
             _emit_result(
                 on_result,

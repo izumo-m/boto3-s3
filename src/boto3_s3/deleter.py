@@ -47,6 +47,9 @@ from concurrent.futures import (
 )
 from typing import TYPE_CHECKING, Any, cast
 
+from botocore.exceptions import MissingDependencyException
+
+from boto3_s3 import crtsupport
 from boto3_s3.exceptions import Boto3S3Error, TransportError, ValidationError
 from boto3_s3.s3storage import (
     S3_CODE_CATEGORIES,
@@ -68,6 +71,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from types import TracebackType
 
+    from boto3.s3.transfer import TransferConfig
     from mypy_boto3_s3 import S3Client
     from mypy_boto3_s3.type_defs import (
         DeleteObjectsOutputTypeDef,
@@ -112,6 +116,26 @@ def _retries_disabled(client: Any) -> bool:
 # as a different key. A compiled class instead of a per-character Python loop:
 # `_run_batch` runs this over every submitted key.
 _XML_INCOMPATIBLE = re.compile("[^\t\n\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
+
+
+def deletes_ride_crt(transfer_config: TransferConfig | None) -> bool:
+    """Whether aws-cli would carry this run's deletes on its CRT engine.
+
+    aws-cli sends its per-key deletes through the transfer manager it built for
+    the run, so a run whose ``TransferConfig`` selects the CRT engine
+    (`crtsupport.selects_crt`, boto3's rule - ``None`` is its ``'auto'``)
+    deletes through the CRT client there, and a request that dies without a
+    response surfaces as an awscrt error its completion handler reports
+    (measured: ``delete failed: ... AWS_IO_SOCKET_CLOSED``, rc 1). This library
+    deletes through botocore on either engine, so the answer decides whether
+    such a failure is lost (`lost_like_aws`) or reported. An explicit ``'crt'``
+    without a usable awscrt cannot have selected the engine, so it answers
+    False rather than raising.
+    """
+    try:
+        return crtsupport.selects_crt(transfer_config)
+    except MissingDependencyException:
+        return False
 
 
 def _delete_objects_compatible(key: str) -> bool:
@@ -187,6 +211,7 @@ class S3Deleter:
         operation: str = "delete",
         capture_response: bool = False,
         dryrun: bool = False,
+        transfer_config: TransferConfig | None = None,
     ) -> None:
         # Runtime guard for untyped callers (e.g. S3.resolve routing a bare
         # "bucket/key" to LocalStorage): fail inside the taxonomy, not with an
@@ -228,6 +253,11 @@ class S3Deleter:
         # A transient per-key failure is re-sent unless the client's own
         # policy is not to retry (`_retries_disabled`).
         self._resend_transient = not _retries_disabled(self._client)
+        # Whether a per-key request that dies without a response is lost the
+        # way aws-cli's classic route loses it (`lost_like_aws`): not when the
+        # run's engine is the CRT, which carries aws-cli's deletes too and
+        # reports such a failure (`deletes_ride_crt`).
+        self._lose_responseless = not deletes_ride_crt(transfer_config)
         # Set when the run is abandoned - close(flush=False) for anything but
         # a graceful cancel, or a close() that is itself interrupted - so a
         # batch in flight starts no further per-key request. Written on the
@@ -491,10 +521,21 @@ class S3Deleter:
             failure = request_failure(exc, operation=self._operation, bucket=self._bucket)
             logger.debug("delete_objects failed for s3://%s: %s", self._bucket, failure)
             if lost_like_aws(failure):
-                # Died without a response: each key's own DeleteObject would
-                # have on aws-cli, and each would be lost there.
-                for index, _ in batch:
-                    lost[index] = True
+                # Died without a response. That says nothing about the
+                # per-key DeleteObject aws-cli sends for each of these keys -
+                # a batch past the read timeout, an endpoint that drops only
+                # the batch call - so each key goes out on that route, where
+                # its own outcome (a delete, a failure, or a loss) is decided
+                # as aws-cli's is. A key an abandoned run leaves unsent gets
+                # no record, like aws-cli's never-started future.
+                self._send_singly(
+                    batch,
+                    errors,
+                    deletes,
+                    lost,
+                    purpose="resending a DeleteObjects request that died without a response",
+                    not_sent=lambda index, _info: lost.__setitem__(index, True),
+                )
                 return
             failures = {info.key: failure for _, info in batch}
         else:
@@ -650,7 +691,7 @@ class S3Deleter:
             failure = request_failure(
                 exc, operation=self._operation, bucket=self._bucket, key=info.key
             )
-            if lost_like_aws(failure):
+            if self._lose_responseless and lost_like_aws(failure):
                 lost[index] = True
             else:
                 errors[index] = failure

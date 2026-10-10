@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import (
     ClientError,
     ConnectionClosedError,
@@ -41,8 +42,9 @@ from boto3_s3 import (
     TransferType,
     TransportError,
     ValidationError,
+    crtsupport,
 )
-from boto3_s3.deleter import S3_DELETE_BATCH
+from boto3_s3.deleter import S3_DELETE_BATCH, deletes_ride_crt
 from tests.utils.fakes3 import client_error
 
 if TYPE_CHECKING:
@@ -1062,21 +1064,41 @@ class TestResults:
         with pytest.raises(AssertionError, match="unexpected call"):
             deleter.close()
 
-    def test_a_batch_that_dies_without_a_response_records_nothing(self) -> None:
-        # aws-cli sends one DeleteObject per key, and its completion handler
-        # loses each one that dies without a response (a closed connection, a
-        # read timeout): no line, no count, rc 0 - measured against the pinned
-        # aws through a 127.0.0.1 fake that lists and then closes on every
-        # delete. The batch carrying those keys loses them the same way.
-        fake = _FakeS3Client(script=[ConnectionClosedError(endpoint_url="http://h/"), {}])
+    def test_a_batch_that_dies_without_a_response_resends_each_key(self) -> None:
+        # aws-cli sends one DeleteObject per key, so a dead batch call says
+        # nothing about them: each key goes out on that per-key route, where
+        # aws's own outcome is decided (measured: a batch past
+        # --cli-read-timeout, the per-key deletes answering at once - aws
+        # deletes and reports all three, and so does the resend).
+        fake = _FakeS3Client(
+            script=[ReadTimeoutError(endpoint_url="http://h/")],
+            single_script=[{}, {}, {}],
+        )
         results: list[OpResult] = []
-        deleter = _deleter(fake, batch_size=2, on_result=results.append)
+        deleter = _deleter(fake, batch_size=3, on_result=results.append)
         for key in ("a", "b", "c"):
             deleter.submit(_info(key))
         deleter.close()
-        assert _keys(fake.calls) == [["a", "b"], ["c"]]
-        assert [(r.compare_key, r.outcome) for r in results] == [("c", OpOutcome.SUCCEEDED)]
-        assert (deleter.succeeded, deleter.failed) == (1, 0)
+        assert _keys(fake.calls) == [["a", "b", "c"]]
+        assert sorted(call["Key"] for call in fake.single_calls) == ["a", "b", "c"]
+        assert [(r.compare_key, r.outcome) for r in results] == [
+            ("a", OpOutcome.SUCCEEDED),
+            ("b", OpOutcome.SUCCEEDED),
+            ("c", OpOutcome.SUCCEEDED),
+        ]
+
+    def test_keys_whose_own_delete_dies_too_are_lost(self) -> None:
+        # The per-key requests die as well: each is lost the way aws-cli's
+        # classic completion handler loses it - no record, no count, rc 0.
+        dead = ConnectionClosedError(endpoint_url="http://h/")
+        fake = _FakeS3Client(script=[dead], single_script=[dead, dead])
+        results: list[OpResult] = []
+        deleter = _deleter(fake, batch_size=2, on_result=results.append)
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
+        deleter.close()
+        assert results == []
+        assert (deleter.succeeded, deleter.failed) == (0, 0)
         assert deleter.first_error is None
 
     def test_a_single_key_that_dies_without_a_response_records_nothing(self) -> None:
@@ -1087,6 +1109,42 @@ class TestResults:
         deleter.close()
         assert results == []
         assert (deleter.succeeded, deleter.failed) == (0, 0)
+
+    def test_on_the_crt_engine_such_a_key_fails_instead(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws-cli carries the deletes of a CRT run on its CRT client, whose
+        # dead request is an awscrt error the completion handler reports
+        # (measured: `delete failed: ... AWS_IO_SOCKET_CLOSED`, rc 1).
+        monkeypatch.setattr(crtsupport, "should_use_crt", lambda _preferred: True)
+        dead = ConnectionClosedError(endpoint_url="http://h/")
+        fake = _FakeS3Client(script=[dead], single_script=[dead])
+        results: list[OpResult] = []
+        deleter = _deleter(
+            fake,
+            on_result=results.append,
+            transfer_config=TransferConfig(preferred_transfer_client="crt"),
+        )
+        deleter.submit(_info("a"))
+        deleter.close()
+        assert [r.outcome for r in results] == [OpOutcome.FAILED]
+        assert isinstance(results[0].error, TransportError)
+        assert deleter.failed == 1
+
+    def test_which_engine_carries_the_deletes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # boto3's selection rule; an explicit 'crt' that cannot be honored
+        # (no usable awscrt) answers False instead of raising.
+        from botocore.exceptions import MissingDependencyException
+
+        monkeypatch.setattr(crtsupport, "should_use_crt", lambda _preferred: True)
+        assert deletes_ride_crt(TransferConfig(preferred_transfer_client="crt"))
+        assert not deletes_ride_crt(TransferConfig(preferred_transfer_client="classic"))
+
+        def missing(_preferred: str) -> bool:
+            raise MissingDependencyException(msg="awscrt")
+
+        monkeypatch.setattr(crtsupport, "should_use_crt", missing)
+        assert not deletes_ride_crt(TransferConfig(preferred_transfer_client="crt"))
 
     def test_a_refused_connection_still_fails_the_batch(self) -> None:
         # EndpointConnectionError carries no response attribute at all, so

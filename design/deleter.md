@@ -105,12 +105,20 @@ no thread can be started, and the sender falls back to the worker itself.
 Results from both routes are emitted in original submission order.
 
 A request that dies without a response - botocore's closed-connection /
-read-timeout family - leaves its keys with no record and no count: all of a
-batch's keys when the `DeleteObjects` request dies, one key when its own
-`DeleteObject` does. aws-cli sends one `DeleteObject` per key and its
-completion handler loses each such failure ([`opresult.md`](./opresult.md),
-`lost_like_aws`), so `rm --recursive` against an endpoint that drops every
-delete exits 0 silently on both tools.
+read-timeout family - is handled per key, as aws-cli's own per-key
+`DeleteObject` would meet it. A dead `DeleteObjects` decides nothing for its
+keys - a batch past the read timeout, an endpoint that drops only the batch
+call, while each key's own delete would go through (measured: aws deletes and
+reports every key) - so every key of it goes out again on the per-key route,
+whatever the retry policy (each key's one attempt is the one aws makes). A
+per-key `DeleteObject` that dies this way leaves its key with no record and
+no count where the run's engine is classic: aws-cli's completion handler loses
+each such failure ([`opresult.md`](./opresult.md), `lost_like_aws`), so
+`rm --recursive` against an endpoint that drops every delete exits 0 silently
+on both tools. Where the run's engine is the CRT (`transfer_config`,
+`deletes_ride_crt`), aws-cli carries its deletes on the CRT client, whose
+dead request it reports, so the key is an ordinary failure here (rc 1 on both;
+the line's wording is the CRT's there, botocore's here).
 
 `capture_response=True` instead sends `Quiet=False`, so the response also lists
 the successful `Deleted[]` entries; each is reconstructed into a per-key

@@ -184,7 +184,8 @@ documented where it is owned:
 - `filter: FileFilter | None` on `cp` / `mv` / `rm` / `sync`
   ([`../filters.md`](../filters.md)), and, on `cp` / `mv` / `sync`, the
   `transfer_config` argument plus the `**options` transfer options
-  ([`../options.md`](../options.md)). Each operation page states which key the
+  ([`../options.md`](../options.md)); `rm` takes `transfer_config` too, for its
+  engine choice alone ([`rm.md`](./rm.md)). Each operation page states which key the
   filter matches against for that operation.
 - `recursive: bool = False` on `cp` / `mv` / `rm` / `ls` — what it selects
   differs per operation, so each page states its own meaning. `sync` is always
