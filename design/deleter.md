@@ -261,6 +261,13 @@ versioned bucket) cannot be mapped back to submission order.
 
 ## 4. aws-cli parity notes
 
+Batching is an accepted deviation ([`overview.md`](./overview.md), exit code
+charter exception 4): a difference from aws-cli that originates in sending
+`DeleteObjects` batches instead of one `DeleteObject` per key is recorded here
+and in aws-differences.md, not reopened. The deleter still narrows such a
+difference where that is cheap - every per-key re-send in section 3 exists for
+that - so a key never gets fewer attempts than aws-cli gives it.
+
 - aws-cli uses only per-key `DeleteObject` and does not use the batch API
   (`DeleteObjects`). This implementation's batching is a wire-level deviation
   that is observationally equivalent for ordinary keys: deleting a nonexistent

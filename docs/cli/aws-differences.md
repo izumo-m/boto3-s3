@@ -218,7 +218,11 @@ comes out differently, listed in section 1.
   closes at once, is exit code 120 here.
 - **A batched delete names a different operation when a key fails.** Deletes go
   out in batches here — up to a thousand keys per `DeleteObjects` request —
-  where `aws` sends one `DeleteObject` per key. For a run that finishes
+  where `aws` sends one `DeleteObject` per key. Batching is a settled design,
+  and the differences it causes — this entry's, and the Ctrl-C during deletes
+  under the CRT engine below — are accepted rather than open: where a batch
+  can cheaply be brought closer to `aws`'s per-key outcome it is, by sending
+  keys again one by one. For a run that finishes
   enumerating, the objects removed and the exit code are the same (a key that
   no longer exists is a success on both wire shapes) unless the endpoint keeps
   failing requests (below); the per-key failure line is not. A key the batch
@@ -317,7 +321,8 @@ comes out differently, listed in section 1.
   delete already queued, then ends with the per-key lines — a request the
   interrupt cancelled fails with `AWS_ERROR_S3_CANCELED` — and no closing line,
   exit code 1 (measured: thirty keys, all deleted). This command's deletes
-  are batched and stop at the interrupt as on the classic engine: the
+  are batched — an accepted difference (above) — and stop at the interrupt as
+  on the classic engine: the
   requests already out finish, no further one starts, and the run closes with
   `cancelled: ctrl-c received`, exit code 1 — so objects `aws` would still
   have deleted survive. Re-running the command deletes them.
