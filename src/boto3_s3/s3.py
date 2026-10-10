@@ -1697,7 +1697,9 @@ class S3:
                 src_bucket=storage.bucket,
                 src_key=storage.key,
                 dest_fileobj=dest_fileobj,
-                src_display=storage.as_text(),
+                # aws prints the source as its argument normalization left it:
+                # a keyless one is the bucket root, "s3://b/" (or "s3:///").
+                src_display=storage.normalized_uri(),
                 dest_display="-",
             )
         transferrer = Transferrer(

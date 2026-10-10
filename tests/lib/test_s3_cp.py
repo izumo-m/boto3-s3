@@ -1277,6 +1277,30 @@ class TestStreamRoutes:
         S3().cp(S3Storage("s3://bucket/k", client=client), down, dryrun=True)
         assert calls == [] and down.opens == []
 
+    @pytest.mark.parametrize(
+        ("uri", "shown"),
+        [
+            ("s3://bucket", "s3://bucket/"),
+            ("s3://bucket/", "s3://bucket/"),
+            ("s3:///", "s3:///"),
+            ("s3://bucket/k", "s3://bucket/k"),
+        ],
+    )
+    def test_a_stream_download_names_a_keyless_source_as_the_bucket_root(
+        self, uri: str, shown: str
+    ) -> None:
+        # aws prints the source as its argument normalization left it
+        # (measured: `cp s3://b - --dryrun` is `download: s3://b/ to -`).
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        S3().cp(
+            S3Storage(uri, client=client),
+            IOStorage(io.BytesIO()),
+            dryrun=True,
+            on_result=results.append,
+        )
+        assert [result.src for result in results] == [shown]
+
     def test_stream_with_recursive_is_rejected(self) -> None:
         client, _ = make_recording_client([])
         with pytest.raises(ValidationError) as excinfo:
