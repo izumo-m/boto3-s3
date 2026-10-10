@@ -32,6 +32,7 @@ from botocore.utils import ensure_boolean
 
 from boto3_s3 import ConfigurationError, InvalidConfigError, TransferConfig, crtsupport
 from boto3_s3.awsconfig import SIZE_SUFFIX, AwsConfig, split_size_suffix
+from boto3_s3_cli import usage
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +113,11 @@ def human_readable_to_int(value: str) -> int:
             return int(value)
         except ValueError:
             raise InvalidConfigError(f"Invalid size value: {value}") from None
-    return int(value[: -len(suffix)]) * SIZE_SUFFIX[suffix]
+    try:
+        return int(value[: -len(suffix)]) * SIZE_SUFFIX[suffix]
+    except ValueError as exc:
+        # aws lets this one through raw: its own interpreter's words.
+        raise ValueError(usage.int_error_message(exc)) from None
 
 
 class RuntimeConfig:

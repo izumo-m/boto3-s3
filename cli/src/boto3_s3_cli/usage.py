@@ -8,6 +8,8 @@ name or value.
 
 from __future__ import annotations
 
+import re
+
 _TWO_PATH_FORMS = "<LocalPath> <S3Uri> or <S3Uri> <LocalPath> or <S3Uri> <S3Uri>"
 
 
@@ -35,6 +37,22 @@ def bare_single_uri_usage() -> str:
 def two_path_usage(command: str) -> str:
     """aws's usage error for a two-path transfer command (cp / mv / sync) - rc 252."""
     return f"usage: boto3-s3 {command} {_TWO_PATH_FORMS}\nError: Invalid argument type"
+
+
+# Python 3.10's int() names its digit limit without the unit 3.11 added.
+_UNITLESS_DIGIT_LIMIT = re.compile(r"^Exceeds the limit \((\d+)\) for ")
+
+
+def int_error_message(exc: ValueError) -> str:
+    """A bare ``int()`` failure's text, worded as aws's interpreter words it.
+
+    aws reports the ``ValueError`` of its bare ``int()`` conversions as the
+    exception's own text, so the wording is its bundled Python's - 3.14. Of
+    the interpreters this command runs on, only 3.10 words one of them
+    differently: the digit limit, ``Exceeds the limit (4300) for ...`` where
+    3.11 onward says ``Exceeds the limit (4300 digits) for ...``.
+    """
+    return _UNITLESS_DIGIT_LIMIT.sub(r"Exceeds the limit (\1 digits) for ", str(exc))
 
 
 def invalid_bucket_name_message(name: str = "") -> str:

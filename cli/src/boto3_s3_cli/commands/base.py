@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 # These exception names do not themselves import the AWS SDK.
 from boto3_s3 import InvalidValueError, ValidationError
-from boto3_s3_cli import paramfile
+from boto3_s3_cli import paramfile, usage
 from boto3_s3_cli.clientfactory import (
     build_client,
     build_s3,
@@ -194,8 +194,8 @@ def parse_integer_option(value: object, *, operation: str) -> int | None:
         return int(text)
     except ValueError as exc:
         # InvalidValueError: main() maps it to 255 (aws's general handler),
-        # not ValidationError's 252, and str(exc) mirrors aws's message.
-        raise InvalidValueError(str(exc), operation=operation) from exc
+        # not ValidationError's 252, and the text mirrors aws's message.
+        raise InvalidValueError(usage.int_error_message(exc), operation=operation) from exc
 
 
 def _expand_string_paramfile(
