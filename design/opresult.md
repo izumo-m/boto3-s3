@@ -87,9 +87,11 @@ because the run died first - produces nothing. The delete lane carries one
 carve-out: `S3Deleter` entries accepted but never run produce no record - the
 unsent buffer, which a cancellation or an exception that ends the run (a
 listing failure part-way through, say) discards, a dispatched batch an
-immediate cancellation stopped before its request started, and a started
-batch's XML-incompatible key that an abandoned run had not sent yet
-([`deleter.md`](./deleter.md) sections 2-3). Three pre-submission gates carve out
+immediate cancellation stopped before its request started, and a key of a
+started batch due a request of its own - XML-incompatible, a re-send of a
+transient per-key failure, any key of a batch request that failed as a
+whole - that an abandoned run had not sent yet ([`deleter.md`](./deleter.md)
+sections 2-3). Three pre-submission gates carve out
 the other direction: each consumes the item it blocks with an advisory instead
 of an outcome, so that item never reaches the operation layer and gets no
 terminal record - a glacier-blocked source without `ignore_glacier_warnings`

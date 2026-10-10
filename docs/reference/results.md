@@ -54,14 +54,15 @@ discarded after acceptance, or lost the way `aws s3` loses them:
   directory (one `WARNED` record). Under `ignore_glacier_warnings` the glacier
   gate emits a terminal `SKIPPED` record instead. Both option keys are on
   `TransferOptions` ([`options.md`](./options.md));
-- entries the deleter accepted but never ran, which produce no record at all:
-  its unsent buffer, discarded by a cancellation or by an exception that ends
-  the run (a listing failure part-way through, say), and, under
-  `CancelMode.IMMEDIATE`, a dispatched batch whose request had not started —
-  or, inside a started batch, a key sent as a request of its own (one the XML
-  round trip cannot carry, or one of a batch request that died without a
-  response) that had not gone out when the run was abandoned
-  ([`../../design/deleter.md`](../../design/deleter.md));
+- deletes the deleter accepted but whose own request never went out, which
+  produce no record at all: its unsent buffer, discarded by a cancellation or
+  by an exception that ends the run (a listing failure part-way through,
+  say), and, under `CancelMode.IMMEDIATE`, a dispatched batch whose request
+  had not started — or, inside a started batch, a key due a request of its
+  own (one the XML round trip cannot carry, a re-send of a transient per-key
+  failure, any key of a batch request that failed as a whole) that had not
+  gone out when the run was abandoned, even where S3 had already answered the
+  batch for it ([`../../design/deleter.md`](../../design/deleter.md));
 - an item whose botocore request died without any response — botocore's
   closed-connection and read-timeout errors — on a transfer, a per-key
   delete, or a single-key `rm`. It produces no record

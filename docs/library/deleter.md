@@ -142,8 +142,8 @@ A batch's re-sends go out up to ten at a time. Two things switch them off: a
 botocore client configured not to retry at all (a single attempt per request;
 the CRT client retries on its own policy whatever that says), and abandoning
 the run — `close(flush=False)`, or an immediate-mode cancel — after which the
-keys not yet re-sent get no record, as `aws s3` prints nothing for a key whose
-request never started.
+keys not yet re-sent get no record, as `aws s3` prints nothing on its classic
+client for a key whose request never started.
 
 If the batch request itself fails — an error the service answered with, a
 dropped connection, anything the request raised — that decides nothing for its

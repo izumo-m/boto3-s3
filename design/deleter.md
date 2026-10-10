@@ -55,9 +55,10 @@ constant is `boto3_s3.deleter.S3_DELETE_BATCH`.
 - `on_result` is called **from the worker thread**. One `OpResult` per
   dispatched key (`transfer_type=TransferType.DELETE`, `bytes_transferred=0`, in submit order
   within a batch; it is not emitted for keys in a discarded buffer, nor for a
-  per-key request an abandoned run never sent - an XML-incompatible key, or a
-  key of a batch that died without a response - nor for a key whose own
-  `DeleteObject` died without a response on botocore - section 3). The callback
+  per-key request an abandoned run never sent - an XML-incompatible key, a
+  re-send of a transient failure, any key of a batch request that failed as a
+  whole - nor for a key whose own `DeleteObject` died without a response on
+  botocore - section 3). The callback
   must finish quickly and must not raise. If it does raise: records up to that
   point are counted, the rest of the same batch remain undelivered, and the
   exception is re-raised to the caller on the next **non-empty** `flush()` or on
@@ -77,9 +78,8 @@ constant is `boto3_s3.deleter.S3_DELETE_BATCH`.
 - Cancellation never discards a *running* batch's results: a batch whose S3
   request has started completes and delivers its per-key results before
   shutdown returns - bar the per-key requests an abandoned run had not sent
-  yet: a transient failure is left as the batch reported it, an
-  XML-incompatible key or a key of a batch that died without a response gets
-  no record (section 3). A graceful cancel is not an
+  yet (an XML-incompatible key, a re-send of a transient failure, any key of
+  a batch request that failed as a whole), which get no record (section 3). A graceful cancel is not an
   abandonment - it drains the batch in flight whole, although rm and sync
   leave the deleter through `close(flush=False)` then. Unsent buffered entries
   are discarded without an
@@ -184,8 +184,8 @@ versioned bucket) cannot be mapped back to submission order.
   `DeleteObject`, and that request's outcome is the key's result. A throttled
   endpoint can answer every key of a batch this way, so the re-sends go
   through the shared per-key sender above - each may sit through the client's
-  own backoff - and a key not re-sent because the run was abandoned keeps the
-  error the batch reported. The batch entry is not counted against the client's
+  own backoff - and a key not re-sent because the run was abandoned gets no
+  record. The batch entry is not counted against the client's
   retry policy, so a re-sent key gets one attempt more than aws-cli gives it
   (a key that fails exactly `total_max_attempts` times is deleted here and
   failed there) - except when a botocore client is configured for a single
@@ -236,8 +236,10 @@ versioned bucket) cannot be mapped back to submission order.
   here. The re-send goes out whatever the retry policy, since the batch was
   no key's own request - so a key can get more attempts than aws-cli gives
   it, never fewer - and a key the run is abandoned before re-sending gets no
-  record (measured: Ctrl-C with aws's per-key requests still queued prints no
-  line for them).
+  record (measured on the classic engine: Ctrl-C with aws's per-key requests
+  still queued prints no line for them; aws's CRT manager instead swallows an
+  interrupt in its drain and sends them all, a difference recorded in
+  aws-differences.md).
 - **the request raising outside the boto family** (botocore reading a
   response that lacks an element it needs - an S3 Express `CreateSession`
   reply without `Credentials`, a `KeyError` - or a redirect loop ending in

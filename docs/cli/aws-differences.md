@@ -17,7 +17,7 @@ state, the same returned values, the same error conditions, and the same exit
 code**, bar the entries in section 2 that say outright that the run comes out
 differently. Those are a corrupted ranged download, a download body cut
 mid-stream, a recursive delete whose listing dies part way or whose endpoint
-fails its batch requests, a plain-HTTP
+fails its batch requests, a Ctrl-C during deletes under the CRT engine, a plain-HTTP
 endpoint named anywhere but `--endpoint-url` under the CRT engine, a
 `REQUESTS_CA_BUNDLE` the CRT engine cannot use, an `aws` plugin that imports
 `awscli` modules, a `cli_history` directory
@@ -309,8 +309,18 @@ comes out differently, listed in section 1.
   blanks that erase the progress line. The empty line is a rendering accident,
   so this command keeps its uniform Ctrl-C ending instead of copying it. (An
   interrupt landing in the CRT engine's transfer drain is a different shape
-  with no divergence at all: the CRT manager swallows it on both tools, which
-  print their per-item failure lines and no closing line.)
+  with no divergence for transfers: the CRT manager swallows it on both tools,
+  which print their per-item failure lines and no closing line. Deletes
+  differ, below.)
+- **Ctrl-C during deletes under the CRT engine.** `aws`'s CRT manager swallows
+  an interrupt in its drain there too and goes on sending every per-key
+  delete already queued, then ends with the per-key lines — a request the
+  interrupt cancelled fails with `AWS_ERROR_S3_CANCELED` — and no closing line,
+  exit code 1 (measured: thirty keys, all deleted). This command's deletes
+  are batched and stop at the interrupt as on the classic engine: the
+  requests already out finish, no further one starts, and the run closes with
+  `cancelled: ctrl-c received`, exit code 1 — so objects `aws` would still
+  have deleted survive. Re-running the command deletes them.
 - **A `mv` between two spellings of one Outposts object is refused here.** An
   Outposts access point's key can be set off from the ARN with `:` or with `/`.
   `aws` compares its two arguments as text, takes

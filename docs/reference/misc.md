@@ -760,7 +760,8 @@ on its own policy whatever that setting says, so on it the key is always sent
 again. Abandoning the run —
 `close(flush=False)`, or a cancel in immediate mode — starts no further
 re-sends either: the ones already out finish, and the rest get no record, as
-the AWS CLI prints nothing for a key whose request never started. A `DeleteObjects` request that fails as a whole sends its
+the AWS CLI prints nothing on its classic client for a key whose request never
+started. A `DeleteObjects` request that fails as a whole sends its
 keys the same way, whatever the policy, as described below.
 
 Successes on the batch route are synthesized as the submitted keys minus the
