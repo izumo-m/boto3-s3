@@ -177,7 +177,9 @@ class S3Deleter:
     Per-key completion is reported through ``on_result`` - one ``OpResult`` per
     submitted entry, in submission order within a batch (entries abandoned by
     ``close(flush=False)``, by an error-path close, or by a close under a
-    cancelled token get no result); rollup
+    cancelled token get no result, and so does a key whose own DeleteObject
+    died without a response on the classic transfer client - `lost_like_aws`);
+    rollup
     ``succeeded`` / ``failed`` / ``first_error`` are approximate while running
     and final after ``close``. The deleter never raises ``BatchError``
     itself - the caller builds one from the rollup (``first_error`` is the

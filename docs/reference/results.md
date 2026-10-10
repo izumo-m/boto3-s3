@@ -59,7 +59,8 @@ discarded after acceptance, or lost the way `aws s3` loses them:
   the run (a listing failure part-way through, say), and, under
   `CancelMode.IMMEDIATE`, a dispatched batch whose request had not started —
   or, inside a started batch, a key sent as a request of its own (one the XML
-  round trip cannot carry) that had not gone out when the run was abandoned
+  round trip cannot carry, or one of a batch request that died without a
+  response) that had not gone out when the run was abandoned
   ([`../../design/deleter.md`](../../design/deleter.md));
 - an item whose botocore request died without any response — botocore's
   closed-connection and read-timeout errors — on a transfer, a per-key

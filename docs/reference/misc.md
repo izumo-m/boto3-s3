@@ -645,7 +645,9 @@ inline, where an exception it raises propagates out of `submit` directly.
 
 One [`OpResult`](./results.md#opresult) per dispatched entry, emitted in
 submission order within a batch (bar a per-key request an abandoned run never
-sent — the last paragraph of this section). `transfer_type` is
+sent — the last paragraph of this section — and, on
+`transfer_client="classic"`, a key whose own `DeleteObject` died without a
+response, dropped as `aws s3` drops it). `transfer_type` is
 [`TransferType.DELETE`](./results.md#transfertype) and `bytes_transferred`
 stays `0`. `compare_key` is the entry's own `compare_key` when it has one and
 its `key` otherwise. `src` is `s3://<bucket>/<key>`, `src_info` is the
@@ -734,8 +736,8 @@ is recorded with the batch's own per-key error. Abandoning the run —
 `close(flush=False)`, or a cancel in immediate mode — starts no further
 re-sends either: the ones already out finish, and the rest are recorded with
 the batch's error. Only per-key entries are retried this way; a
-`DeleteObjects` request that fails as a whole has already been retried by the
-client and is recorded as below.
+`DeleteObjects` request that fails as a whole with an answer has already been
+retried by the client and is recorded as below.
 
 Successes on the batch route are synthesized as the submitted keys minus the
 keys in `Errors[]`. An entry that cannot be attributed to a submitted key,
@@ -752,10 +754,13 @@ makes that entry positive per-key evidence. These synthesized failures count in
 `failed` and can become `first_error`. S3 answers only for the keys the request
 carried, so this is a guard rather than a behavior a real run reaches.
 
-A request-level failure — the `delete_objects` call itself failing — is
-recorded as the failure of **every** key that call carried, with the same
-translated exception, and the following batches still run. A wrong bucket name
-therefore fails everything and shows up in the counts. Keys of the same
+A request-level failure — the `delete_objects` call itself failing with an
+answer: a service error, a refused connection — is recorded as the failure of
+**every** key that call carried, with the same translated exception, and the
+following batches still run. A wrong bucket name therefore fails everything and
+shows up in the counts. A call that dies without any response instead sends
+each of its keys again as a `DeleteObject` of its own, and each key takes that
+request's outcome. Keys of the same
 dispatch that took the per-key fallback route are unaffected by it: there, that
 call's own success or translated exception is the key's result directly.
 
@@ -776,7 +781,8 @@ from being dispatched. A batch whose request has already started completes and
 delivers its per-key results — a graceful cancel drains all of it, while an
 immediate one (like `close(flush=False)` for any other reason) starts none of
 the batch's remaining per-key requests: a transient failure not re-sent keeps
-the batch's error, and an XML-incompatible key not sent gets no record.
+the batch's error, and an XML-incompatible key, or a key of a batch that died
+without a response, not sent gets no record.
 Buffered entries that were never sent are
 discarded without results, and
 [`CancelMode.IMMEDIATE`](./results.md#cancelmode) may additionally cancel a

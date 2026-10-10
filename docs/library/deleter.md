@@ -94,7 +94,9 @@ rehearsing; this flag is for code driving the deleter directly.
 
 `on_result` receives one `OpResult` per dispatched key, with `transfer_type`
 `delete` and `bytes_transferred` 0, in submission order within a batch. Keys
-discarded without being sent produce no record.
+discarded without being sent produce no record, and neither does a key whose
+own `DeleteObject` died without a response on `transfer_client="classic"`
+(above).
 
 **It is called from the worker thread.** Keep it fast and do not let it raise.
 If it does raise, the records already delivered are counted, the rest of that
@@ -135,9 +137,14 @@ client configured not to retry at all (a single attempt per request), and
 abandoning the run — `close(flush=False)`, or an immediate-mode cancel — after
 which the keys not yet re-sent are recorded with the batch's own error.
 
-If the batch request itself fails, **every key in that batch** is recorded as
+If the batch request itself fails with an answer — an error the service
+returned, a refused connection — **every key in that batch** is recorded as
 failed and the deleter continues with the following batches. So a wrong bucket
-name fails everything, and the counts show it.
+name fails everything, and the counts show it. A batch request that dies
+without any response decides nothing for its keys: each is sent again as a
+`DeleteObject` of its own, the request `aws s3` sends, and takes that
+request's outcome — which on `transfer_client="classic"` includes being
+dropped without a record if it dies the same way.
 
 Success on the batch route is normally read as "not in the response's error
 list". If the response carries an error the deleter cannot pin on any key it

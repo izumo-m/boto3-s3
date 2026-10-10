@@ -216,17 +216,24 @@ comes out differently, listed in section 1.
   this command writes the page itself, so `help > /dev/full`, or a reader that
   closes at once, is exit code 120 here.
 - **Deletes never ride the CRT engine.** With
-  `preferred_transfer_client = crt`, `aws` routes each `rm` — and each S3-side
-  `sync --delete` — through its CRT client, while here they keep their
+  `preferred_transfer_client = crt`, `aws` routes each `rm` — and each
+  `sync --delete` from a local directory to S3 (an S3-to-S3 run is always on
+  its classic client) — through its CRT client, while here they keep their
   `DeleteObject` / batched `DeleteObjects` requests. The CRT client itself is
   still built: `rm` constructs it exactly as `aws` does, taking its own
   host-wide CRT slot exactly as `aws` takes its own (the two slots are separate
   and never contend), so a configuration the CRT refuses fails the same way —
   the client simply carries no deletes. One consequence: the numeric `[s3]`
   tuning keys shape `aws`'s deletes and not this command's, since only its
-  transfers ride the engine those keys configure. Same objects deleted, same
-  exit code; the one place it shows in the output is a failure the CRT reports
-  differently, such as credentials that cannot be resolved: `aws` prints its
+  transfers ride the engine those keys configure. The CRT client also retries
+  a delete on its own policy — a request that dies without a response is sent
+  up to six times whatever `AWS_MAX_ATTEMPTS` says — so a connection that drops
+  only now and then can leave `aws` deleting the object at exit code 0 where
+  this command, held to the configured attempts, reports `delete failed:` at
+  exit code 1 (measured). Otherwise the same objects are deleted with the same
+  exit code: a delete that keeps dying is reported by both. The other place it
+  shows is a failure the CRT words differently, such as credentials that
+  cannot be resolved: `aws` prints its
   CRT delegate's `AWS_AUTH_CREDENTIALS_PROVIDER_DELEGATE_FAILURE` (preceded by
   a Python `Exception ignored in:` block) where this command prints botocore's
   `Unable to locate credentials`. Uploads and downloads use the CRT engine on

@@ -54,8 +54,11 @@ constant is `boto3_s3.deleter.S3_DELETE_BATCH`.
   caller thread (single producer).
 - `on_result` is called **from the worker thread**. One `OpResult` per
   dispatched key (`transfer_type=TransferType.DELETE`, `bytes_transferred=0`, in submit order
-  within a batch; it is not emitted for keys in a discarded buffer, nor for an
-  XML-incompatible key an abandoned run never sent - section 3). The callback
+  within a batch; it is not emitted for keys in a discarded buffer, nor for a
+  per-key request an abandoned run never sent - an XML-incompatible key, or a
+  key of a batch that died without a response - nor for a key whose own
+  `DeleteObject` died without a response on the classic transfer client -
+  section 3). The callback
   must finish quickly and must not raise. If it does raise: records up to that
   point are counted, the rest of the same batch remain undelivered, and the
   exception is re-raised to the caller on the next **non-empty** `flush()` or on
@@ -76,7 +79,8 @@ constant is `boto3_s3.deleter.S3_DELETE_BATCH`.
   request has started completes and delivers its per-key results before
   shutdown returns - bar the per-key requests an abandoned run had not sent
   yet: a transient failure is left as the batch reported it, an
-  XML-incompatible key gets no record (section 3). A graceful cancel is not an
+  XML-incompatible key or a key of a batch that died without a response gets
+  no record (section 3). A graceful cancel is not an
   abandonment - it drains the batch in flight whole, although rm and sync
   leave the deleter through `close(flush=False)` then. Unsent buffered entries
   are discarded without an
@@ -178,8 +182,9 @@ versioned bucket) cannot be mapped back to submission order.
   when the attempts are spent the recorded error is the `DeleteObject`
   `ClientError` - aws-cli's own line for the key, singular operation name and
   retry suffix included. It is not a fallback for a failed batch: a
-  `DeleteObjects` request failing as a whole was retried by the client already
-  and fails every key it carried (below).
+  `DeleteObjects` request failing as a whole with an answer was retried by the
+  client already and fails every key it carried (below); one that died without
+  a response re-sends its keys on the per-key route instead (above).
 - **an unattributable `Errors[]` entry** (a missing `Key`, or a spelling that
   does not match the submitted key): logs a WARNING (the trace stays) and
   **fails the rest of that batch closed**. Such an entry means the response no
@@ -201,7 +206,9 @@ versioned bucket) cannot be mapped back to submission order.
   answers only for the keys the request carried (and aws-cli never issues
   `DeleteObjects` at all, section 4), so this is a fail-closed defense rather
   than an observable behavior.
-- **request-level failure** (the `delete_objects` call itself failing): records
+- **request-level failure** (the `delete_objects` call itself failing with an
+  answer - a service error, a refused connection; one that died without a
+  response re-sends its keys instead, above): records
   the `Boto3S3Error` raised by `s3storage.s3_errors` (which translates via
   `translate_boto_error`) as a failure for **every key** in that batch, and
   continues with subsequent batches
