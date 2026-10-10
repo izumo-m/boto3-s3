@@ -487,9 +487,10 @@ def materialize_crt_engine(
     run deletes anything, so every construction-time failure - awscrt's own
     ``assert isinstance(region, str)`` on an unresolved region above all -
     surfaces there rather than inside the operation. This library's ``rm``
-    builds the engine only once it has a delete to send (and a dryrun never),
-    so a caller owing that order pays the same construction here
-    (cross-process lock included) and drops the result; the deletes reuse it.
+    builds the engine later - with its deleter, just before the listing, or
+    just before a single key's request, and never for a dryrun - so a caller
+    owing that order pays the same construction here (cross-process lock
+    included) and drops the result; the deletes reuse it.
 
     A config that selects the classic engine - explicitly, or through ``auto``
     on a host the CRT is not tuned for - makes this a no-op. Nothing is
@@ -527,8 +528,8 @@ def create_crt_request_sender(
     it for a transfer - the same singleton, lock, compatibility pins and
     postures, and the same construction-time failures - and ``None`` means
     the same classic fallback. What comes back sends requests s3transfer's
-    manager has no route for (`crtrequest`); the deleter's ``DeleteObjects``
-    is the one that needs it.
+    manager has no route for (`crtrequest`): the deleter's ``DeleteObjects``,
+    and with them its single ``DeleteObject`` requests and ``rm``'s.
     """
     if (
         create_crt_transfer_manager(

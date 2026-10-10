@@ -163,14 +163,22 @@ Raises:
   a string, an `os.PathLike`, nor an `S3Storage`; the location is an
   unsupported ARN form or has a key but no bucket; or its bucket part is empty
   (`"s3://"`), which this operation requires. No request is sent in these
-  cases.
+  cases. Also a `TransferConfig` carrying classic-only settings with
+  `preferred_transfer_client="crt"`, raised as the CRT engine the deletes ride
+  is built — with the deleter, before the listing, or just before the single
+  key's request — and never under `dryrun`.
 - [`ConfigurationError`](../exceptions.md#configurationerror), or its
   [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement —
   the client had to be built from a profile, region, endpoint or partial
   credentials that will not resolve, only when the target did not bring its
   own client; and credentials missing when the listing sends its first
   request. The blind single-key delete, which lists nothing, reports missing
-  credentials as its item's failure instead (`BatchError` below).
+  credentials as its item's failure instead (`BatchError` below). A selected
+  CRT engine that cannot be built — a CA bundle it cannot read or use — is an
+  `InvalidConfigError`, raised where the engine is built (above).
+- botocore's `MissingDependencyException` — `preferred_transfer_client="crt"`
+  requested explicitly without a usable awscrt, raised where the engine would
+  be built, as a transfer raises it ([`../options.md`](../options.md)).
 - The listing's own rejection, translated to its category and propagated
   untouched: `NoSuchBucket` becomes
   [`NotFoundError`](../exceptions.md#notfounderror), a denied `ListBucket`

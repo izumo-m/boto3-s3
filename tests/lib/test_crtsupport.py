@@ -681,6 +681,25 @@ class TestCreateCrtRequestSender:
         # Construction went through the transfer engine's own path.
         assert len(stubs.manager_kwargs) == 2
 
+    def test_the_serializers_own_edits_do_not_reach_the_sender(
+        self, stubs: CrtStubs, senders: list[Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # s3transfer's serializer writes into the client arguments it is given
+        # (service_name, a merged unsigned config); the sender's own client
+        # build would then fail with "multiple values for 'service_name'".
+        class Serializer:
+            def __init__(self, session: Any, client_kwargs: dict[str, Any]) -> None:
+                client_kwargs["service_name"] = "s3"
+                client_kwargs["config"] = "merged"
+
+        monkeypatch.setattr(s3transfer_crt, "BotocoreCRTRequestSerializer", Serializer)
+        client = FakeClient()
+        config = TransferConfig(preferred_transfer_client="crt")
+        assert crtsupport.create_crt_request_sender(client, config) is not None  # pyright: ignore[reportArgumentType]
+        [(_, _, client_kwargs)] = senders
+        assert "service_name" not in client_kwargs
+        assert client_kwargs["config"] is client.meta.config
+
     def test_a_classic_fallback_is_none(self, stubs: CrtStubs, senders: list[Any]) -> None:
         stubs.lock = None  # another process holds the CRT slot
         client = FakeClient()

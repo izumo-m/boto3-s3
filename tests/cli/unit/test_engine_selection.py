@@ -494,7 +494,7 @@ class TestCrtEngineConstructionSlot:
     aws's ``_get_transfer_manager`` runs right after the ``[s3]`` read and
     before anything about the run is decided, so a CRT selection pays the whole
     construction even for a ``--dryrun``, and even for ``rm``, whose deletes
-    build it only once there is a delete to send (design/crt.md section 6).
+    ride it but build it later (design/crt.md sections 4 and 6).
     When no region
     resolves, that construction is awscrt's ``assert isinstance(region, str)``:
     a bare ``AssertionError`` that aws's general handler renders as an empty

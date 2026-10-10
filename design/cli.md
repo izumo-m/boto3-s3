@@ -874,22 +874,17 @@ like aws; `ls` and `presign` share the query/endpoint/timeout/paramfile/conversi
 prefix for their integer options).
 
 rm is an `S3TransferCommand` in aws, so it follows the family's construction
-order (section 5.7) even though its deletes go nowhere near a transfer manager:
+order (section 5.7), its deletes riding the engine that order builds:
 the S3 client is built right after the session profile - before the fileb
 positional decode and before the path check above, so an empty region is 255
 ahead of both - and the `[s3]` runtime config is read and the transfer engine
 materialized right after that path check, before the bucket-less form below.
 An invalid `[s3]` value is therefore 255 for every rm form, `--quiet` included
 (the report comes from the error handler, not the result printer), while still
-losing to the path-type 252. A CRT selection builds the CRT client there and
-never uses it ([`crt.md`](./crt.md) sections 4 and 6). Only
-`preferred_transfer_client` reaches anything: the resolved `TransferConfig` is
-consumed by the engine construction alone and is not threaded into `S3.rm`,
-which takes no transfer config, so the numeric `[s3]` keys stay inert for
-deletes. That is a divergence from aws, whose rm really is tuned by them
-because its deletes ride the manager - the same divergence the deletion routing
-already records ([`crt.md`](./crt.md) section 6), not a new one, since none of
-those keys is observable in rc or output.
+losing to the path-type 252. A CRT selection builds the CRT client there, and
+the resolved `TransferConfig` is threaded into `S3.rm`, whose deletes ride
+that client - batched - as aws's ride its manager ([`crt.md`](./crt.md)
+sections 4 and 6).
 
 The target has 3 forms
 (determined from aws-cli `filegenerator.py` plus the real

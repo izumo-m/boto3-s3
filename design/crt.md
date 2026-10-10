@@ -57,7 +57,7 @@ naturally.
 |---|---|
 | `transferconfig.py` | `TransferConfig` = a subclass of boto3's `TransferConfig`. Adds the CRT tuning fields that boto3 lacks (`target_bandwidth` / `should_stream` / `disk_throughput` / `direct_io`) plus the classic multipart-copy's `annotation_temp_dir` (transfer.md section 4). A plain boto3 config is also accepted (`crtsupport.py` reads the CRT fields via `getattr` with a default of None, so a plain boto3 config works too). |
 | `crtsupport.py` | A faithful port of boto3's `boto3/crt.py` plus improvements. `should_use_crt` (whether to attempt CRT given `preferred`), `create_crt_transfer_manager` (the process-singleton CRT client + serializer, lock, compatibility check), `create_crt_request_sender` (the same engine as a sender of single requests, for the deletes - section 6), `is_optimized_for_system` / `acquire_process_lock` (the building blocks for the CLI decision tree). It does not pull in awscrt / s3transfer.crt at import time. |
-| `crtrequest.py` | `CrtRequestSender`: one botocore-serialized S3 request through the engine's CRT client, for the operations `CRTTransferManager` has no route for (the deleter's `DeleteObjects` - section 6). Also free of awscrt at import time. |
+| `crtrequest.py` | `CrtRequestSender`: one botocore-serialized S3 request through the engine's CRT client, for the operation `CRTTransferManager` has no route for (the deleter's `DeleteObjects`) and, so one route reads every delete's answer, for the single-key `DeleteObject`s too (section 6). Also free of awscrt at import time. |
 | `Transferrer._get_manager` in `transfer.py` | The engine seam. COPY is unconditionally classic, and `capture_response=True` forces classic before any config is read (transfer.md section 2). Otherwise it reads `preferred_transfer_client`, attempts CRT (classic fallback if None), and the rest takes the conventional classic path. |
 | `runtimeconfig.py` (CLI) | A port of `RuntimeConfig` from aws-cli `transferconfig.py` + reading `[s3]` + the decision tree (`resolve_transfer_client`) + building the `TransferConfig` (`build_transfer_config`). |
 
@@ -324,9 +324,10 @@ effective `TransferConfig` selects and drops it (a no-op when that engine is
 classic; the CRT client is a process-wide singleton, so the transfer that
 follows reuses whatever was built).
 
-For rm this construction comes ahead of any delete: the deletes ride the
-engine (section 6) but build it only once there is a delete to send, and a
-dryrun never. Paying it at aws's slot is what makes the failure surfaces
+For rm this construction comes ahead of everything the run does: the deletes
+ride the engine (section 6), but the library builds it later - the recursive
+route with its deleter, just before the listing; the single-key route just
+before its request; a dryrun never. Paying it at aws's slot is what makes the failure surfaces
 identical - the alternative, synthesizing awscrt's assertion ourselves, would
 rest the parity on a hand-written mirror of a third-party `assert`.
 
@@ -374,16 +375,18 @@ plumbing, but that class is transfer *tuning*, and a compatibility-posture
 boolean does not belong in it. `S3` already declares one such posture
 (`reusable_after_interrupt`), so it is where the second one goes.
 
-Only uploads reach this surface - a local source or a stdin stream alike, both
-measured byte-for-byte. A download or a sync fails earlier, at the botocore
-listing / HeadObject call, with `fatal error: Unable to locate credentials` on
-both tools.
+Only uploads and a single-key `rm` reach this surface - a local source or a
+stdin stream alike, and the rm's one `DeleteObject`, all measured
+byte-for-byte. A download, a sync or a recursive rm fails earlier, at the
+botocore listing / HeadObject call, with `fatal error: Unable to locate
+credentials` on both tools.
 
 A credential that resolves *lazily* - an assumed role, an SSO token, a web
 identity - is the same surface one step later: aws-cli's factory wraps the
 session's credentials object unresolved, so a refresh that fails (the token
 expired, STS unreachable or refusing) lands inside the delegate, per item
-(`upload failed: ... AWS_AUTH_CREDENTIALS_PROVIDER_DELEGATE_FAILURE`, rc 1),
+(`upload failed: ...` / `delete failed: ...
+AWS_AUTH_CREDENTIALS_PROVIDER_DELEGATE_FAILURE`, rc 1),
 a download or sync fails at its botocore call (`fatal error:`, rc 1), and a
 `--dryrun` never resolves it at all (rc 0). boto3's compatibility check would
 resolve it ahead of the transfer - `get_frozen_credentials()` on every

@@ -25,8 +25,8 @@ S3(session=None, *, endpoint_url=None, config=None,
   or `rm` the difference is severalfold.
 - **`endpoint_url`**, **`config`** — passed on when building clients, for an
   S3-compatible endpoint or a `botocore.config.Config`.
-- **`transfer_config`** — the default `TransferConfig` for `cp` / `mv` / `sync`.
-  Any call can override it.
+- **`transfer_config`** — the default `TransferConfig` for `cp` / `mv` / `sync`
+  / `rm` (for `rm`, the engine its deletes ride). Any call can override it.
 - **`reusable_after_interrupt`** — how Ctrl-C is handled: clean up first, or exit fast.
   `True` (the default) re-raises `KeyboardInterrupt` only after every resource
   has been reclaimed, so the next operation still works. `False` treats Ctrl-C
@@ -36,8 +36,9 @@ S3(session=None, *, endpoint_url=None, config=None,
   that lands in its transfer drain, so a CRT run cut short there raises
   `BatchError` with the cancelled items counted as failures instead. Only
   `KeyboardInterrupt` is affected — every other exception reclaims fully.
-- **`crt_allow_absent_credentials`** — whether the CRT transfer engine may be
-  used by a client that resolved no credentials. `False` (the default) drops
+- **`crt_allow_absent_credentials`** — whether the CRT transfer engine (which
+  carries the deletes too, when selected) may be used by a client that
+  resolved no credentials. `False` (the default) drops
   to the classic engine and reports `Unable to locate credentials`; `True`
   attempts the transfer and lets it fail inside the CRT credentials delegate,
   which is what `aws s3` does. Only reproducing aws's output needs it.

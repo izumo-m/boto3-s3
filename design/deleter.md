@@ -57,8 +57,7 @@ constant is `boto3_s3.deleter.S3_DELETE_BATCH`.
   within a batch; it is not emitted for keys in a discarded buffer, nor for a
   per-key request an abandoned run never sent - an XML-incompatible key, or a
   key of a batch that died without a response - nor for a key whose own
-  `DeleteObject` died without a response on the classic transfer client -
-  section 3). The callback
+  `DeleteObject` died without a response on botocore - section 3). The callback
   must finish quickly and must not raise. If it does raise: records up to that
   point are counted, the rest of the same batch remain undelivered, and the
   exception is re-raised to the caller on the next **non-empty** `flush()` or on
@@ -98,7 +97,8 @@ use `DeleteObject`, whose request success or translated exception directly
 determines the per-key result. A batch's per-key requests - these, and the
 re-sends of transient failures below - share one sender (`_send_singly`): ten
 at a time (aws-cli's default request concurrency, which is what sends its
-per-key deletes), since either kind can be most of a batch, and no further
+per-key deletes on its classic client; its CRT client's are bounded by the CRT
+manager instead), since either kind can be most of a batch, and no further
 request once the run is abandoned (`close(flush=False)` for anything but a
 graceful cancel, a `close()` that was itself interrupted, or the token
 cancelled in immediate mode). An
@@ -124,8 +124,11 @@ botocore's.
 A request that dies without a response is handled per key, as aws-cli's own
 per-key `DeleteObject` would meet it. On botocore that is the
 closed-connection / read-timeout family; on the CRT client it is awscrt's own
-error once the CRT has spent its retries (`crtrequest.died_without_answer` -
-anything but an HTTP error answer). A dead `DeleteObjects` decides nothing
+error once the CRT has spent its retries (`crtrequest.died_without_answer`).
+That includes a server error answer the CRT kept getting - a 500, a 503, a
+`RequestTimeout`, which it re-sends itself and, attempts spent, reports as its
+own error rather than as the answer - so only an answer the CRT does not retry
+(`AccessDenied`, a missing bucket) reaches the deleter as one. A dead `DeleteObjects` decides nothing
 for its keys - a batch past the read timeout, an endpoint that drops only the
 batch call, a flaky connection that ran through the one batch request's
 attempts while each of aws-cli's per-key requests has attempts of its own
@@ -221,8 +224,9 @@ versioned bucket) cannot be mapped back to submission order.
   `DeleteObjects` at all, section 4), so this is a fail-closed defense rather
   than an observable behavior.
 - **request-level failure** (the `delete_objects` call itself failing with an
-  answer - a service error, a refused connection; one that died without a
-  response re-sends its keys instead, above): records
+  answer - a service error, on botocore a refused connection; one that died
+  without a response, which on the CRT client includes a retried server error
+  once spent, re-sends its keys instead, above): records
   the `Boto3S3Error` raised by `s3storage.s3_errors` (which translates via
   `translate_boto_error`) as a failure for **every key** in that batch, and
   continues with subsequent batches
@@ -289,10 +293,11 @@ versioned bucket) cannot be mapped back to submission order.
   a failure line (so the CLI layer can use it as-is when composing
   `delete failed: ...`). The shape is aws's; the bytes are not, and that is the
   visible edge of the batching above. A per-key line composed from a
-  `DeleteObjects` `Errors[]` entry names the **plural** operation and carries no
-  `(reached max retries: N)` suffix, where aws - issuing one `DeleteObject` per
-  key - names the singular one and, on its classic client, lets botocore
-  append the suffix (its CRT client's error carries none). The
+  `DeleteObjects` `Errors[]` entry names the **plural** operation and never
+  carries the `(reached max retries: N)` suffix, where aws - issuing one
+  `DeleteObject` per key - names the singular one and, on its classic client,
+  carries the suffix botocore appends once the request's attempts are spent
+  (its CRT client's error carries none). The
   non-batched single-key delete keeps `DeleteObject` and matches aws byte for
   byte, so the difference is confined to the batched routes
   (`rm --recursive`, an S3-side `sync --delete`, `rb --force`). Recorded for

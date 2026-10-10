@@ -374,11 +374,12 @@ itself mirrors aws-cli's `ResultProcessor`):
   total: the byte meter reads done over expected for the real transfers
   alone, and the two meters disagree mid-run and at the end.
 
-Four more are in the result text itself rather than in its rendering:
+Three more are in the result text itself rather than in its rendering:
 
 - **A batched delete's per-key failure line** names the `DeleteObjects`
-  operation and carries no `(reached max retries: N)` suffix, where aws's line
-  names `DeleteObject` and lets botocore append the suffix. It follows from the
+  operation and never carries the `(reached max retries: N)` suffix, where
+  aws's line names `DeleteObject` and, on its classic client, carries the
+  suffix botocore appends once the request's attempts are spent. It follows from the
   accepted batching ([`deleter.md`](./deleter.md) section 4): the line is
   composed from the batch response's own `Errors[]` entry rather than by
   botocore. It reaches the batching routes alone - `rm --recursive`, an S3-side

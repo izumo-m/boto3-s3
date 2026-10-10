@@ -3,10 +3,10 @@
 Both CLIs run against the same endpoint with a temporary
 ``AWS_CONFIG_FILE`` selecting the CRT transfer client. Upload / download / mv /
 sync exercise the real ``CRTTransferManager``. The rm and upload-sync-delete
-cases cover S3 deletion at the CLI boundary because boto3-s3's accepted
-``DeleteObject`` / batched ``S3Deleter`` routes do not share aws-cli's per-key
-CRT transport; download sync-delete covers the local deletion both CLIs
-perform. The lane is differential - no goldens - and asserts that our
+cases cover S3 deletion at the CLI boundary: both CLIs delete on their CRT
+client, aws-cli one ``DeleteObject`` per key and boto3-s3 in ``DeleteObjects``
+batches (design/crt.md section 6); download sync-delete covers the local
+deletion both CLIs perform. The lane is differential - no goldens - and asserts that our
 CRT-configured mode agrees with aws's on rc, stdout, the bucket end state, the
 local destination and source trees, and the download mtime.
 

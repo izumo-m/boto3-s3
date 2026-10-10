@@ -173,9 +173,10 @@ class RmCommand(Command):
         # rm is an S3TransferCommand in aws, so it reads and validates [s3] and
         # builds a transfer manager exactly like cp - after the path check above
         # (which a bad [s3] value loses to) and before everything below (which it
-        # beats, the bucket-less synthesis included). The deletes build the
-        # engine only once there is a delete to send (design/crt.md section 6),
-        # but its construction failures are aws's, so they must land at aws's
+        # beats, the bucket-less synthesis included). The deletes ride the
+        # engine but the library builds it later - with the deleter, or just
+        # before a single key's request (design/crt.md sections 4 and 6) - and
+        # its construction failures are aws's, so they must land at aws's
         # point.
         transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type="s3")
         transferargs.materialize_transfer_engine(s3, client, transfer_config, operation="rm")

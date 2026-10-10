@@ -4,7 +4,9 @@ s3transfer's ``CRTTransferManager`` carries uploads, downloads and per-key
 ``DeleteObject`` requests on the CRT client and has no route for any other
 operation. aws-cli deletes through it one key per request; the deleter here
 batches its keys into ``DeleteObjects`` (design/deleter.md), so riding the same
-engine takes a route s3transfer does not offer. This module is that route,
+engine takes a route s3transfer does not offer. This module is that route -
+for the batches, and for the deleter's single ``DeleteObject`` requests too,
+so one route reads every delete's answer (``capture_response`` included) -
 built the way s3transfer builds its own: a botocore client that neither signs
 nor sends serializes the operation, the CRT client signs the request and sends
 it as a ``DEFAULT`` meta request under the operation's name, and the answer is
@@ -78,10 +80,13 @@ class CrtRequestSender:
     """Send botocore-serialized S3 requests through one CRT S3 client.
 
     ``call`` blocks until the request is done and returns the parsed response,
-    the dict a botocore client call returns. An HTTP error answer raises the
+    the dict a botocore client call returns. An HTTP error answer the CRT
+    client hands back (one it does not retry, ``AccessDenied`` say) raises the
     botocore ``ClientError`` subclass for its code, read from the answer the
     way s3transfer reads one for the CRT engine; any other failure raises the
-    awscrt error itself. ``call`` may run on several threads at once.
+    awscrt error itself - a server error the CRT kept getting included, which
+    it reports as its own error once its retries are spent. ``call`` may run
+    on several threads at once.
 
     The serializer client is built from the botocore session and client
     arguments the CRT engine's own request serializer was built from

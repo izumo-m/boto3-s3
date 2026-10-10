@@ -355,7 +355,8 @@ its `__all__`:
 - `create_crt_request_sender(client, config, ...)` — the same engine, with the
   same arguments and the same `None`, as a sender of single S3 requests
   (`crtrequest.CrtRequestSender`) for an operation the transfer manager has no
-  route for; [`S3Deleter`](#s3deleter) sends its `DeleteObjects` this way.
+  route for; [`S3Deleter`](#s3deleter) sends its `DeleteObjects` this way, and
+  its single `DeleteObject`s and `rm`'s with them.
 - `create_crt_transfer_manager(client, config, ...)` — builds, or reuses, the
   process-wide CRT client for `client` and returns an s3transfer
   `CRTTransferManager`, or `None` where boto3 would fall back to classic (the
@@ -553,7 +554,12 @@ Construction raises [`ValidationError`](./exceptions.md#validationerror) for a
 integer in 1..1000. If
 `storage` has to build its own default client, that build can raise
 [`ConfigurationError`](./exceptions.md#configurationerror) or
-[`InvalidConfigError`](./exceptions.md#invalidconfigerror).
+[`InvalidConfigError`](./exceptions.md#invalidconfigerror). Where
+`transfer_config` selects the CRT engine, building it raises what building a
+transfer's raises: `ValidationError` for classic-only settings beside an
+explicit `'crt'`, `InvalidConfigError` for a CA bundle the CRT cannot use, and
+botocore's `MissingDependencyException` for an explicit `'crt'` without a
+usable awscrt.
 
 The rollup is exposed as three read-only properties. `succeeded` and `failed`
 count keys reported so far; `first_error` is the first per-key failure
@@ -779,10 +785,12 @@ following batches still run. A wrong bucket name therefore fails everything and
 shows up in the counts. A call that dies without any response instead sends
 each of its keys again as a `DeleteObject` of its own on the same client, and
 each key takes that request's outcome. On the CRT client that is any failure
-other than an HTTP error answer — awscrt's own error, raised once the CRT has
-spent its retries, a refused connection included — since one batch request's
-attempts are not the attempts `aws s3` gives each key; a key can so get more
-attempts than `aws s3` gives it, never fewer. Keys of the same
+the CRT reports as its own error once it has spent its retries — a dropped or
+refused connection, and a server error answer it kept getting (a 500, a 503,
+a `RequestTimeout`) — leaving only an answer it does not retry
+(`AccessDenied`, a missing bucket) to fail the batch's keys as above; one
+batch request's attempts are not the attempts `aws s3` gives each key, and a
+key can so get more attempts than `aws s3` gives it, never fewer. Keys of the same
 dispatch that took the per-key fallback route are unaffected by it: there, that
 call's own success or translated exception is the key's result directly.
 

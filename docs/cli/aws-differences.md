@@ -17,7 +17,7 @@ state, the same returned values, the same error conditions, and the same exit
 code**, bar the entries in section 2 that say outright that the run comes out
 differently. Those are a corrupted ranged download, a download body cut
 mid-stream, a recursive delete whose listing dies part way or whose batches
-keep losing their connection under the CRT engine, a plain-HTTP
+keep losing their connection, a plain-HTTP
 endpoint named anywhere but `--endpoint-url` under the CRT engine, a
 `REQUESTS_CA_BUNDLE` the CRT engine cannot use, an `aws` plugin that imports
 `awscli` modules, a `cli_history` directory
@@ -41,7 +41,7 @@ cover the text that differs on purpose — the progress display, help pages and
 `--debug` traces, the failure lines of a batched delete, the closing line of a Ctrl-C
 `aws` cannot attribute to a cancelled classic transfer, the failure line of a
 directory copied without `--recursive`, the invalid-bucket-name reports this
-command writes itself, the `--version` line, two argument-parsing corners, the
+command writes itself, the `--version` line, three argument-parsing corners, the
 history warning `aws` writes and this command has not, the messages the
 installed botocore itself writes, the element a listing entry missing two
 required ones is blamed on, and the request a failing stream download is
@@ -218,15 +218,16 @@ comes out differently, listed in section 1.
 - **A batched delete names a different operation when a key fails.** Deletes go
   out in batches here — up to a thousand keys per `DeleteObjects` request —
   where `aws` sends one `DeleteObject` per key. For a run that finishes
-  enumerating, the objects removed and the exit code are the same (a key that
-  no longer exists is a success on both wire shapes); the per-key failure line
-  is not. It reads `delete failed:
+  enumerating over a connection that holds, the objects removed and the exit
+  code are the same (a key that no longer exists is a success on both wire
+  shapes); the per-key failure line is not. It reads `delete failed:
   s3://bkt/key An error occurred (AccessDenied) when calling the DeleteObjects
-  operation: <message>` — the plural operation name, and no
+  operation: <message>` — the plural operation name, and never the
   `(reached max retries: N)` suffix — because the line is composed from that
   batch response's own per-key error rather than written by botocore, where
-  `aws`'s reads `... when calling the DeleteObject operation (reached max
-  retries: 0): <message>` (its CRT client's line carries no suffix either).
+  `aws`'s reads `... when calling the DeleteObject operation: <message>`, with
+  that suffix where botocore spent the request's attempts (`AWS_MAX_ATTEMPTS=1`
+  gives `(reached max retries: 0)`; its CRT client's line never carries one).
   (A key the batch reports with a fault the service
   asks to have retried — `InternalError`, `SlowDown`, `ServiceUnavailable`,
   `RequestTimeout` — is the exception: it is sent again as a `DeleteObject`
@@ -250,19 +251,29 @@ comes out differently, listed in section 1.
   would have removed survive**. Re-running the command deletes them, and a run
   that enumerates to the end is unaffected.
 
+  One batch request also has one set of attempts, where each of `aws`'s
+  per-key requests has its own, so **a connection that keeps dropping** can
+  end differently too. A batch that dies without an answer is sent again key
+  by key, each key taking its own `DeleteObject`'s outcome, which can give a
+  key more attempts than `aws` gives it — never fewer. A connection that drops
+  often enough to defeat `aws`'s per-key requests can therefore leave this
+  command deleting objects, with their `delete:` lines, that `aws` leaves in
+  place: on the classic engine `aws` drops such a key without a line at exit
+  code 0 (measured: six dropped requests for two keys), under the CRT engine
+  it reports it at exit code 1 (measured: twelve). A delete that keeps dying
+  ends the same on both tools — no line and exit code 0 on the classic
+  engine, the same `delete failed:` line and exit code 1 under the CRT.
+
   Under the CRT engine (`preferred_transfer_client = crt`) the batches ride
   the CRT client, as `aws`'s per-key deletes ride its own — `rm` and a
   `sync --delete` from a local directory (an S3-to-S3 sync is on the classic
   client on both tools) — so the CRT's retry policy, its failure text and the
-  numeric `[s3]` tuning keys apply to them as they do on `aws`. One batch
-  request has one set of attempts, where each of `aws`'s per-key requests has
-  its own: a batch whose attempts run out without an answer is therefore sent
-  again key by key, each key taking its own `DeleteObject`'s outcome. A key
-  can so get more attempts than `aws` gives it, and a connection that drops
-  often enough to fail `aws`'s requests can leave this command deleting the
-  objects at exit code 0 (measured: twelve dropped requests for two keys,
-  `aws` exit code 1); a delete that keeps dying is reported by both, in the
-  same words.
+  `[s3]` keys that tune the CRT client apply to them as they do on `aws`. The
+  CRT re-sends a server error answer itself (a 500, a 503, a
+  `RequestTimeout`), and once its attempts are spent it reports its own error
+  rather than the answer, so such a batch is sent again key by key as well;
+  an answer it does not retry — `AccessDenied`, a missing bucket — fails every
+  key of the batch.
 - **A plain-HTTP endpoint named anywhere but `--endpoint-url` still reaches
   the CRT engine.** Under `preferred_transfer_client = crt`, `aws` decides
   whether its CRT client speaks TLS from `--endpoint-url` alone, so an

@@ -1404,6 +1404,28 @@ class TestCrtRoute:
         assert [str(r.error) for r in results] == ["AWS_IO_SOCKET_CLOSED: socket is closed."] * 2
         assert deleter.failed == 2
 
+    def test_an_answer_the_crt_hands_back_fails_every_key(self, built: list[Any]) -> None:
+        # The CRT's own S3ResponseError is an answer (an error document inside
+        # a 200 it will not retry), not a death: no key goes out on its own.
+        awscrt_s3 = pytest.importorskip("awscrt.s3")
+        answer = awscrt_s3.S3ResponseError(
+            code=14370,
+            name="AWS_ERROR_S3_NON_RECOVERABLE_ASYNC_ERROR",
+            message="Async error received from S3 and not recoverable from retry.",
+            status_code=200,
+            headers=[],
+            body=b"<Error><Code>AccessDenied</Code></Error>",
+            operation_name="DeleteObjects",
+        )
+        fake = _FakeS3Client(script=[answer])
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append, transfer_config=_CRT)
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
+        deleter.close()
+        assert fake.single_calls == []
+        assert [r.outcome for r in results] == [OpOutcome.FAILED] * 2
+
     def test_an_error_answer_to_the_batch_fails_every_key(self, built: list[Any]) -> None:
         # An answer is the batch request's own outcome, as on botocore: no
         # key goes out again on its own.

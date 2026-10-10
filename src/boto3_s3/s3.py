@@ -1045,11 +1045,11 @@ class S3:
         ``aws s3 rm`` constructs its transfer manager before deciding anything
         about the run, so the engine's construction-time failures - awscrt
         refusing a client with no region above all - belong to the command, not
-        to the deletes. `rm` here builds the engine only once it has a delete
-        to send (and a ``dryrun`` never), so an application that owes
-        ``aws s3`` parity calls this to pay the same construction
-        (cross-process lock included) at the same point; the deletes then
-        reuse what it built.
+        to the deletes. `rm` here builds the engine later - with its deleter,
+        just before the listing, or just before a single key's request, and
+        never for a ``dryrun`` - so an application that owes ``aws s3`` parity
+        calls this to pay the same construction (cross-process lock included)
+        at the same point; the deletes then reuse what it built.
 
         The engine is chosen from *transfer_config* (this instance's
         ``transfer_config`` when none is given) with the same rule the transfer

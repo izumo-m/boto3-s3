@@ -255,3 +255,38 @@ class TestSigningConfig:
     )
     def test_everything_else_is_the_client_default(self, bucket: str) -> None:
         assert crtrequest._signing_config(bucket) is None  # pyright: ignore[reportPrivateUsage]
+
+
+class TestDiedWithoutAnswer:
+    """What the deleter re-sends key by key after a CRT batch fails."""
+
+    def test_awscrts_own_error_is_a_death(self) -> None:
+        from awscrt.exceptions import from_code
+
+        assert crtrequest.died_without_answer(from_code(1051))
+
+    def test_judged_by_the_cause_of_a_wrapped_failure(self) -> None:
+        from awscrt.exceptions import from_code
+
+        from boto3_s3.s3storage import request_failure
+
+        failure = request_failure(from_code(1051), operation="rm", bucket="b", key="k")
+        assert crtrequest.died_without_answer(failure)
+
+    def test_an_answer_is_not(self) -> None:
+        # An answer the CRT hands back as its S3ResponseError (an S3 error
+        # document inside a 200, which it will not retry) is the request's
+        # outcome; so is botocore's error for a translated answer.
+        answer = awscrt.s3.S3ResponseError(
+            code=14370,
+            name="AWS_ERROR_S3_NON_RECOVERABLE_ASYNC_ERROR",
+            message="Async error received from S3 and not recoverable from retry.",
+            status_code=200,
+            headers=[],
+            body=b"<Error><Code>AccessDenied</Code></Error>",
+            operation_name="DeleteObjects",
+        )
+        assert not crtrequest.died_without_answer(answer)
+        error = ClientError({"Error": {"Code": "AccessDenied"}}, "DeleteObjects")
+        assert not crtrequest.died_without_answer(error)
+        assert not crtrequest.died_without_answer(ValueError("boom"))
