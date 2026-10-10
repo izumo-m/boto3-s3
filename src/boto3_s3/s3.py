@@ -59,7 +59,7 @@ from boto3_s3.exceptions import (
 )
 from boto3_s3.iostorage import IOStorage
 from boto3_s3.localstorage import LocalStorage, to_native_path, translate_os_error
-from boto3_s3.s3storage import S3Storage, request_failure, s3_errors
+from boto3_s3.s3storage import S3Storage, lost_like_aws, request_failure, s3_errors
 from boto3_s3.storage import Location, Storage
 from boto3_s3.transfer import TransferItem, Transferrer, crt_engine_errors
 from boto3_s3.types import (
@@ -2396,7 +2396,8 @@ class S3:
         stamped on the hand-built ``FileInfo``. A token cancelled from the
         ``FAILED`` record's callback wins over the failure's ``BatchError``,
         the precedence the batched path and the transfers give it; the caller
-        polls the token after a success or a dry run.
+        polls the token after a success, a dry run, or a failure lost the way
+        aws-cli loses it (`lost_like_aws`).
         """
         key = storage.key
         info = S3FileInfo(key=key, compare_key=key[len(root) :], storage=storage)
@@ -2424,6 +2425,10 @@ class S3:
             # request_failure the way the deleter wraps it (aws's task records
             # both alike).
             failure = request_failure(exc, operation="rm", bucket=storage.bucket, key=key)
+            if lost_like_aws(failure):
+                # Died without a response: aws-cli's task loses it - no line,
+                # rc 0 (`lost_like_aws`) - so no record and no BatchError.
+                return
             _emit_result(
                 on_result,
                 info=info,

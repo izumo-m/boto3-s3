@@ -44,8 +44,8 @@ reaches the operation produces nothing: one a filter excluded during
 enumeration, one a `sync` decision declined to act on (`create_filter`,
 `update_filter`, `delete_filter`, or the `pair_filter` that replaces all three,
 [`operations/sync.md`](./operations/sync.md)), or one never enumerated because
-the run ended first. Two carve-outs exist, both of them items consumed before
-submission or discarded after acceptance:
+the run ended first. Three carve-outs exist, items consumed before submission,
+discarded after acceptance, or lost the way `aws s3` loses them:
 
 - an item a pre-transfer gate rejects with an advisory instead of an outcome:
   the glacier gate without `ignore_glacier_warnings` (one `WARNED` record), a
@@ -60,7 +60,15 @@ submission or discarded after acceptance:
   `CancelMode.IMMEDIATE`, a dispatched batch whose request had not started —
   or, inside a started batch, a key sent as a request of its own (one the XML
   round trip cannot carry) that had not gone out when the run was abandoned
-  ([`../../design/deleter.md`](../../design/deleter.md)).
+  ([`../../design/deleter.md`](../../design/deleter.md));
+- an item whose request died without any response — botocore's
+  closed-connection and read-timeout errors — on a transfer, a batched
+  delete, or a single-key `rm`. It produces no record and is in no count,
+  because `aws s3` loses it too: its per-item completion handler fails on the
+  missing response, so the item prints no line and the run exits 0 when
+  nothing else failed. A refused connection or a service error response is
+  an ordinary `FAILED` record. The dropped failure is logged at debug level
+  on the `boto3_s3.s3storage` logger.
 
 `WARNED` and `NOTICE` sit outside that rule in the other direction as well.
 Being advisories rather than outcomes, they are not tied one-to-one to an item:

@@ -100,6 +100,8 @@ _package_logger = logging.getLogger("boto3_s3")
 if not any(isinstance(h, logging.NullHandler) for h in _package_logger.handlers):
     _package_logger.addHandler(logging.NullHandler())
 
+logger = logging.getLogger(__name__)
+
 # S3Storage.open implements only "rb" (a GetObject read convenience, chiefly for
 # a content-based sync filter that reads an object's bytes). "wb" stays
 # unimplemented: every S3 write on the transfer lanes rides s3transfer instead -
@@ -323,6 +325,48 @@ def attribute_failure(
     if error.bucket is None and error.key is None and not isinstance(error, BatchError):
         error.bucket = bucket
         error.key = key
+
+
+def lost_like_aws(exc: BaseException) -> bool:
+    """Whether aws-cli loses this per-item failure without a trace.
+
+    aws-cli's per-item completion handler (its ``DoneResultSubscriber``) asks
+    whether a failure is S3's conditional-write rejection by evaluating
+    ``exception.response.get("Error", {}).get("Code")``. botocore's transport
+    family - a connection refused or closed, a connect or read timeout, every
+    ``HTTPClientError`` - carries ``response = None``, so that expression
+    raises ``AttributeError``, which s3transfer's callback runner logs at
+    debug level and swallows: the item gets no result line, counts as neither
+    done nor failed, and the run exits 0 when nothing else failed (measured on
+    every per-item route - cp / mv / sync / rm, single and recursive). The
+    operations mirror it on the routes aws-cli sends through that handler -
+    the transfer engine's terminal, the S3 deleter, the blind single-key rm -
+    by dropping the item when this answers True, and this logs the dropped
+    failure at debug level the way s3transfer logs aws-cli's.
+
+    The expression is aws-cli's own, evaluated on the exception aws-cli would
+    hold: a family error this library raised from a botocore one (`s3_errors`,
+    `request_failure`) is judged by that botocore cause. Only the botocore
+    family qualifies, because nothing else reaches aws-cli's handler - an
+    s3transfer ``RetriesExceededError``, an awscrt error or an ``OSError``
+    carries no ``response`` there, and a custom backend's own exception that
+    happens to carry one is an ordinary failure here.
+    """
+    seen = exc.__cause__ if isinstance(exc, Boto3S3Error) else exc
+    if not isinstance(seen, BotoCoreError):
+        return False
+    response: Any = getattr(seen, "response", _NO_RESPONSE)
+    if response is _NO_RESPONSE:
+        return False
+    try:
+        response.get("Error", {}).get("Code")
+    except AttributeError:
+        logger.debug("dropping a per-item failure as aws-cli does", exc_info=seen)
+        return True
+    return False
+
+
+_NO_RESPONSE = object()
 
 
 def request_failure(

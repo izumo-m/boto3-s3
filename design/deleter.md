@@ -104,6 +104,14 @@ shutting down - an unclosed deleter's last batch, which shutdown waits for -
 no thread can be started, and the sender falls back to the worker itself.
 Results from both routes are emitted in original submission order.
 
+A request that dies without a response - botocore's closed-connection /
+read-timeout family - leaves its keys with no record and no count: all of a
+batch's keys when the `DeleteObjects` request dies, one key when its own
+`DeleteObject` does. aws-cli sends one `DeleteObject` per key and its
+completion handler loses each such failure ([`opresult.md`](./opresult.md),
+`lost_like_aws`), so `rm --recursive` against an endpoint that drops every
+delete exits 0 silently on both tools.
+
 `capture_response=True` instead sends `Quiet=False`, so the response also lists
 the successful `Deleted[]` entries; each is reconstructed into a per-key
 `DeleteObject`-shaped slot (the entry minus its `Key`, plus the shared

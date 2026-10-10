@@ -29,8 +29,13 @@ import boto3
 import pytest
 from botocore.exceptions import (
     ClientError,
+    ConnectionClosedError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    HTTPClientError,
     IncompleteReadError,
     ProfileNotFound,
+    ReadTimeoutError,
     ResponseStreamingError,
 )
 from moto import mock_aws
@@ -1417,6 +1422,58 @@ _REQUEST_POINTS: list[tuple[Any, tuple[str | None, str | None, str | None]]] = [
     (_request_get_file, ("get_file", "bucket", "prefix/k")),
     (_request_put_file, ("put_file", "bucket", "prefix/k")),
 ]
+
+
+class TestLostLikeAws:
+    """`lost_like_aws` evaluates aws-cli's own precondition check.
+
+    aws-cli's completion handler reads ``exception.response.get("Error",
+    {}).get("Code")``; where that raises ``AttributeError`` the failure is
+    swallowed there, and only there does this answer True.
+    """
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            ConnectionClosedError(endpoint_url="http://h/"),
+            ReadTimeoutError(endpoint_url="http://h/"),
+            ResponseStreamingError(error="cut"),
+            HTTPClientError(error="boom"),
+        ],
+        ids=["connection-closed", "read-timeout", "response-streaming", "http-client"],
+    )
+    def test_a_response_less_transport_error_is_lost(self, exc: Exception) -> None:
+        assert s3storage.lost_like_aws(exc)
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            EndpointConnectionError(endpoint_url="http://h/"),
+            ConnectTimeoutError(endpoint_url="http://h/"),
+            client_error("AccessDenied", 403, "PutObject"),
+            IncompleteReadError(actual_bytes=1, expected_bytes=2),
+            OSError(13, "Permission denied"),
+            KeyError("Credentials"),
+        ],
+        ids=["endpoint", "connect-timeout", "client-error", "incomplete-read", "os", "key"],
+    )
+    def test_everything_else_is_an_ordinary_failure(self, exc: Exception) -> None:
+        assert not s3storage.lost_like_aws(exc)
+
+    def test_a_translated_error_is_judged_by_its_botocore_cause(self) -> None:
+        cause = ConnectionClosedError(endpoint_url="http://h/")
+        translated = TransportError("closed", operation="mv", bucket="b", key="k")
+        translated.__cause__ = cause
+        assert s3storage.lost_like_aws(translated)
+        assert not s3storage.lost_like_aws(TransportError("closed", operation="mv"))
+
+    def test_a_foreign_exception_with_a_none_response_is_not_lost(self) -> None:
+        # Only botocore's family reaches aws-cli's handler; a custom backend's
+        # own exception that happens to carry ``response = None`` fails as usual.
+        class _ForeignError(Exception):
+            response = None
+
+        assert not s3storage.lost_like_aws(_ForeignError())
 
 
 class TestRequestRaisingOutsideTheBotoFamily:

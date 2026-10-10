@@ -5,6 +5,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- A transfer or delete whose request dies without any response (a closed connection, a read timeout) now leaves no record and no count, as `aws s3` loses it, instead of failing the item.
 - A download into an `IOStorage` over an append-mode stream is now written in order instead of scrambling a multipart object.
 - A streaming upload from a seekable stream is no longer cut to `expected_size`; the hint now sizes only a stream the engine cannot size itself.
 - An immediate cancellation now also interrupts a CRT run whose submission is waiting on the engine's backpressure.

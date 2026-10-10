@@ -128,7 +128,10 @@ on both counts.
 **Once a transfer command has started, every failure is 1.** `cp` / `mv` / `rm`
 / `sync` report 1 after they begin — including errors S3 itself returned. That
 is why 254 is narrower than it looks. A usage error caught *before* the
-operation starts is still 252.
+operation starts is still 252. One kind of failure does not count, on either
+tool: an item whose connection is closed, or whose read times out, before any
+response arrives prints no line at all, so a run where only that happened ends
+at 0 although the item was not transferred or deleted.
 
 **Before that, whether the request reached S3 decides the code.** Anything the
 service answered is 254, whatever kind of error it is — a 400 from S3 is 254,
@@ -163,8 +166,8 @@ Three cases where the codes are deliberately not identical:
 - **A listing an S3-compatible endpoint returns unsorted** stops `sync` here
   at exit code 1, where `aws` keeps merging and exits 0.
 
-A few other paths settle on different codes too — a transfer whose connection
-dies below the HTTP layer, a download body cut mid-stream, a plain-HTTP
+A few other paths settle on different codes too — a download body cut
+mid-stream, a plain-HTTP
 endpoint taken from the environment under the CRT engine, an `aws` plugin that
 cannot be imported, a `cli_history` directory `aws` cannot create, an invalid
 `AWS_DEFAULTS_MODE` or `sts_regional_endpoints` value, the `PYTHON*`

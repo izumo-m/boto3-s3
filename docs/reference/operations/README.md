@@ -120,10 +120,11 @@ acts on produces one terminal record — `SUCCEEDED`, `FAILED`, `SKIPPED`,
 `DRYRUN` or `CANCELLED` — while `WARNED` and `NOTICE` records are advisories
 outside that rule, so one key may produce more than one callback. An item that
 never reaches the operation, because a filter dropped it during enumeration or
-because the run ended first, produces nothing. Two carve-outs sit between the
-two — an item a pre-transfer gate consumes with an advisory instead of an
-outcome, and an entry discarded from a batched delete's unsent buffer — and
-both are stated with `OpResult` in [`../results.md`](../results.md).
+because the run ended first, produces nothing. Three carve-outs sit between
+the two — an item a pre-transfer gate consumes with an advisory instead of an
+outcome, an entry discarded from a batched delete's unsent buffer, and an item
+whose request died without a response, which `aws s3` loses as well — and all
+three are stated with `OpResult` in [`../results.md`](../results.md).
 
 The callback runs on a worker thread for engine transfers and for batched
 deletes, and on the scan's prefetch worker for the warnings a walk or listing

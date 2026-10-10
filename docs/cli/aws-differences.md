@@ -15,8 +15,8 @@ variables and `[s3]` tuning keys the command reads see
 Under the same arguments and configuration you get **the same resulting S3
 state, the same returned values, the same error conditions, and the same exit
 code**, bar the entries in section 2 that say outright that the run comes out
-differently. Those are a corrupted ranged download, a transfer whose connection
-dies below the HTTP layer, a download body cut mid-stream, a listing an
+differently. Those are a corrupted ranged download, a download body cut
+mid-stream, a listing an
 S3-compatible endpoint returns unsorted, a recursive delete whose listing dies
 part way, a plain-HTTP
 endpoint named anywhere but `--endpoint-url` under the CRT engine, a
@@ -145,28 +145,6 @@ run comes out differently, listed in section 1.
   `preferred_transfer_client = crt`**, which validates exactly as `aws` does.
   Downloads below the threshold are verified on both tools, so only large
   single-object downloads are affected.
-- **`aws` loses a per-item failure that happened below the HTTP layer.** When
-  the last attempt botocore makes for one item dies without a response — the
-  connection closed, or the read timed out — `aws` records nothing at all: no
-  `... failed:` line, the item counted neither transferred nor failed, and
-  **exit code 0 although nothing was transferred**. Its per-item completion
-  handler asks whether the exception is S3's conditional-write rejection by
-  reading the response off it, which that family of botocore errors leaves
-  empty; the `AttributeError` that follows is swallowed inside `s3transfer` and
-  the failure never reaches the result queue (`aws --debug` prints it). Every
-  route is affected — `cp`, `mv`, `sync` and `rm`, uploads, downloads, S3-to-S3
-  copies and deletes, single-part and multipart — and in a recursive run only
-  the affected item vanishes while the rest print normally. Here the same
-  question is asked in a way that survives the missing response, so the item
-  fails like any other: one `upload failed:` / `download failed:` /
-  `copy failed:` / `move failed:` / `delete failed:` line and exit code 1. The
-  number of attempts, and what is left behind (no partial download, an `mv`
-  source kept, a multipart upload aborted), are the same on both tools. This is
-  deliberately not mirrored: mirroring it would mean exiting 0 and printing
-  nothing after a transfer that did not happen. It belongs to the same family
-  as the rendering accidents below — the empty `fatal error:` line of a Ctrl-C,
-  the CRT engine's `Unknown Error Code` — and is the only one of them you
-  cannot see.
 - **A download body cut mid-stream is retried here and not by `aws`.** The
   retryable set differs between the `s3transfer` installed from PyPI and the
   fork `aws` bundles: the installed botocore turns a connection broken in the
@@ -192,10 +170,9 @@ run comes out differently, listed in section 1.
   not byte-ordered by compare_key (...)`, or `destination` for the other
   side — and exit code 1. Transfers and deletions already reported before that
   point stand on both tools; nothing past it happens here. This is deliberately
-  not mirrored, for the same reason as the swallowed per-item failure above:
-  mirroring would mean deleting destination data that the source still has.
-  Reaching it takes such an endpoint — S3 Express directory buckets, whose listings promise
-  no order, are refused by `sync` up front on both tools.
+  not mirrored: mirroring would mean deleting destination data that the source
+  still has. Reaching it takes such an endpoint — S3 Express directory buckets,
+  whose listings promise no order, are refused by `sync` up front on both tools.
 - **A download stamps an old object on a different second.** Both tools give
   the downloaded file the object's `LastModified`, and for every timestamp
   today's zone rules cover they agree to the second. They part on one old

@@ -17,7 +17,13 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from botocore.exceptions import ClientError, NoCredentialsError
+from botocore.exceptions import (
+    ClientError,
+    ConnectionClosedError,
+    EndpointConnectionError,
+    NoCredentialsError,
+    ReadTimeoutError,
+)
 
 from boto3_s3 import (
     AccessDeniedError,
@@ -1055,6 +1061,44 @@ class TestResults:
         deleter.submit(_info("a" if route == "batch" else "a\x01"))
         with pytest.raises(AssertionError, match="unexpected call"):
             deleter.close()
+
+    def test_a_batch_that_dies_without_a_response_records_nothing(self) -> None:
+        # aws-cli sends one DeleteObject per key, and its completion handler
+        # loses each one that dies without a response (a closed connection, a
+        # read timeout): no line, no count, rc 0 - measured against the pinned
+        # aws through a 127.0.0.1 fake that lists and then closes on every
+        # delete. The batch carrying those keys loses them the same way.
+        fake = _FakeS3Client(script=[ConnectionClosedError(endpoint_url="http://h/"), {}])
+        results: list[OpResult] = []
+        deleter = _deleter(fake, batch_size=2, on_result=results.append)
+        for key in ("a", "b", "c"):
+            deleter.submit(_info(key))
+        deleter.close()
+        assert _keys(fake.calls) == [["a", "b"], ["c"]]
+        assert [(r.compare_key, r.outcome) for r in results] == [("c", OpOutcome.SUCCEEDED)]
+        assert (deleter.succeeded, deleter.failed) == (1, 0)
+        assert deleter.first_error is None
+
+    def test_a_single_key_that_dies_without_a_response_records_nothing(self) -> None:
+        fake = _FakeS3Client(single_script=[ReadTimeoutError(endpoint_url="http://h/")])
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append)
+        deleter.submit(_info("k\x01"))  # XML-incompatible: the per-key route
+        deleter.close()
+        assert results == []
+        assert (deleter.succeeded, deleter.failed) == (0, 0)
+
+    def test_a_refused_connection_still_fails_the_batch(self) -> None:
+        # EndpointConnectionError carries no response attribute at all, so
+        # aws-cli's check answers normally and the key fails there too
+        # (`delete failed: ... Could not connect to the endpoint URL`, rc 1).
+        fake = _FakeS3Client(script=[EndpointConnectionError(endpoint_url="http://h/")])
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append)
+        deleter.submit(_info("a"))
+        deleter.close()
+        assert [r.outcome for r in results] == [OpOutcome.FAILED]
+        assert isinstance(results[0].error, TransportError)
 
     def test_later_batches_run_after_request_failure(self) -> None:
         fake = _FakeS3Client(script=[_client_error(), {}])

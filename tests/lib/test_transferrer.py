@@ -22,7 +22,12 @@ from typing import Any, cast
 
 import pytest
 from boto3.s3.transfer import TransferConfig
-from botocore.exceptions import ClientError
+from botocore.exceptions import (
+    ClientError,
+    ConnectionClosedError,
+    EndpointConnectionError,
+    ReadTimeoutError,
+)
 from s3transfer.copies import CopySubmissionTask
 
 from boto3_s3 import transfer
@@ -1841,6 +1846,79 @@ class TestSerialExecutorInterrupt:
         assert not (tmp_path / "a.bin").exists()  # the move completed
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
         assert (transferrer.succeeded, transferrer.cancelled) == (1, 0)
+
+
+class TestFailureLostLikeAws:
+    """A per-item failure without a response vanishes, as it does on aws-cli.
+
+    aws-cli's completion handler reads ``exception.response.get(...)`` and
+    raises on the ``None`` response botocore's closed-connection and timeout
+    errors carry; s3transfer swallows that, so the item gets no line and no
+    count (measured against the pinned aws through a 127.0.0.1 server that
+    closes every connection: cp, mv, recursive cp and rm all exit 0 silently).
+    """
+
+    @staticmethod
+    def _upload_item(tmp_path: Path) -> TransferItem:
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x")
+        return TransferItem(
+            compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="k"
+        )
+
+    @pytest.mark.parametrize(
+        "raised",
+        [
+            ConnectionClosedError(endpoint_url="http://h/"),
+            ReadTimeoutError(endpoint_url="http://h/"),
+        ],
+        ids=["connection-closed", "read-timeout"],
+    )
+    def test_an_upload_that_dies_without_a_response_leaves_no_record(
+        self, tmp_path: Path, raised: Exception
+    ) -> None:
+        calls, _, results, transferrer = _run(
+            TransferType.UPLOAD, [self._upload_item(tmp_path)], [raised]
+        )
+        assert ops(calls) == ["PutObject"]
+        assert results == []
+        assert (transferrer.succeeded, transferrer.failed, transferrer.skipped) == (0, 0, 0)
+        assert transferrer.first_error is None
+
+    def test_a_refused_connection_still_fails(self, tmp_path: Path) -> None:
+        # No response attribute at all: aws-cli's check answers normally and
+        # the item fails (`upload failed: ... Could not connect`, rc 1).
+        _, _, results, transferrer = _run(
+            TransferType.UPLOAD,
+            [self._upload_item(tmp_path)],
+            [EndpointConnectionError(endpoint_url="http://h/")],
+        )
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert transferrer.failed == 1
+
+    def test_a_move_whose_source_delete_dies_keeps_quiet(self) -> None:
+        # The source delete is translated in-pipeline (s3_errors); the check
+        # reads the botocore cause, the exception aws-cli's handler holds.
+        item = TransferItem(
+            compare_key="a.bin",
+            size=7,
+            etag='"abc123"',
+            src_bucket="src-b",
+            src_key="d/a.bin",
+            dest_bucket="dest-b",
+            dest_key="cp/a.bin",
+        )
+        calls, source_calls, results, transferrer = _run(
+            TransferType.COPY,
+            [item],
+            [{}],
+            source_responses=[ConnectionClosedError(endpoint_url="http://h/")],
+            is_move=True,
+        )
+        assert ops(calls) == ["CopyObject"]
+        assert ops(source_calls) == ["DeleteObject"]
+        assert results == []
+        assert (transferrer.succeeded, transferrer.failed) == (0, 0)
 
 
 class TestNoOverwrite:

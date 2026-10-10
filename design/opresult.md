@@ -102,6 +102,26 @@ the same item's real outcome). Aggregate counts always agree with the records: t
 engine's rollup counters and `BatchError`'s fields are the per-outcome record
 counts ([`exceptions.md`](./exceptions.md) section 4).
 
+One carve-out mirrors aws-cli rather than the rule: an item whose request died
+without a response produces no record and no count. aws-cli's per-item
+completion handler (`DoneResultSubscriber`) checks for S3's conditional-write
+rejection with `exception.response.get("Error", {}).get("Code")`, botocore's
+closed-connection / read-timeout family (every `HTTPClientError`) carries
+`response = None`, and s3transfer's callback runner swallows the
+`AttributeError` that follows - so the item prints no line and the run exits 0
+when nothing else failed (measured on cp / mv / recursive cp / rm against a
+127.0.0.1 server closing every connection). `s3storage.lost_like_aws` evaluates
+that same expression on the exception aws-cli would hold (an in-pipeline
+translation is judged by its botocore cause; only the botocore family
+qualifies) and logs what it drops at debug level, and the routes aws-cli sends
+through that handler apply it: the transfer engine's terminal
+(`Transferrer._record_failure`, after the cancellation branch as in aws-cli),
+the S3 deleter (a batch request losing all its keys, a per-key request its
+own), and the blind single-key `rm` (no record, no `BatchError`). Routes
+outside that handler keep their failures - a refused connection
+(`EndpointConnectionError` has no `response` attribute at all), a synchronous
+local or custom-backend delete, the single-call operations.
+
 A cancellation (on the classic engine: a fatal elsewhere in the run,
 `CancelToken` immediate mode, a Ctrl-C; on the CRT engine: a `CancelToken`
 cancel only - see below) resolves the accepted transfer items like this:

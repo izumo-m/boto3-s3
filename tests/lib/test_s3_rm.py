@@ -20,7 +20,7 @@ import datetime as dt
 from typing import Any
 
 import pytest
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ConnectionClosedError
 
 from boto3_s3 import (
     S3,
@@ -211,6 +211,13 @@ class TestRmSingleKey:
         assert isinstance(exc_info.value.__cause__.__cause__, ClientError)
         assert [(r.compare_key, r.outcome) for r in results] == [("k", OpOutcome.FAILED)]
         assert isinstance(results[0].error, NotFoundError)
+
+    def test_a_delete_that_dies_without_a_response_is_lost_like_aws(self) -> None:
+        # aws-cli's task loses it: no line, rc 0 (measured against the pinned
+        # aws through a 127.0.0.1 server that closes every connection).
+        client = _FakeS3Client(delete_object_error=ConnectionClosedError(endpoint_url="http://h/"))
+        assert _rm("s3://b/k", client) == []
+        assert client.delete_object_calls == [{"Bucket": "b", "Key": "k"}]
 
     def test_excluded_by_matcher_is_silent(self) -> None:
         client = _FakeS3Client()
