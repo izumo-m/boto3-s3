@@ -94,18 +94,20 @@ class WebsiteCommand(Command):
         # carve-out is what keeps "s3:///k" from failing S3Storage.validate
         # before the rejection below can shape it aws's way.
         storage = transferargs.build_s3_storage(f"s3://{path}", client=client)
-        if path.endswith("/") or storage.key:
+        if storage.bucket != path:
             # aws hands the whole remainder to PutBucketWebsite as the Bucket
             # and lets botocore's name regex reject it (rc 252). S3Storage
-            # splits it instead, which would hide that rejection, so the
-            # remainders the split disturbs are refused here from the unsplit
-            # path: whatever S3Storage read as a key ("b/some/key"), the
-            # bucket-less "/k" (whose split leaves no bucket at all), and
-            # "b//", whose leftover slash the split would silently drop. Every
-            # other name botocore refuses - a slash-free bad one, the empty
-            # bucket of "s3://" - survives the split intact and rides on to
-            # keep botocore's own text. An accesspoint ARN parses to a bucket
-            # with no key and passes through, exactly like aws.
+            # splits it instead, which would hide that rejection, so a
+            # remainder the split did not keep whole as the bucket is refused
+            # here from the unsplit path: whatever S3Storage read as a key
+            # ("b/some/key"), the bucket-less "/k" (whose split leaves no
+            # bucket at all), "b//", whose leftover slash the split would
+            # silently drop, and an Outposts ".../accesspoint/ap:", whose ":"
+            # the split eats as the key separator. Every other name botocore
+            # refuses - a slash-free bad one, the empty bucket of "s3://" -
+            # survives the split intact and rides on to keep botocore's own
+            # text. An accesspoint ARN is the whole bucket and passes through,
+            # exactly like aws.
             raise ValidationError(
                 usage.invalid_bucket_name_message(path),
                 operation="website",

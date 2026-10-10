@@ -183,6 +183,24 @@ class TestWebsiteExitCodeShape:
         assert f"{bucket_name_report('/k')}\n" in capsys.readouterr().err
         assert client.calls == []
 
+    @pytest.mark.parametrize("sep", ["/", ":"])
+    def test_an_outposts_access_point_closed_with_a_colon_is_refused(
+        self, sep: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws passes "...accesspoint/ap:" whole as the Bucket and botocore's
+        # name check refuses it (rc 252, no request; measured). The split
+        # here eats the ":" as the key separator and would leave a keyless
+        # access point to configure.
+        name = (
+            f"arn:aws:s3-outposts:us-west-2:123456789012:outpost{sep}"
+            f"op-01234567890123456{sep}accesspoint{sep}ap:"
+        )
+        client = _FakeWebsiteClient()
+        rc = cli.main(["website", f"s3://{name}", "--index-document", "i"], ctx=client_ctx(client))
+        assert rc == 252
+        assert f"{bucket_name_report(name)}\n" in capsys.readouterr().err
+        assert client.calls == []
+
     def test_bucketless_key_schemeless_folds_into_the_bucket_name(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:

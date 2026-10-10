@@ -1057,15 +1057,19 @@ the bucket name. Because aws **keeps a key (`s3://b/some/key`) folded into the
 bucket name** and lets botocore's name regex reject it (rc 252), the CLI side
 reproduces the same shape with a `ValidationError` naming the *unsplit*
 remainder. Only the remainders whose rejection the split would otherwise hide
-need that: whatever `S3Storage` read as a key, the bucket-less `s3:///k`
+need that - every remainder the split does not keep whole as the bucket:
+whatever `S3Storage` read as a key, the bucket-less `s3:///k`
 (measured: aws rejects the name `/k`, so `build_s3_storage`'s carve-out is used
 here too - without it `S3Storage` would refuse the bucket-less form first, with
-its own wording), and the `/` left after stripping (`s3://b//`). Every other name
+its own wording), the `/` left after stripping (`s3://b//`), and an Outposts
+access point closed with `:` (`.../accesspoint/ap:`), whose `:` the split eats
+as the key separator. Every other name
 botocore refuses - a slash-free bad one (`b@d`, `s3://b b`), the empty bucket of
 `s3://` - survives the split unchanged and rides on to PutBucketWebsite, where
 botocore's own rejection (regex tail included) is byte-identical to aws's. So
-website has **two** 252 sources for a bad bucket name: the synthesized one here
-and botocore's. An accesspoint ARN passes through
+website has **two** 252 sources for a bad bucket name: the one raised here,
+worded by botocore's own `validate_bucket_name` (`usage.py`), and botocore's at
+the request. An accesspoint ARN passes through
 entirely as `Bucket` (aws's `block_unsupported_resources` rejects only Object
 Lambda / Outposts bucket ARNs = same as `S3Storage`'s parsing).
 
