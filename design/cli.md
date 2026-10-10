@@ -58,17 +58,23 @@ solidified design is added here.
   the credentials file, the latter updating the former key by key like
   botocore's `full_config`), which section 6 uses to decide whether a report
   still carries its envelope and which `ConfigScan.scoped` reads
-  `cli_timestamp_format` out of (below). What `load_plugins` does with that
-  config *after* the parse - when the `[plugins]` section sets
-  `cli_legacy_plugin_path`, appending it to `sys.path`, importing every other
-  entry of the section and calling its `awscli_initialize` on every
-  invocation, `--version` included (without that entry it imports nothing) -
-  is not reproduced and cannot be: a plugin is written against awscli's own
-  internals.
-  So no plugin is loaded here and the section decides nothing - an entry that
-  fails to import, which stops aws at rc 255 before anything runs, leaves this
-  command running normally (a recorded deviation -
-  [`aws-differences.md`](../docs/cli/aws-differences.md)).
+  `cli_timestamp_format` out of (below). The scan also keeps the config
+  file's `[plugins]` section, and `plugins.load` then does what aws's
+  `load_plugins` does with it, on every invocation, `--version` and the help
+  token included: when the section sets `cli_legacy_plugin_path`, that value
+  is split onto `sys.path`, every other entry is imported, and each module's
+  `awscli_initialize` is called (without that entry nothing is imported). A
+  plugin that fails to import or initialize ends the run there with `str()`
+  of the exception at rc 255, aws's general handler (measured: `No module
+  named '<name>'`, `module '<name>' has no attribute 'awscli_initialize'`).
+  The emitter a plugin registers on only records, so the informational exits
+  stay SDK-free; every botocore session this CLI opens replays the
+  registrations right after botocore's built-ins (`plugins.attach` in
+  `_open_botocore_session`), where aws's session has them, so a handler on a
+  botocore event fires as it does under aws. aws-cli's own events are never
+  emitted here, and a plugin that imports aws-cli's modules fails to import -
+  the part of a plugin written against awscli's internals, recorded in
+  [`aws-differences.md`](../docs/cli/aws-differences.md).
 - `_dispatch` opens by reading the **alias file** (`~/.aws/cli/alias`,
   section 9), which aws reads while it is still assembling its parser - so a
   file it cannot read aborts the run ahead of everything below, `--version` and

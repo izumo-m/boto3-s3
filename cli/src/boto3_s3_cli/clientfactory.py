@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 
 # These exception names do not themselves import the AWS SDK.
 from boto3_s3 import ConfigurationError, InvalidConfigError, InvalidValueError, ValidationError
-from boto3_s3_cli import checksumdefault, configfiles, s3errormsg
+from boto3_s3_cli import checksumdefault, configfiles, plugins, s3errormsg
 from boto3_s3_cli.globalargs import PROFILE_ENV_VARS
 
 if TYPE_CHECKING:
@@ -150,6 +150,9 @@ def _open_botocore_session(args: argparse.Namespace) -> BotocoreSession:
             "max_attempts": ("max_attempts", "AWS_MAX_ATTEMPTS", 3, int),
         }
     )
+    # The `[plugins]` handlers go on next, after botocore's built-ins, where
+    # aws's plugin loader puts them on its own session.
+    plugins.attach(session.get_component("event_emitter"))
     if args.profile:
         session.set_config_variable("profile", args.profile)
     session.set_config_variable("api_versions", {})

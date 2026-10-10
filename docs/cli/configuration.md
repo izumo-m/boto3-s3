@@ -79,12 +79,13 @@ same reason it is inert there, which is why `--no-cli-pager` is among the
 options accepted and ignored
 (see [`aws-differences.md`](./aws-differences.md)).
 
-One section of `~/.aws/config` is not read at all: `[plugins]`, from which
-`aws` — when the section sets `cli_legacy_plugin_path` — imports and
-initializes aws-cli plugins on every invocation. This command has no plugin
-mechanism, so the section is inert — including the case where such an entry
-cannot be imported, which stops `aws` before it does anything and does not
-stop this command (see [`aws-differences.md`](./aws-differences.md)).
+The `[plugins]` section is read the way `aws` reads it: when it sets
+`cli_legacy_plugin_path`, every other entry is imported from there and its
+`awscli_initialize` called, on every invocation, and a plugin that cannot be
+imported or initialized stops the command before it does anything (exit code
+255). A plugin's handlers on the SDK's own events run as they do under `aws`;
+what it hooks into `aws`'s own command machinery does not (see
+[`aws-differences.md`](./aws-differences.md)).
 
 ## 3. Transfer tuning: the `[s3]` section
 

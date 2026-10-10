@@ -18,8 +18,8 @@ code**, bar the entries in section 2 that say outright that the run comes out
 differently. Those are a corrupted ranged download, a download body cut
 mid-stream, a recursive delete whose listing dies part way, a plain-HTTP
 endpoint named anywhere but `--endpoint-url` under the CRT engine, a
-`REQUESTS_CA_BUNDLE` the CRT engine cannot use, an `aws` plugin the
-config file loads through `cli_legacy_plugin_path`, a `cli_history` directory
+`REQUESTS_CA_BUNDLE` the CRT engine cannot use, an `aws` plugin that imports
+`awscli` modules, a `cli_history` directory
 `aws` cannot create, the modification time a download stamps for an object
 older than the local zone's present rules, a `--copy-props all` copy whose
 oversized tag write and its rollback both fail, an invalid `AWS_DEFAULTS_MODE`
@@ -377,21 +377,18 @@ comes out differently, listed in section 1.
   swallows every failure of that machinery, so a directory it cannot write
   changes nothing observable there either — the file simply stops being touched
   once a script switches over.
-- **The `[plugins]` section is not read.** `aws` hands its merged
-  configuration to a plugin loader before it parses anything: when
-  `[plugins]` sets `cli_legacy_plugin_path`, that entry is added to its import
-  path, and every other entry of the section is imported and its
-  `awscli_initialize` called — on every invocation, `--version` included.
-  Without that entry `aws` imports no plugin at all. This command has no
-  plugin mechanism and never reads the section, so whatever a plugin was doing
-  on your `aws` runs — registering handlers, auditing, extra output — simply
-  does not happen. **When such a plugin cannot be imported the run comes out
-  differently**: `aws` refuses to start at all (exit code 255, `No module
-  named '<name>'`, nothing done), while this command runs the operation and
-  exits normally — so a `rm --recursive` that `aws` would never have begun
-  deletes the objects here. This one is not a matter of effort: a plugin is
-  written against `aws`'s own internals, so nothing outside that codebase can
-  run one.
+- **An `aws` plugin's hooks into `aws` itself do not run.** Both tools load
+  `[plugins]` alike — with `cli_legacy_plugin_path` set, every other entry is
+  imported and its `awscli_initialize` called on every invocation, and a
+  plugin that cannot be imported or initialized stops the run with exit code
+  255 before anything happens. What a plugin registers on the SDK's own
+  events (`before-call.s3.PutObject`, `after-call`, `needs-retry` and the
+  like) runs as it does on `aws`. Two parts of a plugin are written against
+  `aws`'s own code and cannot run here: handlers on `aws`'s own events
+  (`building-command-table`, `top-level-args-parsed`, `session-initialized`
+  and the rest) are registered but never called, and **a plugin that imports
+  `awscli` modules fails to import here** — exit code 255 with `No module
+  named 'awscli'`, where `aws` runs it and the command.
 - **User-Agent.** Requests identify themselves as the installed
   `Boto3`/`Botocore`, not as `aws-cli`, and carry none of aws's command
   metadata (`md/command#s3.ls` and the like). Visible only to the server and

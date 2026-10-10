@@ -21,7 +21,7 @@ from boto3_s3 import (
     InvalidValueError,
     ValidationError,
 )
-from boto3_s3_cli import alias, configfiles, globalargs
+from boto3_s3_cli import alias, configfiles, globalargs, plugins
 from boto3_s3_cli.autoprompt import resolve
 from boto3_s3_cli.commands.base import Command, Context, reject_unknown_options
 
@@ -917,6 +917,16 @@ def _main(argv: list[str] | None, ctx: Context | None) -> int:
         _write_error(
             f"Unable to parse config file: {_config_scan.unparseable}", rc=_GENERAL_ERROR_RC
         )
+        return _GENERAL_ERROR_RC
+    # aws loads its plugins from that same config read, before anything else
+    # (`plugins` - the `[plugins]` section with a `cli_legacy_plugin_path`),
+    # so a plugin that fails to import or initialize ends the run here at its
+    # general handler's 255 - `--version` and the help token included
+    # (measured).
+    try:
+        plugins.load(_config_scan.plugins)
+    except Exception as exc:
+        _write_error(exc, rc=_GENERAL_ERROR_RC)
         return _GENERAL_ERROR_RC
     if resolve.AUTO_PROMPT_FLAG in raw and resolve.NO_AUTO_PROMPT_FLAG in raw:
         _write_error(

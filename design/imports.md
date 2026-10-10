@@ -14,7 +14,10 @@ usage errors, and subcommand help may all import the AWS SDK freely.
    AWS SDK module, any per-command module (the `commands` package's shared
    `base` infrastructure may load), or any library module beyond the lazy
    `boto3_s3` root and its pure `exceptions`. Version tokens for installed
-   SDK distributions come from package metadata.
+   SDK distributions come from package metadata. A `[plugins]` entry is
+   imported on those exits too, as aws imports it (design/cli.md section 1);
+   what the plugin itself imports is its own, and the emitter it registers
+   on is SDK-free.
 
 ## 2. Export surface
 
