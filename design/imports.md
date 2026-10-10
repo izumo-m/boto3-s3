@@ -55,7 +55,8 @@ to exactly this contract - the "Library consumption contract" in
   `s3transfer` directly. The bare-import contract holds because the lazy root
   defers those *module* loads, not because the modules defer the SDK -
   touching a root symbol homed in one of them pays the SDK import.
-  `crtsupport.py` keeps all of awscrt / `s3transfer.crt` in-function, so the
+  `crtsupport.py` (and `crtrequest.py`, the deletes' route onto the same CRT
+  client) keeps all of awscrt / `s3transfer.crt` in-function, so the
   classic path works with awscrt absent (when awscrt *is* installed, botocore
   itself imports it eagerly - the classic path avoids requiring awscrt, not
   its import cost).

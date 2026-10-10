@@ -56,12 +56,14 @@ def rm(
 ) -> None: ...
 ```
 
-`transfer_config` (this instance's when `None`) moves no bytes: `rm` always
-deletes through the client. Its engine choice is the one `aws s3 rm` would
-carry the deletes on, which decides how a delete that dies without a response
-is reported — dropped without a record on the classic engine, as `aws s3`
-drops it, and a `FAILED` record where the CRT engine is selected
-([`../results.md`](../results.md)).
+`transfer_config` (this instance's when `None`) moves no bytes; its engine
+choice is the client the deletes ride, as `aws s3 rm` carries them on its
+transfer manager: the storage's botocore client, or — when it selects the CRT
+engine — the CRT client, with this instance's CRT postures (see
+[`S3Deleter`](../misc.md#s3deleter)). That client's retry policy and error
+text are the deletes', and a delete that dies without a response is dropped
+without a record on botocore, as `aws s3` drops it, and a `FAILED` record on
+the CRT client ([`../results.md`](../results.md)). A dryrun builds no engine.
 
 `target` names what to delete: an `"s3://bucket/key"` string (the `s3://`
 scheme is optional, so `"bucket/key"` works too), an `os.PathLike[str]`

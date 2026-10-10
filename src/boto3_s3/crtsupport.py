@@ -71,6 +71,8 @@ if TYPE_CHECKING:
     from boto3.session import Session
     from mypy_boto3_s3 import S3Client
 
+    from boto3_s3.crtrequest import CrtRequestSender
+
 logger = logging.getLogger(__name__)
 
 # The package logger's NullHandler (the rule and the reason are at the same
@@ -88,6 +90,7 @@ __all__ = [
     "CrtRegion",
     "acquire_process_lock",
     "caller_endpoint",
+    "create_crt_request_sender",
     "create_crt_transfer_manager",
     "has_crt_s3transfer",
     "has_minimum_crt_version",
@@ -165,6 +168,7 @@ class _CrtS3Client:
         cred_wrapper: Any | None,
         verify: Any,
         s3_config: Any,
+        serializer_args: tuple[Any, dict[str, Any]] = (None, {}),
     ) -> None:
         self.crt_client = crt_client
         # None = built under the lockless opt-in; `_get_crt_s3_client`
@@ -184,6 +188,21 @@ class _CrtS3Client:
         # _serializer_config_shape's tuple: the Config facets the shared
         # serializer bakes in (the `s3` dict, fips / dualstack endpoint flags).
         self.s3_config = s3_config
+        # The botocore session and client arguments the shared serializer was
+        # built from, for `request_sender` to address requests the same way.
+        self.serializer_args = serializer_args
+        self._sender: Any | None = None
+        self._sender_lock = threading.Lock()
+
+    def request_sender(self) -> Any:
+        """The `crtrequest.CrtRequestSender` on this CRT client, built on first use."""
+        with self._sender_lock:
+            if self._sender is None:
+                from boto3_s3.crtrequest import CrtRequestSender
+
+                session, client_kwargs = self.serializer_args
+                self._sender = CrtRequestSender(self.crt_client, session, client_kwargs)
+            return self._sender
 
 
 def has_minimum_crt_version() -> bool:
@@ -468,8 +487,9 @@ def materialize_crt_engine(
     run deletes anything, so every construction-time failure - awscrt's own
     ``assert isinstance(region, str)`` on an unresolved region above all -
     surfaces there rather than inside the operation. This library's ``rm``
-    deletes through ``DeleteObject`` and never rides the engine, so it pays the
-    same construction here (cross-process lock included) and drops the result.
+    builds the engine only once it has a delete to send (and a dryrun never),
+    so a caller owing that order pays the same construction here
+    (cross-process lock included) and drops the result; the deletes reuse it.
 
     A config that selects the classic engine - explicitly, or through ``auto``
     on a host the CRT is not tuned for - makes this a no-op. Nothing is
@@ -488,6 +508,48 @@ def materialize_crt_engine(
         region=region,
         sign_requests=sign_requests,
     )
+
+
+def create_crt_request_sender(
+    client: S3Client,
+    config: Any | None,
+    *,
+    endpoint: str | None = None,
+    session: Session | None = None,
+    allow_absent_credentials: bool = False,
+    allow_lockless: bool = False,
+    region: CrtRegion = CLIENT_REGION,
+    sign_requests: bool | None = None,
+) -> CrtRequestSender | None:
+    """The CRT engine's client as a sender of single S3 requests, or ``None``.
+
+    The engine is resolved exactly as `create_crt_transfer_manager` resolves
+    it for a transfer - the same singleton, lock, compatibility pins and
+    postures, and the same construction-time failures - and ``None`` means
+    the same classic fallback. What comes back sends requests s3transfer's
+    manager has no route for (`crtrequest`); the deleter's ``DeleteObjects``
+    is the one that needs it.
+    """
+    if (
+        create_crt_transfer_manager(
+            client,
+            config,
+            endpoint=endpoint,
+            session=session,
+            allow_absent_credentials=allow_absent_credentials,
+            allow_lockless=allow_lockless,
+            region=region,
+            sign_requests=sign_requests,
+        )
+        is None
+    ):
+        return None
+    holder = _crt_s3_client
+    if holder is None:
+        # Unreachable: a manager is only built on a live singleton (and the
+        # singleton is never dropped outside the test seam).
+        return None
+    return holder.request_sender()
 
 
 def caller_endpoint(client: S3Client, endpoint: str | None) -> str | None:
@@ -612,10 +674,14 @@ def _initialize(
     # override, clientfactory), so the CRT lane must serialize with the same
     # Config to keep one Host across engines. Addressing-style and
     # accelerate/dualstack settings carry over for the same reason.
-    serializer = BotocoreCRTRequestSerializer(
-        _botocore_session(session),
-        {"region_name": region, "endpoint_url": endpoint_url, "config": client.meta.config},
-    )
+    botocore_session = _botocore_session(session)
+    serializer_kwargs: dict[str, Any] = {
+        "region_name": region,
+        "endpoint_url": endpoint_url,
+        "config": client.meta.config,
+    }
+    # A copy: s3transfer's serializer writes its own entries into the dict.
+    serializer = BotocoreCRTRequestSerializer(botocore_session, dict(serializer_kwargs))
 
     create_kwargs: dict[str, Any] = {
         "region": region,
@@ -644,6 +710,7 @@ def _initialize(
         cred_wrapper,
         create_kwargs["verify"],
         _serializer_config_shape(client),
+        (botocore_session, serializer_kwargs),
     )
 
 

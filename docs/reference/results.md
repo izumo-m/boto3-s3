@@ -69,12 +69,12 @@ discarded after acceptance, or lost the way `aws s3` loses them:
   handler fails on the missing response, so the item prints no line and the
   run exits 0 when nothing else failed. A refused connection, a download's
   read timeout (s3transfer retries it and then fails), a service error
-  response, a failure the CRT engine reports itself, and a delete of a run
-  `aws s3` would carry on its CRT client (`S3Deleter`'s `transfer_client`)
+  response, and a failure the CRT engine reports itself — a delete sent on
+  the CRT client included, as a run that selects the CRT engine sends them —
   are ordinary `FAILED` records. A batched
-  `DeleteObjects` that dies this way is not itself lost: its keys are sent
-  again one `DeleteObject` each, the request `aws s3` sends, and each takes
-  its own outcome. The dropped failure is logged at debug level on the
+  `DeleteObjects` that dies without a response is not itself lost or failed,
+  on either client: its keys are sent again one `DeleteObject` each, the
+  request `aws s3` sends, and each takes its own outcome. The dropped failure is logged at debug level on the
   `boto3_s3.s3storage` logger.
 
 `WARNED` and `NOTICE` sit outside that rule in the other direction as well.

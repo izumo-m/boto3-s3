@@ -94,10 +94,11 @@ what it hooks into `aws`'s own command machinery does not (see
 
 `rm` reads and validates the same section, and builds the transfer engine
 `preferred_transfer_client` names, because `aws s3 rm` does — so an unusable
-value fails identically. But only that one key reaches anything here: this
-command's deletes never ride the transfer engine (see
-[`aws-differences.md`](./aws-differences.md)), so the numeric keys below tune
-nothing about `rm`, where under `aws` they do.
+value fails identically. Under the CRT engine its deletes ride that engine's
+client, as `aws`'s do, so the keys below that tune the CRT client reach them
+on both tools; this command batches them (see
+[`aws-differences.md`](./aws-differences.md)), so there are fewer requests to
+tune.
 
 | Key | Effect |
 | --- | --- |

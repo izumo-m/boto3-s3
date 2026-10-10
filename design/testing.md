@@ -382,10 +382,11 @@ with aws's CRT mode on rc / stdout / bucket state / local tree / download
 mtime across upload and download (each single-part and 9 MiB multipart) plus
 mv and sync (small corpora). The same lane covers the missing CRT-configured deletion shapes:
 single/recursive `rm` and upload/download `sync --delete`. Those cases assert
-CLI-observable parity rather than transport identity: boto3-s3 deliberately
-keeps `DeleteObject` / batched `S3Deleter` for the S3-side deletions instead of
-aws-cli's per-key CRT DELETE requests, while download sync-delete removes local
-files on both sides (deleter.md section 4). A separate `--debug` check
+CLI-observable parity rather than transport identity: boto3-s3 sends the
+S3-side deletions batched on the CRT client (`DeleteObjects`, with
+`DeleteObject` for single keys and per-key re-sends) where aws-cli sends one
+CRT `DeleteObject` per key, while download sync-delete removes local files on
+both sides (deleter.md section 4, crt.md section 6). A separate `--debug` check
 pins that our side actually engaged the CRT engine by asserting the
 transfer-time breadcrumb
 `Transferrer._get_manager` emits (`transfer engine: CRTTransferManager`),

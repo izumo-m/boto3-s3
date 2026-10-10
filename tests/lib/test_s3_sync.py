@@ -46,7 +46,7 @@ from boto3_s3.types import (
     TransferOptions,
     TransferType,
 )
-from tests.utils.fakes3 import MTIME, get_response, listing
+from tests.utils.fakes3 import MTIME, crt_sender_factory, get_response, listing
 from tests.utils.host import skip_if_chmod_is_inert
 from tests.utils.recorder import make_recording_client, ops
 
@@ -1416,23 +1416,34 @@ class TestParallelFilter:
         assert str(errors[0]) == "decide blew up"
 
 
-class TestDeletesThatDieWithoutAResponse:
-    """Which transfer client aws-cli would carry the sync's deletes on.
+class TestDeletesOnTheCrtEngine:
+    """Which client the sync's deletes ride.
 
-    An upload's deletes ride aws-cli's CRT client when the run selects it, and
-    a dead request is then reported; an S3-to-S3 sync always runs on its
-    classic client (`_compute_transfer_client_type`), where the same request is
-    lost (`lost_like_aws`).
+    An upload's deletes ride the CRT client when the run selects the CRT
+    engine, as aws-cli's ride its CRT client, and a request that dies there is
+    reported; an S3-to-S3 sync always runs on aws-cli's classic client
+    (`_compute_transfer_client_type`), so its deletes stay on botocore, where
+    the same request is lost (`lost_like_aws`).
     """
 
-    @pytest.fixture(autouse=True)
-    def _crt_preferred(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # The preference alone, without building a CRT engine for the
-        # transfers: what `deletes_ride_crt` answers for a CRT-selecting
-        # config (its own rule is pinned in test_deleter).
-        from boto3_s3 import s3 as s3_module
+    @pytest.fixture
+    def built(self, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+        # The deletes' engine alone (its own rule is pinned in test_deleter);
+        # the transfers fall back to classic rather than building a real CRT
+        # engine, a process-wide singleton, in a unit test.
+        from boto3_s3 import crtsupport
+        from boto3_s3 import deleter as deleter_module
 
-        monkeypatch.setattr(s3_module, "deletes_ride_crt", lambda _config: True)
+        built: list[Any] = []
+        monkeypatch.setattr(deleter_module, "crt_delete_sender", crt_sender_factory(built))
+        monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", lambda *_a, **_k: None)
+        return built
+
+    @staticmethod
+    def _crt() -> Any:
+        from boto3.s3.transfer import TransferConfig
+
+        return TransferConfig(preferred_transfer_client="crt")
 
     @staticmethod
     def _dead() -> Exception:
@@ -1440,7 +1451,9 @@ class TestDeletesThatDieWithoutAResponse:
 
         return ConnectionClosedError(endpoint_url="http://h/")
 
-    def test_an_s3_to_s3_sync_loses_it_whatever_the_preference(self) -> None:
+    def test_an_s3_to_s3_sync_stays_on_botocore_whatever_the_preference(
+        self, built: list[Any]
+    ) -> None:
         src_client, _ = make_recording_client([listing()])
         dest_client, dest_calls = make_recording_client(
             [listing(("p/z.txt", 1)), self._dead(), self._dead()]
@@ -1451,20 +1464,31 @@ class TestDeletesThatDieWithoutAResponse:
             S3Storage("s3://dest-b/p", client=dest_client),
             delete_filter=True,
             on_result=results.append,
-            transfer_config=_SERIAL,
+            transfer_config=self._crt(),
         )
+        assert built == []
         assert ops(dest_calls) == ["ListObjectsV2", "DeleteObjects", "DeleteObject"]
         assert results == []
 
-    def test_an_upload_sync_on_the_crt_reports_it(self, tmp_path: Path) -> None:
-        client, _ = make_recording_client([listing(("p/z.txt", 1)), self._dead(), self._dead()])
+    def test_an_upload_sync_deletes_on_the_crt_client(
+        self, built: list[Any], tmp_path: Path
+    ) -> None:
+        awscrt_exceptions = pytest.importorskip("awscrt.exceptions")
+        dead = awscrt_exceptions.from_code(1051)
+        client, calls = make_recording_client([listing(("p/z.txt", 1)), dead, dead])
         results: list[OpResult] = []
         with pytest.raises(BatchError):
-            S3().sync(
+            S3(crt_allow_lockless=True).sync(
                 str(tmp_path),
                 S3Storage("s3://bucket/p", client=client),
                 delete_filter=True,
                 on_result=results.append,
-                transfer_config=_SERIAL,
+                transfer_config=self._crt(),
             )
+        ((sender, _, kwargs),) = built
+        # The dead batch, then the key on its own (test_deleter pins why).
+        assert [op for op, _ in sender.calls] == ["DeleteObjects", "DeleteObject"]
+        assert kwargs["crt_allow_lockless"] is True
+        assert ops(calls) == ["ListObjectsV2", "DeleteObjects", "DeleteObject"]
         assert [r.outcome for r in results] == [OpOutcome.FAILED]
+        assert str(results[0].error) == "AWS_IO_SOCKET_CLOSED: socket is closed."

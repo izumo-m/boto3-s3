@@ -32,8 +32,8 @@ fails) — produces no record and is not counted, so the
 run can finish without an error although that item did not happen. `aws s3`
 loses such a failure the same way (no output line, exit code 0). A refused
 connection, that retried read, an error the
-service answered with, a failure the CRT engine reports itself, and a delete of
-a run `aws s3` would carry on its CRT client are ordinary `FAILED` records.
+service answered with, and a failure the CRT engine reports itself — a delete
+sent on the CRT client included — are ordinary `FAILED` records.
 Turn on debug logging for `boto3_s3` to see a dropped failure.
 
 Three checks that run *before* an item is submitted turn it away with an

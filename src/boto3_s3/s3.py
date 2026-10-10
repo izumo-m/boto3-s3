@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, Any, Concatenate, Generic, Literal, ParamSpec,
 import boto3
 from typing_extensions import Unpack
 
-from boto3_s3 import concurrency, crtsupport, producers, transferplan
+from boto3_s3 import concurrency, crtsupport, producers, transferconfig, transferplan
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3.awsconfig import AwsConfig
 from boto3_s3.comparator import (
@@ -48,7 +48,7 @@ from boto3_s3.comparator import (
     SrcOnlyPair,
     SyncPair,
 )
-from boto3_s3.deleter import S3Deleter, deletes_ride_crt
+from boto3_s3.deleter import S3Deleter, crt_delete_sender
 from boto3_s3.exceptions import (
     BatchError,
     Boto3S3Error,
@@ -59,7 +59,7 @@ from boto3_s3.exceptions import (
 )
 from boto3_s3.iostorage import IOStorage
 from boto3_s3.localstorage import LocalStorage, to_native_path, translate_os_error
-from boto3_s3.s3storage import S3Storage, drop_like_aws, request_failure, s3_errors
+from boto3_s3.s3storage import S3Storage, drop_like_aws, request_failure, s3_errors, s3_request
 from boto3_s3.storage import Location, Storage
 from boto3_s3.transfer import TransferItem, Transferrer, crt_engine_errors
 from boto3_s3.types import (
@@ -705,10 +705,14 @@ class _SyncDeletes:
         on_result: ResultCallback | None,
         cancel_token: CancelToken | None,
         capture_response: bool = False,
-        transfer_client: Literal["classic", "crt"] = "classic",
+        transfer_config: TransferConfig | None = None,
+        crt_postures: Mapping[str, Any] | None = None,
     ) -> None:
         self._dest = dest_storage
-        self._transfer_client: Literal["classic", "crt"] = transfer_client
+        # What the deleter's client is chosen by (S3Deleter): the run's
+        # TransferConfig and the S3 instance's CRT postures.
+        self._transfer_config = transfer_config
+        self._crt_postures: Mapping[str, Any] = crt_postures or {}
         self._request_payer = request_payer
         self._dryrun = dryrun
         self._on_result = on_result
@@ -759,7 +763,8 @@ class _SyncDeletes:
                         cancel_token=self._cancel_token,
                         operation="sync",
                         capture_response=self._capture_response,
-                        transfer_client=self._transfer_client,
+                        transfer_config=self._transfer_config,
+                        **self._crt_postures,
                     )
                 )
             self._deleter.submit(info)
@@ -1040,11 +1045,11 @@ class S3:
         ``aws s3 rm`` constructs its transfer manager before deciding anything
         about the run, so the engine's construction-time failures - awscrt
         refusing a client with no region above all - belong to the command, not
-        to the deletes. `rm` here deletes through ``DeleteObject`` /
-        ``DeleteObjects`` and never rides the engine, so an application that
-        owes ``aws s3`` parity calls this to pay the same construction
-        (cross-process lock included) at the same point and simply drops the
-        result.
+        to the deletes. `rm` here builds the engine only once it has a delete
+        to send (and a ``dryrun`` never), so an application that owes
+        ``aws s3`` parity calls this to pay the same construction
+        (cross-process lock included) at the same point; the deletes then
+        reuse what it built.
 
         The engine is chosen from *transfer_config* (this instance's
         ``transfer_config`` when none is given) with the same rule the transfer
@@ -1075,6 +1080,17 @@ class S3:
                 region=self._crt_region,
                 sign_requests=self._crt_sign_requests,
             )
+
+    def _crt_postures(self) -> dict[str, Any]:
+        """This instance's CRT engine postures, as `S3Deleter` takes them."""
+        return {
+            "session": self._session,
+            "crt_endpoint": self._endpoint_url,
+            "crt_allow_absent_credentials": self._crt_allow_absent_credentials,
+            "crt_allow_lockless": self._crt_allow_lockless,
+            "crt_region": self._crt_region,
+            "crt_sign_requests": self._crt_sign_requests,
+        }
 
     def resolve(self, loc: Location) -> Storage:
         """Resolve a ``Location`` to a ``Storage`` (the URL-interpretation seam).
@@ -2115,11 +2131,12 @@ class S3:
             # aws-cli runs an S3-to-S3 sync on its classic transfer client
             # whatever the preference (`_compute_transfer_client_type`), so
             # only an upload's deletes can ride its CRT client.
-            transfer_client=(
-                "crt"
-                if transfer_type is not TransferType.COPY and deletes_ride_crt(transfer_config)
-                else "classic"
+            transfer_config=(
+                transferconfig.TransferConfig(preferred_transfer_client="classic")
+                if transfer_type is TransferType.COPY
+                else transfer_config
             ),
+            crt_postures=self._crt_postures(),
         )
         with ExitStack() as stack:
             stack.enter_context(transferrer)
@@ -2284,15 +2301,15 @@ class S3:
         `CancelledError` after worker cleanup.
 
         ``transfer_config`` (this instance's when ``None``) moves no bytes here:
-        its engine choice is the one ``aws s3 rm`` would carry the deletes on,
-        which decides how a delete that dies without a response is reported -
-        lost on the classic engine, a failure on the CRT (`deletes_ride_crt`).
+        its engine choice is the client the deletes ride, as ``aws s3 rm``
+        carries them on its transfer manager - botocore, or the CRT client when
+        it selects the CRT engine (`crt_delete_sender`, with this instance's
+        CRT postures). That client's retry policy and error text are the
+        deletes', and a delete that dies without a response is lost on
+        botocore and reported on the CRT, as on aws.
         """
         storage = self._resolve_s3_target(target, operation="rm")
         config = transfer_config if transfer_config is not None else self._transfer_config
-        transfer_client: Literal["classic", "crt"] = (
-            "crt" if deletes_ride_crt(config) else "classic"
-        )
         _raise_if_cancelled(cancel_token, "rm")
         if not storage.bucket and (recursive or not storage.key):
             # rm has no bucket-listing mode (scan is object listing only), so a
@@ -2319,7 +2336,7 @@ class S3:
                 capture_response=capture_response,
                 on_result=on_result,
                 cancel_token=cancel_token,
-                lose_responseless=transfer_client == "classic",
+                transfer_config=config,
             )
             _raise_if_cancelled(cancel_token, "rm")
             return
@@ -2362,7 +2379,8 @@ class S3:
             cancel_token=cancel_token,
             operation="rm",
             capture_response=capture_response,
-            transfer_client=transfer_client,
+            transfer_config=config,
+            **self._crt_postures(),
         ) as deleter:
             # cancel_token on the scan too (like ls): the prefetch producer
             # stops between page pulls instead of fetching pages nobody reads.
@@ -2402,8 +2420,8 @@ class S3:
         predicate = item_filter
         return lambda info: _is_folder_marker(info) and predicate(info)
 
-    @staticmethod
     def _rm_single(
+        self,
         storage: S3Storage,
         item_filter: FileFilter | None,
         *,
@@ -2413,7 +2431,7 @@ class S3:
         capture_response: bool,
         on_result: ResultCallback | None,
         cancel_token: CancelToken | None,
-        lose_responseless: bool,
+        transfer_config: TransferConfig | None,
     ) -> None:
         """The blind single-key path (no listing; aws ``_list_single_object``).
 
@@ -2424,6 +2442,10 @@ class S3:
         the precedence the batched path and the transfers give it; the caller
         polls the token after a success, a dry run, or a failure lost the way
         aws-cli loses it (`lost_like_aws`).
+
+        The request rides the client the recursive route's would
+        (`crt_delete_sender`): the storage's own ``delete`` on botocore, or a
+        ``DeleteObject`` of the same shape on the CRT client.
         """
         key = storage.key
         info = S3FileInfo(key=key, compare_key=key[len(root) :], storage=storage)
@@ -2437,9 +2459,19 @@ class S3:
         # build one is not this key failing to delete (no FAILED record, no
         # BatchError), and belongs to no operation - as on the recursive route,
         # where the deleter builds it eagerly.
-        storage.get_client()
+        client = storage.get_client()
+        # Built ahead of the request for the same reason: an engine that
+        # cannot be built is not this key failing to delete.
+        crt = crt_delete_sender(client, transfer_config, operation="rm", **self._crt_postures())
         try:
-            response = storage.delete(info, request_payer=request_payer)
+            if crt is None:
+                response = storage.delete(info, request_payer=request_payer)
+            else:
+                params: dict[str, Any] = {"Bucket": storage.bucket, "Key": key}
+                if request_payer is not None:
+                    params["RequestPayer"] = request_payer
+                with s3_request(operation="rm", bucket=storage.bucket, key=key):
+                    response = crt.call("DeleteObject", params)
         except AssertionError:
             raise  # a test double's guard or an invariant, never a request outcome
         except Exception as exc:
@@ -2451,10 +2483,11 @@ class S3:
             # request_failure the way the deleter wraps it (aws's task records
             # both alike).
             failure = request_failure(exc, operation="rm", bucket=storage.bucket, key=key)
-            if lose_responseless and drop_like_aws(failure):
-                # Died without a response: aws-cli's classic task loses it -
-                # no line, rc 0 (`lost_like_aws`) - so no record and no
-                # BatchError. Its CRT client reports it (`deletes_ride_crt`).
+            if drop_like_aws(failure):
+                # Died without a response on botocore: aws-cli's classic task
+                # loses it - no line, rc 0 (`lost_like_aws`) - so no record and
+                # no BatchError. On the CRT client the failure is awscrt's
+                # error, which is reported, as aws-cli's CRT client reports it.
                 return
             _emit_result(
                 on_result,

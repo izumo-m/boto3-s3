@@ -56,7 +56,8 @@ naturally.
 | module | role |
 |---|---|
 | `transferconfig.py` | `TransferConfig` = a subclass of boto3's `TransferConfig`. Adds the CRT tuning fields that boto3 lacks (`target_bandwidth` / `should_stream` / `disk_throughput` / `direct_io`) plus the classic multipart-copy's `annotation_temp_dir` (transfer.md section 4). A plain boto3 config is also accepted (`crtsupport.py` reads the CRT fields via `getattr` with a default of None, so a plain boto3 config works too). |
-| `crtsupport.py` | A faithful port of boto3's `boto3/crt.py` plus improvements. `should_use_crt` (whether to attempt CRT given `preferred`), `create_crt_transfer_manager` (the process-singleton CRT client + serializer, lock, compatibility check), `is_optimized_for_system` / `acquire_process_lock` (the building blocks for the CLI decision tree). It does not pull in awscrt / s3transfer.crt at import time. |
+| `crtsupport.py` | A faithful port of boto3's `boto3/crt.py` plus improvements. `should_use_crt` (whether to attempt CRT given `preferred`), `create_crt_transfer_manager` (the process-singleton CRT client + serializer, lock, compatibility check), `create_crt_request_sender` (the same engine as a sender of single requests, for the deletes - section 6), `is_optimized_for_system` / `acquire_process_lock` (the building blocks for the CLI decision tree). It does not pull in awscrt / s3transfer.crt at import time. |
+| `crtrequest.py` | `CrtRequestSender`: one botocore-serialized S3 request through the engine's CRT client, for the operations `CRTTransferManager` has no route for (the deleter's `DeleteObjects` - section 6). Also free of awscrt at import time. |
 | `Transferrer._get_manager` in `transfer.py` | The engine seam. COPY is unconditionally classic, and `capture_response=True` forces classic before any config is read (transfer.md section 2). Otherwise it reads `preferred_transfer_client`, attempts CRT (classic fallback if None), and the rest takes the conventional classic path. |
 | `runtimeconfig.py` (CLI) | A port of `RuntimeConfig` from aws-cli `transferconfig.py` + reading `[s3]` + the decision tree (`resolve_transfer_client`) + building the `TransferConfig` (`build_transfer_config`). |
 
@@ -323,11 +324,11 @@ effective `TransferConfig` selects and drops it (a no-op when that engine is
 classic; the CRT client is a process-wide singleton, so the transfer that
 follows reuses whatever was built).
 
-For rm this is construction without use: the deletes still never ride the
-engine (section 6). aws's rm builds the same client and does use it, so paying
-the construction is what makes the failure surfaces identical - the alternative,
-synthesizing awscrt's assertion ourselves, would rest the parity on a
-hand-written mirror of a third-party `assert`.
+For rm this construction comes ahead of any delete: the deletes ride the
+engine (section 6) but build it only once there is a delete to send, and a
+dryrun never. Paying it at aws's slot is what makes the failure surfaces
+identical - the alternative, synthesizing awscrt's assertion ourselves, would
+rest the parity on a hand-written mirror of a third-party `assert`.
 
 ### Entering the CRT engine without credentials
 
@@ -459,25 +460,32 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
 
 ## 6. Degradation and known differences (record)
 
-- **Deletes never ride the CRT engine, but rm builds it**: under CRT
-  configuration rm constructs the CRT client exactly as aws does - the same
-  cross-process lock, the same `create_s3_crt_client` call, so its
-  construction-time failures match - and then deletes through its established
-  non-CRT routes regardless: single rm keeps its blind `DeleteObject`,
-  recursive rm and S3-side
-  `sync --delete` keep `S3Deleter`'s batched `DeleteObjects`, and local-side
-  sync-delete keeps `os.remove`; none route through `CRTTransferManager.delete`.
-  These are the accepted deletion paths documented in deleter.md section 4;
-  the CRT e2e lane pins the charter-observable rc, output, and end states for
-  single/recursive rm and both sync-delete directions. One consequence shows in
-  the credentials-absent corner of section 4: with CRT configured, aws's `rm`
-  fails inside the CRT credentials delegate (`delete failed: ...
-  AWS_AUTH_CREDENTIALS_PROVIDER_DELEGATE_FAILURE`, unraisable block included)
-  while ours fails on its `DeleteObject` (`delete failed: ... Unable to locate
-  credentials`). Same rc 1; the wording follows from the routing decision, not
-  from how credentials are handled. A user can observe it, so it is recorded
-  in [`aws-differences.md`](../docs/cli/aws-differences.md) section 2 too
-  (testing.md section 9's recording rule); the mechanism stays here.
+- **Deletes ride the CRT engine, batched**: under CRT configuration aws sends
+  each `rm` / local-side `sync --delete` deletion through its CRT transfer
+  manager, one `DeleteObject` per key (an S3-to-S3 sync is classic on both
+  tools). `S3Deleter` keeps its batches and sends them on the same CRT client:
+  `CRTTransferManager` has no `DeleteObjects` route, so `crtrequest`'s
+  `CrtRequestSender` provides one the way s3transfer builds its own - an
+  unsigned, non-sending botocore client serializes the request (keeping the
+  checksum `DeleteObjects` requires, which s3transfer strips from its own
+  bodiless requests), the CRT client signs and sends it as a `DEFAULT` meta
+  request under the operation's name, and botocore's parser reads the answer
+  (an HTTP error answer as the botocore error for its code, as s3transfer's
+  `translate_crt_exception` does). The single-key rm and the deleter's per-key
+  requests (keys XML cannot carry, re-sends) ride it as `DeleteObject`. The
+  engine is resolved by `create_crt_request_sender`, which goes through
+  `create_crt_transfer_manager` - same singleton, lock, pins, postures and
+  construction failures - and serves a sender built once per engine from the
+  serializer's own session and client arguments. What this buys is the CRT's
+  retry policy (a request that dies without an answer is sent six times
+  whatever `max_attempts` says, measured), its failure text (the credentials
+  delegate's `AWS_AUTH_CREDENTIALS_PROVIDER_DELEGATE_FAILURE` with its
+  unraisable block, measured identical to aws's), and the `[s3]` tuning keys'
+  reach. What batching leaves is one set of attempts per batch where aws has
+  one per key, so a batch that dies without an answer is re-sent key by key on
+  the same client (deleter.md section 3) - which can give a key more attempts
+  than aws does, never fewer - plus the batch differences deleter.md section 4
+  records for both engines.
 - **A plain-HTTP endpoint named only by the environment**: aws decides its CRT
   client's `use_ssl` from `--endpoint-url` alone, so an `http://` endpoint
   supplied through `AWS_ENDPOINT_URL_S3` is dialed over TLS and the transfer

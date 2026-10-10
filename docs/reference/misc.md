@@ -352,6 +352,10 @@ its `__all__`:
   application's CRT clients share, separate from boto3's and aws-cli's;
   `acquire_process_lock()` — claims it, `False` when another process holds
   it.
+- `create_crt_request_sender(client, config, ...)` — the same engine, with the
+  same arguments and the same `None`, as a sender of single S3 requests
+  (`crtrequest.CrtRequestSender`) for an operation the transfer manager has no
+  route for; [`S3Deleter`](#s3deleter) sends its `DeleteObjects` this way.
 - `create_crt_transfer_manager(client, config, ...)` — builds, or reuses, the
   process-wide CRT client for `client` and returns an s3transfer
   `CRTTransferManager`, or `None` where boto3 would fall back to classic (the
@@ -490,7 +494,13 @@ S3Deleter(
     operation: str = "delete",
     capture_response: bool = False,
     dryrun: bool = False,
-    transfer_client: Literal["classic", "crt"] = "classic",
+    transfer_config: TransferConfig | None = None,
+    session: Session | None = None,
+    crt_endpoint: str | None = None,
+    crt_allow_absent_credentials: bool = False,
+    crt_allow_lockless: bool = False,
+    crt_region: CrtRegion = CLIENT_REGION,
+    crt_sign_requests: bool | None = None,
 )
 ```
 
@@ -504,15 +514,21 @@ lifetime: do not `storage.close()` before the deleter is closed.
 `request_payer` is forwarded as the `RequestPayer` request parameter on both
 the batch and the per-key route; `None` omits it.
 
-`transfer_client` is the transfer client `aws s3` would carry the deleting
-run's deletes on — `"classic"` or `"crt"`; anything else raises
-`ValidationError`. Nothing is sent through it; it decides how a per-key request
-that dies without a response is reported — dropped without a record on
-`"classic"`, as `aws s3` drops it, and a failure on `"crt"`, as `aws s3`'s CRT
-client reports it. A batch request that dies that way is sent again one key at
-a time either way. `rm` derives it from its `transfer_config`; `sync` does too
-for an upload, and passes `"classic"` for an S3-to-S3 run, which `aws s3`
-always runs on its classic client.
+`transfer_config` picks the client the requests ride, the way it picks a
+transfer's engine ([`TransferConfig`](./options.md)'s
+`preferred_transfer_client`, boto3's rule; `None` is `'auto'`): the storage's
+botocore client, or — when it selects the CRT engine — the process-wide CRT
+client, built in the constructor exactly as a transfer builds it (falling back
+to botocore where a transfer would fall back to classic; an explicit `'crt'`
+without a usable awscrt raises botocore's `MissingDependencyException`). On
+the CRT client a request is serialized by botocore and signed and sent by the
+CRT, so the CRT's retry policy and error text apply, as they do to `aws s3`'s
+deletes under that engine. `session` and the `crt_*` arguments are the CRT
+engine's postures, with [`S3`](./s3.md#s3)'s meaning (`crt_endpoint` is its
+`endpoint_url` pin, applied only to the client built from it); `S3.rm` and `sync`
+pass their instance's, and `sync` passes a classic config for an S3-to-S3 run,
+which `aws s3` always runs on its classic client. A `dryrun` deleter builds no
+engine.
 
 `on_result` is a [`ResultCallback`](./results.md#resultcallback) receiving one
 [`OpResult`](./results.md#opresult) per dispatched entry — see
@@ -645,9 +661,9 @@ inline, where an exception it raises propagates out of `submit` directly.
 
 One [`OpResult`](./results.md#opresult) per dispatched entry, emitted in
 submission order within a batch (bar a per-key request an abandoned run never
-sent — the last paragraph of this section — and, on
-`transfer_client="classic"`, a key whose own `DeleteObject` died without a
-response, dropped as `aws s3` drops it). `transfer_type` is
+sent — the last paragraph of this section — and, on the botocore client, a
+key whose own `DeleteObject` died without a response, dropped as `aws s3`
+drops it). `transfer_type` is
 [`TransferType.DELETE`](./results.md#transfertype) and `bytes_transferred`
 stays `0`. `compare_key` is the entry's own `compare_key` when it has one and
 its `key` otherwise. `src` is `s3://<bucket>/<key>`, `src_info` is the
@@ -730,9 +746,11 @@ policy applies, and the key's result is that request's: a success, or — once
 its attempts are spent — the translated `DeleteObject` error, the same text
 the AWS CLI reports for the key. A batch's re-sends run up to ten at a time.
 The batch entry itself is not counted against the policy, so a re-sent key
-gets one attempt more than the policy's limit; a client limited to a single
-attempt (`AWS_MAX_ATTEMPTS=1`, `max_attempts=0`) re-sends nothing, and the key
-is recorded with the batch's own per-key error. Abandoning the run —
+gets one attempt more than the policy's limit; a botocore client limited to a
+single attempt (`AWS_MAX_ATTEMPTS=1`, `max_attempts=0`) re-sends nothing, and
+the key is recorded with the batch's own per-key error. The CRT client retries
+on its own policy whatever that setting says, so on it the key is always sent
+again. Abandoning the run —
 `close(flush=False)`, or a cancel in immediate mode — starts no further
 re-sends either: the ones already out finish, and the rest are recorded with
 the batch's error. Only per-key entries are retried this way; a
@@ -759,8 +777,12 @@ answer: a service error, a refused connection — is recorded as the failure of
 **every** key that call carried, with the same translated exception, and the
 following batches still run. A wrong bucket name therefore fails everything and
 shows up in the counts. A call that dies without any response instead sends
-each of its keys again as a `DeleteObject` of its own, and each key takes that
-request's outcome. Keys of the same
+each of its keys again as a `DeleteObject` of its own on the same client, and
+each key takes that request's outcome. On the CRT client that is any failure
+other than an HTTP error answer — awscrt's own error, raised once the CRT has
+spent its retries, a refused connection included — since one batch request's
+attempts are not the attempts `aws s3` gives each key; a key can so get more
+attempts than `aws s3` gives it, never fewer. Keys of the same
 dispatch that took the per-key fallback route are unaffected by it: there, that
 call's own success or translated exception is the key's result directly.
 
@@ -807,7 +829,11 @@ the service as a line feed, so it is on the list) — falls back to an individua
 batch stays batched. Those individual requests run up to ten at a time, and
 abandoning the run — `close(flush=False)`, or a cancel in immediate mode —
 starts no further ones: a key not yet sent is dropped without a record, like
-an entry still in the buffer. Deleting a
+an entry still in the buffer. Under the CRT engine the batches ride the CRT
+client `aws s3`'s per-key deletes ride, so the retry policy and error text are
+that client's on both; one batch request has one set of attempts where each of
+`aws s3`'s requests has its own, which is why a batch that dies without an
+answer is sent again key by key. Deleting a
 specific `VersionId` is not provided, as `aws s3 rm` does not offer it either.
 
 ## S3_DELETE_BATCH

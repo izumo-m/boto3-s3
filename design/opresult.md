@@ -117,11 +117,11 @@ family qualifies), `drop_like_aws` logs what it drops at debug level, and the ro
 aws-cli sends through that handler with a botocore client apply it: the
 transfer engine's terminal (`Transferrer._record_failure`, after the
 cancellation branch as in aws-cli), the S3 deleter's per-key requests, and the
-blind single-key `rm` (no record, no `BatchError`). The deletes apply it only
-where aws-cli's transfer client for the run is classic (`S3Deleter`'s
-`transfer_client`, `deleter.deletes_ride_crt`; an S3-to-S3 sync is classic
-whatever the preference): aws-cli sends a CRT run's deletes through its CRT
-client, whose dead request is an awscrt error it reports. A batched `DeleteObjects` that dies this way loses nothing
+blind single-key `rm` (no record, no `BatchError`). A run whose engine is the
+CRT sends its deletes on the CRT client, as aws-cli does
+(`deleter.crt_delete_sender`; an S3-to-S3 sync stays classic whatever the
+preference), and a dead request there is an awscrt error, which never
+qualifies - aws-cli's CRT client reports it too. A batched `DeleteObjects` that dies this way loses nothing
 by itself - aws-cli never sends one - so its keys go out again one
 `DeleteObject` each and take their own outcomes ([`deleter.md`](./deleter.md)
 section 3). Failures outside that handler, or that reach it without a

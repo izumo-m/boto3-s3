@@ -898,8 +898,9 @@ def materialize_transfer_engine(
     right after reading ``[s3]`` and before it decides anything about the run,
     so a CRT selection pays its whole construction there - the cross-process
     lock and ``create_s3_crt_client`` - even for a ``--dryrun`` that transfers
-    nothing, and even for ``rm``, whose deletes never ride the engine here. Call
-    it at that slot so the same failures land at the same point.
+    nothing, and even for ``rm``, whose deletes build it only once there is a
+    delete to send. Call it at that slot so the same failures land at the same
+    point.
 
     The one failure it converts is awscrt's own ``assert isinstance(region,
     str)``, which fires when the region chain resolved nothing (`clientfactory`

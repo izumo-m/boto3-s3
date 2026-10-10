@@ -36,7 +36,7 @@ from boto3_s3 import (
     ValidationError,
     rm_filter_root,
 )
-from tests.utils.fakes3 import client_error
+from tests.utils.fakes3 import client_error, crt_sender_factory
 
 _MTIME = dt.datetime(2026, 1, 2, tzinfo=dt.timezone.utc)
 
@@ -218,26 +218,6 @@ class TestRmSingleKey:
         client = _FakeS3Client(delete_object_error=ConnectionClosedError(endpoint_url="http://h/"))
         assert _rm("s3://b/k", client) == []
         assert client.delete_object_calls == [{"Bucket": "b", "Key": "k"}]
-
-    def test_on_the_crt_engine_that_delete_fails_instead(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # aws's CRT client reports it: `delete failed: ... AWS_IO_SOCKET_CLOSED`,
-        # rc 1 (measured with preferred_transfer_client = crt).
-        from boto3.s3.transfer import TransferConfig
-
-        from boto3_s3 import crtsupport
-
-        monkeypatch.setattr(crtsupport, "should_use_crt", lambda _preferred: True)
-        client = _FakeS3Client(delete_object_error=ConnectionClosedError(endpoint_url="http://h/"))
-        results: list[OpResult] = []
-        with pytest.raises(BatchError):
-            S3().rm(
-                S3Storage("s3://b/k", client=client),
-                on_result=results.append,
-                transfer_config=TransferConfig(preferred_transfer_client="crt"),
-            )
-        assert [r.outcome for r in results] == [OpOutcome.FAILED]
 
     def test_excluded_by_matcher_is_silent(self) -> None:
         client = _FakeS3Client()
@@ -466,3 +446,74 @@ class TestRmFileInfoOnBlindPath:
         client = _FakeS3Client()
         _rm("s3://b/data/a.txt", client, filter=keep)
         assert [(i.key, i.size, i.mtime) for i in seen] == [("data/a.txt", None, None)]
+
+
+class TestCrtEngine:
+    """A run whose ``TransferConfig`` selects the CRT engine deletes on the CRT
+    client, single key and recursive alike, as ``aws s3 rm`` does."""
+
+    @pytest.fixture
+    def built(self, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+        from boto3_s3 import deleter as deleter_module
+        from boto3_s3 import s3 as s3_module
+
+        built: list[Any] = []
+        factory = crt_sender_factory(built)
+        monkeypatch.setattr(s3_module, "crt_delete_sender", factory)
+        monkeypatch.setattr(deleter_module, "crt_delete_sender", factory)
+        return built
+
+    @staticmethod
+    def _crt() -> Any:
+        from boto3.s3.transfer import TransferConfig
+
+        return TransferConfig(preferred_transfer_client="crt")
+
+    def test_a_single_key_rides_the_crt_client(self, built: list[Any]) -> None:
+        client = _FakeS3Client()
+        results: list[OpResult] = []
+        S3().rm(
+            S3Storage("s3://b/k", client=client),
+            on_result=results.append,
+            request_payer="requester",
+            transfer_config=self._crt(),
+        )
+        ((sender, _, kwargs),) = built
+        assert sender.calls == [
+            ("DeleteObject", {"Bucket": "b", "Key": "k", "RequestPayer": "requester"})
+        ]
+        assert kwargs["operation"] == "rm"
+        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED]
+
+    def test_a_single_key_whose_delete_dies_fails(self, built: list[Any]) -> None:
+        # aws's CRT client reports it: `delete failed: ... AWS_IO_SOCKET_CLOSED`,
+        # rc 1 (measured with preferred_transfer_client = crt).
+        awscrt_exceptions = pytest.importorskip("awscrt.exceptions")
+        client = _FakeS3Client(delete_object_error=awscrt_exceptions.from_code(1051))
+        results: list[OpResult] = []
+        with pytest.raises(BatchError):
+            S3().rm(
+                S3Storage("s3://b/k", client=client),
+                on_result=results.append,
+                transfer_config=self._crt(),
+            )
+        assert [r.outcome for r in results] == [OpOutcome.FAILED]
+        assert str(results[0].error) == "AWS_IO_SOCKET_CLOSED: socket is closed."
+
+    def test_a_recursive_run_batches_on_it_with_the_instance_postures(
+        self, built: list[Any]
+    ) -> None:
+        client = _FakeS3Client([{"Contents": [_obj("p/a"), _obj("p/b")]}])
+        S3(crt_allow_absent_credentials=True, crt_region=None).rm(
+            S3Storage("s3://b/p", client=client), recursive=True, transfer_config=self._crt()
+        )
+        ((sender, _, kwargs),) = built
+        assert [op for op, _ in sender.calls] == ["DeleteObjects"]
+        assert kwargs["crt_allow_absent_credentials"] is True
+        assert kwargs["crt_region"] is None
+        assert kwargs["operation"] == "rm"
+
+    def test_a_rehearsal_builds_no_engine(self, built: list[Any]) -> None:
+        _rm("s3://b/k", _FakeS3Client(), dryrun=True, transfer_config=self._crt())
+        _rm("s3://b/p", _FakeS3Client(), recursive=True, dryrun=True, transfer_config=self._crt())
+        assert built == []

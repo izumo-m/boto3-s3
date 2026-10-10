@@ -20,7 +20,9 @@ which are not objects; submitting them would try to delete prefixes.
 ```python
 S3Deleter(storage, *, request_payer=None, on_result=None, cancel_token=None,
           batch_size=1000, operation="delete", capture_response=False,
-          dryrun=False, transfer_client="classic")
+          dryrun=False, transfer_config=None, session=None, crt_endpoint=None,
+          crt_allow_absent_credentials=False, crt_allow_lockless=False,
+          crt_region=CLIENT_REGION, crt_sign_requests=None)
 ```
 
 `storage` must be an `S3Storage`; anything else raises `ValidationError`. Only
@@ -55,13 +57,17 @@ thread started it (a daemon thread included), so if you neither close the
 deleter nor use the context manager, shutdown blocks until the in-flight batch
 finishes.
 
-`transfer_client` (`"classic"` or `"crt"`) is the transfer client `aws s3`
-would carry these deletes on; nothing is sent through it. It decides one thing:
-a key whose `DeleteObject` dies without any response (the connection closed, a
-read timeout) is dropped without a record on `"classic"`, as `aws s3` drops it,
-and is a failure on `"crt"`, as `aws s3`'s CRT client reports it. `rm` and
-`sync` choose it from their own `transfer_config` the way `aws s3` chooses its
-client (an S3-to-S3 `sync` is always `"classic"`).
+`transfer_config` picks the client the requests ride, the way it picks a
+transfer's engine (`None` is boto3's `'auto'`): the storage's botocore client,
+or — when it selects the CRT engine — the CRT client, built in the constructor
+just as a transfer builds it. That is the client `aws s3` carries its deletes
+on under the same setting, so its retry policy and its error text are the
+deletes' here too; one difference it makes is spelled out under
+[Failures](#3-failures). `session` and the `crt_*` arguments are the CRT
+engine's postures, as on [`S3`](../reference/s3.md#s3); leave them alone
+unless you set them there. `rm` and `sync` pass their own `transfer_config`
+and postures (an S3-to-S3 `sync` always deletes on botocore, as `aws s3` runs
+it on its classic client).
 
 ### Rehearsing with `dryrun`
 
@@ -95,8 +101,8 @@ rehearsing; this flag is for code driving the deleter directly.
 `on_result` receives one `OpResult` per dispatched key, with `transfer_type`
 `delete` and `bytes_transferred` 0, in submission order within a batch. Keys
 discarded without being sent produce no record, and neither does a key whose
-own `DeleteObject` died without a response on `transfer_client="classic"`
-(above).
+own `DeleteObject` died without a response on the botocore client (see
+[Failures](#3-failures)).
 
 **It is called from the worker thread.** Keep it fast and do not let it raise.
 If it does raise, the records already delivered are counted, the rest of that
@@ -133,18 +139,24 @@ it is sent again on its own, as a `DeleteObject`, so the client's retry policy
 gets to work on it the way it does for every key `aws` deletes. Only if that
 request still fails is the key recorded as failed, with that request's error.
 A batch's re-sends go out up to ten at a time. Two things switch them off: a
-client configured not to retry at all (a single attempt per request), and
-abandoning the run — `close(flush=False)`, or an immediate-mode cancel — after
-which the keys not yet re-sent are recorded with the batch's own error.
+botocore client configured not to retry at all (a single attempt per request;
+the CRT client retries on its own policy whatever that says), and abandoning
+the run — `close(flush=False)`, or an immediate-mode cancel — after which the
+keys not yet re-sent are recorded with the batch's own error.
 
 If the batch request itself fails with an answer — an error the service
-returned, a refused connection — **every key in that batch** is recorded as
-failed and the deleter continues with the following batches. So a wrong bucket
-name fails everything, and the counts show it. A batch request that dies
-without any response decides nothing for its keys: each is sent again as a
-`DeleteObject` of its own, the request `aws s3` sends, and takes that
-request's outcome — which on `transfer_client="classic"` includes being
-dropped without a record if it dies the same way.
+returned, or on botocore a refused connection — **every key in that batch** is
+recorded as failed and the deleter continues with the following batches. So a
+wrong bucket name fails everything, and the counts show it. A batch request
+that dies without any response decides nothing for its keys: each is sent
+again as a `DeleteObject` of its own on the same client, the request `aws s3`
+sends, and takes that request's outcome. On botocore that outcome includes
+being dropped without a record if it dies the same way, as `aws s3` drops it;
+on the CRT client such a key is a failure carrying the CRT's own error, as
+`aws s3` reports it. On the CRT client "without any response" means any
+failure but an error answer, once the CRT has spent its own retries: one
+batch request has one set of attempts, where `aws s3` gives each key its own,
+so a key can get more attempts here than there — never fewer.
 
 Success on the batch route is normally read as "not in the response's error
 list". If the response carries an error the deleter cannot pin on any key it
@@ -182,7 +194,7 @@ in one batch, both records share a single slot.
 you cannot tell the difference: deleting a key that does not exist succeeds
 either way, and per-key success and failure are preserved.
 
-Two consequences of batching:
+Three consequences of batching:
 
 - **A run that dies mid-way leaves different state.** `aws` has already issued
   a delete for everything it enumerated; here the unsent buffer — up to
@@ -192,4 +204,10 @@ Two consequences of batching:
   which is what `aws` does for every key. The rest of the buffer stays batched.
   The individual requests of a batch go out up to ten at a time, and once the
   run is abandoned no further one is started.
+- **A batch request has one set of attempts.** Each of `aws`'s per-key
+  requests has its own, so a batch that dies without an answer is sent again
+  key by key (see [Failures](#3-failures)); a key can end up with more
+  attempts than `aws` gives it. On the CRT engine, where both tools retry on
+  the CRT's policy, a connection that drops often enough to fail `aws`'s
+  requests can leave these deletes succeeding.
 

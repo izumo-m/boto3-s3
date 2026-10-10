@@ -649,6 +649,53 @@ class TestCreateCrtTransferManager:
         assert crtsupport.create_crt_transfer_manager(FakeClient(), config) is not None  # pyright: ignore[reportArgumentType]
 
 
+class TestCreateCrtRequestSender:
+    """The engine's client as a sender of single requests (the deleter's route)."""
+
+    @pytest.fixture
+    def senders(self, monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, Any, dict[str, Any]]]:
+        from boto3_s3 import crtrequest
+
+        built: list[tuple[Any, Any, dict[str, Any]]] = []
+
+        class Sender:
+            def __init__(self, crt_client: Any, session: Any, client_kwargs: Any) -> None:
+                built.append((crt_client, session, client_kwargs))
+
+        monkeypatch.setattr(crtrequest, "CrtRequestSender", Sender)
+        return built
+
+    def test_it_rides_the_engines_client_and_serializer_wiring(
+        self, stubs: CrtStubs, senders: list[Any]
+    ) -> None:
+        client = FakeClient(endpoint="http://127.0.0.1:9000")
+        config = TransferConfig(preferred_transfer_client="crt")
+        first = crtsupport.create_crt_request_sender(client, config)  # pyright: ignore[reportArgumentType]
+        again = crtsupport.create_crt_request_sender(client, config)  # pyright: ignore[reportArgumentType]
+        assert first is not None and first is again  # built once per engine
+        [(crt_client, session, client_kwargs)] = senders
+        assert crt_client is stubs.crt_client
+        [(serializer_session, serializer_kwargs)] = stubs.serializer_args
+        assert session is serializer_session
+        assert client_kwargs == serializer_kwargs
+        # Construction went through the transfer engine's own path.
+        assert len(stubs.manager_kwargs) == 2
+
+    def test_a_classic_fallback_is_none(self, stubs: CrtStubs, senders: list[Any]) -> None:
+        stubs.lock = None  # another process holds the CRT slot
+        client = FakeClient()
+        config = TransferConfig(preferred_transfer_client="crt")
+        assert crtsupport.create_crt_request_sender(client, config) is None  # pyright: ignore[reportArgumentType]
+        assert senders == []
+
+    def test_an_incompatible_client_is_none(self, stubs: CrtStubs, senders: list[Any]) -> None:
+        config = TransferConfig(preferred_transfer_client="crt")
+        assert crtsupport.create_crt_request_sender(FakeClient(), config) is not None  # pyright: ignore[reportArgumentType]
+        other = FakeClient(region="eu-west-1")
+        assert crtsupport.create_crt_request_sender(other, config) is None  # pyright: ignore[reportArgumentType]
+        assert len(senders) == 1
+
+
 class TestSingletonPinNormalization:
     """The endpoint and Config pins compare what botocore resolves, not the spelling.
 

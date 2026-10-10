@@ -393,11 +393,6 @@ Four more are in the result text itself rather than in its rendering:
   other name. Reproducing both orders would make a backend's read order depend
   on its consumer. The exit code, the entries printed before it and the stream
   they go to all agree, and the transfer commands agree entirely.
-- **A `rm` without credentials under the CRT engine** ends its
-  `delete failed:` line with botocore's `Unable to locate credentials`, where
-  aws's CRT-routed delete reports its credentials delegate's
-  `AWS_AUTH_CREDENTIALS_PROVIDER_DELEGATE_FAILURE`. It follows from deletes
-  never riding the CRT engine ([`crt.md`](./crt.md) section 6).
 - **An interrupted `mv`'s record.** aws can delete sources for which it
   printed no `move:` line (measured); this command prints the line for every
   source it deletes.

@@ -44,8 +44,9 @@ from boto3_s3 import (
     ValidationError,
     crtsupport,
 )
-from boto3_s3.deleter import S3_DELETE_BATCH, deletes_ride_crt
-from tests.utils.fakes3 import client_error
+from boto3_s3 import deleter as deleter_module
+from boto3_s3.deleter import S3_DELETE_BATCH, crt_delete_sender
+from tests.utils.fakes3 import client_error, crt_sender_factory
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1110,39 +1111,6 @@ class TestResults:
         assert results == []
         assert (deleter.succeeded, deleter.failed) == (0, 0)
 
-    def test_on_the_crt_client_such_a_key_fails_instead(self) -> None:
-        # aws-cli carries the deletes of a CRT run on its CRT client, whose
-        # dead request is an awscrt error the completion handler reports
-        # (measured: `delete failed: ... AWS_IO_SOCKET_CLOSED`, rc 1).
-        dead = ConnectionClosedError(endpoint_url="http://h/")
-        fake = _FakeS3Client(script=[dead], single_script=[dead])
-        results: list[OpResult] = []
-        deleter = _deleter(fake, on_result=results.append, transfer_client="crt")
-        deleter.submit(_info("a"))
-        deleter.close()
-        assert [r.outcome for r in results] == [OpOutcome.FAILED]
-        assert isinstance(results[0].error, TransportError)
-        assert deleter.failed == 1
-
-    def test_an_unknown_transfer_client_is_refused(self) -> None:
-        with pytest.raises(ValidationError, match="transfer_client"):
-            _deleter(_FakeS3Client(), transfer_client=cast("Any", "auto"))
-
-    def test_which_engine_carries_the_deletes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # boto3's selection rule; an explicit 'crt' that cannot be honored
-        # (no usable awscrt) answers False instead of raising.
-        from botocore.exceptions import MissingDependencyException
-
-        monkeypatch.setattr(crtsupport, "should_use_crt", lambda _preferred: True)
-        assert deletes_ride_crt(TransferConfig(preferred_transfer_client="crt"))
-        assert not deletes_ride_crt(TransferConfig(preferred_transfer_client="classic"))
-
-        def missing(_preferred: str) -> bool:
-            raise MissingDependencyException(msg="awscrt")
-
-        monkeypatch.setattr(crtsupport, "should_use_crt", missing)
-        assert not deletes_ride_crt(TransferConfig(preferred_transfer_client="crt"))
-
     def test_a_refused_connection_still_fails_the_batch(self) -> None:
         # EndpointConnectionError carries no response attribute at all, so
         # aws-cli's check answers normally and the key fails there too
@@ -1349,6 +1317,252 @@ class TestResults:
         assert error.operation == "rm"
         with pytest.raises(ValidationError) as exc_info:
             deleter.submit(_info("again"))
+        assert exc_info.value.operation == "rm"
+
+
+_CRT = TransferConfig(preferred_transfer_client="crt")
+
+
+class TestCrtRoute:
+    """A run whose ``TransferConfig`` selects the CRT engine sends on the CRT
+    client (`crt_delete_sender`), as aws-cli's deletes ride its CRT client."""
+
+    @pytest.fixture
+    def built(self, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+        built: list[Any] = []
+        monkeypatch.setattr(deleter_module, "crt_delete_sender", crt_sender_factory(built))
+        return built
+
+    def test_the_batch_rides_the_crt_client(self, built: list[Any]) -> None:
+        fake = _FakeS3Client()
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append, transfer_config=_CRT)
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
+        deleter.close()
+        ((sender, _, _),) = built
+        assert sender.calls == [
+            (
+                "DeleteObjects",
+                {
+                    "Bucket": "bucket",
+                    "Delete": {"Objects": [{"Key": "a"}, {"Key": "b"}], "Quiet": True},
+                },
+            )
+        ]
+        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED] * 2
+
+    def test_a_classic_run_does_not(self, built: list[Any]) -> None:
+        fake = _FakeS3Client()
+        deleter = _deleter(
+            fake, transfer_config=TransferConfig(preferred_transfer_client="classic")
+        )
+        deleter.submit(_info("a"))
+        deleter.close()
+        assert built == []
+        assert _keys(fake.calls) == [["a"]]
+
+    def test_a_key_the_batch_cannot_carry_rides_it_too(self, built: list[Any]) -> None:
+        fake = _FakeS3Client()
+        deleter = _deleter(fake, transfer_config=_CRT, request_payer="requester")
+        deleter.submit(_info("k\x01"))
+        deleter.close()
+        ((sender, _, _),) = built
+        assert sender.calls == [
+            ("DeleteObject", {"Bucket": "bucket", "Key": "k\x01", "RequestPayer": "requester"})
+        ]
+
+    def test_a_batch_that_dies_sends_each_key_on_its_own(self, built: list[Any]) -> None:
+        # The CRT client spent the batch's attempts; aws-cli's per-key
+        # requests each have attempts of their own (measured: a server
+        # dropping the first six deletes leaves aws at rc 0), so each key
+        # goes out again as its own DeleteObject on the CRT client.
+        awscrt_exceptions = pytest.importorskip("awscrt.exceptions")
+        fake = _FakeS3Client(script=[awscrt_exceptions.from_code(1051)], single_script=[{}, {}])
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append, transfer_config=_CRT)
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
+        deleter.close()
+        ((sender, _, _),) = built
+        assert [op for op, _ in sender.calls] == ["DeleteObjects", "DeleteObject", "DeleteObject"]
+        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED] * 2
+
+    def test_keys_that_die_again_fail_with_the_crt_error(self, built: list[Any]) -> None:
+        # What is left is awscrt's error, which aws-cli reports for each key
+        # (measured: `delete failed: ... AWS_IO_SOCKET_CLOSED`, rc 1) - none
+        # is lost, as botocore's would be.
+        awscrt_exceptions = pytest.importorskip("awscrt.exceptions")
+        dead = awscrt_exceptions.from_code(1051)
+        fake = _FakeS3Client(script=[dead], single_script=[dead, dead])
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append, transfer_config=_CRT)
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
+        deleter.close()
+        assert [r.outcome for r in results] == [OpOutcome.FAILED] * 2
+        assert [str(r.error) for r in results] == ["AWS_IO_SOCKET_CLOSED: socket is closed."] * 2
+        assert deleter.failed == 2
+
+    def test_an_error_answer_to_the_batch_fails_every_key(self, built: list[Any]) -> None:
+        # An answer is the batch request's own outcome, as on botocore: no
+        # key goes out again on its own.
+        fake = _FakeS3Client(script=[_client_error("NoSuchBucket", 404)])
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append, transfer_config=_CRT)
+        deleter.submit(_info("a"))
+        deleter.close()
+        assert fake.single_calls == []
+        assert [type(r.error) for r in results] == [NotFoundError]
+
+    def test_a_key_whose_own_delete_dies_fails_too(self, built: list[Any]) -> None:
+        awscrt_exceptions = pytest.importorskip("awscrt.exceptions")
+        fake = _FakeS3Client(single_script=[awscrt_exceptions.from_code(1051)])
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append, transfer_config=_CRT)
+        deleter.submit(_info("k\x01"))
+        deleter.close()
+        assert [r.outcome for r in results] == [OpOutcome.FAILED]
+
+    def test_a_transient_fault_is_resent_whatever_max_attempts_says(self, built: list[Any]) -> None:
+        # The CRT client retries on its own policy, not botocore's, so the
+        # key goes out again on it even under the no-retry setting.
+        fake = _FakeS3Client(
+            script=[{"Errors": [{"Key": "b", "Code": "InternalError", "Message": "msg"}]}]
+        )
+        fake.meta = SimpleNamespace(  # type: ignore[attr-defined]
+            config=SimpleNamespace(retries={"total_max_attempts": 1, "mode": "standard"})
+        )
+        results: list[OpResult] = []
+        deleter = _deleter(fake, on_result=results.append, transfer_config=_CRT)
+        deleter.submit(_info("a"))
+        deleter.submit(_info("b"))
+        deleter.close()
+        ((sender, _, _),) = built
+        assert [op for op, _ in sender.calls] == ["DeleteObjects", "DeleteObject"]
+        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED, OpOutcome.SUCCEEDED]
+
+    def test_the_postures_reach_the_engine(self, built: list[Any]) -> None:
+        session = cast("Any", object())
+        _deleter(
+            _FakeS3Client(),
+            transfer_config=_CRT,
+            operation="rm",
+            session=session,
+            crt_endpoint="http://e",
+            crt_allow_absent_credentials=True,
+            crt_allow_lockless=True,
+            crt_region=None,
+            crt_sign_requests=False,
+        ).close()
+        ((_, config, kwargs),) = built
+        assert config is _CRT
+        assert kwargs == {
+            "operation": "rm",
+            "session": session,
+            "crt_endpoint": "http://e",
+            "crt_allow_absent_credentials": True,
+            "crt_allow_lockless": True,
+            "crt_region": None,
+            "crt_sign_requests": False,
+        }
+
+    def test_a_rehearsal_builds_no_engine(self, built: list[Any]) -> None:
+        _deleter(_FakeS3Client(), transfer_config=_CRT, dryrun=True).close()
+        assert built == []
+
+
+class TestCrtDeleteSender:
+    """`crt_delete_sender`: the engine built the way a transfer's is."""
+
+    def test_a_classic_selection_builds_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def refuse(*_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("unexpected engine build")
+
+        monkeypatch.setattr(crtsupport, "create_crt_request_sender", refuse)
+        config = TransferConfig(preferred_transfer_client="classic")
+        assert crt_delete_sender(cast("Any", object()), config, operation="rm") is None
+
+    def test_a_crt_selection_builds_it_with_the_postures(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[Any, Any, dict[str, Any]]] = []
+        sender = object()
+
+        def create(client: Any, config: Any, **kwargs: Any) -> Any:
+            calls.append((client, config, kwargs))
+            return sender
+
+        monkeypatch.setattr(crtsupport, "should_use_crt", lambda _preferred: True)
+        monkeypatch.setattr(crtsupport, "create_crt_request_sender", create)
+        client = SimpleNamespace(meta=SimpleNamespace(endpoint_url="http://e"))
+        session = cast("Any", object())
+        got = crt_delete_sender(
+            cast("Any", client),
+            _CRT,
+            operation="rm",
+            session=session,
+            crt_endpoint="http://e",
+            crt_allow_absent_credentials=True,
+            crt_allow_lockless=True,
+            crt_region="eu-west-1",
+            crt_sign_requests=True,
+        )
+        assert got is sender
+        assert calls == [
+            (
+                client,
+                _CRT,
+                {
+                    "endpoint": "http://e",
+                    "session": session,
+                    "allow_absent_credentials": True,
+                    "allow_lockless": True,
+                    "region": "eu-west-1",
+                    "sign_requests": True,
+                },
+            )
+        ]
+
+    def test_an_endpoint_pin_applies_only_to_the_client_built_from_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        endpoints: list[Any] = []
+        monkeypatch.setattr(crtsupport, "should_use_crt", lambda _preferred: True)
+        monkeypatch.setattr(
+            crtsupport,
+            "create_crt_request_sender",
+            lambda _client, _config, **kwargs: endpoints.append(kwargs["endpoint"]),
+        )
+        client = SimpleNamespace(meta=SimpleNamespace(endpoint_url="http://other"))
+        crt_delete_sender(cast("Any", client), _CRT, operation="rm", crt_endpoint="http://e")
+        assert endpoints == [None]
+
+    def test_an_explicit_crt_without_awscrt_raises_like_a_transfer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from botocore.exceptions import MissingDependencyException
+
+        def missing(_preferred: str) -> bool:
+            raise MissingDependencyException(msg="awscrt")
+
+        monkeypatch.setattr(crtsupport, "should_use_crt", missing)
+        with pytest.raises(MissingDependencyException):
+            crt_delete_sender(cast("Any", object()), _CRT, operation="rm")
+
+    def test_a_construction_failure_is_classified_like_a_transfers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from boto3_s3 import InvalidConfigError
+
+        def unreadable(*_args: Any, **_kwargs: Any) -> Any:
+            raise FileNotFoundError(2, "No such file or directory", "/no/ca.pem")
+
+        monkeypatch.setattr(crtsupport, "should_use_crt", lambda _preferred: True)
+        monkeypatch.setattr(crtsupport, "create_crt_request_sender", unreadable)
+        client = SimpleNamespace(meta=SimpleNamespace(endpoint_url=None))
+        with pytest.raises(InvalidConfigError) as exc_info:
+            crt_delete_sender(cast("Any", client), _CRT, operation="rm")
         assert exc_info.value.operation == "rm"
 
 
