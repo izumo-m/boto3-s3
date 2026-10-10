@@ -550,7 +550,7 @@ Callable[[MergedPair], bool]` that **replaces** all three lanes.
 
 ```python
 def decide(pair: MergedPair) -> bool:
-    journal.record(pair)                       # every shape, one ascending stream
+    journal.record(pair)                       # every shape, one stream in merge order
     return not isinstance(pair, DestOnlyPair)  # e.g. never delete
 
 s3.sync(src, dest, pair_filter=decide)
@@ -578,8 +578,8 @@ either not a `SyncPair` or `AwsCliComparison()(pair)`.
   lane whose answers are not known in advance. Returning `False` for every
   `DestOnlyPair` is then the supported observe-only mode.
 - **`ParallelFilter` is refused.** Pooled decisions are consumed in completion
-  order (section 10), which destroys the single ascending stream that is the
-  reason to take one hook at all; a journal or a cursor over the pair stream
+  order (section 10), which destroys the single merge-ordered stream (ascending
+  whenever the listings are) that is the reason to take one hook at all; a journal or a cursor over the pair stream
   depends on that order. The refusal is eager rather than a `TypeError` when the
   value container is called: `ParallelFilter` is data, not a predicate. An
   application that wants pooled decisions keeps the three lanes.

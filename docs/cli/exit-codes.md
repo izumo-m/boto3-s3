@@ -129,11 +129,12 @@ on both counts.
 / `sync` report 1 after they begin — including errors S3 itself returned. That
 is why 254 is narrower than it looks. A usage error caught *before* the
 operation starts is still 252. One kind of failure does not count, on either
-tool, with the classic engine: an item whose connection is closed before any
-response arrives — or, for anything but a download, whose read times out —
-prints no line at all, so a run where only that happened ends at 0 although
-the item was not transferred or deleted. (A download's read timeout is
-retried and then fails, and the CRT engine reports every such failure.)
+tool: an item whose connection is closed before any response arrives — or, for
+anything but a download, whose read times out — prints no line at all, so a
+run where only that happened ends at 0 although the item was not transferred
+or deleted. (A download's read timeout is retried and then fails, and what the
+CRT engine sends itself — its transfers, and the deletes of a run on it —
+reports such a failure.)
 
 **Before that, whether the request reached S3 decides the code.** Anything the
 service answered is 254, whatever kind of error it is — a 400 from S3 is 254,

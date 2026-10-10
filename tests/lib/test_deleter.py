@@ -14,7 +14,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from boto3.s3.transfer import TransferConfig
@@ -1110,26 +1110,23 @@ class TestResults:
         assert results == []
         assert (deleter.succeeded, deleter.failed) == (0, 0)
 
-    def test_on_the_crt_engine_such_a_key_fails_instead(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_on_the_crt_client_such_a_key_fails_instead(self) -> None:
         # aws-cli carries the deletes of a CRT run on its CRT client, whose
         # dead request is an awscrt error the completion handler reports
         # (measured: `delete failed: ... AWS_IO_SOCKET_CLOSED`, rc 1).
-        monkeypatch.setattr(crtsupport, "should_use_crt", lambda _preferred: True)
         dead = ConnectionClosedError(endpoint_url="http://h/")
         fake = _FakeS3Client(script=[dead], single_script=[dead])
         results: list[OpResult] = []
-        deleter = _deleter(
-            fake,
-            on_result=results.append,
-            transfer_config=TransferConfig(preferred_transfer_client="crt"),
-        )
+        deleter = _deleter(fake, on_result=results.append, transfer_client="crt")
         deleter.submit(_info("a"))
         deleter.close()
         assert [r.outcome for r in results] == [OpOutcome.FAILED]
         assert isinstance(results[0].error, TransportError)
         assert deleter.failed == 1
+
+    def test_an_unknown_transfer_client_is_refused(self) -> None:
+        with pytest.raises(ValidationError, match="transfer_client"):
+            _deleter(_FakeS3Client(), transfer_client=cast("Any", "auto"))
 
     def test_which_engine_carries_the_deletes(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # boto3's selection rule; an explicit 'crt' that cannot be honored

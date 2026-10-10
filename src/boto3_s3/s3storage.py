@@ -345,10 +345,9 @@ def lost_like_aws(exc: BaseException) -> bool:
     ordinary failures on aws-cli. The operations mirror the loss on the routes
     aws-cli sends through that handler with a botocore client - the transfer
     engine's terminal, the S3 deleter's per-key requests, the blind
-    single-key rm, the deletes only where the run's engine is classic
-    (`deleter.deletes_ride_crt`) - by dropping the item when this answers
-    True, and this logs the dropped failure at debug level the way s3transfer
-    logs aws-cli's.
+    single-key rm, the deletes only where aws-cli's transfer client for the
+    run is classic (`S3Deleter`'s ``transfer_client``) - by dropping the item
+    through `drop_like_aws`, which also logs it.
 
     The expression is aws-cli's own, evaluated on the exception aws-cli would
     hold: a family error this library raised from a botocore one (`s3_errors`,
@@ -367,9 +366,20 @@ def lost_like_aws(exc: BaseException) -> bool:
     try:
         response.get("Error", {}).get("Code")
     except AttributeError:
-        logger.debug("dropping a per-item failure as aws-cli does", exc_info=seen)
         return True
     return False
+
+
+def drop_like_aws(exc: BaseException) -> bool:
+    """`lost_like_aws`, for a route that drops the item when it answers True.
+
+    The dropped failure is logged at debug level, the way s3transfer logs the
+    one aws-cli's completion handler swallows.
+    """
+    if not lost_like_aws(exc):
+        return False
+    logger.debug("dropping a per-item failure as aws-cli does", exc_info=exc)
+    return True
 
 
 _NO_RESPONSE = object()

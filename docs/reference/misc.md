@@ -490,7 +490,7 @@ S3Deleter(
     operation: str = "delete",
     capture_response: bool = False,
     dryrun: bool = False,
-    transfer_config: TransferConfig | None = None,
+    transfer_client: Literal["classic", "crt"] = "classic",
 )
 ```
 
@@ -504,12 +504,15 @@ lifetime: do not `storage.close()` before the deleter is closed.
 `request_payer` is forwarded as the `RequestPayer` request parameter on both
 the batch and the per-key route; `None` omits it.
 
-`transfer_config` names the engine the deleting operation runs on (`None` is
-boto3's `'auto'`). Nothing is sent through it; its choice decides how a
-per-key request that dies without a response is reported — dropped without a
-record on the classic engine, as `aws s3` drops it, and a failure where the
-CRT engine is selected, as `aws s3`'s CRT client reports it. A batch request
-that dies that way is sent again one key at a time either way.
+`transfer_client` is the transfer client `aws s3` would carry the deleting
+run's deletes on — `"classic"` or `"crt"`; anything else raises
+`ValidationError`. Nothing is sent through it; it decides how a per-key request
+that dies without a response is reported — dropped without a record on
+`"classic"`, as `aws s3` drops it, and a failure on `"crt"`, as `aws s3`'s CRT
+client reports it. A batch request that dies that way is sent again one key at
+a time either way. `rm` derives it from its `transfer_config`; `sync` does too
+for an upload, and passes `"classic"` for an S3-to-S3 run, which `aws s3`
+always runs on its classic client.
 
 `on_result` is a [`ResultCallback`](./results.md#resultcallback) receiving one
 [`OpResult`](./results.md#opresult) per dispatched entry — see

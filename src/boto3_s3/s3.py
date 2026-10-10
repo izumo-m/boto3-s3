@@ -59,7 +59,7 @@ from boto3_s3.exceptions import (
 )
 from boto3_s3.iostorage import IOStorage
 from boto3_s3.localstorage import LocalStorage, to_native_path, translate_os_error
-from boto3_s3.s3storage import S3Storage, lost_like_aws, request_failure, s3_errors
+from boto3_s3.s3storage import S3Storage, drop_like_aws, request_failure, s3_errors
 from boto3_s3.storage import Location, Storage
 from boto3_s3.transfer import TransferItem, Transferrer, crt_engine_errors
 from boto3_s3.types import (
@@ -705,10 +705,10 @@ class _SyncDeletes:
         on_result: ResultCallback | None,
         cancel_token: CancelToken | None,
         capture_response: bool = False,
-        transfer_config: TransferConfig | None = None,
+        transfer_client: Literal["classic", "crt"] = "classic",
     ) -> None:
         self._dest = dest_storage
-        self._transfer_config = transfer_config
+        self._transfer_client: Literal["classic", "crt"] = transfer_client
         self._request_payer = request_payer
         self._dryrun = dryrun
         self._on_result = on_result
@@ -759,7 +759,7 @@ class _SyncDeletes:
                         cancel_token=self._cancel_token,
                         operation="sync",
                         capture_response=self._capture_response,
-                        transfer_config=self._transfer_config,
+                        transfer_client=self._transfer_client,
                     )
                 )
             self._deleter.submit(info)
@@ -1915,7 +1915,8 @@ class S3:
           ``pair_filter`` **replaces** all three lanes with one
           `MergedPairFilter`: every merged pair - `SrcOnlyPair`, `SyncPair` and
           `DestOnlyPair` alike - is passed to it serially, on this calling
-          thread, in ascending compare-key order, and ``True`` means "take this
+          thread, in the merge's order (ascending compare-key order when both
+          listings arrive in key order), and ``True`` means "take this
           pair's default action" (copy a new entry, copy an update, delete an
           orphan). It is for an application that needs one view of everything
           the run decides - an audit journal, a confirmation flow, statistics,
@@ -2111,7 +2112,14 @@ class S3:
             on_result=on_result,
             cancel_token=cancel_token,
             capture_response=capture_response,
-            transfer_config=transfer_config,
+            # aws-cli runs an S3-to-S3 sync on its classic transfer client
+            # whatever the preference (`_compute_transfer_client_type`), so
+            # only an upload's deletes can ride its CRT client.
+            transfer_client=(
+                "crt"
+                if transfer_type is not TransferType.COPY and deletes_ride_crt(transfer_config)
+                else "classic"
+            ),
         )
         with ExitStack() as stack:
             stack.enter_context(transferrer)
@@ -2282,6 +2290,9 @@ class S3:
         """
         storage = self._resolve_s3_target(target, operation="rm")
         config = transfer_config if transfer_config is not None else self._transfer_config
+        transfer_client: Literal["classic", "crt"] = (
+            "crt" if deletes_ride_crt(config) else "classic"
+        )
         _raise_if_cancelled(cancel_token, "rm")
         if not storage.bucket and (recursive or not storage.key):
             # rm has no bucket-listing mode (scan is object listing only), so a
@@ -2308,7 +2319,7 @@ class S3:
                 capture_response=capture_response,
                 on_result=on_result,
                 cancel_token=cancel_token,
-                lose_responseless=not deletes_ride_crt(config),
+                lose_responseless=transfer_client == "classic",
             )
             _raise_if_cancelled(cancel_token, "rm")
             return
@@ -2351,7 +2362,7 @@ class S3:
             cancel_token=cancel_token,
             operation="rm",
             capture_response=capture_response,
-            transfer_config=config,
+            transfer_client=transfer_client,
         ) as deleter:
             # cancel_token on the scan too (like ls): the prefetch producer
             # stops between page pulls instead of fetching pages nobody reads.
@@ -2440,7 +2451,7 @@ class S3:
             # request_failure the way the deleter wraps it (aws's task records
             # both alike).
             failure = request_failure(exc, operation="rm", bucket=storage.bucket, key=key)
-            if lose_responseless and lost_like_aws(failure):
+            if lose_responseless and drop_like_aws(failure):
                 # Died without a response: aws-cli's classic task loses it -
                 # no line, rc 0 (`lost_like_aws`) - so no record and no
                 # BatchError. Its CRT client reports it (`deletes_ride_crt`).

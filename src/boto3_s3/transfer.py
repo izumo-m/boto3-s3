@@ -94,7 +94,7 @@ from boto3_s3.exceptions import (
     ValidationError,
 )
 from boto3_s3.localstorage import LocalStorage, translate_os_error
-from boto3_s3.s3storage import attribute_failure, lost_like_aws, s3_errors, translate_boto_error
+from boto3_s3.s3storage import attribute_failure, drop_like_aws, s3_errors, translate_boto_error
 from boto3_s3.types import (
     AnnotationCopyMode,
     CancelMode,
@@ -1952,7 +1952,7 @@ class Transferrer:
                 self._cancelled += 1
             self._emit(self._result(item, OpOutcome.CANCELLED, error=error))
             return
-        if lost_like_aws(exc):
+        if drop_like_aws(exc):
             # A failure without a response (a connection closed, a timeout):
             # aws-cli's completion handler raises on it and s3transfer swallows
             # that, so the item vanishes - no record, no count (`lost_like_aws`).

@@ -20,7 +20,7 @@ which are not objects; submitting them would try to delete prefixes.
 ```python
 S3Deleter(storage, *, request_payer=None, on_result=None, cancel_token=None,
           batch_size=1000, operation="delete", capture_response=False,
-          dryrun=False, transfer_config=None)
+          dryrun=False, transfer_client="classic")
 ```
 
 `storage` must be an `S3Storage`; anything else raises `ValidationError`. Only
@@ -55,12 +55,13 @@ thread started it (a daemon thread included), so if you neither close the
 deleter nor use the context manager, shutdown blocks until the in-flight batch
 finishes.
 
-`transfer_config` is the `TransferConfig` of the run the deleter serves; nothing
-is sent through it. Its engine choice decides one thing: a key whose
-`DeleteObject` dies without any response (the connection closed, a read timeout)
-is dropped without a record on the classic engine, as `aws s3` drops it, and is
-a failure where the CRT engine is selected, as `aws s3`'s CRT client reports it.
-`rm` and `sync` pass their own.
+`transfer_client` (`"classic"` or `"crt"`) is the transfer client `aws s3`
+would carry these deletes on; nothing is sent through it. It decides one thing:
+a key whose `DeleteObject` dies without any response (the connection closed, a
+read timeout) is dropped without a record on `"classic"`, as `aws s3` drops it,
+and is a failure on `"crt"`, as `aws s3`'s CRT client reports it. `rm` and
+`sync` choose it from their own `transfer_config` the way `aws s3` chooses its
+client (an S3-to-S3 `sync` is always `"classic"`).
 
 ### Rehearsing with `dryrun`
 

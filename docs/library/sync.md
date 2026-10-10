@@ -134,8 +134,10 @@ s3.sync("./site", "s3://my-bucket/site/", pair_filter=decide)
 ```
 
 Two things make this work as a journal. The calls are **serial, on your thread,
-in ascending key order** across all three kinds of entry, so the log is written
-in one deterministic sequence and the callback needs no locking. And every entry
+in ascending key order** across all three kinds of entry — given listings in key
+order, which real S3, MinIO and the local walk all provide (an S3-compatible
+endpoint that does not sort breaks the order, as it breaks the pairing) — so the
+log is written in one deterministic sequence and the callback needs no locking. And every entry
 reaches it, including the ones nothing will be done to — so returning `False`
 everywhere is a real "report what a sync would decide" mode that transfers and
 deletes nothing (a download still creates its destination directory, section

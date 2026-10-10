@@ -1414,3 +1414,57 @@ class TestParallelFilter:
         assert len(errors) == 1
         assert isinstance(errors[0], ValueError)
         assert str(errors[0]) == "decide blew up"
+
+
+class TestDeletesThatDieWithoutAResponse:
+    """Which transfer client aws-cli would carry the sync's deletes on.
+
+    An upload's deletes ride aws-cli's CRT client when the run selects it, and
+    a dead request is then reported; an S3-to-S3 sync always runs on its
+    classic client (`_compute_transfer_client_type`), where the same request is
+    lost (`lost_like_aws`).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _crt_preferred(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The preference alone, without building a CRT engine for the
+        # transfers: what `deletes_ride_crt` answers for a CRT-selecting
+        # config (its own rule is pinned in test_deleter).
+        from boto3_s3 import s3 as s3_module
+
+        monkeypatch.setattr(s3_module, "deletes_ride_crt", lambda _config: True)
+
+    @staticmethod
+    def _dead() -> Exception:
+        from botocore.exceptions import ConnectionClosedError
+
+        return ConnectionClosedError(endpoint_url="http://h/")
+
+    def test_an_s3_to_s3_sync_loses_it_whatever_the_preference(self) -> None:
+        src_client, _ = make_recording_client([listing()])
+        dest_client, dest_calls = make_recording_client(
+            [listing(("p/z.txt", 1)), self._dead(), self._dead()]
+        )
+        results: list[OpResult] = []
+        S3().sync(
+            S3Storage("s3://src-b/p", client=src_client),
+            S3Storage("s3://dest-b/p", client=dest_client),
+            delete_filter=True,
+            on_result=results.append,
+            transfer_config=_SERIAL,
+        )
+        assert ops(dest_calls) == ["ListObjectsV2", "DeleteObjects", "DeleteObject"]
+        assert results == []
+
+    def test_an_upload_sync_on_the_crt_reports_it(self, tmp_path: Path) -> None:
+        client, _ = make_recording_client([listing(("p/z.txt", 1)), self._dead(), self._dead()])
+        results: list[OpResult] = []
+        with pytest.raises(BatchError):
+            S3().sync(
+                str(tmp_path),
+                S3Storage("s3://bucket/p", client=client),
+                delete_filter=True,
+                on_result=results.append,
+                transfer_config=_SERIAL,
+            )
+        assert [r.outcome for r in results] == [OpOutcome.FAILED]

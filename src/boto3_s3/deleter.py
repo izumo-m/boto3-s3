@@ -45,7 +45,7 @@ from concurrent.futures import (
 from concurrent.futures import (
     TimeoutError as FutureTimeoutError,
 )
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from botocore.exceptions import MissingDependencyException
 
@@ -54,6 +54,7 @@ from boto3_s3.exceptions import Boto3S3Error, TransportError, ValidationError
 from boto3_s3.s3storage import (
     S3_CODE_CATEGORIES,
     S3Storage,
+    drop_like_aws,
     lost_like_aws,
     request_failure,
     s3_errors,
@@ -119,7 +120,7 @@ _XML_INCOMPATIBLE = re.compile("[^\t\n\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010f
 
 
 def deletes_ride_crt(transfer_config: TransferConfig | None) -> bool:
-    """Whether aws-cli would carry this run's deletes on its CRT engine.
+    """Whether aws-cli would carry a run's deletes on its CRT transfer client.
 
     aws-cli sends its per-key deletes through the transfer manager it built for
     the run, so a run whose ``TransferConfig`` selects the CRT engine
@@ -127,10 +128,13 @@ def deletes_ride_crt(transfer_config: TransferConfig | None) -> bool:
     deletes through the CRT client there, and a request that dies without a
     response surfaces as an awscrt error its completion handler reports
     (measured: ``delete failed: ... AWS_IO_SOCKET_CLOSED``, rc 1). This library
-    deletes through botocore on either engine, so the answer decides whether
-    such a failure is lost (`lost_like_aws`) or reported. An explicit ``'crt'``
-    without a usable awscrt cannot have selected the engine, so it answers
-    False rather than raising.
+    deletes through botocore on either engine, so the answer - handed to
+    `S3Deleter` as its ``transfer_client`` - decides whether such a failure is
+    lost (`lost_like_aws`) or reported. It does not know the route: aws-cli
+    runs an S3-to-S3 operation on its classic client whatever the preference
+    (``_compute_transfer_client_type``), which the caller applies on top. An
+    explicit ``'crt'`` without a usable awscrt cannot have selected the
+    engine, so it answers False rather than raising.
     """
     try:
         return crtsupport.selects_crt(transfer_config)
@@ -211,7 +215,7 @@ class S3Deleter:
         operation: str = "delete",
         capture_response: bool = False,
         dryrun: bool = False,
-        transfer_config: TransferConfig | None = None,
+        transfer_client: Literal["classic", "crt"] = "classic",
     ) -> None:
         # Runtime guard for untyped callers (e.g. S3.resolve routing a bare
         # "bucket/key" to LocalStorage): fail inside the taxonomy, not with an
@@ -235,6 +239,11 @@ class S3Deleter:
                 f"(got {batch_size!r})",
                 operation=operation,
             )
+        if transfer_client not in ("classic", "crt"):
+            raise ValidationError(
+                f"transfer_client must be 'classic' or 'crt' (got {transfer_client!r})",
+                operation=operation,
+            )
         # Eager: resolve the client and bucket now, so a bad storage fails on
         # the caller thread and the worker never triggers the lazy
         # (deliberately unlocked) client construction.
@@ -254,10 +263,10 @@ class S3Deleter:
         # policy is not to retry (`_retries_disabled`).
         self._resend_transient = not _retries_disabled(self._client)
         # Whether a per-key request that dies without a response is lost the
-        # way aws-cli's classic route loses it (`lost_like_aws`): not when the
-        # run's engine is the CRT, which carries aws-cli's deletes too and
+        # way aws-cli's classic transfer client loses it (`lost_like_aws`):
+        # not when aws-cli would carry these deletes on its CRT client, which
         # reports such a failure (`deletes_ride_crt`).
-        self._lose_responseless = not deletes_ride_crt(transfer_config)
+        self._lose_responseless = transfer_client == "classic"
         # Set when the run is abandoned - close(flush=False) for anything but
         # a graceful cancel, or a close() that is itself interrupted - so a
         # batch in flight starts no further per-key request. Written on the
@@ -691,7 +700,7 @@ class S3Deleter:
             failure = request_failure(
                 exc, operation=self._operation, bucket=self._bucket, key=info.key
             )
-            if self._lose_responseless and lost_like_aws(failure):
+            if self._lose_responseless and drop_like_aws(failure):
                 lost[index] = True
             else:
                 errors[index] = failure

@@ -21,7 +21,8 @@ endpoint named anywhere but `--endpoint-url` under the CRT engine, a
 `REQUESTS_CA_BUNDLE` the CRT engine cannot use, an `aws` plugin that imports
 `awscli` modules, a `cli_history` directory
 `aws` cannot create, the modification time a download stamps for an object
-older than the local zone's present rules, an invalid `AWS_DEFAULTS_MODE`
+older than the local zone's present rules, a CRT-engine `mv` download whose
+source delete dies without a response, an invalid `AWS_DEFAULTS_MODE`
 or `sts_regional_endpoints` value, the `PYTHON*` environment
 variables, and three failures the interpreter decides rather than
 either tool: a stdout that cannot take a streamed object, an error report that
@@ -143,6 +144,17 @@ comes out differently, listed in section 1.
   `preferred_transfer_client = crt`**, which validates exactly as `aws` does.
   Downloads below the threshold are verified on both tools, so only large
   single-object downloads are affected.
+- **An `mv` download whose source delete dies without a response hangs `aws`
+  under the CRT engine.** With `preferred_transfer_client = crt`, an `mv` from
+  S3 to a local path downloads on the CRT client and then deletes the source
+  with a plain `DeleteObject`. When that request's connection is closed before
+  any response, `aws`'s completion handler fails on the missing response (the
+  same failure that makes it drop such an item on the classic engine), but the
+  CRT engine does not swallow it: `aws` writes an `Exception ignored in:`
+  traceback ending in `AttributeError: 'NoneType' object has no attribute
+  'get'` and never exits (measured: still waiting after 90 seconds). Here the
+  item is dropped as on the classic engine: no line, exit code 0, the file
+  downloaded and the source kept.
 - **A download body cut mid-stream is retried here and not by `aws`.** The
   retryable set differs between the `s3transfer` installed from PyPI and the
   fork `aws` bundles: the installed botocore turns a connection broken in the
