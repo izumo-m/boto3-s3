@@ -82,6 +82,53 @@ class _RaisingDeleteClient:
         raise self._error
 
 
+class TestInterrupt:
+    """A Ctrl-C stops the delete lines at once (`interrupts.on_interrupt`).
+
+    aws cancels its per-key delete futures at a Ctrl-C and prints nothing
+    after the first cancelled one (measured: ten deletes in flight, at most
+    one line). A batch request in flight here cannot be cancelled and reports
+    up to a whole batch of keys once it completes, so the printer has to stop
+    when the signal arrives, not when the interrupt reaches the command.
+    """
+
+    def test_a_stopped_printer_prints_nothing(self, capsys: pytest.CaptureFixture[str]) -> None:
+        printer = _DeletePrinter(bucket="b", quiet=False, only_show_errors=False)
+        printer.stop()
+        printer(
+            OpResult(
+                transfer_type=TransferType.DELETE,
+                compare_key="k",
+                outcome=OpOutcome.SUCCEEDED,
+                src="s3://b/k",
+            )
+        )
+        assert capsys.readouterr().out == ""
+
+    def test_rm_stops_its_printer_when_the_signal_arrives(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The hook stands in for a Ctrl-C landing before any record: the
+        # delete still runs, and its line is never printed.
+        from contextlib import contextmanager
+
+        from boto3_s3_cli import interrupts
+
+        hooked: list[Any] = []
+
+        @contextmanager
+        def arrived_at_once(callback: Any) -> Any:
+            hooked.append(callback)
+            callback()
+            yield
+
+        monkeypatch.setattr(interrupts, "on_interrupt", arrived_at_once)
+        result, calls = run_recorded([{}], ["rm", "s3://b/k"])
+        assert len(hooked) == 1
+        assert len(calls) == 1
+        assert (result.rc, result.stdout) == (0, "")
+
+
 class TestOutputMatrix:
     def test_default_prints_delete_line(self) -> None:
         result, _ = run_recorded([{}], ["rm", "s3://b/k"])

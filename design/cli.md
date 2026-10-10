@@ -1318,7 +1318,17 @@ shows its single closing line and none of the results queued behind it (a
 fatal mid-listing prints zero per-item lines for the cancelled set, and an
 interrupted `mv` can delete sources whose `move:` lines never print - nine
 in each of four measured runs). NOTICE lines bypass that processor on aws
-(written straight to stderr) and keep printing. Progress
+(written straight to stderr) and keep printing. A delete has no such
+trigger here: aws's per-key delete futures are cancelled at a Ctrl-C like its
+transfers, while a batched `DeleteObjects` in flight cannot be, so it
+completes and reports up to a whole batch of keys before the interrupt
+reaches the command. The pipeline span (`finish_transfer`, and rm's own) is
+therefore wrapped in `interrupts.on_interrupt`, a SIGINT hook that stops the
+delete lines - `TransferPrinter.stop_deletes`, rm's `_DeletePrinter.stop` -
+the moment the signal arrives and then raises as before (measured: ten
+per-key deletes in flight print at most one line on aws and none here). The
+transfers keep the cancelled-record rule, since aws's CRT manager swallows an
+interrupt in its drain and its transfers go on reporting. Progress
 is `Completed <done>/<total> (<speed>/s) with <n> file(s) remaining`, overwritten
 with `\r` (**no isatty gate** = mixed into a pipe too, as in aws. Goldens mask
 it). The suppression matrix is the same shape as rm: `--quiet` = no printer at

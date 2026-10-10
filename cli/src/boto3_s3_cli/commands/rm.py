@@ -14,7 +14,7 @@ from boto3_s3 import (
     OpResult,
     ValidationError,
 )
-from boto3_s3_cli import clientfactory, filters, globalargs, output, usage
+from boto3_s3_cli import clientfactory, filters, globalargs, interrupts, output, usage
 from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import (
     Command,
@@ -53,9 +53,18 @@ class _DeletePrinter:
         self._bucket = bucket
         self._quiet = quiet
         self._only_show_errors = only_show_errors
+        self._stopped = False
+
+    def stop(self) -> None:
+        """Print nothing more: a Ctrl-C arrived (`interrupts.on_interrupt`).
+
+        aws's result processor drops every result after a Ctrl-C; a batch in
+        flight here still completes and reports its keys afterwards.
+        """
+        self._stopped = True
 
     def __call__(self, result: OpResult) -> None:
-        if self._quiet:
+        if self._quiet or self._stopped:
             return
         try:
             self._write_line(result)
@@ -209,17 +218,18 @@ class RmCommand(Command):
             bucket=storage.bucket, quiet=args.quiet, only_show_errors=args.only_show_errors
         )
         try:
-            s3.rm(
-                storage,
-                recursive=args.recursive,
-                filter=item_filter,
-                dryrun=args.dryrun,
-                request_payer=args.request_payer,
-                on_result=printer,
-                # The engine aws would carry these deletes on, which decides
-                # how one that dies without a response is reported.
-                transfer_config=transfer_config,
-            )
+            with interrupts.on_interrupt(printer.stop):
+                s3.rm(
+                    storage,
+                    recursive=args.recursive,
+                    filter=item_filter,
+                    dryrun=args.dryrun,
+                    request_payer=args.request_payer,
+                    on_result=printer,
+                    # The engine aws would carry these deletes on, which
+                    # decides how one that dies without a response is reported.
+                    transfer_config=transfer_config,
+                )
         except BatchError:
             # Per-key failure lines were already streamed by the printer.
             return 1
