@@ -100,21 +100,22 @@ _QUEUE_MAX = 10_000
 # Queue sentinel: drain what remains, then stop the printer thread.
 _SHUTDOWN = object()
 
-# The longest sleep between two looks at a flag `_wait_set` polls.
-_POLL_CEILING = 0.1
+# The longest a `_wait_set` waits between two looks for a Ctrl-C's handler.
+_WAKE_SLICE = 0.1
 
 
-def _wait_set(event: threading.Event) -> None:
-    """Wait for *event* by reading its flag and sleeping, taking no lock.
+def _wait_set(event: threading.Event, wake: _thread.LockType) -> None:
+    """Wait for *event*, woken by *wake* - the setter releases it after setting.
 
-    The library's single-rm wait has the same shape (``boto3_s3.s3``): an
-    interruptible sleep on every platform, polled from a millisecond up to
-    `_POLL_CEILING`.
+    The same wait as the library's single rm (``boto3_s3.s3``, whose
+    docstring has the reasons): no ``Event.wait`` - its Python-level
+    ``Condition`` can be left half-taken by an interrupt - but a raw lock's
+    timed acquire, one C call that returns as soon as the setter releases
+    and lets a Ctrl-C's handler run between slices on Windows before Python
+    3.14. The event's flag says whether it is set.
     """
-    delay = 0.001
     while not event.is_set():
-        time.sleep(delay)
-        delay = min(delay * 2, _POLL_CEILING)
+        wake.acquire(timeout=_WAKE_SLICE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,9 +218,12 @@ class TransferPrinter:
         # printer-thread-only state (no lock: one thread owns them)
         self._progress_length = 0
         self._output_dead = False
-        # Set when the printer thread leaves its loop: finish() waits on it
-        # rather than on Thread.join (see finish).
+        # Set when the printer thread leaves its loop, then _drained_wake
+        # released: finish() waits on the pair rather than on Thread.join
+        # (see finish).
         self._drained = threading.Event()
+        self._drained_wake = _thread.allocate_lock()
+        self._drained_wake.acquire()
 
     @property
     def wants_progress(self) -> bool:
@@ -257,10 +261,9 @@ class TransferPrinter:
         lock held (the other side then blocks for good) or released twice.
         So the shutdown marker goes in from a throwaway low-level thread (the
         put blocks while a stalled printer has the queue full), and the wait
-        polls the event the printer sets (`_wait_set`) - not ``Thread.join``,
+        is `_wait_set`'s on the event the printer sets - not ``Thread.join``,
         which on Python 3.10 to 3.12 marks a thread finished when interrupted
-        while it runs, and not ``Event.wait``, whose untimed form Windows
-        before Python 3.14 does not interrupt.
+        while it runs, and not ``Event.wait``.
         """
         thread = self._thread
         if thread is None:
@@ -281,7 +284,7 @@ class TransferPrinter:
                 if not marked:
                     _thread.start_new_thread(self._queue.put, (_SHUTDOWN,))
                     marked = True
-                _wait_set(self._drained)
+                _wait_set(self._drained, self._drained_wake)
                 break
             except KeyboardInterrupt as exc:
                 if interrupt is None:
@@ -447,6 +450,7 @@ class TransferPrinter:
             self._render_until_shutdown()
         finally:
             self._drained.set()
+            self._drained_wake.release()
 
     def _render_until_shutdown(self) -> None:
         while True:

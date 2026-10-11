@@ -462,19 +462,29 @@ class TestRmSingleKeyInterrupted:
         finally:
             release.set()
 
+    @staticmethod
+    def _interrupt_the_worker_start(monkeypatch: pytest.MonkeyPatch, *, spawn: bool) -> None:
+        """Raise a KeyboardInterrupt out of the worker's ``Thread.start``,
+        before the thread is spawned or once it is."""
+        real_start = threading.Thread.start
+
+        def start(self: threading.Thread) -> None:
+            if self.name == "boto3-s3-rm-single":
+                if spawn:
+                    real_start(self)
+                raise KeyboardInterrupt
+            real_start(self)
+
+        monkeypatch.setattr(threading.Thread, "start", start)
+
     def test_an_interrupt_before_the_worker_exists_goes_on(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # No thread yet, so no request to wait for: the interrupt is not held.
-        import _thread
-
         from boto3_s3 import s3 as s3_module
 
-        def interrupted_before(_function: Any, _args: Any) -> int:
-            raise KeyboardInterrupt
-
         monkeypatch.setattr(s3_module, "_SPAWN_GRACE", 0.2)
-        monkeypatch.setattr(_thread, "start_new_thread", interrupted_before)
+        self._interrupt_the_worker_start(monkeypatch, spawn=False)
         client = _FakeS3Client()
         results: list[OpResult] = []
         with pytest.raises(KeyboardInterrupt):
@@ -485,15 +495,7 @@ class TestRmSingleKeyInterrupted:
     def test_an_interrupt_once_the_worker_runs_is_held(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import _thread
-
-        real = _thread.start_new_thread
-
-        def interrupted_after(function: Any, args: Any) -> int:
-            real(function, args)
-            raise KeyboardInterrupt
-
-        monkeypatch.setattr(_thread, "start_new_thread", interrupted_after)
+        self._interrupt_the_worker_start(monkeypatch, spawn=True)
         client = _FakeS3Client()
         results: list[OpResult] = []
         with pytest.raises(KeyboardInterrupt):
