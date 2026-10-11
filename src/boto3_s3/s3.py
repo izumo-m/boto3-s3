@@ -22,9 +22,11 @@ SDK-free (design/imports.md).
 from __future__ import annotations
 
 import _thread
+import contextvars
 import functools
 import inspect
 import os
+import sys
 import threading
 import time
 from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
@@ -346,7 +348,13 @@ def _send_through_interrupt(send: Callable[[], Any], held: _HeldInterrupt) -> An
             settled_wake.release()
 
     # Built outside the try: an interrupt landing here leaves no request.
-    worker = threading.Thread(target=run, name="boto3-s3-rm-single", daemon=True)
+    context: dict[str, Any] = {}
+    if getattr(sys.flags, "thread_inherit_context", False):
+        # Python 3.14's Thread.start copies its caller's contextvars under
+        # this flag (the free-threaded build's default). The starter below is
+        # not the caller, so the caller's context is taken here.
+        context["context"] = contextvars.copy_context()
+    worker = threading.Thread(target=run, name="boto3-s3-rm-single", daemon=True, **context)
 
     def start_worker() -> None:
         try:

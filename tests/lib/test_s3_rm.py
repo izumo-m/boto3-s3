@@ -17,6 +17,8 @@ aws-cli parity facts asserted here:
 from __future__ import annotations
 
 import datetime as dt
+import subprocess
+import sys
 import threading
 from typing import Any
 
@@ -520,6 +522,35 @@ class TestRmSingleKeyInterrupted:
             S3().rm(S3Storage("s3://b/k", client=client), on_result=results.append)
         assert client.delete_object_calls == []
         assert [r.outcome for r in results] == [OpOutcome.FAILED]
+
+    @pytest.mark.skipif(sys.version_info < (3, 14), reason="thread_inherit_context is 3.14+")
+    def test_the_worker_inherits_the_callers_context_when_threads_do(self) -> None:
+        # Under -X thread_inherit_context=1 (the free-threaded build's default)
+        # a thread starts with its starter's contextvars; the rm worker is
+        # started from a throwaway thread, so it must be handed the caller's.
+        code = (
+            "import contextvars\n"
+            "from boto3_s3 import S3, S3Storage\n"
+            "from tests.lib.test_s3_rm import _FakeS3Client\n"
+            "var = contextvars.ContextVar('v', default='<unset>')\n"
+            "seen = []\n"
+            "class Client(_FakeS3Client):\n"
+            "    def delete_object(self, **kwargs):\n"
+            "        seen.append(var.get())\n"
+            "        return super().delete_object(**kwargs)\n"
+            "var.set('caller')\n"
+            "S3().rm(S3Storage('s3://b/k', client=Client()))\n"
+            "print(seen)\n"
+        )
+        done = subprocess.run(
+            [sys.executable, "-X", "thread_inherit_context=1", "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        assert done.returncode == 0, done.stderr
+        assert done.stdout.strip() == "['caller']"
 
     def test_the_worker_is_a_named_thread(self) -> None:
         # Not a bare _thread thread: a current_thread() call in it (logging's
