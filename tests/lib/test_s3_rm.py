@@ -17,10 +17,7 @@ aws-cli parity facts asserted here:
 from __future__ import annotations
 
 import datetime as dt
-import signal
-import sys
 import threading
-import time
 from typing import Any
 
 import pytest
@@ -41,6 +38,7 @@ from boto3_s3 import (
     rm_filter_root,
 )
 from tests.utils.fakes3 import client_error, crt_sender_factory
+from tests.utils.interrupts import interrupt_main_in, skip_without_pthread_kill
 
 _MTIME = dt.datetime(2026, 1, 2, tzinfo=dt.timezone.utc)
 
@@ -394,33 +392,7 @@ class TestRmRecursive:
         assert outcomes == {"a": OpOutcome.FAILED, "b": OpOutcome.SUCCEEDED}
 
 
-def _interrupt_main_once_it_waits() -> None:
-    """Send the main thread a real SIGINT once it waits on the single delete.
-
-    A real signal, not a patched wait: the interrupt has to land the way a
-    Ctrl-C does - in the wait - for the test to see what the interpreter
-    does with it (Python 3.10 to 3.12 mark a thread finished when a
-    ``Thread.join`` on it is interrupted).
-    """
-    main = threading.main_thread().ident
-    assert main is not None
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        frame = sys._current_frames().get(main)  # pyright: ignore[reportPrivateUsage]
-        names: list[str] = []
-        while frame is not None:
-            names.append(frame.f_code.co_name)
-            frame = frame.f_back
-        # Condition.wait under Event.wait, called by the helper itself (not
-        # the wait inside Thread.start).
-        if names[:3] == ["wait", "wait", "_send_through_interrupt"]:
-            break
-        time.sleep(0.005)
-    signal.pthread_kill(main, signal.SIGINT)
-    time.sleep(0.05)  # let the main thread take it inside the wait
-
-
-@pytest.mark.skipif(not hasattr(signal, "pthread_kill"), reason="POSIX signal delivery")
+@skip_without_pthread_kill
 class TestRmSingleKeyInterrupted:
     """aws's single delete rides a transfer-manager worker that a Ctrl-C waits
     for, so the in-flight delete is still reported (measured: ``delete:
@@ -429,7 +401,7 @@ class TestRmSingleKeyInterrupted:
     def test_a_ctrl_c_waits_for_the_delete_and_records_it(self) -> None:
         class _InterruptedClient(_FakeS3Client):
             def delete_object(self, **kwargs: Any) -> dict[str, Any]:
-                _interrupt_main_once_it_waits()
+                interrupt_main_in("_send_through_interrupt")
                 return super().delete_object(**kwargs)
 
         client = _InterruptedClient()
@@ -442,7 +414,7 @@ class TestRmSingleKeyInterrupted:
     def test_a_failed_delete_is_recorded_before_the_interrupt(self) -> None:
         class _InterruptedClient(_FakeS3Client):
             def delete_object(self, **kwargs: Any) -> dict[str, Any]:
-                _interrupt_main_once_it_waits()
+                interrupt_main_in("_send_through_interrupt")
                 return super().delete_object(**kwargs)
 
         client = _InterruptedClient(
@@ -458,8 +430,8 @@ class TestRmSingleKeyInterrupted:
 
         class _StallingClient(_FakeS3Client):
             def delete_object(self, **kwargs: Any) -> dict[str, Any]:
-                _interrupt_main_once_it_waits()
-                _interrupt_main_once_it_waits()
+                interrupt_main_in("_send_through_interrupt")
+                interrupt_main_in("_send_through_interrupt")
                 release.wait(10)
                 return super().delete_object(**kwargs)
 

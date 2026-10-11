@@ -57,8 +57,11 @@ if anything failed, the code is 1.
 Ctrl-C before a `cp` / `mv` / `rm` / `sync` run has started, or while `ls`,
 `mb`, `website`, `presign` or `rb` without `--force` is at work — a request
 already in flight included — exits 130. Once a transfer or delete is running,
-Ctrl-C reports 1 instead (above). The interactive prompt's own Ctrl-C and
-end-of-input also exit 130.
+Ctrl-C reports 1 instead (above). After the run has ended, while its result
+lines are still being written (a slow terminal or pipe), Ctrl-C lets every
+line out and then exits 130, as `aws` does; a second Ctrl-C stops the
+remaining lines. The interactive prompt's own Ctrl-C and end-of-input also
+exit 130.
 
 ### 252 — the command line was rejected
 

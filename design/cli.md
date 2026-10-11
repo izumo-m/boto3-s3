@@ -1301,7 +1301,11 @@ lines have already been emitted by on_result), a `KeyboardInterrupt` -> one
 `cancelled: ctrl-c received` line + 1 (aws's result machinery swallows a
 mid-run Ctrl-C into a cancelled run - measured mid-sync and mid-rm, 2.36.40;
 rm's own pipeline catch converts identically, and the dispatcher's 130
-backstop keeps the pre-pipeline spans). aws only reaches that line through a
+backstop keeps the pre-pipeline spans - and the printer's final drain, which
+is past aws's recorder span: a Ctrl-C there escapes to aws's 130 while its
+printer thread writes every queued line, so `TransferPrinter.finish` holds
+the interrupt until the lines are out and then lets it reach the
+dispatcher, whatever the run ended with). aws only reaches that line through a
 *cancelled transfer future*, so where none is in flight - before the first
 submit, during a dryrun, after the last completion - it closes with an empty
 `fatal error:` instead; the uniform line here is the recorded deviation
@@ -1518,7 +1522,7 @@ reviewed with it.
 | code | condition | the name on the aws-cli side |
 |---|---|---|
 | 0 | Success. The `help` token / `--version` are also 0 | - |
-| 130 | Ctrl-C **outside the transfer pipeline** (`KeyboardInterrupt` reaching `main`'s backstop: a bare newline on stdout, no traceback; the auto-prompt's own Ctrl-C/EOF returns the same code). Inside the rm / cp / mv / sync pipeline span a Ctrl-C is instead a cancelled run - `cancelled: ctrl-c received`, rc 1, like aws (section 5.7) | aws's `InterruptExceptionHandler`, 128+SIGINT |
+| 130 | Ctrl-C **outside the transfer pipeline** (`KeyboardInterrupt` reaching `main`'s backstop: a bare newline on stdout, no traceback; the auto-prompt's own Ctrl-C/EOF returns the same code), the printer's final drain after the run included (section 5.7). Inside the rm / cp / mv / sync pipeline span a Ctrl-C is instead a cancelled run - `cancelled: ctrl-c received`, rc 1, like aws (section 5.7) | aws's `InterruptExceptionHandler`, 128+SIGINT |
 | 1 | A subcommand-specific "no result" etc. (`ls` is a specified key / prefix with 0 entries), **all errors after the start of rm / cp / mv / sync / mb / rb** (below; the rm stage of `rb --force` is the 255 below) | the convention of the S3-family commands / a task failure of the transfer family |
 | 2 | **A transfer that completed with warnings only** (cp / mv / sync's glacier skip, an mtime stamp failure, an unreadable local file, etc. section 5.7) | a task warning of the transfer family |
 | 252 | A usage error (an unknown option = `Unknown options: ...`, an invalid choice / value), a client-side `ValidationError`, a `--cli-auto-prompt` rejection | `PARAM_VALIDATION_ERROR_RC` |

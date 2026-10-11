@@ -34,8 +34,9 @@ queue has room (the bounded-queue paragraph below is the deliberate
 exception). Because a
 single thread renders in queue order, line ordering and the ``\\r`` padding
 protocol are exactly the single-threaded behavior. Use the printer as a
-context manager around the run: ``__exit__`` drains and joins the thread, so
-by the time the command returns every line has been written. A dead output
+context manager around the run: ``__exit__`` drains the queue and waits for
+the thread, so by the time the command returns every line has been written
+(a Ctrl-C there is held until then, as ``finish`` describes). A dead output
 stream (``BrokenPipeError`` on a closed pipe) stops rendering but keeps
 draining - the run and its exit code are unaffected.
 
@@ -199,6 +200,9 @@ class TransferPrinter:
         # printer-thread-only state (no lock: one thread owns them)
         self._progress_length = 0
         self._output_dead = False
+        # Set when the printer thread leaves its loop: finish() waits on it
+        # rather than on Thread.join (see finish).
+        self._drained = threading.Event()
 
     @property
     def wants_progress(self) -> bool:
@@ -218,7 +222,21 @@ class TransferPrinter:
         self.finish()
 
     def finish(self) -> None:
-        """Drain the queue and stop the printer thread (idempotent)."""
+        """Drain the queue and stop the printer thread (idempotent).
+
+        A Ctrl-C here lands past the run, where aws's recorder waits for its
+        printer: the interrupt escapes to aws's dispatcher (rc 130) while that
+        ordinary thread still writes every queued line (measured). So the
+        first interrupt is held and the wait goes on with the output alive;
+        a second one stops the output and still waits for the printer to
+        reach the shutdown marker (one write at most - a daemon left writing
+        can abort the process at interpreter shutdown, `Fatal Python error:
+        _enter_buffered_busy`); a third gives up on a printer wedged on a
+        stalled stream. The held interrupt is raised once the printer is
+        done. The wait is on an event the printer sets, not ``Thread.join``:
+        on Python 3.10 to 3.12 a join interrupted while the thread runs marks
+        it finished, and the next join returns at once.
+        """
         thread = self._thread
         if thread is None:
             return
@@ -231,21 +249,24 @@ class TransferPrinter:
         # wedged in put() at ~10k would then deadlock the prefetch join at
         # generator close.
         self._finished = True
-        self._queue.put(_SHUTDOWN)
-        try:
-            thread.join()
-        except BaseException:
-            # Interrupted - a Ctrl-C - while the printer is still writing what
-            # was queued. Left running, the daemon thread can be caught
-            # mid-write by interpreter shutdown, which then aborts the process
-            # (`Fatal Python error: _enter_buffered_busy`, rc 134; aws's printer
-            # is an ordinary thread the interpreter waits for). Stop its output
-            # and let it reach the shutdown marker before the interrupt goes
-            # on; a second interrupt still propagates, for a printer wedged on
-            # a stalled stream.
-            self._output_dead = True
-            thread.join()
-            raise
+        interrupt: KeyboardInterrupt | None = None
+        marked = False
+        while True:
+            try:
+                if not marked:
+                    # Blocks while a stalled printer has the queue full; an
+                    # interrupt stopping the output is what frees it.
+                    self._queue.put(_SHUTDOWN)
+                    marked = True
+                self._drained.wait()
+                break
+            except KeyboardInterrupt as exc:
+                if interrupt is None:
+                    interrupt = exc
+                elif not self._output_dead:
+                    self._output_dead = True
+                else:
+                    raise
         # Discard anything that slipped in around the flag flip, freeing any
         # producer already blocked on a full queue; later stray puts find a
         # queue with room and simply go unread.
@@ -254,6 +275,8 @@ class TransferPrinter:
                 self._queue.get_nowait()
             except queue.Empty:
                 break
+        if interrupt is not None:
+            raise interrupt
 
     # -- callbacks (worker / submitting threads: count and enqueue, never write) --
 
@@ -397,6 +420,12 @@ class TransferPrinter:
 
     def _drain(self) -> None:
         """Render queued records until shutdown, disabling output after stream failure."""
+        try:
+            self._render_until_shutdown()
+        finally:
+            self._drained.set()
+
+    def _render_until_shutdown(self) -> None:
         while True:
             record = self._queue.get()
             if record is _SHUTDOWN:

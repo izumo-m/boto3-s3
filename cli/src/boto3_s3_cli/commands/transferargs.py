@@ -987,17 +987,27 @@ def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], 
     pathologically deep tree is aws's ``fatal error`` rc 1, never the
     dispatcher's 255, and a mid-run Ctrl-C is never its 130). A clean run exits 2
     when only warnings accumulated, else 0. The printer's rendering thread
-    runs for exactly the ``run()`` span - the ``with`` drains it on every
-    path, so all queued lines are written (and precede a ``fatal error:``
-    line) before the exit code is derived.
+    outlives ``run()`` only by its drain: every queued line is written (and
+    precedes a ``fatal error:`` line) before the exit code is derived.
+
+    That drain is past aws's recorder span too - its recorder's shutdown,
+    waiting for its printer thread - so a Ctrl-C landing there is not
+    converted: it reaches the dispatcher's 130 (and its newline) once the
+    printer has written what was queued (``TransferPrinter.finish``),
+    whatever the run itself ended with (measured: all lines, rc 130).
     """
-    try:
-        with printer:
+    error: BaseException | None = None
+    with printer:
+        try:
             run()
-    except BatchError:
+        except BaseException as exc:  # classified below, once every line is out
+            error = exc
+    if error is None:
+        return 2 if printer.warned else 0
+    if isinstance(error, BatchError):
         # Per-item failure lines were already streamed by the printer.
         return 1
-    except KeyboardInterrupt:
+    if isinstance(error, KeyboardInterrupt):
         # Ctrl-C inside the pipeline span is a cancelled run, not the
         # dispatcher's 130: aws's result machinery swallows the interrupt
         # (`CommandResultRecorder.__exit__`), the shutdown cancels the
@@ -1009,17 +1019,15 @@ def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], 
         if not quiet:
             sys.stderr.write("cancelled: ctrl-c received\n")
         return 1
-    except AssertionError:
+    if isinstance(error, AssertionError) or not isinstance(error, Exception):
         # An internal-invariant violation (a bug) surfaces loudly, like the
         # dispatcher's AssertionError re-raise (cli.py) - masking it as a
         # fatal error would also blunt the test doubles' unexpected-call
-        # guards.
-        raise
-    except Exception as exc:
-        if not quiet:
-            sys.stderr.write(f"fatal error: {exc}\n")
-        return 1
-    return 2 if printer.warned else 0
+        # guards; SystemExit and the rest of the BaseException family pass.
+        raise error
+    if not quiet:
+        sys.stderr.write(f"fatal error: {error}\n")
+    return 1
 
 
 __all__ = [
