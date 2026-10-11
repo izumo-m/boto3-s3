@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import datetime as dt
 import threading
+import time
 from typing import Any
 
 import pytest
@@ -38,7 +39,11 @@ from boto3_s3 import (
     rm_filter_root,
 )
 from tests.utils.fakes3 import client_error, crt_sender_factory
-from tests.utils.interrupts import interrupt_main_in, skip_without_pthread_kill
+from tests.utils.interrupts import (
+    interrupt_main_in,
+    interrupt_main_on_call,
+    skip_without_pthread_kill,
+)
 
 _MTIME = dt.datetime(2026, 1, 2, tzinfo=dt.timezone.utc)
 
@@ -425,13 +430,29 @@ class TestRmSingleKeyInterrupted:
             S3().rm(S3Storage("s3://b/k", client=client), on_result=results.append)
         assert [r.outcome for r in results] == [OpOutcome.FAILED]
 
-    def test_a_second_ctrl_c_stops_waiting(self) -> None:
+    def test_a_second_ctrl_c_still_waits_but_records_nothing(self) -> None:
+        # aws's executor threads are joined as it exits, so its request still
+        # completes after a second Ctrl-C - nothing more is printed (measured).
+        class _InterruptedTwice(_FakeS3Client):
+            def delete_object(self, **kwargs: Any) -> dict[str, Any]:
+                interrupt_main_in("_send_through_interrupt")
+                interrupt_main_in("_send_through_interrupt")
+                return super().delete_object(**kwargs)
+
+        client = _InterruptedTwice()
+        results: list[OpResult] = []
+        with pytest.raises(KeyboardInterrupt):
+            S3().rm(S3Storage("s3://b/k", client=client), on_result=results.append)
+        assert client.delete_object_calls == [{"Bucket": "b", "Key": "k"}]
+        assert results == []
+
+    def test_a_third_ctrl_c_stops_waiting(self) -> None:
         release = threading.Event()
 
         class _StallingClient(_FakeS3Client):
             def delete_object(self, **kwargs: Any) -> dict[str, Any]:
-                interrupt_main_in("_send_through_interrupt")
-                interrupt_main_in("_send_through_interrupt")
+                for _ in range(3):
+                    interrupt_main_in("_send_through_interrupt")
                 release.wait(10)
                 return super().delete_object(**kwargs)
 
@@ -442,6 +463,25 @@ class TestRmSingleKeyInterrupted:
             assert results == []
         finally:
             release.set()
+
+    @pytest.mark.parametrize("entered", [threading.Thread.__init__, threading.Thread.start])
+    def test_an_interrupt_before_the_worker_exists_goes_on(
+        self, entered: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # No thread yet, so no request to wait for: the interrupt is not held.
+        from boto3_s3 import s3 as s3_module
+
+        monkeypatch.setattr(s3_module, "_SPAWN_GRACE", 0.2)
+        client = _FakeS3Client()
+        started = time.monotonic()
+        with (
+            interrupt_main_on_call(entered.__code__, "_send_through_interrupt") as fired,
+            pytest.raises(KeyboardInterrupt),
+        ):
+            S3().rm(S3Storage("s3://b/k", client=client))
+        assert fired == [True]
+        assert time.monotonic() - started < 5
+        assert client.delete_object_calls == []
 
 
 class TestRmBucketRootSweep:

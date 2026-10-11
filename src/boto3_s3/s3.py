@@ -251,14 +251,24 @@ def _raise_if_cancelled(cancel_token: CancelToken | None, operation: str) -> Non
 
 
 class _HeldInterrupt:
-    """The Ctrl-C `_send_through_interrupt` held back until its request settled."""
+    """The Ctrl-Cs `_send_through_interrupt` held back until its request settled.
+
+    ``interrupt`` is the first, raised once the outcome is recorded;
+    ``silenced`` is set by a second, after which the outcome is not recorded.
+    """
 
     def __init__(self) -> None:
         self.interrupt: KeyboardInterrupt | None = None
+        self.silenced = False
 
     def raise_if_held(self) -> None:
         if self.interrupt is not None:
             raise self.interrupt
+
+
+# How long an interrupt landing in Thread.start() waits to learn whether the
+# worker was spawned (a spawned thread runs within a moment).
+_SPAWN_GRACE = 1.0
 
 
 def _send_through_interrupt(send: Callable[[], Any], held: _HeldInterrupt) -> Any:
@@ -270,19 +280,24 @@ def _send_through_interrupt(send: Callable[[], Any], held: _HeldInterrupt) -> An
     (measured: ``delete: s3://b/k``, then the closing line). Sent inline,
     the request would be abandoned mid-flight - the server still deletes the
     object, and nothing reports it. So the request runs on a daemon worker
-    and this thread waits; a first interrupt is parked in *held* for the
-    caller to raise once it has recorded the outcome, and a second one stops
-    the wait, as a second Ctrl-C stops aws's shutdown. The request's own
-    result or exception is returned or raised here.
+    and this thread waits. The first interrupt is parked in *held* for the
+    caller to raise once it has recorded the outcome. A second one keeps the
+    wait but silences the outcome: aws's executor threads are still joined
+    as the process exits, so its request still completes - a delete still
+    sent, a retry still made - yet nothing more is printed (measured). A
+    third stops waiting. The request's own result or exception is returned
+    or raised here.
 
     The wait is on an event the worker sets, not ``Thread.join``: on Python
     3.10 to 3.12 a join interrupted while the thread still runs marks the
     thread finished, and every later join returns at once.
     """
     outcome: list[tuple[bool, Any]] = []
+    begun = threading.Event()
     settled = threading.Event()
 
     def run() -> None:
+        begun.set()
         try:
             outcome.append((True, send()))
         except BaseException as exc:  # handed to the waiting thread
@@ -290,20 +305,29 @@ def _send_through_interrupt(send: Callable[[], Any], held: _HeldInterrupt) -> An
         finally:
             settled.set()
 
+    # Built outside the try: an interrupt landing here leaves no request.
+    worker = threading.Thread(target=run, name="boto3-s3-rm-single", daemon=True)
     try:
-        threading.Thread(target=run, name="boto3-s3-rm-single", daemon=True).start()
+        worker.start()
     except KeyboardInterrupt as interrupt:
-        # Landed in start()'s wait for the thread to come up: the request is
-        # already on its way, so it is waited for like one interrupted below.
+        # Landed inside start(). Once the thread is spawned (start() then
+        # waits for it to come up) the request is on its way and is waited
+        # for like one interrupted below; before that there is no request,
+        # and the interrupt goes on.
+        if not begun.wait(_SPAWN_GRACE):
+            raise
         held.interrupt = interrupt
     while True:
         try:
             settled.wait()
             break
         except KeyboardInterrupt as interrupt:
-            if held.interrupt is not None:
+            if held.interrupt is None:
+                held.interrupt = interrupt
+            elif not held.silenced:
+                held.silenced = True
+            else:
                 raise
-            held.interrupt = interrupt
     ok, value = outcome[0]
     if ok:
         return value
@@ -2576,14 +2600,15 @@ class S3:
                 # error, which is reported, as aws-cli's CRT client reports it.
                 held.raise_if_held()
                 return
-            _emit_result(
-                on_result,
-                info=info,
-                storage=storage,
-                outcome=OpOutcome.FAILED,
-                error=failure,
-                src=src,
-            )
+            if not held.silenced:
+                _emit_result(
+                    on_result,
+                    info=info,
+                    storage=storage,
+                    outcome=OpOutcome.FAILED,
+                    error=failure,
+                    src=src,
+                )
             held.raise_if_held()
             _raise_if_cancelled(cancel_token, "rm")
             raise BatchError(
@@ -2598,14 +2623,15 @@ class S3:
         # ResponseMetadata) under extra_info["delete"], the same shape the batched
         # path reconstructs from a DeleteObjects entry.
         extra_info = {"delete": strip_response_metadata(response)} if capture_response else None
-        _emit_result(
-            on_result,
-            info=info,
-            storage=storage,
-            outcome=OpOutcome.SUCCEEDED,
-            extra_info=extra_info,
-            src=src,
-        )
+        if not held.silenced:
+            _emit_result(
+                on_result,
+                info=info,
+                storage=storage,
+                outcome=OpOutcome.SUCCEEDED,
+                extra_info=extra_info,
+                src=src,
+            )
         held.raise_if_held()
 
     # -- bucket / signing -------------------------------------------------

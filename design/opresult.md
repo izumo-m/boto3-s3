@@ -149,7 +149,9 @@ cancel only - see below) resolves the accepted transfer items like this:
 for a Ctrl-C: aws sends it on a transfer-manager worker whose shutdown waits
 for it, so the request runs on a worker here too and the interrupt is held
 until it settles - its real outcome is recorded, then the `KeyboardInterrupt`
-is raised; a second Ctrl-C stops the wait.
+is raised. A second Ctrl-C keeps the wait but drops the record (aws's
+executor threads are joined as it exits, so its request still completes,
+unreported); a third stops the wait.
 
 On the CRT engine, `CANCELLED` is reserved for the cancel this run's
 `CancelToken` ordered - the one revocation aws-cli has no counterpart for -
