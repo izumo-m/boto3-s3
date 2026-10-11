@@ -454,10 +454,12 @@ def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) ->
     paramfile + shorthand, which the coercions beat) -> cp's ``--expected-size``
     paramfile (252) -> the session profile resolution (255: aws binds the
     profile at startup, so a bad ``--profile`` beats every post-parse usage
-    error) -> **the S3 client build** -> the local-local pair gate (252). Only
-    this shared, order-stable prefix lives here - the stream / checksum / SSE-C
-    checks that follow differ in relative order per command and stay with each
-    command.
+    error) -> **the S3 client build** -> the local-local pair gate (252) ->
+    aws's ``_normalize_s3_trailing_slash`` over both paths (``normalize_s3_path``:
+    the refused ARN forms, 252, then the keyless trailing ``/``; the returned
+    paths are the normalized ones). Only this shared, order-stable prefix lives
+    here - the stream / checksum / SSE-C checks that follow differ in relative
+    order per command and stay with each command.
 
     The client build sits at aws's own slot: everything above is aws's parse
     layer, which runs before ``S3Command._run_main`` creates the client, and

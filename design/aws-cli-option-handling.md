@@ -436,7 +436,8 @@ The rest sit outside the pipeline:
   one.` and this ends `greater than or equal to 1.` (rc 255 on both, measured
   2026-08-08). Rewriting an SDK sentence to match would be a fragile string
   patch on a report neither tool authors, so the difference is taken. The
-  invalid-bucket-name entry above is the same family, and the rest of the
+  invalid-bucket-name report is the same family - the installed botocore words
+  it, the names refused before any request included - and the rest of the
   fork's wording differences sit on aws's SSO / login paths, which this command
   does not have.
 - **No `cli_history` warning.** This command has no history mechanism, so it
