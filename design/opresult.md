@@ -91,7 +91,10 @@ immediate cancellation stopped before its request started, and a key of a
 started batch due a request of its own - XML-incompatible, a re-send of a
 transient per-key failure, any key of a batch request that failed as a
 whole - that an abandoned run had not sent yet ([`deleter.md`](./deleter.md)
-sections 2-3). Three pre-submission gates carve out
+sections 2-3). `rm`'s blind single-key delete carries another: under a held
+Ctrl-C it records a delete that went through and nothing else - a failure,
+or any outcome after a second Ctrl-C (below); `rm` never emits `CANCELLED`.
+Three pre-submission gates carve out
 the other direction: each consumes the item it blocks with an advisory instead
 of an outcome, so that item never reaches the operation layer and gets no
 terminal record - a glacier-blocked source without `ignore_glacier_warnings`
@@ -151,9 +154,11 @@ for it, so the request runs on a worker here too and the interrupt is held
 until it settles - a completed delete is recorded, then the
 `KeyboardInterrupt` is raised. A failed one is not recorded: on aws's
 transfer futures a completion wins over the cancel mark and a failure does
-not, as with the transfer items above. A second Ctrl-C keeps the wait but
-drops the record (aws's executor threads are joined as it exits, so its
-request still completes, unreported); a third stops the wait.
+not - for the same reason a transfer item that fails after the
+cancellation reports `CANCELLED`, an outcome `rm` does not emit. A second
+Ctrl-C keeps the wait but drops the record (aws's executor threads are
+joined as it exits, so its request still completes, unreported); a third
+stops the wait.
 
 On the CRT engine, `CANCELLED` is reserved for the cancel this run's
 `CancelToken` ordered - the one revocation aws-cli has no counterpart for -
