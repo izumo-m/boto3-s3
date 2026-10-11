@@ -2378,10 +2378,16 @@ class S3:
         deletes', and a delete that dies without a response is lost on
         botocore and reported on the CRT, as on aws.
         """
-        if isinstance(target, (str, os.PathLike)):
+        text = os.fspath(target) if isinstance(target, (str, os.PathLike)) else None
+        if isinstance(text, str):
             # A string reads as aws s3 rm reads its argument - the same
-            # keyless normalization `resolve` applies for cp / mv / sync.
-            target = S3Storage.normalize_s3_uri(os.fspath(target))
+            # keyless normalization `resolve` applies for cp / mv / sync - with
+            # the scheme this operation lets a caller omit put back first, so
+            # both spellings name the same location. Anything else is left to
+            # `_resolve_s3_target`'s type check.
+            if not text.startswith("s3://"):
+                text = f"s3://{text}"
+            target = S3Storage.normalize_s3_uri(text)
         storage = self._resolve_s3_target(target, operation="rm")
         config = transfer_config if transfer_config is not None else self._transfer_config
         _raise_if_cancelled(cancel_token, "rm")

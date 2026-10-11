@@ -484,6 +484,10 @@ class TestRmBucketRootSweep:
         results.clear()
         s3.rm(f"s3://{arn}:", dryrun=True, on_result=results.append)
         assert [r.src for r in results] == [f"s3://{arn}:/"]
+        # The scheme rm lets a caller omit names the same location.
+        results.clear()
+        s3.rm(f"{arn}:", recursive=True, dryrun=True, on_result=results.append)
+        assert client.list_calls[-1]["Prefix"] == "/"
 
 
 class TestRmTargetValidation:
@@ -500,6 +504,14 @@ class TestRmTargetValidation:
     def test_non_s3_location_is_rejected(self) -> None:
         with pytest.raises(ValidationError, match="rm accepts"):
             S3().rm(123)  # type: ignore[arg-type]
+
+    def test_a_bytes_path_is_rejected_like_any_non_string(self) -> None:
+        class _BytesPath:
+            def __fspath__(self) -> bytes:
+                return b"s3://b/k"
+
+        with pytest.raises(ValidationError, match="rm accepts"):
+            S3().rm(_BytesPath())  # type: ignore[arg-type]
 
     def test_filter_none_deletes_everything_listed(self) -> None:
         client = _FakeS3Client([{"Contents": [_obj("p/a")]}])

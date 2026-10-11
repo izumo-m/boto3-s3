@@ -162,6 +162,35 @@ class TestNormalizeS3Path:
             transferargs.normalize_s3_path(path)
 
 
+class TestNormalizedPathsAreUsed:
+    """The commands build their locations from the normalized path, so an
+    Outposts access point closed with ":" reads as the key "/" (measured:
+    aws lists under "/" and heads "/")."""
+
+    def test_rm_recursive_lists_under_the_key_slash(self) -> None:
+        from tests.utils.harness import run_recorded
+
+        result, calls = run_recorded(
+            [{}], ["rm", f"s3://{_OUTPOSTS_AP}:", "--recursive", "--dryrun"]
+        )
+        assert result.rc == 0, result.stderr
+        assert [(c.operation, c.params.get("Prefix")) for c in calls] == [("ListObjectsV2", "/")]
+
+    def test_a_single_download_heads_the_key_slash(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tests.utils.fakes3 import client_error
+        from tests.utils.harness import run_recorded
+
+        monkeypatch.chdir(tmp_path)
+        result, calls = run_recorded(
+            [client_error("404", 404, "HeadObject")],
+            ["cp", f"s3://{_OUTPOSTS_AP}:", "out", "--dryrun"],
+        )
+        assert result.rc == 1
+        assert [(c.operation, c.params.get("Key")) for c in calls] == [("HeadObject", "/")]
+
+
 class TestRefusedArnsComeFirst:
     """aws refuses the unsupported ARNs right after the path-type check.
 
