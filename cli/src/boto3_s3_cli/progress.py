@@ -70,6 +70,7 @@ in-process tests capture the printer thread's output (rm precedent).
 
 from __future__ import annotations
 
+import _thread
 import queue
 import sys
 import threading
@@ -99,8 +100,21 @@ _QUEUE_MAX = 10_000
 # Queue sentinel: drain what remains, then stop the printer thread.
 _SHUTDOWN = object()
 
-# The slice finish() waits in, so a Ctrl-C reaches it on every platform.
-_INTERRUPTIBLE_SLICE = 0.1
+# The longest sleep between two looks at a flag `_wait_set` polls.
+_POLL_CEILING = 0.1
+
+
+def _wait_set(event: threading.Event) -> None:
+    """Wait for *event* by reading its flag and sleeping, taking no lock.
+
+    The library's single-rm wait has the same shape (``boto3_s3.s3``): an
+    interruptible sleep on every platform, polled from a millisecond up to
+    `_POLL_CEILING`.
+    """
+    delay = 0.001
+    while not event.is_set():
+        time.sleep(delay)
+        delay = min(delay * 2, _POLL_CEILING)
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,11 +250,17 @@ class TransferPrinter:
         can abort the process at interpreter shutdown, `Fatal Python error:
         _enter_buffered_busy`); a third gives up on a printer wedged on a
         stalled stream. The held interrupt is raised once the printer is
-        done. The wait is on an event the printer sets, not ``Thread.join``:
-        on Python 3.10 to 3.12 a join interrupted while the thread runs marks
-        it finished, and the next join returns at once. Both waits are taken
-        in short slices because Windows before Python 3.14 runs a Ctrl-C's
-        handler only when an untimed lock wait ends.
+        done.
+
+        Nothing on this thread takes a Python-level lock while interrupts may
+        land - an interrupt between a ``Condition``'s lock steps leaves the
+        lock held (the other side then blocks for good) or released twice.
+        So the shutdown marker goes in from a throwaway low-level thread (the
+        put blocks while a stalled printer has the queue full), and the wait
+        polls the event the printer sets (`_wait_set`) - not ``Thread.join``,
+        which on Python 3.10 to 3.12 marks a thread finished when interrupted
+        while it runs, and not ``Event.wait``, whose untimed form Windows
+        before Python 3.14 does not interrupt.
         """
         thread = self._thread
         if thread is None:
@@ -258,16 +278,10 @@ class TransferPrinter:
         marked = False
         while True:
             try:
-                while not marked:
-                    # Blocks while a stalled printer has the queue full; an
-                    # interrupt stopping the output is what frees it.
-                    try:
-                        self._queue.put(_SHUTDOWN, timeout=_INTERRUPTIBLE_SLICE)
-                        marked = True
-                    except queue.Full:
-                        pass
-                while not self._drained.wait(_INTERRUPTIBLE_SLICE):
-                    pass
+                if not marked:
+                    _thread.start_new_thread(self._queue.put, (_SHUTDOWN,))
+                    marked = True
+                _wait_set(self._drained)
                 break
             except KeyboardInterrupt as exc:
                 if interrupt is None:

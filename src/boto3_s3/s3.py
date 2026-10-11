@@ -21,6 +21,7 @@ SDK-free (design/imports.md).
 
 from __future__ import annotations
 
+import _thread
 import functools
 import inspect
 import os
@@ -266,12 +267,34 @@ class _HeldInterrupt:
             raise self.interrupt
 
 
-# How long an interrupt landing in Thread.start() waits to learn whether the
-# worker was spawned (a spawned thread runs within a moment).
+# How long an interrupt landing at the worker's start waits to learn whether
+# the worker was spawned (a spawned thread runs within a moment).
 _SPAWN_GRACE = 1.0
 
-# The slice an interruptible wait is taken in (see _send_through_interrupt).
-_INTERRUPTIBLE_SLICE = 0.1
+# The longest sleep between two looks at a flag `_wait_set` polls.
+_POLL_CEILING = 0.1
+
+
+def _wait_set(event: threading.Event, timeout: float | None = None) -> bool:
+    """Wait for *event* without taking any lock on this thread.
+
+    ``Event.wait`` goes through a Python-level ``Condition``, and a
+    ``KeyboardInterrupt`` landing between its lock steps leaves the lock held
+    - the setter then blocks for good - or released twice (``RuntimeError:
+    release unlocked lock``); a wait that holds Ctrl-Cs and goes on waiting
+    keeps reopening that window. Reading the flag and sleeping touches no
+    lock, and the sleep is interruptible on every platform (Windows before
+    Python 3.14 included, where an untimed lock wait is not). The poll starts
+    at a millisecond and backs off to `_POLL_CEILING`. False on *timeout*.
+    """
+    deadline = None if timeout is None else time.monotonic() + timeout
+    delay = 0.001
+    while not event.is_set():
+        if deadline is not None and time.monotonic() >= deadline:
+            return False
+        time.sleep(delay)
+        delay = min(delay * 2, _POLL_CEILING)
+    return True
 
 
 def _send_through_interrupt(send: Callable[[], Any], held: _HeldInterrupt) -> Any:
@@ -282,20 +305,19 @@ def _send_through_interrupt(send: Callable[[], Any], held: _HeldInterrupt) -> An
     request before the run ends, so the delete's own line is still printed
     (measured: ``delete: s3://b/k``, then the closing line). Sent inline,
     the request would be abandoned mid-flight - the server still deletes the
-    object, and nothing reports it. So the request runs on a daemon worker
-    and this thread waits. The first interrupt is parked in *held* for the
-    caller to raise once it has recorded the outcome. A second one keeps the
-    wait but silences the outcome: aws's executor threads are still joined
-    as the process exits, so its request still completes - a delete still
-    sent, a retry still made - yet nothing more is printed (measured). A
-    third stops waiting. The request's own result or exception is returned
-    or raised here.
+    object, and nothing reports it. So the request runs on a worker and this
+    thread waits. The first interrupt is parked in *held* for the caller to
+    raise once it has recorded the outcome. A second one keeps the wait but
+    silences the outcome: aws's executor threads are still joined as the
+    process exits, so its request still completes - a delete still sent, a
+    retry still made - yet nothing more is printed (measured). A third stops
+    waiting. The request's own result or exception is returned or raised here.
 
-    The wait is on an event the worker sets, not ``Thread.join``: on Python
-    3.10 to 3.12 a join interrupted while the thread still runs marks the
-    thread finished, and every later join returns at once. It is taken in
-    short slices because Windows before Python 3.14 runs a Ctrl-C's handler
-    only when an untimed lock wait ends.
+    Nothing on this thread takes a Python-level lock while interrupts may
+    land: the worker is a low-level thread (``_thread.start_new_thread`` -
+    ``Thread.start`` waits on a ``Condition``, and ``Thread.join`` on Python
+    3.10 to 3.12 marks a thread finished when interrupted while it runs), and
+    the waits are `_wait_set`'s.
     """
     outcome: list[tuple[bool, Any]] = []
     begun = threading.Event()
@@ -310,22 +332,18 @@ def _send_through_interrupt(send: Callable[[], Any], held: _HeldInterrupt) -> An
         finally:
             settled.set()
 
-    # Built outside the try: an interrupt landing here leaves no request.
-    worker = threading.Thread(target=run, name="boto3-s3-rm-single", daemon=True)
     try:
-        worker.start()
+        _thread.start_new_thread(run, ())
     except KeyboardInterrupt as interrupt:
-        # Landed inside start(). Once the thread is spawned (start() then
-        # waits for it to come up) the request is on its way and is waited
-        # for like one interrupted below; before that there is no request,
-        # and the interrupt goes on.
-        if not begun.wait(_SPAWN_GRACE):
+        # Landed at the start. Once the thread is spawned the request is on
+        # its way and is waited for like one interrupted below; before that
+        # there is no request, and the interrupt goes on.
+        if not _wait_set(begun, _SPAWN_GRACE):
             raise
         held.interrupt = interrupt
     while True:
         try:
-            while not settled.wait(_INTERRUPTIBLE_SLICE):
-                pass
+            _wait_set(settled)
             break
         except KeyboardInterrupt as interrupt:
             if held.interrupt is None:
