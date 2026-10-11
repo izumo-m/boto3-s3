@@ -100,15 +100,27 @@ class TestFinishInterrupted:
         assert printer._drained.is_set()  # pyright: ignore[reportPrivateUsage]
         assert len(capsys.readouterr().out.splitlines()) < 2000
 
-    @pytest.mark.parametrize("outcome", [None, "failed", "fatal"])
+    @pytest.mark.parametrize(
+        ("outcome", "closing"),
+        [
+            (None, ""),
+            ("failed", ""),
+            ("fatal", "fatal error: boom\n"),
+            ("interrupted", "cancelled: ctrl-c received\n"),
+        ],
+    )
     def test_finish_transfer_lets_a_drain_interrupt_reach_the_dispatcher(
         self,
         outcome: str | None,
+        closing: str,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         # Whatever the run ended with, the interrupt is the dispatcher's 130
-        # (and its newline), not the run span's `cancelled:` / rc 1.
+        # (and its newline) rather than the run span's rc 1 - after the run's
+        # own closing line, which aws's printer thread still writes (measured:
+        # a mid-run Ctrl-C and one in the drain print `cancelled:` and exit
+        # 130).
         from boto3_s3 import BatchError
         from boto3_s3_cli.commands.transferargs import finish_transfer
 
@@ -129,12 +141,14 @@ class TestFinishInterrupted:
                 raise BatchError("1 of 201 failed", succeeded=200, failed=1, warned=0, skipped=0)
             if outcome == "fatal":
                 raise RuntimeError("boom")
+            if outcome == "interrupted":
+                raise KeyboardInterrupt
 
         with pytest.raises(KeyboardInterrupt):
             finish_transfer(printer, quiet=False, run=run)
         captured = capsys.readouterr()
         assert len(captured.out.splitlines()) == 200
-        assert captured.err == ""
+        assert captured.err == closing
 
 
 class TestResultLines:

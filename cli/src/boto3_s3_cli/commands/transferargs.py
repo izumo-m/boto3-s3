@@ -999,37 +999,55 @@ def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], 
     whatever the run itself ended with (measured: all lines, rc 130).
     """
     error: BaseException | None = None
-    with printer:
-        try:
-            run()
-        except BaseException as exc:  # classified below, once every line is out
-            error = exc
+    try:
+        with printer:
+            try:
+                run()
+            except BaseException as exc:  # classified below, once every line is out
+                error = exc
+    except KeyboardInterrupt:
+        # From the drain: aws's printer thread still writes the run's own
+        # closing line - it is a queued result there - before the 130
+        # (measured: a mid-run Ctrl-C, then one in the drain, prints
+        # `cancelled: ctrl-c received` and exits 130).
+        line = None if error is None else _closing_line(error)
+        if line is not None and not quiet:
+            sys.stderr.write(line)
+        raise
     if error is None:
         return 2 if printer.warned else 0
-    if isinstance(error, BatchError):
-        # Per-item failure lines were already streamed by the printer.
-        return 1
-    if isinstance(error, KeyboardInterrupt):
-        # Ctrl-C inside the pipeline span is a cancelled run, not the
-        # dispatcher's 130: aws's result machinery swallows the interrupt
-        # (`CommandResultRecorder.__exit__`), the shutdown cancels the
-        # accepted transfers, and the printer emits one
-        # `cancelled: ctrl-c received` line at rc 1 (measured mid-sync and
-        # mid-rm, 2.36.40). The per-item CANCELLED records stay silent like
-        # aws's (progress.py `_prints`); the pre-pipeline spans keep the
-        # 130 backstop.
-        if not quiet:
-            sys.stderr.write("cancelled: ctrl-c received\n")
-        return 1
-    if isinstance(error, AssertionError) or not isinstance(error, Exception):
+    if isinstance(error, AssertionError) or not isinstance(error, Exception | KeyboardInterrupt):
         # An internal-invariant violation (a bug) surfaces loudly, like the
         # dispatcher's AssertionError re-raise (cli.py) - masking it as a
         # fatal error would also blunt the test doubles' unexpected-call
         # guards; SystemExit and the rest of the BaseException family pass.
         raise error
-    if not quiet:
-        sys.stderr.write(f"fatal error: {error}\n")
+    line = _closing_line(error)
+    if line is not None and not quiet:
+        sys.stderr.write(line)
     return 1
+
+
+def _closing_line(error: BaseException) -> str | None:
+    """The line a run that raised *error* ends with, or None (finish_transfer).
+
+    ``BatchError`` has none - its per-item failure lines were already
+    streamed by the printer. A ``KeyboardInterrupt`` inside the pipeline span
+    is a cancelled run, not the dispatcher's 130: aws's result machinery
+    swallows the interrupt (``CommandResultRecorder.__exit__``), the shutdown
+    cancels the accepted transfers, and the printer emits one ``cancelled:
+    ctrl-c received`` line at rc 1 (measured mid-sync and mid-rm, 2.36.40);
+    the per-item CANCELLED records stay silent like aws's (progress.py
+    ``_prints``), and the pre-pipeline spans keep the 130 backstop. Anything
+    else that killed the run is one ``fatal error:`` line.
+    """
+    if isinstance(error, BatchError):
+        return None
+    if isinstance(error, KeyboardInterrupt):
+        return "cancelled: ctrl-c received\n"
+    if isinstance(error, Exception) and not isinstance(error, AssertionError):
+        return f"fatal error: {error}\n"
+    return None
 
 
 __all__ = [
