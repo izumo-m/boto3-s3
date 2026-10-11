@@ -148,10 +148,12 @@ cancel only - see below) resolves the accepted transfer items like this:
 `rm`'s blind single-key delete (one request, no engine) keeps the same rule
 for a Ctrl-C: aws sends it on a transfer-manager worker whose shutdown waits
 for it, so the request runs on a worker here too and the interrupt is held
-until it settles - its real outcome is recorded, then the `KeyboardInterrupt`
-is raised. A second Ctrl-C keeps the wait but drops the record (aws's
-executor threads are joined as it exits, so its request still completes,
-unreported); a third stops the wait.
+until it settles - a completed delete is recorded, then the
+`KeyboardInterrupt` is raised. A failed one is not recorded: on aws's
+transfer futures a completion wins over the cancel mark and a failure does
+not, as with the transfer items above. A second Ctrl-C keeps the wait but
+drops the record (aws's executor threads are joined as it exits, so its
+request still completes, unreported); a third stops the wait.
 
 On the CRT engine, `CANCELLED` is reserved for the cancel this run's
 `CancelToken` ordered - the one revocation aws-cli has no counterpart for -

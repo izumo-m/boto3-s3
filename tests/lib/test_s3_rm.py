@@ -411,7 +411,10 @@ class TestRmSingleKeyInterrupted:
         assert client.delete_object_calls == [{"Bucket": "b", "Key": "k"}]
         assert [(r.compare_key, r.outcome) for r in results] == [("k", OpOutcome.SUCCEEDED)]
 
-    def test_a_failed_delete_is_recorded_before_the_interrupt(self) -> None:
+    def test_a_delete_failing_after_the_interrupt_is_not_recorded(self) -> None:
+        # On aws's transfer futures a completion wins over the cancel mark and a
+        # failure does not (measured: a 403 after the Ctrl-C prints only the
+        # closing line).
         class _InterruptedClient(_FakeS3Client):
             def delete_object(self, **kwargs: Any) -> dict[str, Any]:
                 interrupt_main_in("_send_through_interrupt")
@@ -423,7 +426,7 @@ class TestRmSingleKeyInterrupted:
         results: list[OpResult] = []
         with pytest.raises(KeyboardInterrupt):
             S3().rm(S3Storage("s3://b/k", client=client), on_result=results.append)
-        assert [r.outcome for r in results] == [OpOutcome.FAILED]
+        assert results == []
 
     def test_a_second_ctrl_c_still_waits_but_records_nothing(self) -> None:
         # aws's executor threads are joined as it exits, so its request still

@@ -147,10 +147,12 @@ reclaimed. On the blind single-key path the token is polled after the record
 is emitted, the `FAILED` record included, so a cancel from that callback
 raises `CancelledError` in place of the `BatchError` the failure would
 otherwise become. A Ctrl-C while that single request is out does not abandon
-it: `rm` waits for the answer, emits its record, and then raises the
-`KeyboardInterrupt`, as `aws s3 rm` still reports a delete it had sent. A
-second Ctrl-C still lets the request finish but emits no record (`aws s3 rm`
-still completes it and prints nothing more); a third stops the wait.
+it: `rm` waits for the answer and then raises the `KeyboardInterrupt`,
+emitting the `SUCCEEDED` record first if the delete went through - as
+`aws s3 rm` still reports a delete it had sent - but no `FAILED` record if it
+failed (there the interrupt wins, as on `aws s3 rm`). A second Ctrl-C still
+lets the request finish but emits no record (`aws s3 rm` still completes it
+and prints nothing more); a third stops the wait.
 
 `capture_response=True` attaches the delete response to a successful
 record's `extra_info` under the key `"delete"`, with `ResponseMetadata`

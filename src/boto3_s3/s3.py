@@ -2624,7 +2624,11 @@ class S3:
                 # error, which is reported, as aws-cli's CRT client reports it.
                 held.raise_if_held()
                 return
-            if not held.silenced:
+            if held.interrupt is None:
+                # A failure after a Ctrl-C is not recorded: on aws's transfer
+                # futures a completion wins over the cancel mark and a failure
+                # does not (measured: a 403 after the interrupt prints only
+                # the closing line).
                 _emit_result(
                     on_result,
                     info=info,
