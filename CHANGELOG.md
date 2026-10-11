@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The module-level functions (`boto3_s3.cp` and the rest) can now be handed to a `ProcessPoolExecutor` - with a compiled `GlobFilter` as `filter=`, too - and a `BatchError` they raise there comes back with its counts.
 - Under `use_threads=False`, a transfer cut short by Ctrl-C is now recorded as cancelled rather than as done, and a `mv` no longer deletes its source after it, wherever the interrupt lands.
 - `ChecksumComparison` now recognizes a multipart (`COMPOSITE`) checksum that arrives without its part count (as MinIO's `GetObjectAttributes` sends it) instead of copying such objects on every run, and a broken part listing no longer hangs or stops the sync.
+- A string path given to `cp` / `mv` / `sync` / `rm` is now read as `aws s3` reads it, so `rm` on an Outposts access point ARN closed with `:` no longer deletes the whole access point; a Ctrl-C during a single-key `rm` now waits for its request and records it before raising.
 - `EtagComparison` now refuses a `part_size` that is not a positive integer when it is constructed.
 - A timestamp an S3-compatible endpoint sends without a zone is now read as local time, as `aws s3` reads it, instead of ending a sync with `TypeError`.
 - Added `is_s3express_accesspoint_path`.

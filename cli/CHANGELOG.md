@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A profile's `cli_auto_prompt` is now read like `aws` reads it: from the profile the environment selects, no longer from the one `--profile` names.
 - More `aws` parity at startup: `--version` with stdout closed no longer ends in a traceback, and runs carrying two mistakes at once (an unknown option beside a bad option value, an unusable instance-metadata setting, `retry_mode = legacy` beside a bad endpoint) now report the one `aws` reports (exit codes changed in those corners).
 - An HTTPS proxy now receives aws's `Host` header for an IPv6-literal endpoint on every host interpreter.
+- More `aws` parity in the subcommands: `rm` on an Outposts access point ARN closed with `:` no longer deletes the whole access point, unsupported ARNs and refused bucket names are reported as and when `aws` reports them, and a Ctrl-C now waits for a single `rm`'s delete and for a finished run's last result lines (exit codes changed in those corners).
 
 ## [0.8.1] - 2026-09-07
 
