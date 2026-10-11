@@ -99,6 +99,9 @@ _QUEUE_MAX = 10_000
 # Queue sentinel: drain what remains, then stop the printer thread.
 _SHUTDOWN = object()
 
+# The slice finish() waits in, so a Ctrl-C reaches it on every platform.
+_INTERRUPTIBLE_SLICE = 0.1
+
 
 @dataclass(frozen=True, slots=True)
 class _ResultRecord:
@@ -235,7 +238,9 @@ class TransferPrinter:
         stalled stream. The held interrupt is raised once the printer is
         done. The wait is on an event the printer sets, not ``Thread.join``:
         on Python 3.10 to 3.12 a join interrupted while the thread runs marks
-        it finished, and the next join returns at once.
+        it finished, and the next join returns at once. Both waits are taken
+        in short slices because Windows before Python 3.14 runs a Ctrl-C's
+        handler only when an untimed lock wait ends.
         """
         thread = self._thread
         if thread is None:
@@ -253,12 +258,16 @@ class TransferPrinter:
         marked = False
         while True:
             try:
-                if not marked:
+                while not marked:
                     # Blocks while a stalled printer has the queue full; an
                     # interrupt stopping the output is what frees it.
-                    self._queue.put(_SHUTDOWN)
-                    marked = True
-                self._drained.wait()
+                    try:
+                        self._queue.put(_SHUTDOWN, timeout=_INTERRUPTIBLE_SLICE)
+                        marked = True
+                    except queue.Full:
+                        pass
+                while not self._drained.wait(_INTERRUPTIBLE_SLICE):
+                    pass
                 break
             except KeyboardInterrupt as exc:
                 if interrupt is None:

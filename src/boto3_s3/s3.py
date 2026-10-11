@@ -270,6 +270,9 @@ class _HeldInterrupt:
 # worker was spawned (a spawned thread runs within a moment).
 _SPAWN_GRACE = 1.0
 
+# The slice an interruptible wait is taken in (see _send_through_interrupt).
+_INTERRUPTIBLE_SLICE = 0.1
+
 
 def _send_through_interrupt(send: Callable[[], Any], held: _HeldInterrupt) -> Any:
     """Run one request to its end on a worker, waiting for it through a Ctrl-C.
@@ -290,7 +293,9 @@ def _send_through_interrupt(send: Callable[[], Any], held: _HeldInterrupt) -> An
 
     The wait is on an event the worker sets, not ``Thread.join``: on Python
     3.10 to 3.12 a join interrupted while the thread still runs marks the
-    thread finished, and every later join returns at once.
+    thread finished, and every later join returns at once. It is taken in
+    short slices because Windows before Python 3.14 runs a Ctrl-C's handler
+    only when an untimed lock wait ends.
     """
     outcome: list[tuple[bool, Any]] = []
     begun = threading.Event()
@@ -319,7 +324,8 @@ def _send_through_interrupt(send: Callable[[], Any], held: _HeldInterrupt) -> An
         held.interrupt = interrupt
     while True:
         try:
-            settled.wait()
+            while not settled.wait(_INTERRUPTIBLE_SLICE):
+                pass
             break
         except KeyboardInterrupt as interrupt:
             if held.interrupt is None:
