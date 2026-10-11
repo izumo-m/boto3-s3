@@ -463,19 +463,19 @@ class TestRmSingleKeyInterrupted:
             release.set()
 
     @staticmethod
-    def _interrupt_the_worker_start(monkeypatch: pytest.MonkeyPatch, *, spawn: bool) -> None:
-        """Raise a KeyboardInterrupt out of the worker's ``Thread.start``,
-        before the thread is spawned or once it is."""
-        real_start = threading.Thread.start
+    def _interrupt_the_spawn(monkeypatch: pytest.MonkeyPatch, *, spawn: bool) -> None:
+        """Raise a KeyboardInterrupt at the worker's spawn - the one C call an
+        interrupt lands before or after - before it runs or once it has."""
+        import _thread
 
-        def start(self: threading.Thread) -> None:
-            if self.name == "boto3-s3-rm-single":
-                if spawn:
-                    real_start(self)
-                raise KeyboardInterrupt
-            real_start(self)
+        real = _thread.start_new_thread
 
-        monkeypatch.setattr(threading.Thread, "start", start)
+        def start_new_thread(function: Any, args: Any) -> int:
+            if spawn:
+                real(function, args)
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(_thread, "start_new_thread", start_new_thread)
 
     def test_an_interrupt_before_the_worker_exists_goes_on(
         self, monkeypatch: pytest.MonkeyPatch
@@ -484,7 +484,7 @@ class TestRmSingleKeyInterrupted:
         from boto3_s3 import s3 as s3_module
 
         monkeypatch.setattr(s3_module, "_SPAWN_GRACE", 0.2)
-        self._interrupt_the_worker_start(monkeypatch, spawn=False)
+        self._interrupt_the_spawn(monkeypatch, spawn=False)
         client = _FakeS3Client()
         results: list[OpResult] = []
         with pytest.raises(KeyboardInterrupt):
@@ -495,13 +495,46 @@ class TestRmSingleKeyInterrupted:
     def test_an_interrupt_once_the_worker_runs_is_held(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        self._interrupt_the_worker_start(monkeypatch, spawn=True)
+        self._interrupt_the_spawn(monkeypatch, spawn=True)
         client = _FakeS3Client()
         results: list[OpResult] = []
         with pytest.raises(KeyboardInterrupt):
             S3().rm(S3Storage("s3://b/k", client=client), on_result=results.append)
         assert client.delete_object_calls == [{"Bucket": "b", "Key": "k"}]
         assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED]
+
+    def test_a_worker_that_cannot_start_fails_the_delete(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real_start = threading.Thread.start
+
+        def start(self: threading.Thread) -> None:
+            if self.name == "boto3-s3-rm-single":
+                raise RuntimeError("can't start new thread")
+            real_start(self)
+
+        monkeypatch.setattr(threading.Thread, "start", start)
+        client = _FakeS3Client()
+        results: list[OpResult] = []
+        with pytest.raises(BatchError):
+            S3().rm(S3Storage("s3://b/k", client=client), on_result=results.append)
+        assert client.delete_object_calls == []
+        assert [r.outcome for r in results] == [OpOutcome.FAILED]
+
+    def test_the_worker_is_a_named_thread(self) -> None:
+        # Not a bare _thread thread: a current_thread() call in it (logging's
+        # thread name) would leave a Dummy thread in threading.enumerate() on
+        # Python 3.10 to 3.12.
+        names: list[str] = []
+
+        class _NamingClient(_FakeS3Client):
+            def delete_object(self, **kwargs: Any) -> dict[str, Any]:
+                names.append(threading.current_thread().name)
+                return super().delete_object(**kwargs)
+
+        S3().rm(S3Storage("s3://b/k", client=_NamingClient()))
+        assert names == ["boto3-s3-rm-single"]
+        assert not any(t.name.startswith("Dummy") for t in threading.enumerate())
 
 
 class TestRmBucketRootSweep:

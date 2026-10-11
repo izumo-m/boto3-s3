@@ -324,9 +324,11 @@ def _send_through_interrupt(send: Callable[[], Any], held: _HeldInterrupt) -> An
     third stops waiting. The request's own result or exception is returned
     or raised here.
 
-    The waits are `_wait_set`'s, never ``Thread.join`` (on Python 3.10 to
-    3.12 a join interrupted while the thread runs marks it finished, and
-    every later join returns at once) nor ``Event.wait``.
+    Nothing on this thread takes a Python-level lock while interrupts may
+    land: the worker is started from another thread, and the waits are
+    `_wait_set`'s - never ``Thread.join`` (on Python 3.10 to 3.12 a join
+    interrupted while the thread runs marks it finished, and every later
+    join returns at once) nor ``Event.wait``.
     """
     outcome: list[tuple[bool, Any]] = []
     begun, begun_wake = threading.Event(), _waker()
@@ -345,13 +347,25 @@ def _send_through_interrupt(send: Callable[[], Any], held: _HeldInterrupt) -> An
 
     # Built outside the try: an interrupt landing here leaves no request.
     worker = threading.Thread(target=run, name="boto3-s3-rm-single", daemon=True)
+
+    def start_worker() -> None:
+        try:
+            worker.start()
+        except BaseException as exc:  # no worker: the failure is the request's
+            outcome.append((False, exc))
+            settled.set()
+            settled_wake.release()
+
     try:
-        worker.start()
+        # Started from a throwaway low-level thread: Thread.start takes
+        # threading's limbo lock and waits on a Condition, Python-level lock
+        # steps an interrupt landing on this thread could leave half-taken.
+        # The spawn is one C call, so an interrupt lands before it or after.
+        _thread.start_new_thread(start_worker, ())
     except KeyboardInterrupt as interrupt:
-        # Landed inside start(). Once the thread is spawned (start() then
-        # waits for it to come up) the request is on its way and is waited
-        # for like one interrupted below; before that there is no request,
-        # and the interrupt goes on.
+        # After the spawn the request is on its way and is waited for like
+        # one interrupted below; before it there is no request, and the
+        # interrupt goes on.
         if not _wait_set(begun, begun_wake, _SPAWN_GRACE):
             raise
         held.interrupt = interrupt

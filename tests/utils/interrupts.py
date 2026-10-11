@@ -26,8 +26,8 @@ def interrupt_main_in(caller: str) -> None:
     """Send the main thread a SIGINT once it waits in *caller*'s `_wait_set`.
 
     Polls the main thread's stack until its innermost Python frame is a
-    ``_wait_set`` (the lock-free flag poll the library's single rm and the
-    CLI printer wait in) called directly from the function named *caller*,
+    ``_wait_set`` (the raw-lock wait the library's single rm and the CLI
+    printer hold Ctrl-Cs in) called directly from the function named *caller*,
     then signals and gives the interrupt a moment to land. Call it from
     another thread.
     """
