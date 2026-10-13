@@ -24,13 +24,21 @@ The suite is opt-in, gated on ``BOTO3_S3_E2E_BUCKET``:
   binary present and on the vendored v2 pin; the bucket reachable and **empty**,
   checked via boto3) and the session aborts on any failure. The non-empty check
   is the safety guard against pointing the variable at a real, populated bucket.
+
+Credentials, region and endpoint come from the env alone (``scripts/minio-env.sh``,
+or ``tests/run_e2e.sh``, which exports a profile's credentials and drops
+``AWS_PROFILE``); ``~`` points at a throwaway directory for the whole suite,
+probe included, so neither tool reads the developer's ``~/.aws`` and the pinned
+aws does not write its session database there.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 import warnings
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -39,7 +47,7 @@ import pytest
 from botocore.config import Config
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator, Iterator
 
 BUCKET_ENV_VAR = "BOTO3_S3_E2E_BUCKET"
 
@@ -61,9 +69,36 @@ def _moto_isolation() -> None:
     real ones. e2e talks to a real endpoint and needs the host's credentials,
     region, and ``AWS_ENDPOINT_URL_S3`` intact, so the parent fixture is
     suppressed by this same-name no-op (pytest's closer-conftest-wins
-    resolution).
+    resolution). The home directory is isolated separately (`_e2e_home`).
     """
     return
+
+
+@contextmanager
+def _isolated_home() -> Generator[None, None, None]:
+    """Point ``~`` at a throwaway directory for the duration.
+
+    Both tools read ``~/.aws/config``, ``~/.aws/credentials`` and
+    ``~/.aws/cli/alias``, and the pinned aws writes
+    ``~/.aws/cli/cache/session.db`` on every command that builds a client
+    (``--version`` alone does not). Against the developer's home, the host's
+    settings would steer both sides of every comparison and each run would
+    write into it. ``USERPROFILE`` is what Windows resolves ``~`` from.
+    """
+    with (
+        tempfile.TemporaryDirectory(prefix="e2e-home-") as home,
+        pytest.MonkeyPatch.context() as mp,
+    ):
+        mp.setenv("HOME", home)
+        mp.setenv("USERPROFILE", home)
+        yield
+
+
+@pytest.fixture(scope="package", autouse=True)
+def _e2e_home() -> Iterator[None]:
+    """The suite-wide `_isolated_home` (package scope: it ends with the suite)."""
+    with _isolated_home():
+        yield
 
 
 def _is_e2e_item(item: Any) -> bool:
@@ -90,7 +125,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[Any]) -> No
             item.add_marker(skip)
         return
 
-    _probe_e2e_environment_or_exit()
+    with _isolated_home():
+        _probe_e2e_environment_or_exit()
 
 
 def _probe_e2e_environment_or_exit() -> None:
@@ -168,13 +204,15 @@ def bucket_name() -> str:
     return name
 
 
-@pytest.fixture(scope="session")
-def s3_client() -> Any:
+@pytest.fixture(scope="package")
+def s3_client(_e2e_home: None) -> Any:
     """An S3 client built from the host env (incl. ``AWS_ENDPOINT_URL_S3``).
 
     Built on a fresh ``Session``: the process-global default session caches
     whatever credentials it resolved first, which in a full run are the fake
-    ones the other suites force via ``_moto_isolation``.
+    ones the other suites force via ``_moto_isolation``. Package scope and the
+    explicit `_e2e_home` dependency build it under the isolated home - a
+    session-scoped fixture would be set up before the package-scoped one.
     """
     return boto3.session.Session().client(
         "s3",
