@@ -201,6 +201,12 @@ class TestRmSingleKey:
         assert [r.src for r in results] == [f"s3://{arn}:k"]
         assert results[0].src_info is not None and results[0].src_info.key == "k"
         assert [r.src for r in _rm("s3://b/k", _FakeS3Client(), dryrun=True)] == ["s3://b/k"]
+        # A name the pattern cuts short (`my_ap` is the access point `my` and
+        # the key `_ap`) prints as typed too: `(dryrun) delete: s3://<arn>/my_ap`.
+        cut = arn[: -len("ap")] + "my_ap"
+        results = _rm(f"s3://{cut}", _FakeS3Client(), dryrun=True)
+        assert [r.src for r in results] == [f"s3://{cut}"]
+        assert results[0].src_info is not None and results[0].src_info.key == "_ap"
 
     def test_failure_emits_failed_and_raises_batch_error(self) -> None:
         client = _FakeS3Client(

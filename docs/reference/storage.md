@@ -771,8 +771,10 @@ are equal **and** their keys satisfy the `same_path` rule anchored at `/` (with
 equal buckets the URI prefix is inert, and the `/`-anchoring preserves
 `os.path`'s semantics exactly). The two agree except for one object spelled two
 ways — an Outposts access point key set off with `:` on one side and `/` on the
-other — which the AWS CLI's string comparison takes for two objects, letting
-the move run onto itself; here it is a self-move like any other. Two locations
+other, or typed straight after an access point name the pattern cuts short
+(`accesspoint/my_ap` on one side, `accesspoint/my/_ap` on the other) — which the
+AWS CLI's string comparison takes for two objects, letting the move run onto
+itself; here it is a self-move like any other. Two locations
 without a bucket are compared as strings only, so `s3://` and `s3:///` are
 different, as they are to the AWS CLI.
 
@@ -800,10 +802,11 @@ hand, `normalized_uri` derives the same form from held state.
 The keyless-normalized `s3://` URI derived from the held state with no string
 round-trip: a keyless bucket reads as `s3://bucket/`, and the bare service root
 keeps the spelling it was given, `s3://` or `s3:///`. It equals
-`normalize_s3_uri(uri)` except for an access point name the AWS CLI's pattern
-cuts short (`accesspoint/my_ap` — not a valid name; the pattern stops at `my`),
-which is rebuilt with a `/` at the cut. This is the form `mv`'s same-path error
-message shows.
+`normalize_s3_uri(uri)`: the separator between the bucket and the key is the
+one the location was typed with — `/`, `:` after an Outposts access point, or
+none where the AWS CLI's pattern cuts an access point name short
+(`accesspoint/my_ap` — not a valid name; the pattern stops at `my` and `_ap` is
+the key). This is the form `mv`'s same-path error message shows.
 
 ### as_text() / format(\*, dir_op)
 

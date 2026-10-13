@@ -18,6 +18,7 @@ from typing_extensions import override
 
 from boto3_s3 import LocalStorage, S3Storage, Storage, transferplan
 from boto3_s3.exceptions import ValidationError
+from boto3_s3.producers import key_after_bucket
 from boto3_s3.transferplan import dest_for, item_paths
 from boto3_s3.types import FileInfo, ScanOptions
 
@@ -567,17 +568,41 @@ class TestMvSamePathGuards:
         assert colon.same_path_as(slash)
         assert slash.same_path_as(colon)
 
-    def test_a_name_the_pattern_cuts_short_is_joined_with_a_slash(self) -> None:
+    def test_a_name_the_pattern_cuts_short_keeps_the_typed_text(self) -> None:
         # `my_ap` is no access-point name: aws-cli's pattern stops at `my` and
-        # reads `_ap/k` as the key. Both tools send that split; here the
-        # string form marks the boundary with "/" (aws-cli keeps the typed
-        # text), so the key still slices off by the bucket's length plus one.
-        arn = self._OUTPOST_AP[: -len("myap")] + "my_ap"
-        storage = S3Storage(f"s3://{arn}/k")
-        assert storage.key == "_ap/k"
-        root, _ = storage.format(dir_op=False)
-        assert root == f"{storage.bucket}/_ap/k"
-        assert root[len(storage.bucket) + 1 :] == storage.key
+        # reads `_ap/k` as the key. Both tools send that split, and aws-cli
+        # prints the location as typed: `rm s3://<arn>/my_ap --dryrun` previews
+        # `delete: s3://<arn>/my_ap` (measured against the pinned aws 2.36.40,
+        # offline). Nothing stands between that bucket and key.
+        for name in ("my_ap", "my.ap", "my%ap", "my\u00e9ap"):
+            arn = self._OUTPOST_AP[: -len("myap")] + name
+            uri = f"s3://{arn}/k"
+            storage = S3Storage(uri)
+            assert storage.bucket == self._OUTPOST_AP[: -len("myap")] + "my"
+            assert storage.key == name[2:] + "/k"
+            assert storage.as_text() == uri == storage.normalized_uri()
+            assert storage.format(dir_op=False) == (f"{arn}/k", False)
+            root, _ = storage.format(dir_op=True)
+            assert root == f"{arn}/k/"
+            assert key_after_bucket(root, storage.bucket) == storage.key + "/"
+
+    def test_the_key_slices_off_after_whichever_separator_was_typed(self) -> None:
+        cut = self._OUTPOST_AP[: -len("myap")] + "my"
+        assert key_after_bucket(f"{cut}_ap/k", cut) == "_ap/k"
+        assert key_after_bucket(f"{self._OUTPOST_AP}:k", self._OUTPOST_AP) == "k"
+        assert key_after_bucket(f"{self._OUTPOST_AP}::k", self._OUTPOST_AP) == ":k"
+        assert key_after_bucket(f"{self._OUTPOST_AP}/k", self._OUTPOST_AP) == "k"
+        assert key_after_bucket("b//k", "b") == "/k"
+        assert key_after_bucket("b/", "b") == ""
+
+    def test_a_cut_short_name_spelled_with_a_slash_is_the_same_object(self) -> None:
+        # `<arn>/my_ap` and `<arn>/my/_ap` are one object; aws-cli's string
+        # rule tells them apart, the held bucket/key do not (as for `:` / `/`).
+        arn = self._OUTPOST_AP[: -len("myap")]
+        typed = S3Storage(f"s3://{arn}my_ap")
+        slashed = S3Storage(f"s3://{arn}my/_ap")
+        assert not same_path(typed.normalized_uri(), slashed.normalized_uri())
+        assert typed.same_path_as(slashed)
 
     def test_same_key_splits_access_point_arns_whole(self) -> None:
         assert same_key(f"s3://{_ACCESSPOINT_ARN}/k.txt", "s3://plain-bucket/k.txt")

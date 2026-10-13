@@ -197,6 +197,21 @@ def _s3_source_display(plan: transferplan.TransferPlan, src_bucket: str, info: F
     return f"s3://{plan.src_root}"
 
 
+def key_after_bucket(path: str, bucket: str) -> str:
+    """The key part of a formatted ``bucket<sep>key`` path (``S3Storage.format``).
+
+    The separator is the one the location was typed with: ``/``, or ``:`` after
+    an Outposts access point - and nothing where the access-point pattern cut
+    the name short (``accesspoint/my_ap`` is bucket ``.../accesspoint/my``, key
+    ``_ap``). The key then starts with the character that stopped the name,
+    which is never ``/`` or ``:``: the pattern would have taken either as the
+    separator. So one leading ``/`` or ``:`` is the separator, and anything
+    else already belongs to the key.
+    """
+    rest = path[len(bucket) :]
+    return rest[1:] if rest[:1] in ("/", ":") else rest
+
+
 def open_side_display(storage: Storage, key: str) -> str:
     """A display string for the custom (``open``-routed) side of a transfer.
 
@@ -422,7 +437,7 @@ def upload_item_from_info(
         src_path=native,
         src_info=info,
         dest_bucket=dest_bucket,
-        dest_key=dest[len(dest_bucket) + 1 :],
+        dest_key=key_after_bucket(dest, dest_bucket),
         src_display=native,
         dest_display=f"s3://{dest}",
     )
@@ -446,7 +461,7 @@ def s3_source_items(
     if plan.dir_op:
         infos: Iterator[FileInfo] = scan_s3_source(
             src_storage,
-            key_prefix=plan.src_root[len(src_bucket) + 1 :],
+            key_prefix=key_after_bucket(plan.src_root, src_bucket),
             item_filter=item_filter,
             options=options,
             reusable_after_interrupt=reusable_after_interrupt,
@@ -639,7 +654,7 @@ def copy_item_from_info(
         src_key=info.key,
         src_info=info,
         dest_bucket=dest_bucket,
-        dest_key=dest[len(dest_bucket) + 1 :],
+        dest_key=key_after_bucket(dest, dest_bucket),
         src_display=src_display,
         dest_display=f"s3://{dest}",
     )
@@ -1054,7 +1069,7 @@ def open_upload_item(
         src_info=info,
         src_fileobj=None if dryrun else _DeferredReader(plan.src, open_key, info.size),
         dest_bucket=dest_bucket,
-        dest_key=dest[len(dest_bucket) + 1 :],
+        dest_key=key_after_bucket(dest, dest_bucket),
         src_display=open_side_display(plan.src, open_key),
         dest_display=f"s3://{dest}",
     )
@@ -1087,7 +1102,7 @@ def open_download_items(
     if plan.dir_op:
         infos: Iterator[FileInfo] = scan_s3_source(
             src_storage,
-            key_prefix=plan.src_root[len(src_bucket) + 1 :],
+            key_prefix=key_after_bucket(plan.src_root, src_bucket),
             item_filter=item_filter,
             options=options,
             reusable_after_interrupt=reusable_after_interrupt,
@@ -1317,7 +1332,7 @@ def sync_entries(
     seeds ``read_ahead=False`` in its ``default_scan_options``).
     """
     if isinstance(storage, S3Storage):
-        key_prefix = root[len(storage.bucket) + 1 :]
+        key_prefix = key_after_bucket(root, storage.bucket)
         for info in scan_s3_source(
             storage,
             key_prefix=key_prefix,

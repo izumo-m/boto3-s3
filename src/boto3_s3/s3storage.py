@@ -1043,13 +1043,9 @@ class S3Storage(Storage):
         its two spellings stay apart the way aws-cli's scheme strip leaves
         them - ``s3://`` is ``""``, ``s3:///`` is ``"/"`` - so the raw URI
         decides there (tested on the scheme-less rest, because ``"s3://"``
-        itself ends in a slash).
-
-        One shape is rebuilt differently from how it was typed: an access
-        point name the pattern cuts short (``accesspoint/my_ap`` - the name
-        stops at ``my``) leaves nothing between bucket and key, and is joined
-        with ``/`` here, because the callers slice the key back off by the
-        bucket's length plus one separator.
+        itself ends in a slash). An access point name the pattern cuts short
+        (``accesspoint/my_ap`` - the name stops at ``my``) has no separator,
+        so it comes back as typed, the way aws-cli prints it.
         """
         if not self._bucket and not self._key:
             return "/" if self._uri[len(_S3_SCHEME) :].endswith("/") else ""
@@ -1073,7 +1069,9 @@ class S3Storage(Storage):
         URI's behavior, ntpath's drive-relative reset included). That agrees
         with aws-cli's strings except where one object is spelled two ways -
         an Outposts access-point key set off with ``:`` on one side and ``/``
-        on the other - which aws-cli takes for two objects and lets the move
+        on the other, or typed straight after a name the pattern cuts short
+        (``accesspoint/my_ap`` against ``accesspoint/my/_ap``) - which aws-cli
+        takes for two objects and lets the move
         proceed onto itself; here it is refused like any other self-move.
 
         A location without a bucket has no object to protect, only a message
@@ -1110,14 +1108,19 @@ class S3Storage(Storage):
         self._uri = text
         self._bucket, self._key = _parse_s3_uri(text)
         # What stood between the bucket part and the key as written. It is "/"
-        # everywhere but one spelling: aws-cli's Outposts access-point pattern
-        # also accepts ":" there (``...:accesspoint/name:key``), and aws-cli
-        # keeps printing and comparing the location as it was typed. The
-        # string forms below rebuild the location with this separator, so they
-        # spell it aws-cli's way; nothing else reads it (the requests take
-        # ``bucket`` and ``key``).
+        # everywhere but on an Outposts access point, whose pattern also
+        # accepts ":" there (``...:accesspoint/name:key``) and accepts nothing
+        # at all where it cuts a name short at a character the name may not
+        # hold (``.../accesspoint/my_ap`` is the access point ``my`` and the
+        # key ``_ap``) - aws-cli keeps printing and comparing the location as
+        # it was typed. The string forms below rebuild the location with this
+        # separator, so they spell it aws-cli's way, and the producers slice
+        # the key back off a formatted path the same way
+        # (`producers.key_after_bucket`); the requests take ``bucket`` and
+        # ``key``. A keyless location typed with no separator takes "/", the
+        # one its bucket root gains.
         boundary = text[len(_S3_SCHEME) + len(self._bucket) : len(text) - len(self._key)]
-        self._key_sep = ":" if boundary == ":" else "/"
+        self._key_sep = boundary if boundary or self._key else "/"
         self._client = client
         self._owns_client = client is None
         # How this source is listed (the scan's source-config): the ListObjectsV2

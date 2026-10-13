@@ -821,6 +821,40 @@ class TestDownloadRoute:
         assert calls[0].params["Key"] == "dir/a.txt"
         assert [r.src for r in results] == [f"s3://{arn}:dir/a.txt"]
 
+    def test_a_cut_short_outposts_name_is_reported_as_written(self, tmp_path: Path) -> None:
+        # `my_ap` is no access point name: aws-cli's pattern stops at `my` and
+        # reads `_ap` as the key, sends that split, and prints the location as
+        # typed: `cp f s3://<arn>/my_ap --dryrun` previews `upload: ./f to
+        # s3://<arn>/my_ap` (measured against the pinned aws 2.36.40, offline).
+        base = "arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-1/accesspoint/"
+        source = tmp_path / "f.txt"
+        source.write_bytes(b"x")
+        client, calls = make_recording_client([{}])
+        results: list[OpResult] = []
+        S3().cp(
+            str(source),
+            S3Storage(f"s3://{base}my_ap", client=client),
+            transfer_config=_SYNC,
+            on_result=results.append,
+        )
+        assert ops(calls) == ["PutObject"]
+        assert (calls[0].params["Bucket"], calls[0].params["Key"]) == (f"{base}my", "_ap")
+        assert [r.dest for r in results] == [f"s3://{base}my_ap"]
+
+        tree = tmp_path / "d"
+        (tree / "sub").mkdir(parents=True)
+        (tree / "sub" / "g.txt").write_bytes(b"y")
+        client, calls = make_recording_client([])
+        results = []
+        S3().cp(
+            str(tree),
+            S3Storage(f"s3://{base}my.ap/", client=client),
+            recursive=True,
+            dryrun=True,
+            on_result=results.append,
+        )
+        assert [r.dest for r in results] == [f"s3://{base}my.ap/sub/g.txt"]
+
     def test_keyless_non_recursive_source_transfers_nothing(self, tmp_path: Path) -> None:
         # `cp s3://bucket .`: aws lists the bucket and exact-matches nothing
         # (rc 0, silent). The listing itself is observable when ListBucket is
