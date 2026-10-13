@@ -276,7 +276,9 @@ upload, the parent reference) are emitted inline on the calling thread
   `copy_props` / `annotation_copy_mode`; an unrecognized `case_conflict` value,
   refused on every route including the streaming one, whose single item builds
   no gate; a `TransferConfig` carrying classic-only settings with
-  `preferred_transfer_client="crt"`; a
+  `preferred_transfer_client="crt"`, rejected when the CRT engine is built —
+  for an upload or a download, not for an S3-to-S3 copy, which runs on the
+  classic engine either way, and never under `dryrun`; a
   `StdioStorage` used as a source in a process with no `sys.stdin`; and a
   case-fold collision under `CaseConflictMode.ERROR`, raised from inside
   enumeration. A `StdioStorage` *destination* has no such precondition,

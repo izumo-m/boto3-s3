@@ -23,8 +23,8 @@ endpoint named anywhere but `--endpoint-url` under the CRT engine, a
 `awscli` modules, exits, raises outside Python's `Exception` family or
 unregisters one of the SDK's own handlers, a `[toplevel]` alias that leads to
 another `aws` command, a timeout typed beside an alias, a `cli_history` directory
-`aws` cannot create, the modification time a download stamps for an object
-older than the local zone's present rules, a CRT-engine `mv` download whose
+`aws` cannot create, the modification time a download stamps in some local
+zones (and the `sync` runs that follow from it), a CRT-engine `mv` download whose
 source delete dies without a response, a help page that cannot be written,
 an ambiguous option abbreviation under Python 3.10 and 3.11, an invalid
 `AWS_DEFAULTS_MODE` or `sts_regional_endpoints` value, the `PYTHON*` environment
@@ -171,20 +171,37 @@ comes out differently, listed in section 1.
   break and prints that same underlying error. This lives in the installed
   `botocore` / `s3transfer` rather than in either tool's own code — the same
   split as the default checksum algorithm below — so no option here changes it.
-- **A download stamps an old object on a different second.** Both tools give
-  the downloaded file the object's `LastModified`, and for every timestamp
-  today's zone rules cover they agree to the second. They part on one old
-  enough that the zone's rule for it differs from the rule in force now: `aws`
-  converts the timestamp to local time and then re-reads those wall-clock
-  fields with `time.mktime`, which resolves them under the zone's *historical*
-  rule and so settles on a different instant than the object carries, while
-  here the object's own instant is stamped. Under `TZ=Asia/Tokyo` an object
-  whose `LastModified` is `1601-01-01T00:00:00Z` comes out stamped
-  `1601-01-01 09:00:00 +0918` on `aws` and `1601-01-01 09:18:59 +0918` here —
-  the latter being the moment the object names. Neither tool warns, the exit
-  codes agree, and the bytes are identical. Real S3 never reports a
-  `LastModified` that old, so reaching this at all takes an S3-compatible
-  implementation that does.
+- **A download's modification time differs in some zones.** Both tools give
+  the downloaded file the object's `LastModified`; here the object's own
+  instant is stamped, always. `aws` converts the timestamp to local time and
+  then re-reads those wall-clock fields with `time.mktime`, and that round trip
+  lands elsewhere in three cases:
+  - **A zone whose rules mark winter as the daylight-saving period**
+    (`Europe/Dublin`, as the tz database models it): on every download route
+    (`cp`, `mv` and `sync`, single or recursive, either engine) `aws` stamps
+    every object an hour off, today's included — an hour late for a winter
+    `LastModified`, an hour early for a summer one. Its `sync` then finds a
+    winter-stamped local copy newer than the object and downloads it again on
+    every run (with `--exact-timestamps`, a summer-stamped one too), and a
+    `sync` in the other direction uploads the winter ones again; here a second
+    `sync` transfers nothing.
+  - **A timestamp old enough that the zone's rule for it differs from the
+    rule in force now**: `aws` resolves the fields under the *historical* rule
+    and settles on a different instant than the object carries. Under
+    `TZ=Asia/Tokyo` an object whose `LastModified` is `1601-01-01T00:00:00Z`
+    comes out stamped `1601-01-01 09:00:00 +0918` on `aws` and
+    `1601-01-01 09:18:59 +0918` here — the latter being the moment the object
+    names.
+  - **A timestamp the zone's history cannot place** (under `TZ=Africa/Abidjan`,
+    `1912-01-01T00:16:07Z`): `aws` stamps nothing, leaving the file with the
+    time it was written, prints `warning: Skipping file <path>. Successfully
+    Downloaded <path> but was unable to update the last modified time. mktime
+    argument out of range` after the download line and exits 2; here the run
+    stamps the object's instant and exits 0.
+
+  The bytes are identical throughout. Real S3 never reports a `LastModified`
+  as old as the last two cases need, so those take an S3-compatible
+  implementation that does; the first needs only the zone.
 - **Default checksum algorithm without awscrt.** Without `--checksum-algorithm`,
   the requests that carry a client-computed checksum use `CRC64NVME` here as on
   `aws` v2 — uploads, deletes, bucket configuration writes, the annotation
@@ -196,6 +213,10 @@ comes out differently, listed in section 1.
   the result or the exit code; what differs is the checksum left on an
   uploaded object (a full-object CRC64NVME against a composite CRC32, or
   none). An explicit `--checksum-algorithm` makes the two agree regardless.
+  The batched deletes the CRT engine sends carry the installed botocore's own
+  default even with awscrt (`CRC32` from botocore 1.36 on); `aws` sends no such
+  request — its deletes
+  go one key at a time, with no checksum.
 - **Output back-pressure.** `aws` queues result lines without limit, so a stalled
   reader grows memory. Here the queue is bounded: a reader that falls far enough
   behind slows the transfer instead. No result line is ever dropped.
@@ -336,7 +357,11 @@ comes out differently, listed in section 1.
   on the classic engine: the
   requests already out finish, no further one starts, and the run closes with
   `cancelled: ctrl-c received`, exit code 1 — so objects `aws` would still
-  have deleted survive. Re-running the command deletes them.
+  have deleted survive. Re-running the command deletes them. A single-key `rm`
+  sends one request, unbatched, and the same rule holds: the request out
+  finishes and is reported (`delete: s3://…`) before that closing line, where
+  `aws` cancels it and reports `delete failed: s3://… AWS_ERROR_S3_CANCELED:
+  Request successfully cancelled` with no closing line, exit code 1 on both.
 - **A `mv` between two spellings of one Outposts object is refused here.** An
   Outposts access point's key can be set off from the ARN with `:` or with `/`.
   `aws` compares its two arguments as text, takes
@@ -519,7 +544,14 @@ comes out differently, listed in section 1.
   every run at 255 on `aws` and may run normally here, or the reverse,
   depending on the Python this command is installed under. Every endpoint
   that is a well-formed URL, and every one that plainly is not, is treated
-  alike on both.
+  alike on both. The S3 endpoint itself meets the same parser where the
+  environment or the config supplies it (`AWS_ENDPOINT_URL`,
+  `AWS_ENDPOINT_URL_S3`, a profile's `endpoint_url`, a `[services]` section):
+  a scheme that starts with a digit ends the run at 255 on both tools, but
+  below Python 3.11 the report here is botocore's
+  ``Custom endpoint `<value>` was not a valid URI`` where `aws` says
+  `Invalid endpoint: <value>`. In `--endpoint-url` that scheme is checked by
+  the rule `aws`'s Python applies, so there it reads the same on every host.
 - **`sts_regional_endpoints` is validated.** The installed botocore still
   validates this config key (and `AWS_STS_REGIONAL_ENDPOINTS`); `aws` v2's
   bundled botocore dropped it. An invalid value is an error here (exit
