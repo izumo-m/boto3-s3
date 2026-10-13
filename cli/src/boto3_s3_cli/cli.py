@@ -9,7 +9,7 @@ import io
 import os
 import re
 import sys
-from collections.abc import Generator, Iterable
+from collections.abc import Generator, Iterable, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from difflib import get_close_matches
 from typing import TYPE_CHECKING, NoReturn, TextIO, cast
@@ -1255,8 +1255,13 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
             _write_error(exc, rc=rc)
             return rc
     try:
-        return _resolve_command(
-            tokens, head, ctx, aliases, suppress_usage_errors=suppress_usage_errors
+        return _run_toplevel_command(
+            alias.SERVICE_NAME,
+            tokens,
+            head,
+            ctx,
+            aliases,
+            suppress_usage_errors=suppress_usage_errors,
         )
     except Boto3S3Error as exc:
         # The alias layer's own failures (an unparseable value, a global it
@@ -1278,6 +1283,84 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
         # the same pin the argparse corners use (design/cli.md section 2).
         _write_error(_RECURSION_LIMIT_REPORT, rc=_GENERAL_ERROR_RC)
         return _GENERAL_ERROR_RC
+
+
+def _run_toplevel_command(
+    name: str,
+    tokens: list[str],
+    head: argparse.Namespace,
+    ctx: Context,
+    aliases: alias.AliasTable,
+    *,
+    suppress_usage_errors: bool,
+) -> int:
+    """Run what aws's top-level command table holds under ``name``.
+
+    Under ``s3`` that is the built-in ``aws s3`` - this CLI - unless the alias
+    file's ``[toplevel]`` section has an ``s3`` entry, which aws's injector
+    writes over it (keeping the built-in aside as the entry's proxy), so every
+    invocation runs through the alias (measured). An external one is a shell
+    command line over everything the globals pass left. An internal one is
+    read by aws's main parser - the globals plus the command name it must
+    start with - so a global in it is applied over the user's like a
+    ``[command s3]`` alias's (``--debug`` / ``--profile`` refused alike), what
+    the parse leaves goes ahead of the user's arguments, and the command it
+    names is looked up in that table again: ``s3`` from the ``s3`` entry
+    itself is the built-in it proxies, any other ``[toplevel]`` name is that
+    alias (whose own ``s3`` leads back to the ``s3`` entry, so a cycle ends as
+    aws's recursion failure). A command outside this surface - another
+    service, or an alias proxying a built-in of its own name - has nothing to
+    run here and is reported as aws reports a name its table lacks
+    (docs/cli/aws-differences.md).
+    """
+    value = aliases.toplevel.get(name)
+    if value is None:
+        return _resolve_command(
+            tokens, head, ctx, aliases, suppress_usage_errors=suppress_usage_errors
+        )
+    if alias.is_external(value):
+        return _run_external_alias(value, tokens)
+    expanded = alias.split_value(name, value)
+    parser = _build_service_alias_parser(aliases.toplevel)
+    try:
+        with _silencer(suppress_usage_errors):
+            parsed, remainder = parser.parse_known_args(expanded)
+    except SystemExit as exc:
+        return 0 if not exc.code else _PARAM_VALIDATION_ERROR_RC
+    command = vars(parsed).pop("command")
+    _apply_alias_globals(name, parser, parsed, head)
+    tokens = remainder + tokens
+    if command == name:
+        if name == alias.SERVICE_NAME:
+            return _resolve_command(
+                tokens, head, ctx, aliases, suppress_usage_errors=suppress_usage_errors
+            )
+        # aws proxies to the built-in service this alias shadows.
+        try:
+            with _silencer(suppress_usage_errors):
+                _build_service_alias_parser({}).parse_known_args([command])
+        except SystemExit:
+            return _PARAM_VALIDATION_ERROR_RC
+    return _run_toplevel_command(
+        command, tokens, head, ctx, aliases, suppress_usage_errors=suppress_usage_errors
+    )
+
+
+def _build_service_alias_parser(toplevel: Mapping[str, str]) -> _ParamValidationArgumentParser:
+    """aws's main parser, as a ``[toplevel]`` alias's value meets it.
+
+    The globals, then the command name as a positional whose choices are the
+    top-level table - here ``s3`` and the ``[toplevel]`` names - so a value
+    without one is ``the following arguments are required: command`` and a
+    name outside them ``argument command: Found invalid choice '<name>'``
+    (measured). argparse's ``--`` handling then matches aws's on every
+    supported Python: a ``--`` before or right after the command name is used
+    up, a later one stays in the remainder.
+    """
+    parser = _build_globals_parser()
+    names = [name for name in toplevel if name != alias.SERVICE_NAME]
+    parser.add_argument("command", choices=[alias.SERVICE_NAME, *names])
+    return parser
 
 
 def _resolve_command(
@@ -1384,19 +1467,7 @@ def _run_alias(
     expansion that names something else (``ls = cp``) still run ``ls``.
     """
     if alias.is_external(value):
-        try:
-            return alias.run_external(value, arguments)
-        except AssertionError:
-            raise
-        except Exception as exc:
-            # Launching the shell can fail on the command line itself (an
-            # embedded NUL, an argument list past the OS limit). aws registers
-            # no handler for that either, so it travels to the entry point's
-            # general chain and is reported like any other unexpected failure -
-            # `str(exc)` at rc 255, never a traceback (measured).
-            rc = _exit_code_for_unexpected(exc)
-            _write_error(exc, rc=rc)
-            return rc
+        return _run_external_alias(value, arguments)
     expanded = alias.split_value(name, value)
     # The same two exits as the top-level pass: a global in the value can fail
     # to parse (rc 252, silenced on the on-partial trial like any other usage
@@ -1428,6 +1499,23 @@ def _run_alias(
             suppress_usage_errors=suppress_usage_errors,
         )
     return _resolve_command(tokens, head, ctx, aliases, suppress_usage_errors=suppress_usage_errors)
+
+
+def _run_external_alias(value: str, arguments: list[str]) -> int:
+    """Run an external (``!``-led) alias over ``arguments``; its status is the run's."""
+    try:
+        return alias.run_external(value, arguments)
+    except AssertionError:
+        raise
+    except Exception as exc:
+        # Launching the shell can fail on the command line itself (an
+        # embedded NUL, an argument list past the OS limit). aws registers
+        # no handler for that either, so it travels to the entry point's
+        # general chain and is reported like any other unexpected failure -
+        # `str(exc)` at rc 255, never a traceback (measured).
+        rc = _exit_code_for_unexpected(exc)
+        _write_error(exc, rc=rc)
+        return rc
 
 
 def _apply_alias_globals(

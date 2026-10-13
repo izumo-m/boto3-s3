@@ -21,7 +21,8 @@ fails its batch requests, a Ctrl-C during deletes under the CRT engine, a plain-
 endpoint named anywhere but `--endpoint-url` under the CRT engine, a
 `REQUESTS_CA_BUNDLE` the CRT engine cannot use, an `aws` plugin that imports
 `awscli` modules, exits, raises outside Python's `Exception` family or
-unregisters one of the SDK's own handlers, a `cli_history` directory
+unregisters one of the SDK's own handlers, a `[toplevel]` alias that leads to
+another `aws` command, a `cli_history` directory
 `aws` cannot create, the modification time a download stamps for an object
 older than the local zone's present rules, a CRT-engine `mv` download whose
 source delete dies without a response, a help page that cannot be written,
@@ -412,6 +413,16 @@ comes out differently, listed in section 1.
   swallows every failure of that machinery, so a directory it cannot write
   changes nothing observable there either — the file simply stops being touched
   once a script switches over.
+- **A `[toplevel]` alias can only lead back to `s3`.** An `s3` entry in the
+  `[toplevel]` section of `~/.aws/cli/alias` replaces `aws s3` on both tools,
+  and this command follows it the same way: the global options in its value,
+  an external (`!`) command, a chain through other `[toplevel]` entries. Where
+  the chain names another command instead — another service
+  (`s3 = s3api ...`), or an entry proxying a built-in service of its own
+  name — `aws` runs that command; this one has none to run and stops with exit
+  code 252 (`argument command: Found invalid choice '<name>'`). That report,
+  for a name neither tool knows, also carries no near-miss suggestion here,
+  where `aws` may suggest one of its services.
 - **An `aws` plugin's hooks into `aws` itself do not run.** Both tools load
   `[plugins]` alike — with `cli_legacy_plugin_path` set, every other entry is
   imported and its `awscli_initialize` called on every invocation, and a

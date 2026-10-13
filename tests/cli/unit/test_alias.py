@@ -467,9 +467,10 @@ class TestReportsAndSections:
         ],
     )
     def test_other_sections_declare_nothing_here(self, alias_file: Path, text: str) -> None:
-        # `[toplevel]` names services (no counterpart here), another command's
-        # section is another command's, and the section name is case-sensitive
-        # - all measured as an invalid choice on aws.
+        # A `[toplevel]` entry sits beside `aws s3`, not under it (only an
+        # `s3` entry reaches this surface), another command's section is
+        # another command's, and the section name is case-sensitive - all
+        # measured as an invalid choice on aws.
         alias_file.write_text(text)
         assert cli.main(["who"], ctx=unused_ctx()) == 252
 
@@ -661,6 +662,112 @@ class TestWhichLeafSectionApplies:
             "[command s3]\nls = !sh -c 'exit 7'\n"
         )
         assert cli.main(["ls", "s3://bkt"], ctx=unused_ctx()) == 7
+
+
+class TestTopLevelS3Alias:
+    """A ``[toplevel]`` entry named ``s3`` replaces ``aws s3`` itself.
+
+    aws's injector writes it over the built-in ``s3`` command (kept aside as
+    its proxy), so every invocation of this CLI runs through it. All measured
+    against the pinned aws-cli.
+    """
+
+    def test_a_global_in_the_value_applies_to_every_run(self, alias_file: Path) -> None:
+        alias_file.write_text("[toplevel]\ns3 = s3 --region eu-west-1\n")
+        seen: list[str | None] = []
+        ctx = TestAliasGlobals()._region_ctx(seen)  # pyright: ignore[reportPrivateUsage]
+        assert cli.main(["ls", "s3://bkt", "--region", "ap-south-1"], ctx=ctx) == 0
+        assert seen == ["eu-west-1"]
+
+    def test_what_the_value_leaves_precedes_the_typed_arguments(self, alias_file: Path) -> None:
+        alias_file.write_text("[toplevel]\ns3 = s3 rm --dryrun\n")
+        result, calls = run_recorded([], ["s3://bkt/k"])
+        assert (result.rc, result.stdout, calls) == (0, "(dryrun) delete: s3://bkt/k\n", [])
+
+    def test_a_double_dash_around_the_command_name_is_used_up(self, alias_file: Path) -> None:
+        for value in ("s3 -- rm --dryrun", "-- s3 rm --dryrun"):
+            alias_file.write_text(f"[toplevel]\ns3 = {value}\n")
+            result, _calls = run_recorded([], ["s3://bkt/k"])
+            assert (result.rc, result.stdout) == (0, "(dryrun) delete: s3://bkt/k\n")
+
+    def test_the_command_alias_section_still_applies_below_it(self, alias_file: Path) -> None:
+        alias_file.write_text(
+            "[toplevel]\ns3 = s3 --region eu-west-1\n[command s3]\nd = rm --dryrun\n"
+        )
+        result, calls = run_recorded([], ["d", "s3://bkt/k"])
+        assert (result.rc, result.stdout, calls) == (0, "(dryrun) delete: s3://bkt/k\n", [])
+
+    @pytest.mark.parametrize(
+        ("value", "message"),
+        [
+            ("s3 =", "the following arguments are required: command"),
+            ("s3 = --region eu-west-1", "the following arguments are required: command"),
+            ("s3 = ls", "argument command: Found invalid choice 'ls'"),
+            # Another service has nothing to run here; aws would run it.
+            ("s3 = s3api", "argument command: Found invalid choice 's3api'"),
+            ("s3 = s3 --output bad", "argument --output: Found invalid choice 'bad'"),
+        ],
+    )
+    def test_a_value_the_main_parser_refuses_is_its_usage_error(
+        self, alias_file: Path, capsys: pytest.CaptureFixture[str], value: str, message: str
+    ) -> None:
+        alias_file.write_text(f"[toplevel]\n{value}\n")
+        assert cli.main(["rm", "s3://bkt/k", "--dryrun"], ctx=unused_ctx()) == 252
+        err = capsys.readouterr().err
+        assert err.startswith(
+            f"boto3-s3: [ERROR]: An error occurred (ParamValidation): {message}\n"
+        )
+        assert err.endswith(_USAGE_BLOCK)
+
+    @pytest.mark.parametrize("flag", ["debug", "profile"])
+    def test_debug_and_profile_are_refused(
+        self, alias_file: Path, capsys: pytest.CaptureFixture[str], flag: str
+    ) -> None:
+        value = "--debug" if flag == "debug" else "--profile x"
+        alias_file.write_text(f"[toplevel]\ns3 = s3 {value}\n")
+        assert cli.main(["rm", "s3://bkt/k", "--dryrun"], ctx=unused_ctx()) == 255
+        assert capsys.readouterr().err == (
+            f'boto3-s3: [ERROR]: Global parameter "--{flag}" detected in alias "s3" '
+            "which is not supported in subcommand aliases.\n"
+        )
+
+    def test_version_in_the_value_prints_and_exits(
+        self, alias_file: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        alias_file.write_text("[toplevel]\ns3 = s3 --version\n")
+        assert cli.main(["rm", "s3://bkt/k"], ctx=unused_ctx()) == 0
+        assert capsys.readouterr().out.startswith("boto3-s3-cli/")
+
+    def test_a_chain_through_another_entry_reaches_it(
+        self, alias_file: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        alias_file.write_text("[toplevel]\ns3 = mys3\nmys3 = s3 --region eu-west-1\n")
+        assert cli.main(["rm", "s3://bkt/k", "--dryrun"], ctx=unused_ctx()) == 255
+        assert capsys.readouterr().err == "boto3-s3: [ERROR]: maximum recursion depth exceeded\n"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="an sh command")
+    def test_an_external_value_runs_over_everything_typed(
+        self, alias_file: Path, tmp_path: Path
+    ) -> None:
+        # The globals are consumed first; the rest, the subcommand included,
+        # is appended (measured: `!echo ext` + `rm s3://b/k --region x
+        # --dryrun` echoes `ext rm s3://b/k --dryrun`).
+        written = tmp_path / "args"
+        alias_file.write_text(
+            f'[toplevel]\ns3 = !sh -c \'printf "%s\\n" "$@" > {written}; exit 7\' sh\n'
+        )
+        rc = cli.main(["rm", "s3://bkt/k", "--region", "x", "--dryrun"], ctx=unused_ctx())
+        assert rc == 7
+        assert written.read_text() == "rm\ns3://bkt/k\n--dryrun\n"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="an sh command")
+    def test_the_help_token_reaches_an_external_value(
+        self, alias_file: Path, tmp_path: Path
+    ) -> None:
+        written = tmp_path / "args"
+        alias_file.write_text(f"[toplevel]\ns3 = !sh -c 'echo \"$@\" > {written}' sh\n")
+        assert cli.main(["help"], ctx=unused_ctx()) == 0
+        assert written.read_text() == "help\n"
 
 
 class TestUnreadableAliasFile:

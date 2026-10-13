@@ -1856,8 +1856,9 @@ The overall design and the library side (boto3-faithful) are in
 aws registers an alias injector on the suffix-less `building-command-table`
 event, so it fires for `building-command-table.s3` too and the `[command s3]`
 section of `~/.aws/cli/alias` becomes subcommands of `aws s3`. That table is
-this CLI's whole surface, so the same section is the one mapped here;
-`[toplevel]` names services and has no counterpart. The file lives at aws's
+this CLI's whole surface, so the same section is the one mapped here.
+`[toplevel]` adds commands beside the services, and only its `s3` entry
+reaches this surface (below). The file lives at aws's
 hardcoded path (`AWS_CONFIG_FILE` does not move it) and is read by `alias.py`
 with `configparser` alone, like the config scan of section 1 - the
 informational exits must not import the SDK ([`imports.md`](./imports.md)).
@@ -1879,6 +1880,29 @@ informational exits must not import the SDK ([`imports.md`](./imports.md)).
   a section up, so its entries are unreachable and nothing reports the
   spelling. `alias.load` applies the same two steps and drops what they do not
   re-key (the whole matrix measured on both tools).
+- **The `[toplevel]` `s3` entry.** aws's top-level injector writes a
+  `[toplevel]` entry over the command of its name, keeping the built-in aside
+  as the entry's proxy, so an `s3` entry replaces `aws s3` itself and every
+  invocation of this CLI runs through it (`_run_toplevel_command`, called by
+  `_dispatch` where aws calls its command: after the globals pass, its three
+  resolutions and the `session-initialized` gates, so a broken global or
+  config still wins). An external value runs over everything the globals pass
+  left, the subcommand and the help token included. An internal one goes
+  through aws's main parser - the globals parser plus the command name as a
+  positional whose choices are `s3` and the `[toplevel]` names
+  (`_build_service_alias_parser`) - so a value without a name is `the
+  following arguments are required: command`, an unknown one `argument
+  command: Found invalid choice`, and a `--` before or right after the name
+  is used up on every supported Python. Its globals apply as a `[command
+  s3]` alias's do (`_apply_alias_globals`), what the parse leaves goes ahead
+  of the user's arguments, and the name is looked up again: `s3` from the
+  `s3` entry is the built-in it proxies (on to `_resolve_command`, so the
+  `[command s3]` aliases and the help token still apply), another
+  `[toplevel]` name is that entry, whose own `s3` leads back to the `s3`
+  entry - a cycle ends as aws's recursion failure (all measured). A name
+  aws would run and this CLI cannot (another service; an entry proxying the
+  built-in of its own name) is reported as the invalid choice, recorded in
+  [`aws-differences.md`](../docs/cli/aws-differences.md).
 - **Resolution.** `_resolve_command` looks the subcommand name up in the alias
   entries *before* the built-in table, because aws's injector writes into that
   table - so an alias shadows a built-in of the same name. The name is also

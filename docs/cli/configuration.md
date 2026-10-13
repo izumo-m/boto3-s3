@@ -178,8 +178,21 @@ recent = !sh -c 'boto3-s3 ls "$1" | sort | tail' sh
 `boto3-s3 lsr s3://bucket` then runs `ls --recursive s3://bucket`, and
 `boto3-s3 recent s3://bucket` runs the shell command with `s3://bucket`
 appended. Because this CLI *is* `aws s3`, `[command s3]` is the section that
-applies; `[toplevel]`, whose entries name services, has no counterpart here and
-is ignored.
+applies. The `[toplevel]` section declares commands beside `aws s3`, so only
+its `s3` entry reaches this CLI — and it replaces `aws s3` itself, so every
+invocation runs through it:
+
+```ini
+[toplevel]
+s3 = s3 --endpoint-url http://localhost:9000
+```
+
+sends every `boto3-s3` command to that endpoint, as it does every `aws s3` one.
+Its value is read like `aws`'s top level: global options, then the command name
+(`s3`, or another `[toplevel]` entry to chain to), then anything to place ahead
+of what was typed; a `!` value runs a shell command with everything typed after
+the global options. A chain that ends at another `aws` command has nothing to
+run here (see [`aws-differences.md`](./aws-differences.md)).
 
 The section header must be spelled `command` followed by a single ASCII space,
 as `aws` requires. Extra spaces are fine (`[command  s3]` is the same section),

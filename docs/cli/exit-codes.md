@@ -174,7 +174,8 @@ A few other paths settle on different codes too — a download body cut
 mid-stream, a plain-HTTP
 endpoint taken from the environment under the CRT engine, an `aws` plugin that
 imports `awscli` modules, exits, raises outside Python's `Exception` family or
-unregisters one of the SDK's own handlers, a `cli_history` directory `aws` cannot create, an invalid
+unregisters one of the SDK's own handlers, a `[toplevel]` alias that leads to
+another `aws` command, a `cli_history` directory `aws` cannot create, an invalid
 `AWS_DEFAULTS_MODE` or `sts_regional_endpoints` value, the `PYTHON*`
 environment variables, a stdout or an error report that cannot be written, and
 a standard stream that cannot be set up at all. Section 2 of
