@@ -984,19 +984,27 @@ def _main(argv: list[str] | None, ctx: Context | None) -> int:
     if mode == "on":
         return _run_auto_prompt(raw, ctx, explicit=resolve.AUTO_PROMPT_FLAG in raw)
     if mode == "on-partial":
-        # Run the command as-is; only a usage error (rc 252, which aws-cli and we
-        # both raise before any S3 call) falls back to prompting (aws-cli's
-        # on-partial branch in clidriver's _do_main). The usage message is silenced on
-        # this trial so the prompt isn't buried under it (aws's
-        # SilenceParamValidationMsgErrorHandler).
+        if ctx.auto_prompter is None and not _prompt_toolkit_installed():
+            # With no prompt to fall back to, the trial run would be the only
+            # one worth having: run it as the ordinary run, reports and all.
+            # Running it silenced and then again would repeat whatever it did
+            # before its 252 - an external alias's command, a request a plugin
+            # handler failed after.
+            return _dispatch(raw, ctx)
+        # Run the command as-is; only a usage error (rc 252) falls back to
+        # prompting (aws-cli's on-partial branch in clidriver's _do_main). The
+        # usage message is silenced on this trial so the prompt isn't buried
+        # under it (aws's SilenceParamValidationMsgErrorHandler).
         rc = _dispatch(raw, ctx, suppress_usage_errors=True)
         if rc != _PARAM_VALIDATION_ERROR_RC:
             return rc
-        return _run_auto_prompt(raw, ctx, explicit=False)
+        return _run_auto_prompt(raw, ctx, explicit=False, rebuild=True)
     return _dispatch(raw, ctx)
 
 
-def _run_auto_prompt(raw_argv: list[str], ctx: Context, *, explicit: bool) -> int:
+def _run_auto_prompt(
+    raw_argv: list[str], ctx: Context, *, explicit: bool, rebuild: bool = False
+) -> int:
     """Run the interactive prompt, then re-dispatch the completed argv once.
 
     The ``prompt_toolkit`` dependency is opt-in (the ``autoprompt`` extra). When
@@ -1006,12 +1014,14 @@ def _run_auto_prompt(raw_argv: list[str], ctx: Context, *, explicit: bool) -> in
     absent but the prompt was only *config/env-driven*, we fall through to normal
     dispatch instead - a missing optional dep must not break every command. An
     injected ``ctx.auto_prompter`` (tests) bypasses the dependency probe.
+
+    ``rebuild`` is the on-partial fall-back's: aws builds a new driver for the
+    run after its prompt (`create_clidriver`), so the config is read and the
+    plugins are loaded and initialized again before the completed command runs.
     """
     prompter = ctx.auto_prompter
     if prompter is None:
-        import importlib.util
-
-        if importlib.util.find_spec("prompt_toolkit") is None:
+        if not _prompt_toolkit_installed():
             if not explicit:
                 return _dispatch(raw_argv, ctx)
             _write_error(
@@ -1043,6 +1053,10 @@ def _run_auto_prompt(raw_argv: list[str], ctx: Context, *, explicit: bool) -> in
     completed = [
         a for a in completed if a not in (resolve.AUTO_PROMPT_FLAG, resolve.NO_AUTO_PROMPT_FLAG)
     ]
+    if rebuild:
+        rc = _build_driver()
+        if rc is not None:
+            return rc
     return _dispatch(completed, ctx)
 
 

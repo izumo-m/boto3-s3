@@ -228,8 +228,14 @@ Behavior per mode:
   with the auto-prompt flags removed (to prevent an infinite re-prompt loop).
 - **on-partial** -> first **run as-is**, and fall back to the prompt and
   re-dispatch **only when rc is 252 (usage error)** (the on-partial branch in
-  aws-cli's `clidriver.py`). 252 is emitted before the S3 call, so it can be re-run
-  without side effects. The usage messages from the attempt (argparse's usage
+  aws-cli's `clidriver.py`). A 252 does not prove the run had no effect - an
+  external alias's command can end with it, and a plugin's handler can raise a
+  parameter-validation failure after a request - so the run after the prompt is
+  the user's choice, as on aws, and never automatic: without `prompt_toolkit`
+  (section 6) there is no trial at all. That run is preceded by what aws's new
+  driver does (`create_clidriver`): the config is read and the plugins are
+  loaded and initialized again (`_build_driver`); `on` keeps its driver. The
+  usage messages from the attempt (argparse's usage
   block / `Unknown options` / 252 `ValidationError`) are **silenced**
   (`_dispatch(suppress_usage_errors=True)` = aws's
   `SilenceParamValidationMsgErrorHandler`) - so the prompt is not buried under a
@@ -279,7 +285,9 @@ importing):
   'boto3-s3-cli[autoprompt]'`) + rc 252.
 - **Absent + config/env-driven** -> **silently fall back to normal dispatch**. So
   that the combination of an ambient setting (`cli_auto_prompt=on`, etc.) and a
-  missing optional dependency does not break every command.
+  missing optional dependency does not break every command. Under `on-partial`
+  the command then runs once, as under `off`, rather than as a silenced trial
+  that a prompt could not follow.
 - **Present** -> import `prompt.py` and run the prompt.
 
 All rc values are non-contractual (the charter's interactive-UI exemption,

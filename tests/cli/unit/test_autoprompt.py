@@ -640,6 +640,56 @@ class TestAutoPromptModeResolution:
         assert "prompt_toolkit" not in err  # the install hint was NOT shown
 
 
+class TestOnPartialRuns:
+    """How often on-partial runs the command, and what each run rebuilds."""
+
+    def test_without_prompt_toolkit_the_command_runs_once_and_reports(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Nothing to fall back to, so the silenced trial would only be run
+        # again: whatever it did before its 252 (an external alias's command,
+        # a request a plugin handler then failed) would happen twice. The one
+        # run is the ordinary one, its usage report included.
+        monkeypatch.setenv("AWS_CLI_AUTO_PROMPT", "on-partial")
+        monkeypatch.setattr(importlib.util, "find_spec", lambda name, package=None: None)
+        runs: list[list[str]] = []
+        dispatch = cli._dispatch  # pyright: ignore[reportPrivateUsage]
+
+        def counted(argv: list[str], ctx: Context, **kwargs: Any) -> int:
+            runs.append(list(argv))
+            return dispatch(argv, ctx, **kwargs)
+
+        monkeypatch.setattr(cli, "_dispatch", counted)
+        assert cli.main(["cp"]) == 252
+        assert runs == [["cp"]]
+        assert "the following arguments are required" in capsys.readouterr().err
+
+    def test_the_run_after_the_prompt_reloads_config_and_plugins(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws builds a new driver for the run after its prompt
+        # (`create_clidriver`): the plugins are imported and initialized
+        # again (measured: `awscli_initialize` runs twice).
+        from boto3_s3_cli import plugins
+
+        monkeypatch.setenv("AWS_CLI_AUTO_PROMPT", "on-partial")
+        loads: list[object] = []
+        monkeypatch.setattr(plugins, "load", lambda section: loads.append(section))
+        prompter = _FakePrompter(["--version"])
+        assert cli.main(["cp"], ctx=Context(auto_prompter=prompter)) == 0
+        assert len(loads) == 2
+
+    def test_an_explicit_prompt_reloads_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # `on` prompts before the first run and keeps its driver.
+        from boto3_s3_cli import plugins
+
+        loads: list[object] = []
+        monkeypatch.setattr(plugins, "load", lambda section: loads.append(section))
+        prompter = _FakePrompter(["--version"])
+        assert cli.main(["--cli-auto-prompt", "cp"], ctx=Context(auto_prompter=prompter)) == 0
+        assert len(loads) == 1
+
+
 def _resolve_from_files(argv: list[str] | None = None) -> str:
     """The mode `cli._main` would resolve, over a fresh scan of the config files."""
     return resolve.resolve_auto_prompt_mode(argv or ["ls"], configfiles.scan())
