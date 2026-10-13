@@ -622,8 +622,9 @@ class TestBuildClient:
         # call, so assert on the exact input botocore's per-request scheme
         # selection keys on: the requested auth scheme is unset, leaving the
         # endpoint's `sigv4-s3express` alive. (`meta.config.signature_version`
-        # cannot serve here - without the pin botocore backfills it with the
-        # *resolved* version, `s3v4` for S3.)
+        # does tell the pin apart - `v4` with it, the resolved `s3v4` botocore
+        # backfills without - but the requested scheme is what the selection
+        # reads.)
         args = _parse(["--region", "us-east-1"])
         args.path = "s3://mybkt--use1-az4--x-s3/key"
         client = clientfactory.build_client(args)
@@ -671,7 +672,7 @@ class TestBuildClient:
 
     def test_no_sign_request_still_wins_for_s3express(self) -> None:
         # --no-sign-request overrides to UNSIGNED even for a directory bucket,
-        # exactly as it overrides the s3v4 pin: the bare zonal-endpoint URL.
+        # exactly as it overrides the SigV4 pin: the bare zonal-endpoint URL.
         args = _parse(["--no-sign-request", "--region", "us-east-1"])
         args.path = "s3://mybkt--use1-az4--x-s3/key"
         client = clientfactory.build_client(args)
@@ -684,7 +685,7 @@ class TestBuildClient:
 
     def test_no_sign_request_still_wins_for_mrap(self) -> None:
         # --no-sign-request overrides to UNSIGNED even for an MRAP target,
-        # exactly as it overrides the s3v4 pin: aws emits the bare URL.
+        # exactly as it overrides the SigV4 pin: aws emits the bare URL.
         args = _parse(["--no-sign-request", "--region", "us-east-1"])
         args.path = "s3://arn:aws:s3::123456789012:accesspoint/test.mrap/key"
         client = clientfactory.build_client(args)

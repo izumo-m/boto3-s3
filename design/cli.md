@@ -552,8 +552,8 @@ numbers in the bold item labels below are that document's.
      auth-scheme resolution, which must pick asymmetric SigV4a for an MRAP and
      for an Outposts access point in either notation
      (item 4) and `sigv4-s3express` (with `CreateSession` credentials) for a
-     directory bucket - a pinned `s3v4` matches either scheme name up to the
-     first dash and would silently sign a plain SigV4 request instead. A plain,
+     directory bucket - a pinned `v4` (or `s3v4`) matches either scheme name up
+     to the first dash and would silently sign a plain SigV4 request instead. A plain,
      region-qualified access-point ARN is *not* in the set: it signs symmetric
      SigV4 like a bucket (every shape measured against the pinned aws-cli).
      The pin stands down for one further reason, unrelated to the targets: an
