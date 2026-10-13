@@ -101,9 +101,13 @@ def exception_text(exc: BaseException) -> str:
     the library's error for a request that raised outside botocore's family,
     say - is rendered as that cause.
     """
+    seen = {id(exc)}
     cause = exc.__cause__
-    if cause is not None and str(exc) == str(cause):
-        return exception_text(cause)
+    # A cause chain can loop (a plugin's ``raise e from e``): stop at the
+    # first exception already visited.
+    while cause is not None and id(cause) not in seen and str(exc) == str(cause):
+        seen.add(id(cause))
+        exc, cause = cause, cause.__cause__
     if isinstance(exc, json.JSONDecodeError):
         return json_error_message(exc)
     if isinstance(exc, ValueError):

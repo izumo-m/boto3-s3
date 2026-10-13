@@ -365,8 +365,8 @@ comes out differently, listed in section 1.
 - **A `mv` between two spellings of one Outposts object is refused here.** An
   Outposts access point's key can be set off from the ARN with `:` or with `/`,
   and a name the access-point pattern cuts short at a character a name may not
-  hold reads as the shorter name and a key (`accesspoint/my_ap` is the access
-  point `my` and the key `_ap`, also spelled `accesspoint/my/_ap`).
+  hold reads as the shorter name and a key (`accesspoint/myap_x` is the access
+  point `myap` and the key `_x`, also spelled `accesspoint/myap/_x`).
   `aws` compares its two arguments as text, takes
   `mv s3://<arn>:k s3://<arn>/k` (or the two spellings of a cut-short name) for
   a move between two objects and sends it — onto itself. This command recognizes the one object and stops: after the
@@ -549,7 +549,11 @@ comes out differently, listed in section 1.
   that is a well-formed URL, and every one that plainly is not, is treated
   alike on both. (The S3 endpoint itself, wherever it comes from, is checked
   for that leading digit by the rule `aws`'s Python applies, and reads the
-  same on every host.)
+  same on every host. The STS or SSO endpoint the credential chain uses is
+  not: the SDK builds that client itself, so below Python 3.11 a digit-led
+  `AWS_ENDPOINT_URL_STS` fails each request here with `Could not connect to
+  the endpoint URL` where `aws` reports `Invalid endpoint`, at the same exit
+  code.)
 - **`sts_regional_endpoints` is validated.** The installed botocore still
   validates this config key (and `AWS_STS_REGIONAL_ENDPOINTS`); `aws` v2's
   bundled botocore dropped it. An invalid value is an error here (exit

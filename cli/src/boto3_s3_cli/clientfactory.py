@@ -1196,13 +1196,19 @@ def _reject_unparsable_endpoint(endpoint_url: str | None) -> None:
     build goes on and every request then fails on the endpoint rules - an
     item's failure at rc 1, and a ``--dryrun`` that succeeds (measured). The
     scheme test is 3.11's (`_has_url_scheme`); the rest of botocore's check is
-    the same code under either interpreter. It runs after the retry mode's,
-    as aws's endpoint is built after the mode is validated, and before the CA
-    bundle's, which the endpoint's HTTP session reads. ``--endpoint-url``
-    never gets this far with such a scheme: aws refuses it while parsing
-    (`validate_endpoint_url`).
+    the same code under either interpreter. So only a scheme the host parsed
+    and 3.11 would not is refused: a value with no scheme at all
+    (``//127.0.0.1:9``) parses with a host on every version, passes aws's
+    check too, and is left to fail where it fails there. It runs after the
+    retry mode's, as aws's endpoint is built after the mode is validated, and
+    before the CA bundle's, which the endpoint's HTTP session reads.
+    ``--endpoint-url`` never gets this far with such a scheme: aws refuses it
+    while parsing (`validate_endpoint_url`).
     """
-    if endpoint_url is not None and not _has_url_scheme(endpoint_url):
+    if endpoint_url is None:
+        return
+    scheme = urlparse(endpoint_url.strip(_C0_AND_SPACE)).scheme
+    if scheme and not scheme[:1].isalpha():
         raise ValueError(f"Invalid endpoint: {endpoint_url}")
 
 

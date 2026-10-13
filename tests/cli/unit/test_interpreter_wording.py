@@ -63,6 +63,16 @@ class TestExceptionText:
         renamed.__cause__ = exc_info.value
         assert usage.exception_text(renamed) == "something else"
 
+    def test_a_cause_chain_that_loops_ends_at_the_loop(self) -> None:
+        # A plugin's `raise e from e` (or two exceptions naming each other)
+        # must not recurse: the text is the one they share.
+        looped = ValueError("self-caused")
+        looped.__cause__ = looped
+        assert usage.exception_text(looped) == "self-caused"
+        first, second = RuntimeError("pair"), RuntimeError("pair")
+        first.__cause__, second.__cause__ = second, first
+        assert usage.exception_text(first) == "pair"
+
     def test_anything_else_is_its_str(self) -> None:
         assert usage.exception_text(KeyError("Bucket")) == "'Bucket'"
         assert usage.exception_text(ValueError("Invalid endpoint: x")) == "Invalid endpoint: x"
@@ -196,3 +206,15 @@ class TestEndpointScheme:
         assert (
             capsys.readouterr().err == "boto3-s3: [ERROR]: Invalid endpoint: 1http://127.0.0.1:9\n"
         )
+
+    def test_an_endpoint_with_no_scheme_is_left_to_the_requests(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # `//host:port` parses with a host on every Python and passes aws's
+        # client build; aws fails it on the requests, so a --dryrun succeeds.
+        (tmp_path / "f").write_bytes(b"x")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AWS_ENDPOINT_URL", "//127.0.0.1:9")
+        rc = cli.main(["cp", "f", "s3://b/k", "--dryrun"])
+        assert rc == 0
+        assert capsys.readouterr().out == "(dryrun) upload: ./f to s3://b/k\n"

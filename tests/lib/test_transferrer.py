@@ -751,6 +751,20 @@ class TestCopy:
                 id="tag-without-key",
             ),
             pytest.param(
+                TransferOptions(),
+                [{}, {"TagSet": [{"Key": "k"}]}],
+                MalformedResponseError,
+                "'Value'",
+                id="tag-without-value",
+            ),
+            pytest.param(
+                TransferOptions(),
+                [{}, {"TagSet": [{}]}],
+                MalformedResponseError,
+                "'Key'",
+                id="tag-without-either-reads-key-first",
+            ),
+            pytest.param(
                 TransferOptions(copy_props=CopyPropsMode.ALL),
                 [{}, {"TagSet": []}, KeyError("Credentials")],
                 Boto3S3Error,
