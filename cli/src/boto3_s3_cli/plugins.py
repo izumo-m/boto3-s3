@@ -13,9 +13,10 @@ through aws's entry-point handlers (`cli.main` reports it). `load` repeats
 exactly those steps, on the same values (a value the INI parse turned into an
 indented block fails the same Python operation).
 
-The emitter a plugin initializes on is a port of the one aws hands it -
-botocore's ``HierarchicalEmitter``, without the ``EventAliaser`` stock
-botocore wraps around a session's emitter - so registering, unregistering and
+The emitter a plugin initializes on is a port of botocore's
+``HierarchicalEmitter``, which the one aws hands it extends (its
+``LazyInitEmitter``, with no ``EventAliaser`` around it as stock botocore
+puts around a session's emitter) - so registering, unregistering and
 emitting behave, and fail, as they do there while the plugins load: an event
 name that is not a string, a handler that is not callable or takes no
 ``**kwargs``, a ``unique_id`` registered with and without its counter in turn,
@@ -423,6 +424,20 @@ class _ReplayedHandler:
         except BaseException as exc:
             raise PluginHandlerError(str(exc)) from exc
 
+    def __eq__(self, other: object) -> bool:
+        # Equal to the handler it wraps, so botocore's `remove_item` finds it
+        # for an unregister of that handler, as aws's emitter finds the bare
+        # one - in the same order as the SDK's own handlers around it.
+        if isinstance(other, _ReplayedHandler):
+            other = other.handler
+        return bool(self.handler == other)
+
+    def __hash__(self) -> int:
+        try:
+            return hash(self.handler)
+        except TypeError:
+            return id(self)
+
     def __repr__(self) -> str:
         return repr(self.handler)
 
@@ -482,19 +497,17 @@ def attach(event_emitter: Any) -> None:
 def _replayed_handler(handler: Any, method: str) -> Any:
     """The object to hand botocore for ``handler`` in a replayed ``method``.
 
-    A registration puts the handler's wrapper on the session, one per
-    distinct handler, so an unregister of it finds that wrapper. An
-    unregister of a handler no plugin registered - one of the SDK's own,
-    like ``validate_bucket_name`` - passes it as it is, so botocore finds
-    the built-in.
+    A registration puts a wrapper on the session, one per distinct handler.
+    An unregister passes the handler as it is: botocore removes the first
+    entry equal to it at that name, which is the SDK's own handler when one
+    is there (``validate_bucket_name``, say, even if the plugin registered
+    it elsewhere too) and otherwise the wrapper, which equals what it wraps.
     """
-    if handler is None:
-        return None
+    if handler is None or method == "unregister":
+        return handler
     for replayed in _replayed:
         if replayed.handler == handler:
             return replayed
-    if method == "unregister":
-        return handler
     replayed = _ReplayedHandler(handler)
     _replayed.append(replayed)
     return replayed

@@ -332,6 +332,69 @@ class TestRegistrationChecks:
         assert cli.main(["ls", "s3://bad!bucket/", "--endpoint-url", "http://127.0.0.1:9"]) == 255
         assert "Could not connect to the endpoint URL" in capsys.readouterr().err
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            # The same built-in registered elsewhere first - narrowing the
+            # check to uploads - must not stand in for the SDK's own.
+            "    cli.register('before-parameter-build.s3.PutObject', validate_bucket_name)\n"
+            "    cli.unregister('before-parameter-build.s3', validate_bucket_name)\n",
+            "    cli.register('bs3.never-emitted', validate_bucket_name)\n"
+            "    cli.unregister('before-parameter-build.s3', validate_bucket_name)\n",
+            "    cli.register('bs3.never-emitted', validate_bucket_name, unique_id='mine')\n"
+            "    cli.unregister('before-parameter-build.s3', unique_id='mine')\n",
+        ],
+        ids=["narrowed", "elsewhere", "unique-id"],
+    )
+    def test_a_built_in_the_plugin_also_registered_is_still_unregistered(
+        self,
+        config: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+        body: str,
+    ) -> None:
+        # Measured on aws: the SDK's own `validate_bucket_name` goes in all
+        # three, so a listing of a name it refuses reaches the endpoint.
+        _write_plugin(
+            config,
+            "bs3plug_vbn2.py",
+            "from botocore.handlers import validate_bucket_name\n"
+            f"def awscli_initialize(cli):\n{body}",
+        )
+        _write_config(config, "mine = bs3plug_vbn2")
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        monkeypatch.setenv("AWS_MAX_ATTEMPTS", "1")
+        assert cli.main(["ls", "s3://bad!bucket/", "--endpoint-url", "http://127.0.0.1:9"]) == 255
+        assert "Could not connect to the endpoint URL" in capsys.readouterr().err
+
+    def test_every_session_gets_the_same_registrations(self, config: Path) -> None:
+        # Unregistering a built-in and then registering it: each session the
+        # run opens replays to the same state.
+        _write_plugin(
+            config,
+            "bs3plug_order.py",
+            "from botocore.handlers import validate_bucket_name\n"
+            "def awscli_initialize(cli):\n"
+            "    cli.unregister('before-parameter-build.s3', validate_bucket_name)\n"
+            "    cli.register('bs3.never-emitted', validate_bucket_name)\n",
+        )
+        _write_config(config, "mine = bs3plug_order")
+        plugins.load(configfiles.scan().plugins)
+        import botocore.session
+        from botocore.handlers import validate_bucket_name
+
+        for _ in range(3):
+            emitter = botocore.session.Session().get_component("event_emitter")
+            plugins.attach(emitter)
+            handlers = list(
+                emitter._emitter._handlers.prefix_search(  # pyright: ignore[reportAttributeAccessIssue]
+                    "before-parameter-build.s3.ListObjectsV2"
+                )
+            )
+            assert validate_bucket_name not in handlers
+
     def test_an_unregister_on_a_name_without_handlers_fails_at_the_first_client(
         self, config: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
