@@ -1147,7 +1147,9 @@ download, whose landing place depends on the stream and the engine: the binary
 view passes `seek` through, so on the classic engine `s3transfer` writes a
 seekable binary stream at absolute offsets from 0 — its prior position is
 ignored, and a multipart download can leave it anywhere — while a text stream,
-a stream that cannot seek, a binary stream in append mode (`open(p, "ab")`, a
+a stream that cannot seek (a pipe, a socket or a console, judged by its
+descriptor: a Windows pipe answers `seekable()` with `True`, and gets the
+write-only view all the same), a binary stream in append mode (`open(p, "ab")`, a
 `>>` redirected stdout's `.buffer`: it reports `seekable()` but every write
 lands at its end, so it gets a write-only view and the parts arrive in order),
 and any stream under the CRT engine are written in order from their current

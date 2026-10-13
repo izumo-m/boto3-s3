@@ -54,7 +54,9 @@ Uploads encode, downloads decode.
 Where a download writes into it depends on the stream and the engine: on the
 classic transfer engine a seekable binary stream is written at absolute offsets
 from 0, so whatever position it held beforehand is ignored, and a multipart
-download can leave it anywhere. A text stream, a stream that cannot seek, a
+download can leave it anywhere. A text stream, a stream that cannot seek
+(a pipe, a socket or a console counts as one even where it claims otherwise —
+a Windows pipe answers `seekable()` with `True`), a
 binary stream in append mode (`open(path, "ab")`, or a `>>` redirected
 stdout's `.buffer` — every write lands at its end, so it is written in order
 rather than at offsets that would scramble a multipart download), and any

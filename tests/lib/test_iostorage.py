@@ -56,6 +56,34 @@ class TestBinaryPassthrough:
         assert IOStorage(buf).open("anything", "rb", size=999).read() == b"x"
 
 
+class _ClaimsSeekableWriter:
+    """A pipe-backed writer that reports ``seekable()`` True, like a Windows pipe."""
+
+    def __init__(self, fd: int) -> None:
+        self._raw = os.fdopen(fd, "wb")
+
+    def write(self, data: bytes) -> int:
+        return self._raw.write(data)
+
+    def flush(self) -> None:
+        self._raw.flush()
+
+    def seekable(self) -> bool:
+        return True
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        return 0
+
+    def tell(self) -> int:
+        return 0
+
+    def fileno(self) -> int:
+        return self._raw.fileno()
+
+    def close(self) -> None:
+        self._raw.close()
+
+
 class _ClaimsSeekable:
     """A pipe-backed reader that reports ``seekable()`` True, like a Windows pipe."""
 
@@ -306,6 +334,23 @@ class TestAppendModeStream:
             assert fh.mode == "wb"
             writer = IOStorage(fh).open("k", "wb")
             assert not hasattr(writer, "seek")
+
+    def test_a_pipe_that_claims_seekable_gets_the_write_only_view(self) -> None:
+        # A Windows pipe answers seekable() True and lets seek succeed without
+        # moving: the positioned download wrote its parts down it in completion
+        # order (measured on Windows, classic engine). The descriptor decides.
+        r, w = os.pipe()
+        stream = _ClaimsSeekableWriter(w)
+        try:
+            writer = IOStorage(stream).open("k", "wb")  # pyright: ignore[reportArgumentType]
+            assert not hasattr(writer, "seek")
+            assert not hasattr(writer, "seekable")
+            writer.write(b"in order")
+            writer.close()
+        finally:
+            stream.close()
+        with os.fdopen(r, "rb") as pipe:
+            assert pipe.read() == b"in order"
 
     def test_a_plain_file_keeps_the_seekable_view(self, tmp_path: Path) -> None:
         with (tmp_path / "out.bin").open("wb") as fh:

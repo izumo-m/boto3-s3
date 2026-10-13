@@ -119,13 +119,16 @@ class _WriteOnly:
 
 
 class _SequentialWriter:
-    """Write-only binary view of an append-mode stream (see `_is_append_mode`).
+    """Write-only binary view of a destination that must be written in order.
 
-    Exposing only ``write`` takes s3transfer's non-seekable download path, which
-    orders the ranged parts before writing them out, so the bytes land in
-    object order at the stream's end - where an append-mode stream puts every
-    write anyway. ``close`` flushes and leaves the caller's stream open, like
-    `_Uncloseable`.
+    Two kinds of stream get it: one in append mode (`_is_append_mode`), and one
+    that cannot be positioned whatever its ``seekable()`` says
+    (`_cannot_seek` - a Windows pipe answers True and lets ``seek`` succeed
+    without moving). Exposing only ``write`` takes s3transfer's non-seekable
+    download path, which orders the ranged parts before writing them out, so
+    the bytes land in object order - at the stream's end, where an append-mode
+    stream puts every write anyway, or down the pipe as they come. ``close``
+    flushes and leaves the caller's stream open, like `_Uncloseable`.
     """
 
     def __init__(self, raw: Any) -> None:
@@ -180,7 +183,14 @@ def _is_append_mode(stream: Any) -> bool:
 
 
 def _cannot_seek(stream: Any) -> bool:
-    """Whether a binary source must be read through `_NonSeekable`.
+    """Whether a binary stream cannot be positioned (`_NonSeekable` / `_SequentialWriter`).
+
+    As a destination, a stream that claims ``seekable()`` without being able
+    to seek would take s3transfer's positioned, parallel download: on Windows
+    a pipe does exactly that, and the classic engine wrote the ranged parts
+    down it in completion order - a scrambled object reported SUCCEEDED
+    (measured: 26 MiB from MinIO), where the CRT engine wrote it in order. As
+    a source, the rest of this note applies.
 
     A stream that answers ``seekable()`` False - a POSIX pipe, a socket file
     - still carries ``seek`` and ``tell``, and the CRT lane hands the stream
@@ -381,9 +391,10 @@ class IOStorage(Storage):
 
         A single endpoint takes no key. A text stream is adapted to bytes via the
         configured ``encoding`` (encode on ``"rb"``, decode on ``"wb"``). A
-        binary stream in append mode is written through a write-only view, so
-        the download runs in order (`_is_append_mode`); one that cannot be
-        positioned is read through a read-only view (`_cannot_seek`).
+        binary stream in append mode (`_is_append_mode`), or one that cannot be
+        positioned (`_cannot_seek`), is written through a write-only view, so
+        the download runs in order; one that cannot be positioned is read
+        through a read-only view.
         """
         stream = self._stream
         assert stream is not None  # plain IOStorage always holds a stream
@@ -394,7 +405,7 @@ class IOStorage(Storage):
                 else _DecodingWriter(stream, self._encoding)
             )
             return cast("BinaryIO", adapter)
-        if mode == "wb" and _is_append_mode(stream):
+        if mode == "wb" and (_is_append_mode(stream) or _cannot_seek(stream)):
             return cast("BinaryIO", _SequentialWriter(stream))
         if mode == "rb" and _cannot_seek(stream):
             return cast("BinaryIO", _NonSeekable(stream))

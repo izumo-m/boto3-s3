@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `sync` no longer stops on a listing that is out of key order; it merges it the way `aws s3 sync` does, mis-pairs included.
 - A transfer or delete whose request dies without any response (a closed connection; a read timeout outside downloads) now leaves no record and no count where `aws s3` loses it, instead of failing the item.
 - When the `TransferConfig` selects the CRT engine, `rm`, `sync`'s deletes and `S3Deleter` now send their deletes (still batched) on the CRT client, as `aws s3` does; `rm` and `S3Deleter` take a `transfer_config` for it.
-- A download into an `IOStorage` over an append-mode stream is now written in order instead of scrambling a multipart object.
+- A download into an `IOStorage` over an append-mode stream, or over a pipe that claims to seek (a Windows pipe), is now written in order instead of scrambling a multipart object.
 - A streaming upload from a seekable stream is no longer cut to `expected_size`; the hint now sizes only a stream the engine cannot size itself.
 - An immediate cancellation now also interrupts a CRT run whose submission is waiting on the engine's backpressure.
 - An incomplete listing, bucket or HeadObject response, or a timestamp the host cannot represent, now raises `MalformedResponseError` instead of the bare `KeyError` / `OverflowError`.
