@@ -276,6 +276,80 @@ class TestAliasGlobals:
         assert cli.main(["v"], ctx=unused_ctx()) == 0
         assert capsys.readouterr().out.startswith("boto3-s3-cli/")
 
+    @pytest.mark.parametrize("value", ["/no/such/bundle.pem", "''"])
+    def test_a_ca_bundle_in_the_value_changes_nothing(self, alias_file: Path, value: str) -> None:
+        # aws folds --ca-bundle into its verification setting while the
+        # typed arguments are parsed; the alias's copy arrives after that
+        # fold, where nothing reads it - a bundle it names is never trusted,
+        # and an empty one is not refused (measured: `x = rm ... --ca-bundle
+        # ''` dry-runs at rc 0, a bundle trusting a self-signed server still
+        # fails verification).
+        alias_file.write_text(f"[command s3]\nx = ls --ca-bundle {value}\n")
+        seen: list[object] = []
+
+        def factory(args: Any) -> Any:
+            from tests.utils.recorder import make_recording_client
+
+            seen.append(args.ca_bundle)
+            client, _calls = make_recording_client(_EMPTY_PAGE)
+            return client
+
+        ctx = Context(client_factory=factory)  # pyright: ignore[reportArgumentType]
+        assert cli.main(["x", "s3://bkt"], ctx=ctx) == 0
+        assert seen == [None]
+
+    def test_no_verify_ssl_in_the_value_is_applied(self, alias_file: Path) -> None:
+        alias_file.write_text("[command s3]\nx = ls --no-verify-ssl\n")
+        seen: list[object] = []
+
+        def factory(args: Any) -> Any:
+            from tests.utils.recorder import make_recording_client
+
+            seen.append(args.no_verify_ssl)
+            client, _calls = make_recording_client(_EMPTY_PAGE)
+            return client
+
+        ctx = Context(client_factory=factory)  # pyright: ignore[reportArgumentType]
+        assert cli.main(["x", "s3://bkt"], ctx=ctx) == 0
+        assert seen == [True]
+
+
+class TestALeadingDoubleDash:
+    """aws parses a value behind its service token, which uses a leading ``--`` up."""
+
+    def test_it_is_used_up_but_still_keeps_globals_out(self, alias_file: Path) -> None:
+        # `x = -- rm --dryrun` + `x s3://bkt/k` dry-runs (measured on aws).
+        alias_file.write_text("[command s3]\nx = -- rm --dryrun\n")
+        result, calls = run_recorded([], ["x", "s3://bkt/k"])
+        assert (result.rc, result.stdout, calls) == (0, "(dryrun) delete: s3://bkt/k\n", [])
+
+    def test_a_shadow_alias_drops_the_name_after_it(self, alias_file: Path) -> None:
+        alias_file.write_text("[command s3]\nrm = -- rm\n")
+        result, calls = run_recorded([], ["rm", "s3://bkt/k", "--dryrun"])
+        assert (result.rc, result.stdout, calls) == (0, "(dryrun) delete: s3://bkt/k\n", [])
+
+    def test_what_follows_it_is_no_global(
+        self, alias_file: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Measured: aws answers `x = -- --version` with `Unknown options:
+        # --version` rather than printing its version.
+        alias_file.write_text("[command s3]\nx = -- --version\n")
+        assert cli.main(["x"], ctx=unused_ctx()) == 252
+        assert capsys.readouterr().err.startswith(
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+        )
+
+    def test_a_later_one_keeps_its_marker(
+        self, alias_file: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Measured: `x = --region us-west-2 -- rm` + `x s3://bkt/k --dryrun`
+        # is `Unknown options: --dryrun` on aws too.
+        alias_file.write_text("[command s3]\nx = --region us-west-2 -- rm\n")
+        assert cli.main(["x", "s3://bkt/k", "--dryrun"], ctx=unused_ctx()) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): Unknown options: --dryrun\n"
+        )
+
 
 class TestShadowingABuiltIn:
     """An alias named after a subcommand proxies to it, minus one token."""

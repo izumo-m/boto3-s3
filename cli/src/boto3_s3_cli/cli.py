@@ -1408,7 +1408,12 @@ def _run_alias(
     except SystemExit as exc:
         return 0 if not exc.code else _PARAM_VALIDATION_ERROR_RC
     _apply_alias_globals(name, parser, parsed, head)
-    tokens = remainder + arguments
+    # aws parses the value behind the service token (`s3 <value>`), so a
+    # leading `--` is used up against that token exactly as on the command
+    # line (`_dispatch`): it still keeps what follows from being read as
+    # globals, but does not reach the command (measured: `x = -- rm --dryrun`
+    # runs the dry run, `x = --region us-west-2 -- rm` keeps its marker).
+    tokens = (remainder[1:] if expanded[:1] == ["--"] else remainder) + arguments
     if name in _COMMAND_TABLE:
         # The built-in runs as this alias's proxy, which is how aws detaches it
         # from the command table - so the section it consults is the shadow
@@ -1454,6 +1459,14 @@ def _apply_alias_globals(
     clientfactory.validate_endpoint_url(parsed)
     clientfactory.resolve_cli_timeouts(parsed)
     for dest in updates:
+        if dest == "ca_bundle":
+            # aws folds `--ca-bundle` into its `verify_ssl` while the user's
+            # own arguments are parsed, and that folded value is the one its
+            # clients read. The alias's copy lands on `ca_bundle` after the
+            # fold, where nothing reads it: an alias's `--ca-bundle` neither
+            # trusts its certificate nor fails empty (measured).
+            # `--no-verify-ssl` is the verification an alias can change.
+            continue
         setattr(head, dest, getattr(parsed, dest))
 
 

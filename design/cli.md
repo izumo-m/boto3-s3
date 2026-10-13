@@ -1902,10 +1902,17 @@ informational exits must not import the SDK ([`imports.md`](./imports.md)).
   globals parser exactly as aws runs it through its main parser - so a global
   option in the value is taken out and applied, **overriding** one the user
   typed, while `--debug` and `--profile` are refused in aws's own scan order
-  (`--debug` blamed first). What the globals parser leaves is placed ahead of
-  the user's arguments and re-resolved, which is what makes alias-to-alias
-  chains work - and what makes an alias that expands to itself end as aws's
-  `maximum recursion depth exceeded` at rc 255.
+  (`--debug` blamed first). `--ca-bundle` is the one global that is parsed but
+  not applied: aws folds it into its verification setting while the user's
+  own arguments are parsed, and the alias's copy lands after that fold, where
+  nothing reads it (measured: an alias's bundle is never trusted, an empty one
+  never refused; `--no-verify-ssl` does apply). What the globals parser leaves
+  is placed ahead of the user's arguments and re-resolved, which is what makes
+  alias-to-alias chains work - and what makes an alias that expands to itself
+  end as aws's `maximum recursion depth exceeded` at rc 255. A `--` leading the
+  value is used up as on the command line (section 1): aws parses the value
+  behind its service token, so the marker still keeps what follows from being
+  read as globals but does not reach the command.
 - **Shadowing a built-in** proxies to that built-in with the *first* token of
   the combined arguments dropped, aws's own rule (`ls = ls --recursive` makes
   every `ls` recursive; `ls = cp` still runs `ls`; `ls =` eats the user's first

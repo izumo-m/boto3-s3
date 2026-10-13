@@ -193,7 +193,8 @@ declare nothing at all, on either tool.
   and placed ahead of what was typed, then parsed again — so an alias may
   expand to another alias, and a global option in the value (say `--region`)
   applies to the run, overriding one typed on the command line. `--debug` and
-  `--profile` are refused there, as they are under `aws`.
+  `--profile` are refused there, as they are under `aws`, and `--ca-bundle`
+  there changes nothing, as under `aws` (`--no-verify-ssl` does apply).
 - An alias named after a built-in subcommand **replaces** it and proxies to it,
   dropping the first word of the expansion: `ls = ls --recursive` makes every
   `ls` recursive.
