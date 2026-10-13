@@ -109,7 +109,7 @@ class TestLoad:
         plugins.load(configfiles.scan().plugins)
         emitter = plugins._emitter  # pyright: ignore[reportPrivateUsage]
         assert emitter is not None
-        assert [(method, args[0]) for method, args, _ in emitter.calls] == [
+        assert [(method, args[0]) for method, args in emitter.calls] == [
             ("register", "before-call.s3.ListObjectsV2")
         ]
 
@@ -119,6 +119,25 @@ class TestLoad:
         config.write_text("[plugins]\ncli_legacy_plugin_path =\n  a = b\nmine = x\n")
         with pytest.raises(AttributeError, match="'dict' object has no attribute 'split'"):
             plugins.load(configfiles.scan().plugins)
+
+    def test_an_indented_entry_fails_in_aws_s_interpreter_s_words(self, config: Path) -> None:
+        # A map reaches `__import__`, which Python 3.10 refuses in other words
+        # than the 3.14 aws runs on (measured: `module name must be a
+        # string`).
+        _write_config(config, "mine =\n  a = b")
+        with pytest.raises(TypeError, match=r"^module name must be a string$"):
+            plugins.load(configfiles.scan().plugins)
+
+    def test_each_load_starts_from_no_registrations(self, config: Path) -> None:
+        # aws builds a new emitter with every driver; a config without the
+        # plugin path leaves nothing behind from an earlier load.
+        _write_plugin(config, "bs3plug_once.py", _RECORDING_PLUGIN)
+        _write_config(config, "mine = bs3plug_once")
+        plugins.load(configfiles.scan().plugins)
+        assert plugins._emitter is not None  # pyright: ignore[reportPrivateUsage]
+        config.write_text("[plugins]\n")
+        plugins.load(configfiles.scan().plugins)
+        assert plugins._emitter is None  # pyright: ignore[reportPrivateUsage]
 
 
 class TestReports:
@@ -131,6 +150,63 @@ class TestReports:
         captured = capsys.readouterr()
         assert captured.out == ""
         assert captured.err == "boto3-s3: [ERROR]: No module named 'bs3plug_missing'\n"
+
+    @pytest.mark.parametrize(
+        ("body", "rc", "message"),
+        [
+            # botocore's parameter-validation failure is aws's entry point's
+            # first handler: 252 with its envelope (measured).
+            (
+                "from botocore.exceptions import ParamValidationError\n"
+                "raise ParamValidationError(report='plugin says no')\n",
+                252,
+                "An error occurred (ParamValidation): Parameter validation failed:\nplugin says no",
+            ),
+            # The rest of the botocore family is that entry point's general
+            # 255, its dedicated rc-253/254 handlers belonging to the driver.
+            (
+                "from botocore.exceptions import NoCredentialsError\nraise NoCredentialsError()\n",
+                255,
+                "Unable to locate credentials",
+            ),
+            ("raise AssertionError('plugin assert')\n", 255, "plugin assert"),
+            # Outside the Exception family aws's chain claims nothing and the
+            # run ends at rc 0 with nothing written; here it is the general
+            # report (docs/cli/aws-differences.md).
+            (
+                "class Stop(BaseException):\n    pass\nraise Stop('base boom')\n",
+                255,
+                "base boom",
+            ),
+            ("raise GeneratorExit('gen')\n", 255, "gen"),
+        ],
+        ids=["param-validation", "no-credentials", "assertion", "base-exception", "generator-exit"],
+    )
+    def test_a_plugin_s_import_failure_is_aws_s_entry_point_report(
+        self,
+        config: Path,
+        capsys: pytest.CaptureFixture[str],
+        body: str,
+        rc: int,
+        message: str,
+    ) -> None:
+        _write_plugin(config, "bs3plug_raise.py", body)
+        _write_config(config, "mine = bs3plug_raise")
+        assert cli.main(["--version"]) == rc
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == f"boto3-s3: [ERROR]: {message}\n"
+
+    def test_a_plugin_that_exits_ends_the_run_with_its_status(self, config: Path) -> None:
+        # Python's own contract, kept: aws's chain lets the exit through to
+        # rc 0 whatever the plugin asked (docs/cli/aws-differences.md).
+        _write_plugin(
+            config, "bs3plug_exit.py", "import sys\ndef awscli_initialize(cli):\n    sys.exit(7)\n"
+        )
+        _write_config(config, "mine = bs3plug_exit")
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["--version"])
+        assert excinfo.value.code == 7
 
     def test_a_credentials_file_section_is_not_read(
         self, config: Path, capsys: pytest.CaptureFixture[str]
@@ -189,6 +265,116 @@ class TestRegistrationChecks:
         assert err.startswith("boto3-s3: [ERROR]: ")
         assert message in err
 
+    @pytest.mark.parametrize(
+        ("body", "message"),
+        [
+            # botocore's trie splits the name of every registration it keeps,
+            # so a name that is no string fails where aws's emitter fails:
+            # while the plugins load (measured: `--version` is rc 255).
+            (
+                "def _h(**kwargs):\n    pass\n"
+                "def awscli_initialize(cli):\n    cli.register(None, _h)\n",
+                "'NoneType' object has no attribute 'split'",
+            ),
+            (
+                "def _h(**kwargs):\n    pass\n"
+                "def awscli_initialize(cli):\n    cli.register(['before-call'], _h)\n",
+                "'list' object has no attribute 'split'",
+            ),
+            # An unregister that stops on a node a longer name created holds
+            # no handler list to search.
+            (
+                "def _h(**kwargs):\n    pass\n"
+                "def awscli_initialize(cli):\n"
+                "    cli.register('bs3.events.deeper', _h)\n"
+                "    cli.unregister('bs3.events', _h)\n",
+                "'NoneType' object has no attribute 'first'",
+            ),
+            # Python names the class that defines the method; aws's is
+            # botocore's own.
+            (
+                "def _h(**kwargs):\n    pass\n"
+                "def awscli_initialize(cli):\n    cli.register('before-call.s3', _h, priority=1)\n",
+                "BaseEventHooks.register() got an unexpected keyword argument 'priority'",
+            ),
+            (
+                "def awscli_initialize(cli):\n    cli.unregister()\n",
+                "HierarchicalEmitter.unregister() missing 1 required positional argument: "
+                "'event_name'",
+            ),
+        ],
+        ids=["none-name", "list-name", "intermediate-node", "unknown-keyword", "missing-name"],
+    )
+    def test_a_call_botocore_s_emitter_refuses_ends_the_run_while_loading(
+        self, config: Path, capsys: pytest.CaptureFixture[str], body: str, message: str
+    ) -> None:
+        _write_plugin(config, "bs3plug_refused.py", body)
+        _write_config(config, "mine = bs3plug_refused")
+        assert cli.main(["--version"]) == 255
+        assert capsys.readouterr().err == f"boto3-s3: [ERROR]: {message}\n"
+
+    def test_a_call_aws_answers_without_its_handlers_is_not_replayed(self, config: Path) -> None:
+        # aws returns before it reads the name of an unregister whose
+        # unique_id was never registered, or of a registration repeating one;
+        # replaying those onto stock botocore's aliasing emitter would split
+        # the name there and fail the session aws runs (measured).
+        _write_plugin(
+            config,
+            "bs3plug_noop.py",
+            "def _h(**kwargs):\n    pass\n"
+            "def awscli_initialize(cli):\n"
+            "    cli.unregister(None, unique_id='never-registered')\n"
+            "    cli.register('before-call.s3', _h, unique_id='u')\n"
+            "    cli.register(None, _h, unique_id='u')\n",
+        )
+        _write_config(config, "mine = bs3plug_noop")
+        plugins.load(configfiles.scan().plugins)
+        import botocore.session
+
+        session = botocore.session.Session()
+        plugins.attach(session.get_component("event_emitter"))
+        emitter = plugins._emitter  # pyright: ignore[reportPrivateUsage]
+        assert emitter is not None
+        assert [method for method, _args in emitter.calls] == ["register"]
+
+    def test_emitting_reaches_the_plugins_own_handlers(
+        self, config: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's emitter runs a plugin's handlers for an event the plugin
+        # emits while it initializes (measured, every invocation alike).
+        _write_plugin(
+            config,
+            "bs3plug_emit.py",
+            "import sys\n"
+            "def _h(**kwargs):\n"
+            "    sys.stderr.write('ran %s\\n' % kwargs['event_name'])\n"
+            "    return 'answer'\n"
+            "def awscli_initialize(cli):\n"
+            "    cli.register('bs3-event', _h)\n"
+            "    sys.stderr.write('%d\\n' % len(cli.emit('bs3-event.sub', x=1)))\n"
+            "    sys.stderr.write('%s\\n' % cli.emit_until_response('bs3-event')[1])\n",
+        )
+        _write_config(config, "mine = bs3plug_emit")
+        assert cli.main(["--version"]) == 0
+        assert capsys.readouterr().err == "ran bs3-event.sub\n1\nran bs3-event\nanswer\n"
+
+    def test_a_copy_of_the_emitter_is_detached(self, config: Path) -> None:
+        # botocore's copy keeps its own registrations: what a plugin puts on a
+        # copy reaches no session.
+        _write_plugin(
+            config,
+            "bs3plug_copy.py",
+            "import copy\n"
+            "def _h(**kwargs):\n    pass\n"
+            "def awscli_initialize(cli):\n"
+            "    copy.copy(cli).register('before-call.s3', _h)\n",
+        )
+        _write_config(config, "mine = bs3plug_copy")
+        plugins.load(configfiles.scan().plugins)
+        emitter = plugins._emitter  # pyright: ignore[reportPrivateUsage]
+        assert emitter is not None
+        assert emitter.calls == []
+
     def test_a_repeated_unique_id_is_recorded_once_by_botocore(self, config: Path) -> None:
         # The duplicate registration is no error (and no second handler):
         # the replay leaves botocore to drop it exactly as aws's emitter does.
@@ -231,6 +417,83 @@ class TestAttach:
         with pytest.raises(_StopError):
             client.list_objects_v2(Bucket="bkt")
         assert sys.modules["bs3plug_rec"].seen == ["before-call.s3.ListObjectsV2"]
+
+
+class TestHandlerFailures:
+    """What a plugin's handler raises is reported as aws reports an Exception."""
+
+    @pytest.mark.parametrize(
+        "raised",
+        [
+            "AssertionError('plugin assert')",
+            "type('Stop', (BaseException,), {})('plugin assert')",
+            "GeneratorExit('plugin assert')",
+        ],
+        ids=["assertion", "base-exception", "generator-exit"],
+    )
+    def test_a_handler_s_failure_is_the_general_report(
+        self,
+        config: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+        raised: str,
+    ) -> None:
+        # aws: `aws: [ERROR]: plugin assert` at 255 for an AssertionError
+        # (measured); a bare one is this CLI's own invariant, so a plugin's
+        # surfaced as a traceback. Outside the Exception family aws ends at
+        # rc 0 with nothing written - a failure reported as a success - and
+        # here it is the same report as an Exception.
+        _write_plugin(
+            config,
+            "bs3plug_fail.py",
+            f"def _h(**kwargs):\n    raise {raised}\n"
+            "def awscli_initialize(cli):\n    cli.register('before-call.s3', _h)\n",
+        )
+        _write_config(config, "mine = bs3plug_fail")
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        rc = cli.main(["ls", "s3://bkt", "--endpoint-url", "http://127.0.0.1:9"])
+        assert rc == 255
+        assert capsys.readouterr().err == "boto3-s3: [ERROR]: plugin assert\n"
+
+    @pytest.mark.parametrize("raised", [KeyboardInterrupt, SystemExit])
+    def test_an_interrupt_or_exit_passes_unchanged(
+        self, config: Path, raised: type[BaseException]
+    ) -> None:
+        _write_plugin(
+            config,
+            "bs3plug_pass.py",
+            f"def _h(**kwargs):\n    raise {raised.__name__}\n"
+            "def awscli_initialize(cli):\n    cli.register('bs3-event', _h)\n",
+        )
+        _write_config(config, "mine = bs3plug_pass")
+        plugins.load(configfiles.scan().plugins)
+        from botocore.hooks import HierarchicalEmitter
+
+        emitter = HierarchicalEmitter()
+        plugins.attach(emitter)
+        with pytest.raises(raised):
+            emitter.emit("bs3-event")
+
+    def test_an_unregister_reaches_the_handler_its_register_put_there(self, config: Path) -> None:
+        # The replay wraps each handler once, so the plugin's unregister finds
+        # what its register left on the session.
+        _write_plugin(
+            config,
+            "bs3plug_unreg.py",
+            "def _h(**kwargs):\n    raise AssertionError('still here')\n"
+            "def awscli_initialize(cli):\n"
+            "    cli.register('bs3-event', _h)\n"
+            "    cli.unregister('bs3-event', _h)\n",
+        )
+        _write_config(config, "mine = bs3plug_unreg")
+        plugins.load(configfiles.scan().plugins)
+        from botocore.hooks import HierarchicalEmitter
+
+        emitter = HierarchicalEmitter()
+        plugins.attach(emitter)
+        assert emitter.emit("bs3-event") == []
 
 
 def _parse_globals(argv: list[str]) -> argparse.Namespace:

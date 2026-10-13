@@ -64,17 +64,29 @@ solidified design is added here.
   token included: when the section sets `cli_legacy_plugin_path`, that value
   is split onto `sys.path`, every other entry is imported, and each module's
   `awscli_initialize` is called (without that entry nothing is imported). A
-  plugin that fails to import or initialize ends the run there with `str()`
-  of the exception at rc 255, aws's general handler (measured: `No module
-  named '<name>'`, `module '<name>' has no attribute 'awscli_initialize'`).
-  The emitter a plugin registers on only records, so the informational exits
-  stay SDK-free; every botocore session this CLI opens replays the
-  registrations right after botocore's built-ins (`plugins.attach` in
-  `_open_botocore_session`), where aws's session has them, so a handler on a
-  botocore event fires as it does under aws. aws-cli's own events are never
-  emitted here, and a plugin that imports aws-cli's modules fails to import -
-  the part of a plugin written against awscli's internals, recorded in
-  [`aws-differences.md`](../docs/cli/aws-differences.md).
+  plugin that fails to import or initialize ends the run there through aws's
+  entry-point handlers (`_build_driver`): a botocore parameter-validation
+  failure at 252 with its envelope, anything else with `str()` of the
+  exception at 255 (measured: `No module named '<name>'`, `module '<name>'
+  has no attribute 'awscli_initialize'`). Two cases part from that chain on
+  purpose: a `SystemExit` ends the run with the status it carries, and a
+  `BaseException` outside `Exception` is reported at 255 like one, where
+  aws's chain claims neither and exits 0 silently. The emitter a plugin
+  registers on is an SDK-free port of the one aws hands it (botocore's
+  `HierarchicalEmitter`, without stock botocore's event aliaser), so its
+  checks, its name splitting, its unregister walk and the plugin's own
+  emits behave and fail as they do while aws loads plugins. Every call that
+  changed it is replayed onto every botocore session this CLI opens, right
+  after botocore's built-ins (`plugins.attach` in `_open_botocore_session`),
+  where aws's session has them, so a handler on a botocore event fires as it
+  does under aws. The replay wraps each handler so that an `AssertionError`
+  - kept loud for this CLI's own invariants - or a `BaseException` outside
+  `Exception` is re-raised as an ordinary `Exception` with the same message,
+  which is how aws reports a handler's `AssertionError`. aws-cli's own events
+  are never emitted here, and a plugin that imports aws-cli's modules fails to
+  import - the part of a plugin written against awscli's internals, recorded
+  in [`aws-differences.md`](../docs/cli/aws-differences.md) with the places
+  the installed SDK differs from aws's bundled one.
 - `_dispatch` opens by reading the **alias file** (`~/.aws/cli/alias`,
   section 9), which aws reads while it is still assembling its parser - so a
   file it cannot read aborts the run ahead of everything below, `--version` and
@@ -1699,7 +1711,9 @@ no handler for either, so both are 255, not 253. A schemeless
 backstop, `_dispatch` maps any non-`Boto3S3Error` exception that still escapes a
 command to the same chain (credential/region 253, `ClientError` 254, else 255),
 so no path crashes with a traceback + rc 1 - except an `AssertionError`, which
-the backstop deliberately re-raises (a broken invariant crashes loudly). The
+the backstop deliberately re-raises (a broken invariant crashes loudly). One
+raised by a plugin's handler is no invariant of this CLI's: the plugin replay
+re-raises it as an ordinary `Exception` before it gets here (section 1). The
 three resolutions of the globals pass (section 1) carry the same backstop, for
 the same reason: aws resolves them inside its handler chain, so an
 `--endpoint-url` whose netloc `urlsplit` refuses (`http://[::1:9000` -> a bare

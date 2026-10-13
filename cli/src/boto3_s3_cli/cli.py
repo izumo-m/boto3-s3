@@ -885,9 +885,63 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
         return rc
 
 
+def _build_driver() -> int | None:
+    """aws's `create_clidriver`, as far as it can fail: the config read, the plugins.
+
+    aws reads the whole merged config while it is still constructing the
+    driver, so a file that is not valid INI settles the run here - ahead of
+    the auto-prompt rejection, --version, the help token and every parse
+    below (all measured), and with botocore's own wording through aws's
+    general handler (255). Only the preliminary scan outranks it. aws then
+    loads its plugins from that same config read (`plugins` - the `[plugins]`
+    section with a `cli_legacy_plugin_path`), so a plugin that fails to import
+    or initialize ends the run here too - `--version` and the help token
+    included (measured) - through aws's entry-point handlers: a
+    parameter-validation failure at 252 with its envelope, a Ctrl-C at 130
+    (`main`'s), anything else at 255 with its message. Two cases part from
+    aws's chain on purpose. A `SystemExit` passes, honoring the exit the
+    plugin asked for, and the rest of the `BaseException` family is reported
+    at 255 like an `Exception`, where aws's chain claims neither, so its run
+    ends at rc 0 with nothing written - a failure reported as a success
+    (docs/cli/aws-differences.md).
+
+    Returns the rc of the report it wrote, or None to go on.
+    """
+    global _config_scan
+    _config_scan = configfiles.scan()
+    if _config_scan.unparseable is not None:
+        _write_error(
+            f"Unable to parse config file: {_config_scan.unparseable}", rc=_GENERAL_ERROR_RC
+        )
+        return _GENERAL_ERROR_RC
+    try:
+        plugins.load(_config_scan.plugins)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:
+        rc = _GENERAL_ERROR_RC
+        # A plugin raising botocore's own exception has imported botocore
+        # already; looking it up there keeps this path SDK-free otherwise.
+        botocore_exceptions = sys.modules.get("botocore.exceptions")
+        if botocore_exceptions is not None and isinstance(
+            exc, botocore_exceptions.ParamValidationError
+        ):
+            rc = _PARAM_VALIDATION_ERROR_RC
+        _write_error(exc, rc=rc)
+        return rc
+    return None
+
+
+def _prompt_toolkit_installed() -> bool:
+    """Is the `autoprompt` extra's ``prompt_toolkit`` there (without importing it)?"""
+    import importlib.util
+
+    return importlib.util.find_spec("prompt_toolkit") is not None
+
+
 def _main(argv: list[str] | None, ctx: Context | None) -> int:
     """The body of `main` (split out so its Ctrl-C backstop wraps everything)."""
-    global _config_scan, _enhanced_envelope
+    global _enhanced_envelope
     # Nothing has built a session yet, so every report below the preliminary
     # scan is rendered the enhanced way (aws's entry-point handler chain is
     # constructed without one).
@@ -907,27 +961,9 @@ def _main(argv: list[str] | None, ctx: Context | None) -> int:
         _build_first_pass_parser().parse_known_args(raw)
     except SystemExit:
         return _PARAM_VALIDATION_ERROR_RC
-    # aws reads the whole merged config next, while it is still constructing the
-    # driver, so a file that is not valid INI settles the run here - ahead of
-    # the auto-prompt rejection, --version, the help token and every parse below
-    # (all measured), and with botocore's own wording through aws's general
-    # handler (255). Only the preliminary scan above outranks it.
-    _config_scan = configfiles.scan()
-    if _config_scan.unparseable is not None:
-        _write_error(
-            f"Unable to parse config file: {_config_scan.unparseable}", rc=_GENERAL_ERROR_RC
-        )
-        return _GENERAL_ERROR_RC
-    # aws loads its plugins from that same config read, before anything else
-    # (`plugins` - the `[plugins]` section with a `cli_legacy_plugin_path`),
-    # so a plugin that fails to import or initialize ends the run here at its
-    # general handler's 255 - `--version` and the help token included
-    # (measured).
-    try:
-        plugins.load(_config_scan.plugins)
-    except Exception as exc:
-        _write_error(exc, rc=_GENERAL_ERROR_RC)
-        return _GENERAL_ERROR_RC
+    rc = _build_driver()
+    if rc is not None:
+        return rc
     if resolve.AUTO_PROMPT_FLAG in raw and resolve.NO_AUTO_PROMPT_FLAG in raw:
         _write_error(
             "Both --cli-auto-prompt and --no-cli-auto-prompt cannot be specified at the same time.",

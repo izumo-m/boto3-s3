@@ -20,7 +20,8 @@ mid-stream, a recursive delete whose listing dies part way or whose endpoint
 fails its batch requests, a Ctrl-C during deletes under the CRT engine, a plain-HTTP
 endpoint named anywhere but `--endpoint-url` under the CRT engine, a
 `REQUESTS_CA_BUNDLE` the CRT engine cannot use, an `aws` plugin that imports
-`awscli` modules, a `cli_history` directory
+`awscli` modules, exits, raises outside Python's `Exception` family or
+unregisters one of the SDK's own handlers, a `cli_history` directory
 `aws` cannot create, the modification time a download stamps for an object
 older than the local zone's present rules, a CRT-engine `mv` download whose
 source delete dies without a response, a help page that cannot be written,
@@ -414,15 +415,41 @@ comes out differently, listed in section 1.
 - **An `aws` plugin's hooks into `aws` itself do not run.** Both tools load
   `[plugins]` alike — with `cli_legacy_plugin_path` set, every other entry is
   imported and its `awscli_initialize` called on every invocation, and a
-  plugin that cannot be imported or initialized stops the run with exit code
-  255 before anything happens. What a plugin registers on the SDK's own
-  events (`before-call.s3.PutObject`, `after-call`, `needs-retry` and the
-  like) runs as it does on `aws`. Two parts of a plugin are written against
-  `aws`'s own code and cannot run here: handlers on `aws`'s own events
-  (`building-command-table`, `top-level-args-parsed`, `session-initialized`
-  and the rest) are registered but never called, and **a plugin that imports
-  `awscli` modules fails to import here** — exit code 255 with `No module
-  named 'awscli'`, where `aws` runs it and the command.
+  plugin that cannot be imported or initialized stops the run before anything
+  happens (exit code 255, or 252 for a parameter-validation error). What a
+  plugin registers on the SDK's own events (`before-call.s3.PutObject`,
+  `after-call`, `needs-retry` and the like) runs as it does on `aws`. Two
+  parts of a plugin are written against `aws`'s own code and cannot run here:
+  handlers on `aws`'s own events (`building-command-table`,
+  `top-level-args-parsed`, `session-initialized` and the rest) are registered
+  but never called, and **a plugin that imports `awscli` modules fails to
+  import here** — exit code 255 with `No module named 'awscli'`, where `aws`
+  runs it and the command.
+- **A plugin meets the installed SDK, not `aws`'s bundled one.** The events
+  only `aws`'s bundled SDK emits (`before-create-client`,
+  `after-create-client`) never fire; fewer clients are built, so the events
+  of building one (`creating-client-class`, `choose-service-name`) fire fewer
+  times; and a recursive `rm`, `sync --delete` and `rb --force` delete
+  through `DeleteObjects`, so no per-key `DeleteObject` event fires for those
+  keys. While the plugins initialize, an event a plugin emits reaches only
+  the handlers plugins registered — on `aws` it reaches `aws`'s own too — and
+  an `unregister` aimed at one of the SDK's own handlers takes effect, or
+  fails, when the run first builds a client: a `--version` or a usage error
+  that builds none is unaffected, where `aws` already applied it, or stopped
+  at exit code 255. Which built-in functions can be a handler is the
+  interpreter's call: under Python 3.10 one such as `print` is accepted while
+  the plugins load and fails when its event fires, where `aws` (on Python
+  3.14) refuses it at load.
+- **A plugin that exits or raises outside `Exception` ends the run as
+  Python would.** A plugin — while it loads, or from a handler — that calls
+  `sys.exit()` ends the run with the status it asked for, and one that raises
+  a `BaseException` that is not an `Exception` (`GeneratorExit`, its own
+  subclass) is reported like any other failure: exit code 255 with its
+  message, or the failed line of the transfer it stopped. An
+  `AssertionError` from a handler is such an ordinary failure on both tools.
+  `aws` handles neither of the first two the way Python would: a run they
+  reach its entry point with ends at exit code 0 with nothing written, and a
+  transfer or delete they stop can be reported as done.
 - **User-Agent.** Requests identify themselves as the installed
   `Boto3`/`Botocore`, not as `aws-cli`, and carry none of aws's command
   metadata (`md/command#s3.ls` and the like). Visible only to the server and
