@@ -281,15 +281,6 @@ class TestRegistrationChecks:
                 "def awscli_initialize(cli):\n    cli.register(['before-call'], _h)\n",
                 "'list' object has no attribute 'split'",
             ),
-            # An unregister that stops on a node a longer name created holds
-            # no handler list to search.
-            (
-                "def _h(**kwargs):\n    pass\n"
-                "def awscli_initialize(cli):\n"
-                "    cli.register('bs3.events.deeper', _h)\n"
-                "    cli.unregister('bs3.events', _h)\n",
-                "'NoneType' object has no attribute 'first'",
-            ),
             # Python names the class that defines the method; aws's is
             # botocore's own.
             (
@@ -303,7 +294,7 @@ class TestRegistrationChecks:
                 "'event_name'",
             ),
         ],
-        ids=["none-name", "list-name", "intermediate-node", "unknown-keyword", "missing-name"],
+        ids=["none-name", "list-name", "unknown-keyword", "missing-name"],
     )
     def test_a_call_botocore_s_emitter_refuses_ends_the_run_while_loading(
         self, config: Path, capsys: pytest.CaptureFixture[str], body: str, message: str
@@ -312,6 +303,58 @@ class TestRegistrationChecks:
         _write_config(config, "mine = bs3plug_refused")
         assert cli.main(["--version"]) == 255
         assert capsys.readouterr().err == f"boto3-s3: [ERROR]: {message}\n"
+
+    def test_unregistering_an_sdk_handler_by_reference_takes_effect(
+        self, config: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The common way to let an S3-compatible store's bucket names through
+        # botocore: aws drops the check, so the request goes out (measured:
+        # `Could not connect` at 255 on a dead endpoint, not the 252 of
+        # `Invalid bucket name`). A longer name registered first leaves this
+        # node without handlers in the plugin's own tree - aws's has the
+        # SDK's there - and the load must not fail on it.
+        _write_plugin(
+            config,
+            "bs3plug_vbn.py",
+            "from botocore.handlers import validate_bucket_name\n"
+            "def _h(**kwargs):\n    pass\n"
+            "def awscli_initialize(cli):\n"
+            "    cli.register('before-parameter-build.s3.PutObject', _h)\n"
+            "    cli.unregister('before-parameter-build.s3', validate_bucket_name)\n",
+        )
+        _write_config(config, "mine = bs3plug_vbn")
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        monkeypatch.setenv("AWS_MAX_ATTEMPTS", "1")
+        assert cli.main(["--version"]) == 0
+        capsys.readouterr()
+        assert cli.main(["ls", "s3://bad!bucket/", "--endpoint-url", "http://127.0.0.1:9"]) == 255
+        assert "Could not connect to the endpoint URL" in capsys.readouterr().err
+
+    def test_an_unregister_on_a_name_without_handlers_fails_at_the_first_client(
+        self, config: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws fails this while the plugins load; here the name could hold the
+        # SDK's handlers, so it is the replay that fails, on the first client.
+        _write_plugin(
+            config,
+            "bs3plug_mid.py",
+            "def _h(**kwargs):\n    pass\n"
+            "def awscli_initialize(cli):\n"
+            "    cli.register('bs3.events.deeper', _h)\n"
+            "    cli.unregister('bs3.events', _h)\n",
+        )
+        _write_config(config, "mine = bs3plug_mid")
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        assert cli.main(["--version"]) == 0
+        capsys.readouterr()
+        assert cli.main(["ls", "s3://bkt", "--endpoint-url", "http://127.0.0.1:9"]) == 255
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: 'NoneType' object has no attribute 'first'\n"
+        )
 
     def test_a_call_aws_answers_without_its_handlers_is_not_replayed(self, config: Path) -> None:
         # aws returns before it reads the name of an unregister whose

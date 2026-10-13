@@ -19,14 +19,17 @@ botocore wraps around a session's emitter - so registering, unregistering and
 emitting behave, and fail, as they do there while the plugins load: an event
 name that is not a string, a handler that is not callable or takes no
 ``**kwargs``, a ``unique_id`` registered with and without its counter in turn,
-an unregister that walks onto a node of the name tree that holds no
-handlers. It is SDK-free because it runs on the informational exits, which
-must not load the SDK (design/imports.md). What it cannot hold is what aws's
-emitter already holds at that point - botocore's and aws-cli's own handlers -
-so an event a plugin emits while it initializes reaches only plugin handlers,
-and an unregister aimed at one of those built-ins (or walking onto a node only
-they create) takes effect, or fails, when the first session replays it rather
-than while the plugins load.
+an unregister of a name the tree does not hold. It is SDK-free because it
+runs on the informational exits, which must not load the SDK
+(design/imports.md). What it cannot hold is what aws's emitter already holds
+at that point - botocore's and aws-cli's own handlers - so an event a plugin
+emits while it initializes reaches only plugin handlers, and an unregister
+aimed at one of those built-ins takes effect when the first session replays
+it rather than while the plugins load. The same goes for an unregister that
+ends on a name holding no handlers here: on aws's tree the built-ins usually
+give that name some, and botocore's failure on a name that has none
+(``'NoneType' object has no attribute 'first'``) is then raised by the
+replay, when the run first builds a client.
 
 Every call that changes that emitter is recorded and replayed onto each
 botocore session this CLI opens (`attach`), right after the session is built
@@ -150,6 +153,13 @@ class _PrefixTrie:
             self._remove_item(next_node, key_parts, value, index + 1)
             if index == len(key_parts) - 1:
                 node_list = next_node["values"]
+                if node_list is None:
+                    # botocore fails here (`None.first`): the name only leads
+                    # to longer ones. This tree lacks the SDK's built-ins,
+                    # which give most event names handlers of their own
+                    # (`before-call.s3`), so the call is left to the replay,
+                    # whose tree has them.
+                    return
                 if value in node_list.first:
                     node_list.first.remove(value)
                 elif value in node_list.middle:
@@ -465,16 +475,26 @@ def attach(event_emitter: Any) -> None:
         return
     for method, (event_name, handler, unique_id, uses_count) in _emitter.calls:
         getattr(event_emitter, method)(
-            event_name, _replayed_handler(handler), unique_id, uses_count
+            event_name, _replayed_handler(handler, method), unique_id, uses_count
         )
 
 
-def _replayed_handler(handler: Any) -> Any:
+def _replayed_handler(handler: Any, method: str) -> Any:
+    """The object to hand botocore for ``handler`` in a replayed ``method``.
+
+    A registration puts the handler's wrapper on the session, one per
+    distinct handler, so an unregister of it finds that wrapper. An
+    unregister of a handler no plugin registered - one of the SDK's own,
+    like ``validate_bucket_name`` - passes it as it is, so botocore finds
+    the built-in.
+    """
     if handler is None:
         return None
     for replayed in _replayed:
         if replayed.handler == handler:
             return replayed
+    if method == "unregister":
+        return handler
     replayed = _ReplayedHandler(handler)
     _replayed.append(replayed)
     return replayed
