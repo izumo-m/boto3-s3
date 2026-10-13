@@ -587,7 +587,11 @@ filesystems. Under both, that message is delivered as a display-only
 [`ValidationError`](./exceptions.md#validationerror) from inside the pipeline.
 
 A key already present at the destination in exactly matching case is not a
-conflict — it is transferred, overwriting that file. What counts as a conflict,
+conflict — it is transferred, overwriting that file. That match is made the way
+the AWS CLI's comparator makes it, walking the listing and the destination side
+by side: from an S3-compatible endpoint whose listing is not in key order, a key
+that arrives after the walk has moved past its match finds none and goes to the
+conflict check instead, as it does there. What counts as a conflict,
 including the in-flight set the check consults, is with the operations that run
 the gate ([`operations/cp.md`](./operations/cp.md),
 [`operations/sync.md`](./operations/sync.md)).

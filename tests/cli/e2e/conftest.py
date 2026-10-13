@@ -83,7 +83,10 @@ def _isolated_home() -> Generator[None, None, None]:
     ``~/.aws/cli/cache/session.db`` on every command that builds a client
     (``--version`` alone does not). Against the developer's home, the host's
     settings would steer both sides of every comparison and each run would
-    write into it. ``USERPROFILE`` is what Windows resolves ``~`` from.
+    write into it. ``USERPROFILE`` is what Windows resolves ``~`` from, and
+    ``AWS_CONFIG_FILE`` / ``AWS_SHARED_CREDENTIALS_FILE`` are dropped too: a
+    shell that exports them would point both tools back at the developer's
+    files (the CRT lane sets its own config file per invocation).
     """
     with (
         tempfile.TemporaryDirectory(prefix="e2e-home-") as home,
@@ -91,6 +94,8 @@ def _isolated_home() -> Generator[None, None, None]:
     ):
         mp.setenv("HOME", home)
         mp.setenv("USERPROFILE", home)
+        mp.delenv("AWS_CONFIG_FILE", raising=False)
+        mp.delenv("AWS_SHARED_CREDENTIALS_FILE", raising=False)
         yield
 
 

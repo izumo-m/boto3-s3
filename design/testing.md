@@ -342,8 +342,9 @@ The suites isolate in both directions: the root `tests/conftest.py` forces
 fake credentials (and strips `AWS_PROFILE` / `AWS_ENDPOINT_URL*`) for
 everything except e2e, which overrides that fixture with a no-op and takes
 credentials, region and endpoint from the env alone while pointing `~` at a
-throwaway directory (both tools read `~/.aws`, and the pinned aws writes its
-session database under it on every command that builds a client); test
+throwaway directory and dropping `AWS_CONFIG_FILE` / `AWS_SHARED_CREDENTIALS_FILE`
+(both tools read `~/.aws`, and the pinned aws writes its session database
+under it on every command that builds a client); test
 fixtures build clients from fresh `boto3.session.Session()` objects because
 the process-global default session caches the first credentials it resolves.
 Two mechanisms pin classic, because the CLI tiers and the library-default

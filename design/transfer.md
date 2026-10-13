@@ -673,11 +673,16 @@ dest-existence check for download. We ported the same three faces:
   applies on a non-S3-Express source, and its S3 Express branch - reject
   `skip` / `error`, a standing warning for `warn` - is reproduced by the CLI
   before the mode reaches the library): aws builds this with the sync
-  machinery (reverse-enumerating the dest + comparator), but the observed
-  behavior reduces to two sets (confirmed by probing) -
-  1. The compare key **exists at the dest in exactly matching case** -> always
-     transferred (aws-cli assigns `AlwaysSync` to the at-dest entry = cp
-     overwrites it; it also does not enter the conflict set).
+  machinery (reverse-enumerating the dest + comparator), and the gate keeps
+  that comparator's destination side (`producers._DestinationMerge`: the dest
+  walked up front in sync's byte order, advanced one source key at a time as
+  the keys arrive) -
+  1. The compare key **pairs with a dest entry in exactly matching case** ->
+     always transferred (aws-cli assigns `AlwaysSync` to the at-dest entry = cp
+     overwrites it; it also does not enter the conflict set). With a sorted
+     listing that is "exists at the dest"; with one that is not, a key arriving
+     after the walk has moved past its match pairs with nothing and falls to
+     the check below, as aws-cli's comparator mis-pairs it.
   2. Otherwise, if "the lowercased key is in the set of downloads **still in
      flight**" or "`os.path.exists(dest)` is true (a case-variant on a
      case-insensitive FS)" -> conflict. `skip` = drop it, `warn` = let it
