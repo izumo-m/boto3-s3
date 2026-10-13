@@ -1179,8 +1179,31 @@ def _create_client(
             botocore_session.set_config_variable("retry_mode", mode)
     retries = cast("dict[str, Any] | None", client.meta.config.retries) or {}
     _reject_unsupported_retry_mode(retries.get("mode"))
+    _reject_unparsable_endpoint(client.meta.endpoint_url)
     _reject_empty_ca_bundle(kwargs.get("verify"))
     return client
+
+
+def _reject_unparsable_endpoint(endpoint_url: str | None) -> None:
+    """Refuse an endpoint aws's Python cannot parse, as aws's client build does.
+
+    botocore checks the endpoint it resolved - from the environment
+    (``AWS_ENDPOINT_URL`` / ``AWS_ENDPOINT_URL_S3``), the config
+    (``endpoint_url``, a ``[services]`` section) or the argument - with
+    ``is_valid_endpoint_url``, which leans on ``urlsplit``. Python 3.10 takes a
+    scheme that starts with a digit (``1http://...``) that 3.11 on refuses, so
+    aws's build raises ``Invalid endpoint: <value>`` (rc 255) while a 3.10
+    build goes on and every request then fails on the endpoint rules - an
+    item's failure at rc 1, and a ``--dryrun`` that succeeds (measured). The
+    scheme test is 3.11's (`_has_url_scheme`); the rest of botocore's check is
+    the same code under either interpreter. It runs after the retry mode's,
+    as aws's endpoint is built after the mode is validated, and before the CA
+    bundle's, which the endpoint's HTTP session reads. ``--endpoint-url``
+    never gets this far with such a scheme: aws refuses it while parsing
+    (`validate_endpoint_url`).
+    """
+    if endpoint_url is not None and not _has_url_scheme(endpoint_url):
+        raise ValueError(f"Invalid endpoint: {endpoint_url}")
 
 
 # What the session's retry mode is swapped for while a client is built from a

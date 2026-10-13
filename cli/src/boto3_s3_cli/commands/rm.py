@@ -253,6 +253,6 @@ class RmCommand(Command):
             # measured, rather than reaching the dispatcher's 255.
             # `SystemExit` is a BaseException and still passes, like there.
             if not args.quiet:
-                sys.stderr.write(f"fatal error: {exc}\n")
+                sys.stderr.write(f"fatal error: {output.error_text(exc)}\n")
             return 1
         return 0

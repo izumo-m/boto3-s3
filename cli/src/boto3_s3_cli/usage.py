@@ -89,16 +89,21 @@ def json_error_message(exc: json.JSONDecodeError) -> str:
 
 
 def exception_text(exc: BaseException) -> str:
-    """An exception's text as aws's general report would print it.
+    """An exception's text as aws would print it, in a report or a failure line.
 
-    aws prints ``str(exc)`` for whatever reaches its general handler, so where
-    the text is the interpreter's own - a ``json`` decode failure (a
-    ``credential_process`` answer, say), an ``int()`` the SDK applies to a
-    config value (``max_attempts``, ``metadata_service_timeout``) - the wording
-    is its bundled Python's. The two shapes an older host words differently
-    are put in that wording (`json_error_message`, `int_error_message`);
-    anything else is ``str(exc)``.
+    aws prints ``str(exc)``, so where the text is the interpreter's own - a
+    ``json`` decode failure (a ``credential_process`` answer, say), an
+    ``int()`` the SDK applies to a config value (``max_attempts``,
+    ``metadata_service_timeout``) or to a response value - the wording is its
+    bundled Python's. The two shapes an older host words differently are put
+    in that wording (`json_error_message`, `int_error_message`); anything else
+    is ``str(exc)``. An exception that carries its cause's text as its own -
+    the library's error for a request that raised outside botocore's family,
+    say - is rendered as that cause.
     """
+    cause = exc.__cause__
+    if cause is not None and str(exc) == str(cause):
+        return exception_text(cause)
     if isinstance(exc, json.JSONDecodeError):
         return json_error_message(exc)
     if isinstance(exc, ValueError):

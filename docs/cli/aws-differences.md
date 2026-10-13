@@ -363,10 +363,13 @@ comes out differently, listed in section 1.
   `aws` cancels it and reports `delete failed: s3://… AWS_ERROR_S3_CANCELED:
   Request successfully cancelled` with no closing line, exit code 1 on both.
 - **A `mv` between two spellings of one Outposts object is refused here.** An
-  Outposts access point's key can be set off from the ARN with `:` or with `/`.
+  Outposts access point's key can be set off from the ARN with `:` or with `/`,
+  and a name the access-point pattern cuts short at a character a name may not
+  hold reads as the shorter name and a key (`accesspoint/my_ap` is the access
+  point `my` and the key `_ap`, also spelled `accesspoint/my/_ap`).
   `aws` compares its two arguments as text, takes
-  `mv s3://<arn>:k s3://<arn>/k` for a move between two objects and sends it —
-  onto itself. This command recognizes the one object and stops: after the
+  `mv s3://<arn>:k s3://<arn>/k` (or the two spellings of a cut-short name) for
+  a move between two objects and sends it — onto itself. This command recognizes the one object and stops: after the
   same "may resolve to same underlying s3 object(s)" warning `aws` prints, it
   ends with `fatal error: Cannot mv a file onto itself: ...` and exit code 1.
   (A `mv` whose two arguments are the same text is refused earlier, as a usage
@@ -544,14 +547,9 @@ comes out differently, listed in section 1.
   every run at 255 on `aws` and may run normally here, or the reverse,
   depending on the Python this command is installed under. Every endpoint
   that is a well-formed URL, and every one that plainly is not, is treated
-  alike on both. The S3 endpoint itself meets the same parser where the
-  environment or the config supplies it (`AWS_ENDPOINT_URL`,
-  `AWS_ENDPOINT_URL_S3`, a profile's `endpoint_url`, a `[services]` section):
-  a scheme that starts with a digit ends the run at 255 on both tools, but
-  below Python 3.11 the report here is botocore's
-  ``Custom endpoint `<value>` was not a valid URI`` where `aws` says
-  `Invalid endpoint: <value>`. In `--endpoint-url` that scheme is checked by
-  the rule `aws`'s Python applies, so there it reads the same on every host.
+  alike on both. (The S3 endpoint itself, wherever it comes from, is checked
+  for that leading digit by the rule `aws`'s Python applies, and reads the
+  same on every host.)
 - **`sts_regional_endpoints` is validated.** The installed botocore still
   validates this config key (and `AWS_STS_REGIONAL_ENDPOINTS`); `aws` v2's
   bundled botocore dropped it. An invalid value is an error here (exit

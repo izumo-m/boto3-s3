@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,20 @@ class TestExceptionText:
         with pytest.raises(json.JSONDecodeError) as exc_info:
             json.loads(doc)
         assert usage.exception_text(exc_info.value) == expected
+
+    def test_an_error_carrying_its_causes_text_is_rendered_as_the_cause(self) -> None:
+        # The library reports a request that raised outside botocore's family
+        # as its base error with the original's text and the original on
+        # __cause__; the line aws prints is the original's.
+        with pytest.raises(json.JSONDecodeError) as exc_info:
+            json.loads('{"a": 1,}')
+        wrapped = RuntimeError(str(exc_info.value))
+        wrapped.__cause__ = exc_info.value
+        expected = "Illegal trailing comma before end of object: line 1 column 8 (char 7)"
+        assert usage.exception_text(wrapped) == expected
+        renamed = RuntimeError("something else")
+        renamed.__cause__ = exc_info.value
+        assert usage.exception_text(renamed) == "something else"
 
     def test_anything_else_is_its_str(self) -> None:
         assert usage.exception_text(KeyError("Bucket")) == "'Bucket'"
@@ -92,4 +107,92 @@ class TestReports:
         assert capsys.readouterr().err == (
             "boto3-s3: [ERROR]: Illegal trailing comma before end of object: "
             "line 1 column 34 (char 33)\n"
+        )
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="a POSIX credential_process script")
+    @pytest.mark.parametrize(
+        ("argv", "line"),
+        [
+            (["cp", "f", "s3://b/k"], "upload failed: ./f to s3://b/k "),
+            (["rm", "s3://b/k"], "delete failed: s3://b/k "),
+            (["cp", "s3://b/", "d", "--recursive"], "fatal error: "),
+            (["rm", "s3://b/", "--recursive"], "fatal error: "),
+            (["mb", "s3://b"], "make_bucket failed: s3://b "),
+            (["rb", "s3://b"], "remove_bucket failed: s3://b "),
+            (["ls", "s3://b"], "boto3-s3: [ERROR]: "),
+        ],
+    )
+    def test_a_refresh_that_fails_mid_run(
+        self,
+        argv: list[str],
+        line: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # The first answer expires inside botocore's mandatory-refresh window,
+        # so the first request's signing calls the process again and gets
+        # trailing-comma JSON: the failure arrives inside a request, as the
+        # library's base error carrying the JSONDecodeError - on an item's
+        # line, a fatal line or the general report alike.
+        counter = tmp_path / "count"
+        expiry = (datetime.now(timezone.utc) + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        script = tmp_path / "creds.sh"
+        script.write_text(
+            "#!/bin/sh\n"
+            f"if [ -e {counter} ]; then\n"
+            '  printf \'%s\' \'{"Version": 1, "AccessKeyId": "a",}\'\n'
+            "else\n"
+            f"  touch {counter}\n"
+            '  printf \'{"Version": 1, "AccessKeyId": "AKIDEXAMPLE", "SecretAccessKey": "secret",'
+            f' "Expiration": "{expiry}"}}\'\n'
+            "fi\n"
+        )
+        script.chmod(0o755)
+        config = tmp_path / "config"
+        config.write_text(f"[default]\ncredential_process = {script}\n")
+        (tmp_path / "f").write_bytes(b"x")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("AWS_ENDPOINT_URL", "http://127.0.0.1:9")
+        monkeypatch.setenv("AWS_MAX_ATTEMPTS", "1")
+        cli.main(argv)
+        err = capsys.readouterr().err
+        assert (
+            f"{line}Illegal trailing comma before end of object: line 1 column 34 (char 33)" in err
+        )
+
+
+class TestEndpointScheme:
+    """An endpoint the environment supplies is judged by aws's Python's rule.
+
+    Python 3.10's ``urlsplit`` takes ``1http`` for a scheme, so botocore's
+    client build lets ``1http://...`` through and every request then fails on
+    the endpoint rules - an item's failure at rc 1, a ``--dryrun`` at rc 0 -
+    where aws's 3.14 build refuses it as ``Invalid endpoint`` (rc 255).
+    """
+
+    @pytest.mark.parametrize(
+        "argv",
+        [["cp", "f", "s3://b/k"], ["cp", "f", "s3://b/k", "--dryrun"], ["rm", "s3://b/k"], ["ls"]],
+    )
+    @pytest.mark.parametrize("variable", ["AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3"])
+    def test_a_digit_led_scheme_is_an_invalid_endpoint(
+        self,
+        argv: list[str],
+        variable: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        (tmp_path / "f").write_bytes(b"x")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AWS_ENDPOINT_URL", "1http://127.0.0.1:9")
+        monkeypatch.setenv(variable, "1http://127.0.0.1:9")
+        rc = cli.main(argv)
+        assert rc == 255
+        assert (
+            capsys.readouterr().err == "boto3-s3: [ERROR]: Invalid endpoint: 1http://127.0.0.1:9\n"
         )

@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from dateutil.tz import tzlocal
 
 from boto3_s3 import FileKind
+from boto3_s3_cli import usage
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -139,9 +140,14 @@ def format_delete(location: str, *, dryrun: bool) -> str:
     return f"{prefix}delete: {location}"
 
 
+def error_text(error: object) -> str:
+    """A failure's text as aws's line prints it (`usage.exception_text` for an exception)."""
+    return usage.exception_text(error) if isinstance(error, BaseException) else str(error)
+
+
 def format_delete_failed(location: str, error: BaseException | None) -> str:
     """One ``rm`` per-key failure line (aws-cli results.py FAILURE_FORMAT)."""
-    return f"delete failed: {location} {error}"
+    return f"delete failed: {location} {error_text(error)}"
 
 
 def format_make_bucket(bucket: str) -> str:
@@ -151,7 +157,7 @@ def format_make_bucket(bucket: str) -> str:
 
 def format_make_bucket_failed(path: str, error: object) -> str:
     """The ``mb`` failure line (the original path argument, like aws-cli)."""
-    return f"make_bucket failed: {path} {error}"
+    return f"make_bucket failed: {path} {error_text(error)}"
 
 
 def format_remove_bucket(bucket: str) -> str:
@@ -161,4 +167,4 @@ def format_remove_bucket(bucket: str) -> str:
 
 def format_remove_bucket_failed(path: str, error: object) -> str:
     """The ``rb`` failure line (the original path argument, like aws-cli)."""
-    return f"remove_bucket failed: {path} {error}"
+    return f"remove_bucket failed: {path} {error_text(error)}"
