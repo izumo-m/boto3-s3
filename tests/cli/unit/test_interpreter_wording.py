@@ -11,6 +11,7 @@ the rewrite; the dev and CI floor (3.10) is where they bite.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -217,4 +218,4 @@ class TestEndpointScheme:
         monkeypatch.setenv("AWS_ENDPOINT_URL", "//127.0.0.1:9")
         rc = cli.main(["cp", "f", "s3://b/k", "--dryrun"])
         assert rc == 0
-        assert capsys.readouterr().out == "(dryrun) upload: ./f to s3://b/k\n"
+        assert capsys.readouterr().out == f"(dryrun) upload: .{os.sep}f to s3://b/k\n"
