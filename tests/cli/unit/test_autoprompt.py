@@ -881,6 +881,27 @@ class TestPromptToolkitAdapter:
         names = [comp.text for comp in self._menu("")]
         assert "cp" in names and "website" in names
 
+    @pytest.mark.parametrize(
+        ("argv", "buffer"),
+        [
+            # Nothing completes a finished word, so aws leaves a space after
+            # it: what is typed next starts a new word (measured: `ls` then
+            # `--dryrun` is `ls --dryrun` on aws, `ls--dryrun` was here).
+            (["ls"], "ls "),
+            (["rm", "s3://b/k", "--dryrun"], "rm s3://b/k --dryrun "),
+            (["cp", "a b"], "cp 'a b' "),
+            # A word still being completed is left open, its menu showing.
+            (["l"], "l"),
+            ([], ""),
+        ],
+    )
+    def test_the_seed_ends_where_aws_s_does(self, argv: list[str], buffer: str) -> None:
+        pytest.importorskip("prompt_toolkit")
+        from boto3_s3_cli.autoprompt.prompt import PromptToolkitAutoPrompter
+
+        prompter = PromptToolkitAutoPrompter()
+        assert prompter._seed(argv) == buffer  # pyright: ignore[reportPrivateUsage]
+
     def test_filters_out_auto_prompt_overrides(self) -> None:
         names = [comp.text for comp in self._menu("cp --cli")]
         assert "--cli-auto-prompt" not in names

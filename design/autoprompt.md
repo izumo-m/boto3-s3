@@ -188,7 +188,10 @@ session).
 
 Display uses prompt_toolkit's standard completion menu. aws's multi-pane
 doc-panel application is not reproduced (the candidates are the ported
-substance, the UI chrome is not - neither is a contract, section 1).
+substance, the UI chrome is not - neither is a contract, section 1). The
+prompt opens the way aws's does, though: seeded with what was typed (the two
+flags taken out), a space after a seed nothing completes so the next word
+starts fresh, and the completion menu already open (aws's `pre_run`).
 
 ## 5. Activation conditions (mode resolution)
 
