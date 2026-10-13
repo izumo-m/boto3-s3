@@ -679,6 +679,39 @@ class TestOnPartialRuns:
         assert cli.main(["cp"], ctx=Context(auto_prompter=prompter)) == 0
         assert len(loads) == 2
 
+    def test_a_failed_rebuild_is_reported_with_the_entry_point_s_envelope(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        # aws reports a new driver that cannot be built through its entry
+        # point's chain, which has no session: the envelope stays even after
+        # the trial run bound a profile no file declares (measured on a pty).
+        from botocore.exceptions import ParamValidationError
+
+        from boto3_s3_cli import plugins
+
+        config = tmp_path / "config"
+        config.write_text("[default]\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        monkeypatch.setenv("AWS_PROFILE", "undeclared")
+        monkeypatch.setenv("AWS_CLI_AUTO_PROMPT", "on-partial")
+        loads: list[object] = []
+
+        def load(section: object) -> None:
+            loads.append(section)
+            if len(loads) == 2:
+                raise ParamValidationError(report="second init says no")
+
+        monkeypatch.setattr(plugins, "load", load)
+        prompter = _FakePrompter(["--version"])
+        assert cli.main(["cp"], ctx=Context(auto_prompter=prompter)) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "Parameter validation failed:\nsecond init says no\n"
+        )
+
     def test_an_explicit_prompt_reloads_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # `on` prompts before the first run and keeps its driver.
         from boto3_s3_cli import plugins

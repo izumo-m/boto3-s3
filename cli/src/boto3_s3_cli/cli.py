@@ -907,7 +907,11 @@ def _build_driver() -> int | None:
 
     Returns the rc of the report it wrote, or None to go on.
     """
-    global _config_scan
+    global _config_scan, _enhanced_envelope
+    # aws's entry point reports these through a chain built without a
+    # session, so the enhanced envelope applies - also after an on-partial
+    # trial run has bound a profile no file declares.
+    _enhanced_envelope = True
     _config_scan = configfiles.scan()
     if _config_scan.unparseable is not None:
         _write_error(
