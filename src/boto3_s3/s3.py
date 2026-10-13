@@ -2872,19 +2872,27 @@ def _sigv4_presign(client: Any, operation: str) -> Generator[None, None, None]:
     (``--no-sign-request``) client, a user's explicit legacy ``s3``, and the
     ``s3express`` / ``s3v4a`` auth-scheme signers all sign exactly as botocore
     chose (the unsigned path in particular breaks if this handler answers for
-    it). The CLI, which pins ``s3v4`` on its client, resolves ``"s3v4-query"``
-    and is untouched. ``"v4-query"`` / ``"s3v4-query"`` are botocore-internal
-    signer tokens; if a botocore version renames them this override simply
-    no-ops back to botocore's default (no crash). Scoped to this client and
-    operation, unregistered in a ``finally`` so no shared state leaks and no
-    new client is built.
+    it). A client configured with the generic ``"v4"`` (the CLI pins it) is
+    left alone too: botocore registers no downgrade for a configured version,
+    so its own ``choose-signer`` handler already answers ``"v4-query"`` with
+    the S3 signer, and an answer here would come ahead of the less specific
+    ``choose-signer.s3`` handlers the caller registered (the CLI's plugins),
+    which would then never see the presign. (A default client's config reads
+    ``"s3v4"`` once built, so that value cannot tell the two apart.)
+    ``"v4-query"`` / ``"s3v4-query"`` are botocore-internal signer tokens; if a
+    botocore version renames them this override simply no-ops back to
+    botocore's default (no crash). Scoped to this client and operation,
+    unregistered in a ``finally`` so no shared state leaks and no new client
+    is built.
 
     A client that does not expose botocore's event seam (a stand-in that only
     implements ``generate_presigned_url``) is left to its own signing - the
     override is a best-effort upgrade, never a hard requirement.
     """
-    events = getattr(getattr(client, "meta", None), "events", None)
-    if events is None or not hasattr(events, "register"):
+    meta = getattr(client, "meta", None)
+    events = getattr(meta, "events", None)
+    configured = getattr(getattr(meta, "config", None), "signature_version", None)
+    if events is None or not hasattr(events, "register") or configured == "v4":
         yield
         return
 

@@ -387,12 +387,39 @@ class TestBuildClient:
     def test_presigned_urls_are_sigv4_even_in_us_east_1(self) -> None:
         # Stock botocore downgrades presigned URLs to SigV2 where the region
         # still accepts it; aws v2's botocore has no SigV2 at all. The pinned
-        # s3v4 keeps presign output aws-shaped.
+        # SigV4 keeps presign output aws-shaped.
         client = clientfactory.build_client(_parse(["--region", "us-east-1"]))
         url = client.generate_presigned_url(
             "get_object", Params={"Bucket": "bucket", "Key": "key"}, ExpiresIn=60
         )
         assert "X-Amz-Algorithm=AWS4-HMAC-SHA256" in url
+
+    def test_the_pin_leaves_botocores_signer_choice_to_answer(self) -> None:
+        # The pin is the generic `v4` aws's endpoint resolution hands its
+        # requests, so botocore's own bare `choose-signer` handler turns it
+        # into the S3 signer and answers: a later bare registration (a
+        # plugin's `disable_signing`) is never reached, and a handler on
+        # `choose-signer.s3` sees the `v4` / `v4-query` aws hands it
+        # (measured against the pinned aws-cli). An `s3v4` pin passed
+        # botocore's handler by and let the bare registration unsign it.
+        from botocore import UNSIGNED
+
+        client = clientfactory.build_client(_parse(["--region", "us-east-1"]))
+        seen: list[str] = []
+
+        def unsign(**_kwargs: Any) -> object:
+            return UNSIGNED
+
+        def watch(signature_version: str, **_kwargs: Any) -> None:
+            seen.append(signature_version)
+
+        client.meta.events.register("choose-signer", unsign)
+        client.meta.events.register("choose-signer.s3", watch)
+        url = client.generate_presigned_url(
+            "get_object", Params={"Bucket": "bucket", "Key": "key"}, ExpiresIn=60
+        )
+        assert "X-Amz-Signature=" in url
+        assert seen == ["v4-query"]
 
     def test_symmetric_sigv4_signers_stay_pure_python(self) -> None:
         # With awscrt importable (the dev group installs botocore[crt]; the
@@ -418,7 +445,7 @@ class TestBuildClient:
         # (region set `*`) - measured against aws 2.36.40, whose MRAP presign
         # signs AWS4-ECDSA-P256-SHA256 for each of these aliases (the empty
         # ARN region is the whole test; the `.mrap` suffix is a convention).
-        # The s3v4 pin stands down when a positional names an MRAP ARN; the
+        # The SigV4 pin stands down when a positional names an MRAP ARN; the
         # dev environment's awscrt (always present, design/testing.md
         # section 4) then signs SigV4a offline.
         arn = f"arn:aws:s3::123456789012:accesspoint/{alias}"
@@ -547,7 +574,7 @@ class TestBuildClient:
         ]
         client = clientfactory.build_client(args)
         resolver = client._ruleset_resolver  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
-        assert resolver._requested_auth_scheme == "s3v4"  # pyright: ignore[reportPrivateUsage]
+        assert resolver._requested_auth_scheme == "v4"  # pyright: ignore[reportPrivateUsage]
 
     def test_transfer_positional_list_lifts_the_pin_too(self) -> None:
         # The transfer family carries a two-item `paths` list; an MRAP ARN on
@@ -588,7 +615,7 @@ class TestBuildClient:
     def test_s3express_target_lifts_the_pin(self) -> None:
         # A directory bucket must resolve to sigv4-s3express with CreateSession
         # credentials; an explicit signature_version suppresses that resolution
-        # (s3v4 matches the scheme name up to the first dash) and signs a plain
+        # (the pin matches the scheme name up to the first dash) and signs a plain
         # SigV4 request instead - measured: a pinned express presign scopes
         # `.../s3/aws4_request` where the unpinned flow dials CreateSession,
         # like aws v2's bundled botocore. Signing needs that live CreateSession
@@ -640,7 +667,7 @@ class TestBuildClient:
         args.paths = ["./backup--x-s3", "s3://plain-bucket/key"]
         client = clientfactory.build_client(args)
         resolver = client._ruleset_resolver  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
-        assert resolver._requested_auth_scheme == "s3v4"  # pyright: ignore[reportPrivateUsage]
+        assert resolver._requested_auth_scheme == "v4"  # pyright: ignore[reportPrivateUsage]
 
     def test_no_sign_request_still_wins_for_s3express(self) -> None:
         # --no-sign-request overrides to UNSIGNED even for a directory bucket,
@@ -1346,7 +1373,7 @@ class TestNoSignRequestPosture:
         assert s3._crt_sign_requests is expected  # pyright: ignore[reportPrivateUsage]
 
     def test_a_signed_run_is_untouched_by_the_kms_case(self, _broken_role_profile: None) -> None:
-        # Without --no-sign-request the s3v4 pin was always there; --sse
+        # Without --no-sign-request the SigV4 pin was always there; --sse
         # aws:kms changes nothing, credentials included.
         for extra in ([], ["--sse", "aws:kms"]):
             args = _parse_transfer(["./local.txt", "s3://bkt/key", "--region", "us-east-1", *extra])

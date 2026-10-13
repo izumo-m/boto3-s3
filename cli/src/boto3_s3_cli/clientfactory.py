@@ -1028,10 +1028,18 @@ def build_client(
     # aws-cli v2's bundled botocore has no S3 SigV2 (hmacv1 "s3"-family
     # signers) left - only the generic query-protocol "v2" - while stock
     # botocore still downgrades *presigned URLs* to SigV2 in regions that
-    # accept it (a default us-east-1 client). Pin s3v4 so every command -
+    # accept it (a default us-east-1 client). Pin SigV4 so every command -
     # visibly, presign's URLs - matches aws v2. (The other half of that
     # divergence, us-east-1 resolving to the legacy global endpoint, is pinned
     # on the session instead: `_pin_regional_s3_endpoint`.)
+    # The pinned name is the generic `v4`, the one aws's endpoint resolution
+    # hands its requests: botocore keeps a requested name as the request's
+    # `auth_type`, and its own `choose-signer` handler turns `v4` into the S3
+    # signer (`s3v4`) and answers there, while an `s3v4` there is passed by
+    # and left to whatever handler comes next - a plugin's bare
+    # `choose-signer` registration, which aws never reaches (measured: a
+    # plugin registering `disable_signing` there unsigned every request).
+    # Every `choose-signer` handler also sees `v4` / `v4-query`, as on aws.
     # The pin stands down when the command targets an MRAP ARN, an S3 Outposts
     # access point (ARN or `--op-s3` alias), or an S3 Express directory
     # bucket: an explicit signature_version suppresses botocore's auth-scheme
@@ -1044,7 +1052,7 @@ def build_client(
     # resolutions alive. With awscrt absent, a SigV4a target (MRAP or
     # Outposts) surfaces botocore's own MissingDependencyException
     # (-> ConfigurationError, 253) instead of a silently mis-signed SigV4
-    # request.
+    # request. (`v4` matches those scheme names the same way.)
     # The pin also stands down for an anonymous run (`_sends_unsigned_requests`),
     # where the UNSIGNED signature waiting in the session default client config
     # is what must reach the client - a per-client signature_version, this pin
@@ -1055,12 +1063,13 @@ def build_client(
     # signs plain SigV4 there too, with or without `--no-sign-request`
     # (measured offline on the pinned aws: `AWS4-HMAC-SHA256` with the
     # client's region in the scope, where the resolution would have chosen
-    # SigV4a / `sigv4-s3express`).
+    # SigV4a / `sigv4-s3express`). That pin keeps aws's own `s3v4`, and with
+    # it the `auth_type` botocore's handler passes by.
     overrides: dict[str, Any] = {}
-    if _requests_kms_signing(args) or (
-        not _includes_endpoint_auth_path(args) and not _sends_unsigned_requests(args)
-    ):
+    if _requests_kms_signing(args):
         overrides["signature_version"] = "s3v4"
+    elif not _includes_endpoint_auth_path(args) and not _sends_unsigned_requests(args):
+        overrides["signature_version"] = "v4"
     # The timeouts arrive as raw strings (see globalargs.add_common_arguments)
     # and are coerced here, aws-cli-style: int() with a 0 -> None ("no timeout")
     # sentinel, a bad value mapped to rc 255 rather than a parse-time rc 252.
