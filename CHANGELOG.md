@@ -6,7 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - `copy_props=ALL` now writes a multipart copy's annotations after its post-copy tags, as `aws s3` does, and no longer needs s3transfer 0.19.
-- `sync` no longer stops on a listing that is out of key order; it merges it the way `aws s3 sync` does, mis-pairs included.
+- `sync` no longer stops on a listing that is out of key order; it merges it the way `aws s3 sync` does, mis-pairs included, and a recursive `cp` / `mv` under `case_conflict` now pairs such a listing against the destination the same way.
 - A transfer or delete whose request dies without any response (a closed connection; a read timeout outside downloads) now leaves no record and no count where `aws s3` loses it, instead of failing the item.
 - When the `TransferConfig` selects the CRT engine, `rm`, `sync`'s deletes and `S3Deleter` now send their deletes (still batched) on the CRT client, as `aws s3` does; `rm` and `S3Deleter` take a `transfer_config` for it.
 - A download into an `IOStorage` over an append-mode stream, or over a pipe that claims to seek (a Windows pipe), is now written in order instead of scrambling a multipart object.

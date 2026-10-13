@@ -1498,6 +1498,14 @@ def _cc_listing() -> dict[str, Any]:
     }
 
 
+def _pairs(gate: CaseConflictGate | None, key: str) -> bool:
+    """Whether the gate's merge pairs ``key`` with a destination entry (advances it)."""
+    assert gate is not None
+    merge = gate._merge  # pyright: ignore[reportPrivateUsage]
+    assert merge is not None
+    return merge.pairs(key)
+
+
 class TestCaseConflictGate:
     def _run(
         self,
@@ -1540,6 +1548,42 @@ class TestCaseConflictGate:
         assert len(notices) == 1
         assert str(notices[0].error).startswith("warning: Downloading b/cc/a.txt -> ")
         assert (out / "A.txt").exists() and (out / "a.txt").exists()
+
+    def test_an_unsorted_listing_pairs_as_aws_cli_merges_it(self, tmp_path: Path) -> None:
+        # aws-cli runs the gate through sync's comparator, which compares only
+        # the two keys in hand: a listing that sends `b.txt` before `a.txt`
+        # (an S3-compatible endpoint that does not sort) moves the destination
+        # past `a.txt` while pairing `b.txt`, so `a.txt` finds no partner and
+        # meets the conflict check against the file it would overwrite -
+        # skipped, where a lookup by name would have copied it (measured
+        # against the pinned aws 2.36.40 on a fake endpoint).
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "a.txt").write_bytes(b"old")
+        (out / "b.txt").write_bytes(b"old")
+        listing = {
+            "Contents": [
+                {"Key": "cc/b.txt", "Size": 5, "LastModified": MTIME, "ETag": '"b"'},
+                {"Key": "cc/a.txt", "Size": 5, "LastModified": MTIME, "ETag": '"a"'},
+            ]
+        }
+        client, calls = make_recording_client([listing, get_response()])
+        results: list[OpResult] = []
+        S3().cp(
+            S3Storage("s3://b/cc/", client=client),
+            str(out),
+            recursive=True,
+            transfer_config=_CASE_CONFLICT_CONFIG,
+            on_result=results.append,
+            **TransferOptions(case_conflict=CaseConflictMode.SKIP),
+        )
+        assert [(c.operation, c.params.get("Key")) for c in calls] == [
+            ("ListObjectsV2", None),
+            ("GetObject", "cc/b.txt"),
+        ]
+        notices = [r for r in results if r.outcome is OpOutcome.NOTICE]
+        assert [str(n.error).split(" -> ")[0] for n in notices] == ["warning: Skipping b/cc/a.txt"]
+        assert (out / "a.txt").read_bytes() == b"old"
 
     def test_error_raises_the_awscli_failure(self, tmp_path: Path) -> None:
         out = tmp_path / "out"
@@ -1697,11 +1741,9 @@ class TestCaseConflictGate:
         (out / "real.txt").write_bytes(b"x")
         (out / "A.txt").symlink_to(out / "real.txt")
         gate, _ = self._build_gate(LocalStorage(str(out)))
-        assert gate is not None
-        assert "A.txt" in gate._dest_keys  # pyright: ignore[reportPrivateUsage]
+        assert _pairs(gate, "A.txt")
         gate, _ = self._build_gate(LocalStorage(str(out), follow_symlinks=False))
-        assert gate is not None
-        assert "A.txt" not in gate._dest_keys  # pyright: ignore[reportPrivateUsage]
+        assert not _pairs(gate, "A.txt")
 
     @skip_if_chmod_is_inert
     def test_case_gate_scan_warns_into_the_rollup_and_filters(self, tmp_path: Path) -> None:
@@ -1720,8 +1762,8 @@ class TestCaseConflictGate:
             )
         finally:
             (out / "secret.txt").chmod(0o644)
-        assert gate is not None
-        assert gate._dest_keys == set()  # pyright: ignore[reportPrivateUsage]
+        assert not _pairs(gate, "A.txt")
+        assert not _pairs(gate, "secret.txt")
         assert transferrer.warned == 1  # the unreadable-file walk warning
 
     def test_exact_case_match_at_dest_always_copies(self, tmp_path: Path) -> None:

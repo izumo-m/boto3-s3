@@ -54,7 +54,7 @@ from boto3_s3.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Iterator, Mapping
+    from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
     from typing import BinaryIO
 
 
@@ -289,13 +289,46 @@ def _glacier_gate(
     return True
 
 
+class _DestinationMerge:
+    """aws-cli's comparator over a destination listing, fed one source key at a time.
+
+    A recursive cp / mv download under ``--case-conflict`` runs, in aws-cli,
+    through sync's machinery: a comparator merges the source listing with the
+    destination walk, and a source entry it pairs with a destination entry (an
+    equal compare key) always transfers while the rest run the conflict check.
+    The gate sees each listed source entry once, in listing order and after
+    the filters - what that comparator sees - so this keeps the comparator's
+    destination side and takes the source keys as they come. Each step
+    compares only the two keys in hand, as `comparator.Comparator.compare`
+    does: a destination key below the source key is passed over (a key only
+    the destination has), an equal one pairs, a greater one waits for the next
+    source key. A listing out of key order therefore mis-pairs here exactly as
+    there - a source key that arrives after the destination has moved past
+    its match finds no partner.
+    """
+
+    def __init__(self, dest_keys: Iterable[str]) -> None:
+        self._dest = iter(dest_keys)
+        self._head = next(self._dest, None)
+
+    def pairs(self, key: str) -> bool:
+        head = self._head
+        while head is not None and head < key:
+            head = next(self._dest, None)
+        if head is not None and head == key:
+            self._head = next(self._dest, None)
+            return True
+        self._head = head
+        return False
+
+
 class CaseConflictGate:
     """The ``--case-conflict`` decision for recursive downloads.
 
     aws builds this from sync machinery (a destination listing paired by a
-    comparator): a source file whose compare key exists at the destination
-    with the **exact same case** always transfers (``AlwaysSync`` - cp
-    overwrites); everything else runs the conflict check
+    comparator): a source file the comparator pairs with a destination entry
+    - the same compare key, **exact same case** - always transfers
+    (``AlwaysSync`` - cp overwrites); everything else runs the conflict check
     (``CaseConflictSync``): a conflict exists when another file with the
     same lowercased name was already admitted in this run, or the
     destination path exists (on a case-insensitive filesystem a
@@ -308,10 +341,18 @@ class CaseConflictGate:
     _DOC_URI = "https://docs.aws.amazon.com/cli/latest/topic/s3-case-insensitivity.html"
 
     def __init__(
-        self, mode: CaseConflictMode, dest_keys: set[str], *, operation: str = "cp"
+        self,
+        mode: CaseConflictMode,
+        dest_keys: Iterable[str] | None,
+        *,
+        operation: str = "cp",
     ) -> None:
+        # ``dest_keys`` is the destination listing in its walk order, merged
+        # against the source keys as they arrive (`_DestinationMerge`); None
+        # where the caller has paired the two already (sync consults the gate
+        # only for a key the destination lacks).
         self._mode = mode
-        self._dest_keys = dest_keys
+        self._merge = None if dest_keys is None else _DestinationMerge(dest_keys)
         self._operation = operation
         self._submitted: set[str] = set()
 
@@ -329,8 +370,8 @@ class CaseConflictGate:
         return False
 
     def blocks(self, item: TransferItem, transferrer: Transferrer) -> bool:
-        if item.compare_key in self._dest_keys:
-            return False  # exact-case match at the destination: always copy
+        if self._merge is not None and self._merge.pairs(item.compare_key):
+            return False  # paired with an exact-case destination entry: always copy
         lowered = item.compare_key.lower()
         src = f"{item.src_bucket}/{item.src_key}"
         dest = os.path.abspath(item.dest_path or "")
@@ -1232,10 +1273,12 @@ def cp_case_gate(
     """Build the ``--case-conflict`` gate when it applies (aws-cli scope:
     recursive S3->local with a mode other than ``ignore``).
 
-    The destination tree is enumerated up front (through ``plan.dest.scan``)
-    into the exact-case membership set the gate's AlwaysSync arm consults -
-    the observable equivalent of aws's reverse file generator + comparator.
-    That reverse enumeration is a full walk of the destination side: aws
+    The destination tree is enumerated up front (through ``plan.dest.scan``),
+    in the byte order sync's merge walks it, and the gate merges each source
+    key against that listing as it arrives - aws's reverse file generator +
+    comparator, step for step (`_DestinationMerge`), so a source listing out
+    of key order pairs, and mis-pairs, as aws's does. That reverse enumeration
+    is a full walk of the destination side: aws
     builds it with the run's ``follow_symlinks`` parameter, routes its
     warnings into the shared result queue (they count toward rc 2), and runs
     the ``--exclude`` / ``--include`` filters over it - so the membership scan
@@ -1253,18 +1296,19 @@ def cp_case_gate(
     if plan.paths_type != "s3local" or not recursive or mode is CaseConflictMode.IGNORE:
         return None
     # paths_type == "s3local" guarantees a LocalStorage destination here.
-    dest_keys = {
+    dest_keys = [
         _compare_key(info)
         for info in plan.dest.scan(
             walk_source_scan_options(
                 plan.dest,
                 recursive=True,
+                sort=True,  # the merge pairs against the destination in byte order
                 on_warning=transferrer.warner.warn,
                 item_filter=item_filter,
                 reusable_after_interrupt=reusable_after_interrupt,
             )
         )
-    }
+    ]
     return CaseConflictGate(mode, dest_keys, operation=operation)
 
 
@@ -1273,10 +1317,10 @@ def sync_case_gate(
 ) -> CaseConflictGate | None:
     """The ``--case-conflict`` gate for sync downloads to a local destination.
 
-    Unlike cp's (which pre-lists the destination for its exact-case
-    AlwaysSync arm), sync already pairs against the destination listing:
+    Unlike cp's (which merges the source keys against a pre-listed
+    destination itself), sync already pairs against the destination listing:
     the gate is consulted only for ``SrcOnlyPair``s (keys missing there), so
-    the membership set is vacuously empty and only the submitted-set /
+    it does no pairing of its own and only the submitted-set /
     ``os.path.exists`` conflict check remains - aws-cli's
     ``CaseConflictSync`` in the ``file_not_at_dest`` slot. Scoped to a
     ``LocalStorage`` destination (a case-insensitive *filesystem*); a custom
@@ -1289,7 +1333,7 @@ def sync_case_gate(
         or not isinstance(dest_storage, LocalStorage)
     ):
         return None
-    return CaseConflictGate(mode, set(), operation="sync")
+    return CaseConflictGate(mode, None, operation="sync")
 
 
 def sync_entries(
