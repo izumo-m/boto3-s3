@@ -738,12 +738,21 @@ class TestTopLevelS3Alias:
         assert cli.main(["rm", "s3://bkt/k"], ctx=unused_ctx()) == 0
         assert capsys.readouterr().out.startswith("boto3-s3-cli/")
 
-    def test_a_chain_through_another_entry_reaches_it(
+    def test_a_chain_back_to_s3_is_aws_s_recursion_failure(
         self, alias_file: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        # The other entry's `s3` is the `s3` entry again, not the built-in it
+        # proxies, so the two re-enter each other until the stack runs out.
         alias_file.write_text("[toplevel]\ns3 = mys3\nmys3 = s3 --region eu-west-1\n")
         assert cli.main(["rm", "s3://bkt/k", "--dryrun"], ctx=unused_ctx()) == 255
         assert capsys.readouterr().err == "boto3-s3: [ERROR]: maximum recursion depth exceeded\n"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="an sh command")
+    def test_a_chain_to_an_external_entry_runs_it(self, alias_file: Path, tmp_path: Path) -> None:
+        written = tmp_path / "args"
+        alias_file.write_text(f"[toplevel]\ns3 = ext\next = !sh -c 'echo \"$@\" > {written}' sh\n")
+        assert cli.main(["rm", "s3://bkt/k"], ctx=unused_ctx()) == 0
+        assert written.read_text() == "rm s3://bkt/k\n"
 
     @pytest.mark.skipif(sys.platform == "win32", reason="an sh command")
     def test_an_external_value_runs_over_everything_typed(
