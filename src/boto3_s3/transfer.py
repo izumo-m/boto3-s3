@@ -94,7 +94,13 @@ from boto3_s3.exceptions import (
     ValidationError,
 )
 from boto3_s3.localstorage import LocalStorage, translate_os_error
-from boto3_s3.s3storage import attribute_failure, drop_like_aws, s3_errors, translate_boto_error
+from boto3_s3.s3storage import (
+    attribute_failure,
+    drop_like_aws,
+    s3_errors,
+    s3_request,
+    translate_boto_error,
+)
 from boto3_s3.types import (
     AnnotationCopyMode,
     CancelMode,
@@ -1620,11 +1626,12 @@ class Transferrer:
 
         def delete_s3_source() -> Any:
             # Pre-translate to the taxonomy carrying the *source* bucket/key, as
-            # S3Storage.delete and the upload path's Storage.delete already do.
-            # Otherwise _record_failure re-tags the raw ClientError with the copy
+            # S3Storage.delete and the upload path's Storage.delete already do -
+            # whatever the request raised, botocore's family or not.
+            # Otherwise _record_failure re-tags the raw exception with the copy
             # destination (dest_bucket/dest_key), mis-attributing a source-delete
             # failure to the object that copied fine.
-            with s3_errors(operation=self._operation, bucket=bucket, key=key):
+            with s3_request(operation=self._operation, bucket=bucket, key=key):
                 return client.delete_object(Bucket=bucket, Key=key, **params)
 
         return _DeleteSource(delete_s3_source, capture=self._capture_response)
@@ -2713,30 +2720,45 @@ class _SetAnnotations:
         if version_id is not None:
             list_params["VersionId"] = version_id
             get_params["VersionId"] = version_id
-        try:
-            # Pre-translate carrying the *source* bucket/key: a raw ClientError
-            # from these source-side reads would be re-tagged with the copy
-            # destination by _record_failure (see delete_s3_source).
-            with s3_errors(
+
+        # Each request - a listing page, an annotation and its body - is
+        # translated carrying the *source* bucket/key: a raw exception from these
+        # source-side reads would be re-tagged with the copy destination by
+        # _record_failure (see delete_s3_source).
+        def source_request() -> Any:
+            return s3_request(
                 operation=self._operation, bucket=self._item.src_bucket, key=self._item.src_key
-            ):
-                paginator = self._source_client.get_paginator("list_object_annotations")
-                names: list[str] = []
-                for page in paginator.paginate(
+            )
+
+        try:
+            paginator = self._source_client.get_paginator("list_object_annotations")
+            pages = iter(
+                paginator.paginate(
                     Bucket=self._item.src_bucket,
                     Key=self._item.src_key,
                     **list_params,
-                ):
-                    for annotation in page.get("Annotations", []):
-                        names.append(annotation["AnnotationName"])
-                for name in names:
+                )
+            )
+            names: list[str] = []
+            while True:
+                with source_request():
+                    page = next(pages, None)
+                if page is None:
+                    break
+                for annotation in page.get("Annotations", []):
+                    names.append(annotation["AnnotationName"])
+            for name in names:
+                with source_request():
                     response = self._source_client.get_object_annotation(
                         Bucket=self._item.src_bucket,
                         Key=self._item.src_key,
                         AnnotationName=name,
                         **get_params,
                     )
-                    store.add(name, response["AnnotationPayload"].read())
+                body = response["AnnotationPayload"]
+                with source_request():
+                    payload = body.read()
+                store.add(name, payload)
         except BaseException:
             self.close()
             raise
@@ -2901,10 +2923,10 @@ class _SetMetadataDirectiveProps:
     def _head_source(self) -> Mapping[str, Any]:
         if self._item.head is not None:
             return self._item.head
-        # Pre-translate carrying the *source* bucket/key: a raw ClientError from
+        # Pre-translate carrying the *source* bucket/key: a raw exception from
         # this source-side read would be re-tagged with the copy destination by
         # _record_failure (see delete_s3_source).
-        with s3_errors(
+        with s3_request(
             operation=self._operation, bucket=self._item.src_bucket, key=self._item.src_key
         ):
             return self._source_client.head_object(
@@ -3022,10 +3044,10 @@ class _SetTags:
             future.set_exception(exc)
 
     def _get_source_tags(self) -> list[dict[str, str]]:
-        # Pre-translate carrying the *source* bucket/key: a raw ClientError from
+        # Pre-translate carrying the *source* bucket/key: a raw exception from
         # this source-side read would be re-tagged with the copy destination by
         # _record_failure (see delete_s3_source).
-        with s3_errors(
+        with s3_request(
             operation=self._operation, bucket=self._item.src_bucket, key=self._item.src_key
         ):
             response = self._source_client.get_object_tagging(

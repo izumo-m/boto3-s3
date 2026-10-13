@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 from botocore.exceptions import ClientError
 
-from boto3_s3.exceptions import Boto3S3Error, ValidationError
+from boto3_s3.exceptions import Boto3S3Error, MalformedResponseError, ValidationError
 from boto3_s3.pathresolver import (
     S3PathResolver,
     has_underlying_s3_path,
@@ -57,16 +57,20 @@ class _FakeS3Control:
         bucket: str = "underlying-bucket",
         mrap_pages: list[dict[str, Any]] | None = None,
         error: Exception | None = None,
+        access_point: dict[str, Any] | None = None,
     ) -> None:
         self.bucket = bucket
         self.mrap_pages = list(mrap_pages or [])
         self.error = error
+        self.access_point = access_point
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     def get_access_point(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(("GetAccessPoint", kwargs))
         if self.error is not None:
             raise self.error
+        if self.access_point is not None:
+            return self.access_point
         return {"Bucket": self.bucket}
 
     def list_multi_region_access_points(self, **kwargs: Any) -> dict[str, Any]:
@@ -77,15 +81,24 @@ class _FakeS3Control:
 
 
 class _FakeSts:
-    def __init__(self, *, account: str = "123456789012", error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        account: str = "123456789012",
+        error: Exception | None = None,
+        identity: dict[str, Any] | None = None,
+    ) -> None:
         self.account = account
         self.error = error
+        self.identity = identity
         self.calls: list[str] = []
 
     def get_caller_identity(self) -> dict[str, Any]:
         self.calls.append("GetCallerIdentity")
         if self.error is not None:
             raise self.error
+        if self.identity is not None:
+            return self.identity
         return {"Account": self.account}
 
 
@@ -442,3 +455,61 @@ class TestResolve:
             resolver.resolve_underlying_s3_paths("s3://my-ap-s3alias/k.txt")
         assert isinstance(excinfo.value.__cause__, ClientError)
         assert "InvalidClientTokenId" in str(excinfo.value)
+
+    def test_whatever_else_the_request_raised_is_the_base_error(self) -> None:
+        # botocore parsing a reply it cannot convert (an unparsable
+        # CreationDate) raises outside its own family; aws prints the text.
+        s3control = _FakeS3Control(error=ValueError('Invalid timestamp "garbage"'))
+        resolver = S3PathResolver(s3control_client=s3control, sts_client=_FakeSts())
+        with pytest.raises(Boto3S3Error) as excinfo:
+            resolver.resolve_underlying_s3_paths(f"s3://{_AP_ARN}/k.txt")
+        assert type(excinfo.value) is Boto3S3Error
+        assert str(excinfo.value) == 'Invalid timestamp "garbage"'
+        assert isinstance(excinfo.value.__cause__, ValueError)
+        assert excinfo.value.operation == "mv"
+
+    @pytest.mark.parametrize(
+        ("path", "s3control", "sts", "element"),
+        [
+            (f"s3://{_AP_ARN}/k.txt", _FakeS3Control(access_point={}), _FakeSts(), "Bucket"),
+            ("s3://my-ap-s3alias/k.txt", _FakeS3Control(), _FakeSts(identity={}), "Account"),
+            (
+                f"s3://{_MRAP_ARN}/k.txt",
+                _FakeS3Control(mrap_pages=[{}]),
+                _FakeSts(),
+                "AccessPoints",
+            ),
+            (
+                f"s3://{_MRAP_ARN}/k.txt",
+                _FakeS3Control(mrap_pages=[{"AccessPoints": [{"Regions": []}]}]),
+                _FakeSts(),
+                "Alias",
+            ),
+            (
+                f"s3://{_MRAP_ARN}/k.txt",
+                _FakeS3Control(mrap_pages=[{"AccessPoints": [{"Alias": "mfzwi23gnjvgw.mrap"}]}]),
+                _FakeSts(),
+                "Regions",
+            ),
+            (
+                f"s3://{_MRAP_ARN}/k.txt",
+                _FakeS3Control(
+                    mrap_pages=[
+                        {"AccessPoints": [{"Alias": "mfzwi23gnjvgw.mrap", "Regions": [{}]}]}
+                    ]
+                ),
+                _FakeSts(),
+                "Bucket",
+            ),
+        ],
+    )
+    def test_a_reply_missing_what_aws_subscripts(
+        self, path: str, s3control: _FakeS3Control, sts: _FakeSts, element: str
+    ) -> None:
+        # aws dies on the KeyError naming the element and prints its text.
+        resolver = S3PathResolver(s3control_client=s3control, sts_client=sts)
+        with pytest.raises(MalformedResponseError) as excinfo:
+            resolver.resolve_underlying_s3_paths(path)
+        assert str(excinfo.value) == f"'{element}'"
+        assert isinstance(excinfo.value.__cause__, KeyError)
+        assert excinfo.value.operation == "mv"

@@ -432,9 +432,16 @@ Raises:
   [`NotFoundError`](./exceptions.md#notfounderror),
   [`TransportError`](./exceptions.md#transporterror) — for a failing
   `GetAccessPoint`, `GetCallerIdentity` or `ListMultiRegionAccessPoints`, with
-  the botocore error kept as `__cause__`.
+  whatever the request raised kept as `__cause__` — a botocore error, or
+  anything else botocore died of inside it (a reply value its parser cannot
+  convert), which is the base class carrying that exception's text.
+- [`MalformedResponseError`](./exceptions.md#malformedresponseerror) for a reply
+  missing an element the AWS CLI reads by subscript (`GetAccessPoint`'s
+  `Bucket`, `GetCallerIdentity`'s `Account`, the listing's `AccessPoints` and
+  each access point's `Alias`, `Regions` and region `Bucket`), with the AWS
+  CLI's text: the element's name in quotes.
 
-Both of the above carry `operation="mv"`: the tag is fixed in this class rather
+All of the above carry `operation="mv"`: the tag is fixed in this class rather
 than taken as a parameter.
 
 ## has_underlying_s3_path

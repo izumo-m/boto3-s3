@@ -34,6 +34,7 @@ from s3transfer.copies import CopySubmissionTask
 from boto3_s3 import transfer
 from boto3_s3.exceptions import (
     AccessDeniedError,
+    Boto3S3Error,
     CancelledError,
     ConfigurationError,
     InvalidConfigError,
@@ -700,6 +701,22 @@ class TestCopy:
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         error = results[0].error
         assert type(error) is AccessDeniedError
+        assert (error.bucket, error.key) == ("src-b", "d/a.bin")
+
+    def test_a_tagging_read_raising_outside_botocore_names_the_source(self) -> None:
+        # What botocore dies of inside the request (an S3 Express CreateSession
+        # reply without Credentials) is the request failing all the same.
+        source_responses: list[dict[str, Any] | Exception] = [{}, KeyError("Credentials")]
+        _, _, results, transferrer = _run(
+            TransferType.COPY,
+            [self._item(size=9 * _MIB)],
+            [],
+            source_responses=source_responses,
+        )
+        assert (transferrer.succeeded, transferrer.failed) == (0, 1)
+        error = results[0].error
+        assert type(error) is Boto3S3Error
+        assert isinstance(error.__cause__, KeyError)
         assert (error.bucket, error.key) == ("src-b", "d/a.bin")
 
     def test_single_part_copy_excludes_annotations(self) -> None:
@@ -2153,6 +2170,29 @@ class TestMove:
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         error = results[0].error
         assert error is not None
+        assert (error.bucket, error.key) == ("src-b", "d/a.bin")
+
+    def test_copy_move_delete_raising_outside_botocore_attributes_to_the_source(self) -> None:
+        item = TransferItem(
+            compare_key="a.bin",
+            size=7,
+            etag='"abc123"',
+            src_bucket="src-b",
+            src_key="d/a.bin",
+            dest_bucket="dest-b",
+            dest_key="cp/a.bin",
+        )
+        _, _, results, transferrer = _run(
+            TransferType.COPY,
+            [item],
+            [{}],
+            source_responses=[KeyError("Credentials")],
+            is_move=True,
+        )
+        assert (transferrer.succeeded, transferrer.failed) == (0, 1)
+        error = results[0].error
+        assert type(error) is Boto3S3Error
+        assert isinstance(error.__cause__, KeyError)
         assert (error.bucket, error.key) == ("src-b", "d/a.bin")
 
     def test_request_payer_flows_to_the_delete(self, tmp_path: Path) -> None:
