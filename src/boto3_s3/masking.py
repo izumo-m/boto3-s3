@@ -186,7 +186,7 @@ _SSE_C_PARAM_RE = re.compile(
 
 # SigV2 (HmacV1) Authorization header ``AWS <access-key-id>:<signature>`` (legacy
 # signature_version='s3'; non-default for the library, never for the CLI which
-# pins s3v4). The signature after the colon is fully masked, and the id goes
+# pins SigV4). The signature after the colon is fully masked, and the id goes
 # through ``_reveal_access_key`` like every other id slot, so an id of any
 # shape - an S3-compatible endpoint's ``minioadmin``, say - is covered: an
 # AWS-shaped id keeps its tail, anything else masks entirely. The id runs to

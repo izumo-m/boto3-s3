@@ -189,8 +189,8 @@ s3 = s3 --endpoint-url http://localhost:9000
 
 sends every `boto3-s3` command to that endpoint, as it does every `aws s3` one.
 Its value is read like `aws`'s top level: global options, then the command name
-(`s3`, or another `[toplevel]` entry to chain to), then anything to place ahead
-of what was typed; a `!` value runs a shell command with everything typed after
+(`s3`, or another `[toplevel]` entry - an external one, say - to chain to),
+then anything to place ahead of what was typed; a `!` value runs a shell command with everything typed after
 the global options. A chain that ends at another `aws` command has nothing to
 run here (see [`aws-differences.md`](./aws-differences.md)).
 

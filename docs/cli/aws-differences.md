@@ -22,7 +22,7 @@ endpoint named anywhere but `--endpoint-url` under the CRT engine, a
 `REQUESTS_CA_BUNDLE` the CRT engine cannot use, an `aws` plugin that imports
 `awscli` modules, exits, raises outside Python's `Exception` family or
 unregisters one of the SDK's own handlers, a `[toplevel]` alias that leads to
-another `aws` command, a `cli_history` directory
+another `aws` command, a timeout typed beside an alias, a `cli_history` directory
 `aws` cannot create, the modification time a download stamps for an object
 older than the local zone's present rules, a CRT-engine `mv` download whose
 source delete dies without a response, a help page that cannot be written,
@@ -418,11 +418,17 @@ comes out differently, listed in section 1.
   and this command follows it the same way: the global options in its value,
   an external (`!`) command, a chain through other `[toplevel]` entries. Where
   the chain names another command instead — another service
-  (`s3 = s3api ...`), or an entry proxying a built-in service of its own
-  name — `aws` runs that command; this one has none to run and stops with exit
-  code 252 (`argument command: Found invalid choice '<name>'`). That report,
-  for a name neither tool knows, also carries no near-miss suggestion here,
-  where `aws` may suggest one of its services.
+  (`s3 = s3api ...`), `help`, or an entry proxying a built-in service of its
+  own name — `aws` runs that command; this one has none to run and stops with
+  exit code 252 (`argument command: Found invalid choice '<name>'`). That
+  report, for a name neither tool knows, also carries no near-miss suggestion
+  here, where `aws` may suggest one of its services.
+- **An alias keeps the timeouts typed with it.** On `aws`, running any
+  internal alias — a `[command s3]` one, or any command under a `[toplevel]`
+  `s3` entry — drops `--cli-read-timeout` and `--cli-connect-timeout` typed on
+  the command line unless the alias's value sets them itself: rereading the
+  value resets both to their defaults. This command keeps the
+  typed values, so a run that times out here can complete there.
 - **An `aws` plugin's hooks into `aws` itself do not run.** Both tools load
   `[plugins]` alike — with `cli_legacy_plugin_path` set, every other entry is
   imported and its `awscli_initialize` called on every invocation, and a
@@ -451,8 +457,8 @@ comes out differently, listed in section 1.
   interpreter's call: under Python 3.10 one such as `print` is accepted while
   the plugins load and fails when its event fires, where `aws` (on Python
   3.14) refuses it at load.
-- **A plugin that exits or raises outside `Exception` ends the run as
-  Python would.** A plugin — while it loads, or from a handler — that calls
+- **A plugin that exits or raises outside `Exception` is not ignored.** A
+  plugin — while it loads, or from a handler — that calls
   `sys.exit()` ends the run with the status it asked for, and one that raises
   a `BaseException` that is not an `Exception` (`GeneratorExit`, its own
   subclass) is reported like any other failure: exit code 255 with its

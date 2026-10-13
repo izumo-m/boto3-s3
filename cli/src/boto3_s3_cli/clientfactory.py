@@ -893,7 +893,7 @@ def _includes_endpoint_auth_path(args: argparse.Namespace) -> bool:
     alias) and for an S3 Express directory bucket or one of its access points
     (``--x-s3`` / ``--xa-s3``: must sign ``sigv4-s3express`` with
     `CreateSession` credentials) - the shapes an explicit `signature_version`
-    would mis-sign, so the s3v4 pin stands down for them.
+    would mis-sign, so the SigV4 pin stands down for them.
     Reads the parsed positionals off the namespace - `paths` (a string, or the
     transfer family's two-item list) and presign's `path`. The single-path
     commands' positionals arrive paramfile-expanded by client-build time; the
@@ -909,7 +909,7 @@ def _includes_endpoint_auth_path(args: argparse.Namespace) -> bool:
     form before the check, which `is_s3express_path` and
     `is_outpost_alias_path` require precisely because a transfer positional
     could be a local file ending in ``--x-s3`` or ``--op-s3``. Without this,
-    the s3v4 pin would stay on and the URL would sign plain SigV4 with no
+    the SigV4 pin would stay on and the URL would sign plain SigV4 with no
     `CreateSession` - unusable against the directory bucket, where aws
     (resolving the auth scheme off the final Bucket, not the input notation)
     signs ``sigv4-s3express``; an Outposts alias would likewise get a

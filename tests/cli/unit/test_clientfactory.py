@@ -622,8 +622,8 @@ class TestBuildClient:
         # call, so assert on the exact input botocore's per-request scheme
         # selection keys on: the requested auth scheme is unset, leaving the
         # endpoint's `sigv4-s3express` alive. (`meta.config.signature_version`
-        # cannot serve here - botocore backfills it with the *resolved*
-        # version, `s3v4` for S3 with or without the pin.)
+        # cannot serve here - without the pin botocore backfills it with the
+        # *resolved* version, `s3v4` for S3.)
         args = _parse(["--region", "us-east-1"])
         args.path = "s3://mybkt--use1-az4--x-s3/key"
         client = clientfactory.build_client(args)

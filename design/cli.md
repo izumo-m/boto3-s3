@@ -540,8 +540,12 @@ numbers in the bold item labels below are that document's.
      for the profile chain in item 5).
   2. **always-on SigV4** - stock botocore downgrades presigned URLs to SigV2 in
      regions that accept SigV2 (us-east-1), but SigV2 does not exist in aws v2's
-     botocore. `Config(signature_version="s3v4")` is set for every command whose
-     positionals name none of four targets: an MRAP ARN, an S3 Outposts
+     botocore. `Config(signature_version="v4")` is set for every command whose
+     positionals name none of four targets (`"s3v4"` under `--sse aws:kms`, as
+     aws sets it; the generic `v4` is the name aws's endpoint resolution hands
+     its requests, which botocore's own `choose-signer` handler then turns into
+     the S3 signer - a pinned `s3v4` left that choice to the next handler, a
+     plugin's included): an MRAP ARN, an S3 Outposts
      access-point ARN, an S3 Outposts access-point *alias*, and an S3 Express
      directory bucket. For those four
      the pin stands down: an explicit `signature_version` suppresses botocore's
@@ -637,7 +641,7 @@ numbers in the bold item labels below are that document's.
      like) is a domain where botocore itself requires awscrt: with the `crt`
      extra, the CRT signer handles it just as in aws v2 (measured: an MRAP
      presign signs `AWS4-ECDSA-P256-SHA256` with `X-Amz-Region-Set=*` on both
-     CLIs - this needs item 2's MRAP stand-down, since the s3v4 pin would
+     CLIs - this needs item 2's MRAP stand-down, since the SigV4 pin would
      otherwise force a symmetric signature real AWS rejects); without it,
      botocore raises `MissingDependencyException` (`Missing Dependency: This
      operation requires an additional dependency. Use pip install
