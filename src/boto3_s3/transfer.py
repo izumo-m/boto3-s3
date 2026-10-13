@@ -97,6 +97,7 @@ from boto3_s3.localstorage import LocalStorage, translate_os_error
 from boto3_s3.s3storage import (
     attribute_failure,
     drop_like_aws,
+    read_required,
     s3_errors,
     s3_request,
     translate_boto_error,
@@ -2700,6 +2701,20 @@ class _SetAnnotations:
         finally:
             self.close()
 
+    def _source_element(self, entry: Mapping[str, Any], element: str) -> Any:
+        """An element aws-cli reads off a source reply by subscript (`read_required`).
+
+        A missing one is a ``MalformedResponseError`` with the ``KeyError``'s
+        text, naming the source rather than the copy destination.
+        """
+        return read_required(
+            entry,
+            element,
+            operation=self._operation,
+            bucket=self._item.src_bucket,
+            key=self._item.src_key,
+        )
+
     def _read_source(self) -> None:
         """Read every source annotation into the selected store.
 
@@ -2746,7 +2761,7 @@ class _SetAnnotations:
                 if page is None:
                     break
                 for annotation in page.get("Annotations", []):
-                    names.append(annotation["AnnotationName"])
+                    names.append(self._source_element(annotation, "AnnotationName"))
             for name in names:
                 with source_request():
                     response = self._source_client.get_object_annotation(
@@ -2755,7 +2770,7 @@ class _SetAnnotations:
                         AnnotationName=name,
                         **get_params,
                     )
-                body = response["AnnotationPayload"]
+                body = self._source_element(response, "AnnotationPayload")
                 with source_request():
                     payload = body.read()
                 store.add(name, payload)
@@ -3055,7 +3070,35 @@ class _SetTags:
                 Key=self._item.src_key,
                 **requestparams.map_get_object_tagging_params(self._options),
             )
-        return [{"Key": tag["Key"], "Value": tag["Value"]} for tag in response.get("TagSet", [])]
+        # aws-cli subscripts the reply's TagSet, then each tag's Key and Value
+        # as it serializes them; a missing one is a MalformedResponseError
+        # naming the source, with the KeyError's text aws-cli prints.
+        tags = read_required(
+            response,
+            "TagSet",
+            operation=self._operation,
+            bucket=self._item.src_bucket,
+            key=self._item.src_key,
+        )
+        return [
+            {
+                "Key": read_required(
+                    tag,
+                    "Key",
+                    operation=self._operation,
+                    bucket=self._item.src_bucket,
+                    key=self._item.src_key,
+                ),
+                "Value": read_required(
+                    tag,
+                    "Value",
+                    operation=self._operation,
+                    bucket=self._item.src_bucket,
+                    key=self._item.src_key,
+                ),
+            }
+            for tag in tags
+        ]
 
     def _rollback(self, bucket: str, key: str) -> None:
         # A raised delete error is left to escape on_done (matching aws-cli): the

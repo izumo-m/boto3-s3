@@ -855,6 +855,42 @@ class TestDownloadRoute:
         )
         assert [r.dest for r in results] == [f"s3://{base}my.ap/sub/g.txt"]
 
+    def test_a_cut_short_outposts_name_addresses_the_split_on_every_route(
+        self, tmp_path: Path
+    ) -> None:
+        # The key slices off a formatted path after the separator as typed -
+        # none at the cut (producers.key_after_bucket): the recursive
+        # download's listing, an S3-to-S3 copy's destination key and sync's
+        # listing all address the access point `my` and the key `_ap`.
+        base = "arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-1/accesspoint/"
+        client, calls = make_recording_client([{}])
+        S3().cp(
+            S3Storage(f"s3://{base}my_ap/", client=client),
+            str(tmp_path / "out"),
+            recursive=True,
+            transfer_config=_SYNC,
+        )
+        assert [(c.operation, c.params["Bucket"], c.params["Prefix"]) for c in calls] == [
+            ("ListObjectsV2", f"{base}my", "_ap/")
+        ]
+
+        client, calls = make_recording_client([head_response(), {}])
+        S3().cp(
+            S3Storage("s3://b/k", client=client),
+            S3Storage(f"s3://{base}my_ap", client=client),
+            transfer_config=_SYNC,
+        )
+        assert ops(calls) == ["HeadObject", "CopyObject"]
+        assert (calls[1].params["Bucket"], calls[1].params["Key"]) == (f"{base}my", "_ap")
+
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        client, calls = make_recording_client([{}])
+        S3().sync(str(empty), S3Storage(f"s3://{base}my_ap/", client=client), delete_filter=True)
+        assert [(c.operation, c.params["Bucket"], c.params["Prefix"]) for c in calls] == [
+            ("ListObjectsV2", f"{base}my", "_ap/")
+        ]
+
     def test_keyless_non_recursive_source_transfers_nothing(self, tmp_path: Path) -> None:
         # `cp s3://bucket .`: aws lists the bucket and exact-matches nothing
         # (rc 0, silent). The listing itself is observable when ListBucket is

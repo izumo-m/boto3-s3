@@ -244,7 +244,10 @@ single-object `HeadObject` missing `ContentLength` or `LastModified` — each
 element read in the CLI's own order, so a doubly incomplete entry is blamed on
 the same element (the exact rules are under `scan_pages`, `list_buckets` and
 `get_fileinfo` in [`storage.md`](./storage.md); the access point replies
-[`S3PathResolver`](./misc.md#s3pathresolver) reads are listed there) — and a
+[`S3PathResolver`](./misc.md#s3pathresolver) reads are listed there), a copy's
+source `GetObjectTagging` reply missing `TagSet` or a tag's `Key` / `Value`, or
+its source annotation listing or `GetObjectAnnotation` reply missing
+`AnnotationName` / `AnnotationPayload` (attributed to the source) — and a
 `LastModified` the
 host's local zone cannot represent (years 1 and 9999, within the zone's offset
 of `datetime`'s range; on Windows also every timestamp before 1970 or past the

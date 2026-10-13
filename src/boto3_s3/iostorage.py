@@ -17,7 +17,10 @@ it reports ``seekable()`` and takes ``seek``, but every write lands at its end,
 so s3transfer's positioned, parallel download would append the ranged parts in
 completion order - the view hides ``seek`` and the download runs in order.
 (The descriptor's flag can be read on POSIX only; on Windows the ``mode``
-string is the whole cue - `_is_append_mode`.)
+string is the whole cue - `_is_append_mode`.) A stream that cannot be
+positioned whatever it reports - a pipe, a socket, a console, judged by its
+descriptor (`_cannot_seek`; a Windows pipe answers ``seekable()`` True) - gets
+the same write-only view as a destination, and a read-only one as a source.
 The transfer ``close``s every fileobj ``open`` returns (the open
 route flushes a real backend's writer that way), so each ``IOStorage`` *writer*
 view absorbs that ``close`` into a flush and each reader view's ``close`` is a
@@ -353,9 +356,10 @@ class IOStorage(Storage):
     (`_Uncloseable`) - except one in append mode, written through a write-only
     view (`_SequentialWriter`) so a multipart download lands in order rather
     than in completion order, and one that cannot be positioned (a pipe, a
-    socket, a console - `_cannot_seek`), read through a read-only view
-    (`_NonSeekable`) so both engines take their buffered upload path instead
-    of probing it with ``seek`` / ``tell``; a text stream - recognized as an
+    socket, a console - `_cannot_seek`), written through that same view and
+    read through a read-only one (`_NonSeekable`) so both engines take their
+    buffered upload path instead of probing it with ``seek`` / ``tell``; a text
+    stream - recognized as an
     ``io.TextIOBase`` or by its ``encoding`` attribute (``codecs.open``'s
     ``StreamReaderWriter``, a text-mode ``SpooledTemporaryFile``) - is wrapped
     with ``encoding`` (default utf-8). The caller's stream is never closed by

@@ -38,6 +38,7 @@ from boto3_s3.exceptions import (
     CancelledError,
     ConfigurationError,
     InvalidConfigError,
+    MalformedResponseError,
     NotFoundError,
     TransportError,
     ValidationError,
@@ -161,6 +162,16 @@ def _run(
         for item in items:
             transferrer.submit(item)
     return calls, source_calls, results, transferrer
+
+
+class _BodyRaising:
+    """A streaming body whose ``read`` raises (a reply cut short inside botocore)."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    def read(self, *_: Any) -> bytes:
+        raise self._exc
 
 
 class TestUpload:
@@ -716,6 +727,99 @@ class TestCopy:
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         error = results[0].error
         assert type(error) is Boto3S3Error
+        assert isinstance(error.__cause__, KeyError)
+        assert (error.bucket, error.key) == ("src-b", "d/a.bin")
+
+    @pytest.mark.parametrize(
+        ("options", "source_responses", "error_type", "text"),
+        [
+            pytest.param(
+                TransferOptions(copy_props=CopyPropsMode.METADATA_DIRECTIVE),
+                [KeyError("Credentials")],
+                Boto3S3Error,
+                "'Credentials'",
+                id="head-raises",
+            ),
+            pytest.param(
+                TransferOptions(), [{}, {}], MalformedResponseError, "'TagSet'", id="no-tagset"
+            ),
+            pytest.param(
+                TransferOptions(),
+                [{}, {"TagSet": [{"Value": "v"}]}],
+                MalformedResponseError,
+                "'Key'",
+                id="tag-without-key",
+            ),
+            pytest.param(
+                TransferOptions(copy_props=CopyPropsMode.ALL),
+                [{}, {"TagSet": []}, KeyError("Credentials")],
+                Boto3S3Error,
+                "'Credentials'",
+                id="listing-raises",
+            ),
+            pytest.param(
+                TransferOptions(copy_props=CopyPropsMode.ALL),
+                [{}, {"TagSet": []}, {"Annotations": [{"Size": 1}]}],
+                MalformedResponseError,
+                "'AnnotationName'",
+                id="entry-without-name",
+            ),
+            pytest.param(
+                TransferOptions(copy_props=CopyPropsMode.ALL),
+                [
+                    {},
+                    {"TagSet": []},
+                    {"Annotations": [{"AnnotationName": "n"}]},
+                    KeyError("Credentials"),
+                ],
+                Boto3S3Error,
+                "'Credentials'",
+                id="annotation-raises",
+            ),
+            pytest.param(
+                TransferOptions(copy_props=CopyPropsMode.ALL),
+                [{}, {"TagSet": []}, {"Annotations": [{"AnnotationName": "n"}]}, {}],
+                MalformedResponseError,
+                "'AnnotationPayload'",
+                id="reply-without-payload",
+            ),
+            pytest.param(
+                TransferOptions(copy_props=CopyPropsMode.ALL),
+                [
+                    {},
+                    {"TagSet": []},
+                    {"Annotations": [{"AnnotationName": "n"}]},
+                    {"AnnotationPayload": _BodyRaising(KeyError("Credentials"))},
+                ],
+                Boto3S3Error,
+                "'Credentials'",
+                id="body-read-raises",
+            ),
+        ],
+    )
+    def test_a_source_read_failure_names_the_source(
+        self,
+        options: TransferOptions,
+        source_responses: list[dict[str, Any] | Exception],
+        error_type: type[Boto3S3Error],
+        text: str,
+    ) -> None:
+        # Whatever a source-side read raises - botocore's family or not - or
+        # a reply missing an element aws-cli reads by subscript (its KeyError's
+        # text) fails the item against the *source*, not the copy destination
+        # _record_failure would otherwise stamp on it.
+        _, _, results, transferrer = _run(
+            TransferType.COPY,
+            [self._item(size=9 * _MIB)],
+            [],
+            source_responses=source_responses,
+            options=options,
+        )
+        assert (transferrer.succeeded, transferrer.failed) == (0, 1)
+        error = results[0].error
+        assert error is not None
+        assert type(error) is error_type
+        assert str(error) == text
         assert isinstance(error.__cause__, KeyError)
         assert (error.bucket, error.key) == ("src-b", "d/a.bin")
 

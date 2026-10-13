@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A download into an `IOStorage` over an append-mode stream, or over a pipe that claims to seek (a Windows pipe), is now written in order instead of scrambling a multipart object.
 - A streaming upload from a seekable stream is no longer cut to `expected_size`; the hint now sizes only a stream the engine cannot size itself.
 - An immediate cancellation now also interrupts a CRT run whose submission is waiting on the engine's backpressure.
-- An incomplete listing, bucket or HeadObject response, or a timestamp the host cannot represent, now raises `MalformedResponseError` instead of the bare `KeyError` / `OverflowError`.
+- An incomplete listing, bucket or HeadObject response, a copy's incomplete source tag set or annotation reply, or a timestamp the host cannot represent, now raises `MalformedResponseError` instead of the bare `KeyError` / `OverflowError` (a tag reply without `TagSet` no longer passes as no tags).
 - Log masking now also hides a legacy SigV2 `Authorization` header whose access key id is not AWS-shaped (an S3-compatible endpoint's, say), and such an id in a credentials response body.
 - A failed S3 request is now a `Boto3S3Error` whatever botocore raised inside it; a listing, a HEAD, a single-object call or an `S3PathResolver` lookup could leak a bare `KeyError` / `RecursionError` / `ValueError`, and a copy's source-side request could blame the destination.
 - A batched delete now re-sends on its own a key S3 reports with a transient error, and every key of a batch request that failed as a whole, as `aws s3` sends each key on its own, instead of failing them.

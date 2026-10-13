@@ -214,6 +214,23 @@ class TestOpenUploadRoute:
         assert results[0].src == "mem://data/a.txt"
         assert results[0].dest == "s3://bucket/up/a.txt"
 
+    def test_an_upload_into_a_cut_short_outposts_name_puts_the_split_key(self) -> None:
+        # `my_ap` is the access point `my` and the key `_ap`: the key slices
+        # off the formatted destination with no separator at the cut.
+        base = "arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-1/accesspoint/"
+        src = _MemStorage({"": b"x"}, location="mem://data/a.txt")
+        client, calls = make_recording_client([{}])
+        results: list[OpResult] = []
+        S3().cp(
+            src,
+            S3Storage(f"s3://{base}my_ap", client=client),
+            transfer_config=_SYNC,
+            on_result=results.append,
+        )
+        assert ops(calls) == ["PutObject"]
+        assert (calls[0].params["Bucket"], calls[0].params["Key"]) == (f"{base}my", "_ap")
+        assert results[0].dest == f"s3://{base}my_ap"
+
     def test_recursive_upload_opens_each_key_in_order(self) -> None:
         src = _MemStorage({"a.txt": b"x", "sub/b.txt": b"yy"}, location="mem://data/")
         client, calls = make_recording_client([{}, {}])
@@ -416,6 +433,22 @@ class TestOpenDownloadRoute:
         S3().cp(S3Storage("s3://b/d/a.txt", client=client), dest, transfer_config=_SYNC)
         assert ops(calls) == ["HeadObject", "GetObject"]
         assert store == {"": b"payload"}
+
+    def test_a_recursive_download_from_a_cut_short_outposts_name_lists_the_split(
+        self,
+    ) -> None:
+        base = "arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-1/accesspoint/"
+        dest = _MemStorage({}, location="mem://data/")
+        client, calls = make_recording_client([{}])
+        S3().cp(
+            S3Storage(f"s3://{base}my_ap/", client=client),
+            dest,
+            recursive=True,
+            transfer_config=_SYNC,
+        )
+        assert [(c.operation, c.params["Bucket"], c.params["Prefix"]) for c in calls] == [
+            ("ListObjectsV2", f"{base}my", "_ap/")
+        ]
 
     def test_single_download_into_a_directory_uses_the_basename(self) -> None:
         # A "/"-terminated destination adopts the source's name (use_src_name).
