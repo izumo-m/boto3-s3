@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 
 # These exception names do not themselves import the AWS SDK.
 from boto3_s3 import ConfigurationError, InvalidConfigError, InvalidValueError, ValidationError
-from boto3_s3_cli import checksumdefault, configfiles, plugins, s3errormsg
+from boto3_s3_cli import checksumdefault, configfiles, plugins, s3errormsg, usage
 from boto3_s3_cli.globalargs import PROFILE_ENV_VARS
 
 if TYPE_CHECKING:
@@ -882,7 +882,7 @@ def _coerce_cli_timeout(value: str) -> int | None:
     try:
         return int(value) or None
     except ValueError as exc:
-        raise InvalidValueError(str(exc)) from exc
+        raise InvalidValueError(usage.int_error_message(exc)) from exc
 
 
 def _includes_endpoint_auth_path(args: argparse.Namespace) -> bool:

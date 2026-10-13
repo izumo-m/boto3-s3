@@ -362,10 +362,22 @@ solidified design is added here.
   Python, and the older text is rewritten into it.
   - `json` gave the two **trailing-comma** failures a message of their own in
     3.13, anchored on the comma rather than on the closing bracket, so
-    `shorthand._json_decode_message` re-anchors the older one and a
+    `usage.json_error_message` re-anchors the older one and a
     `--metadata '{"a": 1,}'` reports `Illegal trailing comma before end of
     object` (and its array twin) on every host. Those two shapes are the whole
     difference, measured across 3.10 / 3.12 / 3.14 over a broken-JSON corpus.
+    A decode failure the SDK raises - a `credential_process` that prints such
+    JSON - reaches the general report (rc 255), which renders every exception
+    through `usage.exception_text` and so re-anchors it the same way.
+  - `int()`'s **digit limit** is `Exceeds the limit (4300) for integer string
+    conversion` on 3.10 and `(4300 digits)` from 3.11, so
+    `usage.int_error_message` rewrites the older form: at each `int()` the CLI
+    applies to an option it converts after parsing (`--page-size`,
+    `--expires-in`, `--expected-size`, `--cli-read-timeout`,
+    `--cli-connect-timeout`, an `[s3]` size), and - through
+    `usage.exception_text` - in the general report, which is where the
+    SDK's own `int()` of a config value (`max_attempts`,
+    `metadata_service_timeout`, `metadata_service_num_attempts`) arrives.
   - A codec that is not a text encoding (`AWS_CLI_FILE_ENCODING=rot13`)
     surfaces as the interpreter's own `LookupError` through the general
     handler (rc 255), and its `'<codec>' is not a text encoding` line carried

@@ -21,7 +21,7 @@ from boto3_s3 import (
     InvalidValueError,
     ValidationError,
 )
-from boto3_s3_cli import alias, configfiles, globalargs, plugins
+from boto3_s3_cli import alias, configfiles, globalargs, plugins, usage
 from boto3_s3_cli.autoprompt import resolve
 from boto3_s3_cli.commands.base import Command, Context, reject_unknown_options
 
@@ -255,13 +255,17 @@ def _write_error(message: object, *, rc: int | None = None, code: str | None = N
     bare region assertion, which the CRT construction converts at rc 255, and
     the rc-255 general handler envelopes nothing.
 
+    An exception's text is `usage.exception_text`'s: aws prints `str(exc)`,
+    so where that text is the interpreter's own the wording is aws's bundled
+    3.14's, whatever this host runs (design/cli.md section 2).
+
     Stripping last is what keeps the multi-line reports clean: they end with
     the newline their usage block carries, which must not surface as a trailing
     blank line. A message carrying its own embedded `[ERROR]` line (the
     missing-subcommand report) therefore renders as two prefixed lines,
     enveloped or not, exactly as aws's does.
     """
-    detail = str(message)
+    detail = usage.exception_text(message) if isinstance(message, BaseException) else str(message)
     if code is None:
         if rc == _PARAM_VALIDATION_ERROR_RC:
             code = "ParamValidation"

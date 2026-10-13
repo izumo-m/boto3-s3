@@ -8,6 +8,7 @@ name or value.
 
 from __future__ import annotations
 
+import json
 import re
 
 _TWO_PATH_FORMS = "<LocalPath> <S3Uri> or <S3Uri> <LocalPath> or <S3Uri> <S3Uri>"
@@ -53,6 +54,56 @@ def int_error_message(exc: ValueError) -> str:
     3.11 onward says ``Exceeds the limit (4300 digits) for ...``.
     """
     return _UNITLESS_DIGIT_LIMIT.sub(r"Exceeds the limit (\1 digits) for ", str(exc))
+
+
+# json's own whitespace set (json.decoder.WHITESPACE_STR).
+_JSON_WHITESPACE = " \t\n\r"
+
+
+def json_error_message(exc: json.JSONDecodeError) -> str:
+    """Render a decode failure the way the official aws build's json does.
+
+    Python 3.13 gave the two trailing-comma shapes a message of their own,
+    anchored on the comma instead of on the closing bracket. aws ships 3.14,
+    so the newer text is the parity target on every interpreter this CLI runs
+    on; the older ones are re-anchored here. Those two shapes are the whole
+    difference (measured across 3.10 / 3.12 / 3.14 over a broken-JSON corpus).
+    """
+    if exc.msg == "Expecting property name enclosed in double quotes":
+        closer, message = "}", "Illegal trailing comma before end of object"
+    elif exc.msg == "Expecting value":
+        closer, message = "]", "Illegal trailing comma before end of array"
+    else:
+        return str(exc)
+    doc = exc.doc
+    if exc.pos >= len(doc) or doc[exc.pos] != closer:
+        return str(exc)
+    comma = exc.pos - 1
+    while comma >= 0 and doc[comma] in _JSON_WHITESPACE:
+        comma -= 1
+    if comma < 0 or doc[comma] != ",":
+        return str(exc)
+    lineno = doc.count("\n", 0, comma) + 1
+    colno = comma - doc.rfind("\n", 0, comma)
+    return f"{message}: line {lineno} column {colno} (char {comma})"
+
+
+def exception_text(exc: BaseException) -> str:
+    """An exception's text as aws's general report would print it.
+
+    aws prints ``str(exc)`` for whatever reaches its general handler, so where
+    the text is the interpreter's own - a ``json`` decode failure (a
+    ``credential_process`` answer, say), an ``int()`` the SDK applies to a
+    config value (``max_attempts``, ``metadata_service_timeout``) - the wording
+    is its bundled Python's. The two shapes an older host words differently
+    are put in that wording (`json_error_message`, `int_error_message`);
+    anything else is ``str(exc)``.
+    """
+    if isinstance(exc, json.JSONDecodeError):
+        return json_error_message(exc)
+    if isinstance(exc, ValueError):
+        return int_error_message(exc)
+    return str(exc)
 
 
 def invalid_bucket_name_message(name: str = "") -> str:

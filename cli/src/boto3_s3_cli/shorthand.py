@@ -34,7 +34,7 @@ import string
 from typing import TypeAlias, cast
 
 from boto3_s3 import ValidationError
-from boto3_s3_cli import paramfile
+from boto3_s3_cli import paramfile, usage
 
 # What one shorthand key can carry: a scalar, a `fileb://` load, or - through
 # the csv / explicit-list / hash-literal forms - a nesting of those.
@@ -64,9 +64,6 @@ _SECOND_VALUE_RE = re.compile(
 )
 _SINGLE_QUOTED_RE = re.compile(r"'(?:\\'|[^'])*'", re.UNICODE)
 _DOUBLE_QUOTED_RE = re.compile(r'"(?:\\"|[^"])*"', re.UNICODE)
-
-# json's own whitespace set (json.decoder.WHITESPACE_STR).
-_JSON_WHITESPACE = " \t\n\r"
 
 
 class _ShorthandParseError(ValueError):
@@ -133,7 +130,7 @@ def _parse_json_map(value: str, *, name: str, operation: str) -> dict[str, str]:
         data = json.loads(value)
     except json.JSONDecodeError as exc:
         raise ValidationError(
-            f"Error parsing parameter '{name}': Invalid JSON: {_json_decode_message(exc)}\n"
+            f"Error parsing parameter '{name}': Invalid JSON: {usage.json_error_message(exc)}\n"
             f"JSON received: {value}",
             operation=operation,
         ) from exc
@@ -150,34 +147,6 @@ def _parse_json_map(value: str, *, name: str, operation: str) -> dict[str, str]:
         )
         raise ValidationError("Parameter validation failed:\n" + reports, operation=operation)
     return cast("dict[str, str]", entries)
-
-
-def _json_decode_message(exc: json.JSONDecodeError) -> str:
-    """Render a decode failure the way the official aws build's json does.
-
-    Python 3.13 gave the two trailing-comma shapes a message of their own,
-    anchored on the comma instead of on the closing bracket. aws ships 3.14,
-    so the newer text is the parity target on every interpreter this CLI runs
-    on; the older ones are re-anchored here. Those two shapes are the whole
-    difference (measured across 3.10 / 3.12 / 3.14 over a broken-JSON corpus).
-    """
-    if exc.msg == "Expecting property name enclosed in double quotes":
-        closer, message = "}", "Illegal trailing comma before end of object"
-    elif exc.msg == "Expecting value":
-        closer, message = "]", "Illegal trailing comma before end of array"
-    else:
-        return str(exc)
-    doc = exc.doc
-    if exc.pos >= len(doc) or doc[exc.pos] != closer:
-        return str(exc)
-    comma = exc.pos - 1
-    while comma >= 0 and doc[comma] in _JSON_WHITESPACE:
-        comma -= 1
-    if comma < 0 or doc[comma] != ",":
-        return str(exc)
-    lineno = doc.count("\n", 0, comma) + 1
-    colno = comma - doc.rfind("\n", 0, comma)
-    return f"{message}: line {lineno} column {colno} (char {comma})"
 
 
 def _json_value_repr(value: object) -> str:
