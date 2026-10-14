@@ -66,6 +66,29 @@ _SYNC = TransferConfig(use_threads=False)
 _CASE_CONFLICT_CONFIG = TransferConfig(max_concurrency=1)
 
 
+def _release_once_queued(
+    monkeypatch: pytest.MonkeyPatch, release: threading.Event, count: int
+) -> None:
+    """Set *release* once *count* items have been queued on a Transferrer.
+
+    For a test whose first request is held until a cancel its record
+    triggers: the run checks the cancel before it pulls each next item, so
+    a file the walk had not reached by then is never queued. Releasing on a
+    fixed delay instead let a slow runner (a Windows CI job) reach the last
+    file only after the cancel, one record short.
+    """
+    queued: list[TransferItem] = []
+    real_submit = Transferrer.submit
+
+    def submit(self: Transferrer, item: TransferItem) -> None:
+        real_submit(self, item)
+        queued.append(item)
+        if len(queued) == count:
+            release.set()
+
+    monkeypatch.setattr(Transferrer, "submit", submit)
+
+
 class TestUploadRoute:
     def test_single_upload_names_the_key_from_the_prefix(self, tmp_path: Path) -> None:
         src = tmp_path / "a.txt"
@@ -428,7 +451,9 @@ class TestUploadRoute:
         assert calls == []
         assert not dest.exists()
 
-    def test_graceful_cancel_from_result_drains_submitted_transfers(self, tmp_path: Path) -> None:
+    def test_graceful_cancel_from_result_drains_submitted_transfers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         for name in ("a.txt", "b.txt", "c.txt"):
             (tmp_path / name).write_bytes(name.encode())
         client, _ = make_recording_client([])
@@ -450,7 +475,7 @@ class TestUploadRoute:
             if len(results) == 1:
                 token.cancel()
 
-        threading.Timer(0.2, release_first.set).start()
+        _release_once_queued(monkeypatch, release_first, 3)
         with pytest.raises(CancelledError):
             S3().cp(
                 str(tmp_path),
@@ -532,7 +557,7 @@ class TestUploadRoute:
                 token.cancel()
                 threading.Thread(target=escalate, daemon=True).start()
 
-        threading.Timer(0.2, release_first.set).start()
+        _release_once_queued(monkeypatch, release_first, 3)
         with pytest.raises(CancelledError):
             S3().cp(
                 str(tmp_path),
