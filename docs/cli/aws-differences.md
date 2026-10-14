@@ -364,6 +364,15 @@ comes out differently, listed in section 1.
   finishes and is reported (`delete: s3://…`) before that closing line, where
   `aws` cancels it and reports `delete failed: s3://… AWS_ERROR_S3_CANCELED:
   Request successfully cancelled` with no closing line, exit code 1 on both.
+- **A CRT download that writes no file fails here.** Under
+  `preferred_transfer_client = crt`, a download whose local file cannot be
+  created at all - a name longer than the filesystem allows - is reported by
+  the CRT engine as a success. `aws` prints `download:` and a warning that the
+  modification time could not be set, exits 2, and on `mv` deletes the S3
+  object, so the object is gone and no file was written (measured). This
+  command reports the item as `download failed:` / `move failed:` with the
+  operating system's error, exits 1, and keeps the object - the classic
+  engine's outcome on both tools.
 - **A `mv` between two spellings of one Outposts object is refused here.** An
   Outposts access point's key can be set off from the ARN with `:` or with `/`,
   and a name the access-point pattern cuts short at a character a name may not

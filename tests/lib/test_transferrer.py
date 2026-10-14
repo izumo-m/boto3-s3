@@ -2246,6 +2246,60 @@ class TestWorkerRaise:
         assert transferrer.warner.warned == 1
 
 
+class _SettableFuture(_FakeCrtFuture):
+    """A CRT future that succeeded, until a subscriber overrides its outcome."""
+
+    def __init__(self) -> None:
+        super().__init__(RuntimeError("unused"))
+        self._failure: BaseException | None = None
+
+    def result(self) -> None:
+        if self._failure is not None:
+            raise self._failure
+
+    def set_exception(self, exception: BaseException) -> None:
+        self._failure = exception
+
+
+class _CrtDownloadWritingNothing(_CrtDrainManager):
+    """The CRT engine's report for a download it could not create: success."""
+
+    def download(self, **kwargs: Any) -> _FakeCrtFuture:
+        future = _SettableFuture()
+        self._accepted.append((future, list(kwargs["subscribers"])))
+        return future
+
+
+class TestCrtDownloadNeverWritten:
+    """awscrt reports a download whose file it could not create (a name too
+    long) as a success; aws then prints it done with an mtime warning, and a
+    mv deletes the source (measured). Nothing arrived, so the item fails."""
+
+    @pytest.mark.parametrize("is_move", [False, True])
+    def test_the_item_fails_and_the_source_stays(self, tmp_path: Path, is_move: bool) -> None:
+        item = TransferItem(
+            compare_key="a.bin",
+            size=7,
+            etag='"abc123"',
+            mtime=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            src_bucket="bucket",
+            src_key="d/a.bin",
+            dest_path=str(tmp_path / "never-written.bin"),
+        )
+        client, calls = make_recording_client([])
+        results: list[OpResult] = []
+        with Transferrer(
+            TransferType.DOWNLOAD, client, is_move=is_move, on_result=results.append
+        ) as transferrer:
+            transferrer._manager = _CrtDownloadWritingNothing()  # pyright: ignore[reportPrivateUsage]
+            transferrer.submit(item)
+        assert calls == []  # no DeleteObject for the source
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        cause = results[0].error.__cause__ if results[0].error is not None else None
+        assert isinstance(cause, OSError)
+        assert cause.filename == str(tmp_path / "never-written.bin")
+
+
 class TestStreamDownloadRetry:
     """A single-request download into a destination that cannot seek is
     retried from the object's first byte; each byte must still be written once

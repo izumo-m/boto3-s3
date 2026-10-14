@@ -474,12 +474,16 @@ def _set_file_utime(path: str, timestamp: float) -> None:
     A permission failure (EPERM - typically a file owned by another user) is
     re-worded the way aws words it, so the resulting warning carries
     aws-cli's "attempting to modify the utime" text; every other error keeps
-    its own message.
+    its own message - with the path in it: Python 3.10 to 3.12's POSIX
+    ``os.utime`` leaves the path off its error, which 3.13 and the 3.14
+    aws bundles name (``[Errno 36] File name too long: '<path>'``).
     """
     try:
         os.utime(path, (timestamp, timestamp))
     except OSError as exc:
         if exc.errno != errno.EPERM:
+            if exc.filename is None and exc.errno is not None:
+                raise OSError(exc.errno, exc.strerror, path) from exc
             raise
         raise AccessDeniedError(
             "The file was downloaded, but attempting to modify the utime of the file "
@@ -2066,7 +2070,7 @@ class Transferrer:
                 self._first_error = error
         self._emit(self._result(item, OpOutcome.FAILED, error=error))
 
-    def _stamp_mtime(self, item: TransferItem) -> None:
+    def _stamp_mtime(self, item: TransferItem) -> BaseException | None:
         """Stamp the source LastModified onto the downloaded file.
 
         Runs where the download's subscribers do - an s3transfer worker, or
@@ -2075,7 +2079,10 @@ class Transferrer:
         does not undo the transfer (the bytes are on disk): it adds a WARNED
         record with aws's wording - the broad catch is deliberate, ``os.utime``
         can raise ``OverflowError`` / ``ValueError`` on Windows for timestamps
-        outside ``localtime()``'s range besides the common ``OSError``.
+        outside ``localtime()``'s range besides the common ``OSError``. The one
+        exception is a CRT download whose destination does not exist at all:
+        the engine never wrote it, and the error is returned for `_StampMtime`
+        to fail the item with.
 
         Whole seconds only: aws-cli stamps its source timestamp through
         ``timetuple`` / ``time.mktime``, which drops the sub-second part, and an
@@ -2085,15 +2092,26 @@ class Transferrer:
         there.
         """
         if item.mtime is None or item.dest_path is None:
-            return
+            return None
         try:
             _set_file_utime(item.dest_path, item.mtime.replace(microsecond=0).timestamp())
         except Exception as exc:
+            if (
+                isinstance(exc, OSError)
+                and not isinstance(self._manager, TransferManager)
+                and not os.path.lexists(item.dest_path)
+            ):
+                # The CRT engine wrote nothing yet reported success (a name
+                # too long to create: awscrt drops the failure, aws reports
+                # the download done with this warning, and a mv deletes the
+                # source). Nothing arrived, so the stamp's error is the item's.
+                return exc
             self.warn(
                 f"Skipping file {item.dest_path}. Successfully Downloaded {item.dest_path} "
                 f"but was unable to update the last modified time. {exc}",
                 key=item.compare_key,
             )
+        return None
 
 
 # -- subscribers --------------------------------------------------------------
@@ -2547,18 +2565,24 @@ class _StampMtime:
     source delete runs - a delete failure (``move failed``, the file stays)
     still leaves the mtime aws-shaped, and the opt-in ``_FsyncDest`` barrier
     flushes the final metadata. The stamp itself (`Transferrer._stamp_mtime`)
-    never raises - a failure becomes a WARNED record - so this cannot flip
-    the settled future.
+    never raises - a failure becomes a WARNED record - and flips the settled
+    future only where the CRT engine reported a download it never wrote:
+    ``set_exception`` (s3transfer accepts the post-done override) then makes
+    the item FAILED and keeps a ``mv``'s source.
     """
 
-    def __init__(self, item: TransferItem, stamp: Callable[[TransferItem], None]) -> None:
+    def __init__(
+        self, item: TransferItem, stamp: Callable[[TransferItem], BaseException | None]
+    ) -> None:
         self._item = item
         self._stamp = stamp
 
     def on_done(self, future: Any, **kwargs: Any) -> None:
         if _outcome(future) is not None:
             return
-        self._stamp(self._item)
+        failure = self._stamp(self._item)
+        if failure is not None:
+            future.set_exception(failure)
 
 
 class _DeleteSource:
