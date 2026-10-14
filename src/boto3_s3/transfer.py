@@ -15,7 +15,8 @@ threads for submitted work - the calling thread itself under
 directory source
 rejected at submit, dryrun / skip / notice emissions - fire inline on the
 submitting thread. Keep callbacks fast and non-raising either way, the
-``S3Deleter`` contract),
+``S3Deleter`` contract; one that raises anyway ends the run with its
+exception on the operation's thread, `Transferrer._deliver`),
 lock-guarded rollup counters for ``BatchError``, byte progress to
 ``on_progress``.
 
@@ -70,6 +71,7 @@ import posixpath
 import tempfile
 import threading
 from collections.abc import Callable, Generator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib.metadata import version
@@ -79,6 +81,7 @@ from urllib.parse import quote, urlparse
 from botocore.exceptions import BotoCoreError, ClientError
 from s3transfer.compat import seekable
 from s3transfer.copies import CopySubmissionTask
+from s3transfer.download import DownloadNonSeekableOutputManager, ImmediatelyWriteIOGetObjectTask
 from s3transfer.exceptions import CancelledError as S3TransferCancelledError
 from s3transfer.futures import NonThreadedExecutor
 from s3transfer.manager import TransferManager
@@ -1062,10 +1065,18 @@ class Transferrer:
         # cancel it describes is issued, so the callback that observes a
         # cancel outcome observes the flag too.
         self._cancel_initiated = False
-        # The interrupt a use_threads=False run took mid-transfer, kept by
-        # `_note_interrupt` for `submit` to re-raise: upstream's serial executor
-        # swallows it inside the manager call (`_SerialExecutor`).
-        self._pending_interrupt: BaseException | None = None
+        # The first exception the run must hand back to the caller from a
+        # place that cannot raise it there, kept by `_note_raise` for `submit`
+        # / `__exit__` to re-raise: an interrupt upstream's serial executor
+        # swallows inside the manager call, one the caller's own code raised
+        # on a worker (`_TaskGuard`, `_GuardedReader`), and anything the
+        # caller's ``on_result`` raised wherever a record settled
+        # (`_deliver`).
+        self._pending_raise: BaseException | None = None
+        self._pending_lock = threading.Lock()
+        # The thread the caller drives the run from: a record settled there
+        # can raise the callback's exception on the spot (`_deliver`).
+        self._caller_thread = threading.get_ident()
         self._succeeded = 0
         self._failed = 0
         self._skipped = 0
@@ -1079,7 +1090,7 @@ class Transferrer:
             src_storage=src_storage,
             dest_storage=dest_storage,
             operation=operation,
-            on_result=on_result,
+            on_result=self._deliver if on_result is not None else None,
         )
 
     # -- lifecycle ---------------------------------------------------------
@@ -1124,6 +1135,10 @@ class Transferrer:
         interrupt itself, so that lane never needs the distinction.
         """
         if self._manager is None:
+            # No transfer ran, but a warning the walk reported from its
+            # prefetch worker may still have noted the caller's exception.
+            if exc is None:
+                self._raise_pending()
             return
         graceful_drain = (
             isinstance(exc, CancelledError)
@@ -1165,11 +1180,10 @@ class Transferrer:
                 # feeding _store forever on a longer-lived client.
                 self._capture.unregister(self._client)
         # An interrupt that became an item's outcome during the drain (or on
-        # the last submit's worker) has no later `submit` to re-raise it.
-        pending = self._pending_interrupt
-        if pending is not None and exc is None:
-            self._pending_interrupt = None
-            raise pending
+        # the last submit's worker), or a callback's exception noted there,
+        # has no later `submit` to re-raise it.
+        if exc is None:
+            self._raise_pending()
 
     def _watch_for_immediate_cancel(self) -> None:
         """Cancel tracked futures once the token escalates to IMMEDIATE.
@@ -1321,9 +1335,10 @@ class Transferrer:
                 future = self._submit_copy(item)
             self._track_future(future)
         except BaseException as raised:
-            if raised is self._pending_interrupt:
-                # Already on its way to the caller: nothing left to hand back.
-                self._pending_interrupt = None
+            with self._pending_lock:
+                if raised is self._pending_raise:
+                    # Already on its way to the caller: nothing left to hand back.
+                    self._pending_raise = None
             # The item may carry a stream handle - _cp_stream's already-open
             # fileobj, or the open route's deferred reader/writer. A submit
             # that raises before the manager accepted the work - the grants
@@ -1335,18 +1350,51 @@ class Transferrer:
         # A use_threads=False run's interrupt: the serial executor settled the
         # item (CANCELLED) and noted the interrupt, and upstream's submission
         # task then swallowed it, so the manager call returned as if nothing
-        # had happened. Re-raise it here - the item's fileobjs were already
-        # released by its done subscribers - and the caller's exit folds the
-        # manager the way any mid-run interrupt does.
-        pending = self._pending_interrupt
+        # had happened. The same holds for whatever a worker noted since the
+        # last submit (`_note_raise`). Re-raise it here - the item's fileobjs
+        # were already released by its done subscribers - and the caller's
+        # exit folds the manager the way any mid-run interrupt does.
+        self._raise_pending()
+
+    def _note_raise(self, exc: BaseException) -> None:
+        """Keep the first exception owed to the caller (`_pending_raise`)."""
+        with self._pending_lock:
+            if self._pending_raise is None:
+                self._pending_raise = exc
+
+    def _raise_pending(self) -> None:
+        """Re-raise, once, the exception `_note_raise` kept."""
+        with self._pending_lock:
+            pending, self._pending_raise = self._pending_raise, None
         if pending is not None:
-            self._pending_interrupt = None
             raise pending
 
-    def _note_interrupt(self, exc: BaseException) -> None:
-        """Keep the first interrupt the serial executor saw (`_SerialExecutor`)."""
-        if self._pending_interrupt is None:
-            self._pending_interrupt = exc
+    def _deliver(self, result: OpResult) -> None:
+        """Hand one record to the caller's ``on_result``, whatever thread settled it.
+
+        A record settles where its item ends: the calling thread for a
+        submit-time outcome, a walk warning or a ``use_threads=False``
+        transfer, an s3transfer worker for a threaded one, an awscrt thread
+        for the CRT engine's. Whatever the callback raises belongs to the
+        caller, but only the calling thread can raise it there: s3transfer
+        logs and drops an ``Exception`` from a done callback (the calling
+        thread under ``use_threads=False`` included), a worker's
+        ``BaseException`` dies with the pool's work item, and one escaping an
+        awscrt callback leaves the CRT manager's drain waiting for good. So
+        the exception is noted first (`_note_raise`, re-raised by the next
+        `submit` or by ``__exit__``) and raised on the spot only on the
+        calling thread - where it propagates as it always did, or, inside
+        s3transfer's callback runner, is dropped there and still reaches the
+        caller through the note.
+        """
+        callback = self._on_result
+        assert callback is not None  # only wired when the caller passed one
+        try:
+            callback(result)
+        except BaseException as exc:
+            self._note_raise(exc)
+            if threading.get_ident() == self._caller_thread:
+                raise
 
     @staticmethod
     def _close_item_fileobjs(item: TransferItem) -> None:
@@ -1424,9 +1472,13 @@ class Transferrer:
         if self._capture is not None:
             # Admit the key: only submitted items' responses are recorded.
             self._capture.expect(item.dest_bucket, item.dest_key)
+        fileobj: Any = item.src_fileobj if item.src_fileobj is not None else item.src_path
+        if item.src_fileobj is not None and not isinstance(manager, TransferManager):
+            # The CRT engine reads the body on an awscrt thread (`_GuardedReader`).
+            fileobj = _GuardedReader(item.src_fileobj, self._note_raise, self._caller_thread)
         return self._accept(
             manager.upload,
-            fileobj=item.src_fileobj if item.src_fileobj is not None else item.src_path,
+            fileobj=fileobj,
             bucket=item.dest_bucket,
             key=item.dest_key,
             extra_args=extra_args,
@@ -1781,13 +1833,14 @@ class Transferrer:
             # TransferConfig carries, or the two drift (they differ in the
             # download IO queue depth).
             config = transferconfig.TransferConfig()
-        executor_cls: Any = None
-        if not getattr(config, "use_threads", True):
-            # boto3's NonThreadedExecutor semantics, with a mid-transfer
-            # interrupt settling the item before upstream's teardown runs
-            # (`_SerialExecutor`); s3transfer instantiates the class per
-            # executor with max_workers alone, so the note hook rides a partial.
-            executor_cls = functools.partial(_SerialExecutor, self._note_interrupt)
+        # boto3's NonThreadedExecutor semantics under use_threads=False, and
+        # s3transfer's default thread pool otherwise, each with the task hooks
+        # (`_TaskGuard`); s3transfer instantiates the class per executor with
+        # max_workers alone, so the note hook rides a partial.
+        executor_cls: Any = functools.partial(
+            _SerialExecutor if not getattr(config, "use_threads", True) else _ThreadedExecutor,
+            self._note_raise,
+        )
         # TransferManager registers handlers on self._client at construction and
         # leaves them there - shutdown() never removes them. Intentional and
         # boto3-faithful (boto3's own TransferManager does the same): we do not
@@ -1829,7 +1882,7 @@ class Transferrer:
 
     def _emit(self, result: OpResult) -> None:
         if self._on_result is not None:
-            self._on_result(result)
+            self._deliver(result)
 
     def _record_success(
         self,
@@ -1934,7 +1987,7 @@ class Transferrer:
             # it on the way - so it is kept for `submit` / `__exit__` to hand
             # back to the caller, and the item records CANCELLED under the
             # wording the serial executor's own cancel uses.
-            self._note_interrupt(exc)
+            self._note_raise(exc)
             exc = S3TransferCancelledError(str(exc) or repr(exc))
         if interrupted or _is_cancellation(
             exc, cancel_initiated=self._cancel_initiated, revoked=revoked
@@ -2052,50 +2105,38 @@ class Transferrer:
 # on_done(future), all with **kwargs.
 
 
-class _SerialExecutor(NonThreadedExecutor):
-    """``use_threads=False``'s executor: s3transfer's serial one, with an
-    interrupt settling the transfer before the task's teardown runs.
+class _TaskGuard:
+    """The hooks both classic executors install on each task s3transfer submits.
 
-    Under ``NonThreadedExecutor`` every task runs on the calling thread, so a
-    ``KeyboardInterrupt`` (any ``BaseException`` outside ``Exception``) lands
-    inside a task's main. Upstream's ``Task.__call__`` catches ``Exception``
-    alone, and its ``finally`` still runs the task's done callbacks - a
-    download's final rename task among them - and, for the final task,
-    ``announce_done``, with the coordinator still ``running``: ``result()``
-    then returns ``None`` as if the transfer had succeeded, so the done
-    subscribers would delete a ``mv`` source, rename a half-written download
-    into place, and record SUCCEEDED for bytes that never arrived - and
-    ``SubmissionTask._main`` swallows the interrupt, so the run goes on to the
-    next item (measured: a SIGINT mid-PutObject under ``use_threads=False``
-    left ``mv`` with neither the file nor the object). Each task's
-    ``_execute_main`` is wrapped so the interrupt first cancels the
-    coordinator - ``CancelledError`` naming it, the shape the manager's own
-    Ctrl-C shutdown gives in-flight transfers, so the item records CANCELLED
-    and upstream's failure cleanups run (temp file removed, multipart
-    aborted, the rename skipped) - and is noted for `Transferrer.submit` to
-    re-raise once the manager call returns. An interrupt escaping a done
-    callback (past ``_execute_main``) is noted at the executor boundary the
-    same way, and the terminal subscribers run once per item so upstream's
-    second announce, re-running the uncleared list, cannot double-count.
-    The subscribers whose own work decides the item's fate do not let one
-    escape at all - the open route's commit and mv's source delete store it
-    as the future's outcome, as upstream's submission task does for one that
-    lands in its own body - and that outcome records CANCELLED and is handed
-    back the same way (`_outcome`, `Transferrer._record_failure`). The last
-    gap is the submission task's own unwind after its final task settled the
-    item: upstream swallows an interrupt there without storing it, so the
-    hook that would have stored it notes it too (`_noting`).
+    s3transfer hands every task object to its executor's ``submit``, so the
+    hooks go onto the task instance there, before it runs (`_install`):
+
+    - ``_execute_main`` is wrapped (`_guarded`) so a ``BaseException`` outside
+      ``Exception`` landing in a task's main first cancels the transfer's
+      coordinator and is then noted for the caller's thread to re-raise
+      (`Transferrer._note_raise`). Upstream's ``Task.__call__`` catches
+      ``Exception`` alone, and its ``finally`` still runs the task's done
+      callbacks - a download's final rename task among them - and, for the
+      final task, ``announce_done``, with the coordinator still ``running``:
+      ``result()`` then returns ``None`` as if the transfer had succeeded, so
+      the done subscribers would delete a ``mv`` source, rename a half-written
+      download into place, and record SUCCEEDED for bytes that never arrived.
+      Cancelled first - ``CancelledError`` naming the exception, the shape the
+      manager's own Ctrl-C shutdown gives in-flight transfers - the item
+      records CANCELLED and upstream's failure cleanups run (temp file
+      removed, multipart aborted, the rename skipped).
+    - a submission task's ``_log_and_set_exception`` notes such an exception
+      too (`_noting`).
+    - a single-request download into a destination that cannot seek writes
+      each byte once across retries (`_writing_once`).
+
     The attribute lookups are guards: an upstream that reshapes its task
     degrades to its own behavior.
     """
 
-    def __init__(
-        self, note: Callable[[BaseException], None], max_workers: int | None = None
-    ) -> None:
-        super().__init__(max_workers)
-        self._note = note
+    _note: Callable[[BaseException], None]
 
-    def submit(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
+    def _install(self, fn: Any) -> None:
         coordinator = getattr(fn, "_transfer_coordinator", None)
         execute = getattr(fn, "_execute_main", None)
         if coordinator is not None and execute is not None:
@@ -2103,12 +2144,13 @@ class _SerialExecutor(NonThreadedExecutor):
         log_and_set = getattr(fn, "_log_and_set_exception", None)
         if log_and_set is not None and hasattr(fn, "_submit"):
             fn._log_and_set_exception = self._noting(log_and_set)
-        try:
-            return super().submit(fn, *args, **kwargs)
-        except BaseException as exc:
-            if not isinstance(exc, Exception):
-                self._note(exc)
-            raise
+        if isinstance(fn, ImmediatelyWriteIOGetObjectTask):
+            task: Any = fn
+            main_kwargs: dict[str, Any] = getattr(task, "_main_kwargs", None) or {}
+            output: Any = main_kwargs.get("download_output_manager")
+            handle_io = getattr(task, "_handle_io", None)
+            if isinstance(output, DownloadNonSeekableOutputManager) and handle_io is not None:
+                task._handle_io = _writing_once(handle_io)
 
     def _noting(self, log_and_set: Callable[[Any], Any]) -> Callable[[Any], Any]:
         """Wrap a submission task's ``_log_and_set_exception`` to note an interrupt.
@@ -2146,6 +2188,160 @@ class _SerialExecutor(NonThreadedExecutor):
                 raise
 
         return _execute_main
+
+
+def _writing_once(handle_io: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap a single-request download's ``_handle_io`` so a retry rewrites nothing.
+
+    Upstream sends a download below the multipart threshold as one GetObject
+    whose chunks it writes as they arrive (``ImmediatelyWriteIOGetObjectTask``),
+    and a body cut mid-stream is retried from its first byte. A destination
+    that can seek takes each chunk at its offset, so the retry overwrites; one
+    that cannot (a stream, an append-mode file, a pipe - `IOStorage`'s
+    write-only views) gets the chunks appended, the bytes before the cut twice
+    and still reported SUCCEEDED (measured: a 50-byte object cut at 3 bytes
+    came out 53 bytes, exit code 0). The ranged path does not have the problem
+    - its writes pass through s3transfer's ``DeferQueue``, which drops what it
+    has already written - so this applies the same rule to the single request:
+    chunks run on one thread, in order, each carrying its offset, and anything
+    below the high-water mark is dropped or trimmed before it is written.
+    """
+    written = 0
+
+    def _handle_io(download_output_manager: Any, fileobj: Any, chunk: Any, index: int) -> None:
+        nonlocal written
+        end = index + len(chunk)
+        if end <= written:
+            return
+        if index < written:
+            chunk = chunk[written - index :]
+            index = written
+        handle_io(download_output_manager, fileobj, chunk, index)
+        written = end
+
+    return _handle_io
+
+
+class _SerialExecutor(_TaskGuard, NonThreadedExecutor):
+    """``use_threads=False``'s executor: s3transfer's serial one, with an
+    interrupt settling the transfer before the task's teardown runs.
+
+    Under ``NonThreadedExecutor`` every task runs on the calling thread, so a
+    ``KeyboardInterrupt`` (any ``BaseException`` outside ``Exception``) lands
+    inside a task's main, where `_TaskGuard` settles it (measured before the
+    guard: a SIGINT mid-PutObject under ``use_threads=False`` left ``mv``
+    with neither the file nor the object, and ``SubmissionTask._main``
+    swallowed the interrupt, so the run went on to the next item). An
+    interrupt escaping a done callback (past ``_execute_main``) is noted at
+    this executor's boundary the same way, and the terminal subscribers run
+    once per item so upstream's second announce, re-running the uncleared
+    list, cannot double-count. The subscribers whose own work decides the
+    item's fate do not let one escape at all - the open route's commit and
+    mv's source delete store it as the future's outcome, as upstream's
+    submission task does for one that lands in its own body - and that
+    outcome records CANCELLED and is handed back the same way (`_outcome`,
+    `Transferrer._record_failure`). The last gap is the submission task's own
+    unwind after its final task settled the item: upstream swallows an
+    interrupt there without storing it, so the hook that would have stored it
+    notes it too (`_TaskGuard._noting`).
+    """
+
+    def __init__(
+        self, note: Callable[[BaseException], None], max_workers: int | None = None
+    ) -> None:
+        super().__init__(max_workers)
+        self._note = note
+
+    def submit(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
+        self._install(fn)
+        try:
+            return super().submit(fn, *args, **kwargs)
+        except BaseException as exc:
+            if not isinstance(exc, Exception):
+                self._note(exc)
+            raise
+
+
+class _ThreadedExecutor(_TaskGuard, ThreadPoolExecutor):
+    """A threaded run's executor: s3transfer's default thread pool, guarded.
+
+    A signal is only ever delivered to the main thread, so a ``BaseException``
+    outside ``Exception`` raised on one of these workers comes from the
+    caller's own code running there: an event handler registered on the
+    client (a CLI plugin's), the caller's stream read or written by a task.
+    Upstream lets it pass `Task.__call__` with the transfer still unsettled -
+    the item then recorded SUCCEEDED, so a ``mv`` deleted its source though
+    no PutObject went out and a download into a stream reported success with
+    nothing written - and the pool's work item swallowed it, so the run
+    returned normally (measured: ``sys.exit(3)`` in a plugin's PutObject
+    handler). `_TaskGuard` settles the item CANCELLED and notes the exception;
+    one escaping a task past its main (a done callback) is noted here.
+    `Transferrer.submit` / ``__exit__`` re-raise it on the calling thread, so
+    it ends the operation the way it would have on that thread.
+    """
+
+    def __init__(
+        self, note: Callable[[BaseException], None], max_workers: int | None = None
+    ) -> None:
+        super().__init__(max_workers=max_workers)
+        self._note = note
+
+    def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
+        self._install(fn)
+        return super().submit(self._noting_call, fn, *args, **kwargs)
+
+    def _noting_call(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return fn(*args, **kwargs)
+        except BaseException as exc:
+            if not isinstance(exc, Exception):
+                self._note(exc)
+            raise
+
+
+class _StreamInterruptedError(RuntimeError):
+    """What `_GuardedReader` raises to awscrt in place of the caller's interrupt."""
+
+
+class _GuardedReader:
+    """A CRT upload's body that hands the caller's interrupt back, not to awscrt.
+
+    awscrt reads an upload body from its own event-loop thread (its
+    ``InputStream`` duck-types ``read`` / ``readinto`` / ``seek``). A
+    ``BaseException`` outside ``Exception`` the caller's stream raises there
+    reaches awscrt's native layer as is: a ``SystemExit`` stalled the process
+    for good, and a ``KeyboardInterrupt`` became the request's
+    ``AWS_ERROR_UNKNOWN`` with the interrupt itself gone (measured). This view
+    notes it for the calling thread (`Transferrer._note_raise`, re-raised by
+    the next ``submit`` or ``__exit__``) and raises an ordinary exception in
+    its place, which awscrt turns into that request's failure. On the calling
+    thread itself (s3transfer positioning the body at submit) the exception
+    propagates unchanged. Every other attribute delegates to the stream.
+    """
+
+    _GUARDED = frozenset({"read", "read1", "readinto", "readinto1", "seek", "tell"})
+
+    def __init__(self, raw: Any, note: Callable[[BaseException], None], caller: int) -> None:
+        self._raw = raw
+        self._note = note
+        self._caller = caller
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._raw, name)
+        if name not in self._GUARDED or not callable(attr):
+            return attr
+        note, caller = self._note, self._caller
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return attr(*args, **kwargs)
+            except BaseException as exc:
+                if isinstance(exc, Exception) or threading.get_ident() == caller:
+                    raise
+                note(exc)
+                raise _StreamInterruptedError(str(exc) or repr(exc)) from exc
+
+        return call
 
 
 class _ProvideSize:

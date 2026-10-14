@@ -71,7 +71,13 @@ class Boto3S3Error(Exception):
   engine every task exception must land in its item's record, so an
   unclassified one surfaces there wrapped in the base `Boto3S3Error` (the
   last-resort clause) instead. `KeyboardInterrupt` / `SystemExit` always pass
-  through.
+  through - including one the caller's own code raises on a transfer's worker
+  thread (an event handler registered on the client, a stream the transfer
+  reads or writes): the engine settles that item CANCELLED (FAILED on the CRT
+  engine) and re-raises the exception on the operation's thread
+  (`transfer._TaskGuard`, `transfer._GuardedReader`). Whatever `on_result`
+  raises reaches the caller the same way, from whichever thread the record
+  settled on (`Transferrer._deliver`).
 - **Intentional pass-through exception**: using
   `TransferConfig.preferred_transfer_client="crt"` while awscrt is absent (or
   older than boto3's minimum) passes

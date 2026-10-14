@@ -26,6 +26,7 @@ from botocore.exceptions import (
     ClientError,
     ConnectionClosedError,
     EndpointConnectionError,
+    IncompleteReadError,
     ReadTimeoutError,
 )
 from s3transfer import copies as s3transfer_copies
@@ -2025,6 +2026,271 @@ class TestSerialExecutorInterrupt:
         assert not (tmp_path / "a.bin").exists()  # the move completed
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
         assert (transferrer.succeeded, transferrer.cancelled) == (1, 0)
+
+
+class _WriteOnlySink:
+    """A destination that cannot seek: s3transfer's non-seekable download path."""
+
+    def __init__(self) -> None:
+        self.data = bytearray()
+
+    def write(self, data: bytes) -> int:
+        self.data += data
+        return len(data)
+
+    def close(self) -> None:
+        pass
+
+
+class _CutBody:
+    """A GetObject body that stops with a retryable error after ``cut`` bytes."""
+
+    def __init__(self, data: bytes, *, cut: int) -> None:
+        self._data = data[:cut]
+        self._cut = cut
+        self._total = len(data)
+        self._done = False
+
+    def read(self, amount: int = -1) -> bytes:
+        if self._done:
+            raise IncompleteReadError(actual_bytes=self._cut, expected_bytes=self._total)
+        self._done = True
+        return self._data
+
+
+class TestWorkerRaise:
+    """A threaded run's worker never receives a signal, so a ``BaseException``
+    outside ``Exception`` raised there comes from the caller's own code - an
+    event handler on the client, a stream - and upstream would let the item
+    settle as a success while the pool swallowed the exception
+    (`transfer._ThreadedExecutor`). Whatever ``on_result`` raises belongs to
+    the caller on every engine (`Transferrer._deliver`)."""
+
+    def _upload_item(self, tmp_path: Path) -> TransferItem:
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"payload")
+        return TransferItem(
+            compare_key="a.bin",
+            size=7,
+            src_path=str(src),
+            src_info=FileInfo(key=str(src).replace(os.sep, "/")),
+            dest_bucket="b",
+            dest_key="k",
+        )
+
+    @pytest.mark.parametrize("raised", [SystemExit(3), KeyboardInterrupt()])
+    def test_a_handler_exit_on_a_worker_keeps_the_move_source(
+        self, tmp_path: Path, raised: BaseException
+    ) -> None:
+        item = self._upload_item(tmp_path)
+        client, calls = make_recording_client([raised])
+        results: list[OpResult] = []
+        transferrer = Transferrer(
+            TransferType.UPLOAD,
+            client,
+            src_storage=LocalStorage("."),
+            transfer_config=TransferConfig(),
+            is_move=True,
+            on_result=results.append,
+        )
+        with pytest.raises(type(raised)), transferrer:
+            transferrer.submit(item)
+        assert ops(calls) == ["PutObject"]
+        assert (tmp_path / "a.bin").exists()
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+        assert (transferrer.succeeded, transferrer.cancelled) == (0, 1)
+
+    def test_a_stream_interrupt_on_the_io_worker_is_not_a_success(self) -> None:
+        class _InterruptingSink(_WriteOnlySink):
+            def write(self, data: bytes) -> int:
+                raise KeyboardInterrupt
+
+        item = TransferItem(
+            compare_key="a.bin",
+            size=7,
+            etag='"abc123"',
+            src_bucket="bucket",
+            src_key="d/a.bin",
+            dest_fileobj=cast("Any", _InterruptingSink()),
+        )
+        client, _calls = make_recording_client(
+            [{"Body": io.BytesIO(b"payload"), "ContentLength": 7}]
+        )
+        results: list[OpResult] = []
+        transferrer = Transferrer(
+            TransferType.DOWNLOAD,
+            client,
+            transfer_config=TransferConfig(),
+            on_result=results.append,
+        )
+        with pytest.raises(KeyboardInterrupt), transferrer:
+            transferrer.submit(item)
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+
+    @pytest.mark.parametrize("config", [TransferConfig(), _SYNC_CONFIG], ids=["threads", "serial"])
+    def test_an_on_result_error_reaches_the_caller(
+        self, tmp_path: Path, config: TransferConfig
+    ) -> None:
+        # s3transfer logs and drops an Exception from a done callback, on a
+        # worker and on the calling thread alike.
+        item = self._upload_item(tmp_path)
+        client, _calls = make_recording_client([{}])
+
+        def on_result(result: OpResult) -> None:
+            raise ValueError("from on_result")
+
+        transferrer = Transferrer(
+            TransferType.UPLOAD,
+            client,
+            src_storage=LocalStorage("."),
+            transfer_config=config,
+            on_result=on_result,
+        )
+        with pytest.raises(ValueError, match="from on_result"), transferrer:
+            transferrer.submit(item)
+
+    def test_the_crt_body_hands_an_interrupt_back_instead_of_to_awscrt(self) -> None:
+        class _Exiting:
+            def read(self, amount: int = -1) -> bytes:
+                raise SystemExit(5)
+
+        noted: list[BaseException] = []
+        reader: Any = transfer._GuardedReader(  # pyright: ignore[reportPrivateUsage]
+            _Exiting(), noted.append, threading.get_ident()
+        )
+        # The calling thread itself: unchanged.
+        with pytest.raises(SystemExit):
+            reader.read(1)
+        assert noted == []
+        # An awscrt thread: noted, and an ordinary exception in its place.
+        raised: list[BaseException] = []
+
+        def read_elsewhere() -> None:
+            try:
+                reader.read(1)
+            except BaseException as exc:
+                raised.append(exc)
+
+        worker = threading.Thread(target=read_elsewhere)
+        worker.start()
+        worker.join()
+        assert [type(exc) for exc in noted] == [SystemExit]
+        assert [type(exc).__name__ for exc in raised] == ["_StreamInterruptedError"]
+
+    def test_a_crt_stream_upload_hands_awscrt_the_guarded_body(self, tmp_path: Path) -> None:
+        stream = io.BytesIO(b"payload")
+        client, _ = make_recording_client([])
+        manager = _CrtCapturingManager()
+        with Transferrer(TransferType.UPLOAD, client) as transferrer:
+            transferrer._manager = manager  # pyright: ignore[reportPrivateUsage]
+            transferrer.submit(
+                TransferItem(
+                    compare_key="-",
+                    size=None,
+                    src_fileobj=cast("Any", stream),
+                    src_info=FileInfo(key="-"),
+                    dest_bucket="b",
+                    dest_key="k",
+                )
+            )
+            src = tmp_path / "a.bin"
+            src.write_bytes(b"x")
+            transferrer.submit(
+                TransferItem(
+                    compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="a"
+                )
+            )
+        body, path = (upload["fileobj"] for upload in manager.uploads)
+        assert isinstance(body, transfer._GuardedReader)  # pyright: ignore[reportPrivateUsage]
+        assert body._raw is stream  # pyright: ignore[reportPrivateUsage]
+        assert path == str(src)  # a file is sent by path, not read through Python
+
+    def test_an_on_result_error_off_the_calling_thread_does_not_stall_the_crt_drain(
+        self, tmp_path: Path
+    ) -> None:
+        class _ThreadedDrain(_CrtCapturingManager):
+            # awscrt settles transfers on its own event-loop thread.
+            def shutdown(self) -> None:
+                worker = threading.Thread(target=self._drain)
+                worker.start()
+                worker.join()
+
+        def on_result(result: OpResult) -> None:
+            raise ValueError("from on_result")
+
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x")
+        client, _ = make_recording_client([])
+        transferrer = Transferrer(TransferType.UPLOAD, client, on_result=on_result)
+        with pytest.raises(ValueError, match="from on_result"), transferrer:
+            transferrer._manager = _ThreadedDrain()  # pyright: ignore[reportPrivateUsage]
+            transferrer.submit(
+                TransferItem(
+                    compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="a"
+                )
+            )
+        assert transferrer.succeeded == 1
+
+    def test_a_warning_off_the_calling_thread_reaches_a_run_without_transfers(self) -> None:
+        # A dry run builds no manager; the walk still warns from its prefetch
+        # worker, and what on_result raised there must still end the run.
+        def on_result(result: OpResult) -> None:
+            raise ValueError("from on_result")
+
+        client, _ = make_recording_client([])
+        transferrer = Transferrer(TransferType.UPLOAD, client, on_result=on_result)
+        with pytest.raises(ValueError, match="from on_result"), transferrer:
+            worker = threading.Thread(target=transferrer.warner.warn, args=("unreadable",))
+            worker.start()
+            worker.join()
+        assert transferrer.warner.warned == 1
+
+
+class TestStreamDownloadRetry:
+    """A single-request download into a destination that cannot seek is
+    retried from the object's first byte; each byte must still be written once
+    (`transfer._writing_once`) - upstream's ranged path de-duplicates through
+    its DeferQueue, the single request did not."""
+
+    @pytest.mark.parametrize("config", [TransferConfig(), _SYNC_CONFIG], ids=["threads", "serial"])
+    @pytest.mark.parametrize("cut", [3, 30])
+    def test_a_cut_body_retried_writes_the_object_once(
+        self, config: TransferConfig, cut: int
+    ) -> None:
+        payload = bytes(range(50))
+        sink = _WriteOnlySink()
+        item = TransferItem(
+            compare_key="a.bin",
+            size=len(payload),
+            etag='"abc123"',
+            src_bucket="bucket",
+            src_key="d/a.bin",
+            dest_fileobj=cast("Any", sink),
+        )
+        calls, _, results, _ = _run(
+            TransferType.DOWNLOAD,
+            [item],
+            [
+                {"Body": _CutBody(payload, cut=cut), "ContentLength": len(payload)},
+                {"Body": io.BytesIO(payload), "ContentLength": len(payload)},
+            ],
+            config=config,
+        )
+        assert ops(calls) == ["GetObject", "GetObject"]
+        assert bytes(sink.data) == payload
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+
+    def test_the_wrapper_trims_an_overlapping_chunk(self) -> None:
+        written: list[tuple[bytes, int]] = []
+
+        def handle_io(manager: Any, fileobj: Any, chunk: bytes, index: int) -> None:
+            written.append((chunk, index))
+
+        handle = transfer._writing_once(handle_io)  # pyright: ignore[reportPrivateUsage]
+        handle(None, None, b"abcd", 0)
+        handle(None, None, b"ab", 0)  # wholly rewritten: dropped
+        handle(None, None, b"cdef", 2)  # straddles the high-water mark: trimmed
+        assert written == [(b"abcd", 0), (b"ef", 4)]
 
 
 class TestFailureLostLikeAws:

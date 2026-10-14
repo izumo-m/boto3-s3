@@ -163,9 +163,11 @@ comes out differently, listed in section 1.
   fork `aws` bundles: the installed botocore turns a connection broken in the
   middle of a response body into an error the installed `s3transfer` re-fetches
   the range for, while the bundled pair does not. So one transient break leaves
-  this command at exit code 0 with the complete file, where `aws` exits 1 with
+  this command at exit code 0 with the complete file (on stdout, every byte
+  once), where `aws` exits 1 with
   the underlying `Connection broken: IncompleteRead(...)` on its
-  `download failed:` line and nothing at the destination. A break that persists
+  `download failed:` line and nothing at the destination (on stdout, the bytes
+  that arrived before the break). A break that persists
   fails both — exit code 1, no file — but this command spends five attempts per
   range and ends with `Max Retries Exceeded`, where `aws` gives up on the first
   break and prints that same underlying error. This lives in the installed

@@ -563,6 +563,29 @@ class TestHandlerFailures:
         assert rc == 255
         assert capsys.readouterr().err == "boto3-s3: [ERROR]: plugin assert\n"
 
+    def test_an_exit_in_a_transfer_worker_s_handler_ends_the_run_and_keeps_the_source(
+        self, config: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The PutObject runs on an s3transfer worker: the exit used to settle
+        # the item as a success (`move:` at rc 0, the file deleted, nothing
+        # sent) - aws's own outcome, which the difference doc rules out here.
+        _write_plugin(
+            config,
+            "bs3plug_wexit.py",
+            "import sys\ndef _h(**kwargs):\n    sys.exit(3)\n"
+            "def awscli_initialize(cli):\n    cli.register('before-call.s3.PutObject', _h)\n",
+        )
+        _write_config(config, "mine = bs3plug_wexit")
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "f").write_text("x")
+        with pytest.raises(SystemExit) as exited:
+            cli.main(["mv", "f", "s3://bkt/k", "--endpoint-url", "http://127.0.0.1:9"])
+        assert exited.value.code == 3
+        assert (tmp_path / "f").exists()
+
     @pytest.mark.parametrize("raised", [KeyboardInterrupt, SystemExit])
     def test_an_interrupt_or_exit_passes_unchanged(
         self, config: Path, raised: type[BaseException]
