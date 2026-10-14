@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from botocore.exceptions import InvalidConfigError as BotocoreInvalidConfigError
 from botocore.exceptions import NoRegionError
 from botocore.utils import JSONFileCache
 
@@ -2296,6 +2297,36 @@ class TestVerifyResolution:
         monkeypatch.setenv("REQUESTS_CA_BUNDLE", "")
         with pytest.raises(InvalidConfigError, match="Invalid CA bundle"):
             clientfactory.build_client(_parse([]))
+
+    @pytest.mark.parametrize("var", ["AWS_CA_BUNDLE", "REQUESTS_CA_BUNDLE"])
+    @pytest.mark.parametrize("flag", [["--no-verify-ssl"], ["--ca-bundle", "ca.pem"]])
+    def test_a_client_the_sdk_builds_is_held_to_the_check_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, var: str, flag: list[str]
+    ) -> None:
+        # The flag sets the S3 client's own trust, but the clients the SDK
+        # builds from the session - the credential chain's STS / SSO, the CRT
+        # serializer - read the session's empty value and took it as
+        # "verification off". aws checks every client it builds: measured, an
+        # assume-role profile with `AWS_CA_BUNDLE=` beside either flag is rc
+        # 255 there, where this fetched credentials over unverified TLS.
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "ca.pem").write_text("")
+        monkeypatch.setenv(var, "")
+        s3 = clientfactory.build_s3(_parse(flag))
+        s3.client()
+        with pytest.raises(BotocoreInvalidConfigError) as excinfo:
+            _provider_client(s3.session._session)  # pyright: ignore[reportOptionalMemberAccess, reportPrivateUsage]
+        assert str(excinfo.value) == _EMPTY_CA_BUNDLE_REPORT
+
+    def test_a_client_the_sdk_builds_with_a_usable_bundle_is_left_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bundle = tmp_path / "ca.pem"
+        bundle.write_text("")
+        monkeypatch.setenv("AWS_CA_BUNDLE", str(bundle))
+        s3 = clientfactory.build_s3(_parse([]))
+        client = _provider_client(s3.session._session)  # pyright: ignore[reportOptionalMemberAccess, reportPrivateUsage]
+        assert _client_verify(client) == str(bundle)
 
     def test_no_verify_ssl_beats_an_empty_ca_bundle(self) -> None:
         # The rejection reads the *resolved* value, and `--no-verify-ssl`

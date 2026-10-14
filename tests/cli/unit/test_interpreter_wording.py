@@ -240,6 +240,27 @@ class TestEndpointScheme:
             capsys.readouterr().err == "boto3-s3: [ERROR]: Invalid endpoint: 1http://127.0.0.1:9\n"
         )
 
+    def test_the_credential_chain_s_endpoint_is_judged_the_same_way(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The assume-role provider's STS client is one the SDK builds itself.
+        # aws's build refuses a digit-led endpoint there too (measured for
+        # STS, SSO and sso-oidc), where 3.10's went on to `Could not connect
+        # to the endpoint URL` at the same exit code.
+        config = tmp_path / "config"
+        config.write_text(
+            "[profile ar]\nrole_arn = arn:aws:iam::123456789012:role/r\n"
+            "source_profile = src\nregion = us-east-1\n"
+            "[profile src]\naws_access_key_id = AKID\naws_secret_access_key = s\n"
+        )
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        monkeypatch.setenv("AWS_ENDPOINT_URL_STS", "1http://127.0.0.1:9")
+        rc = cli.main(["ls", "s3://b/", "--profile", "ar", "--endpoint-url", "http://127.0.0.1:9"])
+        assert rc == 255
+        assert (
+            capsys.readouterr().err == "boto3-s3: [ERROR]: Invalid endpoint: 1http://127.0.0.1:9\n"
+        )
+
     def test_an_endpoint_with_no_scheme_is_left_to_the_requests(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:

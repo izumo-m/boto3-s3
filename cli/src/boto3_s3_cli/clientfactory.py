@@ -159,8 +159,48 @@ def _open_botocore_session(args: argparse.Namespace) -> BotocoreSession:
     _pin_regional_s3_endpoint(session)
     _drop_tls_key_log()
     session.set_default_client_config(_default_client_config(args))
+    _check_every_client(session)
     _inject_credential_cache(session)
     return session
+
+
+def _check_every_client(session: BotocoreSession) -> None:
+    """Hold every client the session builds to aws's own client-build checks.
+
+    aws's bundled botocore refuses, in every ``create_client``, an endpoint its
+    Python cannot parse (`_reject_unparsable_endpoint`) and a CA bundle that
+    resolves to an empty or whitespace-only value (`_reject_empty_ca_bundle`).
+    `_create_client` supplies both for the clients this module builds, but the
+    SDK builds others from the same session - the credential chain's STS, SSO
+    and sso-oidc clients, the CRT engine's request serializer - and those took
+    an empty ``AWS_CA_BUNDLE`` beside a valid ``--ca-bundle`` as "verification
+    off", fetching credentials over unverified TLS where aws stops (measured:
+    rc 255 for ``ls``, a failed item for ``cp``, rc 0 here). So the session's
+    own ``create_client`` runs the two checks on what it built, resolving the
+    trust source the way botocore does when the caller names none: the
+    session's ``ca_bundle``, then ``REQUESTS_CA_BUNDLE``. It is installed
+    before the credential chain is built, whose providers keep the method
+    they were handed.
+    """
+    import inspect
+
+    create_client = session.create_client
+    signature = inspect.signature(create_client)
+
+    def checked_create_client(*args: Any, **kwargs: Any) -> Any:
+        client = create_client(*args, **kwargs)
+        verify = signature.bind(*args, **kwargs).arguments.get("verify")
+        if verify is None:
+            verify = session.get_config_variable("ca_bundle")
+        if verify is None:
+            verify = os.environ.get("REQUESTS_CA_BUNDLE")
+        _reject_unparsable_endpoint(client.meta.endpoint_url)
+        _reject_empty_ca_bundle(verify)
+        return client
+
+    # An instance attribute shadows the method for every caller that looks it
+    # up on this session (boto3's `Session.client` included).
+    setattr(session, "create_client", checked_create_client)  # noqa: B010
 
 
 class _RegionalS3Section:
@@ -1275,6 +1315,9 @@ def _reject_empty_ca_bundle(verify: Any) -> None:
     botocore that already rejects, ``session.client`` raised the identical
     exception first and this is unreached; on an older one, this supplies it.
 
+    Every client a CLI-opened session builds is held to it
+    (`_check_every_client`), the SDK's own included; `_create_client` checks
+    again, for a client built from a session this module did not open.
     ``build_client`` / ``build_service_client`` catch it in their
     ``except BotoCoreError`` clause and refine it to the library
     ``InvalidConfigError`` (rc 255), exactly as they would botocore's own. It

@@ -523,7 +523,14 @@ numbers in the bold item labels below are that document's.
   `InvalidConfigError` (rc 255, its exact wording), which is what aws v2 does
   from 2.36.2 on and what the installed botocore does from 1.43.54 - the
   supported floor is older, so the CLI supplies the check itself and the
-  rejection holds across the whole range. It runs where aws runs it, after
+  rejection holds across the whole range. aws runs it in every
+  `create_client`, so it covers the clients the SDK builds from the session
+  too - the credential chain's STS / SSO / sso-oidc clients and the CRT
+  engine's request serializer, which read the session's `ca_bundle` even when
+  `--ca-bundle` or `--no-verify-ssl` set the S3 client's own trust - and
+  so does the CLI: every session it opens checks each client it builds
+  (`_check_every_client`, which applies the digit-led endpoint check
+  `_reject_unparsable_endpoint` alongside). It runs where aws runs it, after
   `session.client` has resolved the profile and the endpoint, so an undeclared
   `--profile` and an empty `--region` (`Invalid endpoint`) still report first,
   and a rejected retry mode still beats it (all measured). `--no-verify-ssl`

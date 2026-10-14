@@ -589,13 +589,10 @@ comes out differently, listed in section 1.
   every run at 255 on `aws` and may run normally here, or the reverse,
   depending on the Python this command is installed under. Every endpoint
   that is a well-formed URL, and every one that plainly is not, is treated
-  alike on both. (The S3 endpoint itself, wherever it comes from, is checked
-  for that leading digit by the rule `aws`'s Python applies, and reads the
-  same on every host. The STS or SSO endpoint the credential chain uses is
-  not: the SDK builds that client itself, so below Python 3.11 a digit-led
-  `AWS_ENDPOINT_URL_STS` fails each request here with `Could not connect to
-  the endpoint URL` where `aws` reports `Invalid endpoint`, at the same exit
-  code.)
+  alike on both. (The S3 endpoint itself, and the STS or SSO endpoint the
+  credential chain uses, wherever they come from, are checked for that
+  leading digit by the rule `aws`'s Python applies, and read the same on
+  every host.)
 - **`sts_regional_endpoints` is validated.** The installed botocore still
   validates this config key (and `AWS_STS_REGIONAL_ENDPOINTS`); `aws` v2's
   bundled botocore dropped it. An invalid value is an error here (exit
