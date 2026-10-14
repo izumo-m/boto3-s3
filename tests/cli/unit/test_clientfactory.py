@@ -1161,9 +1161,9 @@ class TestCredentialCache:
         # unwritable-cache rc flips back, the entry's mode becomes 0600).
         from botocore.tokens import SSOTokenProvider
 
-        monkeypatch.setattr(
-            SSOTokenProvider, "DEFAULT_CACHE_CLS", SSOTokenProvider.DEFAULT_CACHE_CLS
-        )
+        # Back to botocore's own class first: an earlier test's session left
+        # the pin in place, which would hide a pin made too late here.
+        monkeypatch.setattr(SSOTokenProvider, "DEFAULT_CACHE_CLS", JSONFileCache)
         session = clientfactory.build_session(_parse([]))._session  # pyright: ignore[reportPrivateUsage]
         sso = session.get_component("credential_provider").get_provider("sso")
         token_cache = sso._token_provider._cache  # pyright: ignore[reportAttributeAccessIssue]
