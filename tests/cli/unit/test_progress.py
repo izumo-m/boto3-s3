@@ -567,12 +567,15 @@ class TestPrinterThread:
         # printer thread), only the rendering records are dropped.
         assert printer.warned == 3
 
-    def test_dead_stream_stops_rendering_but_not_the_counters(
+    def test_a_dead_stream_drops_only_its_own_lines(
         self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # A closed pipe (BrokenPipeError on write) must not kill the drain:
-        # rendering stops, the queue keeps draining, and the rc inputs -
-        # counted on the worker side - are unaffected.
+        # A closed pipe (BrokenPipeError on write) must not kill the drain,
+        # and drops only the lines bound for it: aws's ResultProcessor goes on
+        # past each handler's failure, so the failure line stderr can still
+        # take is written (measured: stdout at /dev/full, a closed pipe or
+        # fd 1 closed). The rc inputs - counted on the worker side - are
+        # unaffected.
         class _DeadStream:
             def write(self, text: str) -> int:
                 raise BrokenPipeError
@@ -582,15 +585,28 @@ class TestPrinterThread:
 
         monkeypatch.setattr(sys, "stdout", _DeadStream())
         with TransferPrinter() as printer:
-            printer.on_result(_result(OpOutcome.SUCCEEDED))  # render raises -> output dead
+            printer.on_result(_result(OpOutcome.SUCCEEDED))
             printer.on_result(_result(OpOutcome.FAILED, error=RuntimeError("boom")))
-        # The FAILED line (stderr) was skipped too: one dead stream silences
-        # the printer as a whole, deliberately.
-        assert capsys.readouterr().err == ""
+            printer.on_result(_result(OpOutcome.SUCCEEDED))
+        assert "failed:" in capsys.readouterr().err
         assert (printer.failed, printer.warned) == (1, 0)
-        # The drain consumed both records even though rendering was dead - a
-        # crashed printer thread would have left them queued.
         assert printer._queue.qsize() == 0  # pyright: ignore[reportPrivateUsage]
+
+    def test_a_dead_stderr_keeps_the_success_lines(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class _DeadStream:
+            def write(self, text: str) -> int:
+                raise BrokenPipeError
+
+            def flush(self) -> None:  # pragma: no cover - never reached
+                raise BrokenPipeError
+
+        monkeypatch.setattr(sys, "stderr", _DeadStream())
+        with TransferPrinter() as printer:
+            printer.on_result(_result(OpOutcome.FAILED, error=RuntimeError("boom")))
+            printer.on_result(_result(OpOutcome.SUCCEEDED))
+        assert capsys.readouterr().out.count("upload:") == 1
 
     def test_unencodable_key_does_not_silence_the_run(
         self, monkeypatch: pytest.MonkeyPatch

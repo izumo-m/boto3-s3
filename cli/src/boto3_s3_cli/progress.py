@@ -216,7 +216,8 @@ class TransferPrinter:
         # drains the queue after it: nothing later is printed or counted, a
         # success that completed (an mv's source already deleted) included.
         self._stopped = False
-        # printer-thread-only state (no lock: one thread owns them)
+        # printer-thread-only state (no lock: one thread owns them), except
+        # _output_dead: set by finish() on a second Ctrl-C to stop the output
         self._progress_length = 0
         self._output_dead = False
         # Set when the printer thread leaves its loop, then _drained_wake
@@ -446,7 +447,7 @@ class TransferPrinter:
     # -- rendering (the printer thread) ----------------------------------------
 
     def _drain(self) -> None:
-        """Render queued records until shutdown, disabling output after stream failure."""
+        """Render queued records until shutdown, each one's write failure its own."""
         try:
             self._render_until_shutdown()
         finally:
@@ -468,15 +469,19 @@ class TransferPrinter:
                     assert isinstance(record, _ResultRecord)
                     self._render_result(record)
             except Exception:
-                # A dead stream (BrokenPipeError on a closed pipe, a full
-                # non-blocking pty, ...): stop rendering but keep draining so
-                # no worker ever blocks on the queue. The rc inputs live on
-                # the worker side and are unaffected; cli._dispatch's general
-                # backstop covers the process-level contract (report + 255) for
-                # a write failure that does escape a command.
-                # An unencodable key is not a dead stream: _uni_write handles
-                # UnicodeEncodeError inline, so it never reaches here.
-                self._output_dead = True
+                # A stream that cannot take the line (BrokenPipeError on a
+                # closed pipe, a full device, a full non-blocking pty, ...):
+                # drop this record's write and go on with the next one, as
+                # aws's ResultProcessor goes on past each handler's failure -
+                # stdout dying must not silence the failure lines stderr can
+                # still take, nor a dead stderr the success lines. The rc
+                # inputs live on the worker side and are unaffected;
+                # cli._dispatch's general backstop covers the process-level
+                # contract (report + 255) for a write failure that does escape
+                # a command. An unencodable key is not a dead stream:
+                # _uni_write handles UnicodeEncodeError inline, so it never
+                # reaches here.
+                pass
 
     def _render_result(self, record: _ResultRecord) -> None:
         """Render one terminal result with aws-cli's stream and wording rules."""
@@ -556,7 +561,7 @@ class TransferPrinter:
         try:
             self._uni_write(sys.stdout, " " * self._progress_length + "\r")
         except Exception:
-            self._output_dead = True
+            pass  # a dead stdout: nothing to blot out
 
     def _uni_write(self, stream: TextIO, text: str) -> None:
         """The shared ``uni_print`` port (``output.uni_write``), kept as a
