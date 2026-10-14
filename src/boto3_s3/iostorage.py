@@ -57,6 +57,8 @@ from boto3_s3.storage import Storage, StorageCapability
 if TYPE_CHECKING:
     from typing import BinaryIO
 
+    from _typeshed import SupportsRead, SupportsWrite
+
 try:
     import fcntl
 except ImportError:  # Windows: no descriptor flags; the open mode is the only cue
@@ -381,8 +383,16 @@ class IOStorage(Storage):
         StorageCapability.OPEN_READ | StorageCapability.OPEN_WRITE
     )
 
-    def __init__(self, stream: IO[bytes] | IO[str], *, encoding: str = "utf-8") -> None:
-        self._stream: IO[Any] | None = stream
+    def __init__(
+        self,
+        stream: SupportsRead[bytes] | SupportsRead[str] | SupportsWrite[bytes] | SupportsWrite[str],
+        *,
+        encoding: str = "utf-8",
+    ) -> None:
+        # Typed by what a transfer needs - a read for an upload, a write for a
+        # download - so a wrapper exposing only one of them (the gzip example
+        # in docs/library/streams.md) type-checks; the views probe the rest.
+        self._stream: IO[Any] | None = cast("IO[Any]", stream)
         try:
             codecs.lookup(encoding)
         except LookupError as exc:

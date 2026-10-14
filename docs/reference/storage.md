@@ -1123,14 +1123,20 @@ class IOStorage(Storage):
     )
 
     def __init__(
-        self, stream: IO[bytes] | IO[str], *, encoding: str = "utf-8"
+        self,
+        stream: SupportsRead[bytes] | SupportsRead[str] | SupportsWrite[bytes] | SupportsWrite[str],
+        *,
+        encoding: str = "utf-8",
     ) -> None: ...
 ```
 
 `capabilities` is just the `OPEN_*` pair: a single stream supports byte I/O in
 both directions, chosen per `open` call, with no listing and no deletion.
 
-`stream` is the caller's file-like object. A binary stream is used as it is,
+`stream` is the caller's file-like object: anything with a `read` for an
+upload or a `write` for a download (typeshed's `SupportsRead` /
+`SupportsWrite`), so a wrapper exposing only one of them is accepted. A binary
+stream is used as it is,
 behind a close-suppressing view — except one that cannot be positioned (a
 pipe, a socket, a console: `seekable()` answers False, or `os.fstat` reports
 its descriptor as a FIFO, character device or socket, which a Windows pipe is
