@@ -78,6 +78,7 @@ from importlib.metadata import version
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote, urlparse
 
+from botocore import httpchecksum
 from botocore.exceptions import BotoCoreError, ClientError
 from s3transfer.compat import seekable
 from s3transfer.copies import CopySubmissionTask
@@ -470,6 +471,53 @@ def annotations_copy_unsupported_reason(client: S3Client) -> str | None:
             f"(S3 object annotations); the installed botocore is {version('botocore')}."
         )
     return None
+
+
+# Back-compat (supported floor botocore 1.31, docs/compatibility.md): botocore
+# computes a request checksum only for the algorithms its httpchecksum tables
+# know - CRC64NVME from 1.36.0, SHA512 and the XXHASH family from 1.42.53 (the
+# S3 model lists those two only from 1.42.94, the release
+# docs/compatibility.md names), each read from the published sources. Below
+# that, every item would fail on botocore's "Unsupported checksum algorithm";
+# the run is refused up front instead, naming the documented version. An
+# algorithm botocore knows but computes only through awscrt is not refused
+# here: without the crt extra it fails per item with botocore's Missing
+# Dependency report (docs/compatibility.md section 2). Drop an entry once the
+# floor reaches it.
+_CHECKSUM_MIN_BOTOCORE = {
+    "crc64nvme": "1.36.0",
+    "sha512": "1.42.94",
+    "xxhash64": "1.42.94",
+    "xxhash3": "1.42.94",
+    "xxhash128": "1.42.94",
+}
+
+
+def _checksum_algorithm_unsupported_reason(algorithm: object) -> str | None:
+    """Why the installed botocore cannot compute ``algorithm``, or ``None``.
+
+    Reads botocore's own tables - the algorithms its httpchecksum computes and
+    the ones it computes only through awscrt - so the probe is version-agnostic;
+    the message names the documented minimum as a hint. Only the algorithms
+    newer than the floor are probed: CRC32 / CRC32C / SHA1 / SHA256 are known
+    to every supported botocore, and a name botocore never computes (MD5) or
+    does not know at all keeps botocore's own per-item report.
+    """
+    if not isinstance(algorithm, str):
+        return None
+    minimum = _CHECKSUM_MIN_BOTOCORE.get(algorithm.lower())
+    if minimum is None:
+        return None
+    known = {
+        *getattr(httpchecksum, "_SUPPORTED_CHECKSUM_ALGORITHMS", ()),
+        *getattr(httpchecksum, "_CRT_CHECKSUM_ALGORITHMS", ()),
+    }
+    if algorithm.lower() in known:
+        return None
+    return (
+        f"checksum_algorithm={algorithm.upper()} requires botocore >= {minimum}; "
+        f"the installed botocore is {version('botocore')}."
+    )
 
 
 # A CRT failure of the item's local file, by awscrt's error name: the local
@@ -1011,6 +1059,11 @@ class Transferrer:
             if reason is not None:
                 # The environment (SDK floor) lacks the capability, not the
                 # caller's arguments: a ConfigurationError.
+                raise ConfigurationError(reason, operation=operation)
+        # Checksum-algorithm gate: only uploads and copies send ChecksumAlgorithm.
+        if transfer_type in (TransferType.UPLOAD, TransferType.COPY):
+            reason = _checksum_algorithm_unsupported_reason(self._options.get("checksum_algorithm"))
+            if reason is not None:
                 raise ConfigurationError(reason, operation=operation)
         # The copy-props mode is interpreted once here so a bad value fails at
         # construction rather than at the first submit. None means unspecified;

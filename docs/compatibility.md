@@ -5,7 +5,12 @@ compute (below).** Four of the entries below additionally need the `crt`
 extra.
 
 If you cannot upgrade, the table says what each feature needs; below the version
-listed, that feature is not supported. Check what you have with
+listed, that feature is not supported. Unless its row says otherwise, a feature
+you ask for by name — an option, a bucket kind, a checksum algorithm — is
+refused there before any request is sent;
+[`library/errors.md`](./library/errors.md) and
+[`cli/exit-codes.md`](./cli/exit-codes.md) say what each refusal raises or
+exits with. Check what you have with
 `boto3-s3 --version`, or `python -c "import boto3; print(boto3.__version__)"`.
 
 **Upgrading `boto3` is the one move that matters.** It pins `botocore` and

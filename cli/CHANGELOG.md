@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - On every host interpreter, an HTTPS proxy now receives aws's `Host` header for an IPv6-literal endpoint, and a report quoting Python's own text (an over-long number, a trailing comma in a `credential_process` answer) reads as `aws`'s.
 - A download to stdout (`cp s3://… -`) whose body is cut and retried no longer writes its first bytes twice, and a CRT download whose file could not be put in place (a name too long, a directory at the destination) now fails instead of reporting success (where `mv` deleted the object).
 - More `aws` parity in the subcommands: `rm` on an Outposts access point ARN closed with `:` no longer deletes the whole access point, unsupported ARNs and refused bucket names are reported as and when `aws` reports them, and a Ctrl-C now waits for a single `rm`'s delete and for a finished run's last result lines (exit codes changed in those corners).
+- On an SDK too old for them, `mb --tags` and `-an` bucket names, the newer `--checksum-algorithm` values and S3 Express directory buckets are now refused up front with the version they need (exit codes changed).
 
 ## [0.8.1] - 2026-09-07
 

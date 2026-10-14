@@ -1749,6 +1749,23 @@ class TestConstructor:
         assert exc_info.value.key == "key"
         assert exc_info.value.bucket is None
 
+    def test_directory_bucket_refused_on_a_botocore_without_s3express(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Below botocore 1.33.2 (no S3ExpressIdentityResolver) a --x-s3 bucket
+        # would be addressed as an ordinary one - a presign returns a URL that
+        # cannot work - so validate() refuses it, naming the version.
+        import botocore.utils
+
+        monkeypatch.delattr(botocore.utils, "S3ExpressIdentityResolver")
+        with pytest.raises(ConfigurationError, match=r"1\.33\.2") as exc_info:
+            S3Storage("s3://demo--usw2-az1--x-s3/key").validate()
+        assert exc_info.value.bucket == "demo--usw2-az1--x-s3"
+        S3Storage("s3://general-purpose/key").validate()  # any other bucket passes
+
+    def test_directory_bucket_passes_on_a_botocore_with_s3express(self) -> None:
+        S3Storage("s3://demo--usw2-az1--x-s3/key").validate()
+
     def test_direct_validate_leaves_the_operation_unset(self) -> None:
         # The storage does not know which operation is about to use it; the
         # operation layer stamps the name (see test_s3.py). A caller invoking

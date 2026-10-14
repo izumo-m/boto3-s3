@@ -1013,7 +1013,10 @@ in `--x-s3` (an S3 Express directory bucket) is rejected with rc 252.
 Request shaping is done by the library's `S3.mb` in the same shape as aws-cli:
 `LocationConstraint` is the client's region (not sent when it is `us-east-1`); if
 the bucket name ends in `-an`, `BucketNamespace=account-regional`; tags go to
-`CreateBucketConfiguration.Tags`.
+`CreateBucketConfiguration.Tags`. On a botocore whose model predates either
+member (`BucketNamespace` 1.42.67, `Tags` 1.39.2) `S3.mb` refuses before the
+request with a `ConfigurationError` naming the version, which the command
+reports on its `make_bucket failed:` line (rc 1).
 
 | flag | handling |
 |---|---|

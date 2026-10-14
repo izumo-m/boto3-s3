@@ -306,7 +306,7 @@ chain:
 
   `copy_props=ALL` on an SDK without the annotations model is refused
   at `Transferrer` construction
-  with a `ConfigurationError` (CLI rc 253); the probe behind that gate is
+  with a `ConfigurationError` (the CLI's one `fatal error:` line, rc 1); the probe behind that gate is
   public: **`annotations_copy_unsupported_reason(client)`** returns the
   rejection wording (naming botocore >= 1.43.31 as the hint) or `None`,
   introspecting the model directly, version-agnostic; the installed
@@ -708,6 +708,16 @@ dest-existence check for download. We ported the same three faces:
 - `checksum_algorithm` (upload / copy) -> `ChecksumAlgorithm`. For multipart,
   s3transfer propagates it correctly to Create/Part/Complete. **An explicit
   specification beats pip s3transfer's default injection (`setdefault`)**.
+- **SDK floor gate**: an algorithm the installed botocore's httpchecksum
+  tables do not know - `CRC64NVME` below 1.36.0, `SHA512` and the `XXHASH`
+  family below 1.42.53 (the message names 1.42.94, compatibility.md's
+  version, where the S3 model first lists them) - is refused at
+  `Transferrer` construction with a `ConfigurationError` (the CLI's one
+  `fatal error:` line, rc 1) instead of failing every item on botocore's
+  "Unsupported checksum algorithm". One botocore knows but computes only
+  through awscrt is left to botocore's per-item Missing Dependency report
+  (compatibility.md section 2), and `MD5` or an unknown name keeps botocore's
+  per-item report too.
 - `checksum_mode` (download) -> GetObject's `ChecksumMode: ENABLED` (botocore
   verifies the response's checksum). What botocore can verify is the single
   (non-ranged) GET, whose response carries the checksum header; a ranged

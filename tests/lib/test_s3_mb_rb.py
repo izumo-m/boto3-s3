@@ -22,20 +22,39 @@ from boto3_s3 import (
     S3,
     BatchError,
     Boto3S3Error,
+    ConfigurationError,
     NotFoundError,
     S3Storage,
     ValidationError,
 )
+from tests.utils.fakemodel import model_meta
 from tests.utils.fakes3 import client_error
+
+# The CreateBucket members of the current botocore that S3.mb's SDK gate
+# probes (BucketNamespace from 1.42.67, CreateBucketConfiguration.Tags from
+# 1.39.2).
+_CURRENT_CREATE_BUCKET = frozenset(
+    {
+        "Bucket",
+        "BucketNamespace",
+        "CreateBucketConfiguration.LocationConstraint",
+        "CreateBucketConfiguration.Tags",
+    }
+)
 
 
 class _FakeMeta:
-    def __init__(self, region_name: str) -> None:
+    def __init__(self, region_name: str, create_bucket_members: frozenset[str]) -> None:
         self.region_name = region_name
+        self.service_model = model_meta({"CreateBucket": create_bucket_members}).service_model
 
 
 class _FakeBucketClient:
-    """Fake covering the mb/rb wire surface (create_bucket / delete_bucket)."""
+    """Fake covering the mb/rb wire surface (create_bucket / delete_bucket).
+
+    ``create_bucket_members`` is the CreateBucket input the client's model
+    carries; drop a member to model a botocore that predates it.
+    """
 
     def __init__(
         self,
@@ -43,8 +62,9 @@ class _FakeBucketClient:
         region: str = "us-east-1",
         create_error: Exception | None = None,
         delete_error: Exception | None = None,
+        create_bucket_members: frozenset[str] = _CURRENT_CREATE_BUCKET,
     ) -> None:
-        self.meta = _FakeMeta(region)
+        self.meta = _FakeMeta(region, create_bucket_members)
         self.create_error = create_error
         self.delete_error = delete_error
         self.create_calls: list[dict[str, Any]] = []
@@ -135,6 +155,41 @@ class TestMb:
         client = _FakeBucketClient(region="us-east-1")
         S3().mb(S3Storage("s3://bucket", client=client), tags=tags)
         assert client.create_calls == [{"Bucket": "bucket"}]
+
+    def test_namespace_refused_on_a_botocore_without_it(self) -> None:
+        # Below botocore 1.42.67 the model has no BucketNamespace: refused
+        # before the request, naming the version, instead of botocore's
+        # "Unknown parameter" about a member the caller never typed.
+        client = _FakeBucketClient(
+            create_bucket_members=_CURRENT_CREATE_BUCKET - {"BucketNamespace"}
+        )
+        with pytest.raises(ConfigurationError, match=r"1\.42\.67") as exc_info:
+            S3().mb(S3Storage("s3://demo-an", client=client))
+        assert client.create_calls == []
+        assert (exc_info.value.operation, exc_info.value.bucket) == ("mb", "demo-an")
+
+    def test_tags_refused_on_a_botocore_without_them(self) -> None:
+        client = _FakeBucketClient(
+            region="us-west-2",
+            create_bucket_members=_CURRENT_CREATE_BUCKET - {"CreateBucketConfiguration.Tags"},
+        )
+        with pytest.raises(ConfigurationError, match=r"1\.39\.2"):
+            S3().mb(S3Storage("s3://bucket", client=client), tags={"K": "V"})
+        assert client.create_calls == []
+
+    def test_an_old_model_does_not_block_what_it_can_send(self) -> None:
+        # The probe runs only for the member actually sent: a plain bucket
+        # with a location constraint goes out on a model with neither member.
+        client = _FakeBucketClient(
+            region="us-west-2",
+            create_bucket_members=frozenset(
+                {"Bucket", "CreateBucketConfiguration.LocationConstraint"}
+            ),
+        )
+        S3().mb(S3Storage("s3://bucket", client=client))
+        assert client.create_calls == [
+            {"Bucket": "bucket", "CreateBucketConfiguration": {"LocationConstraint": "us-west-2"}}
+        ]
 
     def test_key_part_is_ignored(self) -> None:
         # Same as aws mb: split_s3_bucket_key keeps the bucket, drops the key.
