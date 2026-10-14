@@ -1201,10 +1201,10 @@ class TestSerializerConfig:
         serializer = self._serializer_client(client, botocore.session.Session(profile="x"))
         assert "app/" not in self._user_agent(serializer)
 
-    def test_a_second_client_with_another_app_id_does_not_share_the_engine(self) -> None:
-        # The engine's serializer names its requests after the first client;
-        # a client naming itself otherwise falls back to classic rather than
-        # going out under the first one's app id.
+    def test_a_second_client_with_another_app_id_still_shares_the_engine(self) -> None:
+        # The engine's serializer names its requests after the client it was
+        # built for. Only the User-Agent differs for a second client, so it
+        # keeps the CRT engine rather than losing it to a name.
         import botocore.session
 
         session = botocore.session.Session()
@@ -1218,8 +1218,7 @@ class TestSerializerConfig:
             "s3", region_name="us-east-1", config=Config(**{"user_agent_appid": "aaa"})
         )
         shape = crtsupport._serializer_config_shape  # pyright: ignore[reportPrivateUsage]
-        assert shape(first) != shape(second)
-        assert shape(first) == shape(same)
+        assert shape(first) == shape(second) == shape(same)
 
     def test_a_callers_own_user_agent_still_rides(self) -> None:
         import botocore.session

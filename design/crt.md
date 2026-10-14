@@ -193,16 +193,24 @@ also read as `'auto'`) with the same rules as boto3.
     endpoint through the session instead - the serializer builds its own client
     from the session it is handed, so the CLI's session-level
     `us_east_1_regional_endpoint` pin (cli.md section 4 item 3) reaches it as it
-    reaches every other client (one Host across engines). Two parts of the
+    reaches every other client (one Host across engines). Three parts of the
     Config are rewritten on the way (`_serializer_config`): the preliminary
     User-Agent botocore stores in it goes back to what the caller supplied
     (handed on, it read as a caller-supplied `user_agent` and froze the
-    header in botocore's legacy form, dropping `app/<id>`), and every `s3`
+    header in botocore's legacy form, dropping `app/<id>`); the app id is
+    pinned to the client's resolved one, empty for none; and every `s3`
     key and fips / dualstack flag the client left out is pinned to
     botocore's default - otherwise the serializer's session, which is not the
     client's when the client came from another session, filled them from its
     own profile (its `addressing_style = virtual` put the CRT's requests on a
-    virtual host where classic's went path-style; measured)
+    virtual host where classic's went path-style, its `sdk_ua_app_id` named
+    a client that has none; measured). What botocore takes from the session
+    instead of the Config - the header's leading product name, a
+    session-level `user_agent_extra` - stays the serializer session's, and a
+    later client sharing the engine sends its CRT requests under the name of
+    the client the engine was built for. The compatibility check below does
+    not pin the User-Agent: a name is no reason to lose the engine (boto3's
+    own check pins only region and credentials)
 
   - part_size = that value **only when `multipart_chunksize` is explicitly set**;
     `None` if unset (CRT dynamic). Determined via boto3's `UNSET_DEFAULT`

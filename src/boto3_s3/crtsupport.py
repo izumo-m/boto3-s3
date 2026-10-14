@@ -186,8 +186,7 @@ class _CrtS3Client:
         self.cred_wrapper = cred_wrapper
         self.verify = verify  # _derive_verify's form: None / False / CA path
         # _serializer_config_shape's tuple: the Config facets the shared
-        # serializer bakes in (the `s3` dict, fips / dualstack endpoint flags,
-        # the User-Agent identity).
+        # serializer bakes in (the `s3` dict, fips / dualstack endpoint flags).
         self.s3_config = s3_config
         # The botocore session and client arguments the shared serializer was
         # built from, for `request_sender` to address requests the same way.
@@ -760,18 +759,24 @@ def _serializer_config(client: S3Client) -> Any:
       botocore leaves out of the header).
 
     The rest of the client's resolved Config - timeouts, retries, checksum
-    modes - is recorded on it explicitly and rides as it was.
+    modes - is recorded on it explicitly and rides as it was. What botocore
+    takes from the session rather than the Config - the product name leading
+    the header, a session-level ``user_agent_extra`` - is the serializer
+    session's; and the engine is process-wide, so a later client sharing it
+    sends its CRT requests under the name of the client the engine was built
+    for. Only the User-Agent differs that way, which is not a reason to leave
+    the engine: the compatibility check pins what shapes the requests
+    (`_is_compatible_request`), as boto3's own check pins less.
     """
     from botocore.config import Config
 
     config: Any = client.meta.config
     client_s3: Mapping[str, Any] = getattr(config, "s3", None) or {}
-    user_agent, _extra, app_id = _user_agent_identity(client)
     # Typed loosely: botocore-stubs declares neither every `s3` key nor
     # `user_agent_appid`.
     pins: dict[str, Any] = {
-        "user_agent": user_agent,
-        "user_agent_appid": app_id,
+        "user_agent": getattr(config, "_supplied_user_agent", None),
+        "user_agent_appid": getattr(config, "user_agent_appid", None) or "",
         "s3": {**_S3_CONFIG_DEFAULTS, **client_s3},
         "use_fips_endpoint": bool(getattr(config, "use_fips_endpoint", None)),
         "use_dualstack_endpoint": bool(getattr(config, "use_dualstack_endpoint", None)),
@@ -779,37 +784,18 @@ def _serializer_config(client: S3Client) -> Any:
     return config.merge(Config(**pins))
 
 
-def _user_agent_identity(client: S3Client) -> tuple[Any, Any, str]:
-    """What the client names itself with: the caller's own ``user_agent``,
-    ``user_agent_extra`` and app id (``""`` for none).
-
-    ``user_agent`` is what the caller supplied, which botocore keeps aside
-    from the preliminary string it stores on the Config (`_serializer_config`).
-    """
-    config: Any = client.meta.config
-    return (
-        getattr(config, "_supplied_user_agent", None),
-        getattr(config, "user_agent_extra", None),
-        getattr(config, "user_agent_appid", None) or "",
-    )
-
-
 # Marks a key `_S3_CONFIG_DEFAULTS` has no default for: its value is always compared.
 _NO_DEFAULT: Final = object()
 
 
-def _serializer_config_shape(
-    client: S3Client,
-) -> tuple[tuple[tuple[str, Any], ...], bool, bool, tuple[Any, Any, str]]:
+def _serializer_config_shape(client: S3Client) -> tuple[tuple[tuple[str, Any], ...], bool, bool]:
     """The client-Config facets the shared serializer / CRT client bake in.
 
     The ``s3`` dict (addressing style, accelerate/dualstack, us-east-1
     regional form) plus the top-level fips / dualstack endpoint flags, which
-    shape URL resolution outside the ``s3`` dict, and the name the requests
-    go out under (`_user_agent_identity`). Compared by
+    shape URL resolution outside the ``s3`` dict. Compared by
     `_is_compatible_request` so a later client with different URL-shaping
-    settings, or another app id, falls back to classic instead of riding the
-    first client's.
+    settings falls back to classic instead of riding the first client's.
 
     Compared as what botocore resolves, not as the caller spelled it: a
     missing ``s3`` dict, an empty one and one naming only defaults
@@ -833,7 +819,6 @@ def _serializer_config_shape(
         explicit,
         bool(getattr(config, "use_fips_endpoint", None)),
         bool(getattr(config, "use_dualstack_endpoint", None)),
-        _user_agent_identity(client),
     )
 
 
@@ -868,9 +853,11 @@ def _is_compatible_request(
     The last two go beyond boto3's own check (region + credentials): the
     singleton CRT client holds the first client's ``verify`` and the shared
     serializer its ``Config`` (`_serializer_config_shape`: the ``s3`` dict
-    plus the fips / dualstack endpoint flags and the User-Agent identity), so
-    a later client differing in either would silently transfer under the
-    first one's TLS, URL-shaping settings and app id.
+    plus the fips / dualstack endpoint flags), so a later client differing in
+    either would silently transfer under the first one's TLS and URL-shaping
+    settings. The User-Agent the serializer names requests with is not
+    pinned: a client differing only there shares the engine
+    (`_serializer_config`).
     Incompatible means classic for that run, never a wrong-config CRT
     transfer.
 
