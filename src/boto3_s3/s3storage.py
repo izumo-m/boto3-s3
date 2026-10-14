@@ -214,6 +214,23 @@ _S3_OUTPOST_BUCKET_ARN_RE = re.compile(
     r"[a-zA-Z0-9\-]{1,63})[/:]?(?P<key>.*)$"
 )
 
+
+def botocore_older_than(minimum: str) -> bool:
+    """Whether the installed botocore's release is below ``minimum`` (``"X.Y.Z"``).
+
+    The SDK-floor gates that probe a botocore internal (a class, a private
+    table) also require this, so a later botocore that merely renames the
+    internal is never refused. A release that does not parse reads as not
+    older.
+    """
+    try:
+        installed = tuple(int(part) for part in version("botocore").split(".")[:3])
+        wanted = tuple(int(part) for part in minimum.split("."))
+    except ValueError:
+        return False
+    return installed < wanted
+
+
 # Back-compat (supported floor botocore 1.31, docs/compatibility.md): botocore
 # learned S3 Express directory buckets - the --x-s3 suffix, their zonal
 # endpoint and CreateSession credentials - in 1.33.2 (its
@@ -228,10 +245,14 @@ _S3EXPRESS_MIN_BOTOCORE = "1.33.2"
 def _s3express_unsupported_reason(bucket: str) -> str | None:
     """Why the installed botocore cannot address directory bucket ``bucket``, or ``None``.
 
-    ``None`` for any other bucket. The probe is the resolver itself
-    (version-agnostic); the message names the minimum version as a hint.
+    ``None`` for any other bucket. The probe is the resolver itself, backed by
+    the release (`botocore_older_than`), and the message names that version.
     """
-    if not bucket.endswith("--x-s3") or hasattr(botocore.utils, "S3ExpressIdentityResolver"):
+    if (
+        not bucket.endswith("--x-s3")
+        or hasattr(botocore.utils, "S3ExpressIdentityResolver")
+        or not botocore_older_than(_S3EXPRESS_MIN_BOTOCORE)
+    ):
         return None
     return (
         "S3 Express directory buckets (a name ending in --x-s3) require botocore >= "

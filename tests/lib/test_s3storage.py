@@ -1758,12 +1758,23 @@ class TestConstructor:
         import botocore.utils
 
         monkeypatch.delattr(botocore.utils, "S3ExpressIdentityResolver")
+        monkeypatch.setattr(s3storage, "version", lambda _name: "1.31.0")
         with pytest.raises(ConfigurationError, match=r"1\.33\.2") as exc_info:
             S3Storage("s3://demo--usw2-az1--x-s3/key").validate()
         assert exc_info.value.bucket == "demo--usw2-az1--x-s3"
         S3Storage("s3://general-purpose/key").validate()  # any other bucket passes
 
     def test_directory_bucket_passes_on_a_botocore_with_s3express(self) -> None:
+        S3Storage("s3://demo--usw2-az1--x-s3/key").validate()
+
+    def test_a_newer_botocore_without_the_resolver_name_is_not_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The resolver is a botocore internal: a release past 1.33.2 that
+        # renamed it must not lose directory buckets.
+        import botocore.utils
+
+        monkeypatch.delattr(botocore.utils, "S3ExpressIdentityResolver")
         S3Storage("s3://demo--usw2-az1--x-s3/key").validate()
 
     def test_direct_validate_leaves_the_operation_unset(self) -> None:

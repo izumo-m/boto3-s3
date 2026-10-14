@@ -35,7 +35,7 @@ from botocore.exceptions import (
 from s3transfer import copies as s3transfer_copies
 from s3transfer.copies import CopySubmissionTask
 
-from boto3_s3 import transfer
+from boto3_s3 import s3storage, transfer
 from boto3_s3.exceptions import (
     AccessDeniedError,
     Boto3S3Error,
@@ -3926,7 +3926,9 @@ class TestChecksumAlgorithmSupport:
 
     @staticmethod
     def _floor_tables(monkeypatch: pytest.MonkeyPatch) -> None:
-        # botocore 1.31's tables: no CRC64NVME, SHA512 or XXHASH anywhere.
+        # botocore 1.31: its release, and tables with no CRC64NVME, SHA512 or
+        # XXHASH anywhere.
+        monkeypatch.setattr(s3storage, "version", lambda _name: "1.31.0")
         monkeypatch.setattr(
             transfer.httpchecksum, "_SUPPORTED_CHECKSUM_ALGORITHMS", ["crc32", "sha1", "sha256"]
         )
@@ -3995,6 +3997,17 @@ class TestChecksumAlgorithmSupport:
             TransferType.UPLOAD,
             model_only_client(set()),
             options={"checksum_algorithm": "CRC64NVME"},
+        )
+
+    def test_a_newer_botocore_with_renamed_tables_is_not_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The tables are botocore internals: on a release past the algorithm's
+        # a rename (here: the names missing from both) must not refuse it.
+        monkeypatch.setattr(transfer.httpchecksum, "_SUPPORTED_CHECKSUM_ALGORITHMS", [])
+        monkeypatch.setattr(transfer.httpchecksum, "_CRT_CHECKSUM_ALGORITHMS", [])
+        Transferrer(
+            TransferType.UPLOAD, model_only_client(set()), options={"checksum_algorithm": "SHA512"}
         )
 
     def test_download_is_not_gated(self, monkeypatch: pytest.MonkeyPatch) -> None:

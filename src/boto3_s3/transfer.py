@@ -102,6 +102,7 @@ from boto3_s3.exceptions import (
 from boto3_s3.localstorage import LocalStorage, translate_os_error
 from boto3_s3.s3storage import (
     attribute_failure,
+    botocore_older_than,
     client_build_error,
     crt_error_name,
     drop_like_aws,
@@ -497,8 +498,9 @@ def _checksum_algorithm_unsupported_reason(algorithm: object) -> str | None:
     """Why the installed botocore cannot compute ``algorithm``, or ``None``.
 
     Reads botocore's own tables - the algorithms its httpchecksum computes and
-    the ones it computes only through awscrt - so the probe is version-agnostic;
-    the message names the documented minimum as a hint. Only the algorithms
+    the ones it computes only through awscrt - backed by the release
+    (`botocore_older_than`, so a renamed table never refuses a newer botocore);
+    the message names the documented minimum. Only the algorithms
     newer than the floor are probed: CRC32 / CRC32C / SHA1 / SHA256 are known
     to every supported botocore, and a name botocore never computes (MD5) or
     does not know at all keeps botocore's own per-item report.
@@ -512,7 +514,7 @@ def _checksum_algorithm_unsupported_reason(algorithm: object) -> str | None:
         *getattr(httpchecksum, "_SUPPORTED_CHECKSUM_ALGORITHMS", ()),
         *getattr(httpchecksum, "_CRT_CHECKSUM_ALGORITHMS", ()),
     }
-    if algorithm.lower() in known:
+    if algorithm.lower() in known or not botocore_older_than(minimum):
         return None
     return (
         f"checksum_algorithm={algorithm.upper()} requires botocore >= {minimum}; "
