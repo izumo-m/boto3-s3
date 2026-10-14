@@ -36,7 +36,7 @@ Each accepts `True`, `False`, or a callable. For `create_filter` and
 to act on it:
 
 ```python
-s3.sync(src, dest, delete_filter=lambda info: info.mtime < cutoff)
+s3.sync(src, dest, delete_filter=lambda info: info.mtime is not None and info.mtime < cutoff)
 ```
 
 `update_filter` is different because its entry exists on both sides, so its

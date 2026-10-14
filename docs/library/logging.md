@@ -7,8 +7,10 @@ tokens and SSE-C keys. `boto3_s3.set_stream_logger` mirrors
 ```python
 from boto3_s3 import set_stream_logger
 
-set_stream_logger("botocore")           # masked
-set_stream_logger("botocore", mask_secrets=False)   # not masked
+set_stream_logger("botocore")  # masked
+
+# Or, unmasked — instead of the call above, as each call adds a handler:
+# set_stream_logger("botocore", mask_secrets=False)
 ```
 
 The first three arguments are boto3's — `name`, `level`, `format_string` — with

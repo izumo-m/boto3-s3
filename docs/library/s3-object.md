@@ -99,6 +99,8 @@ S3-to-S3 copy is the clear case — the instance default cannot express it. Buil
 each client and wrap each URL:
 
 ```python
+from boto3_s3 import S3Storage
+
 s3.cp(
     S3Storage("s3://src-bucket/data/", client=src_client),
     S3Storage("s3://dest-bucket/data/", client=dest_client),
@@ -141,8 +143,9 @@ jobs = [
 ]
 
 with concurrent.futures.ThreadPoolExecutor() as pool:
-    for path, dest in jobs:
-        pool.submit(s3.cp, str(path), dest)
+    futures = [pool.submit(s3.cp, str(path), dest) for path, dest in jobs]
+for future in futures:
+    future.result()  # re-raises a failed copy's error
 ```
 
 Do not use bare `"s3://..."` arguments for this: each operation would build its

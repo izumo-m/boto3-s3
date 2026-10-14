@@ -62,7 +62,7 @@ the `boto3-s3` command, not here.
 
 ```python
 s3.rm("s3://bucket/tmp/", recursive=True, filter=lambda info: info.size == 0)
-s3.sync(src, dest, filter=lambda info: not info.compare_key.startswith("draft/"))
+s3.sync(src, dest, filter=lambda info: not (info.compare_key or "").startswith("draft/"))
 ```
 
 [`FileInfo`](../reference/results.md#fileinfo) carries `key`, `compare_key`,
