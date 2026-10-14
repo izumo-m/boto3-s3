@@ -72,9 +72,36 @@ class TestFastParseTimestamp:
     def test_digit_only_strings_stay_on_botocore_epoch_semantics(self) -> None:
         # "20200101" is epoch seconds to botocore, but Python 3.11+'s
         # fromisoformat would read it as the basic-format date 2020-01-01;
-        # the fast path's requires-a-dash guard keeps such inputs on
-        # botocore's interpretation on every Python version.
+        # the fast path's S3-form gate keeps such inputs on botocore's
+        # interpretation on every Python version.
         assert fast_parse_timestamp("20200101") == parse_timestamp("20200101")
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "2025-W01-1T00:00:00Z",  # a week date: 3.11+'s fromisoformat reads it
+            "2025-001T00:00:00Z",  # an ordinal date
+            "2025-01-01T24:00:00Z",  # 3.14's fromisoformat reads it as the next day
+            "2025-01-01T00:00:00.1234567Z",
+            "2025-01-01T00:00Z",
+            "2025-01-01",
+            "2025-01-01 00:00:00Z",
+            "2025-01-01T00:00:00,5Z",
+            "+2025-01-01T00:00:00Z",
+            "2025-1-1T00:00:00Z",
+        ],
+    )
+    def test_other_iso_spellings_answer_as_botocore_answers(self, value: str) -> None:
+        # Whatever the interpreter's fromisoformat accepts, an S3-compatible
+        # endpoint's odd spelling must parse - or fail, stopping the listing
+        # as it stops aws's - exactly as botocore's parser does.
+        def outcome(parse: Any) -> object:
+            try:
+                return parse(value)
+            except ValueError as exc:
+                return type(exc)
+
+        assert outcome(fast_parse_timestamp) == outcome(parse_timestamp)
 
     def test_invalid_input_raises_like_botocore(self) -> None:
         with pytest.raises(ValueError):

@@ -27,12 +27,20 @@ boto3 at module top.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 
 import boto3
 import botocore.session
 from botocore.utils import parse_timestamp
+
+# The ISO 8601 extended calendar form S3 timestamps take: a date, a time with
+# an hour of 00-23 and an optional fraction, and an optional zone. Anything
+# else goes to botocore's own parser (`fast_parse_timestamp`).
+_S3_TIMESTAMP = re.compile(
+    r"\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})?\Z"
+)
 
 
 def fast_parse_timestamp(value: Any) -> datetime:
@@ -42,10 +50,13 @@ def fast_parse_timestamp(value: Any) -> datetime:
     through `datetime.fromisoformat` (~100x faster than the dateutil walk
     botocore falls back to); everything else - RFC 822 header dates, epoch
     numbers, a lowercase ``z`` suffix - falls through to botocore's own
-    `parse_timestamp` untouched. The fast path requires a ``-`` in the
-    string: a digit-only string like ``"20200101"`` is an epoch-seconds
-    value to botocore, while Python 3.11+'s `fromisoformat` would read it
-    as a basic-format date - the guard keeps such inputs on botocore's
+    `parse_timestamp` untouched. The fast path takes only the extended
+    calendar form S3 sends (`_S3_TIMESTAMP`): Python 3.11+'s
+    `fromisoformat` reads much more - a digit-only ``"20200101"``, which
+    botocore reads as epoch seconds, a week date (``2025-W01-1``), and on
+    3.14 an hour of ``24`` - where botocore answers differently or refuses
+    (an S3-compatible endpoint's week date must stop a listing as it stops
+    aws's), so the gate keeps every other spelling on botocore's
     interpretation on every Python. For every input both paths accept the
     returned value is equal; only the tzinfo class differs
     (`datetime.timezone` instead of dateutil's ``tzutc`` / ``tzoffset``), so
@@ -58,7 +69,7 @@ def fast_parse_timestamp(value: Any) -> datetime:
     to choose an explicit format; the CLI's credential cache stores
     ``isoformat()``, which is aws-cli's own on-disk form.
     """
-    if isinstance(value, str) and "-" in value:
+    if isinstance(value, str) and _S3_TIMESTAMP.match(value):
         text = value[:-1] + "+00:00" if value.endswith("Z") else value
         try:
             return datetime.fromisoformat(text)
