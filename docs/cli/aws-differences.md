@@ -249,6 +249,16 @@ comes out differently, listed in section 1.
   hands its page to a pager process and exits 0 whatever becomes of it, while
   this command writes the page itself, so `help > /dev/full`, or a reader that
   closes at once, is exit code 120 here.
+- **A delete answered `412 PreconditionFailed` fails here.** `aws` turns a
+  `PreconditionFailed` answer into a silent skip whatever the request was - a
+  rule meant for `--no-overwrite`'s conditional writes - so a `DeleteObject`
+  answered that way prints nothing and does not count: `rm`, a `mv`'s source
+  deletion and `sync --delete` end at exit code 0 with the object still there,
+  and `rb --force` goes on to remove the bucket. This command reports it as a
+  failed delete (`delete failed:` / `move failed:`, exit code 1; 255 for
+  `rb --force`, whose bucket removal then does not run). S3 itself never
+  answers an unconditional delete this way; only an S3-compatible endpoint
+  can.
 - **A batched delete names a different operation when a key fails.** Deletes go
   out in batches here — up to a thousand keys per `DeleteObjects` request —
   where `aws` sends one `DeleteObject` per key. Batching is a settled design,
