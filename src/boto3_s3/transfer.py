@@ -94,11 +94,14 @@ from boto3_s3.exceptions import (
     CancelledError,
     ConfigurationError,
     InvalidConfigError,
+    NotFoundError,
+    TransportError,
     ValidationError,
 )
 from boto3_s3.localstorage import LocalStorage, translate_os_error
 from boto3_s3.s3storage import (
     attribute_failure,
+    crt_error_name,
     drop_like_aws,
     read_required,
     s3_errors,
@@ -468,6 +471,18 @@ def annotations_copy_unsupported_reason(client: S3Client) -> str | None:
     return None
 
 
+# A CRT failure of the item's local file, by awscrt's error name: the local
+# taxonomy's categories (`Transferrer._local_failure`).
+_CRT_LOCAL_CATEGORIES: dict[str, type[Boto3S3Error]] = {
+    "AWS_ERROR_NO_PERMISSION": AccessDeniedError,
+    "AWS_ERROR_FILE_INVALID_PATH": NotFoundError,
+    "AWS_ERROR_FILE_OPEN_FAILURE": TransportError,
+    "AWS_ERROR_FILE_READ_FAILURE": TransportError,
+    "AWS_ERROR_FILE_WRITE_FAILURE": TransportError,
+    "AWS_ERROR_NO_SPACE": TransportError,
+}
+
+
 def _set_file_utime(path: str, timestamp: float) -> None:
     """Set a file's atime/mtime (aws-cli's ``set_file_utime``).
 
@@ -482,7 +497,7 @@ def _set_file_utime(path: str, timestamp: float) -> None:
         os.utime(path, (timestamp, timestamp))
     except OSError as exc:
         if exc.errno != errno.EPERM:
-            if exc.filename is None and exc.errno is not None:
+            if exc.filename is None and exc.errno is not None and os.name != "nt":
                 raise OSError(exc.errno, exc.strerror, path) from exc
             raise
         raise AccessDeniedError(
@@ -1525,6 +1540,8 @@ class Transferrer:
         subscribers.append(_ForgetFuture(self._forget_future))
         # Manager first: a stream run builds it (and the capture) at first submit.
         manager = self._get_manager()
+        if item.dest_path is not None and not isinstance(manager, TransferManager):
+            subscribers.insert(0, _KeepRenameFailure())
         if self._capture is not None:
             # Admit the key only now: a same-run content filter may have read
             # this source through the run's own client (a SyncPair content
@@ -2039,7 +2056,7 @@ class Transferrer:
             thrown = exc
             exc = Boto3S3Error(str(thrown))
             exc.__cause__ = thrown
-        error = translate_boto_error(
+        error = self._local_failure(item, exc) or translate_boto_error(
             exc,
             operation=self._operation,
             bucket=item.dest_bucket or item.src_bucket,
@@ -2070,7 +2087,32 @@ class Transferrer:
                 self._first_error = error
         self._emit(self._result(item, OpOutcome.FAILED, error=error))
 
-    def _stamp_mtime(self, item: TransferItem) -> BaseException | None:
+    def _local_failure(self, item: TransferItem, exc: BaseException) -> Boto3S3Error | None:
+        """The local taxonomy's error for a failure of the item's local file, else None.
+
+        The engines open, write and rename the local file themselves - the
+        classic engine's s3transfer raising the ``OSError`` (``[Errno 13]
+        Permission denied`` for a download into a directory it cannot write),
+        the CRT engine reporting it under awscrt's name - so the failure takes
+        the category the library's own file paths give it
+        (`translate_os_error`), its message (aws's words) as it is, and names
+        the file in ``key`` with no ``bucket`` (design/exceptions.md section
+        2.1), not the object. botocore's own errors that are also ``OSError``
+        (``SSLError``) are the request's; a stream item has no local path and
+        keeps the request's attribution.
+        """
+        path = item.dest_path if self._transfer_type is TransferType.DOWNLOAD else item.src_path
+        if path is None or isinstance(exc, BotoCoreError):
+            return None
+        key = path.replace(os.sep, "/")
+        if isinstance(exc, OSError):
+            return translate_os_error(exc, operation=self._operation, key=key)
+        category = _CRT_LOCAL_CATEGORIES.get(crt_error_name(exc) or "")
+        if category is None:
+            return None
+        return category(str(exc), operation=self._operation, key=key)
+
+    def _stamp_mtime(self, item: TransferItem) -> None:
         """Stamp the source LastModified onto the downloaded file.
 
         Runs where the download's subscribers do - an s3transfer worker, or
@@ -2079,10 +2121,7 @@ class Transferrer:
         does not undo the transfer (the bytes are on disk): it adds a WARNED
         record with aws's wording - the broad catch is deliberate, ``os.utime``
         can raise ``OverflowError`` / ``ValueError`` on Windows for timestamps
-        outside ``localtime()``'s range besides the common ``OSError``. The one
-        exception is a CRT download whose destination does not exist at all:
-        the engine never wrote it, and the error is returned for `_StampMtime`
-        to fail the item with.
+        outside ``localtime()``'s range besides the common ``OSError``.
 
         Whole seconds only: aws-cli stamps its source timestamp through
         ``timetuple`` / ``time.mktime``, which drops the sub-second part, and an
@@ -2092,26 +2131,15 @@ class Transferrer:
         there.
         """
         if item.mtime is None or item.dest_path is None:
-            return None
+            return
         try:
             _set_file_utime(item.dest_path, item.mtime.replace(microsecond=0).timestamp())
         except Exception as exc:
-            if (
-                isinstance(exc, OSError)
-                and not isinstance(self._manager, TransferManager)
-                and not os.path.lexists(item.dest_path)
-            ):
-                # The CRT engine wrote nothing yet reported success (a name
-                # too long to create: awscrt drops the failure, aws reports
-                # the download done with this warning, and a mv deletes the
-                # source). Nothing arrived, so the stamp's error is the item's.
-                return exc
             self.warn(
                 f"Skipping file {item.dest_path}. Successfully Downloaded {item.dest_path} "
                 f"but was unable to update the last modified time. {exc}",
                 key=item.compare_key,
             )
-        return None
 
 
 # -- subscribers --------------------------------------------------------------
@@ -2565,6 +2593,35 @@ class _FsyncDest:
             os.close(dir_fd)
 
 
+class _KeepRenameFailure:
+    """Let a CRT download's failed rename settle its item.
+
+    s3transfer's CRT manager downloads into a temporary file and renames it
+    into place from a done handler that runs before the subscribers
+    (``RenameTempFileHandler``). A rename that fails - a directory already at
+    the destination, a name too long to create, on Windows a file another
+    process holds open - is handed to the coordinator's ``set_exception``,
+    which ignores it once the transfer is done: the item read as a success, a
+    ``mv`` deleted its source, and nothing was written (aws's outcome as
+    well, measured). Installed when the transfer is queued, this makes that
+    late ``set_exception`` an override, so every subscriber after it - the
+    stamp, the source delete, the completion - sees the failure. Guarded on
+    the attributes: an upstream that reshapes its coordinator keeps its own
+    behavior.
+    """
+
+    def on_queued(self, future: Any, **kwargs: Any) -> None:
+        coordinator = getattr(future, "_coordinator", None)
+        set_exception = getattr(coordinator, "set_exception", None)
+        if coordinator is None or set_exception is None:
+            return
+
+        def set_exception_overriding(exception: BaseException, override: bool = False) -> None:
+            set_exception(exception, override=True)
+
+        coordinator.set_exception = set_exception_overriding
+
+
 class _StampMtime:
     """Stamp the source LastModified onto a successfully downloaded file.
 
@@ -2573,24 +2630,18 @@ class _StampMtime:
     source delete runs - a delete failure (``move failed``, the file stays)
     still leaves the mtime aws-shaped, and the opt-in ``_FsyncDest`` barrier
     flushes the final metadata. The stamp itself (`Transferrer._stamp_mtime`)
-    never raises - a failure becomes a WARNED record - and flips the settled
-    future only where the CRT engine reported a download it never wrote:
-    ``set_exception`` (s3transfer accepts the post-done override) then makes
-    the item FAILED and keeps a ``mv``'s source.
+    never raises - a failure becomes a WARNED record - so this cannot flip
+    the settled future.
     """
 
-    def __init__(
-        self, item: TransferItem, stamp: Callable[[TransferItem], BaseException | None]
-    ) -> None:
+    def __init__(self, item: TransferItem, stamp: Callable[[TransferItem], None]) -> None:
         self._item = item
         self._stamp = stamp
 
     def on_done(self, future: Any, **kwargs: Any) -> None:
         if _outcome(future) is not None:
             return
-        failure = self._stamp(self._item)
-        if failure is not None:
-            future.set_exception(failure)
+        self._stamp(self._item)
 
 
 class _DeleteSource:

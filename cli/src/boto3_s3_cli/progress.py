@@ -36,9 +36,10 @@ single thread renders in queue order, line ordering and the ``\\r`` padding
 protocol are exactly the single-threaded behavior. Use the printer as a
 context manager around the run: ``__exit__`` drains the queue and waits for
 the thread, so by the time the command returns every line has been written
-(a Ctrl-C there is held until then, as ``finish`` describes). A dead output
-stream (``BrokenPipeError`` on a closed pipe) stops rendering but keeps
-draining - the run and its exit code are unaffected.
+(a Ctrl-C there is held until then, as ``finish`` describes). A write the
+stream refuses (``BrokenPipeError`` on a closed pipe) drops that one line and
+rendering goes on with the next record, as aws's result processor does - the
+run and its exit code are unaffected.
 
 One deliberate deviation from aws-cli: the queue is **bounded**
 (``_QUEUE_MAX`` records) where aws's result queue is unbounded. aws never

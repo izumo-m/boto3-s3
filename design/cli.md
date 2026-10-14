@@ -394,7 +394,9 @@ solidified design is added here.
     `Range Not Satisfiable`, 422 `Unprocessable Content`), so
     `usage.status_phrase_message` puts the older name into the newer one
     wherever `usage.exception_text` renders the error. A service's own
-    message is never touched.
+    message is left alone unless it is exactly that phrase under its status
+    number as the code - the generic answer's shape, which the rewrite cannot
+    tell apart from it.
   - Two library-side pins serve the same rule, at the ports of aws's own
     code that call the stdlib: a key with an embedded NUL fails its download
     directory with `mkdir: embedded null character in path` (3.12+ names the

@@ -521,6 +521,28 @@ class TestClientSeam:
                 build()
             assert isinstance(exc_info.value.__cause__, AttributeError)
 
+    def test_a_credential_process_that_cannot_run_maps_to_invalid_config_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # botocore runs credential_process while it builds the client, and a
+        # missing executable surfaces as subprocess's own FileNotFoundError.
+        def boom(*args: Any, **kwargs: Any) -> Any:
+            raise FileNotFoundError(2, "No such file or directory", "/no/such-helper")
+
+        monkeypatch.setattr(boto3, "client", boom)
+        for build in (lambda: S3().client(), lambda: S3Storage("s3://b/").get_client()):
+            with pytest.raises(InvalidConfigError) as exc_info:
+                build()
+            assert isinstance(exc_info.value.__cause__, FileNotFoundError)
+
+    def test_a_caller_s_wrong_typed_argument_passes_through(self) -> None:
+        # A programming error in the arguments is not the configuration's
+        # (design/exceptions.md section 2): it propagates as is.
+        with pytest.raises(AttributeError):
+            S3(session=cast("Any", "x")).client()
+        with pytest.raises(AttributeError):
+            S3(config=cast("Any", "x")).client()
+
 
 class TestResolveSeam:
     """``S3.resolve`` injects ``client()`` into bare ``s3://`` strings and is overridable."""

@@ -1434,48 +1434,66 @@ class _FakeCrtError(Exception):
 
 
 class TestTranslateEngineFailures:
-    """The engines' own failures take the category the same event has on the
-    library's own paths, whatever engine raised them."""
+    """The shared translator classifies the CRT engine's network and server
+    failures by awscrt's name; a local file's failure is the transfer
+    engine's to classify, where the file is known."""
 
     @pytest.mark.parametrize(
-        ("exc", "category"),
+        "exc",
         [
-            (PermissionError(errno.EACCES, "Permission denied", "/d/f"), AccessDeniedError),
-            (FileNotFoundError(errno.ENOENT, "No such file or directory", "/d/f"), NotFoundError),
-            (IsADirectoryError(errno.EISDIR, "Is a directory", "/d"), TransportError),
+            _FakeCrtError("AWS_IO_SOCKET_CONNECTION_REFUSED"),
+            _FakeCrtError("AWS_IO_DNS_QUERY_FAILED"),
+            _FakeCrtError("AWS_IO_TLS_ERROR_NEGOTIATION_FAILURE"),
+            _FakeCrtError("AWS_ERROR_HTTP_CONNECTION_CLOSED"),
+            _FakeCrtError("AWS_ERROR_S3_SLOW_DOWN"),
+            _FakeCrtError("AWS_ERROR_S3_INTERNAL_ERROR"),
         ],
     )
-    def test_an_os_error_inside_the_classic_engine(
-        self, exc: OSError, category: type[Boto3S3Error]
-    ) -> None:
+    def test_a_crt_network_or_server_failure_is_transport(self, exc: BaseException) -> None:
         error = s3storage.translate_boto_error(exc, operation="cp", bucket="b", key="k")
-        assert type(error) is category
-        assert str(error) == str(exc)  # aws's words, as they are
-        assert (error.operation, error.bucket, error.key) == ("cp", "b", "k")
-
-    @pytest.mark.parametrize(
-        ("exc", "category"),
-        [
-            (_FakeCrtError("AWS_IO_SOCKET_CONNECTION_REFUSED"), TransportError),
-            (_FakeCrtError("AWS_IO_TLS_ERROR_NEGOTIATION_FAILURE"), TransportError),
-            (_FakeCrtError("AWS_ERROR_S3_SLOW_DOWN"), TransportError),
-            (_FakeCrtError("AWS_ERROR_S3_INTERNAL_ERROR"), TransportError),
-            (_FakeCrtError("AWS_ERROR_NO_PERMISSION"), AccessDeniedError),
-            (_FakeCrtError("AWS_ERROR_FILE_INVALID_PATH"), NotFoundError),
-            (
-                RuntimeError("43 (AWS_ERROR_NO_PERMISSION): User does not have permission"),
-                AccessDeniedError,
-            ),
-            (_FakeCrtError("AWS_ERROR_S3_CANCELED"), Boto3S3Error),
-            (RuntimeError("no awscrt here"), Boto3S3Error),
-        ],
-    )
-    def test_a_crt_failure_by_its_error_name(
-        self, exc: BaseException, category: type[Boto3S3Error]
-    ) -> None:
-        error = s3storage.translate_boto_error(exc, operation="cp", bucket="b", key="k")
-        assert type(error) is category
+        assert type(error) is TransportError
         assert str(error) == str(exc)
+        assert (error.bucket, error.key) == ("b", "k")
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            _FakeCrtError("AWS_ERROR_NO_PERMISSION"),
+            _FakeCrtError("AWS_ERROR_FILE_INVALID_PATH"),
+            _FakeCrtError("AWS_ERROR_S3_CANCELED"),
+            RuntimeError("43 (AWS_ERROR_NO_PERMISSION): User does not have permission"),
+            RuntimeError("no awscrt here"),
+            # Raised inside a request it can be a credential provider's - a
+            # missing credential_process executable - not the object's.
+            FileNotFoundError(errno.ENOENT, "No such file or directory", "/bin/helper"),
+            PermissionError(errno.EACCES, "Permission denied", "/d/f"),
+        ],
+    )
+    def test_everything_else_stays_at_the_base(self, exc: BaseException) -> None:
+        error = s3storage.translate_boto_error(exc, operation="cp", bucket="b", key="k")
+        assert type(error) is Boto3S3Error
+        assert str(error) == str(exc)
+
+    def test_crt_error_name_reads_both_shapes(self) -> None:
+        assert s3storage.crt_error_name(_FakeCrtError("AWS_ERROR_NO_SPACE")) == "AWS_ERROR_NO_SPACE"
+        assert (
+            s3storage.crt_error_name(RuntimeError("43 (AWS_ERROR_NO_PERMISSION): text"))
+            == "AWS_ERROR_NO_PERMISSION"
+        )
+        assert s3storage.crt_error_name(RuntimeError("plain")) is None
+        assert s3storage.crt_error_name(ImportError("x", name="mod")) is None
+
+    def test_a_request_s_os_error_is_not_an_absence(self) -> None:
+        # A HeadObject that dies on a credential provider's FileNotFoundError
+        # (a web identity token file that is gone) must not read as the
+        # object being absent: get_fileinfo returns None only for a 404.
+        client, _ = make_recording_client(
+            [FileNotFoundError(errno.ENOENT, "No such file or directory", "/tok")]
+        )
+        with pytest.raises(Boto3S3Error) as raised:
+            S3Storage("s3://b/k", client=client).get_fileinfo()
+        assert type(raised.value) is Boto3S3Error
+        assert isinstance(raised.value.__cause__, FileNotFoundError)
 
 
 class TestLostLikeAws:

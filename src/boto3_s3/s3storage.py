@@ -149,42 +149,37 @@ _TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
     IncompleteReadError,
 )
 
-# The CRT engine's failures by awscrt's error name: its AwsCrtError carries the
-# name, and a request awscrt refuses synchronously (a local file it cannot
-# open) raises RuntimeError("<code> (<name>): <text>"). The classic engine's
-# categories for the same events: a connection, DNS, TLS or socket failure and
-# S3's own 5xx / throttle answers the CRT client retried and gave up on are
-# transport; a local path awscrt cannot open is the local taxonomy's
-# (`translate_os_error`). Unlisted names (a cancellation, an unknown error)
-# stay at the base.
-_CRT_NAME_CATEGORIES: dict[str, type[Boto3S3Error]] = {
-    "AWS_ERROR_NO_PERMISSION": AccessDeniedError,
-    "AWS_ERROR_FILE_INVALID_PATH": NotFoundError,
-    "AWS_ERROR_FILE_OPEN_FAILURE": TransportError,
-    "AWS_ERROR_FILE_READ_FAILURE": TransportError,
-    "AWS_ERROR_FILE_WRITE_FAILURE": TransportError,
-    "AWS_ERROR_NO_SPACE": TransportError,
-    "AWS_ERROR_HTTP_CONNECTION_CLOSED": TransportError,
-    "AWS_ERROR_HTTP_SERVER_CLOSED": TransportError,
-    "AWS_ERROR_HTTP_RESPONSE_FIRST_BYTE_TIMEOUT": TransportError,
-    "AWS_ERROR_S3_SLOW_DOWN": TransportError,
-    "AWS_ERROR_S3_INTERNAL_ERROR": TransportError,
-}
+# The CRT engine's network and server failures by awscrt's error name: a
+# connection, DNS, TLS or socket failure and S3's own 5xx / throttle answers
+# the CRT client retried and gave up on - transport, as the classic engine's
+# botocore files the same events. Every other name stays at the base here; a
+# local file the engine could not open or write is the transfer engine's to
+# classify (`transfer.Transferrer`), where the local path is known.
+_CRT_TRANSPORT_NAMES = frozenset(
+    {
+        "AWS_ERROR_HTTP_CONNECTION_CLOSED",
+        "AWS_ERROR_HTTP_SERVER_CLOSED",
+        "AWS_ERROR_HTTP_RESPONSE_FIRST_BYTE_TIMEOUT",
+        "AWS_ERROR_S3_SLOW_DOWN",
+        "AWS_ERROR_S3_INTERNAL_ERROR",
+    }
+)
 _CRT_TRANSPORT_PREFIXES = ("AWS_IO_SOCKET_", "AWS_IO_DNS_", "AWS_IO_TLS_")
 _CRT_RUNTIME_ERROR = re.compile(r"\d+ \((AWS_[A-Z0-9_]+)\)")
 
 
-def _crt_error_category(exc: BaseException) -> type[Boto3S3Error] | None:
-    """The category of an awscrt failure by its error name, else None."""
+def crt_error_name(exc: BaseException) -> str | None:
+    """awscrt's error name for a CRT failure, else None.
+
+    An ``AwsCrtError`` carries it (``name``, beside ``code``); a request awscrt
+    refuses synchronously - a local file it cannot open - raises a plain
+    ``RuntimeError("<code> (<name>): <text>")`` instead.
+    """
     name: object = getattr(exc, "name", None) if hasattr(exc, "code") else None
     if not isinstance(name, str) and type(exc) is RuntimeError:
         match = _CRT_RUNTIME_ERROR.match(str(exc))
         name = match.group(1) if match else None
-    if not isinstance(name, str) or not name.startswith("AWS_"):
-        return None
-    if name.startswith(_CRT_TRANSPORT_PREFIXES):
-        return TransportError
-    return _CRT_NAME_CATEGORIES.get(name)
+    return name if isinstance(name, str) and name.startswith("AWS_") else None
 
 
 # S3 error Code -> exception category, shared by every translation path: the
@@ -300,14 +295,14 @@ def translate_boto_error(
     it) to ``ConfigurationError``, a present-but-unusable
     profile or partial credentials to its ``InvalidConfigError`` refinement,
     and ``ParamValidationError`` (client-side validation - no HTTP happened)
-    to ``ValidationError``, which aws-cli files under its usage rc. An
-    ``OSError`` raised by local file I/O inside s3transfer takes the local
-    taxonomy's category (`translate_os_error`) with its message as it is (the
-    ``[Errno 21] Is a directory`` text aws prints for a directory source
-    survives verbatim), and an awscrt failure the category its error name
-    maps to (`_crt_error_category`). An existing ``Boto3S3Error`` passes
-    through unchanged, and anything else becomes the base category carrying
-    its message.
+    to ``ValidationError``, which aws-cli files under its usage rc. A CRT
+    network or server failure is a ``TransportError`` by its awscrt name
+    (`crt_error_name`). An existing ``Boto3S3Error`` passes through
+    unchanged, and anything else becomes the base category carrying its
+    message - an ``OSError`` included: raised inside a request it can be a
+    credential provider's (a missing ``credential_process`` executable), not
+    the filesystem the request is about, so a local file's failure is
+    classified where the file is known (the transfer engine's records).
     """
     if isinstance(exc, Boto3S3Error):
         return exc
@@ -330,16 +325,11 @@ def translate_boto_error(
         return TransportError(str(exc), operation=operation, bucket=bucket, key=key)
     if isinstance(exc, ParamValidationError):
         return ValidationError(str(exc), operation=operation, bucket=bucket, key=key)
-    if isinstance(exc, OSError):
-        # Local I/O inside the classic engine's tasks (s3transfer opens,
-        # writes and renames the files itself): the local taxonomy's
-        # category, with the message - aws's own words - kept as it is.
-        local = translate_os_error(exc, operation=operation, key=key)
-        local.bucket = bucket
-        return local
-    category = _crt_error_category(exc)
-    if category is not None:
-        return category(str(exc), operation=operation, bucket=bucket, key=key)
+    name = crt_error_name(exc)
+    if name is not None and (
+        name in _CRT_TRANSPORT_NAMES or name.startswith(_CRT_TRANSPORT_PREFIXES)
+    ):
+        return TransportError(str(exc), operation=operation, bucket=bucket, key=key)
     return Boto3S3Error(str(exc), operation=operation, bucket=bucket, key=key)
 
 
@@ -1277,8 +1267,9 @@ class S3Storage(Storage):
         a lock; build the client on the caller side for concurrent use. A failed
         default build raises the translated ``Boto3S3Error`` -
         ``InvalidConfigError`` for a set-but-unusable ``AWS_PROFILE``, partial
-        credentials, a malformed environment endpoint or a config value of the
-        wrong shape - never the raw
+        credentials, a malformed environment endpoint, a config value of the
+        wrong shape or a ``credential_process`` executable that cannot run -
+        never the raw
         botocore error (design/exceptions.md section 1). Missing credentials
         and an unset region do not fail the build: the client's first request
         fails on the missing credentials instead, and an unset region falls
@@ -1289,12 +1280,14 @@ class S3Storage(Storage):
             with s3_errors(operation=None):
                 try:
                     self._client = boto3.client("s3")
-                except (ValueError, AttributeError) as exc:
+                except (ValueError, AttributeError, OSError) as exc:
                     # A malformed endpoint from the environment
                     # (AWS_ENDPOINT_URL[_S3]) raises a plain ValueError, not a
-                    # BotoCoreError, and a config value of the wrong shape
-                    # (`s3 = foo`) an AttributeError - the same holes
-                    # S3.client() plugs (design/exceptions.md).
+                    # BotoCoreError, a config value of the wrong shape
+                    # (`s3 = foo`) an AttributeError, and a
+                    # `credential_process` executable that cannot run an
+                    # OSError - the same holes S3.client() plugs
+                    # (design/exceptions.md).
                     raise InvalidConfigError(str(exc)) from exc
         return self._client
 

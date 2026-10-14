@@ -1159,8 +1159,9 @@ class S3:
         one explicitly via ``S3Storage(uri, client=s3.client())``. A failed build
         raises the translated ``Boto3S3Error`` - ``InvalidConfigError`` for a
         set-but-unusable ``AWS_PROFILE``, partial credentials, a malformed
-        region or ``endpoint_url``, or a config value of the wrong shape
-        (``s3 = foo``), and the base ``Boto3S3Error`` for any other
+        region or ``endpoint_url``, a config value of the wrong shape
+        (``s3 = foo``) or a ``credential_process`` executable that cannot run,
+        and the base ``Boto3S3Error`` for any other
         botocore error, which the translator's last clause claims - never the
         raw botocore error (design/exceptions.md section 1). Missing
         credentials and an unset region do not fail the build: missing
@@ -1168,21 +1169,30 @@ class S3:
         ``presign`` - as a ``ConfigurationError``, and an unset region falls
         back to botocore's default for S3.
         """
+        # Outside the translation: a session without `client` is the
+        # caller's programming error, and passes through as one.
+        build: Any = self._session.client if self._session is not None else boto3.client
         # operation=None: no subcommand is in scope at build time.
         with s3_errors(operation=None):
             try:
-                if self._session is not None:
-                    return self._session.client(
-                        "s3", endpoint_url=self._endpoint_url, config=self._config
-                    )
-                return boto3.client("s3", endpoint_url=self._endpoint_url, config=self._config)
-            except (ValueError, AttributeError) as exc:
-                # botocore rejects a malformed endpoint_url with a plain
-                # ValueError (not a BotoCoreError), and trips over a config
-                # value of the wrong shape (`s3 = foo`, a scalar where it
-                # reads a section) with an AttributeError; either would leak
-                # raw through s3_errors. A set-but-unusable setting is
-                # InvalidConfigError's definition (design/exceptions.md).
+                return build("s3", endpoint_url=self._endpoint_url, config=self._config)
+            except (ValueError, AttributeError, OSError) as exc:
+                # What the SDK raises outside its own family while it reads
+                # the configuration: a plain ValueError for a malformed
+                # endpoint_url, an AttributeError for a config value of the
+                # wrong shape (`s3 = foo`, a scalar where it reads a section),
+                # an OSError for a `credential_process` executable that cannot
+                # be run (the provider runs it at build). A set-but-unusable
+                # setting is InvalidConfigError's definition
+                # (design/exceptions.md). A `config` that is not a botocore
+                # Config is the caller's error, not the configuration's.
+                from botocore.config import Config as BotocoreConfig
+
+                if isinstance(exc, AttributeError) and not isinstance(
+                    self._config,
+                    (BotocoreConfig, type(None)),  # pyright: ignore[reportUnnecessaryIsInstance] - a caller's value at runtime
+                ):
+                    raise
                 raise InvalidConfigError(str(exc)) from exc
 
     def materialize_crt_engine(

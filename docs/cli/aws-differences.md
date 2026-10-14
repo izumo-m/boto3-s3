@@ -355,12 +355,14 @@ comes out differently, listed in section 1.
   measurement).
 - **Ctrl-C's closing line.** Both tools exit 1 on a Ctrl-C caught mid-run,
   and both close with `cancelled: ctrl-c received` when the interrupt
-  cancels a classic transfer: a download whose body is still arriving, or an
+  cancels a classic transfer: a download whose body is still arriving, a
+  multipart upload or copy with parts or its completion still to go, or an
   item still waiting for a worker. `aws` produces that line only from such a
   cancelled transfer, so everywhere else it has one — the
   interrupt landed before the first transfer was submitted, or during a
-  `--dryrun`, or after the last one finished, or while every request of the
-  run was already out (an upload, a copy or a delete it lets finish: a single
+  `--dryrun`, or after the last one finished, or while every transfer of the
+  run was down to its one request already out (an upload or copy small
+  enough to go as one request, or a delete, that it lets finish: a single
   one, or a few no more than the worker count), or mid-submission under
   `preferred_transfer_client = crt` — `aws` closes instead with a
   `fatal error:` line carrying no message: its recorder renders the
@@ -386,11 +388,14 @@ comes out differently, listed in section 1.
   `aws` cancels it and reports `delete failed: s3://… AWS_ERROR_S3_CANCELED:
   Request successfully cancelled` with no closing line, exit code 1 on both.
 - **A CRT download that writes no file fails here.** Under
-  `preferred_transfer_client = crt`, a download whose local file cannot be
-  created at all - a name longer than the filesystem allows - is reported by
-  the CRT engine as a success. `aws` prints `download:` and a warning that the
-  modification time could not be set, exits 2, and on `mv` deletes the S3
-  object, so the object is gone and no file was written (measured). This
+  `preferred_transfer_client = crt`, a download whose file cannot be put in
+  place - a name longer than the filesystem allows, a directory already
+  standing at the destination - is reported by the CRT engine as a success
+  (`s3transfer` drops the failed rename of its temporary file). `aws` prints
+  `download:` (with a warning that the modification time could not be set,
+  and exit code 2, where the name is too long; exit code 0 otherwise), and on
+  `mv` deletes the S3 object, so the object is gone and no file was written
+  (measured). This
   command reports the item as `download failed:` / `move failed:` with the
   operating system's error, exits 1, and keeps the object - the classic
   engine's outcome on both tools.

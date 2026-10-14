@@ -11,6 +11,7 @@ deterministic.
 from __future__ import annotations
 
 import concurrent.futures
+import errno
 import io
 import os
 import threading
@@ -2247,52 +2248,70 @@ class TestWorkerRaise:
         assert transferrer.warner.warned == 1
 
 
-class _SettableFuture(_FakeCrtFuture):
-    """A CRT future that succeeded, until a subscriber overrides its outcome."""
+class _CrtCoordinator:
+    """s3transfer's CRT coordinator: a done transfer ignores a late exception."""
 
     def __init__(self) -> None:
+        self.exception: BaseException | None = None
+
+    def done(self) -> bool:
+        return True
+
+    def set_exception(self, exception: BaseException, override: bool = False) -> None:
+        if not self.done() or override:
+            self.exception = exception
+
+
+class _CrtRenameFuture(_FakeCrtFuture):
+    def __init__(self, fileobj: Any) -> None:
         super().__init__(RuntimeError("unused"))
-        self._failure: BaseException | None = None
+        self._coordinator = _CrtCoordinator()
+        cast("Any", self.meta).call_args = SimpleNamespace(fileobj=fileobj)
 
     def result(self) -> None:
-        if self._failure is not None:
-            raise self._failure
+        if self._coordinator.exception is not None:
+            raise self._coordinator.exception
 
     def set_exception(self, exception: BaseException) -> None:
-        self._failure = exception
+        self._coordinator.set_exception(exception, override=True)
 
 
-class _CrtDownloadWritingNothing(_CrtDrainManager):
-    """The CRT engine's report for a download it could not create: success."""
+class _CrtRenameFailing(_CrtDrainManager):
+    """The CRT manager's download whose rename into place fails: its done
+    handler (``RenameTempFileHandler``) runs before the subscribers and hands
+    the error to the already-done coordinator."""
+
+    def __init__(self, error: OSError) -> None:
+        super().__init__()
+        self._error = error
 
     def download(self, **kwargs: Any) -> _FakeCrtFuture:
-        future = _SettableFuture()
-        self._accepted.append((future, list(kwargs["subscribers"])))
+        future = _CrtRenameFuture(kwargs["fileobj"])
+        subscribers = list(kwargs["subscribers"])
+        for subscriber in subscribers:
+            on_queued = getattr(subscriber, "on_queued", None)
+            if on_queued is not None:
+                on_queued(future)
+        self._accepted.append((future, subscribers))
         return future
 
-
-class TestDirectoryCreatorWording:
-    def test_an_embedded_nul_reads_as_the_bundled_interpreter_words_it(
-        self, tmp_path: Path
-    ) -> None:
-        # aws's subscriber lets the ValueError through; its 3.14 names the
-        # path function, which 3.10 and 3.11 do not.
-        future = SimpleNamespace(
-            meta=SimpleNamespace(
-                call_args=SimpleNamespace(fileobj=str(tmp_path / "d\x00e" / "f.txt"))
-            )
-        )
-        with pytest.raises(ValueError, match=r"^mkdir: embedded null character in path$"):
-            transfer._DirectoryCreator().on_queued(future)  # pyright: ignore[reportPrivateUsage]
+    def _drain(self) -> None:
+        for future, _subscribers in self._accepted:
+            future._coordinator.set_exception(self._error)  # the rename handler
+        super()._drain()
 
 
-class TestCrtDownloadNeverWritten:
-    """awscrt reports a download whose file it could not create (a name too
-    long) as a success; aws then prints it done with an mtime warning, and a
-    mv deletes the source (measured). Nothing arrived, so the item fails."""
+class TestCrtDownloadRenameFailure:
+    """A CRT download whose rename into place fails (a directory at the
+    destination, a name too long to create) read as a success: aws then
+    prints it done, and a mv deletes the source with nothing written
+    (measured). The failure now settles the item."""
 
     @pytest.mark.parametrize("is_move", [False, True])
     def test_the_item_fails_and_the_source_stays(self, tmp_path: Path, is_move: bool) -> None:
+        dest = tmp_path / "a.bin"
+        dest.mkdir()
+        error = IsADirectoryError(errno.EISDIR, "Is a directory", str(dest) + ".tmp", str(dest))
         item = TransferItem(
             compare_key="a.bin",
             size=7,
@@ -2300,20 +2319,83 @@ class TestCrtDownloadNeverWritten:
             mtime=datetime(2025, 1, 1, tzinfo=timezone.utc),
             src_bucket="bucket",
             src_key="d/a.bin",
-            dest_path=str(tmp_path / "never-written.bin"),
+            dest_path=str(dest),
         )
         client, calls = make_recording_client([])
         results: list[OpResult] = []
         with Transferrer(
             TransferType.DOWNLOAD, client, is_move=is_move, on_result=results.append
         ) as transferrer:
-            transferrer._manager = _CrtDownloadWritingNothing()  # pyright: ignore[reportPrivateUsage]
+            transferrer._manager = _CrtRenameFailing(error)  # pyright: ignore[reportPrivateUsage]
             transferrer.submit(item)
         assert calls == []  # no DeleteObject for the source
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
-        cause = results[0].error.__cause__ if results[0].error is not None else None
-        assert isinstance(cause, OSError)
-        assert cause.filename == str(tmp_path / "never-written.bin")
+        failure = results[0].error
+        assert failure is not None and failure.__cause__ is error
+        # A local file's failure: the file in key, no bucket.
+        assert (failure.bucket, failure.key) == (None, str(dest).replace(os.sep, "/"))
+
+
+class _CrtNamedError(Exception):
+    """awscrt's ``AwsCrtError`` shape: ``code`` / ``name``."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f"{name}: text")
+        self.code = 43
+        self.name = name
+
+
+class TestLocalFailureClassification:
+    """A failure of the item's local file takes the local taxonomy's class
+    and names the file, whichever engine raised it (`_local_failure`)."""
+
+    def _record(self, kind: TransferType, item: TransferItem, exc: BaseException) -> OpResult:
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        with Transferrer(kind, client, on_result=results.append) as transferrer:
+            transferrer._record_failure(item, exc)  # pyright: ignore[reportPrivateUsage]
+        assert len(results) == 1
+        return results[0]
+
+    def _download(self, **fields: Any) -> TransferItem:
+        return TransferItem(compare_key="a.bin", src_bucket="b", src_key="d/a.bin", **fields)
+
+    @pytest.mark.parametrize(
+        ("exc", "category"),
+        [
+            (PermissionError(errno.EACCES, "Permission denied", "/x/a.bin.tmp"), AccessDeniedError),
+            (FileNotFoundError(errno.ENOENT, "No such file or directory"), NotFoundError),
+            (IsADirectoryError(errno.EISDIR, "Is a directory"), TransportError),
+            (_CrtNamedError("AWS_ERROR_NO_PERMISSION"), AccessDeniedError),
+            (_CrtNamedError("AWS_ERROR_FILE_INVALID_PATH"), NotFoundError),
+            (_CrtNamedError("AWS_ERROR_FILE_WRITE_FAILURE"), TransportError),
+        ],
+    )
+    def test_a_download_s_local_failure_names_the_file(
+        self, tmp_path: Path, exc: BaseException, category: type[Boto3S3Error]
+    ) -> None:
+        dest = str(tmp_path / "a.bin")
+        result = self._record(TransferType.DOWNLOAD, self._download(dest_path=dest), exc)
+        assert result.outcome is OpOutcome.FAILED
+        assert type(result.error) is category
+        assert result.error is not None
+        assert str(result.error) == str(exc)
+        assert (result.error.bucket, result.error.key) == (None, dest.replace(os.sep, "/"))
+
+    def test_an_upload_s_local_failure_names_its_source(self, tmp_path: Path) -> None:
+        src = str(tmp_path / "a.bin")
+        item = TransferItem(compare_key="a.bin", src_path=src, dest_bucket="b", dest_key="k")
+        result = self._record(TransferType.UPLOAD, item, IsADirectoryError(errno.EISDIR, "x"))
+        assert type(result.error) is TransportError
+        assert result.error is not None and result.error.key == src.replace(os.sep, "/")
+
+    def test_a_stream_item_keeps_the_request_s_attribution(self) -> None:
+        # No local path to name: the failure stays the base error on the object.
+        item = self._download(dest_fileobj=cast("Any", _WriteOnlySink()))
+        result = self._record(TransferType.DOWNLOAD, item, PermissionError(errno.EACCES, "x"))
+        assert type(result.error) is Boto3S3Error
+        assert result.error is not None
+        assert (result.error.bucket, result.error.key) == ("b", "d/a.bin")
 
 
 class TestStreamDownloadRetry:

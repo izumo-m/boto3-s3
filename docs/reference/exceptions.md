@@ -78,7 +78,9 @@ instances exist only where no classification applies:
 
 - the S3 error translator's last-resort clause, for an exception no earlier
   clause claims — an error the CRT engine reports under a name it has no
-  category for (a cancellation, an unknown error), say;
+  category for (a cancellation, an unknown error), or an `OSError` a request
+  raises from a credential provider (a `credential_process` executable or a
+  web identity token file that is missing), say;
 - whatever an S3 request raised from inside botocore that is none of
   botocore's own exceptions — a redirect loop ending in `RecursionError`, an
   S3 Express session reply without `Credentials` (`KeyError`), a response
@@ -313,9 +315,10 @@ AWS configuration (a `ConfigParseError`, say). It is also the class for a
 malformed `endpoint_url` — one passed to `S3`, or one taken from
 `AWS_ENDPOINT_URL` / `AWS_ENDPOINT_URL_S3` when a default client is built —
 and for a malformed or empty region, both of which botocore rejects with a
-`ValueError` that the client builders convert here, and for a config value of
+`ValueError` that the client builders convert here, for a config value of
 the wrong shape (`s3 = foo`, a value where botocore reads a section), on which
-botocore's client build fails with an `AttributeError`. The CRT transfer engine
+botocore's client build fails with an `AttributeError`, and for a
+`credential_process` executable that cannot run while the client is built. The CRT transfer engine
 raises it when it is built — at the first transfer, or from
 [`materialize_crt_engine`](./s3.md#materialize_crt_engineclient--transfer_confignone)
 — around a CA bundle it cannot read (a missing path, a directory, a file it
