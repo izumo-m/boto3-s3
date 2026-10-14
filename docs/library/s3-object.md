@@ -263,7 +263,8 @@ intact with no leftovers, readers never see a half-written file, a symlink at
 the destination is replaced rather than written through, and missing parent
 directories are created. One thing goes further than `cp`'s lane: an existing
 file's permission bits survive the replacement, rather than the replaced file
-coming back with whatever bits a fresh one gets.
+coming back with whatever bits a fresh one gets. (On Windows a read-only file
+cannot be replaced at all: the download fails and leaves it as it was.)
 
 What this pair deliberately does not do:
 

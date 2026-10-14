@@ -2146,6 +2146,37 @@ class TestGetFile:
         assert isinstance(exc_info.value.__cause__, OSError)
         assert sorted(p.name for p in tmp_path.iterdir()) == ["occupied"]  # temp file removed
 
+    def test_a_read_only_destination_that_cannot_be_replaced_leaves_no_temp_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Windows: the temp file takes the destination's read-only mode, the
+        # replace onto a read-only file is refused, and so is deleting a
+        # read-only temp file - the cleanup must lift the flag first. Both
+        # refusals are simulated so the path runs on every platform.
+        dest = tmp_path / "state.json"
+        dest.write_bytes(b"old")
+        dest.chmod(0o444)
+        real_unlink = os.unlink
+
+        def refuse_replace(_src: str, _dst: str) -> None:
+            raise PermissionError(13, "Access is denied", str(dest))
+
+        def windows_unlink(path: str) -> None:
+            if not os.stat(path).st_mode & stat.S_IWRITE:
+                raise PermissionError(13, "Access is denied", path)
+            real_unlink(path)
+
+        monkeypatch.setattr(os, "replace", refuse_replace)
+        monkeypatch.setattr(os, "unlink", windows_unlink)
+        client, _calls = make_recording_client([_get_response(b"new")])
+        try:
+            with pytest.raises(AccessDeniedError):
+                S3Storage("s3://bucket/state.json", client=client).get_file(dest)
+            assert dest.read_bytes() == b"old"
+            assert sorted(p.name for p in tmp_path.iterdir()) == ["state.json"]
+        finally:
+            dest.chmod(0o644)
+
     @pytest.mark.skipif(sys.platform == "win32", reason="symlink creation needs privileges")
     def test_a_symlink_destination_is_replaced_not_followed(self, tmp_path: Path) -> None:
         reference = tmp_path / "reference.bin"

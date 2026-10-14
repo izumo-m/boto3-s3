@@ -1053,7 +1053,8 @@ s3transfer's own download lane has — so:
   replacement, since the swap lands a new inode — this lane's own addition, not
   something s3transfer does; a destination that did not exist gets the bits a
   plain `open(…, "wb")` would give it (the temp file is created with mode
-  `0o666`, so the umask decides);
+  `0o666`, so the umask decides). Windows cannot replace a read-only
+  destination: the call fails with `AccessDeniedError` and leaves it as it was;
 - missing parent directories are created.
 
 Nothing stamps the local file's mtime: that is the transfer lanes' AWS CLI

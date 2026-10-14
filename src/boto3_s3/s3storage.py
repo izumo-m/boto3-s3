@@ -1705,7 +1705,9 @@ class S3Storage(Storage):
         replaced rather than followed into its target. On top of that pair, and
         unlike s3transfer, an existing regular destination's permission bits are
         carried onto the replacement (the swap lands a new inode, so without
-        that the mode would silently become the temp file's). Missing parent
+        that the mode would silently become the temp file's). Windows cannot
+        replace a read-only destination: the call fails with
+        ``AccessDeniedError`` and leaves it as it was. Missing parent
         directories are created.
 
         Nothing stamps the local file's mtime - that is the transfer lanes' aws
@@ -1871,8 +1873,15 @@ class S3Storage(Storage):
             if not stream_owns_fd:
                 with suppress(OSError):
                     os.close(fd)
-            with suppress(OSError):
+            try:
                 os.unlink(temp_path)
+            except OSError:
+                # Windows refuses to delete a read-only file, and the temp file
+                # took a read-only destination's mode - the very replace that
+                # Windows also refuses. Lift the flag and delete again.
+                with suppress(OSError):
+                    os.chmod(temp_path, stat_module.S_IREAD | stat_module.S_IWRITE)
+                    os.unlink(temp_path)
 
         try:
             _preserve_destination_mode(dest, temp_path)
