@@ -1184,6 +1184,43 @@ class TestSerializerConfig:
         assert "cfg/retry-mode" in user_agent
         assert user_agent.count("Botocore/") == 1
 
+    def test_another_sessions_app_id_does_not_name_the_requests(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Restoring the header's own form must not let the serializer's
+        # session supply what the client has none of: X's `sdk_ua_app_id`
+        # named the CRT's requests of a client of Y that carries no app id,
+        # whose classic requests carry none (measured).
+        import botocore.session
+
+        config = tmp_path / "config"
+        config.write_text("[profile x]\nsdk_ua_app_id = xapp\n[profile y]\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        monkeypatch.delenv("AWS_SDK_UA_APP_ID", raising=False)
+        client = botocore.session.Session(profile="y").create_client("s3", region_name="us-east-1")
+        serializer = self._serializer_client(client, botocore.session.Session(profile="x"))
+        assert "app/" not in self._user_agent(serializer)
+
+    def test_a_second_client_with_another_app_id_does_not_share_the_engine(self) -> None:
+        # The engine's serializer names its requests after the first client;
+        # a client naming itself otherwise falls back to classic rather than
+        # going out under the first one's app id.
+        import botocore.session
+
+        session = botocore.session.Session()
+        first = session.create_client(
+            "s3", region_name="us-east-1", config=Config(**{"user_agent_appid": "aaa"})
+        )
+        second = session.create_client(
+            "s3", region_name="us-east-1", config=Config(**{"user_agent_appid": "bbb"})
+        )
+        same = session.create_client(
+            "s3", region_name="us-east-1", config=Config(**{"user_agent_appid": "aaa"})
+        )
+        shape = crtsupport._serializer_config_shape  # pyright: ignore[reportPrivateUsage]
+        assert shape(first) != shape(second)
+        assert shape(first) == shape(same)
+
     def test_a_callers_own_user_agent_still_rides(self) -> None:
         import botocore.session
 
