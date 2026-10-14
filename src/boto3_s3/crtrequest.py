@@ -159,7 +159,13 @@ class CrtRequestSender:
         if error is not None:
             raise self._translate(error, operation) or error
         code = status[0] if status else 200
-        if code == 200 and _special_case_error(bytes(body)):
+        payload = bytes(body)
+        if code < 300 and operation != "DeleteObjects":
+            # A single DeleteObject's answer lives in its headers alone, and
+            # aws's CRT client never reads the body of one that succeeded: it
+            # takes the 200 as the delete done whatever follows (measured).
+            payload = b""
+        elif code == 200 and _special_case_error(payload):
             # botocore's rule for a 200 answer whose body is S3's error, or
             # does not parse at all: a 500. The CRT client already fails an
             # `Error` document itself (re-sending a passing fault first), so
@@ -167,7 +173,7 @@ class CrtRequestSender:
             # DeleteObjects result it would list no failure, which says every
             # key was deleted.
             code = 500
-        parsed = self._parse(operation, code, response_headers, bytes(body))
+        parsed = self._parse(operation, code, response_headers, payload)
         if code >= 300:
             raise self._client_error(parsed, operation)
         return parsed

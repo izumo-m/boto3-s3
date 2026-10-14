@@ -195,6 +195,14 @@ class TestSend:
             sender.call("DeleteObjects", {"Bucket": "bkt", "Delete": {"Objects": [{"Key": "a"}]}})
         assert exc_info.value.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 500
 
+    def test_a_single_delete_s_200_is_done_whatever_its_body(self, serve: Any) -> None:
+        # A DeleteObject reads nothing from its body; aws's CRT client takes
+        # the 200 as the delete done (measured), so the batch's rule stays
+        # with the batch.
+        _, sender = serve(_reply("200 OK", {}, b"<ListBucketResult><Contents>"))
+        response = sender.call("DeleteObject", {"Bucket": "bkt", "Key": "k"})
+        assert response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 200
+
     def test_a_request_botocore_rejects_never_goes_out(self, serve: Any) -> None:
         from botocore.exceptions import ParamValidationError
 
