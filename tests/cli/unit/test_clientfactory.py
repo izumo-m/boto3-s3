@@ -1117,6 +1117,41 @@ class TestCredentialCache:
             cache_dir.chmod(0o700)
         assert excinfo.value.filename == str(cache_dir / "denied-key.json")
 
+    def test_the_sso_token_cache_is_written_the_same_way(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The `sso-session` provider writes a refreshed token back to
+        # ~/.aws/sso/cache through a cache it builds itself, from this class
+        # attribute. Through the installed botocore's temp file + rename, a
+        # read-only entry in a writable directory was replaced (rc 0 where
+        # aws is 255), a writable entry in a read-only directory could not be
+        # (rc 255 where aws is 0), and a 0644 entry became 0600 (measured).
+        import tempfile
+
+        from botocore.tokens import SSOTokenProvider
+
+        def refuse(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("the token cache must not write through a temp file")
+
+        # Restored after the test: the pin is process-wide by design.
+        monkeypatch.setattr(
+            SSOTokenProvider, "DEFAULT_CACHE_CLS", SSOTokenProvider.DEFAULT_CACHE_CLS
+        )
+        clientfactory.build_session(_parse([]))
+        monkeypatch.setattr(tempfile, "mkstemp", refuse)
+        token_dir = tmp_path / "sso-cache"
+        token_dir.mkdir()
+        entry = token_dir / "token-key.json"
+        entry.write_text("{}")
+        entry.chmod(0o644)
+        cache = SSOTokenProvider.DEFAULT_CACHE_CLS(
+            str(token_dir), dumps_func=lambda _value: "dumped"
+        )
+        cache["token-key"] = {"accessToken": "t"}
+        assert entry.read_text() == "dumped"
+        if sys.platform != "win32":
+            assert stat.S_IMODE(entry.stat().st_mode) == 0o644
+
     def test_a_fetched_credential_lands_in_that_directory(self, tmp_path: Path) -> None:
         # The write half: whatever a provider caches becomes a file under the
         # shared directory, so the next invocation (and aws) can read it.

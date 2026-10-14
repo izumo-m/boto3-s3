@@ -13,6 +13,7 @@ import argparse
 import enum
 import json
 import os
+from collections.abc import Callable
 from datetime import datetime
 from functools import cache
 from typing import TYPE_CHECKING, Any, Final, Literal, cast
@@ -383,6 +384,13 @@ def _inject_credential_cache(session: BotocoreSession) -> None:
     driver has bound ``--profile``, so the provider chain this reaches is built
     for the run's own profile).
 
+    The SSO token the ``sso-session`` provider refreshes is written back to
+    ``~/.aws/sso/cache`` the same way - the installed botocore writes it
+    through a temporary file and ``os.replace``, so a cache aws can write
+    (an unwritable directory over a writable entry) failed here, one aws
+    cannot (a read-only entry) succeeded here, and the entry's mode changed
+    (measured) - by building that cache from the same class.
+
     A ``ProfileNotFound`` from building the chain is swallowed exactly as aws
     swallows it: the profile is reported by the caller's own config read
     instead, keeping that error's wording and position. The ``sso`` provider is
@@ -390,9 +398,15 @@ def _inject_credential_cache(session: BotocoreSession) -> None:
     a botocore whose chain has no such provider.
     """
     from botocore.exceptions import ProfileNotFound, UnknownCredentialError
+    from botocore.tokens import SSOTokenProvider
 
     cache = _credential_cache_class()
     cache_dir = _credential_cache_dir()
+    # The SSO provider builds its token cache itself, from this class
+    # attribute, when the chain is built - and writes it back on every
+    # refresh of an `sso-session` token. A CLI process opens no session that
+    # should write it any other way.
+    SSOTokenProvider.DEFAULT_CACHE_CLS = cache
     try:
         chain = session.get_component("credential_provider")
         chain.get_provider("assume-role").cache = cache(cache_dir)
@@ -436,6 +450,10 @@ def _credential_cache_class() -> type[Any]:
     name, stable across runs, where this CLI reported a random
     ``tmpXXXXXXXX.tmp`` (rc 255 on both).
 
+    The SSO token cache (``~/.aws/sso/cache``) is one of these too: botocore
+    builds it inside the SSO provider with its own serializer, which this
+    class takes as ``dumps_func`` the way botocore's does.
+
     The class is built lazily because botocore is imported lazily, and cached
     so every cache this CLI installs is of one type.
     """
@@ -444,16 +462,22 @@ def _credential_cache_class() -> type[Any]:
     from botocore.utils import JSONFileCache
 
     class CliCredentialCache(JSONFileCache):
-        def __init__(self, working_dir: str) -> None:
-            super().__init__(working_dir)
-            # The base keeps its own copy under a private name botocore-stubs
-            # does not declare, so hold one here rather than reach for it.
+        def __init__(
+            self, working_dir: str, dumps_func: Callable[[Any], str] | None = None
+        ) -> None:
+            super().__init__(working_dir, dumps_func=dumps_func)
+            # The base keeps its own copies under private names botocore-stubs
+            # does not declare, so hold them here rather than reach for them.
             self._dir = working_dir
+            self._dump = dumps_func
 
         def __setitem__(self, cache_key: str, value: Any) -> None:
             full_key = os.path.join(self._dir, cache_key + ".json")
             try:
-                file_content = json.dumps(value, default=_serialize_cache_entry)
+                if self._dump is not None:
+                    file_content = self._dump(value)
+                else:
+                    file_content = json.dumps(value, default=_serialize_cache_entry)
             except (TypeError, ValueError) as exc:
                 raise ValueError(
                     f"Value cannot be cached, must be JSON serializable: {value}"
