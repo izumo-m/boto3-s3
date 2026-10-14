@@ -210,6 +210,25 @@ class TestS3Method:
         monkeypatch.setenv("AWS_CONFIG_FILE", str(path))
         assert S3().aws_config().get_str("region") == "us-east-1"
 
+    def test_a_later_default_session_is_followed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The memo used to keep the default session of the first read, so a
+        # `setup_default_session(profile_name=...)` after it moved the
+        # zero-config S3()'s clients to the new profile while the reader stayed
+        # on the old one (measured).
+        path = tmp_path / "config"
+        path.write_text(_CONFIG)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(path))
+        monkeypatch.delenv("AWS_DEFAULT_REGION")  # the profile's region decides the client's
+        monkeypatch.setattr(boto3, "DEFAULT_SESSION", None)
+        s3 = S3()
+        assert s3.aws_config().get_str("region") == "us-east-1"
+        assert s3.aws_config() is s3.aws_config()
+        boto3.setup_default_session(profile_name="prod")
+        assert s3.aws_config().get_str("region") == "eu-west-1"
+        assert s3.client().meta.region_name == "eu-west-1"
+
 
 class TestConfigSectionParsing:
     """Parsing / lookup in isolation - literal dicts, no file or SDK."""

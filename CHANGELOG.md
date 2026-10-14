@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `EtagComparison` now refuses a `part_size` that is not a positive integer when it is constructed.
 - A timestamp an S3-compatible endpoint sends without a zone is now read as local time, as `aws s3` reads it, instead of ending a sync with `TypeError`.
 - Added `is_s3express_accesspoint_path`.
+- `S3.aws_config()` without a session now follows a later `boto3.setup_default_session(...)`, as `S3.client()` does, instead of keeping the profile of its first read.
 - The CRT transfer engine no longer resolves a lazily refreshed credential (an assumed role, an SSO token) before the transfer, so a refresh failure is the item's and a dryrun completes, as with `aws s3`; it now also runs on boto3 1.34 to 1.41 with the `crt` extra (it failed with `ImportError`), and a CA bundle it cannot use raises `InvalidConfigError` instead of the bare error.
 - A second client whose `Config` or endpoint is spelled differently but resolves the same (`Config(s3={})` after `Config()`, a trailing slash) now shares the CRT engine instead of silently running classic, and the CRT engine's requests now carry the client's `app/` User-Agent id and the client's own URL shape when the client came from another session than the `S3`'s.
 - An upload from an `IOStorage` over a pipe or socket now works on the CRT engine (it failed with `Illegal seek`, and on Windows stored a truncated object).

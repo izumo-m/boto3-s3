@@ -1143,7 +1143,9 @@ class S3:
         # Memoized AwsConfig (aws_config()): resolve+parse the config file once
         # per instance, since a sync filter may consult it per object. A benign,
         # idempotent cache - concurrent first calls recompute the same reader.
-        self._aws_config: AwsConfig | None = None
+        # Without a session it is kept with the default session it was read
+        # under, and read again once boto3's default session changes.
+        self._aws_config: tuple[AwsConfig, object] | None = None
 
     @property
     def session(self) -> Session | None:
@@ -1289,13 +1291,20 @@ class S3:
         (``cp`` / ``sync`` / ...) never read the config file on their own, so they
         carry no hidden dependence on the ambient ``~/.aws/config``. The reader is
         memoized per instance (the file is parsed once in the common case;
-        concurrent first calls may benignly recompute - see ``__init__``). Matching ``aws s3``'s
+        concurrent first calls may benignly recompute - see ``__init__``).
+        Without a ``session`` it follows ``boto3.DEFAULT_SESSION`` as `client`
+        does: a ``boto3.setup_default_session(profile_name=...)`` made after a
+        first read is picked up by the next one, rather than leaving the reader
+        on the profile the clients no longer use. Matching ``aws s3``'s
         ``[s3]`` semantics on top of these values (the defaults table, validation,
         the engine decision) is the CLI distribution's job, not the library's.
         """
-        if self._aws_config is None:
-            self._aws_config = AwsConfig.from_session(self._session)
-        return self._aws_config
+        source = self._session if self._session is not None else boto3.DEFAULT_SESSION
+        memo = self._aws_config
+        if memo is None or memo[1] is not source:
+            memo = (AwsConfig.from_session(self._session), source)
+            self._aws_config = memo
+        return memo[0]
 
     # -- listing ----------------------------------------------------------
 
