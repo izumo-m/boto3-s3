@@ -188,6 +188,27 @@ class TestAliasGlobals:
         )
         assert seen == ["eu-west-1", "eu-west-1"]
 
+    def test_the_typed_region_is_kept_for_the_session(self, alias_file: Path) -> None:
+        # aws binds its session's region from the typed arguments before the
+        # alias runs, so the credential chain's STS stays in the typed region
+        # (or none) while the request signs with the alias's (measured).
+        from boto3_s3_cli import clientfactory
+
+        alias_file.write_text("[command s3]\ng = ls --region eu-west-1\n")
+        typed: list[str | None] = []
+
+        def factory(args: Any) -> Any:
+            from tests.utils.recorder import make_recording_client
+
+            typed.append(clientfactory.typed_region(args))
+            client, _calls = make_recording_client(_EMPTY_PAGE)
+            return client
+
+        ctx = Context(client_factory=factory)  # pyright: ignore[reportArgumentType]
+        assert cli.main(["g", "s3://bkt", "--region", "ap-south-1"], ctx=ctx) == 0
+        assert cli.main(["g", "s3://bkt"], ctx=ctx) == 0
+        assert typed == ["ap-south-1", None]
+
     def test_a_value_the_resolution_cannot_take_is_reported_not_raised(
         self, alias_file: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:

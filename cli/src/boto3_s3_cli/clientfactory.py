@@ -557,14 +557,15 @@ def build_s3(args: argparse.Namespace) -> S3:
     config and IMDS are all fixed by then. The same value is what the CRT
     posture below declares, so client and engine can never disagree on it, and
     `_bind_region` puts it on the session so the clients *botocore* builds
-    resolve it too.
+    resolve it too - unless an alias's ``--region`` replaced the typed one,
+    which reaches the clients only (`typed_region`).
     """
     from boto3_s3 import S3
 
     session = build_session(args)
     botocore_session = session._session  # pyright: ignore[reportPrivateUsage]
     region = _resolve_region(args.region, botocore_session)
-    _bind_region(botocore_session, args.region, region)
+    _bind_region(botocore_session, args, region)
 
     class CliS3(S3):
         def client(self) -> S3Client:
@@ -622,11 +623,11 @@ def build_s3(args: argparse.Namespace) -> S3:
 def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | None:
     """The region to build a client in: the *explicit* value, else the chain.
 
-    The *explicit* value is ``--region``, or the caller's region for
-    ``build_service_client`` - and it wins whenever it was supplied at all,
-    the empty string included. aws's s3 commands hand ``parsed_globals.region``
-    straight to ``create_client``, so ``--region ""`` reaches the S3 client as
-    itself and fails construction there on both tools (rc 255). What the
+    The *explicit* value is ``--region`` (an alias's included) - and it wins
+    whenever it was supplied at all, the empty string included. aws's s3
+    commands hand ``parsed_globals.region`` straight to ``create_client``, so
+    ``--region ""`` reaches the S3 client as itself and fails construction
+    there on both tools (rc 255). What the
     *session* is bound to is a different question with a different answer for
     that one value - see `_bind_region`.
     """
@@ -684,8 +685,24 @@ def _region_chain(session: BotocoreSession) -> str | None:
         return None
 
 
+# The namespace attribute an alias leaves the typed ``--region`` under when its
+# own value replaces ``region`` (`typed_region`).
+TYPED_REGION = "typed_region"
+
+
+def typed_region(args: argparse.Namespace) -> str | None:
+    """The ``--region`` the user typed, before an alias's value replaced it.
+
+    aws binds the session's region from the arguments it parsed itself, ahead
+    of any alias (``_handle_top_level_args``); an alias's ``--region`` only
+    rewrites the parsed globals its clients are built from. The dispatcher
+    keeps the typed value under `TYPED_REGION` when an alias replaces it.
+    """
+    return cast("str | None", getattr(args, TYPED_REGION, args.region))
+
+
 def _bind_region(
-    botocore_session: BotocoreSession, explicit: str | None, resolved: str | None
+    botocore_session: BotocoreSession, args: argparse.Namespace, resolved: str | None
 ) -> None:
     """Bind onto the session the region aws's own chain answers.
 
@@ -712,15 +729,25 @@ def _bind_region(
     this CLI walked on to ``AWS_DEFAULT_REGION`` and the profile and signed in
     a region aws never used.
 
-    *resolved* is the answer `_resolve_region` already computed for the same
-    flag, so the chain - whose last link is the IMDS probe - is walked once per
-    invocation. Only the falsy-flag corner asks it again, no client's region
-    being able to carry that answer. Nothing is bound when the chain resolved
-    nothing, which leaves the session on botocore's identical answer.
+    The flag that binds is the one the user typed (`typed_region`): an
+    alias's ``--region`` reaches the clients but not aws's session, so with
+    no other region an alias-carried one leaves aws's ``AssumeRole`` without
+    a region (rc 253) where binding it signed there (measured). Neither does
+    a client built for another region bind anything - only the builder that
+    opened the session does, so ``--source-region``'s client leaves the
+    credential chain in the run's own region, as aws's source client does.
+
+    *resolved* is the answer `_resolve_region` already computed for
+    ``args.region``, so the chain - whose last link is the IMDS probe - is
+    walked once per invocation. Only the falsy-flag corner and an alias's
+    replacement ask it again, no client's region being able to carry that
+    answer. Nothing is bound when the chain resolved nothing, which leaves the
+    session on botocore's identical answer.
     """
-    if explicit:
-        region = explicit
-    elif explicit is None:
+    typed = typed_region(args)
+    if typed:
+        region = typed
+    elif typed is None and args.region is None:
         region = resolved
     else:
         region = _region_chain(botocore_session)
@@ -784,13 +811,14 @@ def build_service_client(
     only the profile session, the caller's region choice (the source side
     passes ``--source-region``, the destination ``--region``, sts none),
     and the resolved TLS ``verify`` setting (`_resolve_verify`) - no endpoint
-    override. aws binds ``--region`` into the session itself at startup
-    (clidriver's ``set_config_variable``), so a ``create_client`` with no
-    ``region_name`` still lands in ``--region``; mirror that by falling back
-    from the caller's ``None`` to ``args.region`` before the shared
-    ``_resolve_region`` chain (``AWS_REGION`` > ``AWS_DEFAULT_REGION`` >
-    config > IMDS), and by binding the same answer onto a session this builder
-    opened itself (`_bind_region`). aws likewise resolves
+    override. A caller's ``None`` is left to the session, as there: aws binds
+    its region chain's answer into the session at startup, a truthy typed
+    ``--region`` at its head, so a ``create_client`` with no ``region_name``
+    lands on that answer - which `build_s3` bound, or `_bind_region` binds
+    here onto a session this builder opened itself. ``--region ""`` is the
+    corner that tells them apart: it never binds, so the source and sts
+    clients resolve the rest of the chain while the destination's s3control,
+    handed the flag itself, fails on the empty region (measured). aws likewise resolves
     ``--cli-read-timeout`` / ``--cli-connect-timeout`` into the *session*
     default client config at startup, so ``from_session``'s ``create_client``
     inherits them; fold the same timeouts into this client's ``Config``.
@@ -821,9 +849,7 @@ def build_service_client(
                 timestamp_parser=fast_parse_timestamp
             )
             session = boto3.Session(botocore_session=botocore_session)
-            _bind_region(
-                botocore_session, args.region, _resolve_region(args.region, botocore_session)
-            )
+            _bind_region(botocore_session, args, _resolve_region(args.region, botocore_session))
         else:
             botocore_session = session._session  # pyright: ignore[reportPrivateUsage]
         # aws's startup handlers thread the timeouts through the session
@@ -841,9 +867,7 @@ def build_service_client(
             session,
             botocore_session,
             service,
-            region_name=_resolve_region(
-                region if region is not None else args.region, botocore_session
-            ),
+            region_name=region,
             verify=_resolve_verify(args, botocore_session),
             config=Config(**service_overrides),
         )
@@ -1095,12 +1119,18 @@ def build_client(
                 timestamp_parser=fast_parse_timestamp
             )
             session = boto3.Session(botocore_session=botocore_session)
+            opened_here = True
         else:
             botocore_session = session._session  # pyright: ignore[reportPrivateUsage]
+            opened_here = False
         client_region = (
             _resolve_region(args.region, botocore_session) if region is _UNRESOLVED else region
         )
-        _bind_region(botocore_session, args.region, client_region)
+        if opened_here:
+            # A session handed in belongs to its opener, who bound it: a
+            # client built for another region (`--source-region`) must not
+            # rebind it under the credential chain (`_bind_region`).
+            _bind_region(botocore_session, args, client_region)
         client = _create_client(
             session,
             botocore_session,

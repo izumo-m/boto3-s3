@@ -1473,7 +1473,7 @@ class TestRegionSessionBinding:
         session = clientfactory.build_session(args)._session  # pyright: ignore[reportPrivateUsage]
         clientfactory._bind_region(  # pyright: ignore[reportPrivateUsage]
             session,
-            args.region,
+            args,
             clientfactory._resolve_region(args.region, session),  # pyright: ignore[reportPrivateUsage]
         )
         assert session.get_config_variable("region") is None
@@ -1537,6 +1537,51 @@ class TestRegionSessionBinding:
             monkeypatch.setenv(var, value)
         session = self._session_of(clientfactory.build_s3(_parse([])))
         assert session.get_config_variable("region") == ""
+
+    def test_a_client_built_for_another_region_does_not_rebind_the_session(self) -> None:
+        # `--source-region`'s client is built from the run's session with its
+        # own region; aws's source client takes that region as `region_name`
+        # alone, so its credential chain still signs `AssumeRole` in the
+        # run's region. Rebinding the shared session put STS in the source
+        # region - and with no other region source, made a run aws fails
+        # (`You must specify a region.`, rc 1) succeed (measured).
+        args = _parse(["--region", "eu-west-1"])
+        s3 = clientfactory.build_s3(args)
+        source_args = argparse.Namespace(**vars(args))
+        source_args.region = "us-west-2"
+        source_client = clientfactory.build_client(source_args, session=s3.session)
+        session = self._session_of(s3)
+        assert source_client.meta.region_name == "us-west-2"
+        assert session.get_config_variable("region") == "eu-west-1"
+        assert _provider_client(session).meta.region_name == "eu-west-1"
+
+    def test_a_source_region_alone_binds_nothing(self) -> None:
+        args = _parse([])
+        s3 = clientfactory.build_s3(args)
+        source_args = argparse.Namespace(**vars(args))
+        source_args.region = "us-west-2"
+        clientfactory.build_client(source_args, session=s3.session)
+        assert self._session_of(s3).get_config_variable("region") is None
+
+    @pytest.mark.parametrize(
+        ("typed", "expected"),
+        [(None, None), ("us-west-2", "us-west-2"), ("", None)],
+        ids=["none-typed", "typed", "empty-typed"],
+    )
+    def test_an_alias_region_reaches_the_client_but_not_the_session(
+        self, typed: str | None, expected: str | None
+    ) -> None:
+        # aws binds the session from the arguments it parsed itself, before
+        # any alias runs; an alias's `--region` rewrites only the globals the
+        # clients are built from (measured: `myls = ls --region eu-west-1`
+        # lists in eu-west-1 while `AssumeRole` goes to the typed region, or
+        # fails NoRegion, rc 253, with none).
+        args = _parse([] if typed is None else ["--region", typed])
+        setattr(args, clientfactory.TYPED_REGION, args.region)
+        args.region = "eu-west-1"
+        s3 = clientfactory.build_s3(args)
+        assert s3.client().meta.region_name == "eu-west-1"
+        assert self._session_of(s3).get_config_variable("region") == expected
 
     def test_the_region_chain_is_still_walked_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Binding must not cost a second walk: the chain's last link is the
@@ -2090,14 +2135,27 @@ class TestBuildServiceClient:
     ) -> None:
         # aws binds --region into the session at startup, so from_session's
         # region-less sts client (and the source s3control without
-        # --source-region) still lands in --region; the caller's None must fall
-        # back to args.region ahead of the env/config chain.
+        # --source-region) still lands in --region.
         monkeypatch.delenv("AWS_REGION", raising=False)
         monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
         client = clientfactory.build_service_client(
             "sts", _parse(["--region", "eu-central-1"]), region=None
         )
         assert client.meta.region_name == "eu-central-1"
+
+    def test_none_region_under_an_empty_flag_is_the_sessions_answer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `--region ""` never binds the session, so aws's region-less clients
+        # resolve the rest of its chain: measured, `mv` from an access-point
+        # alias with `--validate-same-s3-paths --region ""` and AWS_REGION set
+        # resolved and moved (rc 0), where taking the flag itself built them
+        # with an empty region (rc 255).
+        monkeypatch.setenv("AWS_REGION", "eu-west-1")
+        monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+        args = _parse(["--region", ""])
+        client = clientfactory.build_service_client("sts", args, region=None)
+        assert client.meta.region_name == "eu-west-1"
 
 
 def _client_verify(client: Any) -> Any:

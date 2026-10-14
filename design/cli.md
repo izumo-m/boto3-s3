@@ -565,7 +565,14 @@ numbers in the bold item labels below are that document's.
      `AWS_REGION=eu-west-1` has aws sign `AssumeRole` in eu-west-1. A present
      but empty `AWS_REGION=` is a different case: it *is* the chain's answer, so
      it binds as itself and aws signs with an empty region scope, rather than
-     being walked past to `AWS_DEFAULT_REGION` and the profile. The library
+     being walked past to `AWS_DEFAULT_REGION` and the profile. Only the builder
+     that opened the session binds it, and only from the `--region` the user
+     typed: aws binds once, in `_handle_top_level_args`, ahead of any alias, so
+     an alias's `--region` reaches the clients alone (the dispatcher keeps the
+     typed value aside, `typed_region`), and `--source-region`'s client leaves
+     the session alone. Rebinding either way signed `AssumeRole` in a region
+     aws never used, and with no other region source made a run aws fails
+     (rc 1 / 253) succeed (measured). The library
      keeps stock botocore order on purpose (the boto3=library / aws=CLI split, as
      for the profile chain in item 5).
   2. **always-on SigV4** - stock botocore downgrades presigned URLs to SigV2 in
@@ -1441,11 +1448,12 @@ construction order in section 5.7):
    ARN / MRAP ARN. A bare bucket passes through with no API call) and the
    same-path guard is reapplied to every combination - a match is 252 (the message
    uses the original URI). The clients go via `Context.service_client_factory`:
-   the src-side s3control uses `--source-region`, falling back to `--region`
-   when unspecified (aws-cli lands on the same result by binding `--region`
-   into the session both clients come from; its ARG_TABLE default is dead),
-   the dest side uses `--region`, and sts has no region (a transcription of aws-cli
-   `from_session`). An outposts **alias** is unresolvable, 252, and a missing MRAP
+   the src-side s3control uses `--source-region`, and when that is unspecified
+   names no region at all, like sts: both then land on the session's region,
+   which is a truthy `--region` or the rest of the chain - so `--region ""`
+   resolves the source side through `AWS_REGION` and the like, as aws's does
+   (its ARG_TABLE default is dead) - while the dest side's s3control is handed
+   `--region` itself (a transcription of aws-cli `from_session`). An outposts **alias** is unresolvable, 252, and a missing MRAP
    alias is also 252 (the wording is verbatim from aws-cli). A ClientError from
    s3control / sts keeps `__cause__` and is **254** (aws is also 254 on
    a GetCallerIdentity failure). Because the main S3 client already exists by

@@ -1540,7 +1540,9 @@ def _apply_alias_globals(
     checked in aws's own order, so a value carrying both blames ``--debug``.
     The values it keeps then go through the same resolutions the top-level
     pass runs, which is where a bad ``--endpoint-url`` or ``--query`` in an
-    alias is rejected, before they are copied over the user's.
+    alias is rejected, before they are copied over the user's. A replaced
+    ``--region`` leaves the user's own value behind for the session
+    (`clientfactory.typed_region`).
     """
     from boto3_s3_cli import clientfactory
 
@@ -1554,6 +1556,10 @@ def _apply_alias_globals(
     globalargs.validate_query(parsed)
     clientfactory.validate_endpoint_url(parsed)
     clientfactory.resolve_cli_timeouts(parsed)
+    if "region" in updates and not hasattr(head, clientfactory.TYPED_REGION):
+        # aws bound its session's region from the user's own arguments before
+        # any alias ran; the alias's value reaches the clients alone.
+        setattr(head, clientfactory.TYPED_REGION, head.region)
     for dest in updates:
         if dest == "ca_bundle":
             # aws folds `--ca-bundle` into its `verify_ssl` while the user's

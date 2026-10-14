@@ -205,7 +205,9 @@ declare nothing at all, on either tool.
 - Any other value is **CLI arguments**. They are split with shell quoting rules
   and placed ahead of what was typed, then parsed again — so an alias may
   expand to another alias, and a global option in the value (say `--region`)
-  applies to the run, overriding one typed on the command line. `--debug` and
+  applies to the run, overriding one typed on the command line - though, as
+  under `aws`, credentials fetched for a role still use the region typed or
+  configured, not the alias's. `--debug` and
   `--profile` are refused there, as they are under `aws`, and `--ca-bundle`
   there changes nothing, as under `aws` (`--no-verify-ssl` does apply).
 - An alias named after a built-in subcommand **replaces** it and proxies to it,
