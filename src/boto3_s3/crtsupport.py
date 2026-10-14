@@ -674,12 +674,14 @@ def _initialize(
     # engine to regional the same way (its us_east_1_regional_endpoint
     # override, clientfactory), so the CRT lane must serialize with the same
     # Config to keep one Host across engines. Addressing-style and
-    # accelerate/dualstack settings carry over for the same reason.
+    # accelerate/dualstack settings carry over for the same reason - pinned,
+    # so the serializer's own session cannot fill in what the client's left
+    # out (`_serializer_config`).
     botocore_session = _botocore_session(session)
     serializer_kwargs: dict[str, Any] = {
         "region_name": region,
         "endpoint_url": endpoint_url,
-        "config": client.meta.config,
+        "config": _serializer_config(client),
     }
     # A copy: s3transfer's serializer writes its own entries into the dict.
     serializer = BotocoreCRTRequestSerializer(botocore_session, dict(serializer_kwargs))
@@ -717,14 +719,60 @@ def _initialize(
 
 # The `s3` Config facets botocore reads at these values when they are absent:
 # a client naming one of them explicitly shapes the same URL as a client that
-# leaves it out, so `_serializer_config_shape` drops them before comparing.
+# leaves it out, so `_serializer_config_shape` drops them before comparing,
+# and `_serializer_config` pins every one the client leaves out.
 _S3_CONFIG_DEFAULTS: dict[str, Any] = {
     "addressing_style": "auto",
     "use_accelerate_endpoint": False,
     "use_dualstack_endpoint": False,
     "use_arn_region": True,
     "us_east_1_regional_endpoint": "legacy",
+    "s3_disable_multiregion_access_points": False,
+    "payload_signing_enabled": None,
 }
+
+
+def _serializer_config(client: S3Client) -> Any:
+    """The client's ``Config`` as the serializer's own client must be given it.
+
+    The serializer builds a second botocore client to address the CRT's
+    requests, and two things ``client.meta.config`` holds would not carry
+    over as the transfer client's:
+
+    - ``user_agent``: botocore stores the client's preliminary User-Agent
+      string there, and a client handed it takes it for the caller's own
+      ``user_agent``, which freezes the header in its legacy form -
+      ``app/<id>`` (``sdk_ua_app_id`` / ``AWS_SDK_UA_APP_ID``) and
+      ``cfg/retry-mode`` dropped, ``Botocore/<v>`` doubled, where the classic
+      requests and aws's CRT ones carry them (measured). What the caller
+      supplied, which botocore keeps aside, goes back in its place.
+    - what the serializer's session can fill in: a key the ``s3`` dict leaves
+      out, and a fips / dualstack flag left unset, come from *that* session's
+      profile, which is not the client's when the client was built from
+      another session (``S3(session=X)`` with ``S3Storage(uri, client=<a
+      client of Y>)``) - X's ``[s3] addressing_style = virtual`` put the CRT's
+      requests on a virtual host where classic's went path-style (measured).
+      Each is pinned to the client's resolved value, or to botocore's own
+      default (`_S3_CONFIG_DEFAULTS`).
+
+    The rest of the client's resolved Config - timeouts, retries, checksum
+    modes - is recorded on it explicitly and rides as it was.
+    """
+    from botocore.config import Config
+
+    config: Any = client.meta.config
+    client_s3: Mapping[str, Any] = getattr(config, "s3", None) or {}
+    # Typed loosely: botocore-stubs declares only the keys it knows.
+    s3: Any = {**_S3_CONFIG_DEFAULTS, **client_s3}
+    return config.merge(
+        Config(
+            user_agent=getattr(config, "_supplied_user_agent", None),
+            s3=s3,
+            use_fips_endpoint=bool(getattr(config, "use_fips_endpoint", None)),
+            use_dualstack_endpoint=bool(getattr(config, "use_dualstack_endpoint", None)),
+        )
+    )
+
 
 # Marks a key `_S3_CONFIG_DEFAULTS` has no default for: its value is always compared.
 _NO_DEFAULT: Final = object()

@@ -188,7 +188,16 @@ also read as `'auto'`) with the same rules as boto3.
     endpoint through the session instead - the serializer builds its own client
     from the session it is handed, so the CLI's session-level
     `us_east_1_regional_endpoint` pin (cli.md section 4 item 3) reaches it as it
-    reaches every other client (one Host across engines)
+    reaches every other client (one Host across engines). Two parts of the
+    Config are rewritten on the way (`_serializer_config`): the preliminary
+    User-Agent botocore stores in it goes back to what the caller supplied
+    (handed on, it read as a caller-supplied `user_agent` and froze the
+    header in botocore's legacy form, dropping `app/<id>`), and every `s3`
+    key and fips / dualstack flag the client left out is pinned to
+    botocore's default - otherwise the serializer's session, which is not the
+    client's when the client came from another session, filled them from its
+    own profile (its `addressing_style = virtual` put the CRT's requests on a
+    virtual host where classic's went path-style; measured)
 
   - part_size = that value **only when `multipart_chunksize` is explicitly set**;
     `None` if unset (CRT dynamic). Determined via boto3's `UNSET_DEFAULT`

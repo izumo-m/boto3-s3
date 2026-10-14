@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -22,6 +23,7 @@ import pytest
 # the library defers this import so it stays SDK-free.
 s3transfer_crt = pytest.importorskip("s3transfer.crt")
 from botocore import UNSIGNED  # noqa: E402
+from botocore.config import Config  # noqa: E402
 from botocore.exceptions import ClientError, MissingDependencyException  # noqa: E402
 
 from boto3_s3 import crtsupport  # noqa: E402
@@ -54,7 +56,7 @@ class FakeClient:
         self.meta = SimpleNamespace(
             region_name=region,
             endpoint_url=endpoint,
-            config=SimpleNamespace(signature_version=signature_version, s3=s3_config),
+            config=Config(signature_version=signature_version, s3=s3_config),
         )
         self._endpoint = SimpleNamespace(http_session=SimpleNamespace(_verify=verify))
         self._creds = make_creds() if creds is _DEFAULT_CREDS else creds
@@ -243,15 +245,18 @@ class TestCreateCrtTransferManager:
         assert kwargs["target_throughput"] is None
         assert kwargs["crt_credentials_provider"] == "crt-provider"
         [(_, client_kwargs)] = stubs.serializer_args
+        serializer_config = client_kwargs.pop("config")
         assert client_kwargs == {
             "region_name": "us-east-1",
             "endpoint_url": "http://127.0.0.1:9000",
-            # The client's own Config rides along so the serializer's nested
-            # client keeps the caller's endpoint/addressing settings (the CLI's
-            # us-east-1 regional pin included - aws v2's bundled botocore is
-            # regional-only there, stock botocore is not).
-            "config": client.meta.config,
         }
+        # The client's own Config rides along so the serializer's nested
+        # client keeps the caller's endpoint/addressing settings (the CLI's
+        # us-east-1 regional pin included - aws v2's bundled botocore is
+        # regional-only there, stock botocore is not), with the `s3` keys it
+        # leaves out pinned to botocore's defaults (`_serializer_config`).
+        assert serializer_config.signature_version == client.meta.config.signature_version
+        assert serializer_config.s3 == crtsupport._S3_CONFIG_DEFAULTS  # pyright: ignore[reportPrivateUsage]
         [manager_kwargs] = stubs.manager_kwargs
         assert manager_kwargs["crt_s3_client"] is stubs.crt_client
         assert manager_kwargs["config"] is config
@@ -698,7 +703,7 @@ class TestCreateCrtRequestSender:
         assert crtsupport.create_crt_request_sender(client, config) is not None  # pyright: ignore[reportArgumentType]
         [(_, _, client_kwargs)] = senders
         assert "service_name" not in client_kwargs
-        assert client_kwargs["config"] is client.meta.config
+        assert isinstance(client_kwargs["config"], Config)
 
     def test_a_classic_fallback_is_none(self, stubs: CrtStubs, senders: list[Any]) -> None:
         stubs.lock = None  # another process holds the CRT slot
@@ -1126,3 +1131,94 @@ class TestBotocoreSession:
 
         monkeypatch.setattr(boto3, "DEFAULT_SESSION", None)
         assert isinstance(crtsupport._botocore_session(None), Session)
+
+
+class _RequestStoppedError(Exception):
+    """Raised from ``before-send`` once the request has been seen."""
+
+
+class TestSerializerConfig:
+    """The Config the CRT serializer's own client is built with.
+
+    The serializer builds a second botocore client to address the CRT's
+    requests; what it is handed has to shape those requests the way the
+    transfer client shapes its own (design/crt.md section 3).
+    """
+
+    @staticmethod
+    def _user_agent(client: Any) -> str:
+        seen: list[str] = []
+
+        def stop(request: Any, **_kwargs: Any) -> None:
+            seen.append(request.headers["User-Agent"].decode())
+            raise _RequestStoppedError
+
+        client.meta.events.register("before-send.s3.*", stop)
+        with pytest.raises(_RequestStoppedError):
+            client.head_bucket(Bucket="b")
+        return seen[0]
+
+    def _serializer_client(self, client: Any, session: Any) -> Any:
+        return session.create_client(
+            "s3",
+            region_name="us-east-1",
+            endpoint_url="http://127.0.0.1:9",
+            config=crtsupport._serializer_config(client),  # pyright: ignore[reportPrivateUsage]
+            aws_access_key_id="AKID",
+            aws_secret_access_key="secret",
+        )
+
+    def test_the_app_id_reaches_the_crt_requests(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # `client.meta.config` holds the client's own preliminary User-Agent;
+        # handed on verbatim it read as a caller-supplied one and froze the
+        # header in botocore's legacy form - no `app/<id>`, no
+        # `cfg/retry-mode`, `Botocore/<v>` twice - where classic's requests
+        # and aws's CRT ones carry them (measured).
+        import botocore.session
+
+        monkeypatch.setenv("AWS_SDK_UA_APP_ID", "myapp")
+        session = botocore.session.Session()
+        client = session.create_client("s3", region_name="us-east-1")
+        user_agent = self._user_agent(self._serializer_client(client, session))
+        assert "app/myapp" in user_agent
+        assert "cfg/retry-mode" in user_agent
+        assert user_agent.count("Botocore/") == 1
+
+    def test_a_callers_own_user_agent_still_rides(self) -> None:
+        import botocore.session
+
+        session = botocore.session.Session()
+        client = session.create_client(
+            "s3", region_name="us-east-1", config=Config(user_agent="MyApp/1.0")
+        )
+        assert self._user_agent(self._serializer_client(client, session)).startswith("MyApp/1.0")
+
+    def test_another_sessions_profile_does_not_reshape_the_requests(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `S3(session=X)` with `S3Storage(uri, client=<a client of Y>)`: the
+        # serializer is built from X, whose profile filled in what Y's client
+        # left out - X's `addressing_style = virtual` put the CRT's requests
+        # on a virtual host while classic's went path-style (measured).
+        import botocore.session
+
+        config = tmp_path / "config"
+        config.write_text(
+            "[profile x]\ns3 =\n    addressing_style = virtual\n"
+            "use_fips_endpoint = true\n[profile y]\n"
+        )
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        client = botocore.session.Session(profile="y").create_client("s3", region_name="us-east-1")
+        serializer = self._serializer_client(client, botocore.session.Session(profile="x"))
+        assert serializer.meta.config.s3["addressing_style"] == "auto"
+        assert not serializer.meta.config.use_fips_endpoint
+        seen: list[str] = []
+
+        def stop(request: Any, **_kwargs: Any) -> None:
+            seen.append(request.url)
+            raise _RequestStoppedError
+
+        serializer.meta.events.register("before-send.s3.*", stop)
+        with pytest.raises(_RequestStoppedError):
+            serializer.head_object(Bucket="bkt", Key="k")
+        assert seen == ["http://127.0.0.1:9/bkt/k"]
