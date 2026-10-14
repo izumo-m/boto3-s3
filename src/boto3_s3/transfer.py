@@ -101,6 +101,7 @@ from boto3_s3.exceptions import (
 from boto3_s3.localstorage import LocalStorage, translate_os_error
 from boto3_s3.s3storage import (
     attribute_failure,
+    client_build_error,
     crt_error_name,
     drop_like_aws,
     read_required,
@@ -666,9 +667,12 @@ def crt_engine_errors(operation: str | None) -> Generator[None, None, None]:
     ``InvalidConfigError``; the botocore family - a refreshable credential the
     compatibility check had to resolve for a client holding a credentials
     object other than the singleton's, the serializer's client build - goes
-    through `s3_errors`. awscrt's bare ``AssertionError`` on an unresolved
-    region passes through untouched: the CLI converts it at its one call
-    site, and the library documents it as the programming-error family.
+    through `s3_errors`, and what that build raises outside the family
+    (``ValueError`` / ``AttributeError`` reading a malformed configuration)
+    through `client_build_error`, as for any client build. awscrt's bare
+    ``AssertionError`` on an unresolved region passes through untouched: the
+    CLI converts it at its one call site, and the library documents it as the
+    programming-error family.
     boto3's ``MissingDependencyException`` never reaches this seam - the
     engine selection raises it ahead, and keeps its documented pass-through.
     """
@@ -690,6 +694,14 @@ def crt_engine_errors(operation: str | None) -> Generator[None, None, None]:
             raise translate_boto_error(exc, operation=operation) from exc
         except (OSError, RuntimeError) as exc:
             raise InvalidConfigError(str(exc), operation=operation) from exc
+        except (ValueError, AttributeError) as exc:
+            # What the serializer's client build raises outside botocore's
+            # family while it reads the configuration of the session it is
+            # built from - an `s3 = foo` scalar where it reads a section -
+            # classified as `S3.client()` classifies the same build.
+            error = client_build_error(exc)
+            attribute_failure(error, operation=operation, bucket=None, key=None)
+            raise error from exc
         except Exception as exc:
             invalid_config = _crt_config_error_type()
             if invalid_config is not None and isinstance(exc, invalid_config):

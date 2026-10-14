@@ -3643,8 +3643,21 @@ class TestCrtEngineErrors:
                 ClientError({"Error": {"Code": "AccessDenied", "Message": "denied"}}, "AssumeRole"),
                 AccessDeniedError,
             ),
+            # The serializer's client build reading a malformed configuration
+            # of the session it is built from (`s3 = foo`), as `S3.client()`
+            # classifies the same build (`client_build_error`).
+            (AttributeError("'str' object has no attribute 'get'"), InvalidConfigError),
+            (ValueError("Invalid endpoint: 1http://127.0.0.1:9"), InvalidConfigError),
         ],
-        ids=["missing-ca", "directory-ca", "unreadable-ca", "unparsable-ca", "refused-assume-role"],
+        ids=[
+            "missing-ca",
+            "directory-ca",
+            "unreadable-ca",
+            "unparsable-ca",
+            "refused-assume-role",
+            "malformed-s3-section",
+            "malformed-endpoint",
+        ],
     )
     def test_a_construction_failure_keeps_its_category(
         self, monkeypatch: pytest.MonkeyPatch, raised: Exception, expected: type[Any]
