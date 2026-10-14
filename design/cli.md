@@ -1457,7 +1457,8 @@ construction order in section 5.7):
    uses the original URI). The clients go via `Context.service_client_factory`:
    the src-side s3control uses `--source-region`, and when that is unspecified
    names no region at all, like sts: both then land on the session's region,
-   which is a truthy `--region` or the rest of the chain - so `--region ""`
+   which is a truthy typed `--region` (an alias's never binds it, item 1 of
+   section 4) or the rest of the chain - so `--region ""`
    resolves the source side through `AWS_REGION` and the like, as aws's does
    (its ARG_TABLE default is dead) - while the dest side's s3control is handed
    `--region` itself (a transcription of aws-cli `from_session`). An outposts **alias** is unresolvable, 252, and a missing MRAP

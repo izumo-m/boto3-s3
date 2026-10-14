@@ -165,9 +165,9 @@ class MvCommand(Command):
         off) and the *keys* match, both sides resolve
         through ``S3PathResolver`` - the source-side s3control client in
         ``--source-region``, the destination's in ``--region``, sts with no
-        per-client choice; an unset choice falls back to ``--region`` inside
-        ``build_service_client``, the way aws's ``from_session`` clients
-        inherit the session that binds ``--region`` - and every resolved pair
+        per-client choice; an unset choice is left to the session's region,
+        as aws's ``from_session`` clients inherit theirs (a truthy typed
+        ``--region``, else the region chain) - and every resolved pair
         runs the same guard, still reporting the *original* URIs. When validation
         is off, the two keys match, and a side looks access-point-shaped,
         aws's standing warning

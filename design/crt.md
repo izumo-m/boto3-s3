@@ -150,7 +150,12 @@ also read as `'auto'`) with the same rules as boto3.
     `--endpoint-url` through. aws-cli itself has a known bug where, with only the
     env `AWS_ENDPOINT_URL_S3` set, it makes a TLS connection over http and dies
     with `AWS_IO_SOCKET_CLOSED`; we do not hit it because we derive from the
-    resolved `client.meta.endpoint_url`.
+    resolved `client.meta.endpoint_url`. A `None` is resolved again by the
+    serializer under its own session (below), so a client whose AWS endpoint
+    came from another session than the `S3`'s would be addressed by whatever
+    `endpoint_url` / `[services]` the `S3`'s session configures - a library
+    corner only (the CLI has one session), not measured, since probes cannot
+    lift the endpoint variables.
   - use_ssl = the endpoint's scheme is other than `http`
   - verify = the client's TLS verification setting. Via the private botocore
     attribute `client._endpoint.http_session._verify` (a private dependency at
