@@ -69,13 +69,16 @@ def fast_parse_timestamp(value: Any) -> datetime
 
 `value` is whatever botocore hands its timestamp parser: an ISO 8601 string, an
 RFC 822 header date, an epoch number. The fast path is taken only for a `str`
-containing `-`; a trailing `Z` is rewritten to `+00:00` and the string goes to
+in the extended calendar form S3 sends — `YYYY-MM-DDThh:mm:ss`, an hour from
+00 to 23, an optional fraction of up to six digits and an optional `Z` or
+`±hh:mm` zone; a trailing `Z` is rewritten to `+00:00` and the string goes to
 `datetime.fromisoformat`. Everything else — and any string `fromisoformat`
 rejects with `ValueError` — falls through to botocore's own `parse_timestamp`
-untouched. The `-` requirement is a deliberate guard: a digit-only string such
-as `"20200101"` is an epoch-seconds value to botocore, while Python 3.11+'s
-`fromisoformat` would read it as a basic-format date, so the guard keeps such
-input on botocore's interpretation on every supported Python.
+untouched. The form is a deliberate guard: Python 3.11+'s `fromisoformat`
+reads much more than S3 sends — a digit-only `"20200101"`, which botocore reads
+as epoch seconds, a week date (`2025-W01-1`), and on 3.14 an hour of `24` —
+where botocore answers differently or refuses, so the guard keeps every other
+spelling on botocore's interpretation on every supported Python.
 
 The return is a `datetime`. For every input both paths accept, the two agree in
 value; the difference is the tzinfo class — `datetime.timezone` on the fast
