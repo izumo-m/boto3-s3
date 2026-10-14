@@ -158,6 +158,14 @@ comes out differently, listed in section 1.
   'get'` and never exits (measured: still waiting after 90 seconds). Here the
   item is dropped as on the classic engine: no line, exit code 0, the file
   downloaded and the source kept.
+- **A download answered `416` reads as an empty object here.** The
+  classic engine's installed `s3transfer` takes a `GetObject` answered
+  `416 InvalidRange` for an object with no bytes; the fork `aws` bundles
+  reports it. From an endpoint that answers a plain `GET` of a non-empty
+  object that way (S3 does not), a download to stdout writes nothing and
+  exits 0 here, where `aws` prints `download failed: ... (InvalidRange)` and
+  exits 1; a download to a file fails on both tools at 1, worded here by the
+  missing temporary file it then tries to rename.
 - **A download body cut mid-stream is retried here and not by `aws`.** The
   retryable set differs between the `s3transfer` installed from PyPI and the
   fork `aws` bundles: the installed botocore turns a connection broken in the
@@ -336,11 +344,14 @@ comes out differently, listed in section 1.
   ([`../../design/crt.md`](../../design/crt.md) section 3 records the
   measurement).
 - **Ctrl-C's closing line.** Both tools exit 1 on a Ctrl-C caught mid-run,
-  and on the classic engine with transfers actually in flight both close
-  with `cancelled: ctrl-c received`. `aws` produces that line only from a
-  cancelled *classic* transfer future, so everywhere else it has one — the
+  and both close with `cancelled: ctrl-c received` when the interrupt
+  cancels a classic transfer: a download whose body is still arriving, or an
+  item still waiting for a worker. `aws` produces that line only from such a
+  cancelled transfer, so everywhere else it has one — the
   interrupt landed before the first transfer was submitted, or during a
-  `--dryrun`, or after the last one finished, or mid-submission under
+  `--dryrun`, or after the last one finished, or while every request of the
+  run was already out (an upload, a copy or a delete it lets finish: a single
+  one, or a few no more than the worker count), or mid-submission under
   `preferred_transfer_client = crt` — `aws` closes instead with a
   `fatal error:` line carrying no message: its recorder renders the
   `KeyboardInterrupt`, whose text is empty, as an error result padded with the
@@ -503,9 +514,13 @@ comes out differently, listed in section 1.
   subclass) is reported like any other failure: exit code 255 with its
   message, or the failed line of the transfer it stopped. An
   `AssertionError` from a handler is such an ordinary failure on both tools.
-  `aws` handles neither of the first two the way Python would: a run they
-  reach its entry point with ends at exit code 0 with nothing written, and a
-  transfer or delete they stop can be reported as done.
+  This holds wherever the handler runs, a transfer's worker thread included.
+  `aws` handles neither of the first two the way Python would: one that
+  reaches its entry point (an `ls` listing) ends the run at exit code 0 with
+  nothing written, one raised while it lists or heads for a transfer or
+  delete ends it with `fatal error: 7` (the status as the message) at 1, and
+  one raised inside a request it sends for an item reports that item done -
+  a `mv` then deletes its source though nothing was sent (measured).
 - **User-Agent.** Requests identify themselves as the installed
   `Boto3`/`Botocore`, not as `aws-cli`, and carry none of aws's command
   metadata (`md/command#s3.ls` and the like). Visible only to the server and
@@ -605,7 +620,7 @@ comes out differently, listed in section 1.
   run's own exit code with 255 on both when the report carries a character the
   output codec cannot encode (`AWS_CLI_OUTPUT_ENCODING`, whose codec is
   described in [`configuration.md`](./configuration.md)) — there the second
-  report still gets written. With stdout and stderr both broken, though —
+  report still gets written. With stderr broken, though — `2>/dev/full`, or
   `ls s3://bkt/ 2>&1 |` a reader that closes at once — there is nothing left to
   catch it: `aws` lets the failure escape and its interpreter exits **1**,
   while here the process ends at **120** on the shutdown flush that fails on

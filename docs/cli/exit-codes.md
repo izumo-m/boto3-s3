@@ -38,8 +38,11 @@ a failure that stops the whole run prints one `fatal error:` line.
 
 Ctrl-C during a running transfer or delete is also 1, with a
 `cancelled: ctrl-c received` line — the one line `aws` words differently when
-no transfer is in flight to cancel
-([`aws-differences.md`](./aws-differences.md) section 2).
+no transfer is left to cancel
+([`aws-differences.md`](./aws-differences.md) section 2). `rb --force` is the
+exception: Ctrl-C during its listing or its deletions is 255, the code of a
+deletion that fails there (section 2), and during the bucket removal itself
+130 (below).
 
 `ls` uses 1 for its own "nothing to show" case: a key or prefix that matched no
 entries.
@@ -55,8 +58,8 @@ if anything failed, the code is 1.
 ### 130 — Ctrl-C outside a running transfer or delete
 
 Ctrl-C before a `cp` / `mv` / `rm` / `sync` run has started, or while `ls`,
-`mb`, `website`, `presign` or `rb` without `--force` is at work — a request
-already in flight included — exits 130. Once a transfer or delete is running,
+`mb`, `website`, `presign` or `rb` is at work — a request already in flight
+included, and for `rb --force` once its objects are deleted — exits 130. Once a transfer or delete is running,
 Ctrl-C reports 1 instead (above). After the run has ended, while its result
 lines are still being written (a slow terminal or pipe), Ctrl-C lets every
 line out and then exits 130, as `aws` does; a second Ctrl-C stops the
@@ -132,9 +135,11 @@ on both counts.
 / `sync` report 1 after they begin — including errors S3 itself returned. That
 is why 254 is narrower than it looks. A usage error caught *before* the
 operation starts is still 252. One kind of failure does not count, on either
-tool: an item whose connection is closed, or whose read times out, before any
-response arrives prints no line at all, so a run where only that happened ends
-at 0 although the item was not transferred or deleted. (A download's own read
+tool: an item whose request fails before any response arrives — its
+connection closed, its read timed out, a header value the HTTP layer refuses
+to send (a line break in `--cache-control`, say) — prints no line at all, so a
+run where only that happened ends at 0 although the item was not transferred
+or deleted. (A download's own read
 of the object is retried on a timeout and then fails, and what the CRT engine
 sends itself — its transfers, and the deletes of a run on it — reports such a
 failure.)
