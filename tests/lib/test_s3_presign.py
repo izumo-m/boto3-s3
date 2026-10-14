@@ -20,7 +20,15 @@ from typing import Any
 import pytest
 from botocore.exceptions import ParamValidationError
 
-from boto3_s3 import S3, BatchError, Boto3S3Error, S3Storage, ValidationError
+from boto3_s3 import (
+    S3,
+    BatchError,
+    Boto3S3Error,
+    ConfigurationError,
+    S3Storage,
+    ValidationError,
+    s3storage,
+)
 
 
 class _FakePresignClient:
@@ -69,6 +77,25 @@ class TestPresign:
     def test_url_returned_unchanged(self) -> None:
         client = _FakePresignClient(url="https://x.example/y?sig=1")
         assert S3().presign(_storage("s3://b/k", client)) == "https://x.example/y?sig=1"
+
+    def test_directory_bucket_refused_on_a_botocore_without_s3express(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Below botocore 1.33.2 a --x-s3 bucket would be signed as an ordinary
+        # one, a URL that cannot work; the operation refuses it instead, before
+        # any client call (s3._validate_storage).
+        import botocore.utils
+
+        monkeypatch.delattr(botocore.utils, "S3ExpressIdentityResolver")
+        monkeypatch.setattr(s3storage, "version", lambda _name: "1.31.0")
+        client = _FakePresignClient()
+        with pytest.raises(ConfigurationError, match=r"1\.33\.2") as exc_info:
+            S3().presign(_storage("s3://demo--usw2-az1--x-s3/key", client))
+        assert (exc_info.value.operation, exc_info.value.bucket) == (
+            "presign",
+            "demo--usw2-az1--x-s3",
+        )
+        assert client.calls == []
 
     def test_invalid_target_type_raises_validation_error(self) -> None:
         with pytest.raises(ValidationError):

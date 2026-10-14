@@ -6,8 +6,9 @@ extra.
 
 If you cannot upgrade, the table says what each feature needs; below the version
 listed, that feature is not supported. Unless its row says otherwise, a feature
-you ask for by name — an option, a bucket kind, a checksum algorithm — is
-refused there before any request is sent;
+you ask for by name — an option, a bucket kind, a checksum algorithm — through
+an `S3` operation or the `boto3-s3` command is refused there before any request
+is sent (a `Storage` or `S3Deleter` used directly may not be);
 [`library/errors.md`](./library/errors.md) and
 [`cli/exit-codes.md`](./cli/exit-codes.md) say what each refusal raises or
 exits with. Check what you have with
@@ -24,6 +25,7 @@ bound, so a newer `boto3` is picked up as it is.
 | --- | --- |
 | the CRT transfer engine | boto3 >= 1.34.6, plus the `crt` extra: the engine needs awscrt >= 0.19.18 (boto3's own minimum), and the extra's awscrt is pinned by botocore, whose 1.34.6 is the first to pin one at that minimum — boto3 1.34.6 is the first that cannot resolve to an older botocore. An endpoint on a non-standard port (MinIO's 9000, say) additionally needs the awscrt botocore 1.40.12 and later pin (boto3 >= 1.40.12 for the same reason; older ones dial the standard port only). Below boto3 1.42.0 the `[s3]` keys the transfer manager reads (`multipart_chunksize`) do not reach the engine — `target_bandwidth` still does — and the warning that says so shows under `--debug` only |
 | S3 Express directory buckets (a bucket name ending `--x-s3`) | boto3 >= 1.33.2 |
+| S3 Express access points (a name ending `--xa-s3`) | boto3 >= 1.37.24 |
 | `ls --bucket-name-prefix` / `--bucket-region` | boto3 >= 1.35.42 |
 | `no_overwrite` / `--no-overwrite` on upload | boto3 >= 1.36.0 |
 | `checksum_algorithm` = `CRC64NVME` | boto3 >= 1.36.0, plus the `crt` extra |

@@ -69,6 +69,12 @@ def model_meta(members_by_op: Mapping[str, Collection[str] | None]) -> Any:
     return _Meta(members_by_op)
 
 
+def model_client(members_by_op: Mapping[str, Collection[str] | None]) -> Any:
+    """A client whose S3 model carries exactly the named input members per op
+    (the shapes `model_meta` describes), with no API calls."""
+    return _ModelOnlyClient(members_by_op)
+
+
 def model_only_client(ops_with_member: set[str], member: str = "IfNoneMatch") -> Any:
     """A client whose S3 model carries *member* only on the named ops
     (e.g. ``{"PutObject"}``); an empty set models a botocore predating the

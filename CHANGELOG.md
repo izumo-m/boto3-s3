@@ -35,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A `mime.types` the host has but cannot read now fails each upload it would have typed, as `aws s3` does, instead of ending the run with a bare `PermissionError`.
 - The `Content-Type` guess now runs the algorithm of the interpreter `aws` bundles on every host, so on Windows under Python 3.10 to 3.12 a file whose name is all extension (`.json`) is uploaded untyped as `aws s3` uploads it.
 - Log masking no longer runs through the rest of a logged XML body when an object key is spelled like a secret's name (`Signature=...`): the other keys of a batched delete stay readable.
-- On an SDK too old for them, `mb`'s tags and `-an` bucket names, the newer checksum algorithms and S3 Express directory buckets are now refused up front with a `ConfigurationError` naming the version they need.
+- On an SDK too old for them, `mb`'s tags and `-an` bucket names, the newer checksum algorithms and S3 Express directory buckets and access points are now refused up front with a `ConfigurationError` naming the version they need.
 
 ## [0.11.1] - 2026-09-07
 

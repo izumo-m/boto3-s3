@@ -236,9 +236,7 @@ A few more members come with working defaults a custom backend normally keeps:
   the location, a no-op by default. Construction is permissive (a building
   block); an operation — or the CLI at its parity point — calls this to reject
   a malformed location loudly before use. `S3Storage` overrides it with the
-  aws-cli-parity checks (unsupported ARN forms, a key with no bucket) and
-  the SDK-floor refusal of a directory bucket on a botocore that predates
-  S3 Express,
+  aws-cli-parity checks (unsupported ARN forms, a key with no bucket),
   `LocalStorage` rejects an empty path (`""` is no location to Python, only
   `abspath` would make it the working directory; aws-cli agrees except for
   the destination of a single download, which the CLI layer turns into `"."`

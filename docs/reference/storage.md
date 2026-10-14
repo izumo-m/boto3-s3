@@ -831,11 +831,6 @@ calls it before an operation and the CLI at its parity point, so a malformed
 location fails loudly instead of reaching the API as a cryptic botocore error.
 Idempotent.
 
-A directory bucket (a name ending in `--x-s3`) on a botocore that predates
-S3 Express (below 1.33.2) is refused here too, as a `ConfigurationError`
-naming the version: such a botocore would address it as an ordinary bucket,
-and a presigned URL for it would come back unusable without a word.
-
 Each rejection carries what identifies the offending location. The two ARN
 forms report the whole ARN as `bucket` and leave `key` unset — the whole ARN,
 not this storage's `bucket`, which holds only the part before the first `/`

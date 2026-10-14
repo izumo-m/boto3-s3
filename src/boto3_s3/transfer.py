@@ -78,7 +78,6 @@ from importlib.metadata import version
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote, urlparse
 
-from botocore import httpchecksum
 from botocore.exceptions import BotoCoreError, ClientError
 from s3transfer.compat import seekable
 from s3transfer.copies import CopySubmissionTask
@@ -102,7 +101,6 @@ from boto3_s3.exceptions import (
 from boto3_s3.localstorage import LocalStorage, translate_os_error
 from boto3_s3.s3storage import (
     attribute_failure,
-    botocore_older_than,
     client_build_error,
     crt_error_name,
     drop_like_aws,
@@ -474,17 +472,22 @@ def annotations_copy_unsupported_reason(client: S3Client) -> str | None:
     return None
 
 
-# Back-compat (supported floor botocore 1.31, docs/compatibility.md): botocore
-# computes a request checksum only for the algorithms its httpchecksum tables
-# know - CRC64NVME from 1.36.0, SHA512 and the XXHASH family from 1.42.53 (the
-# S3 model lists those two only from 1.42.94, the release
-# docs/compatibility.md names), each read from the published sources. Below
-# that, every item would fail on botocore's "Unsupported checksum algorithm";
-# the run is refused up front instead, naming the documented version. An
-# algorithm botocore knows but computes only through awscrt is not refused
-# here: without the crt extra it fails per item with botocore's Missing
-# Dependency report (docs/compatibility.md section 2). Drop an entry once the
-# floor reaches it.
+# Back-compat (supported floor botocore 1.31, docs/compatibility.md): the S3
+# model gained each newer checksum algorithm in one release - CRC64NVME in
+# 1.36.0, SHA512 and the XXHASH family in 1.42.94 - with every member that
+# carries it (the request's Checksum<ALG>, UploadPart's and UploadPartCopy's
+# results, CompletedPart), each read from the published wheels. Below it a run
+# with that algorithm cannot work whole: a single upload fails on botocore's
+# "Unsupported checksum algorithm" (or, where botocore computes it before the
+# model lists it, 1.42.53 - 1.42.93 for SHA512 / XXHASH, sends it), and a
+# multipart upload or copy cannot carry its parts' checksums into the Complete,
+# since s3transfer reads them off part results the model does not parse. Only a
+# single-part copy gets by (S3 computes it), and sizes are unknown up front, so
+# uploads and copies are refused alike, as --no-overwrite is. An algorithm the
+# model knows but botocore computes only through awscrt is not refused here:
+# without the crt extra it fails per item with botocore's Missing Dependency
+# report (docs/compatibility.md section 2). Drop an entry once the floor
+# reaches it.
 _CHECKSUM_MIN_BOTOCORE = {
     "crc64nvme": "1.36.0",
     "sha512": "1.42.94",
@@ -494,27 +497,26 @@ _CHECKSUM_MIN_BOTOCORE = {
 }
 
 
-def _checksum_algorithm_unsupported_reason(algorithm: object) -> str | None:
-    """Why the installed botocore cannot compute ``algorithm``, or ``None``.
+def _checksum_algorithm_unsupported_reason(client: S3Client, algorithm: object) -> str | None:
+    """Why the installed SDK cannot run a transfer with ``algorithm``, or ``None``.
 
-    Reads botocore's own tables - the algorithms its httpchecksum computes and
-    the ones it computes only through awscrt - backed by the release
-    (`botocore_older_than`, so a renamed table never refuses a newer botocore);
-    the message names the documented minimum. Only the algorithms
-    newer than the floor are probed: CRC32 / CRC32C / SHA1 / SHA256 are known
-    to every supported botocore, and a name botocore never computes (MD5) or
-    does not know at all keeps botocore's own per-item report.
+    Membership of the algorithm's ``Checksum<ALG>`` member is introspected on
+    the client's S3 model (``PutObject``'s input - the release that adds it adds
+    the part members a multipart transfer needs too), version-agnostic; the
+    message names the minimum version as a hint. Only the algorithms newer than
+    the floor are probed: CRC32 / CRC32C / SHA1 / SHA256 are in every supported
+    model, and a name botocore never computes (MD5) or does not know at all
+    keeps botocore's own per-item report.
     """
     if not isinstance(algorithm, str):
         return None
     minimum = _CHECKSUM_MIN_BOTOCORE.get(algorithm.lower())
     if minimum is None:
         return None
-    known = {
-        *getattr(httpchecksum, "_SUPPORTED_CHECKSUM_ALGORITHMS", ()),
-        *getattr(httpchecksum, "_CRT_CHECKSUM_ALGORITHMS", ()),
-    }
-    if algorithm.lower() in known or not botocore_older_than(minimum):
+    members = getattr(
+        client.meta.service_model.operation_model("PutObject").input_shape, "members", {}
+    )
+    if f"Checksum{algorithm.upper()}" in members:
         return None
     return (
         f"checksum_algorithm={algorithm.upper()} requires botocore >= {minimum}; "
@@ -1064,7 +1066,9 @@ class Transferrer:
                 raise ConfigurationError(reason, operation=operation)
         # Checksum-algorithm gate: only uploads and copies send ChecksumAlgorithm.
         if transfer_type in (TransferType.UPLOAD, TransferType.COPY):
-            reason = _checksum_algorithm_unsupported_reason(self._options.get("checksum_algorithm"))
+            reason = _checksum_algorithm_unsupported_reason(
+                client, self._options.get("checksum_algorithm")
+            )
             if reason is not None:
                 raise ConfigurationError(reason, operation=operation)
         # The copy-props mode is interpreted once here so a bad value fails at

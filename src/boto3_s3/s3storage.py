@@ -234,20 +234,35 @@ def botocore_older_than(minimum: str) -> bool:
 # Back-compat (supported floor botocore 1.31, docs/compatibility.md): botocore
 # learned S3 Express directory buckets - the --x-s3 suffix, their zonal
 # endpoint and CreateSession credentials - in 1.33.2 (its
-# S3ExpressIdentityResolver, read from the published wheels). An older botocore
-# addresses such a bucket as an ordinary one: its requests go to a host that does
-# not serve the bucket, and a presigned URL comes back that cannot work, without
-# a word. Such a location is refused up front instead (`S3Storage.validate`).
-# Drop this gate once the floor reaches 1.33.2.
+# S3ExpressIdentityResolver), and the access points of one (the --xa-s3
+# suffix) in 1.37.24 (its endpoint rules), each read from the published
+# releases. An older botocore addresses such a location as an ordinary bucket:
+# its requests go to a host that does not serve it, and a presigned URL comes
+# back that cannot work, without a word. The `S3` operations refuse it up front
+# instead (`s3._validate_storage`), after the location checks, so the command's
+# own usage errors for a directory bucket keep their exit code. Drop each gate
+# once the floor reaches it.
 _S3EXPRESS_MIN_BOTOCORE = "1.33.2"
+_S3EXPRESS_ACCESS_POINT_MIN_BOTOCORE = "1.37.24"
 
 
-def _s3express_unsupported_reason(bucket: str) -> str | None:
-    """Why the installed botocore cannot address directory bucket ``bucket``, or ``None``.
+def s3express_unsupported_reason(bucket: str) -> str | None:
+    """Why the installed botocore cannot address S3 Express location ``bucket``, or ``None``.
 
-    ``None`` for any other bucket. The probe is the resolver itself, backed by
-    the release (`botocore_older_than`), and the message names that version.
+    ``None`` for any other bucket. A directory bucket is probed by the
+    resolver, backed by the release (`botocore_older_than`, so a later botocore
+    that renamed it is never refused); its access point, which botocore knows
+    only through its endpoint rules, by the release alone. The message names
+    the version.
     """
+    if bucket.endswith("--xa-s3"):
+        if not botocore_older_than(_S3EXPRESS_ACCESS_POINT_MIN_BOTOCORE):
+            return None
+        return (
+            "S3 Express access points (a name ending in --xa-s3) require botocore >= "
+            f"{_S3EXPRESS_ACCESS_POINT_MIN_BOTOCORE}; the installed botocore is "
+            f"{version('botocore')}."
+        )
     if (
         not bucket.endswith("--x-s3")
         or hasattr(botocore.utils, "S3ExpressIdentityResolver")
@@ -1299,9 +1314,7 @@ class S3Storage(Storage):
         parse-time 252), and a key with
         no bucket (``"s3:///k"`` - aws's handling of that form varies per
         command, so the CLI invokes this only where its command's parity point
-        wants the rejection). A directory bucket (``--x-s3``) on a botocore
-        that predates S3 Express is refused too, as a ``ConfigurationError``
-        (`_s3express_unsupported_reason`). The library calls this before an operation and
+        wants the rejection). The library calls this before an operation and
         the CLI at its parity-correct point, so a malformed location fails loud
         instead of reaching the API as a cryptic botocore error. Idempotent.
 
@@ -1331,9 +1344,6 @@ class S3Storage(Storage):
             raise ValidationError(
                 f"s3:// URL has a key but no bucket: {self._uri!r}", key=self._key
             )
-        reason = _s3express_unsupported_reason(self._bucket)
-        if reason is not None:
-            raise ConfigurationError(reason, bucket=self._bucket)
 
     def get_client(self) -> S3Client:
         """Return the boto3 S3 client, building a default one lazily if omitted.

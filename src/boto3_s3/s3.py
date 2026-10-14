@@ -71,6 +71,7 @@ from boto3_s3.s3storage import (
     request_failure,
     s3_errors,
     s3_request,
+    s3express_unsupported_reason,
 )
 from boto3_s3.storage import Location, Storage
 from boto3_s3.transfer import TransferItem, Transferrer, crt_engine_errors
@@ -191,9 +192,21 @@ def _attributed_entries(entries: Iterable[_T], operation: str) -> Iterator[_T]:
 
 
 def _validate_storage(storage: Storage, *, operation: str) -> None:
-    """Run ``Storage.validate`` and attribute its failure to ``operation``."""
+    """Run ``Storage.validate`` and attribute its failure to ``operation``.
+
+    An S3 location then passes the SDK-floor gate for S3 Express
+    (`s3express_unsupported_reason`): a directory bucket or its access point
+    on a botocore that predates it is a ``ConfigurationError``. It runs here,
+    after the location checks, rather than in ``validate`` itself, which the
+    CLI calls ahead of its own usage errors for a directory bucket (``mb`` /
+    ``sync`` on one, exit code 252 at every version).
+    """
     with _attributed_to(operation):
         storage.validate()
+    if isinstance(storage, S3Storage):
+        reason = s3express_unsupported_reason(storage.bucket)
+        if reason is not None:
+            raise ConfigurationError(reason, operation=operation, bucket=storage.bucket)
 
 
 @contextmanager

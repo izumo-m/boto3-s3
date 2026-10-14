@@ -1749,32 +1749,16 @@ class TestConstructor:
         assert exc_info.value.key == "key"
         assert exc_info.value.bucket is None
 
-    def test_directory_bucket_refused_on_a_botocore_without_s3express(
+    def test_validate_leaves_s3express_to_the_operation(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Below botocore 1.33.2 (no S3ExpressIdentityResolver) a --x-s3 bucket
-        # would be addressed as an ordinary one - a presign returns a URL that
-        # cannot work - so validate() refuses it, naming the version.
+        # The floor gate runs in the S3 operation (s3._validate_storage), after
+        # the location checks: the CLI calls validate() ahead of its own usage
+        # errors for a directory bucket, which keep exit code 252.
         import botocore.utils
 
         monkeypatch.delattr(botocore.utils, "S3ExpressIdentityResolver")
         monkeypatch.setattr(s3storage, "version", lambda _name: "1.31.0")
-        with pytest.raises(ConfigurationError, match=r"1\.33\.2") as exc_info:
-            S3Storage("s3://demo--usw2-az1--x-s3/key").validate()
-        assert exc_info.value.bucket == "demo--usw2-az1--x-s3"
-        S3Storage("s3://general-purpose/key").validate()  # any other bucket passes
-
-    def test_directory_bucket_passes_on_a_botocore_with_s3express(self) -> None:
-        S3Storage("s3://demo--usw2-az1--x-s3/key").validate()
-
-    def test_a_newer_botocore_without_the_resolver_name_is_not_refused(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # The resolver is a botocore internal: a release past 1.33.2 that
-        # renamed it must not lose directory buckets.
-        import botocore.utils
-
-        monkeypatch.delattr(botocore.utils, "S3ExpressIdentityResolver")
         S3Storage("s3://demo--usw2-az1--x-s3/key").validate()
 
     def test_direct_validate_leaves_the_operation_unset(self) -> None:
@@ -1963,6 +1947,49 @@ class _FailingBody:
 
     def close(self) -> None:
         self.closes += 1
+
+
+class TestS3ExpressFloorGate:
+    """`s3express_unsupported_reason`: a directory bucket below botocore
+    1.33.2, or its access point below 1.37.24, cannot be addressed."""
+
+    @staticmethod
+    def _release(monkeypatch: pytest.MonkeyPatch, release: str) -> None:
+        monkeypatch.setattr(s3storage, "version", lambda _name: release)
+
+    def test_directory_bucket_refused_without_the_resolver_below_its_release(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import botocore.utils
+
+        monkeypatch.delattr(botocore.utils, "S3ExpressIdentityResolver")
+        self._release(monkeypatch, "1.33.1")
+        reason = s3storage.s3express_unsupported_reason("demo--usw2-az1--x-s3")
+        assert reason is not None and "1.33.2" in reason and "1.33.1" in reason
+        assert s3storage.s3express_unsupported_reason("general-purpose") is None
+
+    def test_a_newer_botocore_without_the_resolver_name_is_not_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The resolver is a botocore internal: a release past 1.33.2 that
+        # renamed it must not lose directory buckets.
+        import botocore.utils
+
+        monkeypatch.delattr(botocore.utils, "S3ExpressIdentityResolver")
+        assert s3storage.s3express_unsupported_reason("demo--usw2-az1--x-s3") is None
+
+    def test_access_point_refused_below_1_37_24(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # botocore knows the --xa-s3 form only through its endpoint rules (from
+        # 1.37.24); the resolver alone (1.33.2) does not address it.
+        self._release(monkeypatch, "1.37.23")
+        reason = s3storage.s3express_unsupported_reason("demo--usw2-az1--xa-s3")
+        assert reason is not None and "1.37.24" in reason
+        self._release(monkeypatch, "1.37.24")
+        assert s3storage.s3express_unsupported_reason("demo--usw2-az1--xa-s3") is None
+
+    def test_current_botocore_addresses_both(self) -> None:
+        for bucket in ("demo--usw2-az1--x-s3", "demo--usw2-az1--xa-s3"):
+            assert s3storage.s3express_unsupported_reason(bucket) is None
 
 
 class TestGetFile:

@@ -708,16 +708,22 @@ dest-existence check for download. We ported the same three faces:
 - `checksum_algorithm` (upload / copy) -> `ChecksumAlgorithm`. For multipart,
   s3transfer propagates it correctly to Create/Part/Complete. **An explicit
   specification beats pip s3transfer's default injection (`setdefault`)**.
-- **SDK floor gate**: an algorithm the installed botocore's httpchecksum
-  tables do not know - `CRC64NVME` below 1.36.0, `SHA512` and the `XXHASH`
-  family below 1.42.53 (the message names 1.42.94, compatibility.md's
-  version, where the S3 model first lists them) - is refused at
-  `Transferrer` construction with a `ConfigurationError` (the CLI's one
-  `fatal error:` line, rc 1) instead of failing every item on botocore's
-  "Unsupported checksum algorithm". One botocore knows but computes only
-  through awscrt is left to botocore's per-item Missing Dependency report
-  (compatibility.md section 2), and `MD5` or an unknown name keeps botocore's
-  per-item report too.
+- **SDK floor gate**: an algorithm the client's S3 model does not carry -
+  `CRC64NVME` below botocore 1.36.0, `SHA512` and the `XXHASH` family below
+  1.42.94, probed as `PutObject`'s `Checksum<ALG>` member - is refused at
+  `Transferrer` construction, for an upload or a copy, with a
+  `ConfigurationError` (the CLI's one `fatal error:` line, rc 1). The release
+  that adds the member adds the part members too (`UploadPart` and
+  `UploadPartCopy` results, `CompletedPart`); below it a single upload fails
+  on botocore's "Unsupported checksum algorithm" - or, on 1.42.53 - 1.42.93,
+  where botocore already computes SHA512 / XXHASH, goes out - and a multipart
+  upload or copy completes without its parts' checksums, s3transfer reading
+  them off part results the model does not parse. Only a single-part copy
+  would get by (S3 computes it), and sizes are unknown up front, so copies are
+  refused with uploads, as `--no-overwrite` is. An algorithm the model knows
+  but botocore computes only through awscrt is left to botocore's per-item
+  Missing Dependency report (compatibility.md section 2), and `MD5` or an
+  unknown name keeps botocore's per-item report too.
 - `checksum_mode` (download) -> GetObject's `ChecksumMode: ENABLED` (botocore
   verifies the response's checksum). What botocore can verify is the single
   (non-ranged) GET, whose response carries the checksum header; a ranged

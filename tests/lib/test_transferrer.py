@@ -23,6 +23,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import boto3
 import pytest
 from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import (
@@ -35,7 +36,7 @@ from botocore.exceptions import (
 from s3transfer import copies as s3transfer_copies
 from s3transfer.copies import CopySubmissionTask
 
-from boto3_s3 import s3storage, transfer
+from boto3_s3 import transfer
 from boto3_s3.exceptions import (
     AccessDeniedError,
     Boto3S3Error,
@@ -67,7 +68,7 @@ from boto3_s3.types import (
     TransferProgress,
     TransferType,
 )
-from tests.utils.fakemodel import model_only_client
+from tests.utils.fakemodel import model_client, model_only_client
 from tests.utils.fakes3 import MTIME, client_error
 from tests.utils.recorder import ApiCall, make_recording_client, ops
 
@@ -3918,21 +3919,14 @@ class TestConditionalWriteSupport:
 class TestChecksumAlgorithmSupport:
     """The checksum-algorithm SDK gate (docs/compatibility.md).
 
-    botocore computes a request checksum only for the algorithms its
-    httpchecksum tables know (CRC64NVME from 1.36.0, SHA512 and XXHASH from
-    1.42.53); below that every item would fail on "Unsupported checksum
-    algorithm", so the run is refused up front, naming the documented version.
+    The S3 model gains each newer algorithm in one release, with every member
+    that carries it (CRC64NVME 1.36.0, SHA512 and XXHASH 1.42.94); below it a
+    single upload fails and a multipart upload or copy cannot carry its parts'
+    checksums, so uploads and copies are refused up front, naming the version.
     """
 
-    @staticmethod
-    def _floor_tables(monkeypatch: pytest.MonkeyPatch) -> None:
-        # botocore 1.31: its release, and tables with no CRC64NVME, SHA512 or
-        # XXHASH anywhere.
-        monkeypatch.setattr(s3storage, "version", lambda _name: "1.31.0")
-        monkeypatch.setattr(
-            transfer.httpchecksum, "_SUPPORTED_CHECKSUM_ALGORITHMS", ["crc32", "sha1", "sha256"]
-        )
-        monkeypatch.setattr(transfer.httpchecksum, "_CRT_CHECKSUM_ALGORITHMS", ["crc32", "crc32c"])
+    # PutObject's checksum members on botocore 1.31 (the floor).
+    _FLOOR = frozenset({"ChecksumCRC32", "ChecksumCRC32C", "ChecksumSHA1", "ChecksumSHA256"})
 
     @pytest.mark.parametrize(
         ("algorithm", "minimum"),
@@ -3945,10 +3939,9 @@ class TestChecksumAlgorithmSupport:
         ],
     )
     def test_upload_and_copy_refused_below_the_algorithm(
-        self, monkeypatch: pytest.MonkeyPatch, algorithm: str, minimum: str
+        self, algorithm: str, minimum: str
     ) -> None:
-        self._floor_tables(monkeypatch)
-        client = model_only_client(set())
+        client = model_client({"PutObject": self._FLOOR})
         for transfer_type in (TransferType.UPLOAD, TransferType.COPY):
             with pytest.raises(ConfigurationError, match=re.escape(minimum)) as exc_info:
                 Transferrer(
@@ -3959,73 +3952,35 @@ class TestChecksumAlgorithmSupport:
                 )
             assert f"checksum_algorithm={algorithm}" in str(exc_info.value)
 
-    def test_lowercase_name_is_probed_like_botocore_reads_it(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # botocore lowercases the member before its lookup; so does the probe.
-        self._floor_tables(monkeypatch)
+    def test_a_model_with_the_member_runs(self) -> None:
+        # 1.42.94 onward: the member is there, whatever botocore computes it with.
+        client = model_client({"PutObject": self._FLOOR | {"ChecksumSHA512"}})
+        Transferrer(TransferType.UPLOAD, client, options={"checksum_algorithm": "SHA512"})
+
+    def test_lowercase_name_is_probed_like_botocore_reads_it(self) -> None:
+        # botocore uppercases nothing for the caller; the probe folds the case.
+        client = model_client({"PutObject": self._FLOOR})
         with pytest.raises(ConfigurationError, match=r"SHA512"):
-            Transferrer(
-                TransferType.UPLOAD,
-                model_only_client(set()),
-                options={"checksum_algorithm": "sha512"},
-            )
+            Transferrer(TransferType.UPLOAD, client, options={"checksum_algorithm": "sha512"})
 
     @pytest.mark.parametrize("algorithm", ["CRC32", "CRC32C", "SHA1", "SHA256", "MD5", "BOGUS"])
-    def test_floor_algorithms_and_unknown_names_are_left_to_botocore(
-        self, monkeypatch: pytest.MonkeyPatch, algorithm: str
-    ) -> None:
-        # The floor's own algorithms pass; MD5 (modelled, never computable) and
-        # an unknown name keep botocore's per-item report.
-        self._floor_tables(monkeypatch)
-        Transferrer(
-            TransferType.UPLOAD, model_only_client(set()), options={"checksum_algorithm": algorithm}
-        )
+    def test_floor_algorithms_and_unknown_names_are_left_to_botocore(self, algorithm: str) -> None:
+        # The floor's own algorithms pass; MD5 (modelled from 1.42.94, never
+        # computable) and an unknown name keep botocore's per-item report.
+        client = model_client({"PutObject": self._FLOOR})
+        Transferrer(TransferType.UPLOAD, client, options={"checksum_algorithm": algorithm})
 
-    def test_an_algorithm_botocore_computes_only_through_awscrt_is_not_refused(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # CRC64NVME known to botocore but awscrt absent: botocore's own
-        # per-item Missing Dependency report stands (compatibility.md section 2).
-        monkeypatch.setattr(
-            transfer.httpchecksum, "_SUPPORTED_CHECKSUM_ALGORITHMS", ["crc32", "sha1", "sha256"]
-        )
-        monkeypatch.setattr(
-            transfer.httpchecksum, "_CRT_CHECKSUM_ALGORITHMS", ["crc32", "crc32c", "crc64nvme"]
-        )
-        Transferrer(
-            TransferType.UPLOAD,
-            model_only_client(set()),
-            options={"checksum_algorithm": "CRC64NVME"},
-        )
-
-    def test_a_newer_botocore_with_renamed_tables_is_not_refused(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # The tables are botocore internals: on a release past the algorithm's
-        # a rename (here: the names missing from both) must not refuse it.
-        monkeypatch.setattr(transfer.httpchecksum, "_SUPPORTED_CHECKSUM_ALGORITHMS", [])
-        monkeypatch.setattr(transfer.httpchecksum, "_CRT_CHECKSUM_ALGORITHMS", [])
-        Transferrer(
-            TransferType.UPLOAD, model_only_client(set()), options={"checksum_algorithm": "SHA512"}
-        )
-
-    def test_download_is_not_gated(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_download_is_not_gated(self) -> None:
         # A download never sends ChecksumAlgorithm.
-        self._floor_tables(monkeypatch)
-        Transferrer(
-            TransferType.DOWNLOAD,
-            model_only_client(set()),
-            options={"checksum_algorithm": "SHA512"},
-        )
+        client = model_client({"PutObject": self._FLOOR})
+        Transferrer(TransferType.DOWNLOAD, client, options={"checksum_algorithm": "SHA512"})
 
-    def test_current_botocore_knows_every_gated_algorithm(self) -> None:
-        # The dev SDK is above every entry, so nothing is refused there.
+    def test_current_botocore_models_every_gated_algorithm(self) -> None:
+        # The dev SDK is above every entry, so a real client is refused nothing.
+        client = boto3.client("s3", region_name="us-east-1")
         for algorithm in transfer._CHECKSUM_MIN_BOTOCORE:  # pyright: ignore[reportPrivateUsage]
             Transferrer(
-                TransferType.UPLOAD,
-                model_only_client(set()),
-                options={"checksum_algorithm": algorithm.upper()},
+                TransferType.UPLOAD, client, options={"checksum_algorithm": algorithm.upper()}
             )
 
 
