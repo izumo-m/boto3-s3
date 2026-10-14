@@ -1364,7 +1364,7 @@ class LocalFileGenerator:
 
 
 def translate_os_error(
-    exc: OSError,
+    exc: OSError | ValueError,
     *,
     operation: str | None,
     key: str | None,
@@ -1373,6 +1373,10 @@ def translate_os_error(
     """Map an ``OSError`` to the library taxonomy (the local mirror of
     ``s3storage.translate_boto_error``): missing path -> ``NotFoundError``,
     permission -> ``AccessDeniedError``, everything else -> ``TransportError``.
+    A ``ValueError`` is a path the OS calls refuse before asking the
+    filesystem - an embedded NUL, a lone surrogate the filesystem encoding
+    cannot carry (``UnicodeEncodeError``) - and maps to ``ValidationError``:
+    the caller supplied it.
 
     Shared by the local-filesystem failure paths that raise into the taxonomy
     (this backend's single-entry and I/O operations, the engines'
@@ -1383,6 +1387,8 @@ def translate_os_error(
     ``str(exc)`` when the caller carries aws-cli wording of its own.
     """
     text = str(exc) if message is None else message
+    if isinstance(exc, ValueError):
+        return ValidationError(text, operation=operation, key=key)
     if isinstance(exc, FileNotFoundError):
         return NotFoundError(text, operation=operation, key=key)
     if isinstance(exc, PermissionError):
@@ -1829,7 +1835,7 @@ class LocalStorage(Storage):
             # is False, aws-cli's own existence probe treats it as gone - so return
             # None per get_fileinfo's contract, not a raised transport error.
             return None
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             # operation=None, like open / delete: the storage cannot know which
             # operation resolves the path, so the operation layer fills the
             # name in (attribute_failure); key names the path, the entry's own
@@ -1902,10 +1908,11 @@ class LocalStorage(Storage):
             if parent:
                 os.makedirs(parent, exist_ok=True)
             return cast("BinaryIO", open(target, "wb"))
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             # operation=None: the storage cannot know which operation opened
             # it; the operation layer fills the name in (attribute_failure).
-            raise translate_os_error(exc, operation=None, key=key) from exc
+            # key names the file opened, as get_fileinfo / delete name theirs.
+            raise translate_os_error(exc, operation=None, key=target.replace(os.sep, "/")) from exc
 
     @override
     def delete(self, info: FileInfo) -> None:
@@ -1913,7 +1920,7 @@ class LocalStorage(Storage):
         target = to_native_path(info.key)
         try:
             os.remove(target)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             # operation=None, like open: an mv's source delete and a sync's
             # orphan removal both reach this and stamp their own name.
             raise translate_os_error(exc, operation=None, key=info.key) from exc

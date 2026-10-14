@@ -149,6 +149,44 @@ _TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
     IncompleteReadError,
 )
 
+# The CRT engine's failures by awscrt's error name: its AwsCrtError carries the
+# name, and a request awscrt refuses synchronously (a local file it cannot
+# open) raises RuntimeError("<code> (<name>): <text>"). The classic engine's
+# categories for the same events: a connection, DNS, TLS or socket failure and
+# S3's own 5xx / throttle answers the CRT client retried and gave up on are
+# transport; a local path awscrt cannot open is the local taxonomy's
+# (`translate_os_error`). Unlisted names (a cancellation, an unknown error)
+# stay at the base.
+_CRT_NAME_CATEGORIES: dict[str, type[Boto3S3Error]] = {
+    "AWS_ERROR_NO_PERMISSION": AccessDeniedError,
+    "AWS_ERROR_FILE_INVALID_PATH": NotFoundError,
+    "AWS_ERROR_FILE_OPEN_FAILURE": TransportError,
+    "AWS_ERROR_FILE_READ_FAILURE": TransportError,
+    "AWS_ERROR_FILE_WRITE_FAILURE": TransportError,
+    "AWS_ERROR_NO_SPACE": TransportError,
+    "AWS_ERROR_HTTP_CONNECTION_CLOSED": TransportError,
+    "AWS_ERROR_HTTP_SERVER_CLOSED": TransportError,
+    "AWS_ERROR_HTTP_RESPONSE_FIRST_BYTE_TIMEOUT": TransportError,
+    "AWS_ERROR_S3_SLOW_DOWN": TransportError,
+    "AWS_ERROR_S3_INTERNAL_ERROR": TransportError,
+}
+_CRT_TRANSPORT_PREFIXES = ("AWS_IO_SOCKET_", "AWS_IO_DNS_", "AWS_IO_TLS_")
+_CRT_RUNTIME_ERROR = re.compile(r"\d+ \((AWS_[A-Z0-9_]+)\)")
+
+
+def _crt_error_category(exc: BaseException) -> type[Boto3S3Error] | None:
+    """The category of an awscrt failure by its error name, else None."""
+    name: object = getattr(exc, "name", None) if hasattr(exc, "code") else None
+    if not isinstance(name, str) and type(exc) is RuntimeError:
+        match = _CRT_RUNTIME_ERROR.match(str(exc))
+        name = match.group(1) if match else None
+    if not isinstance(name, str) or not name.startswith("AWS_"):
+        return None
+    if name.startswith(_CRT_TRANSPORT_PREFIXES):
+        return TransportError
+    return _CRT_NAME_CATEGORIES.get(name)
+
+
 # S3 error Code -> exception category, shared by every translation path: the
 # request-level ClientError below and the per-key DeleteObjects ``Errors[]``
 # entries in deleter.py (which carry no HTTP status to widen on). The code
@@ -263,10 +301,13 @@ def translate_boto_error(
     profile or partial credentials to its ``InvalidConfigError`` refinement,
     and ``ParamValidationError`` (client-side validation - no HTTP happened)
     to ``ValidationError``, which aws-cli files under its usage rc. An
-    existing ``Boto3S3Error`` passes through unchanged, and anything else -
-    an ``OSError`` raised by local file I/O inside s3transfer, say - becomes
-    the base category carrying its message (the ``[Errno 21] Is a directory``
-    text aws prints for a directory source survives verbatim).
+    ``OSError`` raised by local file I/O inside s3transfer takes the local
+    taxonomy's category (`translate_os_error`) with its message as it is (the
+    ``[Errno 21] Is a directory`` text aws prints for a directory source
+    survives verbatim), and an awscrt failure the category its error name
+    maps to (`_crt_error_category`). An existing ``Boto3S3Error`` passes
+    through unchanged, and anything else becomes the base category carrying
+    its message.
     """
     if isinstance(exc, Boto3S3Error):
         return exc
@@ -289,6 +330,16 @@ def translate_boto_error(
         return TransportError(str(exc), operation=operation, bucket=bucket, key=key)
     if isinstance(exc, ParamValidationError):
         return ValidationError(str(exc), operation=operation, bucket=bucket, key=key)
+    if isinstance(exc, OSError):
+        # Local I/O inside the classic engine's tasks (s3transfer opens,
+        # writes and renames the files itself): the local taxonomy's
+        # category, with the message - aws's own words - kept as it is.
+        local = translate_os_error(exc, operation=operation, key=key)
+        local.bucket = bucket
+        return local
+    category = _crt_error_category(exc)
+    if category is not None:
+        return category(str(exc), operation=operation, bucket=bucket, key=key)
     return Boto3S3Error(str(exc), operation=operation, bucket=bucket, key=key)
 
 
@@ -1226,7 +1277,8 @@ class S3Storage(Storage):
         a lock; build the client on the caller side for concurrent use. A failed
         default build raises the translated ``Boto3S3Error`` -
         ``InvalidConfigError`` for a set-but-unusable ``AWS_PROFILE``, partial
-        credentials or a malformed environment endpoint - never the raw
+        credentials, a malformed environment endpoint or a config value of the
+        wrong shape - never the raw
         botocore error (design/exceptions.md section 1). Missing credentials
         and an unset region do not fail the build: the client's first request
         fails on the missing credentials instead, and an unset region falls
@@ -1237,11 +1289,12 @@ class S3Storage(Storage):
             with s3_errors(operation=None):
                 try:
                     self._client = boto3.client("s3")
-                except ValueError as exc:
+                except (ValueError, AttributeError) as exc:
                     # A malformed endpoint from the environment
                     # (AWS_ENDPOINT_URL[_S3]) raises a plain ValueError, not a
-                    # BotoCoreError - the same hole S3.client() plugs
-                    # (design/exceptions.md).
+                    # BotoCoreError, and a config value of the wrong shape
+                    # (`s3 = foo`) an AttributeError - the same holes
+                    # S3.client() plugs (design/exceptions.md).
                     raise InvalidConfigError(str(exc)) from exc
         return self._client
 
@@ -1682,8 +1735,8 @@ class S3Storage(Storage):
         source = os.fspath(path)
         try:
             special = is_special_file(source)
-        except OSError:
-            special = False  # missing, or unreachable: the open below reports it
+        except (OSError, ValueError):
+            special = False  # missing, unreachable or unnameable: the open below reports it
         if special:
             raise ValidationError(
                 f"{source}: File is character special device, block special device, "
@@ -1693,7 +1746,7 @@ class S3Storage(Storage):
             )
         try:
             stream = open(source, "rb")
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             raise translate_os_error(exc, operation=_PUT_FILE_OPERATION, key=source) from exc
         with stream:
             try:
@@ -1740,7 +1793,7 @@ class S3Storage(Storage):
             if parent:
                 os.makedirs(parent, exist_ok=True)
             fd, temp_path = _create_download_temp(dest)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             raise translate_os_error(exc, operation=_GET_FILE_OPERATION, key=dest) from exc
         # The stream takes the descriptor over on a successful fdopen and closes
         # it from then on (the `with` below, on every path out); until then the

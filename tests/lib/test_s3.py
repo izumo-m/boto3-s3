@@ -507,6 +507,20 @@ class TestClientSeam:
         assert type(exc_info.value) is InvalidConfigError
         assert isinstance(exc_info.value.__cause__, ValueError)
 
+    def test_a_config_value_of_the_wrong_shape_maps_to_invalid_config_error(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `s3 = foo` is a scalar where botocore reads a section: its
+        # `.get(...)` on the string raises AttributeError mid-build.
+        config = tmp_path / "config"
+        config.write_text("[default]\nregion = us-east-1\ns3 = foo\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        monkeypatch.delenv("AWS_PROFILE", raising=False)
+        for build in (lambda: S3().client(), lambda: S3Storage("s3://b/").get_client()):
+            with pytest.raises(InvalidConfigError) as exc_info:
+                build()
+            assert isinstance(exc_info.value.__cause__, AttributeError)
+
 
 class TestResolveSeam:
     """``S3.resolve`` injects ``client()`` into bare ``s3://`` strings and is overridable."""

@@ -77,9 +77,8 @@ classified failure is always raised as one of the subclasses below. Direct base
 instances exist only where no classification applies:
 
 - the S3 error translator's last-resort clause, for an exception no earlier
-  clause claims — notably an `OSError` raised inside s3transfer's task
-  execution, deliberately kept at the base rather than `TransportError` so the
-  AWS CLI's message survives verbatim;
+  clause claims — an error the CRT engine reports under a name it has no
+  category for (a cancellation, an unknown error), say;
 - whatever an S3 request raised from inside botocore that is none of
   botocore's own exceptions — a redirect loop ending in `RecursionError`, an
   S3 Express session reply without `Credentials` (`KeyError`), a response
@@ -143,11 +142,10 @@ space keeps that naming whole.
 The caller lacks permission for the resource. Raised for an S3 403 or the
 `AccessDenied` error code, and for a local `PermissionError` on boto3-s3's
 own paths — a storage's `open`, `delete` or `get_fileinfo`, a directory the
-operation creates — so one `except AccessDeniedError` covers both sides of a
-transfer there. A `PermissionError` raised inside s3transfer's task execution
-(a download into a directory the process cannot write, say) is the `OSError`
-carve-out described under `Boto3S3Error`: it stays at the base class with the
-`PermissionError` as its cause.
+operation creates — and inside either transfer engine (a download into a
+directory the process cannot write: the classic engine's `PermissionError`,
+the CRT engine's `AWS_ERROR_NO_PERMISSION`), so one `except AccessDeniedError`
+covers both sides of a transfer. The message is the one the AWS CLI prints.
 
 ```python
 class AccessDeniedError(Boto3S3Error): ...
@@ -160,7 +158,7 @@ hierarchy.
 
 The target resource does not exist. Raised for an S3 404 or the `NoSuchKey` /
 `NoSuchBucket` / `NoSuchVersion` / `NotFound` error codes, for a local
-`FileNotFoundError`, and for a source that does not exist when an operation
+`FileNotFoundError` (the CRT engine's `AWS_ERROR_FILE_INVALID_PATH`), and for a source that does not exist when an operation
 checks it up front — a `cp` / `mv` / `sync` whose local source path is missing,
 and a single-object `cp` / `mv` whose S3 source `HeadObject` answers 404, fail
 this way before item processing begins, so the error propagates directly rather
@@ -185,8 +183,10 @@ unrecognized value for a mode option such as `copy_props`,
 `annotation_copy_mode` or `case_conflict`, or for `presign`'s `method`; a
 case-fold collision under `CaseConflictMode.ERROR`; and `stdin` unavailable
 where a stream needs it (there is no `stdout` counterpart — matching the AWS
-CLI, a missing one fails that item from inside the transfer instead). It is
-also the class for botocore's
+CLI, a missing one fails that item from inside the transfer instead); a local
+path the operating system refuses before asking the filesystem (an embedded
+NUL, a lone surrogate the filesystem encoding cannot carry), with the
+`ValueError` on `__cause__`. It is also the class for botocore's
 `ParamValidationError` — client-side validation, so no request was sent — and
 for an S3 4xx other than 403 and 404 whose code is not in the category table.
 
@@ -221,11 +221,12 @@ A network or local I/O failure. Raised for an S3 5xx or a throttling response
 botocore's connection and HTTP-client failures (endpoint or connect failure,
 proxy failure, read timeout, a dropped connection, a response body that ends
 short of its `Content-Length`), and for a local `OSError`
-that is neither `FileNotFoundError` nor `PermissionError` on boto3-s3's own
-paths, including a failed directory creation. One carve-out: an `OSError`
-surfacing from inside s3transfer's task execution stays at the base
-`Boto3S3Error` rather than becoming a `TransportError`, so the AWS CLI's
-message text rides through unchanged.
+that is neither `FileNotFoundError` nor `PermissionError`, including a failed
+directory creation and one raised inside the classic transfer engine (the
+AWS CLI's message text kept as it is). On the CRT engine the same events
+arrive under awscrt's error names and take the same class: a socket, DNS or
+TLS failure, a closed connection, S3's `SlowDown` and internal errors the
+engine gave up retrying, a local file it cannot open, read or write.
 
 ```python
 class TransportError(Boto3S3Error): ...
@@ -312,7 +313,9 @@ AWS configuration (a `ConfigParseError`, say). It is also the class for a
 malformed `endpoint_url` — one passed to `S3`, or one taken from
 `AWS_ENDPOINT_URL` / `AWS_ENDPOINT_URL_S3` when a default client is built —
 and for a malformed or empty region, both of which botocore rejects with a
-`ValueError` that the client builders convert here. The CRT transfer engine
+`ValueError` that the client builders convert here, and for a config value of
+the wrong shape (`s3 = foo`, a value where botocore reads a section), on which
+botocore's client build fails with an `AttributeError`. The CRT transfer engine
 raises it when it is built — at the first transfer, or from
 [`materialize_crt_engine`](./s3.md#materialize_crt_engineclient--transfer_confignone)
 — around a CA bundle it cannot read (a missing path, a directory, a file it

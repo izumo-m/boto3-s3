@@ -1158,8 +1158,9 @@ class S3:
         change credentials, reuse a cached client, or return a test double; reuse
         one explicitly via ``S3Storage(uri, client=s3.client())``. A failed build
         raises the translated ``Boto3S3Error`` - ``InvalidConfigError`` for a
-        set-but-unusable ``AWS_PROFILE``, partial credentials, or a malformed
-        region or ``endpoint_url``, and the base ``Boto3S3Error`` for any other
+        set-but-unusable ``AWS_PROFILE``, partial credentials, a malformed
+        region or ``endpoint_url``, or a config value of the wrong shape
+        (``s3 = foo``), and the base ``Boto3S3Error`` for any other
         botocore error, which the translator's last clause claims - never the
         raw botocore error (design/exceptions.md section 1). Missing
         credentials and an unset region do not fail the build: missing
@@ -1175,10 +1176,12 @@ class S3:
                         "s3", endpoint_url=self._endpoint_url, config=self._config
                     )
                 return boto3.client("s3", endpoint_url=self._endpoint_url, config=self._config)
-            except ValueError as exc:
+            except (ValueError, AttributeError) as exc:
                 # botocore rejects a malformed endpoint_url with a plain
-                # ValueError (not a BotoCoreError), which would leak raw
-                # through s3_errors. A set-but-unusable setting is
+                # ValueError (not a BotoCoreError), and trips over a config
+                # value of the wrong shape (`s3 = foo`, a scalar where it
+                # reads a section) with an AttributeError; either would leak
+                # raw through s3_errors. A set-but-unusable setting is
                 # InvalidConfigError's definition (design/exceptions.md).
                 raise InvalidConfigError(str(exc)) from exc
 
@@ -1593,7 +1596,7 @@ class S3:
         if recursive and isinstance(dest_storage, LocalStorage):
             try:
                 dest_storage.ensure_directory()
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 raise translate_os_error(exc, operation=operation, key=None) from exc
         client = client_provider.get_client()
         source_client = source_provider.get_client() if source_provider is not None else None
@@ -2179,7 +2182,7 @@ class S3:
         if isinstance(dest_storage, LocalStorage):
             try:
                 dest_storage.ensure_directory()
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 raise translate_os_error(exc, operation="sync", key=None) from exc
         # An S3 Express directory bucket lists in unspecified order
         # (`ListObjectsV2` drops the lexicographic guarantee), which would feed

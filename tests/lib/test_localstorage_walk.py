@@ -2214,8 +2214,42 @@ class TestLocalStorageIO:
             assert handle.read() == b"payload"
 
     def test_open_missing_for_read_raises_not_found(self, tmp_path: Path) -> None:
-        with pytest.raises(NotFoundError):
+        with pytest.raises(NotFoundError) as raised:
             LocalStorage(tmp_path).open("missing.bin", "rb")
+        # The failure names the file opened, as get_fileinfo / delete name
+        # theirs (a local error's key is a filesystem path).
+        assert raised.value.key == str(tmp_path / "missing.bin").replace(os.sep, "/")
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            pytest.param("a\x00b", id="nul"),
+            # Windows' filesystem encoding passes a lone surrogate through.
+            pytest.param(
+                "a\ud800b",
+                id="surrogate",
+                marks=pytest.mark.skipif(os.name == "nt", reason="POSIX filesystem encoding"),
+            ),
+        ],
+    )
+    def test_a_path_the_os_cannot_take_is_a_validation_error(
+        self, tmp_path: Path, name: str
+    ) -> None:
+        # The OS calls refuse an embedded NUL (ValueError) or a lone surrogate
+        # (UnicodeEncodeError) before the filesystem is asked: the caller's
+        # value is invalid, not the filesystem failing.
+        storage = LocalStorage(tmp_path)
+        calls: list[Callable[[], object]] = [
+            lambda: storage.open(name, "rb"),
+            lambda: storage.open(name, "wb"),
+            lambda: storage.get_fileinfo(name),
+            lambda: LocalStorage(str(tmp_path / name)).get_fileinfo(),
+            lambda: storage.delete(FileInfo(key=str(tmp_path / name))),
+        ]
+        for call in calls:
+            with pytest.raises(ValidationError) as raised:
+                call()
+            assert isinstance(raised.value.__cause__, ValueError)
 
     def test_open_empty_key_is_the_location_itself(self, tmp_path: Path) -> None:
         # key="" is the location itself (the get_fileinfo convention):

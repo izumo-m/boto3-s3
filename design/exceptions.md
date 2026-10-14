@@ -166,8 +166,11 @@ taxonomy ([`storage.md`](./storage.md) section 2).
 | S3 `InternalError` / `SlowDown` / `ServiceUnavailable` / `RequestTimeout` (5xx / throttle) | `TransportError` |
 | local `PermissionError` | `AccessDeniedError` |
 | local `FileNotFoundError` / a missing source path | `NotFoundError` |
+| a local path the OS calls refuse before the filesystem is asked (an embedded NUL's `ValueError`, a lone surrogate's `UnicodeEncodeError`) | `ValidationError` |
 | connection failure / timeout / a body ending short of its `Content-Length` (botocore's `IncompleteReadError` under urllib3 1.x, a broken stream under urllib3 2); a local-I/O `OSError` caught on boto3-s3's own paths (incl. a failed `makedirs`) | `TransportError` |
-| an `OSError` surfacing from inside s3transfer's task execution (aws's message survives verbatim, e.g. `[Errno 21] Is a directory`) | base `Boto3S3Error` (the last-resort clause, section 3) |
+| an `OSError` surfacing from inside s3transfer's task execution (aws's message survives verbatim, e.g. `[Errno 21] Is a directory`) | the local rows above (`translate_os_error`'s category, the message unchanged) |
+| a CRT engine failure, by awscrt's error name (its `AwsCrtError`, or the `RuntimeError` `<code> (<name>): ...` a request awscrt refuses synchronously raises - `s3storage._crt_error_category`): `AWS_IO_SOCKET_*` / `AWS_IO_DNS_*` / `AWS_IO_TLS_*`, a closed connection, a first-byte timeout, S3's `SlowDown` / internal error the CRT client gave up retrying, a local file it cannot open / read / write, no space | `TransportError` |
+| the same, for `AWS_ERROR_NO_PERMISSION` / `AWS_ERROR_FILE_INVALID_PATH` | `AccessDeniedError` / `NotFoundError` |
 | a listing / bucket / single-object HEAD entry missing an element aws-cli reads by subscript (its bare `KeyError` naming the element - `s3storage.read_required`) | `MalformedResponseError` |
 | an S3 `LastModified` the host's local zone cannot represent (aws-cli's `astimezone` `OverflowError`, `date value out of range`; on Windows also the `OSError` `[Errno 22]` its `time.localtime` raises below the epoch and past the year 3000, measured against `aws.exe` - `s3storage.reject_unrepresentable_stamp`) | `MalformedResponseError` |
 | `NoCredentialsError` / `NoRegionError` | `ConfigurationError` |
@@ -200,8 +203,10 @@ never shuts an engine down from the callback's worker thread.
 
 Local `OSError`s are converted by one shared translator
 (`localstorage.translate_os_error`, the local mirror of
-`s3storage.translate_boto_error`): `FileNotFoundError` -> `NotFoundError`,
-`PermissionError` -> `AccessDeniedError`, everything else -> `TransportError`.
+`s3storage.translate_boto_error`, which hands it the `OSError`s raised inside
+s3transfer's tasks): `FileNotFoundError` -> `NotFoundError`,
+`PermissionError` -> `AccessDeniedError`, everything else -> `TransportError`,
+and a path the OS calls refuse (`ValueError`) -> `ValidationError`.
 
 One local failure never reaches a category at all: the post-download `utime`
 stamp. `transfer.py` re-words its EPERM into aws's "attempting to modify the
@@ -219,9 +224,8 @@ other 4xx -> `ValidationError`, otherwise the base `Boto3S3Error`. The error
 
 - that final widening fallback;
 - `translate_boto_error`'s last clause, for an exception no earlier clause
-  claims - notably an `OSError` raised inside s3transfer's task execution,
-  deliberately kept base (not `TransportError`) so aws's message rides
-  through verbatim, and whatever a request raised from inside botocore
+  claims - a CRT failure under a name the table above does not list (a
+  cancellation, an unknown error), and whatever a request raised from inside botocore
   outside botocore's own family (`s3storage.request_failure`: a redirect
   loop's `RecursionError`, an S3 Express session reply without `Credentials`,
   a value the response parser cannot convert). Every request point applies

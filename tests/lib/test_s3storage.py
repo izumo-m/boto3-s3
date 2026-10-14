@@ -1424,6 +1424,60 @@ _REQUEST_POINTS: list[tuple[Any, tuple[str | None, str | None, str | None]]] = [
 ]
 
 
+class _FakeCrtError(Exception):
+    """awscrt's ``AwsCrtError`` shape: ``code`` / ``name`` / message."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f"{name}: text")
+        self.code = 1
+        self.name = name
+
+
+class TestTranslateEngineFailures:
+    """The engines' own failures take the category the same event has on the
+    library's own paths, whatever engine raised them."""
+
+    @pytest.mark.parametrize(
+        ("exc", "category"),
+        [
+            (PermissionError(errno.EACCES, "Permission denied", "/d/f"), AccessDeniedError),
+            (FileNotFoundError(errno.ENOENT, "No such file or directory", "/d/f"), NotFoundError),
+            (IsADirectoryError(errno.EISDIR, "Is a directory", "/d"), TransportError),
+        ],
+    )
+    def test_an_os_error_inside_the_classic_engine(
+        self, exc: OSError, category: type[Boto3S3Error]
+    ) -> None:
+        error = s3storage.translate_boto_error(exc, operation="cp", bucket="b", key="k")
+        assert type(error) is category
+        assert str(error) == str(exc)  # aws's words, as they are
+        assert (error.operation, error.bucket, error.key) == ("cp", "b", "k")
+
+    @pytest.mark.parametrize(
+        ("exc", "category"),
+        [
+            (_FakeCrtError("AWS_IO_SOCKET_CONNECTION_REFUSED"), TransportError),
+            (_FakeCrtError("AWS_IO_TLS_ERROR_NEGOTIATION_FAILURE"), TransportError),
+            (_FakeCrtError("AWS_ERROR_S3_SLOW_DOWN"), TransportError),
+            (_FakeCrtError("AWS_ERROR_S3_INTERNAL_ERROR"), TransportError),
+            (_FakeCrtError("AWS_ERROR_NO_PERMISSION"), AccessDeniedError),
+            (_FakeCrtError("AWS_ERROR_FILE_INVALID_PATH"), NotFoundError),
+            (
+                RuntimeError("43 (AWS_ERROR_NO_PERMISSION): User does not have permission"),
+                AccessDeniedError,
+            ),
+            (_FakeCrtError("AWS_ERROR_S3_CANCELED"), Boto3S3Error),
+            (RuntimeError("no awscrt here"), Boto3S3Error),
+        ],
+    )
+    def test_a_crt_failure_by_its_error_name(
+        self, exc: BaseException, category: type[Boto3S3Error]
+    ) -> None:
+        error = s3storage.translate_boto_error(exc, operation="cp", bucket="b", key="k")
+        assert type(error) is category
+        assert str(error) == str(exc)
+
+
 class TestLostLikeAws:
     """`lost_like_aws` evaluates aws-cli's own precondition check.
 
