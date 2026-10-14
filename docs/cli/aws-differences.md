@@ -356,14 +356,15 @@ comes out differently, listed in section 1.
 - **Ctrl-C's closing line.** Both tools exit 1 on a Ctrl-C caught mid-run,
   and both close with `cancelled: ctrl-c received` when the interrupt
   cancels a classic transfer: a download whose body is still arriving, a
-  multipart upload or copy with parts or its completion still to go, or an
-  item still waiting for a worker. `aws` produces that line only from such a
+  multipart upload or copy with parts still to go, or an item still waiting
+  for a worker. `aws` produces that line only from such a
   cancelled transfer, so everywhere else it has one — the
   interrupt landed before the first transfer was submitted, or during a
   `--dryrun`, or after the last one finished, or while every transfer of the
   run was down to its one request already out (an upload or copy small
-  enough to go as one request, or a delete, that it lets finish: a single
-  one, or a few no more than the worker count), or mid-submission under
+  enough to go as one request, a multipart one sending its completion, or a
+  delete, that it lets finish and reports done: a single one, or a few no
+  more than the worker count), or mid-submission under
   `preferred_transfer_client = crt` — `aws` closes instead with a
   `fatal error:` line carrying no message: its recorder renders the
   `KeyboardInterrupt`, whose text is empty, as an error result padded with the

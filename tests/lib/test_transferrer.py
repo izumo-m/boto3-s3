@@ -2301,6 +2301,32 @@ class _CrtRenameFailing(_CrtDrainManager):
         super()._drain()
 
 
+class TestDirectoryCreatorWording:
+    def test_an_embedded_nul_reads_as_the_bundled_interpreter_words_it(
+        self, tmp_path: Path
+    ) -> None:
+        # aws's subscriber lets the ValueError through; its 3.14 names the
+        # path function, which 3.10 and 3.11 do not.
+        future = SimpleNamespace(
+            meta=SimpleNamespace(
+                call_args=SimpleNamespace(fileobj=str(tmp_path / "d\x00e" / "f.txt"))
+            )
+        )
+        with pytest.raises(ValueError, match=r"^mkdir: embedded null character in path$"):
+            transfer._DirectoryCreator().on_queued(future)  # pyright: ignore[reportPrivateUsage]
+
+    def test_a_directory_it_cannot_create_names_the_file(self, tmp_path: Path) -> None:
+        # A local failure carries the file in key and no bucket, as the
+        # engine's own record of the item's local file does.
+        blocker = tmp_path / "f"
+        blocker.write_text("x")
+        dest = str(blocker / "sub" / "a.bin")
+        future = SimpleNamespace(meta=SimpleNamespace(call_args=SimpleNamespace(fileobj=dest)))
+        with pytest.raises(Boto3S3Error) as raised:
+            transfer._DirectoryCreator().on_queued(future)  # pyright: ignore[reportPrivateUsage]
+        assert (raised.value.bucket, raised.value.key) == (None, dest.replace(os.sep, "/"))
+
+
 class TestCrtDownloadRenameFailure:
     """A CRT download whose rename into place fails (a directory at the
     destination, a name too long to create) read as a success: aws then
@@ -2363,7 +2389,7 @@ class TestLocalFailureClassification:
     @pytest.mark.parametrize(
         ("exc", "category"),
         [
-            (PermissionError(errno.EACCES, "Permission denied", "/x/a.bin.tmp"), AccessDeniedError),
+            (PermissionError(errno.EACCES, "Permission denied"), AccessDeniedError),
             (FileNotFoundError(errno.ENOENT, "No such file or directory"), NotFoundError),
             (IsADirectoryError(errno.EISDIR, "Is a directory"), TransportError),
             (_CrtNamedError("AWS_ERROR_NO_PERMISSION"), AccessDeniedError),
@@ -2396,6 +2422,34 @@ class TestLocalFailureClassification:
         assert type(result.error) is Boto3S3Error
         assert result.error is not None
         assert (result.error.bucket, result.error.key) == ("b", "d/a.bin")
+
+
+class TestOnlyTheItemsOwnFileIsLocal:
+    """An ``OSError`` naming some other file in the item's task - a credential
+    provider's token file, the host's mime.types - is the request's, not the
+    item's local file failing (`transfer._names_item_file`)."""
+
+    def test_an_error_naming_another_file_stays_the_request_s(self, tmp_path: Path) -> None:
+        src = str(tmp_path / "a.bin")
+        item = TransferItem(compare_key="a.bin", src_path=src, dest_bucket="b", dest_key="k")
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        with Transferrer(TransferType.UPLOAD, client, on_result=results.append) as transferrer:
+            transferrer._record_failure(  # pyright: ignore[reportPrivateUsage]
+                item, FileNotFoundError(errno.ENOENT, "No such file", str(tmp_path / "token"))
+            )
+        assert type(results[0].error) is Boto3S3Error
+        assert results[0].error is not None
+        assert (results[0].error.bucket, results[0].error.key) == ("b", "k")
+
+    def test_the_temporary_file_beside_it_and_no_name_are_the_item_s(self, tmp_path: Path) -> None:
+        path = str(tmp_path / "a.bin")
+        names_item_file = transfer._names_item_file  # pyright: ignore[reportPrivateUsage]
+        assert names_item_file(OSError(errno.EACCES, "x", path + ".AbC123"), path)
+        assert names_item_file(OSError(errno.EISDIR, "x", path + ".AbC123", path), path)
+        assert names_item_file(OSError(errno.ENOSPC, "No space left on device"), path)
+        assert not names_item_file(OSError(errno.ENOENT, "x", path + "x"), path)
+        assert not names_item_file(OSError(errno.EACCES, "x", "/etc/mime.types"), path)
 
 
 class TestStreamDownloadRetry:
@@ -2984,6 +3038,12 @@ class TestDownloadMoveFsync:
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
         assert "Input/output error" in str(results[0].error)
         assert str(results[0].error).startswith("Failed to persist ")
+        # A local failure: the file in key, no bucket.
+        assert results[0].error is not None
+        assert (results[0].error.bucket, results[0].error.key) == (
+            None,
+            str(tmp_path / "out" / "a.bin").replace(os.sep, "/"),
+        )
 
     def test_default_storage_does_not_fsync(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -333,6 +333,30 @@ def translate_boto_error(
     return Boto3S3Error(str(exc), operation=operation, bucket=bucket, key=key)
 
 
+# The OSErrors a client build raises when a configured path cannot be used:
+# a credential_process executable that is missing, not executable, a
+# directory, or not a program at all.
+_CONFIG_PATH_ERRORS = (FileNotFoundError, PermissionError, IsADirectoryError, NotADirectoryError)
+
+
+def client_build_error(exc: ValueError | AttributeError | OSError) -> Boto3S3Error:
+    """The family error for what the SDK raises outside its own family while it builds a client.
+
+    It reads the configuration then: a malformed endpoint is a plain
+    ``ValueError``, a config value of the wrong shape (``s3 = foo``, a scalar
+    where it reads a section) an ``AttributeError``, and a configured path
+    that cannot be used (a ``credential_process`` executable, run at build)
+    an ``OSError`` - set-but-unusable configuration, `InvalidConfigError`.
+    Any other ``OSError`` (out of file descriptors reading the SDK's own
+    data) is local I/O failing, `TransportError`.
+    """
+    if isinstance(exc, OSError) and not (
+        isinstance(exc, _CONFIG_PATH_ERRORS) or exc.errno == errno.ENOEXEC
+    ):
+        return TransportError(str(exc))
+    return InvalidConfigError(str(exc))
+
+
 @contextmanager
 def s3_errors(
     *, operation: str | None, bucket: str | None = None, key: str | None = None
@@ -1282,13 +1306,10 @@ class S3Storage(Storage):
                     self._client = boto3.client("s3")
                 except (ValueError, AttributeError, OSError) as exc:
                     # A malformed endpoint from the environment
-                    # (AWS_ENDPOINT_URL[_S3]) raises a plain ValueError, not a
-                    # BotoCoreError, a config value of the wrong shape
-                    # (`s3 = foo`) an AttributeError, and a
-                    # `credential_process` executable that cannot run an
-                    # OSError - the same holes S3.client() plugs
-                    # (design/exceptions.md).
-                    raise InvalidConfigError(str(exc)) from exc
+                    # (AWS_ENDPOINT_URL[_S3]), a config value of the wrong
+                    # shape, a credential_process that cannot run - the same
+                    # holes S3.client() plugs (`client_build_error`).
+                    raise client_build_error(exc) from exc
         return self._client
 
     def close(self) -> None:

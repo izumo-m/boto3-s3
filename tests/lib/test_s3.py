@@ -535,6 +535,26 @@ class TestClientSeam:
                 build()
             assert isinstance(exc_info.value.__cause__, FileNotFoundError)
 
+    @pytest.mark.parametrize(
+        ("raised", "category"),
+        [
+            (OSError(8, "Exec format error"), "InvalidConfigError"),
+            (IsADirectoryError(21, "Is a directory", "/helper"), "InvalidConfigError"),
+            (OSError(24, "Too many open files", "/botocore/data/endpoints.json"), "TransportError"),
+        ],
+    )
+    def test_a_build_time_os_error_is_configuration_only_for_a_configured_path(
+        self, monkeypatch: pytest.MonkeyPatch, raised: OSError, category: str
+    ) -> None:
+        def boom(*args: Any, **kwargs: Any) -> Any:
+            raise raised
+
+        monkeypatch.setattr(boto3, "client", boom)
+        with pytest.raises(Boto3S3Error) as exc_info:
+            S3().client()
+        assert type(exc_info.value).__name__ == category
+        assert exc_info.value.__cause__ is raised
+
     def test_a_caller_s_wrong_typed_argument_passes_through(self) -> None:
         # A programming error in the arguments is not the configuration's
         # (design/exceptions.md section 2): it propagates as is.

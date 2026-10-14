@@ -57,13 +57,19 @@ from boto3_s3.exceptions import (
     BatchError,
     Boto3S3Error,
     CancelledError,
-    InvalidConfigError,
     NotFoundError,
     ValidationError,
 )
 from boto3_s3.iostorage import IOStorage
 from boto3_s3.localstorage import LocalStorage, to_native_path, translate_os_error
-from boto3_s3.s3storage import S3Storage, drop_like_aws, request_failure, s3_errors, s3_request
+from boto3_s3.s3storage import (
+    S3Storage,
+    client_build_error,
+    drop_like_aws,
+    request_failure,
+    s3_errors,
+    s3_request,
+)
 from boto3_s3.storage import Location, Storage
 from boto3_s3.transfer import TransferItem, Transferrer, crt_engine_errors
 from boto3_s3.types import (
@@ -1178,14 +1184,9 @@ class S3:
                 return build("s3", endpoint_url=self._endpoint_url, config=self._config)
             except (ValueError, AttributeError, OSError) as exc:
                 # What the SDK raises outside its own family while it reads
-                # the configuration: a plain ValueError for a malformed
-                # endpoint_url, an AttributeError for a config value of the
-                # wrong shape (`s3 = foo`, a scalar where it reads a section),
-                # an OSError for a `credential_process` executable that cannot
-                # be run (the provider runs it at build). A set-but-unusable
-                # setting is InvalidConfigError's definition
-                # (design/exceptions.md). A `config` that is not a botocore
-                # Config is the caller's error, not the configuration's.
+                # the configuration (`client_build_error`). A `config` that is
+                # not a botocore Config is the caller's error, not the
+                # configuration's.
                 from botocore.config import Config as BotocoreConfig
 
                 if isinstance(exc, AttributeError) and not isinstance(
@@ -1193,7 +1194,7 @@ class S3:
                     (BotocoreConfig, type(None)),  # pyright: ignore[reportUnnecessaryIsInstance] - a caller's value at runtime
                 ):
                     raise
-                raise InvalidConfigError(str(exc)) from exc
+                raise client_build_error(exc) from exc
 
     def materialize_crt_engine(
         self, client: S3Client, *, transfer_config: TransferConfig | None = None

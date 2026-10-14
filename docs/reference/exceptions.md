@@ -225,7 +225,8 @@ proxy failure, read timeout, a dropped connection, a response body that ends
 short of its `Content-Length`), and for a local `OSError`
 that is neither `FileNotFoundError` nor `PermissionError`, including a failed
 directory creation and one raised inside the classic transfer engine (the
-AWS CLI's message text kept as it is). On the CRT engine the same events
+AWS CLI's message text kept as it is), and an `OSError` while a client is
+built that is not a configured path failing (out of file descriptors, say). On the CRT engine the same events
 arrive under awscrt's error names and take the same class: a socket, DNS or
 TLS failure, a closed connection, S3's `SlowDown` and internal errors the
 engine gave up retrying, a local file it cannot open, read or write.

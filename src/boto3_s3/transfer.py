@@ -483,6 +483,27 @@ _CRT_LOCAL_CATEGORIES: dict[str, type[Boto3S3Error]] = {
 }
 
 
+def _names_item_file(exc: OSError, path: str) -> bool:
+    """Whether ``exc`` is about the item's local file at ``path``.
+
+    True for an error naming the file or the temporary file a download
+    writes beside it (``<path>.<suffix>``, renamed into place), on either
+    side of a rename, and for one naming no file at all (a full disk on a
+    write); False for one naming another file.
+    """
+    names: list[str | bytes] = [
+        name for name in (exc.filename, exc.filename2) if isinstance(name, (str, bytes))
+    ]
+    if not names:
+        return True
+    own = os.path.normcase(os.path.abspath(path))
+    for name in names:
+        other = os.path.normcase(os.path.abspath(os.fsdecode(name)))
+        if other == own or other.startswith(own + "."):
+            return True
+    return False
+
+
 def _set_file_utime(path: str, timestamp: float) -> None:
     """Set a file's atime/mtime (aws-cli's ``set_file_utime``).
 
@@ -2098,14 +2119,18 @@ class Transferrer:
         (`translate_os_error`), its message (aws's words) as it is, and names
         the file in ``key`` with no ``bucket`` (design/exceptions.md section
         2.1), not the object. botocore's own errors that are also ``OSError``
-        (``SSLError``) are the request's; a stream item has no local path and
-        keeps the request's attribution.
+        (``SSLError``) are the request's; so is an ``OSError`` naming some
+        other file - a credential provider's token file, the host's
+        ``mime.types`` - raised in the same task; a stream item has no local
+        path and keeps the request's attribution.
         """
         path = item.dest_path if self._transfer_type is TransferType.DOWNLOAD else item.src_path
         if path is None or isinstance(exc, BotoCoreError):
             return None
         key = path.replace(os.sep, "/")
         if isinstance(exc, OSError):
+            if not _names_item_file(exc, path):
+                return None
             return translate_os_error(exc, operation=self._operation, key=key)
         category = _CRT_LOCAL_CATEGORIES.get(crt_error_name(exc) or "")
         if category is None:
@@ -2509,10 +2534,13 @@ class _DirectoryCreator:
         except FileExistsError:
             pass
         except OSError as exc:
+            # key names the file being downloaded (a local failure's address,
+            # design/exceptions.md section 2.1), as the engine's own record
+            # of the item's local file does.
             raise translate_os_error(
                 exc,
                 operation=None,
-                key=None,
+                key=future.meta.call_args.fileobj.replace(os.sep, "/"),
                 message=f"Could not create directory {directory}: {exc}",
             ) from exc
         except ValueError as exc:
@@ -2562,7 +2590,7 @@ class _FsyncDest:
                 translate_os_error(
                     exc,
                     operation=None,
-                    key=None,
+                    key=self._path.replace(os.sep, "/"),
                     message=f"Failed to persist {self._path} to disk: {exc}",
                 )
             )
