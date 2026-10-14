@@ -28,6 +28,7 @@ from boto3_s3.comparator import ParallelFilter, SyncPair
 from boto3_s3.exceptions import (
     BatchError,
     CancelledError,
+    ConfigurationError,
     NotFoundError,
     TransportError,
     ValidationError,
@@ -480,6 +481,28 @@ class TestSyncUpload:
         with pytest.raises(ValidationError) as excinfo:
             S3().sync(str(src), S3Storage("s3://b--use1-az4--x-s3/p", client=client))
         assert str(excinfo.value) == "Cannot use sync command with a directory bucket."
+        assert calls == []
+
+    def test_directory_bucket_refusal_comes_before_the_sdk_floor_gate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # On a botocore that predates S3 Express the sync refusal still wins:
+        # upgrading would not make sync usable on a directory bucket, so the
+        # floor gate (an upgrade hint) must not come first. An access point
+        # (--xa-s3) is not refused by sync and meets the gate.
+        import botocore.utils
+
+        from boto3_s3 import s3storage
+
+        monkeypatch.delattr(botocore.utils, "S3ExpressIdentityResolver")
+        monkeypatch.setattr(s3storage, "version", lambda _name: "1.31.0")
+        src = tmp_path / "src"
+        src.mkdir()
+        client, calls = make_recording_client([])
+        with pytest.raises(ValidationError, match="Cannot use sync command"):
+            S3().sync(str(src), S3Storage("s3://b--use1-az4--x-s3/p", client=client))
+        with pytest.raises(ConfigurationError, match=r"1\.37\.24"):
+            S3().sync(str(src), S3Storage("s3://b--use1-az4--xa-s3/p", client=client))
         assert calls == []
 
     def test_cancel_token_aborts_between_pairs(self, tmp_path: Path) -> None:

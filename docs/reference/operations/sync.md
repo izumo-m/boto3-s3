@@ -343,9 +343,11 @@ order rather than in compare-key order.
   [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement —
   a profile, region, endpoint or partial credentials that will not resolve
   while a client is built for a bare `s3://…` argument, credentials missing
-  when the run's first request needs them, and `copy_props=ALL` on an SDK
-  without the annotations model (S3-to-S3 route), the latter raised as the run
-  is set up — before any item, and under `dryrun` too.
+  when the run's first request needs them, `copy_props=ALL` on an SDK
+  without the annotations model (S3-to-S3 route) or a `checksum_algorithm`
+  newer than its S3 model, raised as the run is set up — before any item, and
+  under `dryrun` too — and an S3 Express access point the SDK predates (a
+  directory bucket is the `ValidationError` above at every version).
 - [`AccessDeniedError`](../exceptions.md#accessdeniederror) or
   [`TransportError`](../exceptions.md#transporterror) — creating the local
   destination directory failed, mapped by the same rules as any other local

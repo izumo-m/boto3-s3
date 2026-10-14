@@ -70,7 +70,10 @@ Raises:
   constructed without a `client`, which builds its default on first use; `mb`
   reads the location constraint from that client, so the failure precedes the
   request. Missing credentials fail no build: they raise `ConfigurationError`
-  when the `CreateBucket` request is signed.
+  when the `CreateBucket` request is signed. An SDK whose S3 model predates
+  what the request carries — `tags` (botocore 1.39.2), a `-an` bucket name
+  (1.42.67) — or an S3 Express location it predates raises `ConfigurationError`
+  naming the version, before the request.
 - The `CreateBucket` rejection itself, translated to its category:
   [`AccessDeniedError`](../exceptions.md#accessdeniederror),
   [`NotFoundError`](../exceptions.md#notfounderror),

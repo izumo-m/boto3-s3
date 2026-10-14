@@ -97,6 +97,21 @@ class TestPresign:
         )
         assert client.calls == []
 
+    def test_a_keyless_directory_bucket_target_skips_the_floor_gate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # botocore refuses a presign with no key at every version (aws exits
+        # 252), so the floor gate's upgrade hint must not pre-empt it.
+        import botocore.utils
+
+        monkeypatch.delattr(botocore.utils, "S3ExpressIdentityResolver")
+        monkeypatch.setattr(s3storage, "version", lambda _name: "1.31.0")
+        client = _FakePresignClient()
+        S3().presign(_storage("s3://demo--usw2-az1--x-s3/", client))
+        assert [params for _method, params, _expires in client.calls] == [
+            {"Bucket": "demo--usw2-az1--x-s3", "Key": ""}
+        ]
+
     def test_invalid_target_type_raises_validation_error(self) -> None:
         with pytest.raises(ValidationError):
             S3().presign(123)  # pyright: ignore[reportArgumentType]

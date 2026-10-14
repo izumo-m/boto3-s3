@@ -8,7 +8,8 @@ If you cannot upgrade, the table says what each feature needs; below the version
 listed, that feature is not supported. Unless its row says otherwise, a feature
 you ask for by name — an option, a bucket kind, a checksum algorithm — through
 an `S3` operation or the `boto3-s3` command is refused there before any request
-is sent (a `Storage` or `S3Deleter` used directly may not be);
+is sent — bar the path resolution `mv --validate-same-s3-paths` runs first —
+while a `Storage` or `S3Deleter` used directly may not be checked;
 [`library/errors.md`](./library/errors.md) and
 [`cli/exit-codes.md`](./cli/exit-codes.md) say what each refusal raises or
 exits with. Check what you have with

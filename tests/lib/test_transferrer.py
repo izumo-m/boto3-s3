@@ -3952,10 +3952,17 @@ class TestChecksumAlgorithmSupport:
                 )
             assert f"checksum_algorithm={algorithm}" in str(exc_info.value)
 
-    def test_a_model_with_the_member_runs(self) -> None:
-        # 1.42.94 onward: the member is there, whatever botocore computes it with.
+    @pytest.mark.parametrize("transfer_type", [TransferType.UPLOAD, TransferType.COPY])
+    @pytest.mark.parametrize("algorithm", ["SHA512", "sha512", "Sha512"])
+    def test_a_model_with_the_member_runs(
+        self, transfer_type: TransferType, algorithm: str
+    ) -> None:
+        # 1.42.94 onward: the member is there, whatever botocore computes it
+        # with - for a copy as for an upload, and whatever the name's case.
         client = model_client({"PutObject": self._FLOOR | {"ChecksumSHA512"}})
-        Transferrer(TransferType.UPLOAD, client, options={"checksum_algorithm": "SHA512"})
+        Transferrer(
+            transfer_type, client, source_client=client, options={"checksum_algorithm": algorithm}
+        )
 
     def test_lowercase_name_is_probed_like_botocore_reads_it(self) -> None:
         # botocore uppercases nothing for the caller; the probe folds the case.

@@ -714,13 +714,14 @@ dest-existence check for download. We ported the same three faces:
   `Transferrer` construction, for an upload or a copy, with a
   `ConfigurationError` (the CLI's one `fatal error:` line, rc 1). The release
   that adds the member adds the part members too (`UploadPart` and
-  `UploadPartCopy` results, `CompletedPart`); below it a single upload fails
-  on botocore's "Unsupported checksum algorithm" - or, on 1.42.53 - 1.42.93,
-  where botocore already computes SHA512 / XXHASH, goes out - and a multipart
-  upload or copy completes without its parts' checksums, s3transfer reading
-  them off part results the model does not parse. Only a single-part copy
-  would get by (S3 computes it), and sizes are unknown up front, so copies are
-  refused with uploads, as `--no-overwrite` is. An algorithm the model knows
+  `UploadPartCopy` results, `CompletedPart`). Below it an upload fails on
+  botocore's "Unsupported checksum algorithm" (a multipart one at its first
+  part) - except on 1.42.53 - 1.42.93, where botocore already computes SHA512 /
+  XXHASH and a multipart upload completes without its parts' checksums,
+  s3transfer reading them off part results the model does not parse; a
+  multipart copy completes without them at every such version. Only a
+  single-part copy would get by (S3 computes it), and sizes are unknown up
+  front, so copies are refused with uploads, as `--no-overwrite` is. An algorithm the model knows
   but botocore computes only through awscrt is left to botocore's per-item
   Missing Dependency report (compatibility.md section 2), and `MD5` or an
   unknown name keeps botocore's per-item report too.

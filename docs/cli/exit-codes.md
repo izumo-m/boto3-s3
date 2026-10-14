@@ -80,14 +80,20 @@ Credentials or a region could not be resolved, or a requested feature needs a
 dependency that is not installed — asking for the CRT transfer engine without
 the `crt` extra is the common case — or one that is installed but too old to
 carry it ([`compatibility.md`](../compatibility.md) lists what each feature
-needs). Not every such case lands here: a CRT-only `--checksum-algorithm`
-without the extra fails per item (1), `--copy-props all`, a
-`--checksum-algorithm` newer than the SDK, or a `cp` / `mv` / `rm` on an S3
-Express bucket or access point the SDK predates ends the run with one
-`fatal error:` line (1), `mb` reports `--tags` or a `-an` bucket name on a
-too-old SDK on its one `make_bucket failed:` line (1) like any of its failures, and
-`--no-overwrite` on an upload or copy with a too-old SDK is rejected up front
-as a usage error (252).
+needs). Not every such case lands here:
+
+- a CRT-only `--checksum-algorithm` without the extra fails per item (1);
+- `--copy-props all`, a `--checksum-algorithm` newer than the SDK, or a `cp` /
+  `mv` / `rm` / `sync` on an S3 Express bucket or access point the SDK predates
+  ends the run with one `fatal error:` line (1);
+- `mb` and `rb` report a too-old SDK — `mb`'s `--tags` or `-an` bucket name, an
+  S3 Express bucket or access point — on their one `make_bucket failed:` /
+  `remove_bucket failed:` line (1) like any of their failures, and `rb --force`
+  as its failed delete (255);
+- `--no-overwrite` on an upload or copy with a too-old SDK is rejected up front
+  as a usage error (252).
+
+Of the S3 Express refusals, then, only `ls`, `presign` and `website` land here.
 An unusable `cli_timestamp_format` in the profile lands here too, and
 it lands early: ahead of the command itself, a `help` page included
 ([`configuration.md`](./configuration.md)).

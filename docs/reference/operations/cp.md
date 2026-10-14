@@ -294,9 +294,11 @@ upload, the parent reference) are emitted inline on the calling thread
   `get_fileinfo` cannot resolve.
 - [`ConfigurationError`](../exceptions.md#configurationerror), or its
   [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement —
-  `no_overwrite` on an SDK without conditional writes, or `copy_props=ALL` on
-  one without the annotations model, both raised as the run sets up its
-  transfers, before any item is submitted — under `dryrun` too; a profile,
+  `no_overwrite` on an SDK without conditional writes, `copy_props=ALL` on
+  one without the annotations model, or a `checksum_algorithm` newer than its
+  S3 model, all raised as the run sets up its transfers, before any item is
+  submitted — under `dryrun` too; an S3 Express bucket or access point the
+  SDK predates, raised before the run; a profile,
   region, endpoint or partial credentials that will not resolve while a client
   is being built — during resolution for a bare `"s3://…"` argument, or on the
   deferred build of a caller-supplied `S3Storage` that carries none; and

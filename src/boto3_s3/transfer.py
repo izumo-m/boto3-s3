@@ -477,11 +477,12 @@ def annotations_copy_unsupported_reason(client: S3Client) -> str | None:
 # 1.36.0, SHA512 and the XXHASH family in 1.42.94 - with every member that
 # carries it (the request's Checksum<ALG>, UploadPart's and UploadPartCopy's
 # results, CompletedPart), each read from the published wheels. Below it a run
-# with that algorithm cannot work whole: a single upload fails on botocore's
-# "Unsupported checksum algorithm" (or, where botocore computes it before the
-# model lists it, 1.42.53 - 1.42.93 for SHA512 / XXHASH, sends it), and a
-# multipart upload or copy cannot carry its parts' checksums into the Complete,
-# since s3transfer reads them off part results the model does not parse. Only a
+# with that algorithm cannot work whole: an upload fails on botocore's
+# "Unsupported checksum algorithm" (a multipart one at its first part) - except
+# on 1.42.53 - 1.42.93, where botocore computes SHA512 / XXHASH before the model
+# lists them and a multipart upload completes without its parts' checksums,
+# s3transfer reading them off part results the model does not parse; a
+# multipart copy completes without them at every such version. Only a
 # single-part copy gets by (S3 computes it), and sizes are unknown up front, so
 # uploads and copies are refused alike, as --no-overwrite is. An algorithm the
 # model knows but botocore computes only through awscrt is not refused here:

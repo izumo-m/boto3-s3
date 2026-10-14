@@ -209,7 +209,9 @@ A failure that happens before item processing begins raises its category
 exception directly instead: an unknown key in `**options`
 (`ValidationError`), a target that will not resolve or validate
 (`ValidationError`), a client that cannot be built (`ConfigurationError` or its
-`InvalidConfigError` refinement), a missing local source (`NotFoundError`,
+`InvalidConfigError` refinement), an S3 Express location or a requested feature
+the installed SDK predates (`ConfigurationError`, naming the version it needs —
+see [`../../compatibility.md`](../../compatibility.md)), a missing local source (`NotFoundError`,
 worded as the AWS CLI words it), a listing rejected outright.
 
 `mb`, `rb`, `presign` and `website` act on a single thing and raise their
