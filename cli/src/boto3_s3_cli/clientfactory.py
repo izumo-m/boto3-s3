@@ -180,8 +180,8 @@ def _check_every_client(session: BotocoreSession) -> None:
     own ``create_client`` runs the two checks on what it built, resolving the
     trust source the way botocore does when the caller names none: the
     session's ``ca_bundle``, then ``REQUESTS_CA_BUNDLE``. It is installed
-    before the credential chain is built, whose providers keep the method
-    they were handed.
+    before the credential chain is built: its SSO provider keeps the method
+    it was handed then.
     """
     import inspect
 

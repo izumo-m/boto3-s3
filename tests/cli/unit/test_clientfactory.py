@@ -1152,6 +1152,23 @@ class TestCredentialCache:
         if sys.platform != "win32":
             assert stat.S_IMODE(entry.stat().st_mode) == 0o644
 
+    def test_the_sso_provider_is_built_with_that_token_cache(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The provider builds its token cache once, when the chain is built,
+        # so the class has to be pinned before that: pinned after, the chain's
+        # provider kept the installed botocore's write (measured: the
+        # unwritable-cache rc flips back, the entry's mode becomes 0600).
+        from botocore.tokens import SSOTokenProvider
+
+        monkeypatch.setattr(
+            SSOTokenProvider, "DEFAULT_CACHE_CLS", SSOTokenProvider.DEFAULT_CACHE_CLS
+        )
+        session = clientfactory.build_session(_parse([]))._session  # pyright: ignore[reportPrivateUsage]
+        sso = session.get_component("credential_provider").get_provider("sso")
+        token_cache = sso._token_provider._cache  # pyright: ignore[reportAttributeAccessIssue]
+        assert type(token_cache) is clientfactory._credential_cache_class()  # pyright: ignore[reportPrivateUsage]
+
     def test_a_fetched_credential_lands_in_that_directory(self, tmp_path: Path) -> None:
         # The write half: whatever a provider caches becomes a file under the
         # shared directory, so the next invocation (and aws) can read it.
@@ -2352,6 +2369,38 @@ class TestVerifyResolution:
         with pytest.raises(BotocoreInvalidConfigError) as excinfo:
             _provider_client(s3.session._session)  # pyright: ignore[reportOptionalMemberAccess, reportPrivateUsage]
         assert str(excinfo.value) == _EMPTY_CA_BUNDLE_REPORT
+
+    def test_an_assumed_role_is_fetched_through_the_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The fetch builds its STS client when the credentials are first
+        # used, through the session. An endpoint nothing listens on keeps an
+        # unchecked client from reaching anything.
+        config = tmp_path / "config"
+        config.write_text(
+            "[profile ar]\nrole_arn = arn:aws:iam::123456789012:role/r\n"
+            "source_profile = src\nregion = us-east-1\n"
+            "[profile src]\naws_access_key_id = AKID\naws_secret_access_key = s\n"
+        )
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        monkeypatch.setenv("AWS_ENDPOINT_URL_STS", "http://127.0.0.1:9")
+        monkeypatch.setenv("AWS_MAX_ATTEMPTS", "1")
+        monkeypatch.setenv("AWS_CA_BUNDLE", "")
+        s3 = clientfactory.build_s3(_parse(["--profile", "ar", "--no-verify-ssl"]))
+        credentials = s3.session.get_credentials()  # pyright: ignore[reportOptionalMemberAccess]
+        assert credentials is not None
+        with pytest.raises(BotocoreInvalidConfigError) as excinfo:
+            credentials.get_frozen_credentials()
+        assert str(excinfo.value) == _EMPTY_CA_BUNDLE_REPORT
+
+    def test_the_sso_provider_builds_its_clients_through_the_check(self) -> None:
+        # The SSO provider keeps the `create_client` it was handed when the
+        # chain was built, so the check has to be on the session first: put
+        # on after, legacy SSO and an unexpired `sso-session` fetched their
+        # credentials unchecked (measured: rc 0 where aws is 255).
+        session = clientfactory.build_session(_parse([]))._session  # pyright: ignore[reportPrivateUsage]
+        sso = session.get_component("credential_provider").get_provider("sso")
+        assert sso._client_creator is session.create_client  # pyright: ignore[reportAttributeAccessIssue]
 
     def test_a_client_the_sdk_builds_with_a_usable_bundle_is_left_alone(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
