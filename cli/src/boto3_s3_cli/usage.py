@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import cast
 
 _TWO_PATH_FORMS = "<LocalPath> <S3Uri> or <S3Uri> <LocalPath> or <S3Uri> <S3Uri>"
 
@@ -88,6 +89,38 @@ def json_error_message(exc: json.JSONDecodeError) -> str:
     return f"{message}: line {lineno} column {colno} (char {comma})"
 
 
+# The status phrases Python 3.13 renamed (RFC 9110): botocore fills a
+# body-less error answer's Message from the host's http.client table, so an
+# older host names 413 / 414 / 416 / 422 the old way where aws's bundled 3.14
+# uses the new names.
+_RENAMED_STATUS_PHRASES = {
+    "413": ("Request Entity Too Large", "Content Too Large"),
+    "414": ("Request-URI Too Long", "URI Too Long"),
+    "416": ("Requested Range Not Satisfiable", "Range Not Satisfiable"),
+    "422": ("Unprocessable Entity", "Unprocessable Content"),
+}
+
+
+def status_phrase_message(exc: BaseException) -> str | None:
+    """A botocore ``ClientError``'s text with 3.13's name for its status, or None.
+
+    Only a generic error - the code is the status itself and the message the
+    host's phrase for it - is reworded; a service message is left alone.
+    """
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return None
+    error: object = cast("dict[str, object]", response).get("Error")
+    if not isinstance(error, dict):
+        return None
+    fields = cast("dict[str, object]", error)
+    renamed = _RENAMED_STATUS_PHRASES.get(str(fields.get("Code")))
+    text = str(exc)
+    if renamed is None or fields.get("Message") != renamed[0] or not text.endswith(renamed[0]):
+        return None
+    return text[: -len(renamed[0])] + renamed[1]
+
+
 def exception_text(exc: BaseException) -> str:
     """An exception's text as aws would print it, in a report or a failure line.
 
@@ -96,8 +129,10 @@ def exception_text(exc: BaseException) -> str:
     ``int()`` the SDK applies to a config value (``max_attempts``,
     ``metadata_service_timeout``) or to a response value - the wording is its
     bundled Python's. The two shapes an older host words differently are put
-    in that wording (`json_error_message`, `int_error_message`); anything else
-    is ``str(exc)``. An exception that carries its cause's text as its own -
+    in that wording (`json_error_message`, `int_error_message`), and so is the
+    status phrase a body-less S3 error answer quotes (`status_phrase_message`);
+    anything else is ``str(exc)``. An exception that carries its cause's text
+    as its own -
     the library's error for a request that raised outside botocore's family,
     say - is rendered as that cause.
     """
@@ -112,7 +147,8 @@ def exception_text(exc: BaseException) -> str:
         return json_error_message(exc)
     if isinstance(exc, ValueError):
         return int_error_message(exc)
-    return str(exc)
+    renamed = status_phrase_message(exc)
+    return renamed if renamed is not None else str(exc)
 
 
 def invalid_bucket_name_message(name: str = "") -> str:

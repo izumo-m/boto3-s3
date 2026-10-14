@@ -74,6 +74,38 @@ class TestExceptionText:
         first.__cause__, second.__cause__ = second, first
         assert usage.exception_text(first) == "pair"
 
+    @pytest.mark.parametrize(
+        ("status", "old", "new"),
+        [
+            ("413", "Request Entity Too Large", "Content Too Large"),
+            ("414", "Request-URI Too Long", "URI Too Long"),
+            ("416", "Requested Range Not Satisfiable", "Range Not Satisfiable"),
+            ("422", "Unprocessable Entity", "Unprocessable Content"),
+        ],
+    )
+    def test_a_body_less_error_answer_names_its_status_as_on_3_13(
+        self, status: str, old: str, new: str
+    ) -> None:
+        # botocore fills such an answer's Message from the host's http.client
+        # table, which 3.13 renamed; wrapped by the library or not.
+        from botocore.exceptions import ClientError
+
+        error = ClientError({"Error": {"Code": status, "Message": old}}, "HeadObject")
+        expected = str(error)[: -len(old)] + new
+        assert usage.exception_text(error) == expected
+        wrapped = RuntimeError(str(error))
+        wrapped.__cause__ = error
+        assert usage.exception_text(wrapped) == expected
+
+    def test_a_service_message_keeps_its_words(self) -> None:
+        from botocore.exceptions import ClientError
+
+        error = ClientError(
+            {"Error": {"Code": "InvalidRange", "Message": "Requested Range Not Satisfiable"}},
+            "GetObject",
+        )
+        assert usage.exception_text(error) == str(error)
+
     def test_anything_else_is_its_str(self) -> None:
         assert usage.exception_text(KeyError("Bucket")) == "'Bucket'"
         assert usage.exception_text(ValueError("Invalid endpoint: x")) == "Invalid endpoint: x"

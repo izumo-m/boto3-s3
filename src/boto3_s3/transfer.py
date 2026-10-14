@@ -2487,6 +2487,14 @@ class _DirectoryCreator:
                 key=None,
                 message=f"Could not create directory {directory}: {exc}",
             ) from exc
+        except ValueError as exc:
+            # A key with an embedded NUL (an S3-compatible listing can carry
+            # one): aws's subscriber lets the ValueError through, worded by
+            # its bundled 3.14, whose os functions name themselves in it -
+            # 3.10 and 3.11 say "embedded null byte".
+            if str(exc) == "embedded null byte":
+                raise ValueError("mkdir: embedded null character in path") from exc
+            raise
 
 
 class _FsyncDest:

@@ -388,6 +388,22 @@ solidified design is added here.
   - A self-referential alias ends as `RecursionError`, whose message gained
     its short form in 3.12; the alias runner reports the fixed
     `maximum recursion depth exceeded` on every host (section 9).
+  - A body-less S3 error answer carries the host's **status phrase** as its
+    message (botocore fills it from `http.client.responses`), and 3.13
+    renamed four of them (413 `Content Too Large`, 414 `URI Too Long`, 416
+    `Range Not Satisfiable`, 422 `Unprocessable Content`), so
+    `usage.status_phrase_message` puts the older name into the newer one
+    wherever `usage.exception_text` renders the error. A service's own
+    message is never touched.
+  - Two library-side pins serve the same rule, at the ports of aws's own
+    code that call the stdlib: a key with an embedded NUL fails its download
+    directory with `mkdir: embedded null character in path` (3.12+ names the
+    os function; `transfer._DirectoryCreator`), and a failed mtime stamp names
+    the file (3.13+'s `os.utime`; `transfer._set_file_utime`).
+  - One interpreter wording is left to the host: `re`'s `expected string or
+    bytes-like object` gained `, got '<type>'` in 3.12, and the type a
+    botocore regex was handed cannot be recovered from the error (measured
+    once, on a malformed redirect answer to `ListBuckets`).
 
 ## 3. Module layout
 

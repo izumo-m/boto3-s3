@@ -18,6 +18,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -2268,6 +2269,21 @@ class _CrtDownloadWritingNothing(_CrtDrainManager):
         future = _SettableFuture()
         self._accepted.append((future, list(kwargs["subscribers"])))
         return future
+
+
+class TestDirectoryCreatorWording:
+    def test_an_embedded_nul_reads_as_the_bundled_interpreter_words_it(
+        self, tmp_path: Path
+    ) -> None:
+        # aws's subscriber lets the ValueError through; its 3.14 names the
+        # path function, which 3.10 and 3.11 do not.
+        future = SimpleNamespace(
+            meta=SimpleNamespace(
+                call_args=SimpleNamespace(fileobj=str(tmp_path / "d\x00e" / "f.txt"))
+            )
+        )
+        with pytest.raises(ValueError, match=r"^mkdir: embedded null character in path$"):
+            transfer._DirectoryCreator().on_queued(future)  # pyright: ignore[reportPrivateUsage]
 
 
 class TestCrtDownloadNeverWritten:
