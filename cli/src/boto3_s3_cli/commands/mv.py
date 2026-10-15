@@ -193,12 +193,6 @@ class MvCommand(Command):
         if not same_key:
             return
         if resolving:
-            if any(_predates_access_point(path) for path in (norm_src, norm_dest)):
-                # An S3 Express access point the installed botocore predates
-                # cannot be looked up (S3PathResolver refuses it), and the run
-                # stops at S3.mv's floor gate anyway: leave the report to it,
-                # the `fatal error:` line every other route gives.
-                return
             src_resolver = S3PathResolver(
                 s3control_client=ctx.service_client(
                     "s3control", args, s3, region=args.source_region
@@ -209,8 +203,22 @@ class MvCommand(Command):
                 s3control_client=ctx.service_client("s3control", args, s3, region=args.region),
                 sts_client=ctx.service_client("sts", args, s3),
             )
-            src_paths = src_resolver.resolve_underlying_s3_paths(norm_src)
-            dest_paths = dest_resolver.resolve_underlying_s3_paths(norm_dest)
+            # An S3 Express access point the installed botocore predates
+            # cannot be looked up (S3PathResolver refuses it) and is left as
+            # typed, as before this CLI resolved the shape: the other side
+            # still resolves - its own failures keep their exit codes - and a
+            # run that gets past the check stops at S3.mv's floor gate, the
+            # `fatal error:` line every other route gives.
+            src_paths = (
+                [norm_src]
+                if _predates_access_point(norm_src)
+                else src_resolver.resolve_underlying_s3_paths(norm_src)
+            )
+            dest_paths = (
+                [norm_dest]
+                if _predates_access_point(norm_dest)
+                else dest_resolver.resolve_underlying_s3_paths(norm_dest)
+            )
             for src_path in src_paths:
                 for dest_path in dest_paths:
                     if S3Storage.same_path(src_path, dest_path):

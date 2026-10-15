@@ -438,9 +438,14 @@ class TestResolve:
         s3control = _FakeS3Control(bucket="dir--use1-az4--x-s3")
         sts = _FakeSts()
         resolver = S3PathResolver(s3control_client=s3control, sts_client=sts)
-        with pytest.raises(ConfigurationError, match=r"1\.37\.24") as excinfo:
-            resolver.resolve_underlying_s3_paths("s3://my-ap--use1-az4--xa-s3/k.txt")
-        assert excinfo.value.operation == "mv"
+        for path in (
+            "s3://my-ap--use1-az4--xa-s3/k.txt",
+            # The ARN spelling too: it would take the access point ARN route.
+            "s3://arn:aws:s3:us-east-1:123456789012:accesspoint/my-ap--use1-az4--xa-s3/k.txt",
+        ):
+            with pytest.raises(ConfigurationError, match=r"1\.37\.24") as excinfo:
+                resolver.resolve_underlying_s3_paths(path)
+            assert excinfo.value.operation == "mv"
         assert (s3control.calls, sts.calls) == ([], [])
 
     def test_mrap_fans_out_per_region_across_pages(self) -> None:

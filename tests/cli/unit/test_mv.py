@@ -31,6 +31,9 @@ from tests.utils.recorder import ApiCall, make_recording_client
 _SYNC = TransferConfig(use_threads=False)
 
 _AP_ARN = "arn:aws:s3:us-west-2:123456789012:accesspoint/myaccesspoint"
+# An Outposts access point alias: no API resolves it, so --validate-same-s3-paths
+# refuses it with 252 (aws-cli wording).
+_OP_ALIAS = "myop-o01ac5d28a6a232904e8xz5w8ijx1qzlbp3i3kuse10--op-s3"
 
 _ONTO_ITSELF = "Cannot mv a file onto itself"
 _WARNING_TOKEN = "may resolve to same underlying s3 object(s)"
@@ -281,7 +284,7 @@ class TestValidateSamePaths:
         from boto3_s3 import s3storage
 
         monkeypatch.setattr(s3storage, "version", lambda _name: "1.37.23")
-        ctx, s3control, sts, service_calls, _ = _resolver_ctx(bucket="dir--use1-az4--x-s3")
+        ctx, s3control, sts, _, _ = _resolver_ctx(bucket="dir--use1-az4--x-s3")
         rc = cli.main(
             [
                 "mv",
@@ -295,7 +298,30 @@ class TestValidateSamePaths:
         assert rc == 1
         assert "fatal error: S3 Express access points" in err
         assert "1.37.24" in err
-        assert (s3control.calls, sts.calls, service_calls) == ([], 0, [])
+        assert (s3control.calls, sts.calls) == ([], 0)
+
+    def test_a_predating_access_point_leaves_the_other_side_resolved(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Only the access point is left as typed: the other side still
+        # resolves, so an Outposts alias keeps its 252 (as before --xa-s3 was
+        # resolved here, and as aws reports it) instead of the floor's rc 1.
+        from boto3_s3 import s3storage
+
+        monkeypatch.setattr(s3storage, "version", lambda _name: "1.37.23")
+        ctx, s3control, sts, _, _ = _resolver_ctx(bucket="unused")
+        rc = cli.main(
+            [
+                "mv",
+                f"s3://{_OP_ALIAS}/k.txt",
+                "s3://ap--use1-az4--xa-s3/k.txt",
+                "--validate-same-s3-paths",
+            ],
+            ctx=ctx,
+        )
+        assert rc == 252
+        assert "Can't resolve underlying bucket name of s3 outposts" in capsys.readouterr().err
+        assert (s3control.calls, sts.calls) == ([], 0)
 
     def test_s3express_access_point_warns_without_the_flag(
         self, capsys: pytest.CaptureFixture[str]
