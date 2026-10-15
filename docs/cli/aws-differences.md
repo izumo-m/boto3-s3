@@ -442,7 +442,10 @@ comes out differently, listed in section 1.
   exit 0; only the failed line's wording differs. `aws` threads
   the source through in its trailing-separator form: its line names the
   source `d/` and, on the classic engine, ends with `[Errno 21] Is a
-  directory: '/path/to/d/'` when the destination carries a key — or, when the
+  directory: '/path/to/d/'` when the destination carries a key (over HTTPS,
+  as against real S3, with `Need to rewind the stream
+  <botocore.httpchecksum.AwsChunkedWrapper object at 0x…>, but stream is not
+  seekable.` instead) — or, when the
   destination folds the key away as `s3://bkt/` does, with `Parameter
   validation failed:` and `Invalid length for parameter Key, value: 0, valid
   min length: 1`, the empty key its request reaches botocore with. Under the
@@ -450,8 +453,9 @@ comes out differently, listed in section 1.
   native error its renderer cannot translate. Here the directory is detected
   before submission, so the line names the source `./d` and ends with
   `[Errno 21] Is a directory: '/path/to/d'` on either engine and for either
-  destination. The `Unknown Error Code` ending is a rendering accident, so
-  this command keeps the errno report instead of copying it. Under `--dryrun`
+  destination. The `Unknown Error Code` and `Need to rewind the stream`
+  endings are rendering accidents, so this command keeps the errno report
+  instead of copying them. Under `--dryrun`
   both tools instead exit 0 and preview the
   doomed upload, and the same threading difference shows in the previewed
   line: `aws` prints `(dryrun) upload: d/ to s3://bkt/` — the

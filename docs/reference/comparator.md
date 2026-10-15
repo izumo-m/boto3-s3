@@ -426,13 +426,15 @@ and is re-copied on every run. A single-part object compares regardless of the
 setting.
 
 **Which objects it can judge.** An ETag is a reconstructible MD5 only for an
-unencrypted or SSE-S3 object. SSE-KMS, SSE-C and DSSE objects carry an opaque
-ETag that is not an MD5, and a listing does not reveal an object's encryption,
+unencrypted or SSE-S3 object outside S3 Express. SSE-KMS, SSE-C and DSSE
+objects, and every object in an S3 Express directory bucket (SSE-S3 there
+included, measured on real S3), carry an opaque ETag that is not an MD5, and a
+listing does not reveal an object's encryption,
 so on upload and download every such object reads as differing and is copied on
 every run; an s3-to-s3 pair still compares the two opaque strings directly and
 does skip when they are equal. Use the default judgment against such a
-bucket, or [`ChecksumComparison`](#checksumcomparison) for SSE-KMS and DSSE
-objects.
+bucket, or [`ChecksumComparison`](#checksumcomparison) for SSE-KMS, DSSE and
+S3 Express objects.
 
 Raises, from the constructor:
 [`InvalidConfigError`](./exceptions.md#invalidconfigerror) when `s3` is given
@@ -574,7 +576,14 @@ runs first.
 - both sides `S3FileInfo`: each object's stored checksum is fetched and the two
   are compared by algorithm, kind (`FULL_OBJECT` or `COMPOSITE`) and digest. No
   bytes are read, and the `ObjectParts` pagination is skipped since the stored
-  digests compare directly.
+  digests compare directly. A copy that does not name an algorithm takes
+  whatever S3 stores, and S3 stores a multipart copy as `CRC64NVME`
+  `FULL_OBJECT` (measured on real S3), so a `COMPOSITE` source in another
+  algorithm never compares equal to its copy and is copied again on every run.
+  Give the sync the source objects' algorithm as `checksum_algorithm`: the
+  copy is then a `COMPOSITE` of that algorithm, equal to the source's when the
+  part size is the same as the source's (measured: `CRC32C` in 8 MiB parts
+  copied once and then skipped).
 - exactly one side `S3FileInfo`: that side's checksum is fetched and the
   readable side's bytes are read through its `storage`
   ([`./storage.md`](./storage.md)) and hashed with the same algorithm —

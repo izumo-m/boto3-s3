@@ -45,10 +45,12 @@ Two caveats are inherent to ETag comparison and are the caller's to manage:
   transfer config. The *effective* part size has a 5 MiB floor and 5 GiB ceiling
   and auto-grows past S3's 10000-part limit (s3transfer's ``ChunksizeAdjuster``),
   so a requested ``part_size`` below 5 MiB is clamped up.
-- **the object must be unencrypted or SSE-S3.** SSE-KMS / SSE-C / DSSE objects
-  carry an opaque, non-MD5 ETag that cannot be reconstructed, and a listing does
-  not reveal an object's encryption - so an upload / download against such a
-  bucket treats every object as differing and re-copies it each run (an
+- **the object must be unencrypted or SSE-S3, outside S3 Express.** SSE-KMS /
+  SSE-C / DSSE objects, and every object in an S3 Express directory bucket
+  (SSE-S3 there included, measured on real S3), carry an opaque, non-MD5 ETag
+  that cannot be reconstructed, and a listing does not reveal an object's
+  encryption - so an upload / download against such a bucket treats every
+  object as differing and re-copies it each run (an
   s3-to-s3 pair compares the opaque strings directly, so identical strings -
   rare, since re-encryption changes them - do skip). Use the default
   ``update_filter=None`` there instead.

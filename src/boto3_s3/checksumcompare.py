@@ -228,6 +228,9 @@ class ChecksumComparison(ContentComparison):
         checksums are comparable only when they are the same algorithm and the
         same kind (a COMPOSITE digest and a FULL_OBJECT one say nothing about
         each other); a part count is compared where both responses spell one.
+        Real S3 stores a multipart copy that names no algorithm as CRC64NVME
+        FULL_OBJECT, so a COMPOSITE source in another algorithm never matches
+        its copy unless the sync names that algorithm (docs/reference/comparator.md).
         """
         a = self._remote_checksum(self._src_storage, src.key, need_parts=False)
         b = self._remote_checksum(self._dest_storage, dest.key, need_parts=False)
