@@ -424,7 +424,8 @@ comes out differently, listed in section 1.
   point of a directory bucket (a name ending `--xa-s3`), whose listing is just
   as unordered. There `sync --delete` pairs keys wrongly and deletes
   destination objects the source also has (measured on real S3: of 20
-  identical objects, `aws` left 5 to 8), and `--case-conflict skip` skips
+  identical objects, `aws` left between 5 and 13, a different number each
+  run), and `--case-conflict skip` skips
   objects that conflict with nothing. This command applies the directory
   bucket's rules to its access points too: `sync` exits 252 with `Cannot use
   sync command with a directory bucket.`, and `--case-conflict` takes the
@@ -449,8 +450,9 @@ comes out differently, listed in section 1.
   destination folds the key away as `s3://bkt/` does, with `Parameter
   validation failed:` and `Invalid length for parameter Key, value: 0, valid
   min length: 1`, the empty key its request reaches botocore with. Under the
-  CRT engine it ends with `Unknown Error Code: Unknown Error Code` — the
-  native error its renderer cannot translate. Here the directory is detected
+  CRT engine it ends the same way for that destination, and with `Unknown
+  Error Code: Unknown Error Code` — the native error its renderer cannot
+  translate — for one that carries a key. Here the directory is detected
   before submission, so the line names the source `./d` and ends with
   `[Errno 21] Is a directory: '/path/to/d'` on either engine and for either
   destination. The `Unknown Error Code` and `Need to rewind the stream`

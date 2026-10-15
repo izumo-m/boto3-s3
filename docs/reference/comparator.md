@@ -433,8 +433,10 @@ listing does not reveal an object's encryption,
 so on upload and download every such object reads as differing and is copied on
 every run; an s3-to-s3 pair still compares the two opaque strings directly and
 does skip when they are equal. Use the default judgment against such a
-bucket, or [`ChecksumComparison`](#checksumcomparison) for SSE-KMS, DSSE and
-S3 Express objects.
+bucket, or [`ChecksumComparison`](#checksumcomparison) for SSE-KMS and DSSE
+objects. (`sync` refuses S3 Express directory buckets and their access points,
+so in a sync this strategy never meets their objects; a direct
+`content_differs` call reads them as differing.)
 
 Raises, from the constructor:
 [`InvalidConfigError`](./exceptions.md#invalidconfigerror) when `s3` is given
@@ -576,14 +578,16 @@ runs first.
 - both sides `S3FileInfo`: each object's stored checksum is fetched and the two
   are compared by algorithm, kind (`FULL_OBJECT` or `COMPOSITE`) and digest. No
   bytes are read, and the `ObjectParts` pagination is skipped since the stored
-  digests compare directly. A copy that does not name an algorithm takes
-  whatever S3 stores, and S3 stores a multipart copy as `CRC64NVME`
-  `FULL_OBJECT` (measured on real S3), so a `COMPOSITE` source in another
-  algorithm never compares equal to its copy and is copied again on every run.
-  Give the sync the source objects' algorithm as `checksum_algorithm`: the
-  copy is then a `COMPOSITE` of that algorithm, equal to the source's when the
-  part size is the same as the source's (measured: `CRC32C` in 8 MiB parts
-  copied once and then skipped).
+  digests compare directly. A multipart copy that names no algorithm is
+  stored by S3 as `CRC64NVME` `FULL_OBJECT` whatever the source carried
+  (measured on real S3), so a multipart source with any other checksum never
+  compares equal to its copy and is copied again on every run. For a
+  `COMPOSITE` source, give the sync the source's algorithm as
+  `checksum_algorithm` and copy at the source's part size: the copy is then the
+  same `COMPOSITE` (measured: `CRC32C` in 8 MiB parts copied once and then
+  skipped; at another part size it is copied every run). A `FULL_OBJECT`
+  source in another algorithm has no such remedy — named, the copy becomes a
+  `COMPOSITE` — and is copied on every run either way.
 - exactly one side `S3FileInfo`: that side's checksum is fetched and the
   readable side's bytes are read through its `storage`
   ([`./storage.md`](./storage.md)) and hashed with the same algorithm —

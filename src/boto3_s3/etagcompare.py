@@ -50,10 +50,12 @@ Two caveats are inherent to ETag comparison and are the caller's to manage:
   (SSE-S3 there included, measured on real S3), carry an opaque, non-MD5 ETag
   that cannot be reconstructed, and a listing does not reveal an object's
   encryption - so an upload / download against such a bucket treats every
-  object as differing and re-copies it each run (an
-  s3-to-s3 pair compares the opaque strings directly, so identical strings -
-  rare, since re-encryption changes them - do skip). Use the default
-  ``update_filter=None`` there instead.
+  object as differing and re-copies it each run (an s3-to-s3 pair compares
+  the opaque strings directly, so identical strings - rare, since
+  re-encryption changes them - do skip). Use the default
+  ``update_filter=None`` there instead. ``sync`` refuses S3 Express locations
+  outright, so for their objects this concerns a direct ``content_differs``
+  call.
 
 The copy decision runs on whatever thread drives the ``update_filter`` lane -
 ``sync``'s calling thread by default, or a pool worker under

@@ -481,8 +481,9 @@ scheme botocore has to resolve for itself — asymmetric SigV4a for the first
 three (a Multi-Region Access Point, and an S3 on Outposts access point in
 either notation, ARN or `--op-s3` alias), `sigv4-s3express` for the last two
 (a directory bucket, `--x-s3`, and an access point of one, `--xa-s3`; the two
-stay separate because the AWS CLI's own `is_s3express_bucket`, which the
-`sync` rejection mirrors, tests only the bucket suffix) —
+stay separate because the AWS CLI's own `is_s3express_bucket` tests only the
+bucket suffix, while this project's `sync` rejection and `--case-conflict`
+branch take both) —
 so a caller that pins a symmetric
 `signature_version` on its client (as the `boto3-s3` command does) can stand
 that pin down for them. They test what botocore's endpoint rules test rather

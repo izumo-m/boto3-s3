@@ -24,7 +24,7 @@ orphans still deleted by their own filters.
 | Compares | S3's ETag, reconstructed for the local side | the object's stored checksum, recomputed locally |
 | Extra requests | none | one `GetObjectAttributes` per object consulted |
 | Multipart | needs the part size to match | exact — the part boundaries come back from S3 |
-| Encrypted objects (SSE-KMS / SSE-C / DSSE) and S3 Express objects | does not work | works, except SSE-C (copied every run) |
+| Encrypted objects (SSE-KMS / SSE-C / DSSE) | does not work | works, except SSE-C (copied every run) |
 | Objects uploaded without a checksum | works | falls back to copying |
 
 Reach for `EtagComparison` when the objects are unencrypted and you know the
@@ -54,10 +54,9 @@ any ETag work — a shortcut, and on S3-to-S3 also a guard against two different
 objects sharing an ETag.
 
 **Encrypted objects do not work here.** SSE-KMS, SSE-C and DSSE objects carry an
-opaque ETag that is not an MD5, and so does every object in an S3 Express
-directory bucket, SSE-S3 included, so on upload and download every one of them
+opaque ETag that is not an MD5, so on upload and download every one of them
 reads as differing and is copied. Use the default rule against such buckets,
-or `ChecksumComparison` for SSE-KMS, DSSE and S3 Express objects.
+or `ChecksumComparison` for SSE-KMS and DSSE objects.
 
 An indeterminate comparison always copies. The strategy never skips on a value
 it could not verify.
@@ -87,9 +86,11 @@ and download, both sides on S3-to-S3 — plus the local hash. Section 4 makes
 these run concurrently.
 
 **Anything indeterminate is copied**: an object with no stored checksum, a pair
-whose two sides used different algorithms (on S3-to-S3, every multipart copy of
-a `COMPOSITE` source unless the sync names the source's algorithm in
-`checksum_algorithm` — S3 stores such a copy as `CRC64NVME` otherwise), an
+whose two sides used different algorithms (on S3-to-S3, a multipart copy of any
+source whose checksum is not `CRC64NVME`: S3 stores the copy as `CRC64NVME`
+unless the sync names an algorithm, and naming the source's in
+`checksum_algorithm` helps only a `COMPOSITE` source copied at its own part
+size), an
 unknown algorithm, or a
 `GetObjectAttributes` that fails with a client error such as a 404, a denied
 permission, or an SSE-C object (no customer key is sent).

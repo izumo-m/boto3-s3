@@ -84,8 +84,9 @@ needs). Not every such case lands here:
 
 - a CRT-only `--checksum-algorithm` without the extra fails per item (1);
 - `--copy-props all`, a `--checksum-algorithm` newer than the SDK, or a `cp` /
-  `mv` / `rm` / `sync` on an S3 Express bucket or access point the SDK predates
-  ends the run with one `fatal error:` line (1);
+  `mv` / `rm` on an S3 Express bucket or access point the SDK predates ends the
+  run with one `fatal error:` line (1) — `sync` refuses both at every SDK
+  version (252);
 - `mb` and `rb` report a too-old SDK — `mb`'s `--tags` or `-an` bucket name, an
   S3 Express bucket or access point — on their one `make_bucket failed:` /
   `remove_bucket failed:` line (1) like any of their failures, and `rb --force`
