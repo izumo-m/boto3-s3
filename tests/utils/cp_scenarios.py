@@ -584,8 +584,9 @@ SCENARIOS: tuple[CpScenario, ...] = (
         capture_tree=True,
     ),
     CpScenario(
-        # MinIO answers InvalidArgument for MaxKeys=-1 (rm precedent); the
-        # message text is endpoint-specific.
+        # Negative page size -> server InvalidArgument on both sides (rm
+        # precedent). diff_only: moto raises an internal IndexError for
+        # MaxKeys=-1 instead, so the scenario cannot replay there.
         name="cp_download_page_size_negative",
         argv=("cp", f"s3://{BUCKET_TOKEN}/pg/", "dest", "--recursive", "--page-size", "-1"),
         seed=_SEED_PAGED,

@@ -78,10 +78,10 @@ SCENARIOS: tuple[MbScenario, ...] = (
     # aws mb silently drops the key part (split_s3_bucket_key keeps the
     # bucket); the end state pins that the bucket exists with no objects.
     MbScenario("mb_key_dropped", ("mb", f"s3://{BUCKET_TOKEN}/some/key")),
-    # boto3-s3 extension (aws s3 mb has no --tags): the tags ride
-    # CreateBucketConfiguration.Tags. The end-state tag set is [] on moto and
-    # MinIO (neither honors that field), so this pins no-divergence from aws,
-    # not the tag semantics (see capture_tags).
+    # The tags ride CreateBucketConfiguration.Tags. The end-state tag set is
+    # [] on moto and MinIO (neither honors that field; real S3 applies it), so
+    # this pins no-divergence from aws, not the tag semantics (see
+    # capture_tags).
     MbScenario(
         "mb_tags",
         ("mb", f"s3://{BUCKET_TOKEN}", "--tags", "Key1", "Value1"),
