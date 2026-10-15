@@ -578,16 +578,20 @@ runs first.
 - both sides `S3FileInfo`: each object's stored checksum is fetched and the two
   are compared by algorithm, kind (`FULL_OBJECT` or `COMPOSITE`) and digest. No
   bytes are read, and the `ObjectParts` pagination is skipped since the stored
-  digests compare directly. A multipart copy that names no algorithm is
-  stored by S3 as `CRC64NVME` `FULL_OBJECT` whatever the source carried
-  (measured on real S3), so a multipart source with any other checksum never
-  compares equal to its copy and is copied again on every run. For a
-  `COMPOSITE` source, give the sync the source's algorithm as
-  `checksum_algorithm` and copy at the source's part size: the copy is then the
-  same `COMPOSITE` (measured: `CRC32C` in 8 MiB parts copied once and then
-  skipped; at another part size it is copied every run). A `FULL_OBJECT`
-  source in another algorithm has no such remedy — named, the copy becomes a
-  `COMPOSITE` — and is copied on every run either way.
+  digests compare directly. What a copy stores depends on how it is made
+  (measured on real S3). Below the sync's `multipart_threshold` it is one
+  `CopyObject`, which keeps the source's algorithm as a `FULL_OBJECT`
+  checksum: a `FULL_OBJECT` source then compares equal to its copy, a
+  `COMPOSITE` one never does. At or above it the copy goes part by part, and
+  unless the sync names an algorithm S3 stores it as `CRC64NVME`
+  `FULL_OBJECT`, so a source with any other checksum never compares equal.
+  A `COMPOSITE` source stays comparable only when the copy names its
+  algorithm in `checksum_algorithm` and splits it the same way —
+  `multipart_chunksize` at the source's part size, and `multipart_threshold`
+  low enough that the copy is part by part at all (measured: `CRC32C` and
+  `SHA256` copied once, then skipped). A `FULL_OBJECT` source in another
+  algorithm past the threshold has no such remedy: named, the copy becomes a
+  `COMPOSITE`. Whatever never compares equal is copied again on every run.
 - exactly one side `S3FileInfo`: that side's checksum is fetched and the
   readable side's bytes are read through its `storage`
   ([`./storage.md`](./storage.md)) and hashed with the same algorithm —

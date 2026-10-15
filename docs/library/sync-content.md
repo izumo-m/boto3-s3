@@ -86,12 +86,10 @@ and download, both sides on S3-to-S3 — plus the local hash. Section 4 makes
 these run concurrently.
 
 **Anything indeterminate is copied**: an object with no stored checksum, a pair
-whose two sides used different algorithms (on S3-to-S3, a multipart copy of any
-source whose checksum is not `CRC64NVME`: S3 stores the copy as `CRC64NVME`
-unless the sync names an algorithm, and naming the source's in
-`checksum_algorithm` helps only a `COMPOSITE` source copied at its own part
-size), an
-unknown algorithm, or a
+whose two sides used different algorithms or kinds (on S3-to-S3, often an
+object and its own copy — see
+[`ChecksumComparison`](../reference/comparator.md#checksumcomparison) for when a
+copy stays comparable), an unknown algorithm, or a
 `GetObjectAttributes` that fails with a client error such as a 404, a denied
 permission, or an SSE-C object (no customer key is sent).
 
