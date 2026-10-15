@@ -1932,4 +1932,4 @@ class S3Storage(Storage):
                     raise translate_os_error(exc, operation=_GET_FILE_OPERATION, key=dest) from exc
 
 
-__all__ = ["S3Storage", "s3_errors", "translate_boto_error"]
+__all__ = ["S3Storage", "s3_errors", "s3express_unsupported_reason", "translate_boto_error"]
