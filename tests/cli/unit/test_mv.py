@@ -272,6 +272,31 @@ class TestValidateSamePaths:
         assert s3control.calls[0]["Name"] == "ap--use1-az4--xa-s3"
         assert calls == []
 
+    def test_s3express_access_point_on_a_predating_botocore_keeps_the_floor_report(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Before 1.37.24 the lookup would go to the wrong s3control endpoint
+        # (NoSuchAccessPoint, rc 254, measured): no lookup, and S3.mv's floor
+        # gate reports the version, as without the flag.
+        from boto3_s3 import s3storage
+
+        monkeypatch.setattr(s3storage, "version", lambda _name: "1.37.23")
+        ctx, s3control, sts, service_calls, _ = _resolver_ctx(bucket="dir--use1-az4--x-s3")
+        rc = cli.main(
+            [
+                "mv",
+                "s3://ap--use1-az4--xa-s3/k.txt",
+                "s3://dir--use1-az4--x-s3/k.txt",
+                "--validate-same-s3-paths",
+            ],
+            ctx=ctx,
+        )
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "fatal error: S3 Express access points" in err
+        assert "1.37.24" in err
+        assert (s3control.calls, sts.calls, service_calls) == ([], 0, [])
+
     def test_s3express_access_point_warns_without_the_flag(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:

@@ -31,7 +31,7 @@ from __future__ import annotations
 import re
 from typing import Any, NamedTuple
 
-from boto3_s3.exceptions import ValidationError
+from boto3_s3.exceptions import ConfigurationError, ValidationError
 
 # aws-cli regexes, verbatim. ``has_underlying_s3_path`` and the resolution
 # dispatch share them; the suffix forms (-s3alias / --op-s3 / --xa-s3) have no
@@ -304,10 +304,20 @@ class S3PathResolver:
         match = _S3_MRAP_ARN_TO_ACCOUNT_ALIAS_REGEX.match(bucket)
         if match:
             return self._resolve_mrap_alias(match.group("account"), match.group("alias"), key)
-        if bucket.endswith(("-s3alias", "--xa-s3")):
+        if bucket.endswith("--xa-s3"):
             # An S3 Express access point's GetAccessPoint takes its name as
             # an alias's (measured on real S3: it answers with the directory
-            # bucket); aws-cli does not resolve it.
+            # bucket); aws-cli does not resolve it. A botocore that predates
+            # the shape routes the lookup to the plain s3control endpoint,
+            # which answers NoSuchAccessPoint for one that exists (measured on
+            # 1.37.23), so such an SDK gets the floor message instead.
+            from boto3_s3.s3storage import s3express_unsupported_reason
+
+            reason = s3express_unsupported_reason(bucket)
+            if reason is not None:
+                raise ConfigurationError(reason, operation="mv")
+            return self._resolve_accesspoint_alias(bucket, key)
+        if bucket.endswith("-s3alias"):
             return self._resolve_accesspoint_alias(bucket, key)
         if bucket.endswith("--op-s3"):
             raise ValidationError(

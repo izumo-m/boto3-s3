@@ -14,7 +14,12 @@ from typing import Any
 import pytest
 from botocore.exceptions import ClientError
 
-from boto3_s3.exceptions import Boto3S3Error, MalformedResponseError, ValidationError
+from boto3_s3.exceptions import (
+    Boto3S3Error,
+    ConfigurationError,
+    MalformedResponseError,
+    ValidationError,
+)
 from boto3_s3.pathresolver import (
     S3PathResolver,
     has_underlying_s3_path,
@@ -420,6 +425,23 @@ class TestResolve:
         assert s3control.calls == [
             ("GetAccessPoint", {"AccountId": "999988887777", "Name": "my-ap--use1-az4--xa-s3"})
         ]
+
+    def test_s3express_access_point_on_a_predating_botocore_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A botocore before 1.37.24 sends the lookup to the plain s3control
+        # endpoint, which answers NoSuchAccessPoint for an access point that
+        # exists (measured on 1.37.23): the floor message instead, no request.
+        from boto3_s3 import s3storage
+
+        monkeypatch.setattr(s3storage, "version", lambda _name: "1.37.23")
+        s3control = _FakeS3Control(bucket="dir--use1-az4--x-s3")
+        sts = _FakeSts()
+        resolver = S3PathResolver(s3control_client=s3control, sts_client=sts)
+        with pytest.raises(ConfigurationError, match=r"1\.37\.24") as excinfo:
+            resolver.resolve_underlying_s3_paths("s3://my-ap--use1-az4--xa-s3/k.txt")
+        assert excinfo.value.operation == "mv"
+        assert (s3control.calls, sts.calls) == ([], [])
 
     def test_mrap_fans_out_per_region_across_pages(self) -> None:
         pages = [

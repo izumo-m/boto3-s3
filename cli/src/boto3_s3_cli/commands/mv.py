@@ -16,6 +16,8 @@ from boto3_s3 import (
     ValidationError,
     has_underlying_s3_path,
 )
+from boto3_s3.pathresolver import is_s3express_accesspoint_path
+from boto3_s3.s3storage import s3express_unsupported_reason
 from boto3_s3_cli import filters
 from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import Command, Context
@@ -191,6 +193,12 @@ class MvCommand(Command):
         if not same_key:
             return
         if resolving:
+            if any(_predates_access_point(path) for path in (norm_src, norm_dest)):
+                # An S3 Express access point the installed botocore predates
+                # cannot be looked up (S3PathResolver refuses it), and the run
+                # stops at S3.mv's floor gate anyway: leave the report to it,
+                # the `fatal error:` line every other route gives.
+                return
             src_resolver = S3PathResolver(
                 s3control_client=ctx.service_client(
                     "s3control", args, s3, region=args.source_region
@@ -209,6 +217,14 @@ class MvCommand(Command):
                         raise ValidationError(message, operation="mv")
         elif has_underlying_s3_path(norm_src) or has_underlying_s3_path(norm_dest):
             sys.stderr.write(_VALIDATE_WARNING)
+
+
+def _predates_access_point(path: str) -> bool:
+    """Whether *path* names an S3 Express access point the installed botocore predates."""
+    if not is_s3express_accesspoint_path(path):
+        return False
+    bucket, _key = S3Storage.split_bucket_key(S3Storage.strip_scheme(path))
+    return s3express_unsupported_reason(bucket) is not None
 
 
 __all__ = ["MvCommand"]
