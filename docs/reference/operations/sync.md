@@ -238,7 +238,8 @@ rejected; a `pair_filter` that conflicts with another argument is rejected;
 `src` and `dest` are resolved and validated; an already-cancelled
 `cancel_token` raises; the route is classified, which for an upload checks
 that the local source path exists; a missing local destination directory is
-created; an S3 Express directory bucket on either side is rejected; a client
+created; an S3 Express directory bucket or one of its access points on either
+side is rejected; a client
 is built for an S3 side that still has none; an open-route side is checked for
 the capabilities the route needs; an unrecognized `case_conflict` value is
 rejected. The destination directory is therefore created even by a run that
@@ -327,8 +328,9 @@ order rather than in compare-key order.
   `create_filter` / `update_filter` / `delete_filter`, with `no_overwrite=True`,
   or wrapped in a `ParallelFilter`, each rejected before anything is resolved;
   a local-to-local pair, a custom backend paired with anything but S3, or a
-  stream endpoint; an S3 Express directory bucket on either side, whose
-  listings are not ordered the way the merge-join requires; a custom
+  stream endpoint; an S3 Express directory bucket or one of its access points
+  on either side, whose listings are not ordered the way the merge-join
+  requires; a custom
   (open-route) side that does not declare the capabilities the route needs
   (sorted scanning, the route's read or write, and deletion when the delete
   lane is on for a custom destination — which `pair_filter` switches on too);
@@ -346,8 +348,7 @@ order rather than in compare-key order.
   when the run's first request needs them, `copy_props=ALL` on an SDK
   without the annotations model (S3-to-S3 route) or a `checksum_algorithm`
   newer than its S3 model, raised as the run is set up — before any item, and
-  under `dryrun` too — and an S3 Express access point the SDK predates (a
-  directory bucket is the `ValidationError` above at every version).
+  under `dryrun` too.
 - [`AccessDeniedError`](../exceptions.md#accessdeniederror) or
   [`TransportError`](../exceptions.md#transporterror) — creating the local
   destination directory failed, mapped by the same rules as any other local

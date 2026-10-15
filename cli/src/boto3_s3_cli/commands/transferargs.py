@@ -29,7 +29,7 @@ from boto3_s3 import (
     crtsupport,
 )
 from boto3_s3.localstorage import translate_os_error
-from boto3_s3.pathresolver import is_s3express_path
+from boto3_s3.pathresolver import is_s3express_accesspoint_path, is_s3express_path
 from boto3_s3.transfer import conditional_write_unsupported_reason
 from boto3_s3_cli import (
     checksumdefault,
@@ -633,15 +633,20 @@ def resolve_case_conflict(
     (listings are not lexicographic), so aws rejects ``skip`` / ``error``
     there (252), prints a standing warning for ``warn``, and runs the
     transfer without the comparator - modeled here by downgrading the
-    mode to ``ignore`` after the message. ``recursive`` overrides the
-    parsed flag for commands without one (sync is always recursive).
+    mode to ``ignore`` after the message. aws takes that branch for the
+    ``--x-s3`` suffix only; a source named through an access point of a
+    directory bucket (``--xa-s3``) lists just as unordered, and under aws
+    its keys pair wrongly with the destination's - ``skip`` drops objects
+    that conflict with nothing (measured on real S3) - so it takes the
+    branch here too (docs/cli/aws-differences.md). ``recursive`` overrides
+    the parsed flag for commands without one (sync is always recursive).
     """
     if recursive is None:
         recursive = bool(args.recursive)
     mode = CaseConflictMode(args.case_conflict)
     if mode is CaseConflictMode.IGNORE or paths_type != "s3local" or not recursive:
         return mode
-    if not is_s3express_path(src):
+    if not (is_s3express_path(src) or is_s3express_accesspoint_path(src)):
         return mode
     if mode is not CaseConflictMode.WARN:
         raise ValidationError(
@@ -1061,6 +1066,7 @@ __all__ = [
     "create_local_dest_dir",
     "finish_transfer",
     "identify_type",
+    "is_s3express_accesspoint_path",
     "is_s3express_path",
     "materialize_transfer_engine",
     "normalize_s3_path",

@@ -672,7 +672,8 @@ dest-existence check for download. We ported the same three faces:
   fires when mode != `ignore`; aws-cli's `_modify_instructions_for_case_conflicts`
   applies on a non-S3-Express source, and its S3 Express branch - reject
   `skip` / `error`, a standing warning for `warn` - is reproduced by the CLI
-  before the mode reaches the library): aws builds this with the sync
+  before the mode reaches the library, for an access point of a directory
+  bucket too, which aws's `--x-s3` test misses): aws builds this with the sync
   machinery (reverse-enumerating the dest + comparator), and the gate keeps
   that comparator's destination side (`producers._DestinationMerge`: the dest
   walked up front in sync's byte order, advanced one source key at a time as

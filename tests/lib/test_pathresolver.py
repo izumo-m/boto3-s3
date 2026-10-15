@@ -109,6 +109,9 @@ class TestHasUnderlyingS3Path:
         assert has_underlying_s3_path(f"s3://{_MRAP_ARN}/k.txt")
         assert has_underlying_s3_path("s3://my-alias-s3alias/k.txt")
         assert has_underlying_s3_path("s3://my-outpost-alias--op-s3/k.txt")
+        # An S3 Express access point: aws's test misses it, and a same-key move
+        # onto its directory bucket deletes the object on real S3.
+        assert has_underlying_s3_path("s3://my-ap--use1-az4--xa-s3/k.txt")
 
     def test_plain_buckets_do_not_match(self) -> None:
         assert not has_underlying_s3_path("s3://plain-bucket/k.txt")
@@ -401,6 +404,21 @@ class TestResolve:
         assert sts.calls == ["GetCallerIdentity"]
         assert s3control.calls == [
             ("GetAccessPoint", {"AccountId": "999988887777", "Name": "my-ap-s3alias"})
+        ]
+
+    def test_s3express_access_point_resolves_like_an_alias(self) -> None:
+        # GetAccessPoint takes an S3 Express access point's name and answers
+        # with its directory bucket (measured on real S3); aws does not
+        # resolve this shape at all.
+        s3control = _FakeS3Control(bucket="dir--use1-az4--x-s3")
+        sts = _FakeSts(account="999988887777")
+        resolver = S3PathResolver(s3control_client=s3control, sts_client=sts)
+        assert resolver.resolve_underlying_s3_paths("s3://my-ap--use1-az4--xa-s3/k.txt") == [
+            "s3://dir--use1-az4--x-s3/k.txt"
+        ]
+        assert sts.calls == ["GetCallerIdentity"]
+        assert s3control.calls == [
+            ("GetAccessPoint", {"AccountId": "999988887777", "Name": "my-ap--use1-az4--xa-s3"})
         ]
 
     def test_mrap_fans_out_per_region_across_pages(self) -> None:

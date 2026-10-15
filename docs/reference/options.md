@@ -357,8 +357,8 @@ transfers, lists or deletes independently. A backend that declares
 `StorageCapability.SORTABLE_SCAN` must honor `sort=True`. The two built-in
 backends ignore the flag, because the recursive listing each performs is
 already in that order: S3's `ListObjectsV2` is byte-ordered (S3 Express
-directory buckets excepted, whose unordered listings are why `sync` rejects
-them) and the local walk sorts for parity with `aws s3`. A non-recursive S3
+directory buckets and their access points excepted, whose unordered listings
+are why `sync` rejects them) and the local walk sorts for parity with `aws s3`. A non-recursive S3
 listing keeps its native shape instead, emitting a page's common prefixes ahead
 of its objects; a one-level local listing is sorted like the recursive walk.
 So a custom backend whose sort is expensive is the only
@@ -591,7 +591,11 @@ conflict — it is transferred, overwriting that file. That match is made the wa
 the AWS CLI's comparator makes it, walking the listing and the destination side
 by side: from an S3-compatible endpoint whose listing is not in key order, a key
 that arrives after the walk has moved past its match finds none and goes to the
-conflict check instead, as it does there. What counts as a conflict,
+conflict check instead, as it does there. An S3 Express directory bucket lists
+in no order on real S3, named directly or through one of its access points, so
+`SKIP` and `ERROR` misfire on keys that conflict with nothing there; the
+`boto3-s3` command refuses those two modes for such a source, as `aws` does for
+the directory bucket itself. What counts as a conflict,
 including the in-flight set the check consults, is with the operations that run
 the gate ([`operations/cp.md`](./operations/cp.md),
 [`operations/sync.md`](./operations/sync.md)).

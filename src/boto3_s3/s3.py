@@ -2223,9 +2223,10 @@ class S3:
         A missing local source directory raises (aws's ``The user-provided
         path ... does not exist.``); a local destination directory is
         created up front even when nothing transfers. An S3 Express
-        directory bucket on either side is then rejected (aws's ``Cannot
-        use sync command with a directory bucket.``): its unordered
-        listings would break the sorted merge-join. Item failures -
+        directory bucket or one of its access points on either side is
+        then rejected (aws's ``Cannot use sync command with a directory
+        bucket.``): its unordered listings would break the sorted
+        merge-join. Item failures -
         transfer and delete alike - aggregate into one ``BatchError`` with
         rollup counts (a failure sample as ``__cause__``: the transfer
         rollup's first, else the delete rollup's). `cancel_token` raises
@@ -2285,9 +2286,15 @@ class S3:
         # sync outright on either side
         # (`_validate_not_s3_express_bucket_for_sync`), after creating the
         # local destination directory as above; so does the CLI layer, making
-        # this the backstop for direct library callers.
+        # this the backstop for direct library callers. An access point of a
+        # directory bucket (`--xa-s3`) lists the same keys in the same
+        # unordered way (measured on real S3: 18 of 20 identical objects
+        # deleted by one `delete_filter` run), so it is rejected too, which
+        # aws-cli's `--x-s3`-only test does not do.
         for side_storage in (src_storage, dest_storage):
-            if isinstance(side_storage, S3Storage) and side_storage.bucket.endswith("--x-s3"):
+            if isinstance(side_storage, S3Storage) and side_storage.bucket.endswith(
+                ("--x-s3", "--xa-s3")
+            ):
                 raise ValidationError(
                     "Cannot use sync command with a directory bucket.", operation="sync"
                 )

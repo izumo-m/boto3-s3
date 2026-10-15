@@ -152,7 +152,8 @@ order the listing produces them, so what a caller may rely on is that order:
   `key` in UTF-8 byte order, preserved across pages — and therefore ascending
   by `compare_key` too, since the same prefix is removed from every entry. An
   S3 Express directory bucket is the carve-out: its listings carry no order
-  guarantee at all.
+  guarantee at all, whether it is named directly or through one of its access
+  points.
 - A non-recursive object listing keeps the delimiter listing's native shape:
   each page's common prefixes are delivered ahead of that page's objects, which
   is `aws s3 ls`'s order. Across a multi-page listing the delivered stream is

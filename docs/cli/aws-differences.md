@@ -113,7 +113,9 @@ The same holds for **a `sync --delete` against an S3-compatible endpoint whose
 listing is not in key order**: both tools pair such a listing the same way,
 and that pairing can copy a key and delete it in one run, so whether the key
 survives is timing on either tool (measured: lost in four of six runs on
-each). Real S3 and MinIO list in key order.
+each). Real S3's general purpose buckets and MinIO list in key order; an S3
+Express directory bucket does not, and `sync` refuses it on both tools — and,
+on this command only, an access point of one as well (section 2).
 
 A second arrangement of the same kind is **a `sync --delete` download into a
 case-insensitive directory** (the Windows and macOS defaults) **where a new
@@ -412,6 +414,27 @@ comes out differently, listed in section 1.
   ends with `fatal error: Cannot mv a file onto itself: ...` and exit code 1.
   (A `mv` whose two arguments are the same text is refused earlier, as a usage
   error with exit code 252, on both tools.)
+- **An S3 Express access point is treated as its directory bucket by `sync`
+  and `--case-conflict`, and as an access point alias by `mv`.** `aws`
+  refuses `sync` on an S3 Express
+  directory bucket (a name ending `--x-s3`), whose listing is in no particular
+  order, and for the same reason refuses `--case-conflict skip` / `error` on a
+  download from one and turns `warn` into a standing warning. It recognizes
+  the bucket by the `--x-s3` suffix alone, so it runs both through an access
+  point of a directory bucket (a name ending `--xa-s3`), whose listing is just
+  as unordered. There `sync --delete` pairs keys wrongly and deletes
+  destination objects the source also has (measured on real S3: of 20
+  identical objects, `aws` left 5 to 8), and `--case-conflict skip` skips
+  objects that conflict with nothing. This command applies the directory
+  bucket's rules to its access points too: `sync` exits 252 with `Cannot use
+  sync command with a directory bucket.`, and `--case-conflict` takes the
+  directory bucket's branch. The same gap reaches `mv`: `aws` neither warns
+  about nor resolves an access point of a directory bucket, so moving its key
+  onto the same key of the directory bucket copies the object onto itself and
+  deletes it, silently. This command treats it like an access point alias:
+  it prints `aws`'s "may resolve to same underlying s3 object(s)" warning,
+  and under `--validate-same-s3-paths` resolves the access point and refuses
+  the move with exit code 252.
 - **Copying a directory without `--recursive`.** A `cp` or `mv` whose local
   source is a directory fails — exit code 1 on both tools, the source left in
   place — unless a filter excludes the source (`--exclude 'd/'`, its

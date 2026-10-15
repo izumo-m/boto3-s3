@@ -454,6 +454,31 @@ class TestExpressCaseConflictWarning:
         assert text.startswith("warning: Recursive copies/moves")
         assert not text.endswith("\n")
 
+    @pytest.mark.parametrize("src", ["s3://b--use1-az4--x-s3/p/", "s3://ap--use1-az4--xa-s3/p/"])
+    def test_directory_bucket_and_its_access_point_take_the_branch(
+        self, src: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws takes this branch for --x-s3 only. An access point of a directory
+        # bucket lists the same keys just as unordered, and under aws its keys
+        # then pair wrongly - skip dropped objects that conflicted with nothing
+        # (measured on real S3) - so the access point takes it here too.
+        writes: list[str] = []
+        monkeypatch.setattr(transferargs, "uni_write", lambda _stream, text: writes.append(text))
+        for value in ("skip", "error"):
+            args = argparse.Namespace(case_conflict=value, recursive=True)
+            with pytest.raises(ValidationError, match="when operating on S3 Express"):
+                transferargs.resolve_case_conflict(args, src, "s3local", operation="cp")
+        args = argparse.Namespace(case_conflict="warn", recursive=True)
+        mode = transferargs.resolve_case_conflict(args, src, "s3local", operation="cp")
+        assert mode is CaseConflictMode.IGNORE
+        assert len(writes) == 1
+
+    @pytest.mark.parametrize("src", ["s3://plain/p/", "s3://ap-abc123-s3alias/p/"])
+    def test_other_buckets_keep_the_mode(self, src: str) -> None:
+        args = argparse.Namespace(case_conflict="skip", recursive=True)
+        mode = transferargs.resolve_case_conflict(args, src, "s3local", operation="cp")
+        assert mode is CaseConflictMode.SKIP
+
 
 class TestBuildPrinter:
     """Every display flag reaches the printer it configures.

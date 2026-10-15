@@ -133,8 +133,11 @@ The four checks run in this order: stream source, recursive stream destination,
 `no_overwrite` with a stream destination, same-object move.
 
 The same-object guard is textual. Two paths that reach the same underlying
-bucket through an access point ARN, an access point alias or a multi-region
-access point are not detected by it; resolve them yourself with
+bucket through an access point ARN, an access point alias, a multi-region
+access point, or an access point of an S3 Express directory bucket (`--xa-s3`)
+and the directory bucket itself are not detected by it — and S3 may then accept
+the copy onto itself, which a directory bucket does, so the delete that follows
+removes the only copy (measured on real S3); resolve them yourself with
 [`S3PathResolver`](../misc.md#s3pathresolver) beforehand when that risk
 applies. The library never builds the `s3control` / `sts` clients such a
 resolution needs.

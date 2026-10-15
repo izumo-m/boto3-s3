@@ -268,7 +268,8 @@ mtime rule (full float precision; `delta = dest.mtime - src.mtime`):
   use the same call.
 - `sync s3://b/p s3://b/p` (identical path) makes every pair identical -> silent
   rc 0 (there is no onto-itself guard like mv's).
-- An S3 Express directory bucket (`--x-s3`) on either side is rejected with
+- An S3 Express directory bucket (`--x-s3`) or one of its access points
+  (`--xa-s3`) on either side is rejected with
   aws-cli's `Cannot use sync command with a directory bucket.`
   (`ValidationError`), after the s3local dest-dir creation above and before any
   listing (a bare `s3://` argument's client is already built during
@@ -276,7 +277,10 @@ mtime rule (full float precision; `delta = dest.mtime - src.mtime`):
   built after this check): directory buckets drop `ListObjectsV2`'s
   lexicographic guarantee, so the merge-join could pair keys wrongly and
   `delete_filter` could remove from the destination keys the source has too.
-  The CLI rejects the
+  An access point lists its bucket's keys in the same unordered way (measured
+  on real S3: one `delete_filter` run removed 18 of 20 objects the source also
+  had); aws-cli tests the `--x-s3` suffix only and runs it, which is not
+  copied (docs/cli/aws-differences.md). The CLI rejects the
   same paths at its own validation stage (rc 252); the library guard is the
   backstop for direct callers.
 - opens3 / s3open (a custom backend on one side, the other always S3 - the open

@@ -375,14 +375,17 @@ its `__all__`:
 ## S3PathResolver
 
 Resolves access-point-shaped S3 paths to the real `s3://bucket/key` forms they
-land in. An access point ARN or alias, an S3 on Outposts access point ARN, or a
-Multi-Region Access Point ARN can hide the bucket a path really addresses, so
-two different-looking paths can name the same object; resolving both sides
-first lets a caller compare the real pairs (with
-[`S3Storage.same_path`](./storage.md#s3storage)) before moving anything. This
-is a port of the AWS CLI's own resolver, the machinery behind
-`aws s3 mv --validate-same-s3-paths`. The AWS CLI's `from_session` constructor
-is deliberately not ported: the clients come from the caller.
+land in. An access point ARN or alias, an S3 on Outposts access point ARN, a
+Multi-Region Access Point ARN, or an access point of an S3 Express directory
+bucket can hide the bucket a path really addresses, so two different-looking
+paths can name the same object; resolving both sides first lets a caller
+compare the real pairs (with [`S3Storage.same_path`](./storage.md#s3storage))
+before moving anything. This is a port of the AWS CLI's own resolver, the
+machinery behind `aws s3 mv --validate-same-s3-paths`, with one shape added:
+the AWS CLI does not resolve an S3 Express access point (`--xa-s3`), whose
+same-key move onto its directory bucket deletes the object on real S3 (the
+directory bucket accepts the copy onto itself). The AWS CLI's `from_session`
+constructor is deliberately not ported: the clients come from the caller.
 
 ```python
 class S3PathResolver:
@@ -391,7 +394,8 @@ class S3PathResolver:
 
 `s3control_client` answers `GetAccessPoint` and
 `ListMultiRegionAccessPoints`. `sts_client` answers `GetCallerIdentity`, and is
-consulted only for an access point *alias*, which carries no account id. Both
+consulted only for an access point *alias* or an S3 Express access point,
+which carry no account id. Both
 are keyword-only and required, and both are used lazily: a path with a plain
 bucket name resolves to itself without touching either client. The
 parameters are untyped so any boto3 client fits; build them with the region,
@@ -412,8 +416,9 @@ def resolve_underlying_s3_paths(self, path: str) -> list[str]
 Every `s3://bucket/key` form `path` may land in. The bucket part decides the
 route: a plain access point ARN and an Outposts access point ARN each resolve
 through `GetAccessPoint` to one path; a `-s3alias` access point alias first
-takes the account id from `GetCallerIdentity`, then resolves the same way; a
-Multi-Region Access Point ARN is looked up by alias through paged
+takes the account id from `GetCallerIdentity`, then resolves the same way, and
+so does an S3 Express access point (a name ending `--xa-s3`), to its directory
+bucket; a Multi-Region Access Point ARN is looked up by alias through paged
 `ListMultiRegionAccessPoints` calls and fans out to one path per region of the
 access point. A `--op-s3` Outposts access point alias matches none of those
 routes and raises, since no API resolves it. Any other bucket part is not an
@@ -454,15 +459,16 @@ def has_underlying_s3_path(path: str) -> bool
 ```
 
 Whether `path`'s bucket part may resolve to a different real bucket: `True` for
-the three ARN shapes [`S3PathResolver`](#s3pathresolver) resolves and for the
-two access point alias suffixes, `-s3alias` and the Outposts `--op-s3`. Pure
+the three ARN shapes [`S3PathResolver`](#s3pathresolver) resolves, for the two
+access point alias suffixes, `-s3alias` and the Outposts `--op-s3`, and for an
+S3 Express access point, `--xa-s3` (which the AWS CLI's test misses). Pure
 string inspection — no client, no I/O — which is what gates the AWS CLI's "may
 resolve to same underlying s3 object(s)" warning when validation is off.
 
 A leading `s3://` is optional and stripped when present. The bucket part is the
 ARN when the string starts with one, otherwise everything before the first `/`.
 Nothing is validated: a string that is not an S3 path simply reports `False`,
-unless its first segment happens to end in one of the two alias suffixes.
+unless its first segment happens to end in one of those three suffixes.
 
 The same module, `boto3_s3.pathresolver`, also carries the string probes
 `is_mrap_path`, `is_outpost_path`, `is_outpost_alias_path`,

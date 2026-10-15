@@ -84,7 +84,7 @@ the two entries in hand, so a key that arrives out of order surfaces as a
 `sync`'s delete lane means deleting an entry that exists on both sides, as
 `aws s3 sync` does against an S3-compatible endpoint whose listing does not
 sort. This is why `sync` requires `SORTABLE_SCAN` of a custom backend and
-rejects S3 Express directory buckets outright.
+rejects S3 Express directory buckets and their access points outright.
 
 Both streams are consumed lazily and only one entry of each is held at a time,
 so page-by-page listings pair without either side being materialized. Draining

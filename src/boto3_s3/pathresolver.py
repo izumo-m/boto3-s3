@@ -7,6 +7,10 @@ S3 on Outposts access point ARN, or a Multi-Region Access Point ARN can hide
 the bucket a path really lands in, so ``mv`` would copy an object onto
 itself and then delete it. Resolving first lets a caller compare the real
 ``s3://bucket/key`` pairs (``S3Storage.same_path``) before moving anything.
+One shape is added to aws-cli's: an access point of an S3 Express directory
+bucket (``--xa-s3``), which aws-cli neither warns about nor resolves, and
+whose same-key move onto its directory bucket deletes the object on real S3
+(the directory bucket accepts the copy onto itself).
 
 Following the library's connection model, the resolver takes its
 ``s3control`` and ``sts`` clients from the caller (build them with the
@@ -30,7 +34,8 @@ from typing import Any, NamedTuple
 from boto3_s3.exceptions import ValidationError
 
 # aws-cli regexes, verbatim. ``has_underlying_s3_path`` and the resolution
-# dispatch share them; the suffix forms (-s3alias / --op-s3) have no regex.
+# dispatch share them; the suffix forms (-s3alias / --op-s3 / --xa-s3) have no
+# regex.
 _S3_ACCESSPOINT_ARN_TO_ACCOUNT_NAME_REGEX = re.compile(
     r"^arn:aws.*:s3:[a-z0-9\-]+:(?P<account>[0-9]{12}):accesspoint[:/](?P<name>[a-z0-9\-]{3,50})$"
 )
@@ -50,18 +55,18 @@ _HOST_LABEL_REGEX = re.compile(r"^(?!-)[a-zA-Z\d-]{1,63}(?<!-)$")
 def has_underlying_s3_path(path: str) -> bool:
     """Whether *path*'s bucket part may resolve to a different real bucket.
 
-    True for the three ARN shapes above and for the access-point alias
-    suffixes (``-s3alias``, Outposts ``--op-s3``). Pure string inspection -
-    this is what gates aws's "may resolve to same underlying s3 object(s)"
-    warning when validation is off.
+    True for the three ARN shapes above, for the access-point alias
+    suffixes (``-s3alias``, Outposts ``--op-s3``) and for an S3 Express
+    access point (``--xa-s3``, which aws's test misses). Pure string
+    inspection - this is what gates aws's "may resolve to same underlying s3
+    object(s)" warning when validation is off.
     """
     bucket, _key = _split_bucket_key(path)
     return bool(
         _S3_ACCESSPOINT_ARN_TO_ACCOUNT_NAME_REGEX.match(bucket)
         or _S3_OUTPOST_ACCESSPOINT_ARN_TO_ACCOUNT_REGEX.match(bucket)
         or _S3_MRAP_ARN_TO_ACCOUNT_ALIAS_REGEX.match(bucket)
-        or bucket.endswith("-s3alias")
-        or bucket.endswith("--op-s3")
+        or bucket.endswith(("-s3alias", "--op-s3", "--xa-s3"))
     )
 
 
@@ -184,10 +189,12 @@ def is_s3express_accesspoint_path(path: str) -> bool:
     ``sigv4-s3express`` exactly as they sign the directory bucket itself, off
     the ``accessPointSuffix`` they read from the bucket part, so the same pin
     stand-down applies as for `is_s3express_path`. It is a separate probe
-    because aws-cli's own ``is_s3express_bucket`` tests only ``--x-s3``, and
-    the places that mirror that test (the ``sync`` rejection, the
-    ``--case-conflict`` warning) must keep its narrower answer. The ``s3://``
-    scheme is required for the same reason as there.
+    because aws-cli's own ``is_s3express_bucket`` tests only ``--x-s3``. The
+    places built on that test - the ``sync`` rejection and the
+    ``--case-conflict`` branch - take this suffix too, where aws does not:
+    an access point lists its directory bucket's keys in the same unordered
+    way, which those places exist to keep from the sorted pairing. The
+    ``s3://`` scheme is required for the same reason as there.
     """
     if not path.startswith("s3://"):
         return False
@@ -297,7 +304,10 @@ class S3PathResolver:
         match = _S3_MRAP_ARN_TO_ACCOUNT_ALIAS_REGEX.match(bucket)
         if match:
             return self._resolve_mrap_alias(match.group("account"), match.group("alias"), key)
-        if bucket.endswith("-s3alias"):
+        if bucket.endswith(("-s3alias", "--xa-s3")):
+            # An S3 Express access point's GetAccessPoint takes its name as
+            # an alias's (measured on real S3: it answers with the directory
+            # bucket); aws-cli does not resolve it.
             return self._resolve_accesspoint_alias(bucket, key)
         if bucket.endswith("--op-s3"):
             raise ValidationError(

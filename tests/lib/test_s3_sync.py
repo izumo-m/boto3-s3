@@ -28,7 +28,6 @@ from boto3_s3.comparator import ParallelFilter, SyncPair
 from boto3_s3.exceptions import (
     BatchError,
     CancelledError,
-    ConfigurationError,
     NotFoundError,
     TransportError,
     ValidationError,
@@ -470,16 +469,20 @@ class TestSyncUpload:
         assert [r.outcome for r in results] == [OpOutcome.WARNED]
         assert f"Skipping file {src}{os.sep}. File does not exist." in str(results[0].error)
 
-    def test_directory_bucket_destination_is_rejected(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("bucket", ["b--use1-az4--x-s3", "ap--use1-az4--xa-s3"])
+    def test_directory_bucket_destination_is_rejected(self, tmp_path: Path, bucket: str) -> None:
         # An S3 Express directory bucket lists in unspecified order, so the
         # sorted merge-join (and --delete) cannot run on it; the library
         # rejects with aws-cli's exact wording
         # (_validate_not_s3_express_bucket_for_sync) before any client call.
+        # An access point of one (--xa-s3) lists the same way - aws-cli's test
+        # misses it, and on real S3 one delete_filter run removed 18 of 20
+        # objects the source also had - so it is rejected too.
         src = tmp_path / "src"
         src.mkdir()
         client, calls = make_recording_client([])
         with pytest.raises(ValidationError) as excinfo:
-            S3().sync(str(src), S3Storage("s3://b--use1-az4--x-s3/p", client=client))
+            S3().sync(str(src), S3Storage(f"s3://{bucket}/p", client=client))
         assert str(excinfo.value) == "Cannot use sync command with a directory bucket."
         assert calls == []
 
@@ -487,9 +490,9 @@ class TestSyncUpload:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # On a botocore that predates S3 Express the sync refusal still wins:
-        # upgrading would not make sync usable on a directory bucket, so the
-        # floor gate (an upgrade hint) must not come first. An access point
-        # (--xa-s3) is not refused by sync and meets the gate.
+        # upgrading would not make sync usable on a directory bucket or one of
+        # its access points, so the floor gate (an upgrade hint) must not come
+        # first.
         import botocore.utils
 
         from boto3_s3 import s3storage
@@ -501,7 +504,7 @@ class TestSyncUpload:
         client, calls = make_recording_client([])
         with pytest.raises(ValidationError, match="Cannot use sync command"):
             S3().sync(str(src), S3Storage("s3://b--use1-az4--x-s3/p", client=client))
-        with pytest.raises(ConfigurationError, match=r"1\.37\.24"):
+        with pytest.raises(ValidationError, match="Cannot use sync command"):
             S3().sync(str(src), S3Storage("s3://b--use1-az4--xa-s3/p", client=client))
         assert calls == []
 
@@ -789,8 +792,9 @@ class TestSyncDownload:
         assert calls == []
         assert (tmp_path / "out").read_bytes() == b"keep"
 
+    @pytest.mark.parametrize("bucket", ["b--use1-az4--x-s3", "ap--use1-az4--xa-s3"])
     def test_directory_bucket_source_is_rejected_after_dest_dir_creation(
-        self, tmp_path: Path
+        self, tmp_path: Path, bucket: str
     ) -> None:
         # The rejection guards the source side too, and sits after the s3local
         # dest-dir creation - aws creates the directory and then fails
@@ -798,7 +802,7 @@ class TestSyncDownload:
         out = tmp_path / "out"
         client, calls = make_recording_client([])
         with pytest.raises(ValidationError) as excinfo:
-            S3().sync(S3Storage("s3://b--use1-az4--x-s3/p", client=client), str(out))
+            S3().sync(S3Storage(f"s3://{bucket}/p", client=client), str(out))
         assert str(excinfo.value) == "Cannot use sync command with a directory bucket."
         assert out.is_dir()
         assert calls == []

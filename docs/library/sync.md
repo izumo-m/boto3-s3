@@ -177,9 +177,10 @@ refused. See [`compatibility.md`](../compatibility.md).
   failing — `sync` is a directory operation.
 - **Syncing an S3 location onto itself** does nothing and succeeds silently;
   there is no self-reference guard like `mv`'s.
-- **S3 Express directory buckets** are rejected on either side, because their
-  listings are not ordered the way `sync` needs to pair them. Use a recursive
-  `cp` instead.
+- **S3 Express directory buckets** are rejected on either side, and so are
+  their access points (a name ending `--xa-s3`), because their listings are
+  not ordered the way `sync` needs to pair them. Use a recursive `cp`
+  instead.
 
 ## 7. Results and failure
 

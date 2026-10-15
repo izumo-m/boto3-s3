@@ -372,7 +372,8 @@ prunes decides it instead. `S3Storage` relies on `ListObjectsV2`
 returning keys in byte order, preserved across pages — but its non-recursive
 listing emits each page's common prefixes ahead of that page's objects, which
 is `aws s3 ls`'s shape rather than a merged byte order, and S3 Express
-directory buckets guarantee no order at all, which is why `sync` rejects them.
+directory buckets guarantee no order at all, listed directly or through one of
+their access points, which is why `sync` rejects both.
 
 ## Location
 

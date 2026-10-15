@@ -1357,7 +1357,8 @@ unconditionally) -> the SSE-C pair (252) -> the `--no-overwrite` floor check
 (252, an upload or copy on an installed botocore without S3 conditional
 writes; no aws counterpart) -> the `[s3]` runtime config (255) and
 the transfer-manager construction (255 on a CRT client the region cannot build)
--> the `--case-conflict` Express branch (252) -> `S3().cp(...)`.
+-> the `--case-conflict` Express branch (252; taken for an access point of a
+directory bucket too, which aws's `--x-s3` test misses) -> `S3().cp(...)`.
 **`finish_transfer` - wrapping the `--expected-size` conversion and `S3().cp`
 - is the in-pipeline boundary**: `BatchError` -> 1 (the `... failed:`
 lines have already been emitted by on_result), a `KeyboardInterrupt` -> one
@@ -1538,10 +1539,14 @@ after all of that):
    OSError - the same `_validate_path_args` half as cp's dir_op pre-create,
    run unconditionally for a local dest)
 7. SSE-C pair 252
-8. **An S3 Express directory bucket on either side is 252** (`Cannot use sync
-   command with a directory bucket.` - aws-cli
+8. **An S3 Express directory bucket or one of its access points on either
+   side is 252** (`Cannot use sync command with a directory bucket.` - aws-cli
    `_validate_not_s3_express_bucket_for_sync`. The `--x-s3` suffix decision =
-   `transferargs.is_s3express_path`. A **local** dir of the same name passes)
+   `transferargs.is_s3express_path`, plus `is_s3express_accesspoint_path` for
+   `--xa-s3`, which aws runs - and, its listing being just as unordered,
+   loses objects to `--delete` - a deliberate difference (user decision
+   2026-10-15, docs/cli/aws-differences.md). A **local** dir of the same name
+   passes)
 9. case-conflict resolution (treated as `recursive=True` - sync has no flag)
 10. options conversion (`no_overwrite` is passed through in options; `S3.sync`
    reads it as the write-guard and strips it before the engine - sync does not

@@ -252,6 +252,39 @@ class TestValidateSamePaths:
         assert sts.calls >= 1
         assert s3control.calls[0]["Name"] == "my-ap-s3alias"
 
+    def test_s3express_access_point_is_resolved(self) -> None:
+        # aws neither warns about nor resolves --xa-s3, and on real S3 the move
+        # of an access point's key onto its directory bucket's same key copies
+        # the object onto itself and then deletes it. Resolved here like an
+        # alias, so the flag refuses it.
+        ctx, s3control, sts, _, calls = _resolver_ctx(bucket="dir--use1-az4--x-s3")
+        rc = cli.main(
+            [
+                "mv",
+                "s3://ap--use1-az4--xa-s3/k.txt",
+                "s3://dir--use1-az4--x-s3/k.txt",
+                "--validate-same-s3-paths",
+            ],
+            ctx=ctx,
+        )
+        assert rc == 252
+        assert sts.calls >= 1
+        assert s3control.calls[0]["Name"] == "ap--use1-az4--xa-s3"
+        assert calls == []
+
+    def test_s3express_access_point_warns_without_the_flag(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        ctx, s3control, _, _, _ = _resolver_ctx(
+            bucket="unused", responses=[_head_response(), {}, {}]
+        )
+        rc = cli.main(
+            ["mv", "s3://ap--use1-az4--xa-s3/k.txt", "s3://dir--use1-az4--x-s3/k.txt"], ctx=ctx
+        )
+        assert rc == 0
+        assert s3control.calls == []
+        assert _WARNING_TOKEN in capsys.readouterr().err
+
     def test_source_region_routes_the_source_resolver(self) -> None:
         ctx, _, _, service_calls, _ = _resolver_ctx(bucket="underlying")
         cli.main(
