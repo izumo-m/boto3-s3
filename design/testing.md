@@ -207,14 +207,14 @@ HeadObject fields of one probe key - how ContentType/Metadata/StorageClass
 passthrough and the copy-props chain are verified end-to-end). The download
 mtime stamp is asserted live per side (file mtime == object LastModified),
 never via goldens. Scenarios whose outcome is endpoint-relative are
-`diff_only` (`--sse` and `--storage-class GLACIER` fail on MinIO and
-succeed on real S3; both CLIs always agree); the glacier *gate* shapes run
-on moto instead (`TestCpGlacierOnMoto` - including the restored-object
-pass and force-glacier letting S3's InvalidObjectState through). The `-`
-streaming scenarios carry a `stdin` payload: the e2e driver feeds it to
-both CLIs through the stdin-capable subprocess runners, and the moto
-replay routes any scenario with a payload or a `-` in its argv through
-`run_cli_in_process_streaming`, whose buffer-backed `sys.stdin` /
+`diff_only` (`--sse`, `--storage-class GLACIER`, and `--checksum-algorithm
+XXHASH64` fail on MinIO and succeed on real S3; both CLIs always agree); the
+glacier *gate* shapes run on moto instead (`TestCpGlacierOnMoto` - including
+the restored-object pass and force-glacier letting S3's InvalidObjectState
+through). The `-` streaming scenarios carry a `stdin` payload: the e2e
+driver feeds it to both CLIs through the stdin-capable subprocess runners,
+and the moto replay routes any scenario with a payload or a `-` in its argv
+through `run_cli_in_process_streaming`, whose buffer-backed `sys.stdin` /
 `sys.stdout` shims let the in-process CLI read stdin uploads and write
 raw download bytes (a plain `StringIO` has no `.buffer`). A streaming
 download's golden `stdout_lines` are the object body itself - the
@@ -296,6 +296,10 @@ The commands to bring the stack up and run the suite against it are in
 shaped the way it is. One variation worth knowing: with the environment sourced,
 a bare `uv run pytest` runs the whole suite including e2e, rather than only
 `tests/cli/e2e`.
+
+The stack's server is Silo (`pgsty/silo`), a fork of MinIO; this file calls
+it MinIO. How it differs from real S3 is tabulated in
+[`endpoint-fidelity.md`](./endpoint-fidelity.md).
 
 `scripts/compose.dev.yaml` pins the compose project name (`boto3-s3-dev`) so
 `compose-up.sh` matches the exact container name, and its `mc-init` sidecar
@@ -497,9 +501,9 @@ resolve-every-symbol case guards the three-way `__all__` / `TYPE_CHECKING` /
   the same scenarios exit 0 on both sides - rc parity is endpoint-relative
   by design.
 - **MinIO: no S3 object annotations** (probed 2026-07 on both minio/minio
-  and pgsty/minio): the `x-amz-object-annotation-directive` header is
-  ignored (harmless - the EXCLUDE both CLIs now send on every copy rides
-  through the copy lanes unchanged, goldens unaffected) and
+  and pgsty/minio, 2026-10 on Silo): the `x-amz-object-annotation-directive`
+  header is ignored (harmless - the EXCLUDE both CLIs now send on every copy
+  rides through the copy lanes unchanged, goldens unaffected) and
   ListObjectAnnotations answers 500, so `--copy-props all` cannot be
   exercised end-to-end. Measured against the pinned aws-cli: single-part `all`
   exits 0 on both sides (nothing annotation-related on the wire); the

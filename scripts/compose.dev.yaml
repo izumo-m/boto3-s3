@@ -1,4 +1,5 @@
-# Ephemeral MinIO for boto3-s3 manual testing and the e2e parity suite.
+# Ephemeral MinIO-compatible S3 server (Silo) for boto3-s3 manual testing
+# and the e2e parity suite.
 #
 # Usage (from repo root):
 #   scripts/compose-up.sh          # start the stack, wait for bucket init
@@ -18,10 +19,11 @@ name: boto3-s3-dev
 
 services:
   minio:
-    # pgsty/minio is the community-maintained continuation of minio/minio
-    # (upstream archived 2026-02; its :latest froze at RELEASE.2025-09-07).
-    # Drop-in compatible, CVE fixes only, no new features.
-    image: pgsty/minio:latest
+    # pgsty/silo is the community fork of minio/minio (upstream archived
+    # 2026-02), renamed from pgsty/minio on 2026-08-06. It keeps the MinIO S3
+    # API, port, and MINIO_* variables, but deliberately differs from upstream
+    # MinIO in places (design/endpoint-fidelity.md).
+    image: pgsty/silo:latest
     command: server /data --console-address :9001
     environment:
       MINIO_ROOT_USER: minioadmin

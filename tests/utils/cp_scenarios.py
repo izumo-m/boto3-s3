@@ -816,7 +816,10 @@ SCENARIOS: tuple[CpScenario, ...] = (
     CpScenario(
         # The CRT-backed algorithm family (needs awscrt - installed here by
         # the dev group's botocore[crt]; the dist leaves CRT to the opt-in
-        # `crt` extra); aws accepts it against MinIO (rc 0).
+        # `crt` extra). The dev stack (Silo) rejects the checksum with
+        # InvalidArgument (rc 1) while real S3 and moto accept it (rc 0): the
+        # unconditional rc comparison holds either way (cp_upload_sse
+        # precedent).
         name="cp_checksum_xxhash64",
         argv=(
             "cp",
@@ -826,6 +829,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
             "XXHASH64",
         ),
         local_src=_SRC_SINGLE,
+        diff_only=True,
     ),
     CpScenario(
         name="cp_checksum_mode_download",
