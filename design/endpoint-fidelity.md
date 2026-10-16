@@ -36,7 +36,7 @@ a replacement.
 | G8 | Keys with a `..` segment / `//` | PUT rejected (`XMinioInvalidResourceName` / `XMinioInvalidObjectName`) | accepted | - | T24 |
 | G9 | Object `p` beside prefix `p/` (`pre` and `pre/x.txt`) | listing hides `pre/x.txt`; a purge misses it and it reappears in the next scenario's end state | two independent keys | - | T24 |
 | G10 | Zero-byte PUT | the next request on the same pooled connection stalls until the read timeout | unaffected | unaffected | T1 |
-| G11 | GetObjectAttributes, COMPOSITE checksum | value without the `-N` suffix (HeadObject has it); type only in `ChecksumType` | *unverified* | - | T25 |
+| G11 | GetObjectAttributes, COMPOSITE checksum | value without the `-N` suffix (HeadObject has it); type only in `ChecksumType` | general purpose buckets answer in the same form; S3 Express directory buckets add the `-N` suffix (*measured*) | - | T25 |
 | G12 | UploadPartCopy (multipart copy) | destination carries no checksum | destination carries a CRC64NVME FULL_OBJECT checksum (*measured*) | - | none |
 | G13 | PutObject with a canned ACL or grant, new bucket | accepted, rc 0 | new buckets have ACLs disabled (BucketOwnerEnforced): rejected, rc 1 on both CLIs (*measured*) | accepted | T7 |
 | G14 | CopyObject with `If-None-Match: *` onto an existing key | condition ignored, the copy overwrites (PutObject honors it) | honored: neither CLI copies (*measured*) | condition ignored | T9 |
@@ -85,7 +85,7 @@ test-side changes, and are not listed.
 | T22 | `normalize_rm_stdout` sorts delete lines, justified by an observation on MinIO | `harness.py` | - | needed on every endpoint: the order comes from aws's parallel completion |
 | T23 | the dev stack itself: image, keys, region, readiness wait, container name, the golden-regeneration hint, the benchmark guard that recognizes MinIO | `scripts/compose.dev.yaml`, `compose-up.sh`, `minio-env.sh` / `.cmd`, `golden.py`, `benchmarks/awsenv.py` and its tests | - | rewrite for the replacement |
 | T24 | no scenario uses `..` / `//` keys or an object beside a same-named prefix (no live keys probe; the unit tier pins `..` bytes) | the scenario files | G8, G9 | keep the rule until a replacement is probed; no current seed or golden end state has either shape |
-| T25 | a library unit test fakes the COMPOSITE answer in MinIO's bare form | `test_checksumcompare.TestCompositeForms` | G11 | keep: it pins a form the library accepts; add real S3's form once measured |
+| T25 | a library unit test fakes the COMPOSITE answer in MinIO's bare form | `test_checksumcompare.TestCompositeForms` | G11 | keep: real S3 answers in both forms (G11), and the test pins both |
 
 Not test-side changes, though they mention MinIO: the `diff_only` of the
 negative page-size scenarios (the reason is moto, which raises `IndexError`
