@@ -1151,6 +1151,13 @@ decoding on write for a download.
 
 `encoding` is that codec's encoding and applies only to a text stream; a name
 `codecs.lookup` does not know raises `InvalidValueError` from the constructor.
+A text stream therefore takes the object as text: one that is not valid text in
+`encoding` fails its transfer (a `Boto3S3Error` raised from the
+`UnicodeDecodeError`), and the stream's own encoding and newline translation
+apply to what is written. It is never swapped for its `.buffer` — text it has
+read ahead would be skipped and its encoding ignored — so pass a binary stream
+(`sys.stdout.buffer`) or [`StdioStorage`](#stdiostorage) for the bytes as
+stored.
 A single incremental encoder or decoder spans the whole transfer, so a stateful
 codec behaves as one stream — utf-16 emits its BOM once, not per chunk.
 

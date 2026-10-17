@@ -34,7 +34,7 @@ through it goes straight into `sys.stdout.buffer` and is not flushed when the
 transfer finishes, exactly as `aws` leaves it — whatever the stream still holds
 goes out on your own `flush()` or on the interpreter's at exit.
 
-## 1. Text streams are encoded for you
+## 1. Text streams take the object as text
 
 A binary stream — `io.BytesIO`, a file opened `"rb"` or `"wb"`, a `gzip` writer,
 a pipe — is used as it is; one that cannot be positioned (a pipe, a socket) is
@@ -46,7 +46,17 @@ wrapped with a codec:
 IOStorage(io.StringIO("hello"), encoding="utf-8")   # utf-8 is the default
 ```
 
-Uploads encode, downloads decode.
+Uploads encode, downloads decode, so a text stream sees the object as text and
+its own rules apply on top. An object that is not valid text in `encoding` — an
+image, say — fails its transfer: the item's error is a `Boto3S3Error` raised
+from the `UnicodeDecodeError`. A text-mode file, or `sys.stdout`, writes in the
+encoding it was opened with and, on Windows, turns each `\n` into `\r\n`.
+
+For the bytes exactly as stored, hand over a binary stream instead:
+`sys.stdout.buffer`, a file opened `"wb"`, or `StdioStorage()` for standard
+input and output. A text stream is never swapped for its `.buffer` behind your
+back: text it has already read ahead would be skipped, and the encoding you
+opened it with would be ignored.
 
 ## 2. The stream stays yours
 
@@ -81,7 +91,7 @@ buf.seek(0)
 print(buf.read())        # or just: buf.getvalue()
 ```
 
-A stream that cannot seek is fine — `sys.stdout`, a pipe, or a writer that
+A stream that cannot seek is fine — `sys.stdout.buffer`, a pipe, or a writer that
 exposes only `write`, as in the `gzip` example above. There is nothing to
 rewind; the bytes go wherever the stream sends them, and your own `with` block
 or `close()` finalizes it. A `gzip` writer handed over directly is not such a
