@@ -195,4 +195,4 @@ class TestEmptyCaBundleVariable:
             ]
         )
         assert (result.rc, result.stderr) == (0, "")
-        assert result.stdout == f"(dryrun) upload: ./f.txt to s3://{FUNCTIONAL_BUCKET}/k\n"
+        assert result.stdout == f"(dryrun) upload: .{os.sep}f.txt to s3://{FUNCTIONAL_BUCKET}/k\n"
