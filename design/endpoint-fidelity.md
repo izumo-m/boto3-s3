@@ -19,10 +19,11 @@ observed behavior of RustFS 1.0.2 (`rustfs/rustfs:1.0.2`, image revision
 newer one has not been checked against these rows until the probes are re-run;
 `docker exec boto3-s3-dev-s3-1 rustfs --version` prints the running one.
 
-The real-S3 column is measured where marked *measured* - by the one dated
-real-AWS run, `tests/run_e2e.sh` in ap-northeast-1 on 2026-10-15 (237 of 248
-e2e tests passed; all 11 failures were test-side) plus probes from the same
-day - and is S3's documented behavior otherwise; a row marked *unverified*
+The real-S3 column is measured where marked *measured* - by the real-AWS
+runs of `tests/run_e2e.sh` in ap-northeast-1 (2026-10-15: 237 of 248 e2e
+tests passed, all 11 failures test-side; 2026-10-17, after the section 2
+fixes: 248 of 248) plus probes from those days - and is S3's documented
+behavior otherwise; a row marked *unverified*
 has never been checked against real S3. The moto column matters because
 goldens replay on moto: a golden captured on one endpoint only works if moto
 answers the same way. The last column points to the test-side changes in
