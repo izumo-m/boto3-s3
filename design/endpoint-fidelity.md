@@ -95,8 +95,19 @@ none). The forms a change takes:
 | T13 | no e2e reaches an access point: `mv --validate-same-s3-paths` has no scenario, `ls_accesspoint_arn` is `diff_only` | `mv_scenarios.py`, `ls_scenarios.py` | G6 | real S3 could host an access point for `mv` (needs permissions and a cost estimate); `ls_accesspoint_arn` stays `diff_only` (a foreign ARN fails differently per endpoint) |
 | T14 | `cp_copy_props_none` probes only `Metadata`, leaving the default `ContentType` unchecked | `cp_scenarios.py` | - | the dev stack and moto both answer `binary/octet-stream`; check real S3, then probe `ContentType` too |
 | T15 | the dev stack itself: server and release, keys, us-east-1, the SSE-S3 master key, the readiness wait, the container name, the golden-regeneration hint, the benchmark guard | `scripts/compose.dev.yaml`, `compose-up.sh`, `dev-env.sh` / `.cmd`, `golden.py`, `benchmarks/awsenv.py` | - | rewrite for the new server; re-run the section 1 probes |
-| T16 | no scenario uses `..` / `//` keys (the unit tier pins `..` bytes) | none: a rule for new scenarios, so no marker | G7 | keep the rule while the dev stack rejects such keys |
+| T16 | no scenario uses `..` / `//` keys (the unit tier pins `..` bytes) | none: a rule for new scenarios, so no marker | G7 | keep the rule while the dev stack rejects such keys (the downloads were checked by hand instead: below) |
 | T17 | the `cp_upload_no_guess_mime` golden is frozen | `cp_scenarios.py` | G15 | drop the freeze on an endpoint that answers `binary/octet-stream` |
+
+What T16 leaves out was checked once outside the suite, on 2026-10-17. A
+throwaway CloudServer 9.5.0 (`S3BACKEND=mem`), which accepts such keys
+(section 3), served keys with `..`, `.`, and `\` segments: ones that climb
+out of the prefix, ones that stay inside it, and ones that name the
+destination or its parent. `cp --recursive` and `sync` downloaded them side
+by side with the pinned aws on Linux and with `aws.exe` on Windows (this
+command on Python 3.10 and 3.14). Exit codes, output, and the downloaded
+tree matched on both systems. On Windows the `\` forms that climb out are
+skipped like the `/` ones, and on neither system was anything written
+outside the destination.
 
 Not test-side changes, though they mention an endpoint: the `diff_only` of
 the negative page-size scenarios (the reason is moto, which raises

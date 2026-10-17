@@ -269,7 +269,10 @@ solidified design is added here.
     report closes with, and aws's build runs on 3.14. Here that comes from
     the host interpreter and from nowhere else: on 3.14 a report is colored
     as aws's is, on an older one never. The interpreter's color machinery is
-    not backported for a difference only a terminal shows.
+    not backported for a difference only a terminal shows. On 3.14 the
+    colors match aws's on every usage error checked, both on a Linux
+    pseudo-terminal and, on 2026-10-17, in Windows Terminal, where 3.14 also
+    asks the console whether it interprets escape sequences.
 - **Counted option values.** aws declares `--exclude` / `--include` with
   `nargs=1` and `mb`'s `--tags` with `nargs=2`, which both words a missing
   value by the count (`expected 1 argument`, `expected 2 arguments`) and lets
