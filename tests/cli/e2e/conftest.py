@@ -3,11 +3,11 @@
 This suite runs the real ``aws`` binary and the installed ``boto3-s3``
 console script as **external processes** against the same S3-compatible
 endpoint the host shell is configured for - nothing is mocked. The intended
-setup is the local MinIO stack::
+setup is the local dev stack::
 
     scripts/compose-up.sh
     scripts/install-awscli.sh
-    source scripts/minio-env.sh
+    source scripts/dev-env.sh
     uv run pytest tests/cli/e2e
 
 To run against **real AWS** instead, ``tests/run_e2e.sh`` creates a throwaway
@@ -25,7 +25,7 @@ The suite is opt-in, gated on ``BOTO3_S3_E2E_BUCKET``:
   checked via boto3) and the session aborts on any failure. The non-empty check
   is the safety guard against pointing the variable at a real, populated bucket.
 
-Credentials, region and endpoint come from the env alone (``scripts/minio-env.sh``,
+Credentials, region and endpoint come from the env alone (``scripts/dev-env.sh``,
 or ``tests/run_e2e.sh``, which exports a profile's credentials and drops
 ``AWS_PROFILE``); ``~`` points at a throwaway directory for the whole suite,
 probe included, so neither tool reads the developer's ``~/.aws`` and the pinned
@@ -258,10 +258,10 @@ def _sibling_bucket(s3_client: Any, name: str) -> Iterator[str]:
     The main bucket must stay existing and empty, so those suites work on a
     sibling derived from it (the ``BOTO3_S3_E2E_BUCKET`` opt-in covers the
     derived name). Force-deleted before the test (leftover from a crashed
-    run) and after (never left behind). The suffixes must keep the name
-    clear of ``-an`` (account-regional BucketNamespace semantics, unverified
-    against MinIO) - scenarios append markers like ``--x-s3`` themselves
-    when they test them.
+    run) and after (never left behind). endpoint-fidelity T3: the suffixes
+    must keep the name clear of ``-an`` (account-regional BucketNamespace
+    semantics, unverified against the dev stack) - scenarios append markers
+    like ``--x-s3`` themselves when they test them.
     """
     from tests.utils.harness import force_delete_bucket
 
@@ -272,11 +272,18 @@ def _sibling_bucket(s3_client: Any, name: str) -> Iterator[str]:
 
 @pytest.fixture
 def mb_bucket(s3_client: Any, bucket_name: str) -> Iterator[str]:
-    """The mb parity tests' sibling bucket (created by the command itself)."""
+    """The mb parity tests' sibling bucket (created by the command itself).
+
+    endpoint-fidelity T4: one fixed name, deleted and re-created per scenario
+    and per side - immediate on the dev stack, lagging on real S3.
+    """
     yield from _sibling_bucket(s3_client, f"{bucket_name}-mb")
 
 
 @pytest.fixture
 def rb_bucket(s3_client: Any, bucket_name: str) -> Iterator[str]:
-    """The rb parity tests' sibling bucket (pre-created per scenario)."""
+    """The rb parity tests' sibling bucket (pre-created per scenario).
+
+    endpoint-fidelity T4: the fixed-name re-creation of ``mb_bucket``.
+    """
     yield from _sibling_bucket(s3_client, f"{bucket_name}-rb")

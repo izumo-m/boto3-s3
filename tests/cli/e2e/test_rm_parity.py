@@ -58,7 +58,7 @@ def test_rm_parity(scenario: RmScenario, bucket: str, s3_client: Any) -> None:
         aws_lines = normalize_rm_stdout(aws_result.stdout, bucket=bucket)
         ours_lines = normalize_rm_stdout(ours_result.stdout, bucket=bucket)
 
-        if not scenario.diff_only:
+        if not scenario.diff_only and not scenario.frozen_golden:
             if update_goldens_enabled():
                 write_golden(
                     "rm",

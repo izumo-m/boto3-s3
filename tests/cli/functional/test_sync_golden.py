@@ -2,8 +2,9 @@
 
 The cp replay (see test_cp_golden.py) over the sync scenario table:
 ``local_mtimes`` keeps the time judgments deterministic against moto's
-"seeded at ~now" objects exactly as it does against MinIO in the e2e lane.
-``TestSyncGlacierOnMoto`` pins the glacier-gated shapes MinIO cannot host -
+"seeded at ~now" objects exactly as it does against the dev stack in the e2e
+lane. ``TestSyncGlacierOnMoto`` pins the glacier-gated shapes the dev stack
+cannot host -
 a gated download warns (rc 2) without touching the local side, and
 ``--force-glacier-transfer`` lets S3's own ``InvalidObjectState`` surface
 (rc 1).
@@ -81,7 +82,10 @@ def test_sync_matches_golden(
 
 
 class TestSyncGlacierOnMoto:
-    """The glacier gate on a sync download: skip with a warning, never fail."""
+    """The glacier gate on a sync download: skip with a warning, never fail.
+
+    endpoint-fidelity T9: the dev stack rejects GLACIER, so these run on moto.
+    """
 
     def _seed_glacier(self, moto_s3: Any) -> None:
         moto_s3.put_object(

@@ -1,7 +1,7 @@
 """Shared test harness: CLI runners, bucket seeding/cleanup, ls normalization.
 
 Used by every CLI test tier (``tests/cli/``): the awscli ports and unit tests
-run the CLI in-process, the functional (moto) and e2e (MinIO / real S3)
+run the CLI in-process, the functional (moto) and e2e (dev stack / real S3)
 suites additionally need seeding, cleanup, and output normalization.
 """
 
@@ -307,22 +307,21 @@ def seed_bucket(client: Any, bucket: str, seed: Mapping[str, int | bytes]) -> No
     """Put one object per entry: an ``int`` means ``b"x" * size``, ``bytes``
     are the exact body (transfer scenarios compare downloaded content).
 
-    A zero-byte PUT to a trailing-slash key (directory marker) leaves MinIO's
-    connection unable to answer the next request on it, which then stalls for
-    the client's full read timeout before a retry on a fresh connection
-    succeeds (observed on both minio/minio and pgsty/minio; real S3 and moto
-    are unaffected). ``Connection: close`` on those PUTs makes the server
-    close the poisoned connection so it is never reused.
+    endpoint-fidelity T1: after a zero-byte PUT, the next PUT with a body on
+    the same connection waits for the client's full read timeout (observed on
+    MinIO and on the dev stack; real S3 and moto are unaffected).
+    ``Connection: close`` on zero-byte PUTs makes the server close the
+    connection so it is never reused.
     """
     for key, spec in seed.items():
         body = spec if isinstance(spec, bytes) else b"x" * spec
-        is_marker = key.endswith("/") and not body
-        if is_marker:
+        is_empty = not body
+        if is_empty:
             client.meta.events.register_first("before-send.s3.PutObject", _add_connection_close)
         try:
             client.put_object(Bucket=bucket, Key=key, Body=body)
         finally:
-            if is_marker:
+            if is_empty:
                 client.meta.events.unregister("before-send.s3.PutObject", _add_connection_close)
 
 
@@ -458,7 +457,7 @@ def _normalize_presign_url(url: str, *, bucket: str, mask_region: str | None) ->
     if parts.netloc.startswith(f"{bucket}."):
         # Virtual-host style (the moto replay runs without an endpoint
         # override): canonicalize to path-style so it compares equal to a
-        # path-style capture (MinIO's IP endpoint).
+        # path-style capture (the dev stack's IP endpoint).
         path = f"/{bucket}{path}"
     normalized = f"{ENDPOINT_TOKEN}{path}".replace(bucket, BUCKET_TOKEN)
     if not parts.query:
@@ -494,7 +493,7 @@ def normalize_presign_stdout(
     The endpoint (``scheme://netloc``) is masked after canonicalizing a
     virtual-host URL (bucket in the netloc) to path-style, so the moto
     replay (no endpoint override -> virtual-host) compares equal to the
-    MinIO capture (IP endpoint -> path-style). Query values are
+    dev stack capture (IP endpoint -> path-style). Query values are
     percent-decoded for readable goldens, and the time/credential-dependent
     ones are masked: ``X-Amz-Date``, ``X-Amz-Signature``, and the access
     key + date inside ``X-Amz-Credential``. The credential scope keeps its
@@ -594,7 +593,7 @@ def create_bucket_in_region(client: Any, bucket: str) -> None:
     Real S3 rejects a plain CreateBucket outside us-east-1 with
     ``IllegalLocationConstraintException``, so any other region must be passed
     as ``CreateBucketConfiguration.LocationConstraint``; us-east-1 (the region
-    MinIO reports) forbids the field and takes the plain form. The mb/rb parity
+    the dev stack reports) forbids the field and takes the plain form. The mb/rb parity
     suites pre-create their sibling bucket through here so their run_e2e.sh
     lane works in any region.
     """

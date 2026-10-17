@@ -7,9 +7,9 @@ wiped between the sides and at the end. Comparison covers the unconditional
 rc (exit-code charter, design/overview.md section 3), the masked/sorted stdout, the
 bucket end state, the local destination tree, the probe object's HeadObject
 fields, and the live per-side download-mtime assertion. ``diff_only``
-scenarios carry outcomes that are endpoint-relative (``--sse``, GLACIER
-storage class: MinIO and real S3 answer differently; negative page size: moto
-cannot replay it) or runner-relative (an uncreatable recursive destination
+scenarios carry outcomes that are endpoint-relative (GLACIER storage class:
+the dev stack and real S3 answer differently; negative page size: moto cannot
+replay it) or runner-relative (an uncreatable recursive destination
 depends on the runner's privileges - root creates anything); both CLIs always
 agree, so the rc comparison still holds and no golden is written.
 """
@@ -126,7 +126,7 @@ def test_cp_parity(scenario: CpScenario, bucket: str, s3_client: Any, tmp_path: 
             )
             return
 
-        if not scenario.diff_only:
+        if not scenario.diff_only and not scenario.frozen_golden:
             if update_goldens_enabled():
                 write_golden(
                     "cp",

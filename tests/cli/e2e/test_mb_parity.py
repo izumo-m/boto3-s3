@@ -37,7 +37,7 @@ from tests.utils.mb_scenarios import SCENARIOS, MbScenario, resolve_argv
 
 
 def _reset(s3_client: Any, bucket: str, scenario: MbScenario) -> None:
-    """Put the sibling bucket into the scenario's start state."""
+    """Put the sibling bucket into the scenario's start state (endpoint-fidelity T4)."""
     force_delete_bucket(s3_client, bucket)
     if scenario.pre_create:
         create_bucket_in_region(s3_client, bucket)
@@ -60,7 +60,7 @@ def test_mb_parity(scenario: MbScenario, mb_bucket: str, s3_client: Any) -> None
     aws_lines = normalize_rm_stdout(aws_result.stdout, bucket=mb_bucket)
     ours_lines = normalize_rm_stdout(ours_result.stdout, bucket=mb_bucket)
 
-    if not scenario.diff_only:
+    if not scenario.diff_only and not scenario.frozen_golden:
         if update_goldens_enabled():
             write_golden(
                 "mb",

@@ -11,8 +11,9 @@ Bucket-side source survival is already pinned by ``remaining_keys``.
 The mv exit-code shape: the
 onto-itself family and any ``-`` path are 252, the missing local source is
 255, in-pipeline errors are rc 1 (``move failed:`` / ``fatal error:``), and
-``--validate-same-s3-paths`` adds nothing here - MinIO has no access
-points, so that surface lives in the awscli port and the unit tier.
+``--validate-same-s3-paths`` adds nothing here - the dev stack has no
+access points (endpoint-fidelity T13), so that surface lives in the awscli
+port and the unit tier.
 """
 
 from __future__ import annotations
@@ -299,6 +300,9 @@ SCENARIOS: tuple[CpScenario, ...] = (
         capture_tree=True,
     ),
     CpScenario(
+        # endpoint-fidelity T7: the cp_no_overwrite_copy_exists split - real
+        # S3 and the dev stack keep both keys, moto overwrites and deletes the
+        # source.
         name="mv_no_overwrite_copy_exists",
         argv=(
             "mv",
@@ -307,5 +311,6 @@ SCENARIOS: tuple[CpScenario, ...] = (
             "--no-overwrite",
         ),
         seed={"d/a.txt": b"download body\n", "moved/a.txt": b"already there\n"},
+        diff_only=True,
     ),
 )

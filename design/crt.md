@@ -660,4 +660,4 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   2026-09-06). A library caller on the CRT lane who wants that speed passes
   `checksum_algorithm="CRC64NVME"`.
 - **Cannot be verified under moto**: because CRT bypasses botocore's HTTP layer,
-  actual verification is only on the e2e (MinIO) lane.
+  actual verification is only on the e2e (dev stack) lane.

@@ -11,10 +11,12 @@ CRT-configured mode agrees with aws's on rc, stdout, the bucket end state, the
 local destination and source trees, and the download mtime.
 
 Gated twice: the e2e ``BOTO3_S3_E2E_BUCKET`` opt-in (conftest) and an
-``awscrt`` import check here (the CRT manager needs it). Against a custom
-endpoint (MinIO) the aws side needs an explicit ``--endpoint-url``: aws's CRT
-client reads ``use_ssl`` from the CLI argument only, so an env-only
-``AWS_ENDPOINT_URL_S3`` makes it dial TLS to an http endpoint and fail.
+``awscrt`` import check here (the CRT manager needs it).
+
+endpoint-fidelity T2: against a custom endpoint (the http dev stack) the aws
+side needs an explicit ``--endpoint-url``: aws's CRT client reads ``use_ssl``
+from the CLI argument only, so an env-only ``AWS_ENDPOINT_URL_S3`` makes it
+dial TLS to an http endpoint and fail.
 Our client derives the endpoint from the resolved boto3 client, so
 it does not need the flag - we pass it to both sides for symmetry.
 """

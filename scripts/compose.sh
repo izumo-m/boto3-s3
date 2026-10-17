@@ -5,7 +5,7 @@
 #   scripts/compose.sh up -d
 #   scripts/compose.sh down
 #   scripts/compose.sh ps
-#   scripts/compose.sh logs minio
+#   scripts/compose.sh logs s3
 #
 # For "start and wait until the buckets are provisioned" use
 # scripts/compose-up.sh, which builds on this.

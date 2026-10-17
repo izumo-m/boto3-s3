@@ -19,7 +19,7 @@ The repository is a [uv](https://docs.astral.sh/uv/) workspace with two packages
 - `design/` — design documents and developer runbooks.
 - `benchmarks/` — the performance benchmark harness and its recorded results
   (see [`design/benchmark.md`](design/benchmark.md)).
-- `scripts/` — helpers for the e2e environment (the local MinIO stack and the
+- `scripts/` — helpers for the e2e environment (the local dev S3 stack and the
   pinned aws-cli install).
 
 ## Setup
@@ -34,8 +34,8 @@ Prerequisites:
   Install it into `.venv/bin` with `scripts/install-awscli.sh` (below); an
   arbitrary `aws` found on `PATH` may behave differently and invalidate the
   goldens.
-- For the local MinIO end-to-end environment: Docker with Compose. A run against
-  real S3 does not need Docker.
+- For the local end-to-end environment (the dev S3 stack): Docker with Compose.
+  A run against real S3 does not need Docker.
 
 Install the pinned uv, then the workspace and its dev tools into a local
 virtualenv:
@@ -79,20 +79,22 @@ Ruff is configured for a line length of 100 and a Python 3.10 target.
 which self-skip unless pointed at a live endpoint — so no Docker is needed for
 the default run.
 
-The e2e suite runs `boto3-s3` and the real `aws` command against a local MinIO
-endpoint and compares their behavior:
+The e2e suite runs `boto3-s3` and the real `aws` command against a local S3
+server (RustFS, the dev stack) and compares their behavior:
 
 ```bash
 scripts/install-awscli.sh    # pin aws to the reference source version — idempotent
-scripts/compose-up.sh        # start MinIO, wait for buckets to be provisioned
-source scripts/minio-env.sh  # point AWS tooling and the e2e gate at MinIO
+scripts/compose-up.sh        # start the dev stack, wait for its buckets
+source scripts/dev-env.sh    # point AWS tooling and the e2e gate at it
 uv run pytest tests/cli/e2e  # run the parity suite
 scripts/compose.sh down      # tear the stack down
 ```
 
 Goldens are the recorded real-aws behavior that the in-process suite replays.
-Regenerate them against a clean MinIO with `UPDATE_GOLDENS=1 uv run pytest
-tests/cli/e2e`, and review the diff before committing.
+Regenerate them against a clean dev stack with `UPDATE_GOLDENS=1 uv run pytest
+tests/cli/e2e`, and review the diff before committing. How the dev stack
+answers differently from real S3, and what the tests do about it, is in
+[`design/endpoint-fidelity.md`](design/endpoint-fidelity.md).
 
 The same suite runs on Windows — from a WSL2 shell, against an NTFS copy of
 the tree, with a pinned `aws.exe` — by the procedure in

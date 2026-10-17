@@ -1140,10 +1140,8 @@ rc forms: **0 / 252 / 253 / 254 / 255** (because, unlike mb / rb, there is no
 local catch: a server rejection - `NoSuchBucket`, an endpoint that does not
 accept the configuration - is **254** derived from `ClientError`, while a
 client-construction failure such as `ProfileNotFound` / `PartialCredentialsError`
-is **255**. 1 cannot occur). Because
-MinIO always rejects PutBucketWebsite with MalformedXML
-([`testing.md`](./testing.md) section 7), the success-path verification is handled by
-moto.
+is **255**. 1 cannot occur). The success path is verified on the dev stack
+and on moto ([`testing.md`](./testing.md) section 3).
 
 ### 5.7 `cp`
 

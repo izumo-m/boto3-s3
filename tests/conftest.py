@@ -7,7 +7,7 @@ leak into moto-backed or recorder-backed tests and trigger
 per-test via ``monkeypatch``.
 
 The e2e suite at ``tests/cli/e2e/`` talks to a **real** S3-compatible
-endpoint (MinIO via ``scripts/minio-env.sh``, or real S3) and needs the host
+endpoint (the dev stack via ``scripts/dev-env.sh``, or real S3) and needs the host
 env intact, so ``tests/cli/e2e/conftest.py`` overrides the ``_moto_isolation``
 fixture defined here with a no-op of the same name (pytest's
 closer-conftest-wins resolution).

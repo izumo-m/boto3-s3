@@ -1,7 +1,7 @@
 """Golden replay: ``boto3-s3 ls`` on moto must match what aws-cli did on S3.
 
 Each scenario seeds moto with the exact layout the e2e suite seeded on
-MinIO, runs the CLI in-process, and compares the normalized output against
+the dev stack, runs the CLI in-process, and compares the normalized output against
 the committed golden (captured from the real aws-cli by
 ``tests/cli/e2e/test_ls_parity.py`` under ``UPDATE_GOLDENS=1``).
 """

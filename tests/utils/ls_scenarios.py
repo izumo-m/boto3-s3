@@ -1,7 +1,7 @@
 """Shared ``ls`` scenarios: the single source for golden replay and e2e parity.
 
 Each scenario fixes the bucket layout (``seed``) and the CLI argv, so the
-functional (moto) and e2e (MinIO / real S3) suites exercise **identical
+functional (moto) and e2e (dev stack / real S3) suites exercise **identical
 inputs** - that identity is what makes "golden captured from aws-cli" a valid
 expectation for the moto replay.
 
@@ -47,7 +47,8 @@ _HUMAN_READABLE: Mapping[str, int] = {
 }
 
 # Flat keys only: with no CommonPrefixes in play, page boundaries cannot
-# reorder the PRE/object interleave, so moto/MinIO/S3 paginate identically.
+# reorder the PRE/object interleave, so moto, the dev stack, and S3 paginate
+# identically.
 _PAGED: Mapping[str, int] = {f"pg/k{i:02d}": 1 for i in range(12)}
 
 
@@ -85,7 +86,7 @@ SCENARIOS: tuple[LsScenario, ...] = (
     # the scenario cannot pin -> live diff only.
     LsScenario("ls_all_buckets", ("ls",), diff_only=True),
     # Server-side ClientError -> rc 254 on both sides (design/cli.md section 6). The
-    # "-no-such" suffix guarantees absence on MinIO/moto; on real S3 a
+    # "-no-such" suffix guarantees absence on the dev stack and moto; on real S3 a
     # stranger could own the name (AccessDenied instead), in which case the
     # NoSuchBucket tokens fail visibly rather than silently passing.
     LsScenario(
@@ -129,11 +130,12 @@ SCENARIOS: tuple[LsScenario, ...] = (
         expected_stderr_tokens_aws=("scheme is missing",),
     ),
     # Access-point ARN bucket: botocore (driving both tools) injects the AP
-    # name as a host prefix onto the endpoint, so against MinIO and real S3
-    # alike the request fails - but the *same way* on both sides; a mis-split
+    # name as a host prefix onto the endpoint, so against the dev stack and
+    # real S3 alike the request fails - but the *same way* on both sides; a mis-split
     # ARN would surface as an rc mismatch here. The failure mode itself is
     # endpoint-dependent (connect error vs AccessDenied) -> live diff only,
-    # no stderr tokens.
+    # no stderr tokens. endpoint-fidelity T13: the dev stack has no access
+    # points, so no scenario reaches one.
     LsScenario(
         "ls_accesspoint_arn",
         ("ls", "s3://arn:aws:s3:us-west-2:123456789012:accesspoint/endpoint"),

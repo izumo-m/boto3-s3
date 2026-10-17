@@ -101,7 +101,7 @@ def test_sync_parity(scenario: CpScenario, bucket: str, s3_client: Any, tmp_path
             run_cli_subprocess_with_stdin, scenario, bucket, s3_client, tmp_path / "ours"
         )
 
-        if not scenario.diff_only:
+        if not scenario.diff_only and not scenario.frozen_golden:
             if update_goldens_enabled():
                 write_golden(
                     "sync",

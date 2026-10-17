@@ -405,11 +405,11 @@ def _sha256_composite(data: bytes, sizes: list[int]) -> str:
 class TestCompositeForms:
     """The two spellings of a COMPOSITE value: ``<digest>-<n>`` and the bare digest.
 
-    ``HeadObject`` appends the part count; MinIO's ``GetObjectAttributes``
-    returns the digest bare and says COMPOSITE in ``ChecksumType`` alone
-    (measured). Read as a FULL_OBJECT value, the bare form never matches the
-    whole-file hash, so an unchanged multipart object would be copied on every
-    run.
+    ``HeadObject`` appends the part count; ``GetObjectAttributes`` on a real S3
+    general purpose bucket (and on MinIO) returns the digest bare and says
+    COMPOSITE in ``ChecksumType`` alone (measured). Read as a FULL_OBJECT
+    value, the bare form never matches the whole-file hash, so an unchanged
+    multipart object would be copied on every run.
     """
 
     def _upload(self, tmp_path: Path, resp: Any, data: bytes = _DATA) -> bool:

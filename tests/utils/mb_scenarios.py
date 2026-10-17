@@ -33,15 +33,26 @@ class MbScenario(BaseScenario):
     # True => the scenario bucket already exists when the command runs.
     pre_create: bool = False
     # True => golden-record the bucket's tag set after the run. Neither moto
-    # nor MinIO honors CreateBucketConfiguration.Tags, so this observes an
-    # empty set on both test endpoints: it is an aws-vs-ours no-divergence
-    # check (our --tags extension must not tag where aws leaves it empty),
-    # not a validation of tag application - that needs a live-AWS run.
+    # nor the dev stack honors CreateBucketConfiguration.Tags (real S3 does;
+    # endpoint-fidelity T12), so this observes an empty set on both test
+    # endpoints: it is an aws-vs-ours no-divergence check, not a validation
+    # of tag application - that needs a live-AWS run.
     capture_tags: bool = False
 
 
 SCENARIOS: tuple[MbScenario, ...] = (
     MbScenario("mb_basic", ("mb", f"s3://{BUCKET_TOKEN}")),
+    # --- region-relative (rc 0 in us-east-1, rc 1 elsewhere) -----------------
+    # endpoint-fidelity T11: re-creating a bucket you own succeeds in
+    # us-east-1 (real S3, moto, the dev stack) and fails with
+    # BucketAlreadyOwnedByYou elsewhere (real S3), so the outcome is
+    # region-relative: no golden, and no stderr tokens either.
+    MbScenario(
+        "mb_existing",
+        ("mb", f"s3://{BUCKET_TOKEN}"),
+        pre_create=True,
+        diff_only=True,
+    ),
     # --- usage errors (rc 252) -----------------------------------------------
     MbScenario(
         "mb_no_scheme",
@@ -56,17 +67,6 @@ SCENARIOS: tuple[MbScenario, ...] = (
         expected_stderr_tokens_aws=("directory bucket",),
     ),
     # --- post-start errors (rc 1, never 254) ----------------------------------
-    # diff_only: moto mirrors real S3's us-east-1 quirk (re-creating a bucket
-    # you own succeeds), while MinIO answers BucketAlreadyOwnedByYou -> rc 1
-    # on both live sides; a golden would freeze the MinIO-specific rc.
-    MbScenario(
-        "mb_existing",
-        ("mb", f"s3://{BUCKET_TOKEN}"),
-        pre_create=True,
-        diff_only=True,
-        expected_stderr_tokens_ours=("make_bucket failed",),
-        expected_stderr_tokens_aws=("make_bucket failed",),
-    ),
     # botocore client-side validation of Bucket="" -> rc 1 (same as rm).
     MbScenario(
         "mb_empty_uri",
@@ -79,7 +79,8 @@ SCENARIOS: tuple[MbScenario, ...] = (
     # bucket); the end state pins that the bucket exists with no objects.
     MbScenario("mb_key_dropped", ("mb", f"s3://{BUCKET_TOKEN}/some/key")),
     # The tags ride CreateBucketConfiguration.Tags. The end-state tag set is
-    # [] on moto and MinIO (neither honors that field; real S3 applies it), so
+    # [] on moto and the dev stack (neither honors that field; real S3 applies
+    # it; endpoint-fidelity T12), so
     # this pins no-divergence from aws, not the tag semantics (see
     # capture_tags).
     MbScenario(

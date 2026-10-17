@@ -11,7 +11,7 @@ runner, which feeds the scenario's stdin payload and captures raw stdout
 bytes.
 
 ``TestCpGlacierOnMoto`` covers the glacier gate's success-and-skip shapes
-that MinIO cannot host (no GLACIER storage-class semantics there - the
+that the dev stack cannot host (no GLACIER storage-class semantics there - the
 e2e tier carries only the diff-only storage-class scenario).
 """
 
@@ -103,7 +103,10 @@ def test_cp_matches_golden(
 
 
 class TestCpGlacierOnMoto:
-    """The glacier gate's live shapes (aws-cli s3handler._warn_glacier)."""
+    """The glacier gate's live shapes (aws-cli s3handler._warn_glacier).
+
+    endpoint-fidelity T9: the dev stack rejects GLACIER, so these run on moto.
+    """
 
     def _seed_glacier(self, moto_s3: Any) -> None:
         moto_s3.put_object(

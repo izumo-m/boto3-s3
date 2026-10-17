@@ -1,20 +1,15 @@
 """Shared ``website`` scenarios: the single source for golden replay and e2e parity.
 
-Same contract as ``ls_scenarios``, with an inverted twist (testing.md section 7):
-**MinIO rejects every PutBucketWebsite with MalformedXML** while moto
-supports the operation fully. Server-reaching
-scenarios therefore cannot have goldens - against MinIO they exit 254 on
-both sides, against real S3 the valid ones would exit 0 on both sides, and
-a moto replay would succeed where the MinIO capture failed. They are
-``diff_only=True`` with **no stderr tokens** (MalformedXML is
-endpoint-specific), relying on the unconditional rc comparison; the
-**success path is verified directly on moto** instead
-(``tests/cli/functional/test_website_golden.py``). Only the client-side
-errors (rc 252, no server contact) carry goldens.
+Same contract as ``ls_scenarios``. Real S3, moto, and the dev stack all
+support PutBucketWebsite, so the server-reaching scenarios carry goldens
+like any other; the functional replay runs them on moto. The exception is a
+configuration without an IndexDocument (endpoint-fidelity T8): real S3 and
+the dev stack reject it, moto stores it, so those two scenarios are
+``diff_only`` and rely on the unconditional rc comparison.
 
 No scenario touches objects, so there is no ``seed``; the e2e test calls
-``delete_bucket_website`` best-effort afterwards for the real-S3 case
-(against MinIO every put failed anyway, and its delete is a no-op).
+``delete_bucket_website`` afterwards so a successful put does not leave
+website hosting on the shared bucket.
 
 Charter note (design/overview.md section 3): the exit code is compared for *every*
 scenario, unconditionally.
@@ -36,12 +31,14 @@ class WebsiteScenario(BaseScenario):
 
 
 SCENARIOS: tuple[WebsiteScenario, ...] = (
-    # --- server-reaching: 254 on MinIO (MalformedXML), 0 on real S3 ----------
+    # --- server-reaching -------------------------------------------------------
     WebsiteScenario(
         "website_index",
         ("website", f"s3://{BUCKET_TOKEN}", "--index-document", "index.html"),
-        diff_only=True,
     ),
+    # endpoint-fidelity T8: no IndexDocument - rejected by the dev stack
+    # (254) and, as documented, by real S3 (unverified for this shape);
+    # stored by moto (0).
     WebsiteScenario(
         "website_error_only",
         ("website", f"s3://{BUCKET_TOKEN}", "--error-document", "error.html"),
@@ -57,27 +54,22 @@ SCENARIOS: tuple[WebsiteScenario, ...] = (
             "--error-document",
             "error.html",
         ),
-        diff_only=True,
     ),
-    # The empty configuration goes out for the *server* to reject - 254 on
-    # MinIO and on real S3 alike (InvalidArgument there), never client-side.
+    # endpoint-fidelity T8: the empty configuration goes out for the
+    # *server* to reject, never client-side - 254 on real S3 and the dev
+    # stack, while moto stores it (0).
     WebsiteScenario("website_no_options", ("website", f"s3://{BUCKET_TOKEN}"), diff_only=True),
-    # MinIO checks the XML before bucket existence (MalformedXML), real S3
-    # answers NoSuchBucket - 254 either way, tokens endpoint-specific.
     WebsiteScenario(
         "website_nonexistent_bucket",
         ("website", f"s3://{BUCKET_TOKEN}-no-such", "--index-document", "index.html"),
-        diff_only=True,
     ),
     WebsiteScenario(
         "website_no_scheme",
         ("website", BUCKET_TOKEN, "--index-document", "index.html"),
-        diff_only=True,
     ),
     WebsiteScenario(
         "website_trailing_slash",
         ("website", f"s3://{BUCKET_TOKEN}/", "--index-document", "index.html"),
-        diff_only=True,
     ),
     # --- client-side errors (rc 252, no server contact): golden-backed ------
     # aws folds the key into the Bucket parameter; botocore's name regex

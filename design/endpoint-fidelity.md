@@ -2,60 +2,53 @@
 
 Parity means boto3-s3 behaves like aws against real S3. Running the suite
 against real S3 every time costs too much, so the e2e tier runs both CLIs
-against a local substitute (Silo, a MinIO fork) instead, with occasional
-real-AWS runs ([`testing.md`](./testing.md) section 3, endpoint policy).
-Wherever the
-substitute answers differently from real S3, a pass on it is no evidence of
-parity on real S3. This file records those places (section 1), every
-test-side change made because the endpoint is not real S3 (section 2 - each
-must be revisited when the endpoint is replaced), and the dev stack's image
-with the candidates for a replacement (section 3).
+against a local S3 server, the dev stack (RustFS, `scripts/compose.dev.yaml`),
+with occasional real-AWS runs ([`testing.md`](./testing.md) section 3,
+endpoint policy). Wherever the dev stack answers differently from real S3, a
+pass on it is no evidence of parity on real S3. This file records those
+places (section 1), every test-side change made because the endpoint is not
+real S3 (section 2 - each must be revisited when the endpoint changes), and
+how the dev stack's server was chosen (section 3).
 
-## 1. The dev stack (Silo) against real S3
+## 1. The dev stack (RustFS) and moto against real S3
 
-Every known way the dev stack (`pgsty/silo`, `scripts/compose.dev.yaml`)
-answers differently from real S3, in one place. The Silo column is the
-observed behavior of Silo `RELEASE.2026-10-15T00-00-00Z` (commit `7a3ca0f8`),
-probed on 2026-10-17. The rows were first measured on its predecessor
-`pgsty/minio` (last release `RELEASE.2026-08-04T00-00-00Z`); the same probes
-gave the same answers on Silo except for G18 (G7 and G17 were not
-re-probed). The compose file follows `pgsty/silo:latest`, so the running
-release can move past the one above;
-`docker exec boto3-s3-dev-minio-1 silo --version` prints it, and a newer
-release has not been checked against these rows.
+Every known way the dev stack answers differently from real S3, plus the
+places where moto does and a golden is affected. The dev stack column is the
+observed behavior of RustFS 1.0.2 (`rustfs/rustfs:1.0.2`, image revision
+`2b243d86`), probed on 2026-10-17. The compose file pins that release, so a
+newer one has not been checked against these rows until the probes are re-run;
+`docker exec boto3-s3-dev-s3-1 rustfs --version` prints the running one.
 
 The real-S3 column is measured where marked *measured* - by the one dated
 real-AWS run, `tests/run_e2e.sh` in ap-northeast-1 on 2026-10-15 (237 of 248
-e2e tests passed; all 11 failures were test-side and are rows here) plus
-probes from the same day - and is S3's documented behavior otherwise; a row
-marked *unverified* has never been checked against real S3. The moto
-column matters because goldens replay on moto: a golden re-captured on real
-S3 only works if moto answers the same way. The last column points to the
-test-side changes in section 2; the table doubles as the probe checklist for
-a replacement.
+e2e tests passed; all 11 failures were test-side) plus probes from the same
+day - and is S3's documented behavior otherwise; a row marked *unverified*
+has never been checked against real S3. The moto column matters because
+goldens replay on moto: a golden captured on one endpoint only works if moto
+answers the same way. The last column points to the test-side changes in
+section 2; the table doubles as the probe checklist for a new endpoint.
 
-| # | Surface | Silo (`RELEASE.2026-10-15T00-00-00Z`) | Real S3 | moto | Section 2 |
+| # | Surface | Dev stack (RustFS 1.0.2) | Real S3 | moto | Section 2 |
 |---|---|---|---|---|---|
-| G1 | PutBucketWebsite | `MalformedXML` on every put, checked before bucket existence; GetBucketWebsite `NoSuchWebsiteConfiguration`, DeleteBucketWebsite a no-op | supported; a missing bucket answers `NoSuchBucket` | supported; also accepts an empty configuration | T10 |
-| G2 | `cp --sse` (SSE-S3, no KMS) | rejected, rc 1 | accepted, rc 0 | accepted | T11 |
-| G3 | `--storage-class GLACIER` | `InvalidStorageClass`, rc 1 | accepted, rc 0 | accepted | T12 |
-| G4 | Object annotations | directive header ignored, ListObjectAnnotations 500 | supported | not supported | T13 |
-| G5 | CreateBucket on a bucket you own | `BucketAlreadyOwnedByYou`, rc 1 | us-east-1 succeeds; other regions `BucketAlreadyOwnedByYou` | us-east-1 behavior | T14 |
-| G6 | `CreateBucketConfiguration.Tags` | accepted and ignored (empty tag set) | applied (*measured*) | ignored | T15 |
-| G7 | Access points | none | supported | - | T16 |
-| G8 | Keys with a `..` segment / `//` | PUT rejected (`XMinioInvalidResourceName` / `XMinioInvalidObjectName`) | accepted | - | T24 |
-| G9 | Object `p` beside prefix `p/` (`pre` and `pre/x.txt`) | listing hides `pre/x.txt`; a purge misses it and it reappears in the next scenario's end state | two independent keys | - | T24 |
-| G10 | Zero-byte PUT | the next request on the same pooled connection stalls until the read timeout | unaffected | unaffected | T1 |
-| G11 | GetObjectAttributes, COMPOSITE checksum | value without the `-N` suffix (HeadObject has it); type only in `ChecksumType` | general purpose buckets answer in the same form; S3 Express directory buckets add the `-N` suffix (*measured*) | - | T25 |
-| G12 | UploadPartCopy (multipart copy) | destination carries no checksum | destination carries a CRC64NVME FULL_OBJECT checksum (*measured*) | - | none |
-| G13 | PutObject with a canned ACL or grant, new bucket | accepted, rc 0 | new buckets have ACLs disabled (BucketOwnerEnforced): rejected, rc 1 on both CLIs (*measured*) | accepted | T7 |
-| G14 | CopyObject with `If-None-Match: *` onto an existing key | condition ignored, the copy overwrites (PutObject honors it) | honored: neither CLI copies (*measured*) | condition ignored | T9 |
-| G15 | Bucket delete and re-create under one name | immediate | lags: re-create answers `BucketAlreadyOwnedByYou`, HeadBucket right after create can 404, right after delete can still find it (*measured*) | immediate | T6 |
-| G16 | `LastModified` in listings | sub-second | whole seconds | - | none |
-| G17 | Transport of the dev stack (a setup property, not server behavior) | http | https | in-process | T2, T8 |
-| G18 | PutObject with an XXHASH64, XXHASH3, XXHASH128, or SHA512 checksum | `InvalidArgument` ("Invalid checksum provided."), rc 1; `pgsty/minio` `RELEASE.2026-08-04T00-00-00Z` accepted them | XXHASH64 accepted, rc 0 (*measured*); the others *unverified* | XXHASH64 accepted | T26 |
+| G1 | PutBucketWebsite without an IndexDocument (error document only, or empty) | rejected, `MalformedXML` | rejected (`InvalidArgument`; the error-document-only shape *unverified*) | stored | T8 |
+| G2 | `--storage-class GLACIER` | `InvalidStorageClass`, rc 1 | accepted, rc 0 | accepted | T9 |
+| G3 | Object annotations | ListObjectAnnotations `NotImplemented` | supported | not supported | T10 |
+| G4 | CreateBucket on a bucket you own | succeeds (us-east-1 rule) | us-east-1 succeeds; other regions `BucketAlreadyOwnedByYou` | us-east-1 rule | T11 |
+| G5 | `CreateBucketConfiguration.Tags` | accepted and ignored (empty tag set) | applied (*measured*) | ignored | T12 |
+| G6 | Access points | none | supported | - | T13 |
+| G7 | Keys with a `..` segment / `//` | PUT rejected (`InvalidArgument`, "Invalid object key") | accepted | - | T17 |
+| G8 | Zero-byte PUT | the next PutObject with a body on the same pooled connection waits for the client's read timeout (HEAD, GET, and listings do not) | unaffected | unaffected | T1 |
+| G9 | GetObjectAttributes, COMPOSITE checksum | value with the `-N` suffix, as HeadObject | general purpose buckets omit the suffix there (HeadObject has it); S3 Express directory buckets add it (*measured*) | - | none |
+| G10 | UploadPartCopy (multipart copy) | destination carries no checksum | destination carries a CRC64NVME FULL_OBJECT checksum (*measured*) | - | none |
+| G11 | PutObject with a canned ACL or grant, new bucket | accepted, rc 0 | new buckets have ACLs disabled (BucketOwnerEnforced): rejected, rc 1 on both CLIs (*measured*) | accepted | T5 |
+| G12 | CopyObject with `If-None-Match: *` onto an existing key | honored, as real S3 | honored: neither CLI copies (*measured*) | condition ignored, the copy overwrites | T7 |
+| G13 | Bucket delete and re-create under one name | immediate | lags: re-create answers `BucketAlreadyOwnedByYou`, HeadBucket right after create can 404, right after delete can still find it (*measured*) | immediate | T4 |
+| G14 | `LastModified` in listings | sub-second | whole seconds | - | none |
+| G15 | PutObject without a Content-Type | guessed from the key (`application/json` for `.json`) | `binary/octet-stream` (*measured*) | `binary/octet-stream` | T18 |
+| G16 | HeadObject checksum of a PutObject with the default checksum | the CRC32 value without `ChecksumType` | `ChecksumType: FULL_OBJECT` alongside the value | - | none |
+| G17 | Transport of the dev stack (a setup property, not server behavior) | http | https | in-process | T2, T6 |
 
-G16 changes no test - the e2e sync scenarios shift times by a day - but a
+G14 changes no test - the e2e sync scenarios shift times by a day - but a
 behavior that depends on it (`sync --exact-timestamps` converging) looks
 different on the dev stack than on real S3. G17 matters because botocore
 puts the flexible checksum into an aws-chunked trailer only over https, so
@@ -64,85 +57,120 @@ some failure paths differ by transport, and because aws's CRT client takes
 
 ## 2. Test-side changes
 
-Every change in `tests/` and `scripts/` that exists because the endpoint is
-not real S3, as of the 2026-10-15 inventory (T26 came with the switch to
-Silo on 2026-10-17). "On a new endpoint" is what to do when the e2e endpoint
-changes - to real S3 for a run, or to a replacement for the dev stack.
-Changes to `src/` and `cli/src/` are product fixes, not test-side changes,
-and are not listed.
+Every change in `tests/`, `scripts/`, and `benchmarks/` that exists because
+the endpoint is not real S3. "On a new endpoint" is what to do when the e2e endpoint changes,
+to real S3 for a run or to another server for the dev stack. Changes to
+`src/` and `cli/src/` are product fixes, not test-side changes, and are not
+listed.
+
+Each change carries the marker `endpoint-fidelity T<n>` where it lives - in
+a comment, or in a scenario's `frozen_golden` text - so
+`git grep -n "endpoint-fidelity T"` lists every site (T17, a rule, has
+none). The forms a change takes:
+
+- `diff_only` - no golden; only the live aws-vs-ours comparison runs, rc
+  included.
+- `frozen_golden` - the committed golden matches real S3 and moto but not
+  the dev stack, so the e2e tier neither rewrites nor drift-checks it; the
+  moto replay and the live comparison still run.
+- a live-only scenario, a narrowed probe or stderr token, a setup
+  workaround, or a scenario left out.
 
 | # | Change | Where | Gap | On a new endpoint |
 |---|---|---|---|---|
-| T1 | `Connection: close` on zero-byte directory-marker PUTs | `harness.seed_bucket` | G10 | drop on real S3 or moto (harmless if kept); probe a replacement for the stall |
-| T2 | the CRT lane passes `--endpoint-url` to both CLIs when `AWS_ENDPOINT_URL_S3` is set | `test_crt_parity._crt_invocation` | G17 | needed while the endpoint is http; `run_e2e.sh` unsets the variable, so real S3 skips it |
-| T3 | the dev stack reports us-east-1; bucket creation omits `LocationConstraint` there | `scripts/minio-env.sh` / `.cmd` (`AWS_REGION`), `harness.create_bucket_in_region` | - | the branch is real S3's rule and stays; check that a replacement reporting another region accepts `LocationConstraint` |
-| T4 | `presign_region` has no fetch | `presign_scenarios.py` | none | the comment's premise ("MinIO rejects a scope signed for another region") no longer holds: Silo, like `pgsty/minio` before it, answers 200 for an ap-northeast-1 scope, so the fetch can be enabled on the dev stack already |
-| T5 | sibling bucket names never end in `-an` | `e2e/conftest.py` (`_sibling_bucket`) | - | keep on every endpoint until account-regional BucketNamespace semantics are verified |
-| T6 | one fixed sibling name (`-mb` / `-rb`) is deleted, re-created, and checked with HeadBucket at once, per scenario and between the two CLIs | `e2e/conftest.py`, `test_mb_parity._reset`, `test_rb_parity`, `harness.force_delete_bucket` / `create_bucket_in_region`, `run_e2e.sh` cleanup, [`testing.md`](./testing.md) section 3 | G15 | on real S3, give every scenario and side its own name (still not ending in `-an`) and update the cleanup; this caused 5 of the 11 real-S3 failures |
-| T7 | `cp_upload_acl_public_read` / `cp_upload_grants_uri` goldens record rc 0 (also the `.windows` variants) | `cp_scenarios.py`, `goldens/cp/` | G13 | a real-S3 golden (rc 1) would not replay on moto (rc 0): make them `diff_only` |
-| T8 | the aws-side stderr token for a directory uploaded without `--recursive` is `Is a directory` | `cp_upload_dir_no_recursive` / `_exclude` in `cp_scenarios.py`; the `[Errno 21]` comment of `mv_upload_dir_without_recursive` | G17 | over https aws fails with `Need to rewind the stream ...` instead (rc 1 on both sides, as before): token on `upload failed` only, or switch by transport |
-| T9 | `cp_no_overwrite_copy_exists` / `mv_no_overwrite_copy_exists` goldens record the overwrite MinIO made | `cp_scenarios.py`, `mv_scenarios.py`, their goldens | G14 | a real-S3 golden (no copy) would not replay on moto (overwrites): make them `diff_only` |
-| T10 | the 7 server-reaching website scenarios are `diff_only`; the success path is checked on moto; the e2e cleanup deletes any website configuration | `website_scenarios.py`, `test_website_golden.TestWebsiteOnMoto`, `test_website_parity.py` | G1 | all but `website_no_options` can carry goldens again on an endpoint that supports website (moto also accepts the empty configuration that real S3 rejects); keep the cleanup on real S3 |
-| T11 | `cp_upload_sse` is `diff_only` | `cp_scenarios.py` | G2 | can carry a golden again |
-| T12 | `--storage-class GLACIER` scenarios are `diff_only`; the glacier gate shapes run on moto | `cp_scenarios.py`, `TestCpGlacierOnMoto`, `TestMvGlacierOnMoto`, `TestSyncGlacierOnMoto` | G3 | the storage-class scenarios can carry goldens again; keep the gate shapes on moto (restores take hours on real S3) |
-| T13 | `cp_copy_props_all_multipart` is live-only | `cp_scenarios.py` | G4 | stays live-only: moto has no annotations either |
-| T14 | `mb_existing` is `diff_only`, and its stderr token on our side assumes the failure | `mb_scenarios.py` | G5 | `diff_only` stays (moto is us-east-1); in us-east-1 both CLIs succeed and the `make_bucket failed` token must go or depend on the region |
-| T15 | the `mb_tags` golden records an empty tag set | `mb_scenarios.py`, `goldens/mb/mb_tags.json` | G6 | a real-S3 golden would not replay on moto: drop the tags from the golden and keep the aws-vs-ours comparison |
-| T16 | no e2e for access points: `mv --validate-same-s3-paths` has none, `ls_accesspoint_arn` is `diff_only` | `mv_scenarios.py`, `ls_scenarios.py` | G7 | real S3 could host an access point for `mv` (needs permissions and a cost estimate); `ls_accesspoint_arn` stays `diff_only` (a foreign ARN fails differently per endpoint) |
-| T17 | the presign replay deletes `AWS_SESSION_TOKEN` to match the token-less MinIO capture; the normalizer keeps `X-Amz-Security-Token` | `test_presign_golden.py`, `harness.normalize_presign_stdout` | - (credential type) | a real-S3 run with temporary credentials puts the token into aws's URL and fails every presign golden: mask the token in the normalizer, or require long-term keys |
-| T18 | presign URLs are made path-style, the endpoint becomes `<ENDPOINT>`, a scope region equal to the default becomes `<REGION>` | `harness.normalize_presign_stdout` and helpers | - | needed on every endpoint (capture and replay differ in host form and region) |
-| T19 | nonexistent buckets are named `<bucket>-no-such` (and similar suffixes) | `ls_scenarios.py`, `rm_scenarios.py`, `website_scenarios.py`, `cp_scenarios.py` | - | real S3 shares one namespace; the random bucket names of `run_e2e.sh` keep these absent, a fixed name might not |
-| T20 | expected values justified by a MinIO observation: `ls_page_size_zero`, `rm_page_size_zero`, `cp_upload_no_guess_mime`, `cp_checksum_sha256` | the scenario files | - | none: all matched on real S3 (2026-10-15) |
-| T21 | `cp_copy_props_none` probes only `Metadata`, calling the default `ContentType` endpoint-specific | `cp_scenarios.py` | - | Silo (like `pgsty/minio`) and moto both answer `binary/octet-stream`; check real S3, then probe `ContentType` too |
-| T22 | `normalize_rm_stdout` sorts delete lines, justified by an observation on MinIO | `harness.py` | - | needed on every endpoint: the order comes from aws's parallel completion |
-| T23 | the dev stack itself: image, keys, region, readiness wait, container name, the golden-regeneration hint, the benchmark guard that recognizes MinIO | `scripts/compose.dev.yaml`, `compose-up.sh`, `minio-env.sh` / `.cmd`, `golden.py`, `benchmarks/awsenv.py` and its tests | - | rewrite for the replacement |
-| T24 | no scenario uses `..` / `//` keys or an object beside a same-named prefix (no live keys probe; the unit tier pins `..` bytes) | the scenario files | G8, G9 | keep the rule until a replacement is probed; no current seed or golden end state has either shape |
-| T25 | a library unit test fakes the COMPOSITE answer in MinIO's bare form | `test_checksumcompare.TestCompositeForms` | G11 | keep: real S3 answers in both forms (G11), and the test pins both |
-| T26 | `cp_checksum_xxhash64` is `diff_only` | `cp_scenarios.py` | G18 | can carry a golden again: real S3 and moto both accept XXHASH64 |
+| T1 | `Connection: close` on zero-byte PUTs | `harness.seed_bucket` | G8 | drop on real S3 or moto (harmless if kept) |
+| T2 | the CRT lane passes `--endpoint-url` to both CLIs when `AWS_ENDPOINT_URL_S3` is set | `test_crt_parity._crt_invocation`, `benchmarks/e2e.py` (`_invoke`) | G17 | needed while the endpoint is http; `run_e2e.sh` unsets the variable, so real S3 skips it |
+| T3 | sibling bucket names never end in `-an` | `e2e/conftest.py` (`_sibling_bucket`) | - | keep on every endpoint until account-regional BucketNamespace semantics are verified |
+| T4 | one fixed sibling name (`-mb` / `-rb`) is deleted, re-created, and checked with HeadBucket at once, per scenario and between the two CLIs | `e2e/conftest.py` (`mb_bucket`, `rb_bucket`), `test_mb_parity._reset`, `test_rb_parity._reset`, `run_e2e.sh` cleanup | G13 | on real S3, give every scenario and side its own name (still not ending in `-an`) and update the cleanup; this caused 5 of the 11 real-S3 failures |
+| T5 | `cp_upload_acl_public_read` / `cp_upload_grants_uri` goldens record rc 0 (also the `.windows` variants) | `cp_scenarios.py` | G11 | a real-S3 golden (rc 1) would not replay on moto (rc 0): make them `diff_only` |
+| T6 | the aws-side stderr token for a directory uploaded without `--recursive` is `Is a directory` | `cp_upload_dir_no_recursive` / `_exclude` in `cp_scenarios.py` | G17 | over https aws fails with `Need to rewind the stream ...` instead (rc 1 on both sides, as before): token on `upload failed` only, or switch by transport |
+| T7 | `cp_no_overwrite_copy_exists` / `mv_no_overwrite_copy_exists` are `diff_only` | `cp_scenarios.py`, `mv_scenarios.py` | G12 | stays while moto ignores the condition |
+| T8 | `website_error_only` / `website_no_options` are `diff_only` | `website_scenarios.py` | G1 | stays while moto stores a configuration without an IndexDocument |
+| T9 | `cp_upload_storage_class_glacier` is `diff_only`; the glacier gate shapes run on moto | `cp_scenarios.py`; `TestCpGlacierOnMoto`, `TestMvGlacierOnMoto`, `TestSyncGlacierOnMoto` | G2 | the scenario can carry a golden on an endpoint that accepts GLACIER; keep the gate shapes on moto (restores take hours on real S3) |
+| T10 | `cp_copy_props_all_multipart` is live-only | `cp_scenarios.py` | G3 | stays live-only: moto has no annotations either |
+| T11 | `mb_existing` is `diff_only` and checks no stderr tokens | `mb_scenarios.py` | G4 | stays: the outcome depends on the region |
+| T12 | the `mb_tags` golden records an empty tag set | `mb_scenarios.py`, `golden.py` | G5 | a real-S3 golden would not replay on moto: drop the tags from the golden and keep the aws-vs-ours comparison |
+| T13 | no e2e reaches an access point: `mv --validate-same-s3-paths` has no scenario, `ls_accesspoint_arn` is `diff_only` | `mv_scenarios.py`, `ls_scenarios.py` | G6 | real S3 could host an access point for `mv` (needs permissions and a cost estimate); `ls_accesspoint_arn` stays `diff_only` (a foreign ARN fails differently per endpoint) |
+| T14 | the presign replay deletes `AWS_SESSION_TOKEN` to match the token-less dev stack capture; the normalizer keeps `X-Amz-Security-Token` | `test_presign_golden.py` | - (credential type) | a real-S3 run with temporary credentials puts the token into aws's URL and fails every presign golden: mask the token in the normalizer, or require long-term keys |
+| T15 | `cp_copy_props_none` probes only `Metadata`, leaving the default `ContentType` unchecked | `cp_scenarios.py` | - | the dev stack and moto both answer `binary/octet-stream`; check real S3, then probe `ContentType` too |
+| T16 | the dev stack itself: server and release, keys, us-east-1, the SSE-S3 master key, the readiness wait, the container name, the golden-regeneration hint, the benchmark guard | `scripts/compose.dev.yaml`, `compose-up.sh`, `dev-env.sh` / `.cmd`, `golden.py`, `benchmarks/awsenv.py` | - | rewrite for the new server; re-run the section 1 probes |
+| T17 | no scenario uses `..` / `//` keys (the unit tier pins `..` bytes) | none: a rule for new scenarios, so no marker | G7 | keep the rule while the dev stack rejects such keys |
+| T18 | the `cp_upload_no_guess_mime` golden is frozen | `cp_scenarios.py` | G15 | drop the freeze on an endpoint that answers `binary/octet-stream` |
 
-Not test-side changes, though they mention MinIO: the `diff_only` of the
-negative page-size scenarios (the reason is moto, which raises `IndexError`
-for `MaxKeys=-1`; MinIO and real S3 both answer `InvalidArgument`), the
-`measured on MinIO` notes in `tests/lib/` (where a client-side behavior was
-measured, not a gap), and the example endpoints in unit tests (never
+Not test-side changes, though they mention an endpoint: the `diff_only` of
+the negative page-size scenarios (the reason is moto, which raises
+`IndexError` for `MaxKeys=-1`; real S3 answers `InvalidArgument`); the
+presign normalization (path-style URLs, `<ENDPOINT>`, `<REGION>`), which
+every endpoint needs because capture and replay differ in host form; the
+sorted rm lines, whose order comes from aws's parallel completion;
+nonexistent bucket names derived from the run's bucket (`<bucket>-no-such`),
+which stay absent on real S3 too because `run_e2e.sh` randomizes the base;
+the us-east-1 branch of `harness.create_bucket_in_region`, which is real
+S3's rule; the expected values first observed on MinIO and later matched on
+real S3 (`ls_page_size_zero`, `rm_page_size_zero`, `cp_checksum_sha256`);
+`test_checksumcompare.TestCompositeForms`, whose bare COMPOSITE form is what
+real S3 general purpose buckets answer;
+the `measured on MinIO` notes in `tests/lib/` (where a client-side behavior
+was measured, not a gap); and the example endpoints in unit tests (never
 contacted).
 
-## 3. The dev stack's image and replacement candidates
+## 3. Choosing the dev stack's server
 
 Upstream `minio/minio` is archived, so the dev stack needs a maintained
-endpoint. The candidates below come from a desk survey on 2026-10-06; of
-them, only Silo has run the suite. Facts marked *checked* were confirmed
-against the cited page or registry on the survey date; *source* means read
-from the project's source tree at its HEAD that day, runtime behavior
-unverified; everything else is unverified.
+server. A desk survey on 2026-10-06 listed the candidates below; on
+2026-10-17 the three most likely were measured with the section 1 probes
+and the e2e suite, and the dev stack moved to the closest one, RustFS.
 
-### The switch to Silo (2026-10-17)
+### Measured on 2026-10-17
 
-`pgsty/minio`, the community fork the dev stack used, was renamed to
-**`pgsty/silo`** on 2026-08-06 (<https://github.com/pgsty/silo>), and
-`pgsty/minio:latest` stopped moving at `RELEASE.2026-08-04T00-00-00Z`. On
-2026-10-17 `scripts/compose.dev.yaml` moved to `pgsty/silo:latest`
-(`RELEASE.2026-10-15T00-00-00Z` that day). Only the image name changed: Silo
-keeps the `server` command, the `MINIO_*` variables, and the ports, and
-`pgsty/mc` still creates the buckets. The e2e suite passed 248 of 248 on
-`pgsty/minio` and 247 on Silo; the one failure was G18, now T26.
+The dev stack ran `pgsty/minio` (`RELEASE.2026-08-04T00-00-00Z`), the
+community fork of MinIO, until it was renamed `pgsty/silo` and stopped
+receiving images. Silo, RustFS, and Zenko CloudServer then ran the section 1
+probes and the e2e suite side by side. The goldens had been captured on
+`pgsty/minio`, so an answer closer to real S3 can fail a golden.
 
-Silo's compatibility audit (<https://silo.pgsty.com/compatibility/server/>)
-lists deliberate divergences from upstream MinIO. Probed side by side with
-`pgsty/minio` on 2026-10-17, two of them answer differently on paths this
-suite could reach: Silo rejects the XXHASH and SHA512 checksums (G18), and
-DeleteObject honors `If-Match` (412 on a mismatch, where `pgsty/minio`
-deleted; neither CLI sends it, so no test changes). ListObjects on a missing
-bucket answered `NoSuchBucket` on both images for the shapes probed.
+| Surface | `pgsty/minio`, Silo `RELEASE.2026-10-15T00-00-00Z` | RustFS 1.0.2 | CloudServer 9.5.0 (`S3BACKEND=mem`) |
+|---|---|---|---|
+| PutBucketWebsite | `MalformedXML` on every put | as real S3 | as real S3 |
+| SSE-S3 without a KMS | rejected | accepted once a master key is set | accepted |
+| Re-creating a bucket you own (us-east-1) | `BucketAlreadyOwnedByYou` | succeeds, as real S3 | succeeds, as real S3 |
+| Keys with `..` / `//` (G7) | rejected | rejected | accepted, as real S3 |
+| Object `p` beside `p/x` | the listing hides `p/x` | two keys, as real S3 | two keys, as real S3 |
+| Zero-byte PUT (G8) | the next PUT waits | the next PUT waits | no wait, as real S3 |
+| COMPOSITE in GetObjectAttributes (G9) | as real S3 | `-N` suffix | not stored |
+| UploadPartCopy checksum (G10) | none | none | as real S3 |
+| CopyObject `If-None-Match` (G12) | ignored | honored, as real S3 | honored, as real S3 |
+| PutObject `If-None-Match` / `If-Match` | honored, as real S3 (`If-Match` not probed on `pgsty/minio`) | honored, as real S3 | ignored |
+| XXHASH and SHA512 checksums | `pgsty/minio` accepts; Silo rejects (`InvalidArgument`) | accepted, as real S3 | rejected |
+| Default Content-Type (G15) | `binary/octet-stream`, as real S3 | guessed from the key | none |
+| `CreateBucketConfiguration.Tags` (G5) | ignored | ignored | rejected (`MalformedXML`) |
+| aws's CRT client, download | works | works | writes no file |
+| `REDUCED_REDUNDANCY` upload | works | works | leaves no object |
+| e2e, 248 tests | `pgsty/minio` 248 passed; Silo 247 (the XXHASH64 rejection) | 244 passed; 3 failures were answers matching real S3 (G4, G12 twice), 1 was G15 | 238 passed, 10 failed: 3 as on RustFS, 7 answers further from real S3 |
 
-### Candidates
+All three reject GLACIER, lack object annotations, accept the CLI's ACL and
+grant forms on a new bucket, and list `LastModified` to the sub-second. Silo and RustFS also
+honor `If-Match` on DeleteObject, where `pgsty/minio` deleted anyway;
+neither CLI sends it.
+
+CloudServer drops out: without conditional PutObject the `--no-overwrite`
+scenarios prove nothing, and aws's CRT downloads fail against it. RustFS
+answers as real S3 does on more surfaces than Silo and is further on two
+(G9, G15), so it became the dev stack. It is pinned to 1.0.2 because its 1.0
+release (2026-09-16) is recent.
+
+### Desk survey (2026-10-06)
+
+Facts marked *checked* were confirmed against the cited page or registry on
+the survey date; *source* means read from the project's source tree at its
+HEAD that day, runtime behavior unverified; everything else is unverified.
 
 | Candidate | Status (survey date) | For this suite |
 |---|---|---|
-| **pgsty/silo** (AGPL-3.0) | the dev stack since 2026-10-17; releases 2026-08 to 2026-10; effectively one maintainer | Drop-in (above): answers the section 1 rows as `pgsty/minio` did, plus G18. |
-| **Zenko CloudServer** (`ghcr.io/scality/cloudserver`, Apache-2.0) | 9.4.7 on 2026-10-05 (*checked*); maintained by Scality; Docker Hub `zenko/cloudserver` stale since 2023 | `S3BACKEND=mem` keeps auth, data, metadata, and KMS in memory (*checked* in `lib/Config.js`), so a restart is a full reset. *Source*: website handlers, GetObjectAttributes, CRC64NVME default and trailing checksums, SSE-S3 via the in-memory KMS, extra storage classes via `VALID_STORAGE_CLASSES`. *Source*: no handling of `If-None-Match` / `If-Match` on PUT was found, which `--no-overwrite` relies on - probe first. |
+| **pgsty/silo** (AGPL-3.0) | releases 2026-08 to 2026-10; effectively one maintainer | Measured (above). A drop-in for `pgsty/minio`: the same `server` command, `MINIO_*` variables, and ports. |
+| **Zenko CloudServer** (`ghcr.io/scality/cloudserver`, Apache-2.0) | 9.4.7 on 2026-10-05 (*checked*); maintained by Scality; Docker Hub `zenko/cloudserver` stale since 2023 | Measured (above): not suitable. |
 | **Ceph RGW** (LGPL family) | Tentacle 20.2.4 / Squid 19.2.6 (2026-08-19) | The reference implementation s3-tests grew up with, but no light single container any more: `ceph/ceph-container` (the demo image) is archived; RGW without RADOS (`dbstore` / POSIX drivers) is marked experimental; SSE-S3 needs Vault. A candidate for an occasional reference run, not the everyday lane. |
-| RustFS (Apache-2.0, CLA) | 1.0.0 GA 2026-09-16, 1.0.1 2026-10-03 (*checked*) | MinIO-like strictness: writes accept only STANDARD and REDUCED_REDUNDANCY, GLACIER is `InvalidStorageClass` (*checked* in `storageclass.rs`); `..` / `//` keys rejected and SSE-S3 needs a configured master key (*source*). A fallback if Silo stops. |
+| **RustFS** (Apache-2.0, CLA) | 1.0.0 GA 2026-09-16, 1.0.1 2026-10-03 (*checked*) | Measured (above): the dev stack since 2026-10-17. |
 | VersityGW (Apache-2.0) | v1.8.0 2026-09-04 | Not suitable: SSE-S3 answers 501 (*source*); keys map onto file paths, so `..`, `//`, and `a` beside `a/b` likely diverge from S3. The only candidate that explicitly answers 501 for object annotations (*source*). |
 | SeaweedFS (Apache-2.0) | 4.48 2026-09-28 | Not suitable: `NormalizeObjectKey` silently rewrites keys (`//` -> `/`, `\` -> `/`, leading `/` dropped; *checked*). |
 | Garage (AGPL-3.0) | v2.4.1 2026-09-08 | Not suitable: no conditional PUT, no GetObjectAttributes, no SSE-S3 (*source* / its compatibility page). |
@@ -161,8 +189,3 @@ passed 576 (Ceph), 382 (CloudServer, file backend), 321 (MinIO), 56
 their own counts exclude different tag sets, so the counts screen candidates
 but do not measure fidelity to real S3. This suite's own differential is the
 measure that matters.
-
-### Next step (proposed, not decided)
-
-Stand up CloudServer (`S3BACKEND=mem`) beside Silo and probe every section 1
-row plus conditional PUT and CopyObject, recording the results here.

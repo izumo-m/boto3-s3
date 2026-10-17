@@ -1,12 +1,8 @@
 """Differential parity: ``boto3-s3 website`` vs the real ``aws s3 website``.
 
 The ls-suite contract without seeding (website never touches objects).
-Most scenarios are ``diff_only``: MinIO rejects every PutBucketWebsite with
-MalformedXML, so both sides exit 254 here while both would exit 0 against
-real S3 - the unconditional rc comparison is the charter assertion either
-way, and the success path is verified on moto instead (testing.md section 7).
-Teardown deletes the website configuration best-effort for the real-S3
-case (a no-op against MinIO).
+Teardown deletes the website configuration best-effort, so a successful put
+does not leave website hosting on the shared bucket.
 """
 
 from __future__ import annotations
@@ -43,7 +39,7 @@ def test_website_parity(scenario: WebsiteScenario, bucket: str, s3_client: Any) 
         aws_lines = normalize_rm_stdout(aws_result.stdout, bucket=bucket)
         ours_lines = normalize_rm_stdout(ours_result.stdout, bucket=bucket)
 
-        if not scenario.diff_only:
+        if not scenario.diff_only and not scenario.frozen_golden:
             if update_goldens_enabled():
                 write_golden(
                     "website",
@@ -89,7 +85,6 @@ def test_website_parity(scenario: WebsiteScenario, bucket: str, s3_client: Any) 
             scenario=scenario.name,
         )
     finally:
-        # Real-S3 hygiene: a successful put would leave website hosting on
-        # the shared bucket. Against MinIO nothing was ever set.
+        # A successful put would leave website hosting on the shared bucket.
         with contextlib.suppress(Exception):
             s3_client.delete_bucket_website(Bucket=bucket)

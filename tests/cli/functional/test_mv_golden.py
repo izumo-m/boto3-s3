@@ -4,7 +4,7 @@ The cp replay (see test_cp_golden.py) plus mv's source-side end state: the
 ``src/`` tree is captured after every run and compared against the golden's
 ``src_tree``, and the download-mtime expectation is read before the run
 (the move deletes the source key). ``TestMvGlacierOnMoto`` pins the
-glacier-gated shapes MinIO cannot host - crucially that a gated or failed
+glacier-gated shapes the dev stack cannot host - crucially that a gated or failed
 move never deletes the source object.
 """
 
@@ -83,7 +83,10 @@ def test_mv_matches_golden(
 
 
 class TestMvGlacierOnMoto:
-    """The glacier gate on a move: the source must survive every shape."""
+    """The glacier gate on a move: the source must survive every shape.
+
+    endpoint-fidelity T9: the dev stack rejects GLACIER, so these run on moto.
+    """
 
     def _seed_glacier(self, moto_s3: Any) -> None:
         moto_s3.put_object(

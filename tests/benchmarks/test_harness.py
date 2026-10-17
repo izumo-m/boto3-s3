@@ -1,4 +1,4 @@
-"""Unit coverage for the benchmark harness pieces that do not need MinIO.
+"""Unit coverage for the benchmark harness pieces that do not need the dev stack.
 
 The scenario sets are built and inspected (names, payloads, the shared
 large-transfer knob), the per-invocation runner is exercised on trivial
@@ -248,7 +248,7 @@ class TestRemoteGuards:
         monkeypatch.setenv(awsenv.ALLOW_REMOTE_ENV, "1")
         assert awsenv.remote_opted_in() is True
 
-    def test_bucket_is_fixed_only_on_minio(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_bucket_is_fixed_only_on_dev_stack(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(e2e.BUCKET_ENV, raising=False)
         monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "http://127.0.0.1:9000")
         assert e2e._bench_bucket() == e2e.BUCKET
@@ -268,7 +268,7 @@ class TestRemoteGuards:
         monkeypatch.setenv(e2e.BUCKET_ENV, "someone-elses-bucket")
         with pytest.raises(BenchmarkError, match="must start with"):
             e2e._bench_bucket()
-        # MinIO ignores the override; its bucket is the documented fixed name.
+        # The dev stack ignores the override; its bucket is the documented fixed name.
         monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "http://127.0.0.1:9000")
         assert e2e._bench_bucket() == e2e.BUCKET
 

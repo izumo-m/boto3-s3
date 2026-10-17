@@ -5,12 +5,12 @@ this one needs no moto backend and no seeding - the in-process run only
 consumes the fake credentials/region the root conftest exports, and the
 normalizer (``harness.normalize_presign_stdout``) folds the remaining
 environment differences away: the replay's virtual-host URL (no endpoint
-override) canonicalizes to the capture's path-style (MinIO IP endpoint),
+override) canonicalizes to the capture's path-style (the dev stack's IP endpoint),
 and the credential/date/signature values are masked.
 
-``AWS_SESSION_TOKEN`` is removed per test: the root conftest exports one,
-which would grow the URL an ``X-Amz-Security-Token`` parameter the
-token-less MinIO capture does not have.
+``AWS_SESSION_TOKEN`` is removed per test (endpoint-fidelity T14): the root
+conftest exports one, which would grow the URL an ``X-Amz-Security-Token``
+parameter the token-less dev stack capture does not have.
 """
 
 from __future__ import annotations

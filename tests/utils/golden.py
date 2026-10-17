@@ -85,9 +85,9 @@ class Golden:
     progress: bool | None = None
     # The bucket's tag set after the run (``harness.capture_bucket_tags``,
     # sorted ``Key=Value``; mb scenarios opting in; None = not compared).
-    # Empty on moto/MinIO for a --tags create (neither honors
-    # CreateBucketConfiguration.Tags): an aws-vs-ours no-divergence pin, not
-    # a tag-application check.
+    # Empty on moto and the dev stack for a --tags create (neither honors
+    # CreateBucketConfiguration.Tags; endpoint-fidelity T12): an aws-vs-ours
+    # no-divergence pin, not a tag-application check.
     bucket_tags: list[str] | None = None
 
 
@@ -197,9 +197,10 @@ def load_golden(kind: str, name: str) -> Golden:
             path = variant
     if not path.exists():
         pytest.fail(
-            f"golden {path} is missing. Generate it against MinIO:\n"
+            # endpoint-fidelity T16: the regeneration hint names the dev stack.
+            f"golden {path} is missing. Generate it against the dev stack:\n"
             f"  scripts/compose-up.sh\n"
-            f"  source scripts/minio-env.sh\n"
+            f"  source scripts/dev-env.sh\n"
             f"  UPDATE_GOLDENS=1 uv run pytest tests/cli/e2e"
         )
     data = json.loads(path.read_text())

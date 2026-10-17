@@ -1,8 +1,8 @@
 """Shared ``rm`` scenarios: the single source for golden replay and e2e parity.
 
 Same contract as ``ls_scenarios``: each scenario fixes the bucket layout
-(``seed``) and the CLI argv so the functional (moto) and e2e (MinIO / real
-S3) suites exercise identical inputs. Two rm-specific differences:
+(``seed``) and the CLI argv so the functional (moto) and e2e (dev stack /
+real S3) suites exercise identical inputs. Two rm-specific differences:
 
 - stdout is normalized **sorted** (``harness.normalize_rm_stdout``): aws's
   delete-line order is parallel-completion order, nondeterministic run to

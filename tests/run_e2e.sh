@@ -45,6 +45,7 @@ suffix="$(openssl rand -hex 5 2>/dev/null \
 export BOTO3_S3_E2E_BUCKET="boto3s3-e2e-${suffix}"
 bucket="$BOTO3_S3_E2E_BUCKET"
 
+# endpoint-fidelity T4: the mb/rb siblings use these two fixed names.
 cleanup() {
     echo "--- cleanup: force-remove test buckets ---"
     for name in "$bucket" "${bucket}-mb" "${bucket}-rb"; do

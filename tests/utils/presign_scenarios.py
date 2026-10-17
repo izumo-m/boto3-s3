@@ -73,11 +73,13 @@ SCENARIOS: tuple[PresignScenario, ...] = (
         fetch=True,
     ),
     # --region must reach the credential scope (the normalizer keeps the
-    # region segment). No fetch: MinIO rejects a scope signed for another
-    # region, which is its policy rather than presign parity.
+    # region segment). The fetch compares both sides' answers to that scope:
+    # 200 where the endpoint accepts it, the same refusal where it does not.
     PresignScenario(
         "presign_region",
         ("presign", f"s3://{BUCKET_TOKEN}/presign/basic.txt", "--region", "ap-northeast-1"),
+        seed=_SEEDED,
+        fetch=True,
     ),
     # URL generation never checks existence; the fetch pins 404 == 404.
     PresignScenario(

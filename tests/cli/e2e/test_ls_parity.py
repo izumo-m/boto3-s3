@@ -51,7 +51,7 @@ def test_ls_parity(scenario: LsScenario, bucket: str, s3_client: Any) -> None:
         aws_lines = normalize_ls_stdout(aws_result.stdout, bucket=bucket)
         ours_lines = normalize_ls_stdout(ours_result.stdout, bucket=bucket)
 
-        if not scenario.diff_only:
+        if not scenario.diff_only and not scenario.frozen_golden:
             if update_goldens_enabled():
                 write_golden(
                     "ls",
