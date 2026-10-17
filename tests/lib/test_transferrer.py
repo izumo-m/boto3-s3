@@ -2916,6 +2916,36 @@ class TestStreamDownloadRetry:
         assert bytes(sink.data) == payload
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
 
+    @pytest.mark.parametrize("config", [TransferConfig(), _SYNC_CONFIG], ids=["threads", "serial"])
+    def test_a_body_cut_on_every_attempt_is_transport(self, config: TransferConfig) -> None:
+        # s3transfer retries the read and gives up with RetriesExceededError;
+        # the same cut is TransportError on get_file and on the CRT engine.
+        payload = bytes(range(50))
+        item = TransferItem(
+            compare_key="a.bin",
+            size=len(payload),
+            etag='"abc123"',
+            src_bucket="bucket",
+            src_key="d/a.bin",
+            dest_fileobj=cast("Any", _WriteOnlySink()),
+        )
+        attempts = config.num_download_attempts
+        calls, _, results, _ = _run(
+            TransferType.DOWNLOAD,
+            [item],
+            [
+                {"Body": _CutBody(payload, cut=3), "ContentLength": len(payload)}
+                for _ in range(attempts)
+            ],
+            config=config,
+        )
+        assert ops(calls) == ["GetObject"] * attempts
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        error = results[0].error
+        assert type(error) is TransportError
+        assert str(error) == "Max Retries Exceeded"
+        assert type(error.__cause__).__name__ == "RetriesExceededError"
+
     def test_the_wrapper_trims_an_overlapping_chunk(self) -> None:
         written: list[tuple[bytes, int]] = []
 

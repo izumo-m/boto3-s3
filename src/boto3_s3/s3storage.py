@@ -59,6 +59,7 @@ from botocore.exceptions import (
 from botocore.exceptions import (
     InvalidConfigError as BotocoreInvalidConfigError,
 )
+from s3transfer.exceptions import RetriesExceededError
 from typing_extensions import override
 
 from boto3_s3.exceptions import (
@@ -364,7 +365,8 @@ def translate_boto_error(
     and ``ParamValidationError`` (client-side validation - no HTTP happened)
     to ``ValidationError``, which aws-cli files under its usage rc. A CRT
     network or server failure is a ``TransportError`` by its awscrt name
-    (`crt_error_name`). An existing ``Boto3S3Error`` passes through
+    (`crt_error_name`), and so is s3transfer's ``RetriesExceededError``, the
+    classic engine's download giving up on a body read. An existing ``Boto3S3Error`` passes through
     unchanged, and anything else becomes the base category carrying its
     message - an ``OSError`` included: raised inside a request it can be a
     credential provider's (a missing ``credential_process`` executable), not
@@ -389,6 +391,14 @@ def translate_boto_error(
     if isinstance(exc, _INVALID_CONFIG_ERRORS):
         return InvalidConfigError(str(exc), operation=operation, bucket=bucket, key=key)
     if isinstance(exc, _TRANSPORT_ERRORS):
+        return TransportError(str(exc), operation=operation, bucket=bucket, key=key)
+    if isinstance(exc, RetriesExceededError):
+        # The classic engine's download gave up retrying a body read: s3transfer
+        # retries only transport failures there (a read timeout, a dropped
+        # connection, a body cut short of its Content-Length - its
+        # S3_RETRYABLE_DOWNLOAD_ERRORS) and raises this, with aws-cli's "Max
+        # Retries Exceeded", once its attempts run out. The same events are
+        # TransportError on `get_file` and on the CRT engine.
         return TransportError(str(exc), operation=operation, bucket=bucket, key=key)
     if isinstance(exc, ParamValidationError):
         return ValidationError(str(exc), operation=operation, bucket=bucket, key=key)
