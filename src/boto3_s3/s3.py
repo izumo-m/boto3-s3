@@ -1251,8 +1251,10 @@ class S3:
         raises the translated ``Boto3S3Error`` - ``InvalidConfigError`` for a
         set-but-unusable ``AWS_PROFILE``, partial credentials, a malformed
         region or ``endpoint_url``, a config value of the wrong shape
-        (``s3 = foo``) or a ``credential_process`` executable that cannot run,
-        and the base ``Boto3S3Error`` for any other
+        (``s3 = foo``), a ``credential_process`` executable that cannot run or
+        botocore's own ``InvalidConfigError`` (a ``source_profile`` loop, an
+        ``account_id_endpoint_mode`` it does not know), and the base
+        ``Boto3S3Error`` for any other
         botocore error, which the translator's last clause claims - never the
         raw botocore error (design/exceptions.md section 1). A client whose
         CA bundle setting resolves to an empty or whitespace-only string is
