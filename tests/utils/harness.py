@@ -451,7 +451,9 @@ def head_object_fields(
     return {field: response.get(field) for field in fields}
 
 
-def _normalize_presign_url(url: str, *, bucket: str, mask_region: str | None) -> str:
+def _normalize_presign_url(
+    url: str, *, bucket: str, mask_region: str | None, drop_session_token: bool
+) -> str:
     parts = urllib.parse.urlsplit(url)
     path = parts.path
     if parts.netloc.startswith(f"{bucket}."):
@@ -464,6 +466,8 @@ def _normalize_presign_url(url: str, *, bucket: str, mask_region: str | None) ->
         return normalized
     params: list[str] = []
     for key, value in urllib.parse.parse_qsl(parts.query, keep_blank_values=True):
+        if key == "X-Amz-Security-Token" and drop_session_token:
+            continue
         if key == "X-Amz-Date":
             value = AMZ_DATE_TOKEN
         elif key == "X-Amz-Signature":
@@ -486,7 +490,7 @@ def _normalize_presign_url(url: str, *, bucket: str, mask_region: str | None) ->
 
 
 def normalize_presign_stdout(
-    stdout: str, *, bucket: str, mask_region: str | None = None
+    stdout: str, *, bucket: str, mask_region: str | None = None, drop_session_token: bool = False
 ) -> list[str]:
     """Normalize ``presign`` stdout (a URL line) for goldens / comparison.
 
@@ -504,11 +508,23 @@ def normalize_presign_stdout(
     parameter *order* included (botocore emits a fixed order),
     ``X-Amz-Expires``, ``X-Amz-SignedHeaders``, and the key path. Non-URL
     lines just get the bucket tokenized.
+
+    *drop_session_token* removes ``X-Amz-Security-Token`` for the golden
+    comparisons: the parameter is there only when the credentials are
+    temporary, which differs between a capture and a replay. Two CLIs run on
+    the same credentials compare with it kept.
     """
     lines: list[str] = []
     for line in stdout.splitlines():
         if line.startswith(("http://", "https://")):
-            lines.append(_normalize_presign_url(line, bucket=bucket, mask_region=mask_region))
+            lines.append(
+                _normalize_presign_url(
+                    line,
+                    bucket=bucket,
+                    mask_region=mask_region,
+                    drop_session_token=drop_session_token,
+                )
+            )
         else:
             lines.append(line.replace(bucket, BUCKET_TOKEN))
     return lines
@@ -610,8 +626,8 @@ def create_bucket_in_region(client: Any, bucket: str) -> None:
 def force_delete_bucket(client: Any, bucket: str) -> None:
     """Purge *bucket* and delete it; a missing bucket is a no-op.
 
-    The bucket-lifecycle suites (mb/rb) reset their sibling bucket with this
-    between the aws and boto3-s3 runs and in fixture teardown.
+    The bucket-lifecycle suites (mb/rb) clear their sibling buckets with this
+    before and after each test (the e2e fixtures).
     """
     from botocore.exceptions import ClientError
 
@@ -621,6 +637,25 @@ def force_delete_bucket(client: Any, bucket: str) -> None:
     except ClientError as exc:
         if exc.response.get("Error", {}).get("Code") not in ("NoSuchBucket", "404"):
             raise
+
+
+def settle_bucket_existence(
+    client: Any, bucket: str, *, exists: bool, timeout: float = 20.0
+) -> None:
+    """Wait until HeadBucket answers *exists* for *bucket*, or *timeout* runs out.
+
+    endpoint-fidelity T4: real S3 lags behind a bucket create or delete, so
+    a HeadBucket right after one can still give the old answer. The mb/rb
+    e2e suites call this after a successful run with the state the command
+    should have left; on timeout they capture whatever HeadBucket then
+    answers, so a command that really failed to create or delete still
+    diverges. The dev stack and moto answer at once.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    while bucket_exists(client, bucket) != exists and time.monotonic() < deadline:
+        time.sleep(1.0)
 
 
 def capture_bucket_state(client: Any, bucket: str) -> tuple[bool, list[str] | None]:

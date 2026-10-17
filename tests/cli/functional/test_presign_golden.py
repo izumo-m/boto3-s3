@@ -8,9 +8,10 @@ environment differences away: the replay's virtual-host URL (no endpoint
 override) canonicalizes to the capture's path-style (the dev stack's IP endpoint),
 and the credential/date/signature values are masked.
 
-``AWS_SESSION_TOKEN`` is removed per test (endpoint-fidelity T14): the root
-conftest exports one, which would grow the URL an ``X-Amz-Security-Token``
-parameter the token-less dev stack capture does not have.
+The root conftest exports an ``AWS_SESSION_TOKEN``, so the replay's URL
+carries an ``X-Amz-Security-Token``; the golden comparison drops that
+parameter on both sides, since whether a capture has one depends only on
+its credentials.
 """
 
 from __future__ import annotations
@@ -29,12 +30,14 @@ from tests.utils.presign_scenarios import SCENARIOS, PresignScenario, resolve_ar
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=lambda s: s.name)
-def test_presign_matches_golden(scenario: PresignScenario, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("AWS_SESSION_TOKEN", raising=False)
+def test_presign_matches_golden(scenario: PresignScenario) -> None:
     argv = resolve_argv(scenario, FUNCTIONAL_BUCKET)
     result = run_cli_in_process(argv)
     lines = normalize_presign_stdout(
-        result.stdout, bucket=FUNCTIONAL_BUCKET, mask_region=presign_scope_mask_region(argv)
+        result.stdout,
+        bucket=FUNCTIONAL_BUCKET,
+        mask_region=presign_scope_mask_region(argv),
+        drop_session_token=True,
     )
     golden = load_golden("presign", scenario.name)
     assert_matches_golden(

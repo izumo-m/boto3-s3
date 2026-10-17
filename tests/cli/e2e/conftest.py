@@ -34,6 +34,7 @@ aws does not write its session database there.
 
 from __future__ import annotations
 
+import itertools
 import os
 import shutil
 import tempfile
@@ -252,38 +253,48 @@ def bucket(s3_client: Any, bucket_name: str) -> Iterator[str]:
     _assert_bucket_empty(s3_client, bucket_name, when="after")
 
 
-def _sibling_bucket(s3_client: Any, name: str) -> Iterator[str]:
-    """A bucket the lifecycle (mb/rb) tests own outright.
+# Numbers the sibling-bucket pairs of one session, so no name repeats.
+_SIBLING_SERIAL = itertools.count(1)
 
-    The main bucket must stay existing and empty, so those suites work on a
-    sibling derived from it (the ``BOTO3_S3_E2E_BUCKET`` opt-in covers the
-    derived name). Force-deleted before the test (leftover from a crashed
-    run) and after (never left behind). endpoint-fidelity T3: the suffixes
-    must keep the name clear of ``-an`` (account-regional BucketNamespace
-    semantics, unverified against the dev stack) - scenarios append markers
-    like ``--x-s3`` themselves when they test them.
+
+def _sibling_buckets(s3_client: Any, bucket_name: str, kind: str) -> Iterator[tuple[str, str]]:
+    """Two buckets the lifecycle (mb/rb) tests own outright: aws's, then ours.
+
+    The main bucket must stay existing and empty, so those suites work on
+    siblings derived from it (the ``BOTO3_S3_E2E_BUCKET`` opt-in covers the
+    derived names): ``<main>-<kind><nnn>-aws`` and ``<main>-<kind><nnn>-ours``.
+    endpoint-fidelity T4: every scenario and side gets a name of its own,
+    because real S3 lags behind a delete and re-create under one name (a
+    re-create can answer ``BucketAlreadyOwnedByYou``, a HeadBucket can miss
+    the new bucket). Force-deleted before the test (leftover from a crashed
+    run) and after (never left behind). endpoint-fidelity T3: the names stay
+    clear of a trailing ``-an`` (account-regional BucketNamespace semantics,
+    unverified against the dev stack) - scenarios append markers like
+    ``--x-s3`` themselves when they test them.
     """
     from tests.utils.harness import force_delete_bucket
 
-    force_delete_bucket(s3_client, name)
-    yield name
-    force_delete_bucket(s3_client, name)
+    serial = next(_SIBLING_SERIAL)
+    aws_name = f"{bucket_name}-{kind}{serial:03d}-aws"
+    ours_name = f"{bucket_name}-{kind}{serial:03d}-ours"
+    force_delete_bucket(s3_client, aws_name)
+    force_delete_bucket(s3_client, ours_name)
+    try:
+        yield (aws_name, ours_name)
+    finally:
+        try:
+            force_delete_bucket(s3_client, aws_name)
+        finally:
+            force_delete_bucket(s3_client, ours_name)
 
 
 @pytest.fixture
-def mb_bucket(s3_client: Any, bucket_name: str) -> Iterator[str]:
-    """The mb parity tests' sibling bucket (created by the command itself).
-
-    endpoint-fidelity T4: one fixed name, deleted and re-created per scenario
-    and per side - immediate on the dev stack, lagging on real S3.
-    """
-    yield from _sibling_bucket(s3_client, f"{bucket_name}-mb")
+def mb_buckets(s3_client: Any, bucket_name: str) -> Iterator[tuple[str, str]]:
+    """The mb parity tests' sibling buckets (created by the command itself)."""
+    yield from _sibling_buckets(s3_client, bucket_name, "mb")
 
 
 @pytest.fixture
-def rb_bucket(s3_client: Any, bucket_name: str) -> Iterator[str]:
-    """The rb parity tests' sibling bucket (pre-created per scenario).
-
-    endpoint-fidelity T4: the fixed-name re-creation of ``mb_bucket``.
-    """
-    yield from _sibling_bucket(s3_client, f"{bucket_name}-rb")
+def rb_buckets(s3_client: Any, bucket_name: str) -> Iterator[tuple[str, str]]:
+    """The rb parity tests' sibling buckets (pre-created per scenario)."""
+    yield from _sibling_buckets(s3_client, bucket_name, "rb")

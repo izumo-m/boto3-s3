@@ -1,5 +1,5 @@
 # Ephemeral S3 server (RustFS) for boto3-s3 manual testing and the e2e parity
-# suite. endpoint-fidelity T16: how this server answers differently from real
+# suite. endpoint-fidelity T15: how this server answers differently from real
 # S3, and what the tests do about it, is in design/endpoint-fidelity.md.
 #
 # Usage (from repo root):

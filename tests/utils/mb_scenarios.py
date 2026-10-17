@@ -5,7 +5,7 @@ Same contract as ``rm_scenarios`` with the bucket-lifecycle extras:
 - the scenario bucket is a **sibling** of the suite's main bucket (the e2e
   main bucket must stay existing and empty; the functional suite derives a
   sibling of ``FUNCTIONAL_BUCKET``), pre-created per scenario when
-  ``pre_create`` asks for it and force-deleted between runs;
+  ``pre_create`` asks for it; the e2e suite gives each side a fresh one;
 - the end state is ``(bucket_exists, remaining_keys)`` captured by
   ``harness.capture_bucket_state`` - goldens record both;
 - stdout shares rm's sorted normalization (mb lines carry no timestamps).
@@ -32,11 +32,12 @@ class MbScenario(BaseScenario):
 
     # True => the scenario bucket already exists when the command runs.
     pre_create: bool = False
-    # True => golden-record the bucket's tag set after the run. Neither moto
-    # nor the dev stack honors CreateBucketConfiguration.Tags (real S3 does;
-    # endpoint-fidelity T12), so this observes an empty set on both test
-    # endpoints: it is an aws-vs-ours no-divergence check, not a validation
-    # of tag application - that needs a live-AWS run.
+    # True => compare the bucket's tag set after the run between aws and
+    # ours, live only. endpoint-fidelity T12: real S3 applies
+    # CreateBucketConfiguration.Tags while moto and the dev stack ignore it,
+    # so a golden of the tag set could not serve both a real-S3 capture and
+    # the moto replay; the e2e comparison checks tag application only when
+    # it runs on real S3.
     capture_tags: bool = False
 
 
@@ -78,11 +79,8 @@ SCENARIOS: tuple[MbScenario, ...] = (
     # aws mb silently drops the key part (split_s3_bucket_key keeps the
     # bucket); the end state pins that the bucket exists with no objects.
     MbScenario("mb_key_dropped", ("mb", f"s3://{BUCKET_TOKEN}/some/key")),
-    # The tags ride CreateBucketConfiguration.Tags. The end-state tag set is
-    # [] on moto and the dev stack (neither honors that field; real S3 applies
-    # it; endpoint-fidelity T12), so
-    # this pins no-divergence from aws, not the tag semantics (see
-    # capture_tags).
+    # The tags ride CreateBucketConfiguration.Tags; capture_tags compares the
+    # resulting tag set between aws and ours (endpoint-fidelity T12).
     MbScenario(
         "mb_tags",
         ("mb", f"s3://{BUCKET_TOKEN}", "--tags", "Key1", "Value1"),

@@ -36,7 +36,7 @@ section 2; the table doubles as the probe checklist for a new endpoint.
 | G4 | CreateBucket on a bucket you own | succeeds (us-east-1 rule) | us-east-1 succeeds; other regions `BucketAlreadyOwnedByYou` | us-east-1 rule | T11 |
 | G5 | `CreateBucketConfiguration.Tags` | accepted and ignored (empty tag set) | applied (*measured*) | ignored | T12 |
 | G6 | Access points | none | supported | - | T13 |
-| G7 | Keys with a `..` segment / `//` | PUT rejected (`InvalidArgument`, "Invalid object key") | accepted | - | T17 |
+| G7 | Keys with a `..` segment / `//` | PUT rejected (`InvalidArgument`, "Invalid object key") | accepted | - | T16 |
 | G8 | Zero-byte PUT | the next PutObject with a body on the same pooled connection waits for the client's read timeout (HEAD, GET, and listings do not) | unaffected | unaffected | T1 |
 | G9 | GetObjectAttributes, COMPOSITE checksum | value with the `-N` suffix, as HeadObject | general purpose buckets omit the suffix there (HeadObject has it); S3 Express directory buckets add it (*measured*) | - | none |
 | G10 | UploadPartCopy (multipart copy) | destination carries no checksum | destination carries a CRC64NVME FULL_OBJECT checksum (*measured*) | - | none |
@@ -44,9 +44,10 @@ section 2; the table doubles as the probe checklist for a new endpoint.
 | G12 | CopyObject with `If-None-Match: *` onto an existing key | honored, as real S3 | honored: neither CLI copies (*measured*) | condition ignored, the copy overwrites | T7 |
 | G13 | Bucket delete and re-create under one name | immediate | lags: re-create answers `BucketAlreadyOwnedByYou`, HeadBucket right after create can 404, right after delete can still find it (*measured*) | immediate | T4 |
 | G14 | `LastModified` in listings | sub-second | whole seconds | - | none |
-| G15 | PutObject without a Content-Type | guessed from the key (`application/json` for `.json`) | `binary/octet-stream` (*measured*) | `binary/octet-stream` | T18 |
+| G15 | PutObject without a Content-Type | guessed from the key (`application/json` for `.json`) | `binary/octet-stream` (*measured*) | `binary/octet-stream` | T17 |
 | G16 | HeadObject checksum of a PutObject with the default checksum | the CRC32 value without `ChecksumType` | `ChecksumType: FULL_OBJECT` alongside the value | - | none |
 | G17 | Transport of the dev stack (a setup property, not server behavior) | http | https | in-process | T2, T6 |
+| G18 | ListBuckets with a `Prefix` | the prefix is ignored: every bucket is listed | only the matching buckets | - | none |
 
 G14 changes no test - the e2e sync scenarios shift times by a day - but a
 behavior that depends on it (`sync --exact-timestamps` converging) looks
@@ -65,7 +66,7 @@ listed.
 
 Each change carries the marker `endpoint-fidelity T<n>` where it lives - in
 a comment, or in a scenario's `frozen_golden` text - so
-`git grep -n "endpoint-fidelity T"` lists every site (T17, a rule, has
+`git grep -n "endpoint-fidelity T"` lists every site (T16, a rule, has
 none). The forms a change takes:
 
 - `diff_only` - no golden; only the live aws-vs-ours comparison runs, rc
@@ -80,28 +81,28 @@ none). The forms a change takes:
 |---|---|---|---|---|
 | T1 | `Connection: close` on zero-byte PUTs | `harness.seed_bucket` | G8 | drop on real S3 or moto (harmless if kept) |
 | T2 | the CRT lane passes `--endpoint-url` to both CLIs when `AWS_ENDPOINT_URL_S3` is set | `test_crt_parity._crt_invocation`, `benchmarks/e2e.py` (`_invoke`) | G17 | needed while the endpoint is http; `run_e2e.sh` unsets the variable, so real S3 skips it |
-| T3 | sibling bucket names never end in `-an` | `e2e/conftest.py` (`_sibling_bucket`) | - | keep on every endpoint until account-regional BucketNamespace semantics are verified |
-| T4 | one fixed sibling name (`-mb` / `-rb`) is deleted, re-created, and checked with HeadBucket at once, per scenario and between the two CLIs | `e2e/conftest.py` (`mb_bucket`, `rb_bucket`), `test_mb_parity._reset`, `test_rb_parity._reset`, `run_e2e.sh` cleanup | G13 | on real S3, give every scenario and side its own name (still not ending in `-an`) and update the cleanup; this caused 5 of the 11 real-S3 failures |
-| T5 | `cp_upload_acl_public_read` / `cp_upload_grants_uri` goldens record rc 0 (also the `.windows` variants) | `cp_scenarios.py` | G11 | a real-S3 golden (rc 1) would not replay on moto (rc 0): make them `diff_only` |
-| T6 | the aws-side stderr token for a directory uploaded without `--recursive` is `Is a directory` | `cp_upload_dir_no_recursive` / `_exclude` in `cp_scenarios.py` | G17 | over https aws fails with `Need to rewind the stream ...` instead (rc 1 on both sides, as before): token on `upload failed` only, or switch by transport |
+| T3 | sibling bucket names never end in `-an` | `e2e/conftest.py` (`_sibling_buckets`) | - | keep on every endpoint until account-regional BucketNamespace semantics are verified |
+| T4 | every mb/rb scenario and side gets a sibling bucket of its own, never re-created under the same name; after a successful mb or rb the end state is read once HeadBucket agrees (20 s at most) | `e2e/conftest.py` (`_sibling_buckets`), `test_mb_parity` / `test_rb_parity` (`_prepare`, `_settle`), `harness.settle_bucket_existence`, `run_e2e.sh` cleanup | G13 | needed on real S3; harmless elsewhere |
+| T5 | `cp_upload_acl_public_read` / `cp_upload_grants_uri` are `diff_only` | `cp_scenarios.py` | G11 | stays while real S3 and moto disagree on ACLs for a new bucket |
+| T6 | the aws-side stderr token for a directory uploaded without `--recursive` is only `upload failed`: the cause after it is `Is a directory` over http, `Need to rewind the stream ...` over https | `cp_upload_dir_no_recursive` / `_exclude` in `cp_scenarios.py` | G17 | none: the token holds on every transport |
 | T7 | `cp_no_overwrite_copy_exists` / `mv_no_overwrite_copy_exists` are `diff_only` | `cp_scenarios.py`, `mv_scenarios.py` | G12 | stays while moto ignores the condition |
 | T8 | `website_error_only` / `website_no_options` are `diff_only` | `website_scenarios.py` | G1 | stays while moto stores a configuration without an IndexDocument |
 | T9 | `cp_upload_storage_class_glacier` is `diff_only`; the glacier gate shapes run on moto | `cp_scenarios.py`; `TestCpGlacierOnMoto`, `TestMvGlacierOnMoto`, `TestSyncGlacierOnMoto` | G2 | the scenario can carry a golden on an endpoint that accepts GLACIER; keep the gate shapes on moto (restores take hours on real S3) |
 | T10 | `cp_copy_props_all_multipart` is live-only | `cp_scenarios.py` | G3 | stays live-only: moto has no annotations either |
 | T11 | `mb_existing` is `diff_only` and checks no stderr tokens | `mb_scenarios.py` | G4 | stays: the outcome depends on the region |
-| T12 | the `mb_tags` golden records an empty tag set | `mb_scenarios.py`, `golden.py` | G5 | a real-S3 golden would not replay on moto: drop the tags from the golden and keep the aws-vs-ours comparison |
+| T12 | `mb_tags` compares the tag set between aws and ours only; no golden records a tag set | `mb_scenarios.py` | G5 | stays while moto ignores the tags |
 | T13 | no e2e reaches an access point: `mv --validate-same-s3-paths` has no scenario, `ls_accesspoint_arn` is `diff_only` | `mv_scenarios.py`, `ls_scenarios.py` | G6 | real S3 could host an access point for `mv` (needs permissions and a cost estimate); `ls_accesspoint_arn` stays `diff_only` (a foreign ARN fails differently per endpoint) |
-| T14 | the presign replay deletes `AWS_SESSION_TOKEN` to match the token-less dev stack capture; the normalizer keeps `X-Amz-Security-Token` | `test_presign_golden.py` | - (credential type) | a real-S3 run with temporary credentials puts the token into aws's URL and fails every presign golden: mask the token in the normalizer, or require long-term keys |
-| T15 | `cp_copy_props_none` probes only `Metadata`, leaving the default `ContentType` unchecked | `cp_scenarios.py` | - | the dev stack and moto both answer `binary/octet-stream`; check real S3, then probe `ContentType` too |
-| T16 | the dev stack itself: server and release, keys, us-east-1, the SSE-S3 master key, the readiness wait, the container name, the golden-regeneration hint, the benchmark guard | `scripts/compose.dev.yaml`, `compose-up.sh`, `dev-env.sh` / `.cmd`, `golden.py`, `benchmarks/awsenv.py` | - | rewrite for the new server; re-run the section 1 probes |
-| T17 | no scenario uses `..` / `//` keys (the unit tier pins `..` bytes) | none: a rule for new scenarios, so no marker | G7 | keep the rule while the dev stack rejects such keys |
-| T18 | the `cp_upload_no_guess_mime` golden is frozen | `cp_scenarios.py` | G15 | drop the freeze on an endpoint that answers `binary/octet-stream` |
+| T14 | `cp_copy_props_none` probes only `Metadata`, leaving the default `ContentType` unchecked | `cp_scenarios.py` | - | the dev stack and moto both answer `binary/octet-stream`; check real S3, then probe `ContentType` too |
+| T15 | the dev stack itself: server and release, keys, us-east-1, the SSE-S3 master key, the readiness wait, the container name, the golden-regeneration hint, the benchmark guard | `scripts/compose.dev.yaml`, `compose-up.sh`, `dev-env.sh` / `.cmd`, `golden.py`, `benchmarks/awsenv.py` | - | rewrite for the new server; re-run the section 1 probes |
+| T16 | no scenario uses `..` / `//` keys (the unit tier pins `..` bytes) | none: a rule for new scenarios, so no marker | G7 | keep the rule while the dev stack rejects such keys |
+| T17 | the `cp_upload_no_guess_mime` golden is frozen | `cp_scenarios.py` | G15 | drop the freeze on an endpoint that answers `binary/octet-stream` |
 
 Not test-side changes, though they mention an endpoint: the `diff_only` of
 the negative page-size scenarios (the reason is moto, which raises
 `IndexError` for `MaxKeys=-1`; real S3 answers `InvalidArgument`); the
-presign normalization (path-style URLs, `<ENDPOINT>`, `<REGION>`), which
-every endpoint needs because capture and replay differ in host form; the
+presign normalization (path-style URLs, `<ENDPOINT>`, `<REGION>`, and the
+session token dropped from golden comparisons), which every endpoint needs
+because capture and replay differ in host form and credentials; the
 sorted rm lines, whose order comes from aws's parallel completion;
 nonexistent bucket names derived from the run's bucket (`<bucket>-no-such`),
 which stay absent on real S3 too because `run_e2e.sh` randomizes the base;

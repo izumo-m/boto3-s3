@@ -6,7 +6,7 @@
 # already up.
 #
 # For raw compose subcommands (down, ps, logs, ...) use scripts/compose.sh.
-# endpoint-fidelity T16: the container name and the readiness wait.
+# endpoint-fidelity T15: the container name and the readiness wait.
 
 set -euo pipefail
 

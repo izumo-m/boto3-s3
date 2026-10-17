@@ -185,14 +185,18 @@ Bucket-lifecycle commands (**mb** / **rb**) extend the same model: their
 goldens additionally record `bucket_exists` (the scenario bucket's existence
 after the run; `remaining_keys` is `null` when it is gone), their stdout
 shares rm's sorted normalization (no timestamps; `rb --force` interleaves
-nondeterministically ordered delete lines), and they run against a
-**sibling** bucket derived from the suite's main bucket (`-mb` / `-rb`
-suffix) - the e2e main bucket must stay existing and empty, so the
-`mb_bucket` / `rb_bucket` fixtures force-delete the sibling around each test
-and `harness.force_delete_bucket` resets it between the aws and boto3-s3
-runs. Sibling names must not end in `-an` (account-regional BucketNamespace
-semantics are unverified against the dev stack; covered by ports and unit
-tests instead).
+nondeterministically ordered delete lines), and they run against
+**sibling** buckets derived from the suite's main bucket - the e2e main
+bucket must stay existing and empty. The `mb_buckets` / `rb_buckets`
+fixtures hand each scenario two fresh names, one per side
+(`<main>-mb007-aws` / `<main>-mb007-ours`), and force-delete both around the
+test: real S3 lags behind a delete and re-create under one name, so no name
+is used twice in a run. Each side's stdout masks its own bucket name, so the
+two compare equal. Sibling names must not end in `-an` (account-regional
+BucketNamespace semantics are unverified against the dev stack; covered by
+ports and unit tests instead). mb's tag set (`--tags`) is compared between
+the two sides only, never recorded in a golden: real S3 applies the tags,
+moto and the dev stack do not.
 
 For **website** the goldens cover the client-side errors (rc 252, no
 server contact) and the server-reaching scenarios alike, the latter
@@ -291,11 +295,13 @@ the **endpoint policy**, in two steps:
   1's golden comparison would hide a divergence.
 
 Parameter order, `X-Amz-Expires`, `X-Amz-SignedHeaders`, and the
-key path are compared verbatim. The functional replay needs no moto backend
-(presign never contacts a server) and deletes `AWS_SESSION_TOKEN` for the
-run - the root conftest exports one, which would add an
-`X-Amz-Security-Token` parameter the token-less dev stack capture lacks. The
-e2e suite adds a **fetch layer** for time-stable scenarios: both sides'
+key path are compared verbatim. `X-Amz-Security-Token` is dropped from both
+sides of a golden comparison only: it appears when the credentials are
+temporary, which can differ between capture and replay (the root conftest
+exports a session token for the replay), while the live aws-vs-ours
+comparison runs on one set of credentials and keeps it. The functional
+replay needs no moto backend (presign never contacts a server). The e2e
+suite adds a **fetch layer** for time-stable scenarios: both sides'
 URLs are actually GET and compared on status (and body when 200) - the
 endpoint accepting our signature like it accepts aws's is parity the URL
 string alone cannot prove.

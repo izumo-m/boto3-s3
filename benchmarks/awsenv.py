@@ -75,7 +75,7 @@ def refuse_dev_stack_env() -> None:
     for key in ("AWS_ENDPOINT_URL_S3", "AWS_ENDPOINT_URL"):
         if os.environ.get(key):
             problems.append(f"{key}={os.environ[key]}")
-    # endpoint-fidelity T16: the dev stack's static key.
+    # endpoint-fidelity T15: the dev stack's static key.
     if os.environ.get("AWS_ACCESS_KEY_ID") == "devadmin":
         problems.append("AWS_ACCESS_KEY_ID=devadmin")
     if problems:

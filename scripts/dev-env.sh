@@ -13,7 +13,7 @@
 # (compose.dev.yaml) and must stay empty between test runs.
 #
 # Windows twin (same values, runner form): scripts/dev-env.cmd
-# (design/testing.md section 8). endpoint-fidelity T16: the dev stack's keys
+# (design/testing.md section 8). endpoint-fidelity T15: the dev stack's keys
 # and region (it reports us-east-1).
 
 export AWS_ENDPOINT_URL_S3=http://127.0.0.1:9000

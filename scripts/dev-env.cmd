@@ -7,7 +7,7 @@ rem of its command line in that environment (cwd is left untouched):
 rem
 rem   cmd.exe /c "scripts\dev-env.cmd mise exec -- uv run pytest -q tests\cli\e2e"
 rem
-rem Keep the values in lockstep with scripts/dev-env.sh (endpoint-fidelity T16).
+rem Keep the values in lockstep with scripts/dev-env.sh (endpoint-fidelity T15).
 set "AWS_ENDPOINT_URL_S3=http://127.0.0.1:9000"
 set "AWS_ACCESS_KEY_ID=devadmin"
 set "AWS_SECRET_ACCESS_KEY=devadmin"

@@ -277,7 +277,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         head_fields=("ContentType",),
         local_src=_SRC_JSON,
         frozen_golden=(
-            "endpoint-fidelity T18: the dev stack guesses application/json from"
+            "endpoint-fidelity T17: the dev stack guesses application/json from"
             " the key itself, so live it cannot tell a client-side guess apart"
         ),
     ),
@@ -353,13 +353,15 @@ SCENARIOS: tuple[CpScenario, ...] = (
         head_fields=("StorageClass",),
     ),
     CpScenario(
-        # The ACL form is accepted (rc 0); applied semantics are not asserted
-        # - rc/stdout parity is the contract here. endpoint-fidelity T5: real
-        # S3 rejects ACLs on a new bucket (rc 1) while the dev stack and moto
-        # accept them, so this golden holds for the test endpoints only.
+        # Applied ACL semantics are not asserted - rc/stdout parity is the
+        # contract here. endpoint-fidelity T5: real S3 rejects ACLs on a new
+        # bucket (ACLs disabled, rc 1) while the dev stack and moto accept
+        # them (rc 0), so no golden can serve both a real-S3 capture and the
+        # moto replay.
         name="cp_upload_acl_public_read",
         argv=("cp", "src/a.txt", f"s3://{BUCKET_TOKEN}/up/key.txt", "--acl", "public-read"),
         local_src=_SRC_SINGLE,
+        diff_only=True,
     ),
     CpScenario(
         # endpoint-fidelity T5: as cp_upload_acl_public_read.
@@ -372,6 +374,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
             "read=uri=http://acs.amazonaws.com/groups/global/AllUsers",
         ),
         local_src=_SRC_SINGLE,
+        diff_only=True,
     ),
     CpScenario(
         name="cp_upload_multipart",
@@ -392,15 +395,12 @@ SCENARIOS: tuple[CpScenario, ...] = (
         name="cp_upload_dir_no_recursive",
         argv=("cp", "src", f"s3://{BUCKET_TOKEN}/x"),
         local_src=_SRC_SINGLE,
-        # ours synthesizes EISDIR on every host; aws hits EISDIR at open on
-        # POSIX but ENOENT on Windows (opening "src\" fails there).
-        # endpoint-fidelity T6: over https aws fails earlier, with "Need to
-        # rewind the stream", so its token holds on the http dev stack only.
+        # ours synthesizes EISDIR on every host. endpoint-fidelity T6: aws's
+        # cause differs by host and transport - EISDIR at open on POSIX over
+        # http, ENOENT on Windows (opening "src\" fails there), "Need to
+        # rewind the stream" over https - so its token is the common prefix.
         expected_stderr_tokens_ours=("upload failed", "Is a directory"),
-        expected_stderr_tokens_aws=(
-            "upload failed",
-            "Is a directory" if os.name != "nt" else "[Errno 2]",
-        ),
+        expected_stderr_tokens_aws=("upload failed",),
     ),
     CpScenario(
         # A filter on that same doomed upload matches aws's local_format form
@@ -412,10 +412,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         argv=("cp", "src", f"s3://{BUCKET_TOKEN}/x", "--exclude", "src"),
         local_src=_SRC_SINGLE,
         expected_stderr_tokens_ours=("upload failed", "Is a directory"),
-        expected_stderr_tokens_aws=(
-            "upload failed",
-            "Is a directory" if os.name != "nt" else "[Errno 2]",
-        ),
+        expected_stderr_tokens_aws=("upload failed",),
     ),
     CpScenario(
         # The complement: the separator-terminated pattern is what matches a
@@ -651,7 +648,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         diff_only=True,
     ),
     CpScenario(
-        # Metadata is dropped under copy-props none. endpoint-fidelity T15:
+        # Metadata is dropped under copy-props none. endpoint-fidelity T14:
         # the resulting default ContentType is unverified on real S3, so only
         # Metadata is probed.
         name="cp_copy_props_none",

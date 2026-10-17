@@ -25,37 +25,44 @@ from tests.utils.harness import (
     assert_stderr_tokens,
     capture_bucket_state,
     create_bucket_in_region,
-    force_delete_bucket,
     normalize_rm_stdout,
     run_aws_subprocess,
     run_cli_subprocess,
     seed_bucket,
+    settle_bucket_existence,
 )
 from tests.utils.rb_scenarios import SCENARIOS, RbScenario, resolve_argv
 
 
-def _reset(s3_client: Any, bucket: str, scenario: RbScenario) -> None:
-    """Put the sibling bucket into the scenario's start state (endpoint-fidelity T4)."""
-    force_delete_bucket(s3_client, bucket)
+def _prepare(s3_client: Any, bucket: str, scenario: RbScenario) -> None:
+    """Put a fresh sibling bucket (endpoint-fidelity T4) into the start state."""
     if scenario.pre_create:
         create_bucket_in_region(s3_client, bucket)
         seed_bucket(s3_client, bucket, scenario.seed)
 
 
+def _settle(s3_client: Any, bucket: str, rc: int) -> None:
+    """After a successful rb, wait out real S3's delete lag (endpoint-fidelity T4)."""
+    if rc == 0:
+        settle_bucket_existence(s3_client, bucket, exists=False)
+
+
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=lambda s: s.name)
-def test_rb_parity(scenario: RbScenario, rb_bucket: str, s3_client: Any) -> None:
-    argv = resolve_argv(scenario, rb_bucket)
+def test_rb_parity(scenario: RbScenario, rb_buckets: tuple[str, str], s3_client: Any) -> None:
+    aws_bucket, ours_bucket = rb_buckets
 
-    _reset(s3_client, rb_bucket, scenario)
-    aws_result = run_aws_subprocess(argv)
-    aws_exists, aws_remaining = capture_bucket_state(s3_client, rb_bucket)
+    _prepare(s3_client, aws_bucket, scenario)
+    aws_result = run_aws_subprocess(resolve_argv(scenario, aws_bucket))
+    _settle(s3_client, aws_bucket, aws_result.rc)
+    aws_exists, aws_remaining = capture_bucket_state(s3_client, aws_bucket)
 
-    _reset(s3_client, rb_bucket, scenario)
-    ours_result = run_cli_subprocess(argv)
-    ours_exists, ours_remaining = capture_bucket_state(s3_client, rb_bucket)
+    _prepare(s3_client, ours_bucket, scenario)
+    ours_result = run_cli_subprocess(resolve_argv(scenario, ours_bucket))
+    _settle(s3_client, ours_bucket, ours_result.rc)
+    ours_exists, ours_remaining = capture_bucket_state(s3_client, ours_bucket)
 
-    aws_lines = normalize_rm_stdout(aws_result.stdout, bucket=rb_bucket)
-    ours_lines = normalize_rm_stdout(ours_result.stdout, bucket=rb_bucket)
+    aws_lines = normalize_rm_stdout(aws_result.stdout, bucket=aws_bucket)
+    ours_lines = normalize_rm_stdout(ours_result.stdout, bucket=ours_bucket)
 
     if not scenario.diff_only and not scenario.frozen_golden:
         if update_goldens_enabled():
