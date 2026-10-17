@@ -622,23 +622,37 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   The gate is boto3's `TRANSFER_CONFIG_SUPPORTS_CRT` =
   `hasattr(TransferConfig, "UNSET_DEFAULT")`.
 - **Empty / whitespace-only `verify`**: aws refuses such a value outright from
-  2.36.2 on (`Invalid CA bundle: ...` at rc 255, its bundled botocore and
+  2.36.6 on (`Invalid CA bundle: ...` at rc 255, its bundled botocore and
   s3transfer fork both carrying the check), and so does the CLI - but at the
   botocore client build, which every command performs before any transfer
   engine exists ([`cli.md`](./cli.md) section 4, `_reject_empty_ca_bundle`).
   So the CRT lane is never handed one from the CLI, whichever engine the run
   selects, and both tools report the same line at the same point (measured
   2026-09-06 under `preferred_transfer_client = crt`: an empty `--ca-bundle`,
-  a whitespace-only one, and an empty `AWS_CA_BUNDLE`). What remains below is a **library**
-  concern only, for a caller that builds its own client and bypasses that
-  resolution: pip s3transfer >= 0.19.2 and botocore >= 1.43.54 raise
-  `InvalidConfigError` on the value, while older ones read the empty string as
-  falsy and turn TLS verification off. `_derive_verify` normalizes the empty
-  string to `False` so that lane behaves uniformly across installed versions
-  rather than swinging with the patch level; a whitespace-only value is left
-  through and fails either as a missing CA path or as that same rejection,
-  depending on the version. The engine-rooted half of this version dependence
-  falls under `overview.md` section 3's third exception.
+  a whitespace-only one, and an empty `AWS_CA_BUNDLE`). For a **library**
+  caller that builds its own client, pip botocore >= 1.43.54 (and pip
+  s3transfer >= 0.19.2 on the CRT lane) raise `InvalidConfigError` on the
+  value, while older ones read the empty string as falsy and turn TLS
+  verification off. The library refuses the value itself on every version,
+  with botocore's own error and wording (`s3storage.reject_empty_ca_bundle`):
+  `S3Storage.get_client` for every operation, `S3.client()` and
+  `S3PathResolver` for the clients they hand out or take, and
+  `create_crt_transfer_manager` as its first step - before the cross-process
+  lock and whatever state the singleton is in - for a client passed straight
+  to `materialize_crt_engine` (the client-only check: the environment is
+  `S3.materialize_crt_engine`'s, below). For a client the caller hands over
+  (`S3Storage(client=...)`, `S3PathResolver`, `S3.materialize_crt_engine`) an
+  empty `AWS_CA_BUNDLE` is refused too, because botocore's credential clients
+  resolve it first whatever `verify` the client was given - stricter than
+  aws, which refuses it only when it builds a client that reads the value (a
+  credential client, the CRT request serializer). `REQUESTS_CA_BUNDLE`
+  and a profile's empty `ca_bundle` in that position stay out of reach: the
+  client does not name the session that decides whether they are read.
+  `S3.client()`'s clients carry `CA_BUNDLE_ENVIRONMENT_VETTED` (their own
+  value answers for the environment), and so do the CLI's, which skip that guess
+  since `clientfactory._check_every_client` already checks every client
+  their sessions build at aws's own point (static credentials beside a valid
+  `--ca-bundle` complete, as on aws).
 - **Process-pinned singleton**: the region / credentials / endpoint of the first
   client to reach the CRT path monopolize the in-process CRT, and an incompatible
   second connection falls back to classic (identical behavior to boto3).

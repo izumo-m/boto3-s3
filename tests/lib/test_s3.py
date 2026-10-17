@@ -443,6 +443,11 @@ class TestStorageMethodAttribution:
         assert error.operation == "sync"
 
 
+def _verifying(verify: Any) -> SimpleNamespace:
+    """A client stand-in carrying *verify* where botocore keeps it."""
+    return SimpleNamespace(_endpoint=SimpleNamespace(http_session=SimpleNamespace(_verify=verify)))
+
+
 class TestClientSeam:
     """``S3.client`` builds a fresh client from session / endpoint_url / config."""
 
@@ -496,6 +501,86 @@ class TestClientSeam:
             S3(session=cast("Any", _BrokenSession())).client()
         assert type(exc_info.value) is InvalidConfigError
         assert isinstance(exc_info.value.__cause__, ProfileNotFound)
+
+    @pytest.mark.parametrize("bundle", ["", "   "], ids=["empty", "whitespace"])
+    def test_an_empty_ca_bundle_is_refused(
+        self, bundle: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An older botocore reads an empty CA bundle as "verification off" and
+        # builds the client; 1.43.54 refuses it while building. Either way
+        # the library answers botocore's own refusal, as the InvalidConfigError
+        # refinement, from both build paths.
+        from botocore.exceptions import InvalidConfigError as BotocoreInvalidConfigError
+
+        monkeypatch.setenv("AWS_CA_BUNDLE", bundle)
+        for build in (lambda: S3().client(), lambda: S3Storage("s3://b/").get_client()):
+            with pytest.raises(InvalidConfigError, match="Invalid CA bundle") as exc_info:
+                build()
+            assert type(exc_info.value) is InvalidConfigError
+            assert isinstance(exc_info.value.__cause__, BotocoreInvalidConfigError)
+
+    @pytest.mark.parametrize("bundle", ["", "   "], ids=["empty", "whitespace"])
+    def test_a_supplied_client_with_an_empty_ca_bundle_is_refused(self, bundle: str) -> None:
+        # A client an older botocore built with an empty CA bundle never
+        # carries a request: every operation takes its client from here.
+        client = SimpleNamespace(
+            _endpoint=SimpleNamespace(http_session=SimpleNamespace(_verify=bundle))
+        )
+        storage = S3Storage("s3://b/", client=cast("Any", client))
+        with pytest.raises(InvalidConfigError, match="Invalid CA bundle"):
+            storage.get_client()
+
+    @pytest.mark.parametrize("bundle", ["", "   "], ids=["empty", "whitespace"])
+    def test_an_empty_aws_ca_bundle_is_refused_beside_a_handed_over_client(
+        self, bundle: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The client carries a real path, but the clients botocore builds
+        # behind it for an assumed role or SSO resolve AWS_CA_BUNDLE first.
+        monkeypatch.setenv("AWS_CA_BUNDLE", bundle)
+        with pytest.raises(InvalidConfigError, match="Invalid CA bundle"):
+            S3Storage("s3://b/", client=cast("Any", _verifying("/etc/ca.pem"))).get_client()
+
+    def test_an_empty_requests_ca_bundle_is_not_guessed_at(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Whether the credential clients read REQUESTS_CA_BUNDLE depends on the
+        # session's profile, which a handed-over client does not name.
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", "")
+        client = _verifying("/etc/ca.pem")
+        assert S3Storage("s3://b/", client=cast("Any", client)).get_client() is client
+
+    def test_a_client_the_cli_vetted_skips_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # boto3-s3-cli checks every client its sessions build where aws does;
+        # a second look at the environment would refuse runs aws completes.
+        from boto3_s3.s3storage import CA_BUNDLE_ENVIRONMENT_VETTED
+
+        monkeypatch.setenv("AWS_CA_BUNDLE", "")
+        client = _verifying("/etc/ca.pem")
+        setattr(client, CA_BUNDLE_ENVIRONMENT_VETTED, True)
+        assert S3Storage("s3://b/", client=cast("Any", client)).get_client() is client
+
+    def test_a_client_s3_built_is_not_second_guessed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A session whose ca_bundle was set in code outranks AWS_CA_BUNDLE for
+        # the S3 client and its credential clients alike, so a string-URI
+        # operation handing S3.client()'s client to S3Storage must not refuse
+        # it over the (unread) empty variable.
+        import certifi
+
+        session = boto3.Session(region_name="us-east-1")
+        session._session.set_config_variable("ca_bundle", certifi.where())  # pyright: ignore[reportPrivateUsage]
+        monkeypatch.setenv("AWS_CA_BUNDLE", "")
+        storage = S3(session=session).resolve("s3://b/")
+        assert isinstance(storage, S3Storage)
+        storage.get_client()
+
+    @pytest.mark.parametrize("verify", [True, False, "/etc/ca.pem"], ids=["default", "off", "path"])
+    def test_a_usable_verify_setting_passes(self, verify: Any) -> None:
+        client = SimpleNamespace(
+            _endpoint=SimpleNamespace(http_session=SimpleNamespace(_verify=verify))
+        )
+        assert S3Storage("s3://b/", client=cast("Any", client)).get_client() is client
 
     def test_malformed_endpoint_maps_to_invalid_config_error(self) -> None:
         # botocore rejects a malformed endpoint_url with a plain ValueError,
@@ -806,6 +891,37 @@ class TestMaterializeCrtEngine:
                 "sign_requests": False,
             }
         ]
+
+    @pytest.mark.parametrize("bundle", ["", "   "], ids=["empty", "whitespace"])
+    def test_an_empty_ca_bundle_is_refused_as_invalid_config(self, bundle: str) -> None:
+        # A client handed straight to the CRT seam, past get_client: the
+        # engine refuses it before the lock, and the seam refines botocore's
+        # error to the library's.
+        from botocore.exceptions import InvalidConfigError as BotocoreInvalidConfigError
+
+        pytest.importorskip("awscrt")
+        client = SimpleNamespace(
+            meta=SimpleNamespace(endpoint_url=None),
+            _endpoint=SimpleNamespace(http_session=SimpleNamespace(_verify=bundle)),
+        )
+        config = TransferConfig(preferred_transfer_client="crt")
+        with pytest.raises(InvalidConfigError, match="Invalid CA bundle") as exc_info:
+            S3().materialize_crt_engine(client, transfer_config=config)  # pyright: ignore[reportArgumentType]
+        assert type(exc_info.value) is InvalidConfigError
+        assert isinstance(exc_info.value.__cause__, BotocoreInvalidConfigError)
+
+    def test_an_empty_aws_ca_bundle_is_refused_beside_the_client(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("awscrt")
+        monkeypatch.setenv("AWS_CA_BUNDLE", "")
+        client = SimpleNamespace(
+            meta=SimpleNamespace(endpoint_url=None),
+            _endpoint=SimpleNamespace(http_session=SimpleNamespace(_verify="/etc/ca.pem")),
+        )
+        config = TransferConfig(preferred_transfer_client="crt")
+        with pytest.raises(InvalidConfigError, match="Invalid CA bundle"):
+            S3().materialize_crt_engine(client, transfer_config=config)  # pyright: ignore[reportArgumentType]
 
     def test_the_instance_transfer_config_is_the_fallback(
         self, monkeypatch: pytest.MonkeyPatch

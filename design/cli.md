@@ -440,7 +440,9 @@ planner, `transfer`'s engine pair + the `--no-overwrite` floor probe,
 `globsieve`, `localstorage.translate_os_error`, `awsconfig`'s shared size
 core, `awsclicompare`, `crtsupport`, `masking`'s `SecretMaskingFilter`, and
 `pathresolver`'s pin stand-down probes `is_mrap_path` / `is_outpost_path` /
-`is_outpost_alias_path` / `is_s3express_path` / `is_s3express_accesspoint_path`).
+`is_outpost_alias_path` / `is_s3express_path` / `is_s3express_accesspoint_path`,
+and `s3storage`'s `s3express_unsupported_reason` and the
+`CA_BUNDLE_ENVIRONMENT_VETTED` mark).
 What the in-repo CLI needs, an external
 compatible-tool author needs too (overview.md's mission), so a CLI dependency
 is met by *publishing* the symbol, never by importing a private one. Enforced
@@ -521,7 +523,7 @@ numbers in the bold item labels below are that document's.
   different roots. An empty or whitespace-only answer is **refused** rather
   than used: `_reject_empty_ca_bundle` raises botocore's own
   `InvalidConfigError` (rc 255, its exact wording), which is what aws v2 does
-  from 2.36.2 on and what the installed botocore does from 1.43.54 - the
+  from 2.36.6 on and what the installed botocore does from 1.43.54 - the
   supported floor is older, so the CLI supplies the check itself and the
   rejection holds across the whole range. aws runs it in every
   `create_client`, so it covers the clients the SDK builds from the session
@@ -530,7 +532,10 @@ numbers in the bold item labels below are that document's.
   `--ca-bundle` or `--no-verify-ssl` set the S3 client's own trust - and
   so does the CLI: every session it opens checks each client it builds
   (`_check_every_client`, which applies the digit-led endpoint check
-  `_reject_unparsable_endpoint` alongside). It runs where aws runs it, after
+  `_reject_unparsable_endpoint` alongside), and marks each with the
+  library's `CA_BUNDLE_ENVIRONMENT_VETTED` so the library's own guess at an
+  empty `AWS_CA_BUNDLE` (made for a client a caller hands it) stands down
+  and refuses nothing aws would not. It runs where aws runs it, after
   `session.client` has resolved the profile and the endpoint, so an undeclared
   `--profile` and an empty `--region` (`Invalid endpoint`) still report first,
   and a rejected retry mode still beats it (all measured). `--no-verify-ssl`

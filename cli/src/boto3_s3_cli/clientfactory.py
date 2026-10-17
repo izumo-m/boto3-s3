@@ -181,9 +181,15 @@ def _check_every_client(session: BotocoreSession) -> None:
     trust source the way botocore does when the caller names none: the
     session's ``ca_bundle``, then ``REQUESTS_CA_BUNDLE``. It is installed
     before the credential chain is built: its SSO provider keeps the method
-    it was handed then.
+    it was handed then. Each client it returns carries the library's
+    `CA_BUNDLE_ENVIRONMENT_VETTED` mark, so the library's own guess at the
+    environment (made for a client a caller hands it) stands down: the check
+    here already ran where aws runs it, and the guess would refuse runs aws
+    completes.
     """
     import inspect
+
+    from boto3_s3.s3storage import CA_BUNDLE_ENVIRONMENT_VETTED
 
     create_client = session.create_client
     signature = inspect.signature(create_client)
@@ -197,6 +203,7 @@ def _check_every_client(session: BotocoreSession) -> None:
             verify = os.environ.get("REQUESTS_CA_BUNDLE")
         _reject_unparsable_endpoint(client.meta.endpoint_url)
         _reject_empty_ca_bundle(verify)
+        setattr(client, CA_BUNDLE_ENVIRONMENT_VETTED, True)
         return client
 
     # An instance attribute shadows the method for every caller that looks it
@@ -1326,7 +1333,7 @@ def _session_retry_mode(botocore_session: BotocoreSession) -> Any:
 
 
 def _reject_empty_ca_bundle(verify: Any) -> None:
-    """Reject an empty or whitespace-only CA bundle, like aws v2 (>= 2.36.2).
+    """Reject an empty or whitespace-only CA bundle, like aws v2 (>= 2.36.6).
 
     aws refuses an empty or whitespace-only ``ca_bundle`` / ``AWS_CA_BUNDLE`` /
     ``REQUESTS_CA_BUNDLE`` / ``--ca-bundle`` value outright at client

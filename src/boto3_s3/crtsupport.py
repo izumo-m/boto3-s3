@@ -414,6 +414,13 @@ def create_crt_transfer_manager(
     client that already resolved to signing. Only the CLI distribution sets it
     (design/crt.md section 4).
     """
+    # First of all, before the cross-process lock and whatever state the
+    # singleton is in: a CA bundle setting that would turn TLS verification
+    # off is refused (botocore's own InvalidConfigError, which the transfer
+    # engine's seam refines). Deferred: this module loads nothing SDK-backed.
+    from boto3_s3.s3storage import reject_empty_ca_bundle
+
+    reject_empty_ca_bundle(client)
     if config is None:
         # CRTTransferManager itself accepts config=None but dereferences it at
         # the first transfer (its args creator reads config.multipart_chunksize),
@@ -1054,25 +1061,15 @@ def _derive_verify(client: S3Client) -> Any:
     ``boto3-s3-cli`` avoids that split by resolving an explicit CA file into
     every client it builds, so its clients arrive here carrying a path.
 
-    An empty string is normalized to ``False``. pip s3transfer >= 0.19.2
-    rejects an empty or whitespace-only ``verify`` outright with
-    ``InvalidConfigError``, but aws-cli's bundled s3transfer fork reads the
-    empty string as falsy and turns TLS verification off - the same falsy
-    read botocore's classic lane gives it on both sides - so ``False`` is
-    exactly aws's behavior here, and normalizing it keeps the CRT lane
-    uniform across pip s3transfer versions instead of swinging with the
-    installed patch level (design/overview.md section 3, the engine-difference
-    parity exception). A whitespace-only string is left through deliberately:
-    aws attempts it as a CA-bundle path and fails too, so both sides error
-    either way and only the error's shape differs (recorded in design/crt.md).
+    An empty or whitespace-only string never arrives here:
+    `create_crt_transfer_manager` refuses such a client first
+    (`s3storage.reject_empty_ca_bundle`).
     """
     verify = getattr(
         getattr(getattr(client, "_endpoint", None), "http_session", None), "_verify", None
     )
     if verify is True or verify is None:
         return None
-    if isinstance(verify, str) and verify == "":
-        return False
     return verify
 
 

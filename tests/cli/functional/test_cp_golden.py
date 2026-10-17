@@ -164,3 +164,35 @@ class TestCpGlacierOnMoto:
         assert result.rc == 0
         assert (result.stdout, result.stderr) == ("", "")  # a silent skip is silent on both
         assert not (tmp_path / "out.bin").exists()
+
+
+class TestEmptyCaBundleVariable:
+    """An empty ``AWS_CA_BUNDLE`` beside a valid ``--ca-bundle``, as ``aws s3`` answers it.
+
+    aws refuses the variable only when it builds a client that reads it - an
+    assumed role's STS, SSO, the CRT serializer - so a static-credential run
+    completes. The CLI checks every client its sessions build at that point,
+    and marks them so the library's own guess at the environment, made for a
+    client a caller hands it, stands down (endpoint parity, not a gap).
+    """
+
+    def test_a_static_credential_dryrun_completes(
+        self, moto_s3: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import certifi
+
+        monkeypatch.setenv("AWS_CA_BUNDLE", "")
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "f.txt").write_text("hi")
+        result = run_cli_in_process(
+            [
+                "cp",
+                "--dryrun",
+                "f.txt",
+                f"s3://{FUNCTIONAL_BUCKET}/k",
+                "--ca-bundle",
+                certifi.where(),
+            ]
+        )
+        assert (result.rc, result.stderr) == (0, "")
+        assert result.stdout == f"(dryrun) upload: ./f.txt to s3://{FUNCTIONAL_BUCKET}/k\n"

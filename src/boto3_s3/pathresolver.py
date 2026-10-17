@@ -21,9 +21,10 @@ string probes - ``has_underlying_s3_path`` / ``is_mrap_path`` /
 callable without any client. aws-cli's
 ``from_session`` constructor is deliberately not ported.
 
-This module stays SDK-free at import time (design/imports.md): the first path
-*split* lazily pulls in ``s3storage`` (and with it ``botocore.exceptions``),
-and a client is touched only when a resolution actually calls one.
+This module stays SDK-free at import time (design/imports.md): constructing a
+resolver, or the first path *split*, lazily pulls in ``s3storage`` (and with
+it ``botocore.exceptions``). Construction reads each client's CA bundle
+setting; a client is called only when a resolution needs it.
 """
 
 from __future__ import annotations
@@ -278,10 +279,19 @@ class S3PathResolver:
     ``s3control_client`` answers ``GetAccessPoint`` /
     ``ListMultiRegionAccessPoints``; ``sts_client`` supplies the account id
     when an alias carries none. Both are used lazily - a path with a plain
-    bucket name resolves to itself without any API call.
+    bucket name resolves to itself without any API call. A client whose CA
+    bundle setting is empty or whitespace-only, or either client while
+    ``AWS_CA_BUNDLE`` is set but empty or whitespace-only, is refused at construction with
+    ``InvalidConfigError`` (`s3storage.reject_empty_ca_bundle`).
     """
 
     def __init__(self, *, s3control_client: Any, sts_client: Any) -> None:
+        # Deferred import: keeps this module SDK-free at import time.
+        from boto3_s3.s3storage import reject_empty_ca_bundle, s3_errors
+
+        with s3_errors(operation="mv"):
+            reject_empty_ca_bundle(s3control_client, check_environment=True)
+            reject_empty_ca_bundle(sts_client, check_environment=True)
         self._s3control_client = s3control_client
         self._sts_client = sts_client
 

@@ -397,7 +397,11 @@ class S3PathResolver:
 consulted only for an access point *alias* or an S3 Express access point,
 which carry no account id. Both
 are keyword-only and required, and both are used lazily: a path with a plain
-bucket name resolves to itself without touching either client. The
+bucket name resolves to itself without calling either client. Construction
+raises [`InvalidConfigError`](./exceptions.md#invalidconfigerror) for a client
+whose CA bundle setting is empty or whitespace-only, or while `AWS_CA_BUNDLE`
+is set but empty or whitespace-only (see
+[`InvalidConfigError`](./exceptions.md#invalidconfigerror)). The
 parameters are untyped so any boto3 client fits; build them with the region,
 endpoint and profile wiring you want (the AWS CLI builds the s3control client
 in the path's region and the sts client without one). The resolver keeps no
@@ -571,10 +575,11 @@ deleter a rehearsal — see [Dry runs](#dry-runs).
 
 Construction raises [`ValidationError`](./exceptions.md#validationerror) for a
 `storage` that is not an `S3Storage` and for a `batch_size` that is not an
-integer in 1..1000. If
-`storage` has to build its own default client, that build can raise
+integer in 1..1000. Getting `storage`'s client - building its own default
+one, or vetting a supplied one - can raise
 [`ConfigurationError`](./exceptions.md#configurationerror) or
-[`InvalidConfigError`](./exceptions.md#invalidconfigerror). Where
+[`InvalidConfigError`](./exceptions.md#invalidconfigerror) (a CA bundle
+setting that is empty or whitespace-only among the latter). Where
 `transfer_config` selects the CRT engine, building it raises what building a
 transfer's raises: `ValidationError` for classic-only settings beside an
 explicit `'crt'`, `InvalidConfigError` for a CA bundle the CRT cannot use, and

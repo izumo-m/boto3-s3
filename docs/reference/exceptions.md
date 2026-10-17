@@ -310,16 +310,37 @@ the CRT engine explicitly without a usable awscrt installed propagates botocore'
 A configuration value is present but invalid or unusable. Raised for a config
 or `[s3]` value that will not convert to the type the key requires (an integer,
 a size, a rate), for a config key that names a section where a value is
-expected, for botocore's `ProfileNotFound` and `PartialCredentialsError`, and
-for any other botocore failure to read the config file while the library reads
-AWS configuration (a `ConfigParseError`, say). It is also the class for a
+expected, for botocore's `ProfileNotFound`, `PartialCredentialsError` and
+`InvalidConfigError` (a `source_profile` loop, say), and for any other botocore
+failure to read the config file while the library reads AWS configuration (a
+`ConfigParseError`, say). It is also the class for a
 malformed `endpoint_url` — one passed to `S3`, or one taken from
 `AWS_ENDPOINT_URL` / `AWS_ENDPOINT_URL_S3` when a default client is built —
 and for a malformed or empty region, both of which botocore rejects with a
 `ValueError` that the client builders convert here, for a config value of
 the wrong shape (`s3 = foo`, a value where botocore reads a section), on which
 botocore's client build fails with an `AttributeError`, and for a
-`credential_process` executable that cannot run while the client is built. The CRT transfer engine
+`credential_process` executable that cannot run while the client is built. A
+CA bundle setting (`AWS_CA_BUNDLE`, a profile's `ca_bundle`,
+`REQUESTS_CA_BUNDLE`, or a client's `verify`) that resolves to an empty or
+whitespace-only string is refused with it too, rather than read as "TLS
+verification off": by `S3.client()`, by `S3Storage.get_client()` for a client
+it builds or is handed, by `S3PathResolver` for the clients it is given, and
+by the CRT transfer engine, whatever the installed botocore does with the
+value. A client the library builds resolves the setting the way the clients
+botocore builds behind it for its credentials (an assumed role, SSO) do, so
+its own value answers for them. A client you hand over (to `S3Storage`,
+`S3PathResolver` or `materialize_crt_engine`) may carry an explicit `verify`
+while those credential clients still resolve `AWS_CA_BUNDLE` first, so an
+empty or whitespace-only `AWS_CA_BUNDLE` is refused beside it as well - more
+strictly than the AWS CLI, which refuses it only when it builds a client that
+reads the value (a credential client, the CRT engine's request serializer),
+so a static credential on the classic engine passes there. Two cases stay outside, under a
+botocore older than 1.43.54: an empty `REQUESTS_CA_BUNDLE` or an empty
+profile `ca_bundle` still reaches those credential clients beside a
+handed-over client with an explicit `verify`, since the client does not name
+the session that decides whether they are read; build the client with
+`S3.client()`, or use botocore 1.43.54 or later, to have them refused. The CRT transfer engine
 raises it when it is built — at the first transfer, or from
 [`materialize_crt_engine`](./s3.md#materialize_crt_engineclient--transfer_confignone)
 — around a CA bundle it cannot read (a missing path, a directory, a file it

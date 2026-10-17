@@ -846,8 +846,12 @@ supplied. Memoized: the first call builds or returns the client and every later
 call returns the same instance. Deliberately not guarded by a lock.
 
 Raises: `InvalidConfigError` for a set-but-unusable profile, partial
-credentials or a malformed environment endpoint, and any other failure of the
-default build translated into the library taxonomy
+credentials or a malformed environment endpoint, and on every call for a
+client, built or supplied, whose CA bundle setting is empty or
+whitespace-only, and for a supplied client also while `AWS_CA_BUNDLE` is set
+but empty or whitespace-only (rather than letting requests run with TLS
+verification off - see [`InvalidConfigError`](./exceptions.md#invalidconfigerror)); any
+other failure of the default build is translated into the library taxonomy
 ([`./exceptions.md`](./exceptions.md)); a raw botocore error never escapes.
 Missing credentials and an unset region do not fail the build: missing
 credentials fail the client's first request instead, and an unset region falls

@@ -13,10 +13,12 @@ from typing import Any
 
 import pytest
 from botocore.exceptions import ClientError
+from botocore.exceptions import InvalidConfigError as BotocoreInvalidConfigError
 
 from boto3_s3.exceptions import (
     Boto3S3Error,
     ConfigurationError,
+    InvalidConfigError,
     MalformedResponseError,
     ValidationError,
 )
@@ -371,6 +373,28 @@ class TestIsS3ExpressAccessPointPath:
 
 
 class TestResolve:
+    @pytest.mark.parametrize("which", ["s3control", "sts"])
+    def test_a_client_with_an_empty_ca_bundle_is_refused(self, which: str) -> None:
+        # aws refuses the pair when it builds them; the resolver refuses a
+        # caller-built one at construction, before any request.
+        from types import SimpleNamespace
+
+        empty = SimpleNamespace(_endpoint=SimpleNamespace(http_session=SimpleNamespace(_verify="")))
+        clients: dict[str, Any] = {"s3control_client": _FakeS3Control(), "sts_client": _FakeSts()}
+        clients[f"{which}_client"] = empty
+        with pytest.raises(InvalidConfigError, match="Invalid CA bundle") as exc_info:
+            S3PathResolver(**clients)
+        assert type(exc_info.value) is InvalidConfigError
+        assert exc_info.value.operation == "mv"
+        assert isinstance(exc_info.value.__cause__, BotocoreInvalidConfigError)
+
+    def test_an_empty_aws_ca_bundle_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The pair is handed over, so the variable their credential clients
+        # resolve first is checked too.
+        monkeypatch.setenv("AWS_CA_BUNDLE", "")
+        with pytest.raises(InvalidConfigError, match="Invalid CA bundle"):
+            S3PathResolver(s3control_client=_FakeS3Control(), sts_client=_FakeSts())
+
     def test_plain_bucket_passes_through_without_any_call(self) -> None:
         s3control = _FakeS3Control()
         sts = _FakeSts()

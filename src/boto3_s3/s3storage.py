@@ -57,6 +57,9 @@ from botocore.exceptions import (
 from botocore.exceptions import (
     ConnectionError as BotoConnectionError,
 )
+from botocore.exceptions import (
+    InvalidConfigError as BotocoreInvalidConfigError,
+)
 from typing_extensions import override
 
 from boto3_s3.exceptions import (
@@ -127,6 +130,9 @@ _OPEN_WRITE_NOT_IMPLEMENTED = (
 # 3). Membership differs: the factory's construction-scoped catch maps every
 # other BotoCoreError to InvalidConfigError, while this general translator
 # lists only the known config shapes and keeps anything unlisted at the base.
+# botocore's own InvalidConfigError family is one of those shapes: a
+# source_profile loop, a missing services section, an empty CA bundle
+# (`reject_empty_ca_bundle`).
 _UNRESOLVED_CONFIG_ERRORS: tuple[type[BaseException], ...] = (
     NoCredentialsError,
     NoRegionError,
@@ -134,6 +140,7 @@ _UNRESOLVED_CONFIG_ERRORS: tuple[type[BaseException], ...] = (
 _INVALID_CONFIG_ERRORS: tuple[type[BaseException], ...] = (
     PartialCredentialsError,
     ProfileNotFound,
+    BotocoreInvalidConfigError,
 )
 # Both halves of botocore's transport tree: ConnectionError (endpoint /
 # connect-timeout / proxy) and HTTPClientError (read timeout, a closed
@@ -355,7 +362,8 @@ def translate_boto_error(
     credentials/region and a missing optional dependency
     (``MissingDependencyException`` - awscrt absent where SigV4a signing needs
     it) to ``ConfigurationError``, a present-but-unusable
-    profile or partial credentials to its ``InvalidConfigError`` refinement,
+    profile, partial credentials or botocore's own ``InvalidConfigError``
+    family to the ``InvalidConfigError`` refinement,
     and ``ParamValidationError`` (client-side validation - no HTTP happened)
     to ``ValidationError``, which aws-cli files under its usage rc. A CRT
     network or server failure is a ``TransportError`` by its awscrt name
@@ -417,6 +425,75 @@ def client_build_error(exc: ValueError | AttributeError | OSError) -> Boto3S3Err
     ):
         return TransportError(str(exc))
     return InvalidConfigError(str(exc))
+
+
+# The attribute that tells `reject_empty_ca_bundle` a client's CA bundle
+# environment is already accounted for. `S3.client()` sets it on what it
+# builds (the client's own value answers for the credential clients behind
+# it), and boto3-s3-cli on every client its sessions build: those sessions
+# hold each client the SDK builds behind them - the credential chain's STS
+# and SSO clients, the CRT request serializer - to the CA bundle check at the
+# point aws runs it, so checking the environment again would refuse runs aws
+# completes (static credentials beside a valid --ca-bundle).
+CA_BUNDLE_ENVIRONMENT_VETTED = "_boto3_s3_ca_bundle_environment_vetted"
+
+
+def reject_empty_ca_bundle(client: Any, *, check_environment: bool = False) -> None:
+    """Refuse a client whose CA bundle setting is an empty or whitespace-only string.
+
+    botocore reads an empty value as falsy and turns TLS certificate
+    verification off without a word, so a misconfiguration - an unset
+    variable expanded into ``AWS_CA_BUNDLE``, a blank ``ca_bundle =`` line -
+    silently drops verification; a whitespace-only value fails later as an
+    unreadable path. botocore 1.43.54 and aws-cli 2.36.6 refuse both when a
+    client is built. The supported botocore floor is older, so this supplies
+    the same refusal - botocore's own ``InvalidConfigError`` with its exact
+    wording, which `s3_errors` refines to `InvalidConfigError` - for a client
+    an older botocore built, on either transfer engine.
+
+    The client's own setting is read where botocore keeps it, the endpoint's
+    HTTP session; a client without that shape (a test double) passes, and so
+    do ``False`` (verification off on purpose), ``True`` and a real path.
+    A client the library builds resolves that setting through the same chain
+    as the clients botocore builds behind it for its credentials (an assumed
+    role's STS, SSO): ``AWS_CA_BUNDLE``, the profile's ``ca_bundle``, then
+    ``REQUESTS_CA_BUNDLE``, so its own value answers for them too.
+
+    *check_environment* is for a client the caller built and handed over,
+    which may carry an explicit ``verify`` while those credential clients
+    still resolve the chain: an empty or whitespace-only ``AWS_CA_BUNDLE``,
+    first in the chain, is refused as well. This is stricter than aws, which
+    refuses it only when it builds a client that reads the value - those
+    credential clients, the CRT engine's request serializer - so a static
+    credential on the classic engine passes there. ``REQUESTS_CA_BUNDLE`` and a profile's
+    ``ca_bundle`` stay out of reach in that position: whether they are read
+    depends on the session the client came from, which it does not name. A
+    client marked `CA_BUNDLE_ENVIRONMENT_VETTED` skips the environment: one
+    `S3.client()` built, whose own value already answers for it, and one
+    boto3-s3-cli built, whose sessions check every client at aws's point.
+    """
+    verify = getattr(
+        getattr(getattr(client, "_endpoint", None), "http_session", None), "_verify", None
+    )
+    refused = isinstance(verify, str) and not verify.strip()
+    if check_environment and not refused:
+        env = os.environ.get("AWS_CA_BUNDLE")
+        # The mark is read last: on a botocore client a missing attribute
+        # goes through its event-emitting __getattr__.
+        refused = (
+            env is not None
+            and not env.strip()
+            and not getattr(client, CA_BUNDLE_ENVIRONMENT_VETTED, False)
+        )
+    if refused:
+        raise BotocoreInvalidConfigError(
+            error_msg=(
+                "Invalid CA bundle: the configured value (ca_bundle, "
+                "AWS_CA_BUNDLE, REQUESTS_CA_BUNDLE, or verify) resolved to an "
+                "empty or whitespace-only string. Provide a valid path to a "
+                "CA bundle file."
+            )
+        )
 
 
 @contextmanager
@@ -1356,7 +1433,11 @@ class S3Storage(Storage):
         credentials, a malformed environment endpoint, a config value of the
         wrong shape or a ``credential_process`` executable that cannot run -
         never the raw
-        botocore error (design/exceptions.md section 1). Missing credentials
+        botocore error (design/exceptions.md section 1). A client, built or
+        supplied, whose CA bundle setting is empty or whitespace-only is
+        refused with ``InvalidConfigError`` on every call, and a supplied one
+        also while ``AWS_CA_BUNDLE`` is set but empty or whitespace-only
+        (`reject_empty_ca_bundle`). Missing credentials
         and an unset region do not fail the build: the client's first request
         fails on the missing credentials instead, and an unset region falls
         back to botocore's default for S3.
@@ -1372,6 +1453,8 @@ class S3Storage(Storage):
                     # shape, a credential_process that cannot run - the same
                     # holes S3.client() plugs (`client_build_error`).
                     raise client_build_error(exc) from exc
+        with s3_errors(operation=None):
+            reject_empty_ca_bundle(self._client, check_environment=not self._owns_client)
         return self._client
 
     def close(self) -> None:
@@ -1932,4 +2015,10 @@ class S3Storage(Storage):
                     raise translate_os_error(exc, operation=_GET_FILE_OPERATION, key=dest) from exc
 
 
-__all__ = ["S3Storage", "s3_errors", "s3express_unsupported_reason", "translate_boto_error"]
+__all__ = [
+    "CA_BUNDLE_ENVIRONMENT_VETTED",
+    "S3Storage",
+    "s3_errors",
+    "s3express_unsupported_reason",
+    "translate_boto_error",
+]

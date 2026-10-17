@@ -31,7 +31,7 @@ import threading
 import time
 from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import Executor, Future
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, replace
 from importlib.metadata import version
 from queue import Empty, Queue
@@ -65,9 +65,11 @@ from boto3_s3.exceptions import (
 from boto3_s3.iostorage import IOStorage
 from boto3_s3.localstorage import LocalStorage, to_native_path, translate_os_error
 from boto3_s3.s3storage import (
+    CA_BUNDLE_ENVIRONMENT_VETTED,
     S3Storage,
     client_build_error,
     drop_like_aws,
+    reject_empty_ca_bundle,
     request_failure,
     s3_errors,
     s3_request,
@@ -1240,7 +1242,10 @@ class S3:
         (``s3 = foo``) or a ``credential_process`` executable that cannot run,
         and the base ``Boto3S3Error`` for any other
         botocore error, which the translator's last clause claims - never the
-        raw botocore error (design/exceptions.md section 1). Missing
+        raw botocore error (design/exceptions.md section 1). A client whose
+        CA bundle setting resolves to an empty or whitespace-only string is
+        refused with ``InvalidConfigError`` rather than returned with TLS
+        verification off (`reject_empty_ca_bundle`). Missing
         credentials and an unset region do not fail the build: missing
         credentials fail when the client first signs - a request, or a
         ``presign`` - as a ``ConfigurationError``, and an unset region falls
@@ -1252,7 +1257,7 @@ class S3:
         # operation=None: no subcommand is in scope at build time.
         with s3_errors(operation=None):
             try:
-                return build("s3", endpoint_url=self._endpoint_url, config=self._config)
+                client = build("s3", endpoint_url=self._endpoint_url, config=self._config)
             except (ValueError, AttributeError, OSError) as exc:
                 # What the SDK raises outside its own family while it reads
                 # the configuration (`client_build_error`). A `config` that is
@@ -1266,6 +1271,14 @@ class S3:
                 ):
                     raise
                 raise client_build_error(exc) from exc
+            reject_empty_ca_bundle(client)
+        # Its own value answers for the environment (`reject_empty_ca_bundle`),
+        # so the S3Storage it is handed to need not guess at it again. A
+        # session that returns an object refusing new attributes just leaves
+        # that guess in place.
+        with suppress(AttributeError):
+            setattr(client, CA_BUNDLE_ENVIRONMENT_VETTED, True)
+        return client
 
     def materialize_crt_engine(
         self, client: S3Client, *, transfer_config: TransferConfig | None = None
@@ -1300,6 +1313,8 @@ class S3:
         # seam classifies them (`transfer.crt_engine_errors`); no operation is
         # in scope here, so the errors carry none.
         with crt_engine_errors(operation=None):
+            # A client the caller hands over (`reject_empty_ca_bundle`).
+            reject_empty_ca_bundle(client, check_environment=True)
             crtsupport.materialize_crt_engine(
                 client,
                 config,

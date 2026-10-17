@@ -175,7 +175,7 @@ taxonomy ([`storage.md`](./storage.md) section 2).
 | an S3 `LastModified` the host's local zone cannot represent (aws-cli's `astimezone` `OverflowError`, `date value out of range`; on Windows also the `OSError` `[Errno 22]` its `time.localtime` raises below the epoch and past the year 3000, measured against `aws.exe` - `s3storage.reject_unrepresentable_stamp`) | `MalformedResponseError` |
 | `NoCredentialsError` / `NoRegionError` | `ConfigurationError` |
 | `MissingDependencyException` from a request/signing path (awscrt absent where SigV4a is required - an MRAP target) | `ConfigurationError` |
-| `ProfileNotFound` / `PartialCredentialsError` (the library translator's list; the CLI's client factory goes further and maps every other construction-time `BotoCoreError` here too, while the library's general translator keeps unlisted ones at the base) | `InvalidConfigError` |
+| `ProfileNotFound` / `PartialCredentialsError` / botocore's own `InvalidConfigError` family (the library translator's list; the CLI's client factory goes further and maps every other construction-time `BotoCoreError` here too, while the library's general translator keeps unlisted ones at the base) | `InvalidConfigError` |
 | an `[s3]` / config-file value that does not convert (`runtimeconfig` / `awsconfig`) | `InvalidConfigError` |
 | a post-parse option-value conversion failure (`--page-size abc`, the CLI timeouts) | `InvalidValueError` |
 | `ParamValidationError` / invalid argument / violated precondition (stdin absent, case-conflict `error` mode) | `ValidationError` |

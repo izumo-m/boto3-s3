@@ -609,16 +609,25 @@ class TestCreateCrtTransferManager:
             (True, None),
             (False, False),
             ("/etc/ca.pem", "/etc/ca.pem"),
-            ("", False),
-            ("   ", "   "),
         ],
-        ids=["default", "disabled", "ca-bundle", "empty-ca-bundle", "whitespace-ca-bundle"],
+        ids=["default", "disabled", "ca-bundle"],
     )
     def test_verify_mapping(self, stubs: CrtStubs, botocore_verify: Any, expected: Any) -> None:
         client = FakeClient(verify=botocore_verify)
         crtsupport.create_crt_transfer_manager(client, None)  # pyright: ignore[reportArgumentType]
         [kwargs] = stubs.create_kwargs
         assert kwargs["verify"] == expected
+
+    @pytest.mark.parametrize("botocore_verify", ["", "   "], ids=["empty", "whitespace"])
+    def test_empty_ca_bundle_is_refused(self, stubs: CrtStubs, botocore_verify: str) -> None:
+        # Never read as "verification off": botocore's own InvalidConfigError,
+        # before any CRT client exists.
+        from botocore.exceptions import InvalidConfigError as BotocoreInvalidConfigError
+
+        client = FakeClient(verify=botocore_verify)
+        with pytest.raises(BotocoreInvalidConfigError, match="Invalid CA bundle"):
+            crtsupport.create_crt_transfer_manager(client, None)  # pyright: ignore[reportArgumentType]
+        assert stubs.create_kwargs == []
 
     def test_plain_config_is_not_forwarded_to_the_manager(
         self, stubs: CrtStubs, caplog: pytest.LogCaptureFixture
