@@ -1151,15 +1151,22 @@ decoding on write for a download.
 
 `encoding` is that codec's encoding and applies only to a text stream; a name
 `codecs.lookup` does not know raises `InvalidValueError` from the constructor.
-A text stream therefore takes the object as text: one that is not valid text in
-`encoding` fails its transfer (a `Boto3S3Error` raised from the
-`UnicodeDecodeError`), and the stream's own encoding and newline translation
-apply to what is written. It is never swapped for its `.buffer` — text it has
-read ahead would be skipped and its encoding ignored — so pass a binary stream
-(`sys.stdout.buffer`) or [`StdioStorage`](#stdiostorage) for the bytes as
-stored.
 A single incremental encoder or decoder spans the whole transfer, so a stateful
 codec behaves as one stream — utf-16 emits its BOM once, not per chunk.
+
+A text stream carries the object as text: the encoding it was opened with and
+its newline translation apply to what is read and written. Text that will not
+convert fails the transfer — on a download, an object that is not valid text
+in `encoding` or a character the stream cannot write; on an upload, bytes the
+stream cannot read or a character `encoding` cannot encode. A failed download
+leaves in the stream whatever was decoded before the failure, and the item's
+`OpResult.error` is a `Boto3S3Error` with the `UnicodeDecodeError` or
+`UnicodeEncodeError` on `__cause__`. A text stream is never swapped for its
+`.buffer` — text it has read ahead would be skipped and the encoding it was
+opened with ignored — so pass a binary stream (a file opened `"rb"` or `"wb"`)
+or [`StdioStorage`](#stdiostorage) for the bytes as they are; `StdioStorage`
+writes standard output in order, where `IOStorage(sys.stdout.buffer)` on the
+classic engine writes a redirected file from offset 0.
 
 **The caller's stream is never closed by this class.** The transfer closes
 every file object `open` returns, since that close is how a real backend

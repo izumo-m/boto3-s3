@@ -34,7 +34,7 @@ through it goes straight into `sys.stdout.buffer` and is not flushed when the
 transfer finishes, exactly as `aws` leaves it — whatever the stream still holds
 goes out on your own `flush()` or on the interpreter's at exit.
 
-## 1. Text streams take the object as text
+## 1. Text streams carry the object as text
 
 A binary stream — `io.BytesIO`, a file opened `"rb"` or `"wb"`, a `gzip` writer,
 a pipe — is used as it is; one that cannot be positioned (a pipe, a socket) is
@@ -46,17 +46,34 @@ wrapped with a codec:
 IOStorage(io.StringIO("hello"), encoding="utf-8")   # utf-8 is the default
 ```
 
-Uploads encode, downloads decode, so a text stream sees the object as text and
-its own rules apply on top. An object that is not valid text in `encoding` — an
-image, say — fails its transfer: the item's error is a `Boto3S3Error` raised
-from the `UnicodeDecodeError`. A text-mode file, or `sys.stdout`, writes in the
-encoding it was opened with and, on Windows, turns each `\n` into `\r\n`.
+Uploads encode, downloads decode, so a text stream carries the object as text
+and its own rules apply on top. A text-mode file reads and writes in the
+encoding it was opened with and translates newlines as its `newline=` says: by
+default it reads `\r\n` and `\r` as `\n` on every platform, and on Windows
+writes each `\n` as `\r\n`. `sys.stdin` and `sys.stdout` translate on Windows
+only; `io.StringIO()` translates nothing.
 
-For the bytes exactly as stored, hand over a binary stream instead:
-`sys.stdout.buffer`, a file opened `"wb"`, or `StdioStorage()` for standard
-input and output. A text stream is never swapped for its `.buffer` behind your
-back: text it has already read ahead would be skipped, and the encoding you
-opened it with would be ignored.
+Text that will not convert fails the transfer: on a download, an object that
+is not valid text in `encoding` (an image, under utf-8) or a character the
+stream cannot write in the encoding it was opened with; on an upload, bytes the
+stream cannot read in that encoding (a text-mode `open("photo.jpg")`) or a
+character `encoding` cannot encode. A failed download leaves in the stream
+whatever was decoded before the failure. `cp` (or `mv`) then raises
+`BatchError`, whose `__cause__` is the item's `OpResult.error`; on a download
+that is a `Boto3S3Error` with the `UnicodeDecodeError` or
+`UnicodeEncodeError` on its own `__cause__`.
+
+For the bytes exactly as they are, hand over a binary stream instead — a file
+opened `"rb"` or `"wb"` — or use `StdioStorage()` for standard input and
+output. Prefer `StdioStorage()` to `IOStorage(sys.stdout.buffer)`: stdout
+redirected to a file with `>` can seek, so the classic engine writes that
+buffer from offset 0, over whatever the file already holds (section 2). Text
+you have printed may still sit in `sys.stdout`; call `sys.stdout.flush()`
+first, or it comes out after the object. Likewise, once you have read from
+`sys.stdin` it may hold input read ahead of what it returned, and
+`StdioStorage()` starts after that. A text stream is never swapped for its
+`.buffer` behind your back for the same reason: text it has already read ahead
+would be skipped, and the encoding it was opened with would be ignored.
 
 ## 2. The stream stays yours
 
@@ -91,12 +108,13 @@ buf.seek(0)
 print(buf.read())        # or just: buf.getvalue()
 ```
 
-A stream that cannot seek is fine — `sys.stdout.buffer`, a pipe, or a writer that
+A stream that cannot seek is fine — a pipe, a terminal, or a writer that
 exposes only `write`, as in the `gzip` example above. There is nothing to
 rewind; the bytes go wherever the stream sends them, and your own `with` block
 or `close()` finalizes it. A `gzip` writer handed over directly is not such a
 stream: it reports itself seekable but seeks only forward, so a download large
-enough to go multipart can fail on it.
+enough to go multipart can fail on it. `StdioStorage()` writes standard output
+in order too, even when `>` has sent it to a regular file that can seek.
 
 ## 3. Where a stream may appear
 

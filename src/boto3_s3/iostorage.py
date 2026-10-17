@@ -364,11 +364,12 @@ class IOStorage(Storage):
     stream - recognized as an
     ``io.TextIOBase`` or by its ``encoding`` attribute (``codecs.open``'s
     ``StreamReaderWriter``, a text-mode ``SpooledTemporaryFile``) - is wrapped
-    with ``encoding`` (default utf-8), so it takes the object as text. It is
-    never swapped for its ``.buffer``: text it has already read ahead would be
-    skipped, and the encoding it was opened with ignored; a caller wanting the
-    bytes as stored passes a binary stream. The caller's stream is never closed
-    by this class. As a single endpoint it has no listing: ``scan_pages`` /
+    with ``encoding`` (default utf-8), so it carries the object as text. A text
+    stream is never swapped for its ``.buffer``: text it has already read ahead
+    would be skipped, and the encoding it was opened with ignored; a caller
+    wanting the bytes as they are passes a binary stream, or `StdioStorage` for
+    the process's standard input and output. The caller's stream is never
+    closed by this class. As a single endpoint it has no listing: ``scan_pages`` /
     ``delete`` / ``get_fileinfo`` raise.
 
     ``capabilities`` is just the ``OPEN_*`` pair: a single stream supports only byte
