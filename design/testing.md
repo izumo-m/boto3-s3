@@ -191,7 +191,9 @@ bucket must stay existing and empty. The `mb_buckets` / `rb_buckets`
 fixtures hand each scenario two fresh names, one per side
 (`<main>-mb007-aws` / `<main>-mb007-ours`), and force-delete both around the
 test: real S3 lags behind a delete and re-create under one name, so no name
-is used twice in a run. Each side's stdout masks its own bucket name, so the
+is used twice in a run. Whether a bucket exists is read from ListBuckets,
+not HeadBucket: on real S3, HeadBucket answers from a cache that can trail
+a create by half a minute and a delete by minutes. Each side's stdout masks its own bucket name, so the
 two compare equal. Sibling names must not end in `-an` (account-regional
 BucketNamespace semantics are unverified against the dev stack; covered by
 ports and unit tests instead). mb's tag set (`--tags`) is compared between

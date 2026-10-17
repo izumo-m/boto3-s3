@@ -593,14 +593,17 @@ def fetch_url(url: str) -> tuple[int, bytes]:
 
 
 def bucket_exists(client: Any, bucket: str) -> bool:
-    """Whether *bucket* exists (HeadBucket; any ClientError counts as "no")."""
-    from botocore.exceptions import ClientError
+    """Whether the account owns *bucket*, read from ListBuckets.
 
-    try:
-        client.head_bucket(Bucket=bucket)
-    except ClientError:
-        return False
-    return True
+    endpoint-fidelity T4: real S3 answers HeadBucket from a cache that lags
+    behind the account's bucket list - a name queried before it existed
+    keeps answering 404 for about half a minute after the create, and a
+    bucket that held objects keeps answering 200 for minutes after the
+    delete - while ListBuckets reflects both at once (measured 2026-10-17).
+    Listing also never queries the name itself, so it cannot plant that
+    cached 404.
+    """
+    return any(entry["Name"] == bucket for entry in client.list_buckets().get("Buckets", []))
 
 
 def create_bucket_in_region(client: Any, bucket: str) -> None:
@@ -627,10 +630,14 @@ def force_delete_bucket(client: Any, bucket: str) -> None:
     """Purge *bucket* and delete it; a missing bucket is a no-op.
 
     The bucket-lifecycle suites (mb/rb) clear their sibling buckets with this
-    before and after each test (the e2e fixtures).
+    before and after each test (the e2e fixtures). A bucket the account does
+    not own is left untouched without a request naming it
+    (endpoint-fidelity T4: see `bucket_exists`).
     """
     from botocore.exceptions import ClientError
 
+    if not bucket_exists(client, bucket):
+        return
     try:
         delete_under(client, bucket, "")
         client.delete_bucket(Bucket=bucket)
@@ -642,14 +649,14 @@ def force_delete_bucket(client: Any, bucket: str) -> None:
 def settle_bucket_existence(
     client: Any, bucket: str, *, exists: bool, timeout: float = 20.0
 ) -> None:
-    """Wait until HeadBucket answers *exists* for *bucket*, or *timeout* runs out.
+    """Wait until `bucket_exists` answers *exists* for *bucket*, or *timeout* runs out.
 
-    endpoint-fidelity T4: real S3 lags behind a bucket create or delete, so
-    a HeadBucket right after one can still give the old answer. The mb/rb
-    e2e suites call this after a successful run with the state the command
-    should have left; on timeout they capture whatever HeadBucket then
-    answers, so a command that really failed to create or delete still
-    diverges. The dev stack and moto answer at once.
+    endpoint-fidelity T4: a safety net for real S3's lag behind a bucket
+    create or delete (`bucket_exists` already reads the source that keeps
+    up). The mb/rb e2e suites call this after a successful run with the
+    state the command should have left; on timeout they capture whatever
+    is then listed, so a command that really failed to create or delete
+    still diverges. The dev stack and moto answer at once.
     """
     import time
 
