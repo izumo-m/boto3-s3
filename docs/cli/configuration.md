@@ -52,12 +52,10 @@ On top of those, the command reads `AWS_REGION`, `AWS_DEFAULT_REGION`,
 `AWS_CLI_OUTPUT_ENCODING` and `AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS` itself.
 
 The two encoding variables name codecs. `AWS_CLI_FILE_ENCODING` is the codec a
-`file://` paramfile is read with (section 7); `AWS_CLI_OUTPUT_ENCODING` is the
-one an error report is written with, and reaches nothing else — result lines
-and warnings keep the stream's own codec, as they do under `aws`. A codec
-Python does not know is a configuration error, exit code 255, on either
-variable. With `AWS_CLI_OUTPUT_ENCODING` unset, `PYTHONUTF8=1` selects UTF-8
-for that same report — aws's own compatibility fallback, matched here.
+`file://` paramfile is read with (section 7). `AWS_CLI_OUTPUT_ENCODING` is only
+checked: `aws` writes its error reports in that codec, while here every report
+keeps the stream's own codec. A codec Python does not know is a configuration
+error, exit code 255, on either variable.
 
 `AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS` is honored only when it is literally
 `true` (case-insensitively). `AWS_CLI_AUTO_PROMPT` and the profile key

@@ -11,14 +11,12 @@ session, and that read is where a broken setting stops the run:
   it at rc 255, with botocore's own text.
 
 `help` and `--version` open no session, so none of these reach them. The rest
-of the file pins how `AWS_CLI_OUTPUT_ENCODING`, `--cli-error-format` and
-`cli_history` act on the reports.
+of the file pins that an unknown `AWS_CLI_OUTPUT_ENCODING` codec stops the
+run, and that `--cli-error-format` and `cli_history` change nothing.
 """
 
 from __future__ import annotations
 
-import io
-import sys
 from pathlib import Path
 from typing import ClassVar
 
@@ -287,10 +285,8 @@ class TestInvalidBinaryFormat:
 class TestUnknownOutputEncoding:
     """An unknown `AWS_CLI_OUTPUT_ENCODING` codec ends the run at rc 255.
 
-    aws validates the variable between handling the top-level args and
-    emitting `session-initialized` (`validate_preferred_output_encoding`), so
-    the report is its general handler's - no envelope. Every expectation was
-    measured against the pinned aws-cli.
+    aws refuses such a codec before any command runs; nothing else here reads
+    the variable.
     """
 
     _REPORT = "boto3-s3: [ERROR]: Unknown codec `{}` specified for AWS_CLI_OUTPUT_ENCODING.\n"
@@ -335,8 +331,7 @@ class TestUnknownOutputEncoding:
     def test_a_valid_codec_leaves_a_clean_run_alone(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # The gate rejects nothing a codec lookup accepts; what a valid one
-        # then does to the *reports* is `TestOutputEncodingIsApplied`.
+        # The gate rejects nothing a codec lookup accepts.
         monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "utf-8")
         assert cli.main(["help"]) == 0
         assert capsys.readouterr().err == ""
@@ -347,134 +342,6 @@ class TestUnknownOutputEncoding:
         monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "nosuch")
         assert cli.main(["--version"]) == 0
         assert capsys.readouterr().err == ""
-
-
-class TestOutputEncodingIsApplied:
-    """A valid `AWS_CLI_OUTPUT_ENCODING` re-encodes the error reports.
-
-    aws builds a text writer for stdout and one for stderr every time it
-    reports an error, and building one reconfigures the stream to the codec
-    (`compat.set_preferred_output_encoding`). So the bytes of a report change,
-    a stateful codec gets to add its BOM, and - because reconfiguring resets
-    the error handler to `strict` - a report the codec cannot represent fails
-    to write, escapes to aws's entry-point chain and is replaced by the codec
-    error at rc 255. Every expectation below was measured against the pinned
-    aws-cli, byte for byte under the program-name mapping (the character
-    position a codec error names shifts by the width of that name, and aws's
-    leading blank line - class-1 rules of the normalization,
-    design/testing.md section 9).
-
-    Nothing else re-encodes: a successful run's result, progress and warning
-    lines are the interpreter's own on both tools (measured).
-    """
-
-    # An unknown option carrying U+00E9: the shortest report with a non-ASCII
-    # character in it that needs no client and no filesystem.
-    _ARGV: ClassVar[list[str]] = ["ls", "--café"]
-    _REPORT = "boto3-s3: [ERROR]: An error occurred (ParamValidation): Unknown options: --café\n"
-
-    def _stderr_bytes(self, monkeypatch: pytest.MonkeyPatch, encoding: str = "utf-8") -> io.BytesIO:
-        """Swap `sys.stderr` for a real text stream over a byte buffer.
-
-        capsys decodes what it captured as UTF-8, which cannot show what a
-        re-encoded report actually put on the wire - and a `cp1252` report is
-        not valid UTF-8 at all. The replacement is a `TextIOWrapper` because
-        that is the one thing the codec application needs: a stream it can
-        reconfigure.
-        """
-        raw = io.BytesIO()
-        stream = io.TextIOWrapper(raw, encoding=encoding, newline="", write_through=True)
-        monkeypatch.setattr(sys, "stderr", stream)
-        return raw
-
-    def test_the_report_is_written_in_the_codec(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # cp1252 spells U+00E9 as the single byte 0xe9 where the stream's own
-        # UTF-8 spells it 0xc3 0xa9 (measured on the pinned aws-cli).
-        raw = self._stderr_bytes(monkeypatch)
-        monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "cp1252")
-        assert cli.main(self._ARGV) == 252
-        assert raw.getvalue() == self._REPORT.encode("cp1252")
-
-    @pytest.mark.parametrize("codec", ["utf_8_sig", "utf-16"])
-    def test_a_stateful_codec_gets_its_byte_order_mark(
-        self, codec: str, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        raw = self._stderr_bytes(monkeypatch)
-        monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", codec)
-        assert cli.main(self._ARGV) == 252
-        assert raw.getvalue() == self._REPORT.encode(codec)
-
-    def test_a_codec_that_cannot_write_it_turns_252_into_255(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # The strict handler makes the write raise: aws's renderer drops the
-        # enveloped attempt, retries bare, and lets *that* failure reach its
-        # entry-point chain - which is why the position named below is the
-        # bare message's and the exit code is the general handler's, not the
-        # 252 the run had earned.
-        raw = self._stderr_bytes(monkeypatch)
-        monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "ascii")
-        assert cli.main(self._ARGV) == 255
-        assert raw.getvalue() == (
-            b"boto3-s3: [ERROR]: 'ascii' codec can't encode character '\\xe9' "
-            b"in position 41: ordinal not in range(128)\n"
-        )
-
-    def test_a_top_level_parse_failure_is_written_the_same_way(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # A global that fails to parse is reported by the same writer as
-        # every other report, so the same drop-the-envelope retry applies.
-        raw = self._stderr_bytes(monkeypatch)
-        monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "ascii")
-        assert cli.main(["ls", "--output", "b\u00e9d"]) == 255
-        assert raw.getvalue().startswith(
-            b"boto3-s3: [ERROR]: 'ascii' codec can't encode character '\\xe9' "
-        )
-
-    def test_a_codec_that_swallows_it_reports_nothing_at_255(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # `idna` rejects a label longer than 63 characters and buffers any
-        # trailing label that has no dot to close it, so the report raises and
-        # the codec error that replaces it is silently buffered away: rc 255
-        # with an empty stderr, exactly as aws ends this run.
-        raw = self._stderr_bytes(monkeypatch)
-        monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "idna")
-        assert cli.main(["ls", f"--{'a' * 70}.x"]) == 255
-        assert raw.getvalue() == b""
-
-    def test_pythonutf8_is_the_fallback_codec(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # aws still honors PYTHONUTF8=1 for the report streams (its frozen
-        # interpreter ignores it everywhere else), so the report goes out as
-        # UTF-8 even where the stream itself is not.
-        raw = self._stderr_bytes(monkeypatch, "latin-1")
-        monkeypatch.delenv("AWS_CLI_OUTPUT_ENCODING", raising=False)
-        monkeypatch.setenv("PYTHONUTF8", "1")
-        assert cli.main(self._ARGV) == 252
-        assert raw.getvalue() == self._REPORT.encode("utf-8")
-
-    def test_without_either_variable_the_stream_is_left_alone(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # The contrast for both branches above: an untouched stream writes the
-        # report in its own encoding.
-        raw = self._stderr_bytes(monkeypatch, "latin-1")
-        monkeypatch.delenv("AWS_CLI_OUTPUT_ENCODING", raising=False)
-        monkeypatch.delenv("PYTHONUTF8", raising=False)
-        assert cli.main(self._ARGV) == 252
-        assert raw.getvalue() == self._REPORT.encode("latin-1")
-
-    def test_a_run_that_reports_nothing_never_re_encodes(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # The application point is the report itself, so a run that makes none
-        # leaves both streams as the interpreter set them up (measured: a
-        # narrowed codec changes no byte of a successful command).
-        self._stderr_bytes(monkeypatch)
-        monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "cp1252")
-        assert cli.main(["help"]) == 0
-        assert sys.stderr.encoding == "utf-8"
 
 
 _ERROR_FORMATS = ["enhanced", "legacy", "json", "yaml", "text", "table"]

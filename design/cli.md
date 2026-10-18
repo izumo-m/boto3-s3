@@ -149,15 +149,10 @@ solidified design is added here.
   ambiguous-abbreviation residual above survives on 3.10 / 3.11.
   `--grants` (`nargs='+'`) needs no marker: its pattern is version-stable.
 - **Missing standard streams.** A descriptor closed before startup leaves
-  `sys.stdout` / `sys.stderr` `None`, and what argparse does about that is
-  again the interpreter's: 3.14 falls back to stderr for a missing stream
-  and drops a write that fails, where 3.10 raises. `_print_message` is
-  pinned to the 3.14 form on every parser, and `_VersionAction` writes the
-  same way, so `--version >&-` puts its line on stderr and exits 0 as on aws
-  (measured), with both streams closed included. A help page is the one
-  exception to the fallback: aws hands it to a renderer that writes to
-  descriptor 1 itself, so with stdout closed it is written nowhere, rc 0,
-  and `_print_help` skips the write.
+  `sys.stdout` `None`. `--version` then writes its line to stderr and exits
+  0, as argparse's own version action does, and a help page falls back to
+  stderr the same way (aws writes it nowhere). Anything further - both
+  streams closed, a write that fails - is the host interpreter's.
 - **Negative-number classification.** The other place aws's behaviour comes
   from its interpreter rather than its code. argparse asks
   `_negative_number_matcher` whether a dash-led token that matches no option
@@ -185,17 +180,6 @@ solidified design is added here.
   optionals live on plain argument groups. No option string here is
   digit-led, so the gate is empty everywhere; a test pins that, since a
   digit-led option would need the gate pinned too.
-- **URL scheme detection.** The same interpreter dependence outside argparse:
-  `urlsplit` requires an ASCII letter to lead a scheme only from 3.11 on, so on
-  3.10 `--endpoint-url 192.168.0.9:9000` - a MinIO / Ceph address typed without
-  `http://` - parses with `192.168.0.9` *as* the scheme and would slip past the
-  scheme check below into botocore's `Invalid endpoint:` at rc 255, where aws
-  rejects it at parse time (252). `clientfactory._has_url_scheme` tests the
-  parsed scheme's first character, which adds exactly 3.11's condition, so every
-  supported version reads the value the way the shipped distribution's 3.14 does;
-  `+http://` and `.http://` come along with it. A scheme that is merely unusual -
-  behind a leading space urlsplit strips, upper case, a single letter - still
-  passes, on both tools (measured).
 - **The MIME table an upload's `ContentType` is guessed from** is pinned the
   same way, one layer down: the library carries the shipped distribution's
   3.14 `mimetypes` tables rather than reading the running interpreter's, which
@@ -211,53 +195,18 @@ solidified design is added here.
   urllib3's `HTTPConnection` from `clientfactory._create_client`, the one seam
   every client this CLI hands out passes through, which puts one CONNECT on
   the wire across every supported Python.
-- **More wordings pinned to the official build.** The same rule reaches
-  past argparse, wherever a report quotes text the interpreter wrote: what the
-  shipped distribution's 3.14 says is what is matched on every supported
-  Python, and the older text is rewritten into it.
-  - `json` gave the two **trailing-comma** failures a message of their own in
-    3.13, anchored on the comma rather than on the closing bracket, so
-    `usage.json_error_message` re-anchors the older one and a
-    `--metadata '{"a": 1,}'` reports `Illegal trailing comma before end of
-    object` (and its array twin) on every host. Those two shapes are the whole
-    difference, measured across 3.10 / 3.12 / 3.14 over a broken-JSON corpus.
-    A decode failure the SDK raises - a `credential_process` that prints such
-    JSON - reaches the general report (rc 255), which renders every exception
-    through `usage.exception_text` and so re-anchors it the same way.
-  - `int()`'s **digit limit** is `Exceeds the limit (4300) for integer string
-    conversion` on 3.10 and `(4300 digits)` from 3.11, so
-    `usage.int_error_message` rewrites the older form: at each `int()` the CLI
-    applies to an option it converts after parsing (`--page-size`,
-    `--expires-in`, `--expected-size`, `--cli-read-timeout`,
-    `--cli-connect-timeout`, an `[s3]` size), and - through
-    `usage.exception_text` - in the general report, which is where the
-    SDK's own `int()` of a config value (`max_attempts`,
-    `metadata_service_timeout`, `metadata_service_num_attempts`) arrives.
-  - A codec that is not a text encoding (`AWS_CLI_FILE_ENCODING=rot13`)
-    surfaces as the interpreter's own `LookupError` through the general
-    handler (rc 255), and its `'<codec>' is not a text encoding` line carried
-    a `; use codecs.open() to handle arbitrary codecs` tail until 3.12 dropped
-    it, so `paramfile.read_text_paramfile` strips that tail. The neighboring
-    `unknown encoding: <codec>` needs nothing - it reads the same on every
-    version.
-  - A body-less S3 error answer carries the host's **status phrase** as its
-    message (botocore fills it from `http.client.responses`), and 3.13
-    renamed four of them (413 `Content Too Large`, 414 `URI Too Long`, 416
-    `Range Not Satisfiable`, 422 `Unprocessable Content`), so
-    `usage.status_phrase_message` puts the older name into the newer one
-    wherever `usage.exception_text` renders the error. A service's own
-    message is left alone unless it is exactly that phrase under its status
-    number as the code - the generic answer's shape, which the rewrite cannot
-    tell apart from it.
-  - Two library-side pins serve the same rule, at the ports of aws's own
-    code that call the stdlib: a key with an embedded NUL fails its download
-    directory with `mkdir: embedded null character in path` (3.12+ names the
-    os function; `transfer._DirectoryCreator`), and a failed mtime stamp names
-    the file (3.13+'s `os.utime`; `transfer._set_file_utime`).
-  - One interpreter wording is left to the host: `re`'s `expected string or
-    bytes-like object` gained `, got '<type>'` in 3.12, and the type a
-    botocore regex was handed cannot be recovered from the error (measured
-    once, on a malformed redirect answer to `ListBuckets`).
+- **Interpreter wordings are the host's.** Where a report quotes text the
+  interpreter wrote - a `json` decode failure, `int()`'s digit limit, a
+  codec's `LookupError`, the status phrase botocore puts in a body-less S3
+  error answer - it reads as the running Python writes it, not as aws's
+  bundled 3.14 does ([`overview.md`](./overview.md) section 3). The same
+  goes for which URL schemes `urlsplit` accepts: on 3.10 a digit-led scheme
+  parses, so `--endpoint-url 192.168.0.9:9000` reaches botocore's `Invalid
+  endpoint:` at rc 255 where aws rejects it at parse time (252), and an
+  endpoint from the environment or the config such as `1http://...` is not
+  refused when the client is built (aws: 255); each request then fails
+  against it. The library still pins two such wordings at its ports of aws's
+  code (`transfer._DirectoryCreator`, `transfer._set_file_utime`).
 
 ## 3. Module layout
 
@@ -265,9 +214,8 @@ solidified design is added here.
 |---|---|
 | `cli.py` | Two-stage dispatch (the aws-clidriver lazy-command-table shape): the globals pass consumes the globals off the full argv, the command scan matches its remainder against `_COMMAND_TABLE` (the registry: name -> module, class, help - no command module imported), stage 2 imports the matched module, builds its real parser and runs it. Wires `--debug`, maps exceptions to exit codes; the full `build_parser()` builds the whole surface for tests |
 | `globalargs.py` | Common option definitions (the parent; the aws-cli `globalargs.py` counterpart) |
-| `clientfactory.py` | `build_client(args) -> S3Client` (the connection/authentication layer, section 4) + `build_service_client(service, args, *, region=None)` (the s3control / sts client used by mv's path validation, section 5.8). Both open their botocore session through `_open_botocore_session` (the profile / `api_versions` / retry / timeout / credential-cache alignment of section 4) and create their client through `_create_client`, the single seam that carries aws's retry-mode vocabulary and installs the CONNECT pin - a seam rather than `_open_botocore_session` because `build_client` may be handed a session built elsewhere. Every S3 client the first one builds carries aws's message rewriter (`s3errormsg`) |
+| `clientfactory.py` | `build_client(args) -> S3Client` (the connection/authentication layer, section 4) + `build_service_client(service, args, *, region=None)` (the s3control / sts client used by mv's path validation, section 5.8). Both open their botocore session through `_open_botocore_session` (the profile / `api_versions` / retry / timeout / credential-cache alignment of section 4) and create their client through `_create_client`, the single seam that carries aws's retry-mode vocabulary and installs the CONNECT pin - a seam rather than `_open_botocore_session` because `build_client` may be handed a session built elsewhere. |
 | `proxytunnel.py` | The CONNECT request the official aws distribution sends (section 2): a copy of CPython 3.12+'s tunnel opener, installed onto urllib3's `HTTPConnection` by `clientfactory._create_client` on the host interpreters whose own opener still writes `CONNECT ... HTTP/1.0` with no `Host`. Every precondition - no urllib3, no opener to read, an opener that already writes aws's shape - declines quietly, so it is a no-op on 3.12+ and idempotent |
-| `s3errormsg.py` | aws's `after-call.s3` handler (its `s3errormsg` customization), ported verbatim: it rewrites two "requires Signature Version 4" messages and the cross-region `PermanentRedirect` in place, so every report carrying a service message - the top-level `[ERROR]` line and the per-item `upload failed:` / `download failed:` lines alike - reads as aws's. aws registers it on its session; here `build_client` registers it on each S3 client it builds, the CLI's only S3 client builder. The library stays boto3-faithful and never rewrites a service message |
 | `checksumdefault.py` | aws's default request checksum (`CRC64NVME`, its bundled botocore's `DEFAULT_CHECKSUM_ALGORITHM`) reproduced on the CLI side: `default_algorithm(client)` feeds an upload run's `TransferOptions` (section 5.7, `--checksum-algorithm`), and `register(client)` - attached by `build_client` - stamps it at `provide-client-params.s3.*` on every other request whose operation names a `ChecksumAlgorithm` member, exactly where botocore would stamp its own (under `when_required`, only the checksum-required operations). Only where botocore can compute CRC64NVME. The library keeps botocore's default |
 | `commands/base.py` | The `Command` ABC + `Context` (the injection point for runtime dependencies, section 3.1) |
 | `commands/<sub>.py` | The `Command` subclass for each subcommand (e.g., `LsCommand` in `ls.py`, `RmCommand` in `rm.py`) |
@@ -374,8 +322,7 @@ numbers in the bold item labels below are that document's.
   engine's request serializer, which read the session's `ca_bundle` even when
   `--ca-bundle` or `--no-verify-ssl` set the S3 client's own trust - and
   so does the CLI: every session it opens checks each client it builds
-  (`_check_every_client`, which applies the digit-led endpoint check
-  `_reject_unparsable_endpoint` alongside), and marks each with the
+  (`_check_every_client`), and marks each with the
   library's `CA_BUNDLE_ENVIRONMENT_VETTED` so the library's own guess at an
   empty `AWS_CA_BUNDLE` (made for a client a caller hands it) stands down
   and refuses nothing aws would not. It runs where aws runs it, once
@@ -1366,7 +1313,7 @@ reviewed with it.
 | 1 | A subcommand-specific "no result" etc. (`ls` is a specified key / prefix with 0 entries), **all errors after the start of rm / cp / mv / sync / mb / rb** (below; the rm stage of `rb --force` is the 255 below) | the convention of the S3-family commands / a task failure of the transfer family |
 | 2 | **A transfer that completed with warnings only** (cp / mv / sync's glacier skip, an mtime stamp failure, an unreadable local file, etc. section 5.7) | a task warning of the transfer family |
 | 252 | A usage error (an unknown option = `Unknown options: ...`, an invalid choice / value), a client-side `ValidationError` | `PARAM_VALIDATION_ERROR_RC` |
-| 253 | `ConfigurationError` (credentials / region unresolved, so their reports are enveloped and carry aws's hint (below); an absent awscrt x the `[s3] preferred_transfer_client=crt` degradation section 8 or an MRAP target's SigV4a section 4 item 4, which aws cannot reach and which stay bare), plus an unknown `cli_timestamp_format`, checked when a command opens its session (below) and also bare | `CONFIGURATION_ERROR_RC`, from its `NoCredentialsErrorHandler` / `NoRegionErrorHandler` / `ConfigurationErrorHandler` - three of its four rc-253 handlers, the `PagerErrorHandler` being the one with no counterpart here (below) |
+| 253 | `ConfigurationError` (credentials / region unresolved, reported with botocore's own text; an absent awscrt x the `[s3] preferred_transfer_client=crt` degradation section 8 or an MRAP target's SigV4a section 4 item 4, which aws cannot reach), plus an unknown `cli_timestamp_format`, checked when a command opens its session (below) | `CONFIGURATION_ERROR_RC`, from its `NoCredentialsErrorHandler` / `NoRegionErrorHandler` / `ConfigurationErrorHandler` - three of its four rc-253 handlers, the `PagerErrorHandler` being the one with no counterpart here (below) |
 | 254 | A server-side error (a `Boto3S3Error` whose `__cause__` is a botocore `ClientError`) | `CLIENT_ERROR_RC` |
 | 255 | Any other general error (including `TransportError`, a `NotFoundError` with no `ClientError` cause such as a missing local source, the refining `InvalidValueError` / `InvalidConfigError` (below), an unparseable config / credentials file, an unknown `cli_binary_format` or an IMDS setting botocore refuses - each found when a command opens its session (below) - and any otherwise-uncaught exception via `_dispatch`'s backstop - a `BrokenPipeError` from the `ls \| head` pipeline included, since aws has no special case for it either: both tools report `[Errno 32] Broken pipe` here and the *process* then exits **120**, the interpreter's shutdown flush having failed on the closed pipe as well (measured)), **a failure of the rm stage of `rb --force`** (section 5.4) | `GENERAL_ERROR_RC` |
 
@@ -1382,34 +1329,19 @@ post-parse value failure (`InvalidValueError`) or a bad / unusable config
 ([`exceptions.md`](./exceptions.md) section 2). Parameter validation
 failures mapped to 252 use aws-cli's default enhanced-style
 envelope, `An error occurred (ParamValidation): <message>`. This includes
-argparse failures, unknown options and plain `ValidationError`. The **code the envelope names is the handler's,
-not the exception class's**, and each handler also builds its own message, so
-the two rc-253 failures reachable here carry a hint botocore never wrote:
-`An error occurred (NoCredentials): Unable to locate credentials. You can
-configure credentials by running "aws login".` and `An error occurred
-(NoRegion): You must specify a region. You can also configure your region by
-running "aws configure".` (both measured; the `aws login` hint is reproduced
-verbatim - see [`aws-differences.md`](../docs/cli/aws-differences.md)).
-`_write_error` identifies that pair by the botocore exception the translation
-kept as `__cause__`, never by matching the message text, so the rc-253
-failures with no aws counterpart (an absent awscrt, an SDK floor shortfall)
-stay bare - as do 254 (a `ClientError` already carries its own `An error
-occurred (<Code>) when calling ...`) and 255. Inside the transfer pipeline
-nothing is enveloped: those failures never reach aws's handler chain, so a
-credential-less run reports rc 1 with botocore's own text - a per-item
-`upload failed: ... Unable to locate credentials` when it lands on an object
-(cp / mv / a keyed rm), a whole-run `fatal error: Unable to locate
-credentials` when it lands on the listing a recursive run opens with (sync,
-`rm --recursive`); all four measured on both tools.
+argparse failures, unknown options and plain `ValidationError`. No other
+report is enveloped: an unresolved credential or region (253) is botocore's
+own text, without the `NoCredentials` / `NoRegion` envelope and the `aws
+login` / `aws configure` hints aws adds, and a 254 `ClientError` already
+carries its own `An error occurred (<Code>) when calling ...`. Inside the
+transfer pipeline nothing is enveloped on aws either: a credential-less run
+reports rc 1 with botocore's own text - a per-item `upload failed: ...
+Unable to locate credentials` when it lands on an object (cp / mv / a keyed
+rm), a whole-run `fatal error: Unable to locate credentials` when it lands on
+the listing a recursive run opens with (sync, `rm --recursive`).
 The program-name prefix is rewritten on aws's side before the comparison
 (class 1), and alternate `--cli-error-format` renderings are not implemented
 ([`aws-cli-option-handling.md`](./aws-cli-option-handling.md) sections 2.1 and 6).
-An **empty** message renders as the prefix alone - `boto3-s3: [ERROR]:` with
-**no trailing space** - because aws's `format_error_message` branches on a
-falsy message before it builds the spaced form. The one failure that reaches
-it is awscrt's bare region assertion ([`crt.md`](./crt.md) section 4), and
-nothing can refill the detail there: only the 252 / 253 families carry an
-envelope code.
 
 Of aws's **two other rc-253 handlers**, only one is reachable here.
 `PagerErrorHandler` (`Pager`) belongs to the output pager, which this CLI does
@@ -1454,24 +1386,11 @@ aws renders the envelope through its session, so there the profile's
 `ProfileNotFound` costs a 252 report its envelope (the rc is unchanged); that
 rendering detail is not reproduced.
 
-**A report the output codec cannot write replaces the run's code with 255.**
-`AWS_CLI_OUTPUT_ENCODING` re-encodes the stream each report goes out on (aws's
-`compat.set_preferred_output_encoding`, applied here by
-`_set_preferred_output_encoding` at every site that writes one), and
-reconfiguring an encoding resets the error handler to `strict`, so a character
-the codec lacks makes the write *raise* rather than be escaped. That is the
-way into the bare form: aws wraps the enveloped write alone, so
-it is dropped and the message rewritten unenveloped - and when that write
-raises too, the failure escapes the handler that was reporting and aws's
-entry-point chain reports *it* through the general handler instead. `main`'s
-`UnicodeError` backstop is that chain, so an unknown-option report carrying a
-`café` under `AWS_CLI_OUTPUT_ENCODING=ascii` ends 255 with the codec's own
-message rather than the 252 it had earned - the same inversion on both tools,
-measured, with the second report left unguarded exactly as aws leaves it. An
-*unknown* codec never gets that far: a gate rejects it up front at rc 255,
-from aws's own slot for the check - after the top-level args are bound and
-before `session-initialized`, so it beats every failure a command meets when
-it opens its session.
+**`AWS_CLI_OUTPUT_ENCODING` is checked, not applied.** An unknown codec
+stops the run at rc 255 before any command runs, as aws stops it. A valid one
+changes nothing: reports are written in the stream's own encoding, so aws's
+re-encoding of its reports - and the 255 it turns a report the codec cannot
+write into - is not reproduced.
 
 **The exception rule for rm / cp / mv / sync (the transfer-family commands)**:
 aws-cli's transfer family (rm / cp / mv / sync) aggregates errors after the start

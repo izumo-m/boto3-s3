@@ -34,7 +34,6 @@ from boto3_s3.transfer import conditional_write_unsupported_reason
 from boto3_s3_cli import (
     checksumdefault,
     filters,
-    output,
     paramfile,
     shorthand,
     usage,
@@ -1009,7 +1008,7 @@ def _closing_line(error: BaseException) -> str | None:
     if isinstance(error, KeyboardInterrupt):
         return "cancelled: ctrl-c received\n"
     if isinstance(error, Exception) and not isinstance(error, AssertionError):
-        return f"fatal error: {output.error_text(error)}\n"
+        return f"fatal error: {error}\n"
     return None
 
 

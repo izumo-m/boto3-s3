@@ -13,7 +13,6 @@ around the whole dispatch in `main`.
 from __future__ import annotations
 
 import argparse
-import io
 import sys
 from pathlib import Path
 from typing import Any
@@ -239,18 +238,8 @@ class TestMainExitCodes:
     @pytest.mark.parametrize(
         ("error", "expected_rc", "expected_message"),
         [
-            (
-                NoCredentialsError(),
-                253,
-                "An error occurred (NoCredentials): Unable to locate credentials. "
-                'You can configure credentials by running "aws login".',
-            ),
-            (
-                NoRegionError(),
-                253,
-                "An error occurred (NoRegion): You must specify a region. "
-                'You can also configure your region by running "aws configure".',
-            ),
+            (NoCredentialsError(), 253, "Unable to locate credentials"),
+            (NoRegionError(), 253, "You must specify a region."),
             # PartialCredentialsError has no dedicated aws handler -> the general
             # 255, NOT 253 (only NoCredentials / NoRegion are 253), and that
             # handler formats nothing, so its report stays bare.
@@ -284,8 +273,8 @@ class TestMainExitCodes:
         # escapes command.run untranslated must still map through aws-cli's
         # handler chain (ParamValidation 252, NoCredentials/NoRegion 253,
         # ClientError 254, else 255) without a traceback (the exit-code charter,
-        # design/overview.md section 3) - and render with whatever envelope that
-        # handler carries, which is what the expected text pins per row.
+        # design/overview.md section 3) - and only a usage error (252) carries
+        # an envelope.
         # The client factory raising is the cleanest injection - ls.run calls
         # ctx.client_factory(args) directly, so the raw error escapes run.
         def factory(_args: Any) -> Any:
@@ -434,75 +423,26 @@ class TestGlobalResolutionFailures:
 
 
 class TestUnresolvedConfigReports:
-    """The two rc-253 codes reachable here: envelope + hint bytes.
+    """Credentials or a region that cannot be resolved stop the run at rc 253.
 
-    Measured against the pinned aws-cli with an isolated HOME and no
-    credentials configured (`s3 ls s3://b/`, and `s3 mv` between two access
-    point aliases with `--validate-same-s3-paths` and no region, which is what
-    reaches an s3control client - the s3 client itself falls back to the global
-    endpoint and never raises `NoRegionError`). The leading blank line aws
-    prints before each report, and the program name, are class-1 rules of the
-    parity normalization (design/testing.md section 9). The hint keeps naming
-    the `aws` tool because those are the bytes aws writes and both tools read
-    the same config files (docs/cli/aws-differences.md).
-
-    aws has two further rc-253 handlers (`Configuration`, `Pager`) that no
-    failure here can raise; design/cli.md section 6 records them.
+    The report is botocore's own text. aws's two dedicated handlers are the
+    only rc-253 failures it reaches on this surface; every other botocore
+    failure is its general rc 255.
     """
 
-    _NO_CREDENTIALS = (
-        "boto3-s3: [ERROR]: An error occurred (NoCredentials): Unable to locate "
-        'credentials. You can configure credentials by running "aws login".\n'
-    )
-    _NO_REGION = (
-        "boto3-s3: [ERROR]: An error occurred (NoRegion): You must specify a region."
-        ' You can also configure your region by running "aws configure".\n'
-    )
-
-    def test_no_credentials_is_enveloped_with_the_login_hint(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # The whole real path: botocore raises inside the listing, the library
-        # translates it and keeps the botocore error as __cause__, and that
-        # cause is what names the code.
+    def test_no_credentials_is_253(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # The whole real path: botocore raises inside the listing and the
+        # library translates it, keeping the botocore error as __cause__.
         ctx = Context(client_factory=lambda _args: _RaisingClient(NoCredentialsError()))  # pyright: ignore[reportArgumentType]
         assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 253
-        assert capsys.readouterr().err == self._NO_CREDENTIALS
+        assert capsys.readouterr().err == "boto3-s3: [ERROR]: Unable to locate credentials\n"
 
-    def test_no_region_is_enveloped_with_the_configure_hint(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # Same real translation for the other half of the pair. What raises it
-        # in production is a region-less s3control build (mv's path resolution,
-        # pinned in test_clientfactory.py) - the seam differs, the rendering
-        # does not.
+    def test_no_region_is_253(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # What raises it in production is a region-less s3control build (mv's
+        # path resolution, pinned in test_clientfactory.py).
         ctx = Context(client_factory=lambda _args: _RaisingClient(NoRegionError()))  # pyright: ignore[reportArgumentType]
         assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 253
-        assert capsys.readouterr().err == self._NO_REGION
-
-    def test_the_code_is_read_off_the_cause_not_the_context(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # `raise X from exc` sets __cause__ AND __context__, so only a
-        # cause-only exception distinguishes them. The translation is explicit
-        # about the link it attaches, and reading the implicit one would pick up
-        # whatever exception happened to be in flight.
-        def factory(_args: Any) -> Any:
-            raise _with_cause(ConfigurationError("You must specify a region."), NoRegionError())
-
-        assert cli.main(["ls", "s3://bucket/p/"], ctx=Context(client_factory=factory)) == 253
-        assert capsys.readouterr().err == self._NO_REGION
-
-    def test_an_untranslated_botocore_error_is_enveloped_too(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # The catch-all route (_exit_code_for_unexpected): a raw botocore error
-        # escaping a command is the same aws handler, so it renders the same.
-        def factory(_args: Any) -> Any:
-            raise NoCredentialsError()
-
-        assert cli.main(["ls", "s3://bucket/p/"], ctx=Context(client_factory=factory)) == 253
-        assert capsys.readouterr().err == self._NO_CREDENTIALS
+        assert capsys.readouterr().err == "boto3-s3: [ERROR]: You must specify a region.\n"
 
     def test_partial_credentials_stays_bare(self, capsys: pytest.CaptureFixture[str]) -> None:
         # aws has no handler for it -> its general one: rc 255, no envelope,
@@ -526,15 +466,6 @@ class TestUnresolvedConfigReports:
             f"boto3-s3: [ERROR]: The config profile ({profile}) could not be found\n"
         )
 
-    def test_another_rc_leaves_the_same_exception_bare(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # The envelope belongs to the handler, not to the exception: aws's
-        # rc-254 and rc-255 handlers format nothing, so the same botocore error
-        # reported at another rc must render bare.
-        cli._write_error(NoCredentialsError(), rc=255)
-        assert capsys.readouterr().err == "boto3-s3: [ERROR]: Unable to locate credentials\n"
-
     def test_a_configuration_error_with_no_botocore_cause_stays_bare(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -547,41 +478,6 @@ class TestUnresolvedConfigReports:
         assert cli.main(["ls", "s3://bucket/p/"], ctx=Context(client_factory=factory)) == 253
         assert capsys.readouterr().err == (
             "boto3-s3: [ERROR]: preferred_transfer_client is set to crt but awscrt is ...\n"
-        )
-
-    def test_an_empty_message_writes_the_prefix_alone(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # aws's error formatter branches on a falsy message before it builds
-        # the spaced form, so the prefix carries NO trailing space (measured:
-        # a bare AssertionError from awscrt's region check renders exactly
-        # this). The rc-255 general handler envelopes nothing, so nothing can
-        # refill the detail.
-        cli._write_error("", rc=255)
-        assert capsys.readouterr().err == "boto3-s3: [ERROR]:\n"
-
-    def test_a_whitespace_only_message_keeps_awss_spaced_form(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # aws tests the message for falsiness BEFORE stripping it, so a
-        # whitespace-only message is not the empty branch: it takes the spaced
-        # form and strips to nothing inside it, leaving the trailing space.
-        # Not a case any handler here produces - pinned because the ordering
-        # it proves is the one an empty message with a code depends on.
-        cli._write_error("  \n ", rc=255)
-        assert capsys.readouterr().err == "boto3-s3: [ERROR]: \n"
-
-    def test_an_empty_message_with_a_code_keeps_the_envelope(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # The other half of that ordering: aws's handler envelopes first and
-        # its formatter tests the result, so an empty detail under a code
-        # renders the envelope - stripped of the space the empty detail left,
-        # never the prefix alone. Unreachable today (only rc 252 / 253 carry a
-        # code, and both always carry a message); the mechanism is aws's.
-        cli._write_error("", rc=252)
-        assert (
-            capsys.readouterr().err == "boto3-s3: [ERROR]: An error occurred (ParamValidation):\n"
         )
 
 
@@ -1284,15 +1180,11 @@ class TestTopLevelGlobalsStripping:
 
 
 class TestClosedStandardStreams:
-    """``--version`` and the help token when a standard stream is closed.
+    """``--version`` when stdout is closed.
 
-    A descriptor closed before the interpreter starts leaves ``sys.stdout`` /
-    ``sys.stderr`` ``None``. Measured on the pinned aws-cli: ``--version >&-``
-    exits 0 with the version line on stderr (its argparse, Python 3.14's,
-    falls back to stderr and drops a write that fails), with both closed it
-    still exits 0, and a help page requested with stdout closed is written
-    nowhere, rc 0. This CLI replayed the version line onto the missing stream
-    and left as a traceback at rc 1.
+    A descriptor closed before the interpreter starts leaves ``sys.stdout``
+    ``None``. Like argparse's own version action, the line then goes to
+    stderr and the run exits 0.
     """
 
     @pytest.mark.parametrize("argv", [["--version"], ["ls", "--version"], ["--version", "bogus"]])
@@ -1302,56 +1194,6 @@ class TestClosedStandardStreams:
         monkeypatch.setattr(sys, "stdout", None)
         assert cli.main(argv) == 0
         assert capsys.readouterr().err.startswith("boto3-s3-cli/")
-
-    def test_the_version_line_is_dropped_when_both_are_closed(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(sys, "stdout", None)
-        monkeypatch.setattr(sys, "stderr", None)
-        assert cli.main(["--version"]) == 0
-
-    def test_a_version_line_that_cannot_be_written_is_dropped(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        class _Refusing:
-            def write(self, text: str) -> int:
-                raise OSError(28, "No space left on device")
-
-        monkeypatch.setattr(sys, "stdout", _Refusing())
-        assert cli.main(["--version"]) == 0
-
-    @pytest.mark.parametrize("argv", [["help"], ["ls", "help"]])
-    def test_a_help_page_is_written_nowhere_when_stdout_is_closed(
-        self, argv: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        monkeypatch.setattr(sys, "stdout", None)
-        assert cli.main(argv) == 0
-        assert capsys.readouterr().err == ""
-
-    @pytest.mark.parametrize("argv", [["help"], ["ls", "help"]])
-    def test_a_help_page_with_both_closed_still_exits_zero(
-        self, argv: list[str], monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(sys, "stdout", None)
-        monkeypatch.setattr(sys, "stderr", None)
-        assert cli.main(argv) == 0
-
-    def test_every_parser_prints_the_way_python_3_14_does(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # The pin itself, off the host Python: a missing stream falls back to
-        # stderr, and a failing one is dropped rather than raised.
-        class _Refusing:
-            def write(self, text: str) -> int:
-                raise OSError(28, "No space left on device")
-
-        for parser in _every_built_parser():
-            parser._print_message("page\n", None)  # pyright: ignore[reportPrivateUsage]
-            assert capsys.readouterr().err == "page\n"
-            parser._print_message("page\n", _Refusing())  # pyright: ignore[reportPrivateUsage]
-        monkeypatch.setattr(sys, "stderr", None)
-        for parser in _every_built_parser():
-            parser._print_message("page\n", None)  # pyright: ignore[reportPrivateUsage]
 
 
 class TestTheEntryPointBackstop:
@@ -1371,27 +1213,6 @@ class TestTheEntryPointBackstop:
         monkeypatch.setattr(cli, "_dispatch", explode)
         assert cli.main(["ls", "s3://b/"]) == 255
         assert capsys.readouterr().err == "boto3-s3: [ERROR]: boom\n"
-
-    def test_a_report_the_codec_cannot_write_is_the_codec_s_report(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # The report raises inside the clause that was making it, where the
-        # `UnicodeError` clause beside it cannot reach; aws's entry point
-        # reports the codec error at rc 255, and so must this one (it left as
-        # a traceback at rc 1).
-        def explode(*args: object, **kwargs: object) -> int:
-            raise ValueError("caf\u00e9")
-
-        raw = io.BytesIO()
-        stream = io.TextIOWrapper(raw, encoding="utf-8", newline="", write_through=True)
-        monkeypatch.setattr(sys, "stderr", stream)
-        monkeypatch.setattr(cli, "_dispatch", explode)
-        monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "ascii")
-        assert cli.main(["ls", "s3://b/"]) == 255
-        assert raw.getvalue() == (
-            b"boto3-s3: [ERROR]: 'ascii' codec can't encode character '\\xe9' "
-            b"in position 22: ordinal not in range(128)\n"
-        )
 
     def test_an_assertion_stays_loud(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def explode(*args: object, **kwargs: object) -> int:

@@ -54,21 +54,16 @@ history warning `aws` writes and this command has not. Other error reports
 worded differently from aws's are not listed. And the ordering of concurrent output is not reproducible on either
 tool (below).
 
-Because the text is aws's, so are its envelopes: parameter-validation errors
-use `An error occurred (ParamValidation): <message>`, and so do the
-exit-code 253 reports for unresolved credentials and an unresolved region.
-The 253 an uninstalled dependency produces is this command's own and has no
-envelope, and neither has the 253 of an unusable `cli_timestamp_format`, which
-`aws` reports as `An error occurred (Configuration): ...`
-(see [`exit-codes.md`](./exit-codes.md)). The credentials and region reports
-also keep
-aws's hint verbatim, which is why the credentials error tells you to run
-`aws login`: this command has no login subcommand of its own, and both tools
-read the same credentials and config files, so configuring credentials with
-`aws` — or by any other means — is what fixes the run either way. The
-unresolved-region report points at `aws configure` for the same reason.
-`aws` drops the envelope when the profile you named does not exist in any
-config file, keeping the exit code; this command keeps it. The two also part
+Parameter-validation errors use aws's envelope,
+`An error occurred (ParamValidation): <message>`. No other report has one:
+the exit-code 253 reports for unresolved credentials and an unresolved region
+are botocore's own text, without aws's `NoCredentials` / `NoRegion` envelope
+and its `aws login` / `aws configure` hints, and an unusable
+`cli_timestamp_format`, which `aws` reports as
+`An error occurred (Configuration): ...`, is reported in this command's own
+words (see [`exit-codes.md`](./exit-codes.md)). `aws` drops the envelope
+when the profile you named does not exist in any config file, keeping the
+exit code; this command keeps it. The two also part
 on the error format — `--cli-error-format`, `AWS_CLI_ERROR_FORMAT` and
 the profile key `cli_error_format`: `aws` acts on all three, this command
 accepts every value and ignores it. On `aws`, `enhanced` puts the envelope
@@ -447,13 +442,12 @@ that say outright that the run comes out differently, listed in section 1.
   is printed here while `aws` keeps its own codec (UTF-8 on Linux, the host
   code page on Windows): under `PYTHONIOENCODING=ascii` a `café.txt` result
   line comes out `caf?.txt`, and under `latin-1` it comes out in latin-1
-  bytes. One member `aws`'s own code
-  reads back: `PYTHONUTF8=1`, kept as a compatibility fallback for the streams
-  it writes error reports on, and honored here the same way — so setting it
-  brings an error report into agreement again, while result lines stay as they
-  were. `PYTHONUTF8=0` with `PYTHONCOERCECLOCALE=0` under a C locale goes the
-  other way and makes a UTF-8 config file unreadable here — exit code 255 —
-  where `aws` still reads it. The same packaging decides one thing more: an
+  bytes. One member `aws`'s own code reads back: `PYTHONUTF8=1`, which it
+  applies only to the streams it writes error reports on; here it is the
+  interpreter's own UTF-8 mode and reaches every stream. `PYTHONUTF8=0` with
+  `PYTHONCOERCECLOCALE=0` under a C locale goes the other way and makes a
+  UTF-8 config file unreadable here — exit code 255 — where `aws` still reads
+  it. The same packaging decides one thing more: an
   argument carrying a byte that is not valid UTF-8 is accepted here and the
   run proceeds, while `aws`'s bootloader rejects it before Python starts,
   exiting 255 with `Failed to set sys.argv: decoding error`. Leave the family

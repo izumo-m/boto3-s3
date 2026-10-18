@@ -8,7 +8,7 @@ import importlib
 import os
 import re
 import sys
-from typing import TYPE_CHECKING, NoReturn, TextIO, cast
+from typing import NoReturn, cast
 
 from boto3_s3 import (
     Boto3S3Error,
@@ -17,11 +17,8 @@ from boto3_s3 import (
     InvalidValueError,
     ValidationError,
 )
-from boto3_s3_cli import globalargs, usage
+from boto3_s3_cli import globalargs
 from boto3_s3_cli.commands.base import Command, Context
-
-if TYPE_CHECKING:
-    from _typeshed import SupportsWrite
 
 # Loggers a masked stderr handler is attached to under --debug, via the
 # library's boto3-faithful set_stream_logger (credential masking on by default -
@@ -100,151 +97,24 @@ _COMMAND_TABLE: dict[str, tuple[str, str, str]] = {
 # `_find_command_token` mirrors it; the two must stay the same pattern.
 _NEGATIVE_NUMBER_RE = re.compile(r"-\.?\d")
 
-# aws's codec override for the streams it reports errors on, and the
-# interpreter variable it still honors as a fallback (its compat.py).
+# aws's codec override for its error reports; only an unknown codec named
+# there is acted on (`_dispatch`).
 _OUTPUT_ENCODING_ENV_VAR = "AWS_CLI_OUTPUT_ENCODING"
-_PYTHONUTF8_ENV_VAR = "PYTHONUTF8"
-
-
-def _unresolved_config_report(exc: BaseException) -> tuple[str, str] | None:
-    """aws's envelope code and message for an unresolvable credentials / region.
-
-    aws gives botocore's `NoCredentialsError` and `NoRegionError` handlers of
-    their own (errorhandler.py). Each one names a fixed code - a per-handler
-    constant, not the exception's class name - and appends its own hint to
-    botocore's text: a `. ` separator for the credentials one, whose text ends
-    without a period, a bare space for the region one, whose text ends with
-    one. The hints keep naming the `aws` tool because that is what aws writes
-    and both tools read the same config files, so the advice holds
-    (docs/cli/aws-differences.md; `aws login` has no counterpart here).
-
-    The pair is identified by the botocore exception the library keeps as
-    `__cause__` (`s3storage.s3_errors`, the client builders), never by matching
-    the message text. Returns `None` for every other rc-253 failure: those are
-    this CLI's own (an absent awscrt, an SDK floor shortfall), aws cannot reach
-    them, and they carry no such cause - so they stay bare.
-
-    aws's other reachable rc-253 handler, `Configuration`, has no counterpart
-    here: its one failure on this surface (an unknown `cli_timestamp_format`)
-    is this CLI's own `ConfigurationError`, raised where the session is opened
-    (`clientfactory`), so it stays bare as well. `Pager` belongs to the output
-    pager, which this CLI does not implement.
-    """
-    # Imported here, on a path where credential / region resolution has already
-    # loaded the SDK, so the informational exits stay SDK-free (design/imports.md).
-    from botocore.exceptions import NoCredentialsError, NoRegionError
-
-    cause = exc.__cause__ if isinstance(exc, Boto3S3Error) else exc
-    if isinstance(cause, NoCredentialsError):
-        return "NoCredentials", f'{cause}. You can configure credentials by running "aws login".'
-    if isinstance(cause, NoRegionError):
-        return "NoRegion", f'{cause} You can also configure your region by running "aws configure".'
-    return None
-
-
-def _set_preferred_output_encoding(stream: TextIO) -> None:
-    """Re-encode a report stream the way aws's error writers do.
-
-    aws builds a text writer for every error report it makes, and building one
-    re-encodes the stream it wraps (`compat.set_preferred_output_encoding`):
-    to `AWS_CLI_OUTPUT_ENCODING` when that names a codec, else to UTF-8 when
-    `PYTHONUTF8` is `1` - the fallback aws keeps for users of the interpreter
-    variable its frozen build stopped honoring. Reconfiguring an encoding
-    without an error handler resets the handler to `strict`, so a report the
-    codec cannot represent raises instead of being escaped; `main` reports
-    that raise the way aws's entry-point chain does.
-
-    aws builds both writers for every report and its handlers then write to
-    one: stderr for every report there is, stdout for the bare newline a
-    Ctrl-C prints. Each call site here re-encodes the stream it is about to
-    write, which is the same thing for everything observable - nothing else on
-    this surface writes after a report. Nothing outside a report re-encodes at
-    all: a successful run's result, progress and warning lines keep the
-    interpreter's own streams, aws included (measured on both tools).
-
-    An unknown codec is ignored rather than raised: `_dispatch`'s gate has
-    already rejected one, and aws swallows it here too so the report *about*
-    the codec can still be written. A stream with nothing to reconfigure (a
-    capture buffer) is left alone.
-    """
-    encoding = os.environ.get(_OUTPUT_ENCODING_ENV_VAR)
-    if encoding is None:
-        if os.environ.get(_PYTHONUTF8_ENV_VAR) != "1":
-            return
-        encoding = "UTF-8"
-    reconfigure = getattr(stream, "reconfigure", None)
-    if reconfigure is not None:
-        with contextlib.suppress(LookupError):
-            reconfigure(encoding=encoding)
 
 
 def _write_error(message: object, *, rc: int | None = None) -> None:
-    """Write one CLI error, adding the enhanced envelope required by `rc`.
+    """Write one CLI error report to stderr.
 
-    aws renders every enveloped report through one formatter, so the code it
-    names comes from whichever handler claimed the exception: `ParamValidation`
-    for the whole rc-252 family, and - for the two rc-253 failures aws reaches
-    through a botocore exception on the surface implemented here - one of the
-    codes `_unresolved_config_report` supplies. The other rcs envelope
-    nothing: an rc-254 `ClientError` already carries `An error occurred
-    (<Code>) when calling ...` in its own text, and aws's general rc-255
-    handler formats nothing.
-
-    The three steps below are aws's own sequence, and their order is
-    observable. Its handler builds the enveloped message first and hands the
-    result to `format_error_message`, which **then** tests the message for
-    falsiness and only **then** strips it. So: an empty detail that a code
-    envelopes still renders the envelope (stripped of the space the empty
-    detail left), while a detail that is empty *and* uncoded renders the prefix
-    alone, with **no** trailing space - the branch aws takes before it ever
-    builds the spaced form. The failure that reaches that branch is awscrt's
-    bare region assertion, which the CRT construction converts at rc 255, and
-    the rc-255 general handler envelopes nothing.
-
-    An exception's text is `usage.exception_text`'s: aws prints `str(exc)`,
-    so where that text is the interpreter's own the wording is aws's bundled
-    3.14's, whatever this host runs (design/cli.md section 2).
-
-    Stripping last keeps a message that ends with a newline from surfacing
-    as a trailing blank line.
+    A usage error (rc 252) carries aws's ``An error occurred
+    (ParamValidation):`` envelope; every other report is the message alone (an
+    rc-254 ``ClientError`` already names its code in its own text). Stripping
+    keeps a message that ends with a newline from surfacing as a trailing
+    blank line.
     """
-    detail = usage.exception_text(message) if isinstance(message, BaseException) else str(message)
-    code: str | None = None
+    detail = str(message).strip()
     if rc == _PARAM_VALIDATION_ERROR_RC:
-        code = "ParamValidation"
-    elif rc == _CONFIGURATION_ERROR_RC and isinstance(message, BaseException):
-        report = _unresolved_config_report(message)
-        if report is not None:
-            code, detail = report
-    _set_preferred_output_encoding(sys.stderr)
-    if code is not None:
-        try:
-            _write_report(f"An error occurred ({code}): {detail}")
-            return
-        except Exception:
-            # aws's renderer wraps the whole enveloped write in a `try`, so a
-            # codec that cannot represent the report drops it there and the
-            # bare message is written instead - unenveloped, and only then
-            # allowed to fail (measured: the position the codec error names
-            # is the bare message's, and rc 252 becomes aws's 255 through
-            # that second failure).
-            pass
-    _write_report(detail)
-
-
-def _write_report(detail: str) -> None:
-    """aws's `errorformat.write_error`: the prefix, the message, the newline.
-
-    Three writes there, two here - aws leads with a blank line this CLI does
-    not print (a class-1 rule of the parity normalization, design/testing.md
-    section 9). Keeping the newline a write of its own still matters: under a
-    stateful codec (`utf_8_sig`, `punycode`) the chunk boundaries are what the
-    encoder acts on, and a report that fails to encode must leave the stream
-    exactly as aws leaves it.
-    """
-    prefix = "boto3-s3: [ERROR]:"
-    sys.stderr.write(prefix if not detail else f"{prefix} {detail.strip()}")
-    sys.stderr.write("\n")
+        detail = f"An error occurred (ParamValidation): {detail}"
+    sys.stderr.write(f"boto3-s3: [ERROR]: {detail}".rstrip() + "\n")
 
 
 class _ParamValidationArgumentParser(argparse.ArgumentParser):
@@ -325,38 +195,9 @@ class _ParamValidationArgumentParser(argparse.ArgumentParser):
             return count
         return super()._match_argument(action, arg_strings_pattern)
 
-    def _print_message(self, message: str, file: SupportsWrite[str] | None = None) -> None:
-        """Write a page the way Python 3.14's argparse does, on every Python.
-
-        Two things differ on Python 3.10, and both only show once a standard
-        stream is unusable: the stream given may be absent (a closed
-        descriptor leaves ``sys.stdout`` ``None``), which 3.14 answers by
-        falling back to stderr, and the write itself may fail, which 3.14
-        drops instead of raising. Without them a help page requested with
-        both streams closed is a traceback and rc 1 on the floor Python,
-        where aws - and this CLI on a newer one - exits 0.
-        """
-        if message:
-            stream = file or sys.stderr
-            with contextlib.suppress(AttributeError, OSError):
-                stream.write(message)
-
     def error(self, message: str) -> NoReturn:
         _write_error(message, rc=_PARAM_VALIDATION_ERROR_RC)
         self.exit(2)
-
-
-def _print_help(parser: argparse.ArgumentParser) -> None:
-    """Print a help page to stdout - and nowhere else when stdout is closed.
-
-    aws hands its help page to a renderer that writes to descriptor 1 on its
-    own, so with stdout closed the page is written nowhere and the run still
-    exits 0 (measured). argparse would instead fall back to stderr for a
-    missing stdout, which is right for the version line (`_VersionAction`)
-    and wrong here.
-    """
-    if sys.stdout is not None:
-        parser.print_help(sys.stdout)
 
 
 def _find_command_token(tokens: list[str]) -> int:
@@ -630,23 +471,8 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
         return _main(argv, ctx)
     except KeyboardInterrupt:
         with contextlib.suppress(Exception):
-            # aws's `InterruptExceptionHandler` writes this newline through
-            # the stdout writer its chain built, so the codec applies to it -
-            # the one report on this surface that is not stderr's.
-            _set_preferred_output_encoding(sys.stdout)
             sys.stdout.write("\n")
         return 130
-    except UnicodeError as exc:
-        # aws's entry-point handler chain (its `AWSCLIEntryPoint.main`), whose
-        # one reachable case here is a report `AWS_CLI_OUTPUT_ENCODING` cannot
-        # represent: the codec is strict, so the write raises out of the
-        # handler that was making the report and the general handler reports
-        # *that* at rc 255 - which is what turns a 252 into a 255 when the
-        # message carries a character the codec lacks (measured). The second
-        # report is deliberately unguarded: when the codec cannot write it
-        # either, aws lets the error escape its entry point as well.
-        _write_error(exc, rc=_GENERAL_ERROR_RC)
-        return _GENERAL_ERROR_RC
     except AssertionError:
         # An internal-invariant violation, kept loud (see `_run_command`).
         raise
@@ -658,17 +484,7 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
         # steps, where an exception no step claims must still not surface as
         # a traceback.
         rc = _exit_code_for_unexpected(exc)
-        try:
-            _write_error(exc, rc=rc)
-        except UnicodeError as unwritable:
-            # The codec cannot represent this report either. A raise inside
-            # this clause is out of the `UnicodeError` clause's reach, so the
-            # same second step is taken here: the codec error is the report,
-            # at rc 255 and unguarded (measured: an alias whose endpoint
-            # value carries a character `ascii` lacks is the codec's own
-            # message at 255 on aws).
-            _write_error(unwritable, rc=_GENERAL_ERROR_RC)
-            return _GENERAL_ERROR_RC
+        _write_error(exc, rc=rc)
         return rc
 
 
@@ -722,13 +538,8 @@ def _dispatch(argv: list[str], ctx: Context) -> int:
     except SystemExit as exc:
         return 0 if not exc.code else _PARAM_VALIDATION_ERROR_RC
     tokens = remainder[1:] if argv[:1] == ["--"] else remainder
-    # aws validates AWS_CLI_OUTPUT_ENCODING right here: after handling the
-    # top-level args and before `session-initialized` (clidriver.main calls
-    # compat.validate_preferred_output_encoding between the two). The
-    # validation is separate from the application on purpose, aws's own
-    # split: `_set_preferred_output_encoding` swallows an unknown codec so a
-    # report can still be written, and this gate is what makes one impossible
-    # to reach with the codec still unknown.
+    # aws refuses an unknown AWS_CLI_OUTPUT_ENCODING codec before any command
+    # runs (rc 255). Nothing else here reads the variable.
     output_encoding = os.environ.get(_OUTPUT_ENCODING_ENV_VAR)
     if output_encoding is not None:
         try:
@@ -756,7 +567,7 @@ def _resolve_command(tokens: list[str], head: argparse.Namespace, ctx: Context) 
     table.
     """
     if tokens == ["help"]:
-        _print_help(_build_stage1_parser())
+        _build_stage1_parser().print_help()
         return 0
 
     index = _find_command_token(tokens)
@@ -799,7 +610,7 @@ def _run_command(
         # page, rc 0 - even where a normal parse would fail or run a listing.
         # The globals are already stripped, so a `help` wrapped in globals
         # still pages (aws: `s3 presign help --region us-east-1` pages).
-        _print_help(_build_command_parser(name, command))
+        _build_command_parser(name, command).print_help()
         return 0
     # The top-level pass's namespace carries every parsed global (either side
     # of the subcommand - all consumed there) plus their defaults; the leaf

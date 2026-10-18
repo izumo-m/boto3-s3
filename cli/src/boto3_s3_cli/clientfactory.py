@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 
 # These exception names do not themselves import the AWS SDK.
 from boto3_s3 import ConfigurationError, InvalidConfigError, InvalidValueError, ValidationError
-from boto3_s3_cli import checksumdefault, s3errormsg, usage
+from boto3_s3_cli import checksumdefault
 from boto3_s3_cli.globalargs import PROFILE_ENV_VARS
 
 if TYPE_CHECKING:
@@ -190,18 +190,17 @@ def _reject_unknown_cli_formats(session: BotocoreSession, args: argparse.Namespa
 
 
 def _check_every_client(session: BotocoreSession) -> None:
-    """Hold every client the session builds to aws's own client-build checks.
+    """Hold every client the session builds to aws's empty CA bundle check.
 
-    aws's bundled botocore refuses, in every ``create_client``, an endpoint its
-    Python cannot parse (`_reject_unparsable_endpoint`) and a CA bundle that
+    aws's bundled botocore refuses, in every ``create_client``, a CA bundle that
     resolves to an empty or whitespace-only value (`_reject_empty_ca_bundle`).
-    `_create_client` supplies both for the clients this module builds, but the
+    `_create_client` supplies it for the clients this module builds, but the
     SDK builds others from the same session - the credential chain's STS, SSO
     and sso-oidc clients, the CRT engine's request serializer - and those took
     an empty ``AWS_CA_BUNDLE`` beside a valid ``--ca-bundle`` as "verification
     off", fetching credentials over unverified TLS where aws stops (measured:
     rc 255 for ``ls``, a failed item for ``cp``, rc 0 here). So the session's
-    own ``create_client`` runs the two checks on what it built, resolving the
+    own ``create_client`` runs the check on what it built, resolving the
     trust source the way botocore does when the caller names none: the
     session's ``ca_bundle``, then ``REQUESTS_CA_BUNDLE``. It is installed
     before the credential chain is built: its SSO provider keeps the method
@@ -225,7 +224,6 @@ def _check_every_client(session: BotocoreSession) -> None:
             verify = session.get_config_variable("ca_bundle")
         if verify is None:
             verify = os.environ.get("REQUESTS_CA_BUNDLE")
-        _reject_unparsable_endpoint(client.meta.endpoint_url)
         _reject_empty_ca_bundle(verify)
         setattr(client, CA_BUNDLE_ENVIRONMENT_VETTED, True)
         return client
@@ -520,36 +518,6 @@ def _credential_cache_class() -> type[Any]:
     return CliCredentialCache
 
 
-def _has_url_scheme(value: str) -> bool:
-    """Does *value* carry a URL scheme by the rule the shipped aws build applies?
-
-    ``urlsplit`` requires an ASCII letter to lead the scheme only from Python
-    3.11 on; 3.10 and 3.9 accept any run of scheme characters, so
-    ``192.168.0.9:9000`` - a MinIO / Ceph address typed without ``http://`` -
-    parses there with ``192.168.0.9`` *as the scheme* and slips past a plain
-    truthiness test, reaching botocore for a different message and rc. Testing
-    the parsed scheme's first character adds exactly 3.11's condition (the
-    scheme it returns is lower-cased and drawn from ASCII scheme characters, so
-    one ``isalpha`` covers it), pinning every supported version to what the
-    official aws distribution does - the same pin the argparse corners use
-    (``design/cli.md`` section 2).
-
-    The frozen interpreter also strips C0 control and space characters from
-    both ends before parsing (WHATWG alignment; present in some but not all
-    host patch releases - it shipped and was later reverted within the same
-    minor versions, so even two 3.10.x hosts disagree). The strip here applies
-    it to the gate on every host; only the gate - the value handed onward is
-    untouched, and what botocore then makes of an edge character is the
-    installed SDK's own answer, like every other botocore-owned report.
-    """
-    return urlparse(value.strip(_C0_AND_SPACE)).scheme[:1].isalpha()
-
-
-# What the official build's urlsplit strips from either end of a URL
-# (C0 controls and space; DEL is not stripped - measured on CPython 3.14).
-_C0_AND_SPACE = "".join(map(chr, range(0x21)))
-
-
 def validate_endpoint_url(args: argparse.Namespace) -> None:
     """Reject a schemeless ``--endpoint-url`` (rc 252), as aws-cli does.
 
@@ -557,7 +525,7 @@ def validate_endpoint_url(args: argparse.Namespace) -> None:
     botocore would otherwise raise a bare ``ValueError``.
     """
     endpoint_url: str | None = args.endpoint_url
-    if endpoint_url is not None and not _has_url_scheme(endpoint_url):
+    if endpoint_url is not None and not urlparse(endpoint_url).scheme:
         raise ValidationError(
             f'Bad value for --endpoint-url "{endpoint_url}": scheme is '
             "missing.  Must be of the form http://<hostname>/ or https://<hostname>/"
@@ -911,7 +879,7 @@ def _coerce_cli_timeout(value: str) -> int | None:
     try:
         return int(value) or None
     except ValueError as exc:
-        raise InvalidValueError(usage.int_error_message(exc)) from exc
+        raise InvalidValueError(str(exc)) from exc
 
 
 def _includes_endpoint_auth_path(args: argparse.Namespace) -> bool:
@@ -1030,8 +998,7 @@ def build_client(
     ``--endpoint-url`` and the timeouts map to client kwargs / a botocore
     ``Config``; ``--no-verify-ssl`` and ``--ca-bundle`` head
     the ``verify`` chain (`_resolve_verify`, always resolved to an explicit
-    value so both transfer engines trust the same roots). Every client also
-    carries aws's S3 error-message rewriter (`s3errormsg`). The client is
+    value so both transfer engines trust the same roots). The client is
     handed to the library through ``S3Storage`` - the library never rebuilds
     connection settings itself.
 
@@ -1138,7 +1105,6 @@ def build_client(
             verify=_resolve_verify(args, botocore_session),
             config=Config(**overrides),
         )
-        s3errormsg.register(client)
         checksumdefault.register(client)
         return client
     except (NoCredentialsError, NoRegionError) as exc:
@@ -1173,35 +1139,8 @@ def _create_client(session: Boto3Session, service: str, **kwargs: Any) -> Any:
     client = session.client(service, **kwargs)  # pyright: ignore[reportUnknownMemberType]
     retries = cast("dict[str, Any] | None", client.meta.config.retries) or {}
     _reject_unsupported_retry_mode(retries.get("mode"))
-    _reject_unparsable_endpoint(client.meta.endpoint_url)
     _reject_empty_ca_bundle(kwargs.get("verify"))
     return client
-
-
-def _reject_unparsable_endpoint(endpoint_url: str | None) -> None:
-    """Refuse an endpoint aws's Python cannot parse, as aws's client build does.
-
-    botocore checks the endpoint it resolved - from the environment
-    (``AWS_ENDPOINT_URL`` / ``AWS_ENDPOINT_URL_S3``), the config
-    (``endpoint_url``, a ``[services]`` section) or the argument - with
-    ``is_valid_endpoint_url``, which leans on ``urlsplit``. Python 3.10 takes a
-    scheme that starts with a digit (``1http://...``) that 3.11 on refuses, so
-    aws's build raises ``Invalid endpoint: <value>`` (rc 255) while a 3.10
-    build goes on and every request then fails on the endpoint rules - an
-    item's failure at rc 1, and a ``--dryrun`` that succeeds (measured). The
-    scheme test is 3.11's (`_has_url_scheme`); the rest of botocore's check is
-    the same code under either interpreter. So only a scheme the host parsed
-    and 3.11 would not is refused: a value with no scheme at all
-    (``//127.0.0.1:9``) parses with a host on every version, passes aws's
-    check too, and is left to fail where it fails there. ``--endpoint-url``
-    never gets this far with such a scheme: `validate_endpoint_url` refuses it
-    first.
-    """
-    if endpoint_url is None:
-        return
-    scheme = urlparse(endpoint_url.strip(_C0_AND_SPACE)).scheme
-    if scheme and not scheme[:1].isalpha():
-        raise ValueError(f"Invalid endpoint: {endpoint_url}")
 
 
 def _reject_empty_ca_bundle(verify: Any) -> None:

@@ -81,7 +81,6 @@ from typing import TYPE_CHECKING, TextIO
 
 from boto3_s3 import OpOutcome
 from boto3_s3.localstorage import LocalStorage
-from boto3_s3_cli import output
 from boto3_s3_cli.output import human_readable_size, uni_write
 
 if TYPE_CHECKING:
@@ -430,7 +429,7 @@ class TransferPrinter:
                         result.transfer_type.value,
                         result.src,
                         result.dest,
-                        output.error_text(result.error) if result.error is not None else "",
+                        str(result.error) if result.error is not None else "",
                     )
         if record is not None and not self._finished:
             self._queue.put(record)  # outside the lock, like the snapshot

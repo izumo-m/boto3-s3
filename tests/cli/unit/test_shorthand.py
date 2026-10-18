@@ -353,69 +353,20 @@ class TestJsonShortCircuitGate:
         assert _parse('  {"a": "b"}') == {"a": "b"}
 
 
-class TestJsonDecodeMessagePin:
-    """The decoder wording is pinned to the official aws build's Python (3.14).
+class TestJsonDecodeFailure:
+    """A JSON document that does not decode is a usage error (252).
 
-    Python 3.13 gave the two trailing-comma shapes their own message, anchored
-    on the comma rather than on the closing bracket; older interpreters are
-    re-anchored so the CLI prints the same text everywhere. A corpus of ~930
-    broken documents run under 3.10 / 3.12 / 3.14 showed those two shapes are
-    the whole difference, so nothing else is rewritten.
+    The decoder's own message follows ``Invalid JSON:``, worded as the host's
+    Python words it.
     """
 
-    def test_trailing_comma_in_object(self) -> None:
-        with pytest.raises(ValidationError) as excinfo:
-            _parse('{"a": 1,}')
-        assert str(excinfo.value) == (
-            "Error parsing parameter '--metadata': Invalid JSON: "
-            "Illegal trailing comma before end of object: line 1 column 8 (char 7)\n"
-            'JSON received: {"a": 1,}'
-        )
-
-    def test_trailing_comma_in_nested_array(self) -> None:
-        with pytest.raises(ValidationError) as excinfo:
-            _parse('{"a": [1,]}')
-        assert str(excinfo.value) == (
-            "Error parsing parameter '--metadata': Invalid JSON: "
-            "Illegal trailing comma before end of array: line 1 column 9 (char 8)\n"
-            'JSON received: {"a": [1,]}'
-        )
-
-    def test_comma_position_is_kept_across_whitespace_and_newlines(self) -> None:
-        with pytest.raises(ValidationError) as excinfo:
-            _parse('{"a": 1,\n  }')
-        assert str(excinfo.value) == (
-            "Error parsing parameter '--metadata': Invalid JSON: "
-            "Illegal trailing comma before end of object: line 1 column 8 (char 7)\n"
-            'JSON received: {"a": 1,\n  }'
-        )
-
-    def test_comma_position_counts_from_the_last_newline(self) -> None:
-        with pytest.raises(ValidationError) as excinfo:
-            _parse('{\n "a": 1,\n}')
-        assert str(excinfo.value) == (
-            "Error parsing parameter '--metadata': Invalid JSON: "
-            "Illegal trailing comma before end of object: line 2 column 8 (char 9)\n"
-            'JSON received: {\n "a": 1,\n}'
-        )
-
-    @pytest.mark.parametrize(
-        ("value", "message"),
-        [
-            ('{"a": 1,,}', "Expecting property name enclosed in double quotes"),
-            ('{"a": [1,,2]}', "Expecting value"),
-            ("{,}", "Expecting property name enclosed in double quotes"),
-            ('{"a": [,]}', "Expecting value"),
-            ('{"a" 1}', "Expecting ':' delimiter"),
-        ],
-    )
-    def test_non_trailing_comma_failures_keep_the_decoder_wording(
-        self, value: str, message: str
-    ) -> None:
+    @pytest.mark.parametrize("value", ['{"a": 1,}', '{"a": [1,]}', '{"a" 1}'])
+    def test_it_names_the_parameter_and_echoes_the_value(self, value: str) -> None:
         with pytest.raises(ValidationError) as excinfo:
             _parse(value)
-        assert message in str(excinfo.value)
-        assert "Illegal trailing comma" not in str(excinfo.value)
+        message = str(excinfo.value)
+        assert message.startswith("Error parsing parameter '--metadata': Invalid JSON: ")
+        assert message.endswith(f"\nJSON received: {value}")
 
 
 class TestParseMapOptionErrors:

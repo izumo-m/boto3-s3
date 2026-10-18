@@ -22,7 +22,7 @@ from boto3_s3 import (
     InvalidValueError,
     ValidationError,
 )
-from boto3_s3_cli import clientfactory, globalargs, s3errormsg
+from boto3_s3_cli import clientfactory, globalargs
 from boto3_s3_cli.cli import exit_code_for
 from boto3_s3_cli.commands import transferargs
 
@@ -711,48 +711,6 @@ class TestBuildClient:
                 _parse(["--region", "us-east-1", "--endpoint-url", "example.com"])
             )
         assert 'Bad value for --endpoint-url "example.com": scheme is missing' in str(excinfo.value)
-
-    @pytest.mark.parametrize(
-        "value", ["192.168.0.9:9000", "127.0.0.1:9000/prefix", "+http://127.0.0.1:9000"]
-    )
-    def test_a_scheme_needs_an_ascii_letter_in_front_like_the_python_aws_ships(
-        self, value: str
-    ) -> None:
-        # `--endpoint-url 192.168.0.9:9000` is what a user types with http://
-        # forgotten in front of a MinIO / Ceph address. Only from Python 3.11 on
-        # does urlsplit require an ASCII letter to lead a scheme, so on the
-        # supported floor `192.168.0.9` (and `+http`) parses AS the scheme; a
-        # plain truthiness test then passes the value to botocore for a
-        # different message and rc, where aws - frozen on 3.14 - rejects it at
-        # parse time. Measured on the pinned aws-cli: rc 252 and the wording
-        # below, for every command surface.
-        with pytest.raises(ValidationError) as excinfo:
-            clientfactory.build_client(_parse(["--region", "us-east-1", "--endpoint-url", value]))
-        assert exit_code_for(excinfo.value) == 252
-        assert str(excinfo.value) == (
-            f'Bad value for --endpoint-url "{value}": scheme is missing.  '
-            "Must be of the form http://<hostname>/ or https://<hostname>/"
-        )
-
-    @pytest.mark.parametrize(
-        "value",
-        [
-            " http://127.0.0.1:9000",
-            "http://127.0.0.1:9000 ",
-            "\x1fhttp://127.0.0.1:9000",
-            "HTTP://127.0.0.1:9000",
-            "h://127.0.0.1:9000",
-        ],
-    )
-    def test_an_unusual_but_present_scheme_still_passes(self, value: str) -> None:
-        # The other direction of the same gate, which a first-character test on
-        # the raw value would get wrong: urlsplit strips leading whitespace
-        # before it looks for the scheme and lower-cases what it finds, so all
-        # three of these carry one and aws accepts them (measured: the leading
-        # space and the upper case connect to 127.0.0.1:9000, the one-letter
-        # scheme reaches botocore's own `Custom endpoint ... was not a valid
-        # URI` - never the 252 above).
-        clientfactory.validate_endpoint_url(_parse(["--endpoint-url", value]))
 
     def test_zero_timeout_means_no_timeout(self) -> None:
         # aws maps a 0 timeout to None ("no timeout"); botocore rejects a
@@ -1480,7 +1438,7 @@ class TestRegionSessionBinding:
 
     def test_an_unresolved_region_binds_nothing(self) -> None:
         # aws's truthy guard. Nothing resolved means the session keeps
-        # botocore's own (identical) answer - and the NoRegion envelope that
+        # botocore's own (identical) answer - and the NoRegion failure that
         # answer produces for s3control stays exactly where it was.
         s3 = clientfactory.build_s3(_parse([]))
         session = self._session_of(s3)
@@ -1883,48 +1841,6 @@ class TestDefaultsMode:
         assert str(excinfo.value) == "'str' object has no attribute 'get'"
 
 
-class TestS3ErrorMsgRegistration:
-    def test_every_built_client_rewrites_the_three_s3_messages(self) -> None:
-        # aws hangs its s3errormsg handler off `after-call.s3` for the whole
-        # session, so the rewrite reaches every operation; emitting the event
-        # the way botocore does pins both the key and the wiring.
-        client = clientfactory.build_client(_parse(["--region", "us-east-1"]))
-        parsed: dict[str, Any] = {
-            "Error": {
-                "Code": "PermanentRedirect",
-                "Message": "Please send all future requests to this endpoint.",
-                "Endpoint": "bkt.s3.eu-west-1.amazonaws.com",
-            }
-        }
-        client.meta.events.emit(
-            "after-call.s3.ListObjectsV2",
-            http_response=None,
-            parsed=parsed,
-            model=None,
-            context={},
-        )
-        assert parsed["Error"]["Message"] == (
-            "Please send all future requests to this endpoint: "
-            "bkt.s3.eu-west-1.amazonaws.com\n" + s3errormsg.REGION_ERROR_MSG
-        )
-
-    def test_non_s3_clients_do_not_get_it(self) -> None:
-        # The event key is service-scoped: sts emits `after-call.sts.*`, which
-        # the s3 registration must not reach (aws registers on `after-call.s3`).
-        client = clientfactory.build_service_client("sts", _parse(["--region", "us-east-1"]))
-        parsed: dict[str, Any] = {
-            "Error": {"Code": "PermanentRedirect", "Message": "unchanged.", "Endpoint": "e"}
-        }
-        client.meta.events.emit(
-            "after-call.sts.GetCallerIdentity",
-            http_response=None,
-            parsed=parsed,
-            model=None,
-            context={},
-        )
-        assert parsed["Error"]["Message"] == "unchanged."
-
-
 class TestChecksumDefaultRegistration:
     def test_every_built_client_names_aws_default_where_botocore_would(self) -> None:
         # aws's bundled botocore stamps CRC64NVME on a DeleteObjects that names
@@ -1950,15 +1866,11 @@ class TestBuildServiceClient:
     def test_regionless_s3control_raises_no_region_keeping_the_cause(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # The production seam behind the enveloped `NoRegion` report
-        # (test_exit_codes.py TestUnresolvedConfigReports): s3control has no
-        # global-endpoint fallback - unlike s3 and sts, which is why this is the
-        # only region-less failure the mapped `aws s3` surface can reach, via
-        # mv's --validate-same-s3-paths. The report's aws code is named off the
-        # botocore exception the translation keeps as `__cause__`, so dropping
-        # that link would silently cost the envelope; and the plain
+        # s3control has no global-endpoint fallback - unlike s3 and sts, which
+        # is why this is the only region-less failure the mapped `aws s3`
+        # surface can reach, via mv's --validate-same-s3-paths. The plain
         # ConfigurationError (not the InvalidConfigError refinement) is what
-        # carries the rc.
+        # carries the rc, with botocore's exception kept as its cause.
         for var in ("AWS_REGION", "AWS_DEFAULT_REGION"):
             monkeypatch.delenv(var, raising=False)
         monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "absent-config"))

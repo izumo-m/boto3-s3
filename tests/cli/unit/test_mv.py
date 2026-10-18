@@ -444,10 +444,7 @@ class TestValidateSamePathsClientOrder:
         "--validate-same-s3-paths",
     ]
     _INVALID_S3_ENDPOINT = "boto3-s3: [ERROR]: Invalid endpoint: https://s3..amazonaws.com\n"
-    _NO_REGION = (
-        "boto3-s3: [ERROR]: An error occurred (NoRegion): You must specify a region."
-        ' You can also configure your region by running "aws configure".\n'
-    )
+    _NO_REGION = "boto3-s3: [ERROR]: You must specify a region.\n"
 
     @staticmethod
     def _empty_region(monkeypatch: pytest.MonkeyPatch) -> None:

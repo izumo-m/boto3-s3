@@ -34,7 +34,7 @@ import string
 from typing import TypeAlias, cast
 
 from boto3_s3 import ValidationError
-from boto3_s3_cli import paramfile, usage
+from boto3_s3_cli import paramfile
 
 # What one shorthand key can carry: a scalar, a `fileb://` load, or - through
 # the csv / explicit-list / hash-literal forms - a nesting of those.
@@ -130,8 +130,7 @@ def _parse_json_map(value: str, *, name: str, operation: str) -> dict[str, str]:
         data = json.loads(value)
     except json.JSONDecodeError as exc:
         raise ValidationError(
-            f"Error parsing parameter '{name}': Invalid JSON: {usage.json_error_message(exc)}\n"
-            f"JSON received: {value}",
+            f"Error parsing parameter '{name}': Invalid JSON: {exc}\nJSON received: {value}",
             operation=operation,
         ) from exc
     entries = cast("dict[str, object]", data)  # a `{`-led document decodes to an object

@@ -8,7 +8,7 @@ import os
 # Loaded at dispatch once cp is determined (stage 2 of the lazy dispatch).
 from boto3_s3 import NotFoundError, StdioStorage, ValidationError
 from boto3_s3.transferplan import item_paths, plan_transfer
-from boto3_s3_cli import filters, usage
+from boto3_s3_cli import filters
 from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import Command, Context
 
@@ -162,10 +162,7 @@ class CpCommand(Command):
             # `cp - s3://b/k --expected-size abc --dryrun` is rc 0, measured).
             expected_size = None
             if src == "-" and args.expected_size is not None and not args.dryrun:
-                try:
-                    expected_size = int(args.expected_size)
-                except ValueError as exc:
-                    raise ValueError(usage.int_error_message(exc)) from None
+                expected_size = int(args.expected_size)
             s3.cp(
                 src_location,  # type: ignore[arg-type]
                 dest_location,  # type: ignore[arg-type]

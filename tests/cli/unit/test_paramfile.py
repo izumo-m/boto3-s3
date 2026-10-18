@@ -56,15 +56,11 @@ class TestTextEncoding:
         assert loaded == "こんにちは"
 
 
-class TestBadCodecWording:
-    """`AWS_CLI_FILE_ENCODING` failures word themselves like aws's build.
+class TestBadCodec:
+    """An unusable `AWS_CLI_FILE_ENCODING` is the interpreter's own `LookupError`.
 
-    Both failures reach the user as the interpreter's own `LookupError`
-    through aws's general handler (rc 255, measured), so the wording is
-    whatever Python produced - and Python changed it: up to 3.11 a codec that
-    is not a text encoding carried a `; use codecs.open() ...` tail that
-    aws's official distribution (3.14) does not print. Pinning the newer form
-    keeps the report off the host's Python version.
+    It reaches the user through the general handler (rc 255), worded as the
+    host's Python words it.
     """
 
     def _load(self, tmp_path: Path) -> str:
@@ -72,22 +68,11 @@ class TestBadCodecWording:
         ref.write_text("5\n")
         return paramfile.read_text_paramfile(f"file://{ref}", operation="ls")
 
-    @pytest.mark.parametrize("codec", ["rot13", "base64"])
-    def test_a_non_text_codec_drops_the_interpreter_hint(
-        self, codec: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("AWS_CLI_FILE_ENCODING", codec)
-        with pytest.raises(LookupError) as excinfo:
-            self._load(tmp_path)
-        assert str(excinfo.value) == f"'{codec}' is not a text encoding"
-
     @pytest.mark.parametrize("codec", ["bogus-codec", ""])
     def test_an_unknown_codec_is_left_verbatim(
         self, codec: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # The other LookupError `open` raises reads the same on every Python
-        # (measured identical on the pinned aws-cli), so it must pass through
-        # untouched - including the empty present-wins value.
+        # Including the empty present-wins value.
         monkeypatch.setenv("AWS_CLI_FILE_ENCODING", codec)
         with pytest.raises(LookupError) as excinfo:
             self._load(tmp_path)

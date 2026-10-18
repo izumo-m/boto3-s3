@@ -98,15 +98,12 @@ subcommand stops on it. `help` and `--version` do not read the config files,
 so they still work, where `aws` fails them as well
 ([`configuration.md`](./configuration.md)).
 
-Unresolved credentials and an unresolved region are reported with the same
-envelope and hint as `aws` — `An error occurred (NoCredentials): Unable to
-locate credentials. You can configure credentials by running "aws login".`,
-and the `NoRegion` counterpart pointing at `aws configure`. The hints name
-`aws` because they are `aws`'s own wording and both tools read the same
-config files; see [`aws-differences.md`](./aws-differences.md). The
-dependency failures above are not something `aws` can report, so they have no
-envelope. Once a `cp` / `mv` / `sync` / `rm` run has started, a credential
-failure is exit code 1 with no envelope instead: a per-item
+Unresolved credentials and an unresolved region are reported in botocore's
+own words (`Unable to locate credentials`, `You must specify a region.`),
+without the `An error occurred (NoCredentials):` envelope and the
+`aws login` / `aws configure` hints `aws` adds; the exit code is the same.
+Once a `cp` / `mv` / `sync` / `rm` run has started, a credential
+failure is exit code 1 instead: a per-item
 `upload failed:` / `move failed:` / `delete failed:` line when it lands on an
 upload or a delete, a per-item `download failed:` line on a download to stdout
 (`cp s3://… -`, which starts with no lookup of its own), and a whole-run

@@ -748,15 +748,10 @@ the pinned aws's measured bytes. Four rules.
 One consequence of the first rule, not a fifth rule: when a message quotes a
 character offset or a byte count measured over a line that itself carries the
 program token, the figure moves with the token's width - `boto3-s3` is five
-characters longer than `aws`, so it reads five higher here. The measured
-instance is the codec error a report `AWS_CLI_OUTPUT_ENCODING` cannot
-represent produces ([`cli.md`](./cli.md) section 6): under
-`AWS_CLI_OUTPUT_ENCODING=ascii`, `ls --café` ends `'ascii' codec can't encode
-character '\xe9' in position 36` on aws and `... position 41` here, rc 255 on
-both. The offset is counted over the whole report line, prefix included, so
-the shift *is* the program-token rewrite showing through: class 1, not a
-difference. A figure counted over text that carries no program token is
-comparable as it stands.
+characters longer than `aws`, so it reads five higher here. Such an offset
+is counted over the whole line, prefix included, so the shift *is* the
+program-token rewrite showing through: class 1, not a difference. A figure
+counted over text that carries no program token is comparable as it stands.
 
 The list is **closed**. A comparison never invents a rule to absorb a
 difference it has just found; a new rule takes an explicit design decision and
