@@ -519,7 +519,11 @@ def resolve_transfer_config(
     # boto3 rejects classic-only settings under an explicit 'crt' only; a crt
     # the caller did not ask for is aws-cli's or auto's choice, under which the
     # CRT engine just ignores them, as aws-cli's does.
-    setattr(effective, "_crt_requested", crt and "preferred_transfer_client" in given)  # noqa: B010
+    setattr(  # noqa: B010
+        effective,
+        "_crt_requested",
+        crt and "preferred_transfer_client" in given and preferred == "crt",
+    )
     for rc_key, ctor_key in _CTOR_KEYS.items():
         if ctor_key in given or rc_key not in scoped:
             continue

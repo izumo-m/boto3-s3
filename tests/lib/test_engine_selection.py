@@ -365,18 +365,14 @@ class TestCallerSettings:
         assert config.note == "kept"
         assert config is not given  # a copy: the caller's object is left alone
 
-    @pytest.mark.parametrize("asked", [False, True])
-    def test_classic_only_settings_fail_only_an_asked_for_crt(self, asked: bool) -> None:
+    @pytest.mark.parametrize("preferred", [None, "auto", "crt"])
+    def test_classic_only_settings_fail_only_an_asked_for_crt(self, preferred: str | None) -> None:
         # boto3 rejects classic-only settings under an explicit 'crt'; a crt
-        # chosen by auto or by [s3] leaves them to the engine, which ignores
-        # them, as boto3's auto does.
-        given = (
-            TransferConfig(io_chunksize=_MIB, preferred_transfer_client="crt")
-            if asked
-            else TransferConfig(io_chunksize=_MIB)
-        )
+        # chosen by auto - the default or given - or by [s3] leaves them to
+        # the engine, which ignores them, as boto3's auto does.
+        given = TransferConfig(io_chunksize=_MIB, preferred_transfer_client=preferred)
         config = _build({}, "crt", given)
-        if asked:
+        if preferred == "crt":
             with pytest.raises(Exception, match="io_chunksize"):
                 crtsupport._validate_crt_transfer_config(config)  # pyright: ignore[reportPrivateUsage]
         else:
