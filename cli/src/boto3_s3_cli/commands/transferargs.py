@@ -33,9 +33,7 @@ from boto3_s3.pathresolver import is_s3express_accesspoint_path, is_s3express_pa
 from boto3_s3.transfer import conditional_write_unsupported_reason
 from boto3_s3_cli import (
     checksumdefault,
-    clientfactory,
     filters,
-    globalargs,
     output,
     paramfile,
     shorthand,
@@ -90,8 +88,7 @@ _STORAGE_CLASS_CHOICES = [
 # storage_class / sse / ... ) can't carry such a value (argparse rejects it as
 # an invalid choice first); ``sse-kms-key-id`` and ``grants`` sit earlier in
 # the registration order (resolved individually in ``resolve_paramfile_values``);
-# ``metadata`` is a map, resolved after the integer coercions. Ordered (a tuple)
-# so the first failing paramfile matches aws's option-by-option processing.
+# ``metadata`` is a map, resolved after the integer coercions.
 _PARAMFILE_TEXT_OPTIONS: tuple[str, ...] = (
     "website_redirect",
     "content_type",
@@ -310,24 +307,17 @@ def identify_type(path: str) -> str:
 
 
 def resolve_paramfile_values(args: argparse.Namespace, *, operation: str) -> tuple[int | None, int]:
-    """Resolve the direct-option paramfiles and integer coercions, in aws order.
+    """Resolve the direct-option paramfiles and integer coercions.
 
-    aws processes each argument one at a time in its ``TRANSFER_ARGS``
-    registration order (``BasicCommand.__call__``'s unpack loop): the
-    ``file://`` / ``fileb://`` paramfile expansion and, for the two
-    ``integer`` options, the bare ``int()`` coercion happen together at that
-    option's position. So a bad reference or a bad ``int()`` wins by whichever
-    option comes first - a bad ``--progress-frequency`` (255) beats a later
-    ``--page-size file://missing`` (252), while an earlier ``--content-type
-    file://missing`` (252) beats ``--page-size abc`` (255); all measured
-    against the pinned aws-cli. The order here mirrors that: the SSE-C key blob,
-    ``--sse-kms-key-id``, the copy-source blob, ``--grants``, the free-string
-    text block, then ``--progress-frequency`` and ``--page-size`` (paramfile
-    then coercion). Returns the two coerced integers. ``--metadata`` (a map)
-    and cp's ``--expected-size`` come later, at their own registration
-    positions (``resolve_metadata_option`` / ``expand_option_paramfile`` in
-    ``classify_paths``). ``build_transfer_options`` consumes the resolved
-    values verbatim.
+    The ``file://`` / ``fileb://`` paramfile expansion (a bad reference is
+    252) and, for the two ``integer`` options, the bare ``int()`` coercion
+    (255): the SSE-C key blob, ``--sse-kms-key-id``, the copy-source blob,
+    ``--grants``, the free-string text block, then ``--progress-frequency``
+    and ``--page-size`` (paramfile then coercion). Returns the two coerced
+    integers. ``--metadata`` (a map) and cp's ``--expected-size`` are
+    resolved by ``classify_paths`` (``resolve_metadata_option`` /
+    ``expand_option_paramfile``). ``build_transfer_options`` consumes the
+    resolved values verbatim.
     """
     if args.sse_c_key is not None:
         args.sse_c_key = blob_value(args.sse_c_key, "--sse-c-key", operation=operation)
@@ -392,11 +382,7 @@ def _resolve_integer_option(args: argparse.Namespace, dest: str, *, operation: s
 def resolve_metadata_option(args: argparse.Namespace, *, operation: str) -> None:
     """Resolve ``--metadata`` in place: paramfile, then the shorthand parse.
 
-    Ordered *after* the integer coercions - unlike the direct-option
-    paramfiles above - because aws handles the map option's value with its
-    shorthand machinery (measured: ``--metadata file:///no/x --page-size
-    abc`` is the coercion's 255, while a direct option's bad paramfile wins
-    with 252). A ``file://`` whole-value reference loads the map text (252 on
+    A ``file://`` whole-value reference loads the map text (252 on
     a missing file); a ``fileb://`` one loads bytes and then aws crashes in
     its shorthand parser (measured: rc 255 either way - a non-empty payload
     indexes to an ``int`` that reaches ``in`` a string, an empty one fails a
@@ -424,9 +410,8 @@ def resolve_metadata_option(args: argparse.Namespace, *, operation: str) -> None
 class TransferPaths(NamedTuple):
     """The classified head of a cp/mv/sync invocation (the path-type gate's input).
 
-    ``client`` is the run's S3 client, already built: aws constructs it in
-    ``S3Command._run_main`` ahead of every path validation, so `classify_paths`
-    does too and each command consumes it rather than building its own.
+    ``client`` is the run's S3 client, already built by `classify_paths`; each
+    command consumes it rather than building its own.
     """
 
     page_size: int | None
@@ -441,37 +426,19 @@ class TransferPaths(NamedTuple):
 
 
 def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) -> TransferPaths:
-    """The shared ``run()`` head, in aws's parse-to-validation order.
+    """The shared ``run()`` head of cp/mv/sync.
 
-    The order is exit-code-load-bearing, identical across cp/mv/sync, and
-    measured against the pinned aws-cli on the combined-error cases: the ``--query``
-    compile (252, aws resolves it at ``top-level-args-parsed``, ahead of
-    everything) -> the ``--endpoint-url`` scheme check (252, aws validates the
-    value at parse time) -> the direct-option paramfiles and the two integer
-    coercions, interleaved per aws's option-by-option order
-    (``resolve_paramfile_values``: a bad paramfile is 252, a bad ``int()`` 255,
-    and the earlier option wins) -> the ``--metadata`` resolution (252,
-    paramfile + shorthand, which the coercions beat) -> cp's ``--expected-size``
-    paramfile (252) -> the session profile resolution (255: aws binds the
-    profile at startup, so a bad ``--profile`` beats every post-parse usage
-    error) -> **the S3 client build** -> the local-local pair gate (252) ->
-    aws's ``_normalize_s3_trailing_slash`` over both paths (``normalize_s3_path``:
+    The option values are resolved first - the direct-option paramfiles and
+    the two integer coercions (``resolve_paramfile_values``: a bad paramfile
+    is 252, a bad ``int()`` 255), the ``--metadata`` resolution (252,
+    paramfile + shorthand) and cp's ``--expected-size`` paramfile (252) -
+    then the local-local pair gate (252) and aws's
+    ``_normalize_s3_trailing_slash`` over both paths (``normalize_s3_path``:
     the refused ARN forms, 252, then the keyless trailing ``/``; the returned
-    paths are the normalized ones). Only this shared, order-stable prefix lives
-    here - the stream / checksum / SSE-C checks that follow differ in relative
-    order per command and stay with each command.
-
-    The client build sits at aws's own slot: everything above is aws's parse
-    layer, which runs before ``S3Command._run_main`` creates the client, and
-    everything below is the ``add_paths`` validation, which runs after. So an
-    empty region - the one shape whose client cannot be built (``Invalid
-    endpoint: https://s3..amazonaws.com``, rc 255; an explicit endpoint URL
-    sidesteps that derivation, and the build then succeeds) - preempts every
-    usage error the family reports, while a merely absent region builds fine
-    (S3's global endpoint fallback) and leaves those 252s exactly where they were.
+    paths are the normalized ones), and last the S3 client build. Only this
+    shared prefix lives here - the stream / checksum / SSE-C checks that
+    follow stay with each command.
     """
-    globalargs.validate_query(args)
-    clientfactory.validate_endpoint_url(args)
     page_size, progress_frequency = resolve_paramfile_values(args, operation=operation)
     resolve_metadata_option(args, operation=operation)
     # cp-only (``--expected-size``); a no-op where the attribute is absent.
@@ -480,19 +447,17 @@ def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) ->
     # measured: aws 252 where the integer helper would run int(b'5') and
     # proceed. The stream route's int() coercion still runs at submit time.
     expand_option_paramfile(args, "expected_size", operation=operation)
-    s3 = ctx.s3(args)
-    client = s3.client()
     src, dest = args.paths
     src_type = identify_type(src)
     dest_type = identify_type(dest)
     if src_type == "local" and dest_type == "local":
         raise ValidationError(usage.two_path_usage(operation), operation=operation)
     # aws's add_paths runs _normalize_s3_trailing_slash right after the
-    # path-type check and ahead of every other path validation: the refused
-    # ARN forms beat the stream, checksum, missing-source, directory-creation,
-    # same-path and SSE-C checks below, src before dest.
+    # path-type check.
     src = normalize_s3_path(src)
     dest = normalize_s3_path(dest)
+    s3 = ctx.s3(args)
+    client = s3.client()
     return TransferPaths(
         page_size,
         progress_frequency,

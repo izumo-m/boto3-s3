@@ -62,8 +62,7 @@ included, and for `rb --force` once its objects are deleted — exits 130. Once 
 Ctrl-C reports 1 instead (above). After the run has ended, while its result
 lines are still being written (a slow terminal or pipe), Ctrl-C lets every
 line out and then exits 130, as `aws` does; a second Ctrl-C stops the
-remaining lines. The interactive prompt's own Ctrl-C and end-of-input also
-exit 130.
+remaining lines.
 
 ### 252 — the command line was rejected
 
@@ -138,7 +137,7 @@ instance-metadata setting (`AWS_METADATA_SERVICE_TIMEOUT=abc`). Every
 subcommand stops on them. `help` and `--version` do not read the config
 files, so they still work, where `aws` fails them with 255 too.
 
-## 2. When more than one thing is wrong
+## 2. Which code a failure gets
 
 **Once a transfer command has started, every failure is 1.** `cp` / `mv` / `rm`
 / `sync` report 1 after they begin — including errors S3 itself returned. That
@@ -158,22 +157,18 @@ service answered is 254, whatever kind of error it is — a 400 from S3 is 254,
 not 252, because the request went out. Errors that never left your machine are
 classified by kind: 252, 253 or 255.
 
-The orderings worth knowing, because the answer is not the one you would guess:
+A few codes are not the ones you would guess:
 
 | You run | You get | Because |
 | --- | --- | --- |
-| `mb` / `rb` with both a bad path and a bad `--profile` | 255 | the profile error is detected before the path is validated |
-| a non-integer `--page-size`, `--expires-in` or `--progress-frequency`, with a bad path too | 255 | the number is parsed before the path is validated |
-| the same non-integer value, with an option the subcommand does not have too | 255 | option values are converted before the unknown option is reported; alone, the unknown option is 252 |
+| a non-integer `--page-size`, `--expires-in` or `--progress-frequency` | 255 | the number is converted after the command line is parsed, as on `aws s3` |
 | `cp --expected-size` with a non-integer | 1 when uploading a stream (0 under `--dryrun`), 0 otherwise | the value is read only on the streaming route, and never on a dry run |
 | `rb --force` whose object deletion fails | 255 | the bucket removal never runs |
-| a region set to an empty value, with a bad path or option pairing too | 255 without an endpoint URL; with one (`--endpoint-url` or the environment) the path or option check's own code, 252 or 1 | every subcommand builds its S3 client before it validates paths, and an empty region has no endpoint to derive; an explicit endpoint sidesteps the derivation and the build succeeds (a region merely *unset* builds fine either way, so those checks keep their own codes) |
-| an unusable `[s3]` value on `cp` / `mv` / `sync` / `rm`, with a bad path too | 252 | the path is validated first; without the path error it is 255 |
 | `mv --validate-same-s3-paths` whose lookup fails | 254 if the service answered, 255 if it could not be reached | the check calls out before the move begins |
 
-All of this matches `aws s3` as measured, the orderings above included, but
-only what each code means is promised: which code wins when two things are
-wrong at once is not, so a script should not depend on these orderings.
+Only what each code means is promised. When two things are wrong at once,
+which one is reported - and so which code you get - may differ from
+`aws s3`, so a script should not depend on it.
 
 ## 3. Where this differs from `aws s3`
 

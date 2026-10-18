@@ -365,9 +365,8 @@ def _default_client_config(args: argparse.Namespace) -> Any:
 
     The clients this module builds pass the same two timeouts in their own
     ``Config`` as well, which botocore merges on top of this one - the same
-    number either way. The read timeout is coerced first, aws's registration
-    order (`resolve_cli_timeouts`), so a run with both values broken reports
-    the same one aws reports.
+    number either way. Coercing them here is also what stops a run on a bad
+    value (255) before anything is sent.
     """
     from botocore import UNSIGNED
     from botocore.config import Config
@@ -552,14 +551,10 @@ _C0_AND_SPACE = "".join(map(chr, range(0x21)))
 
 
 def validate_endpoint_url(args: argparse.Namespace) -> None:
-    """Reject a schemeless ``--endpoint-url`` with aws's wording (rc 252).
+    """Reject a schemeless ``--endpoint-url`` (rc 252), as aws-cli does.
 
-    aws-cli validates the value at parse time - before the integer coercions,
-    the session profile, and every path validation - so this runs first in
-    the commands whose later checks could otherwise mask it (measured against
-    the pinned aws-cli: ``--page-size abc --endpoint-url badurl`` is the endpoint's
-    252, not the conversion's 255). Also called inside the client builders,
-    where botocore would otherwise raise a bare ``ValueError``.
+    Called by the client builders before the client is created, where
+    botocore would otherwise raise a bare ``ValueError``.
     """
     endpoint_url: str | None = args.endpoint_url
     if endpoint_url is not None and not _has_url_scheme(endpoint_url):
@@ -567,24 +562,6 @@ def validate_endpoint_url(args: argparse.Namespace) -> None:
             f'Bad value for --endpoint-url "{endpoint_url}": scheme is '
             "missing.  Must be of the form http://<hostname>/ or https://<hostname>/"
         )
-
-
-def validate_profile(args: argparse.Namespace) -> None:
-    """Resolve the session profile the way aws does at startup (rc 255 on failure).
-
-    aws resolves ``--profile`` / the profile env chain in its session before
-    any command validation runs, so a bad profile fails during the startup
-    config reads (ProfileNotFound -> its general handler, rc 255) ahead of
-    every post-parse usage error (252) - while an unresolvable *region* does
-    NOT fail here (aws defers it to request time). Mirror the ordering by
-    forcing one scoped-config read on a session opened like the run's own.
-    """
-    from botocore.exceptions import BotoCoreError
-
-    try:
-        _open_botocore_session(args).get_scoped_config()
-    except BotoCoreError as exc:
-        raise InvalidConfigError(str(exc)) from exc
 
 
 def build_session(args: argparse.Namespace) -> Boto3Session:
@@ -909,7 +886,6 @@ def build_service_client(
             service_overrides["connect_timeout"] = _coerce_cli_timeout(args.cli_connect_timeout)
         return _create_client(
             session,
-            botocore_session,
             service,
             region_name=region,
             verify=_resolve_verify(args, botocore_session),
@@ -919,21 +895,6 @@ def build_service_client(
         raise ConfigurationError(str(exc)) from exc
     except BotoCoreError as exc:
         raise InvalidConfigError(str(exc)) from exc
-
-
-def resolve_cli_timeouts(args: argparse.Namespace) -> None:
-    """Coerce ``--cli-read-timeout`` then ``--cli-connect-timeout`` (255 on failure).
-
-    aws resolves both at ``top-level-args-parsed`` in registration order (read
-    first), before any command-layer parsing, so a bad value beats an invalid
-    choice, unknown options, and missing arguments; the dispatcher's pre-pass
-    calls this to keep that order. Validation-only: the client builders coerce
-    the same namespace strings again when they build.
-    """
-    if args.cli_read_timeout is not None:
-        _coerce_cli_timeout(args.cli_read_timeout)
-    if args.cli_connect_timeout is not None:
-        _coerce_cli_timeout(args.cli_connect_timeout)
 
 
 def _coerce_cli_timeout(value: str) -> int | None:
@@ -1087,10 +1048,6 @@ def build_client(
 
     _pin_python_sigv4_signers()
 
-    # The transfer family already validated this up front (parse-time order);
-    # re-checked here for the commands that build their client first (mb/rb)
-    # and for direct callers - botocore would otherwise raise a bare
-    # ValueError at client creation.
     validate_endpoint_url(args)
 
     # aws-cli v2's bundled botocore has no S3 SigV2 (hmacv1 "s3"-family
@@ -1175,7 +1132,6 @@ def build_client(
             _bind_region(botocore_session, args, client_region)
         client = _create_client(
             session,
-            botocore_session,
             "s3",
             region_name=client_region,
             endpoint_url=args.endpoint_url,
@@ -1195,60 +1151,26 @@ def build_client(
         raise InvalidConfigError(str(exc)) from exc
 
 
-def _create_client(
-    session: Boto3Session, botocore_session: BotocoreSession, service: str, **kwargs: Any
-) -> Any:
+def _create_client(session: Boto3Session, service: str, **kwargs: Any) -> Any:
     """``session.client`` with aws v2's retry-mode vocabulary around it.
 
     The retry configuration itself is the session's (`_open_botocore_session`
     declares aws v2's ``standard`` / 3 defaults), so botocore resolves and
-    validates it exactly where aws's does - and that placement is what a
-    config carrying several mistakes reports: measured on the pinned aws-cli,
-    the profile's ``services`` section is reported first, then the raw ``[s3]``
-    read, then the ``max_attempts`` int cast, then ``[s3] addressing_style``,
-    and only then the attempt range and the mode. Resolving the retry
-    configuration ahead of ``create_client``, as this module used to, put the
-    mode and the range in front of all four.
-
-    Only the vocabulary differs: aws v2's bundled botocore accepts
-    ``standard`` / ``adaptive`` alone, while the installed botocore still
-    counts ``legacy`` as valid and lists all three in its own report. So the
-    mode is judged where botocore judges it - rewording the rejection botocore
-    raises, and rejecting the ``legacy`` it lets through, once the client is
-    built and every earlier report has had its turn.
+    validates it while it builds the client. Only the vocabulary differs: aws
+    v2's bundled botocore accepts ``standard`` / ``adaptive`` alone, while the
+    installed botocore still counts ``legacy`` as valid. So the mode of the
+    built client is checked once more, which refuses the ``legacy`` botocore
+    let through (255).
 
     Every client this CLI hands out is created here, which is what makes this
     the place the CONNECT pin goes on (`proxytunnel`): an HTTPS proxy sees the
     tunnel request the *host interpreter* writes, and only 3.12 and later write
     aws's.
     """
-    from botocore.exceptions import InvalidRetryModeError
-
     from boto3_s3_cli import proxytunnel
 
     proxytunnel.pin_connect_request()
-    # `legacy` is the one mode the installed botocore takes and aws's refuses.
-    # Judging it only once the client exists would put the refusal behind
-    # everything botocore checks *after* its own mode validation - the
-    # endpoint above all (measured: `retry_mode = legacy` with an invalid
-    # endpoint URL is the mode's report on aws). So for the length of this
-    # build the session answers with a mode the installed botocore refuses
-    # too, which makes it raise at the point where it validates modes - aws's
-    # point - while anything it checks earlier still wins as it does there.
-    mode = _session_retry_mode(botocore_session)
-    refused_here = mode == "legacy"
-    if refused_here:
-        botocore_session.set_config_variable("retry_mode", _REFUSED_RETRY_MODE)
-    try:
-        client = session.client(service, **kwargs)  # pyright: ignore[reportUnknownMemberType]
-    except InvalidRetryModeError:
-        _reject_unsupported_retry_mode(
-            mode if refused_here else _session_retry_mode(botocore_session)
-        )
-        raise
-    finally:
-        if refused_here:
-            botocore_session.set_config_variable("retry_mode", mode)
+    client = session.client(service, **kwargs)  # pyright: ignore[reportUnknownMemberType]
     retries = cast("dict[str, Any] | None", client.meta.config.retries) or {}
     _reject_unsupported_retry_mode(retries.get("mode"))
     _reject_unparsable_endpoint(client.meta.endpoint_url)
@@ -1271,36 +1193,15 @@ def _reject_unparsable_endpoint(endpoint_url: str | None) -> None:
     the same code under either interpreter. So only a scheme the host parsed
     and 3.11 would not is refused: a value with no scheme at all
     (``//127.0.0.1:9``) parses with a host on every version, passes aws's
-    check too, and is left to fail where it fails there. It runs after the
-    retry mode's, as aws's endpoint is built after the mode is validated, and
-    before the CA bundle's, which the endpoint's HTTP session reads.
-    ``--endpoint-url`` never gets this far with such a scheme: aws refuses it
-    while parsing (`validate_endpoint_url`).
+    check too, and is left to fail where it fails there. ``--endpoint-url``
+    never gets this far with such a scheme: `validate_endpoint_url` refuses it
+    first.
     """
     if endpoint_url is None:
         return
     scheme = urlparse(endpoint_url.strip(_C0_AND_SPACE)).scheme
     if scheme and not scheme[:1].isalpha():
         raise ValueError(f"Invalid endpoint: {endpoint_url}")
-
-
-# What the session's retry mode is swapped for while a client is built from a
-# `legacy` configuration (`_create_client`): any value outside botocore's own
-# vocabulary does, and this one says why it is there if it ever shows.
-_REFUSED_RETRY_MODE = "legacy (not an aws v2 retry mode)"
-
-
-def _session_retry_mode(botocore_session: BotocoreSession) -> Any:
-    """The retry mode the session's config chain answers with, ``None`` if it cannot.
-
-    A chain that cannot answer (the scoped config of an undeclared profile)
-    is botocore's to report, from inside the client build and at its own
-    position, so the failure is not raised from this read.
-    """
-    try:
-        return botocore_session.get_config_variable("retry_mode")
-    except Exception:
-        return None
 
 
 def _reject_empty_ca_bundle(verify: Any) -> None:
@@ -1322,13 +1223,8 @@ def _reject_empty_ca_bundle(verify: Any) -> None:
     again, for a client built from a session this module did not open.
     ``build_client`` / ``build_service_client`` catch it in their
     ``except BotoCoreError`` clause and refine it to the library
-    ``InvalidConfigError`` (rc 255), exactly as they would botocore's own. It
-    runs after ``session.client`` has resolved the profile and the endpoint -
-    where aws runs it - so a bad ``--profile`` (255) or an empty ``--region``
-    (``Invalid endpoint``, 255) still reports first, and a rejected retry mode
-    (checked just above) still beats it, matching aws's config-resolution vs
-    endpoint-creation order (all measured against the pinned aws-cli). ``False``
-    (``--no-verify-ssl``) and a real path pass through untouched.
+    ``InvalidConfigError`` (rc 255), exactly as they would botocore's own.
+    ``False`` (``--no-verify-ssl``) and a real path pass through untouched.
     """
     from botocore.exceptions import InvalidConfigError as BotocoreInvalidConfigError
 

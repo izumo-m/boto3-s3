@@ -25,21 +25,8 @@ solidified design is added here.
   `AssertionError` is re-raised (a broken invariant should crash loudly, not
   fold into an rc; section 6), and a command-raised `SystemExit` is honored.
   The exit codes for exceptions and usage errors are covered in section 6.
-- `main` opens with aws's **preliminary `--profile` / `--debug` scan**
-  (`_build_first_pass_parser`, aws's `FirstPassGlobalArgParser`, which it runs
-  while the driver is still being constructed): a two-option
-  `parse_known_args` over the raw argv, ahead of everything else. Either
-  option can fail it - `--profile` by having no value, `--debug` by being
-  handed one (`--debug=1`) - and because the scan comes first that failure
-  beats `--version`, the help token and every parse
-  below, wherever the option sits (`ls --profile`, `--debug --profile`, the
-  abbreviations `--p` / `--d=1`; behind `--` the token is data, so the scan
-  cannot see it - all measured). It reports that parser's own two-option usage
-  rather than the top-level block. Only the
-  failure is reproduced: the values themselves come from the globals pass
-  below, which parses them again.
 - Nothing before the command reads aws's config or credentials files. aws
-  builds its botocore session right after the preliminary scan, so a broken
+  builds its botocore session before it parses the command line, so a broken
   file or setting fails even its `help` and `--version`; here botocore reads
   the files when a command opens its session (section 6), so the
   informational exits succeed under a broken config and stay SDK-free
@@ -53,13 +40,9 @@ solidified design is added here.
   ([`aws-differences.md`](../docs/cli/aws-differences.md)).
 - Then comes the aws-shaped **top-level globals pass**: a
   globals-only `parse_known_args` over the full argv (aws's `MainArgParser`)
-  that both *consumes* the globals - its remainder is the only token stream
-  the later stages see, exactly as aws's command layers only see what
-  `MainArgParser` left over - and resolves them: the `--query` compile, the
-  `--endpoint-url` scheme check, and the `--cli-read-timeout` /
-  `--cli-connect-timeout` coercions in aws's registration order - so those
-  errors beat an invalid choice, unknown options, and missing arguments
-  (measured; section 5.7/6). Consuming here is what makes the measured aws
+  that *consumes* the globals - its remainder is the only token stream the
+  later stages see, exactly as aws's command layers only see what
+  `MainArgParser` left over. Consuming here is what makes the measured aws
   behaviors fall out: a global is recognized on either side of the
   subcommand and even between a command option and its value (`presign
   --expires-in --region us-east-1 120` is rc 0), abbreviation resolves
@@ -68,9 +51,8 @@ solidified design is added here.
   flows down to the leaf parser (`--expires-in=120 presign s3://b/k` is
   rc 0). The parse itself settles two outcomes on the spot, written by the
   parser as it exits: a global that fails to parse (invalid choice, missing
-  value) is the run's error - beating the invalid-subcommand rejection and
-  any unknown option anywhere in argv - and a parse-time `--version` prints
-  and exits 0 even beside an invalid subcommand (both measured). Help is
+  value) is a usage error (252), and a parse-time `--version` prints and
+  exits 0. Help is
   reached only through aws's **help-token rule**: an exactly-`help`
   post-globals remainder, or an exactly-`help` stage-2 token list after a
   subcommand, prints the corresponding help page at rc 0 (`ls help` shows
@@ -78,9 +60,8 @@ solidified design is added here.
   invalid-choice 252, like aws; `presign help --region us-east-1` still pages
   because the globals are already gone, like aws). No parser declares an
   argparse help action, so `-h` / `--help` are unrecognized options exactly
-  as on aws (`s3 --help` and `s3 ls -h` are `Unknown options: ...`; at a leaf
-  still missing its positionals the required-argument report comes first, as
-  in `s3 cp -h`; `s3 ls --h` still abbreviates to `--human-readable`; and
+  as on aws (`s3 --help` and `s3 ls -h` are `Unknown options: ...`;
+  `s3 ls --h` still abbreviates to `--human-readable`; and
   `s3 help --help` breaks the exactly-`help` remainder into an invalid
   choice `help` - all measured on 2.36.40).
 - The first `--` stops the globals pass (argparse semantics, verified
@@ -107,8 +88,8 @@ solidified design is added here.
   `suppress_defaults=True` globals parent so their help keeps listing the
   globals; the parser stage 2 actually parses with
   (`_build_command_parse_parser`) knows only the command's own arguments,
-  like aws's leaf parser, and carries the shared top-level usage string that
-  aws's leaf parsers carry.
+  like aws's leaf parser. Whatever that parse cannot place is reported right
+  after it as `Unknown options` (252).
 - The subcommand is located by `_find_command_token` - aws's
   `SubCommandArgParser` shape: unknown optionals are assumed valueless, the
   first positional-looking token (argparse's classification: not dash-led, a
@@ -116,75 +97,39 @@ solidified design is added here.
   behind `--`) names the command, and only that token leaves the stream. It
   shares the pinned matcher below with the parsers, so both stages classify a
   token identically (`s3 -1x` is aws's invalid choice `'-1x'`, not an unknown
-  option - measured). A wrong name goes to `_build_subcommand_error_parser` -
-  a lone positional whose choices are the `_COMMAND_TABLE` keys, so argparse
-  words the rejection exactly as aws's command-table positional does. The
-  name is fed to it behind a `--`, because an option-form token *can* be the
-  name once it sits behind one of its own (`--region us-east-1 -- --bogus` is
-  aws's invalid choice `'--bogus'`, measured) and a bare replay would read it
-  back as an option - which also means that parser never classifies anything
-  itself. With no command token at all, surviving option-like tokens are
-  reported first as `Unknown options` (aws: `s3 --bogus`, and a leading `--`
-  is used up by the globals pass, so `s3 -- --profile` is one too), and with
-  nothing left at all it is aws's bare `too few arguments` usage error. No
-  command module is imported on any of those paths. Each subcommand class
+  option - measured). A name that is not in `_COMMAND_TABLE` is an invalid
+  choice (252) naming it, and an option-form token *can* be that name once it
+  sits behind a `--` of its own (`--region us-east-1 -- --bogus` is aws's
+  invalid choice `'--bogus'`, measured). With no command token at all,
+  surviving option-like tokens are reported as `Unknown options` (aws:
+  `s3 --bogus`, and a leading `--` is used up by the globals pass, so
+  `s3 -- --profile` is one too), and with nothing left at all the missing
+  subcommand is the usage error. No command module is imported on any of
+  those paths. Each subcommand class
   adds its own arguments via `configure(parser)` on the real stage-2 parser.
-- **Parse error text.** aws builds every parser on one base class and hands
-  its main, service and leaf parsers the same usage string, so *every*
-  argparse failure folds `<message>\n\n<usage>` into a single `[ERROR]`
-  report. `_ParamValidationArgumentParser` is that base here, and the
-  failures reproduce aws's byte for byte under one mapping:
-  `aws [options] s3` -> `boto3-s3 [options]`, with aws's
-  `<command> <subcommand>` hierarchy collapsed onto our single level (this
-  command *is* `aws s3`), which also drops the **first** line of its help
-  blurb - `aws help`, the level above us; its `aws <command> help` is our
-  `boto3-s3 help` and its `aws <command> <subcommand> help` our
-  `boto3-s3 <subcommand> help`.
-  The subcommand-decision, globals-parse and subcommand parse failures all
-  close with that one block (`_TOP_LEVEL_USAGE`); only the preliminary
-  `--profile` / `--debug` scan carries argparse's generated one-liner
-  instead, and the `Unknown options` reports - raised by the command layers,
-  not a parser - carry no usage at all (all measured). Off-list values are
-  reported by `_check_value`, aws's hook: `Found invalid choice '<value>'`
-  plus the close matches of the choice list (difflib, cutoff 0.8 - aws's, so
-  `lss` offers `ls` while `web` offers nothing). The name displayed for the
-  positional is `<subcommand>` (help page included), while the error prefix
-  says a bare `subcommand` - argparse names a positional after its dest,
-  exactly as aws's does. Three residual differences remain, all outside that
-  mapping:
-  - **Ambiguous-abbreviation candidates.** `--c could match ...` lists the
-    same options aws lists, in our option-registration order rather than
-    aws's (`--c`, `--cli`, `--n`, `--no`). Matching the order would mean
-    declaring the globals in aws's order, which reshuffles the help page.
+- **Parse error text.** `_ParamValidationArgumentParser` is the base of
+  every parser, as aws's `CLIArgParser` is of its own: each argparse failure
+  is a usage error (252), reported with argparse's own message through the
+  CLI's error formatter. The wording is not aws's - its `Found invalid
+  choice` with close-match suggestions, the usage block it appends to every
+  report, its `too few arguments` - and when several things are wrong on one
+  command line, which one is reported may differ from aws
+  ([`overview.md`](./overview.md) section 3). The one wording kept is
+  `Unknown options: <a>,<b>` (joined with a comma and no space, as aws's
+  command layer joins them), which ported aws-cli tests read. One interpreter
+  difference remains that decides what is accepted, not how a failure reads:
   - **Ambiguous abbreviations met before their turn** (Python 3.10 / 3.11
     only). Argparse raises the ambiguity there while *classifying* the token
     stream, a pass that runs to completion before anything is consumed; 3.12
-    moved the check to the point of use. So below 3.12 an ambiguous
-    abbreviation anywhere in a parse's token stream is that parse's report.
-    A value that ambiguously abbreviates one of the command's own options -
-    `--exclude --ss` against cp's `--sse*` family - is rejected where aws
-    takes it as the value; another error of the same parse loses to the
-    ambiguity (`ls --output bad --no-c` blames `--no-c`); and so does a
-    `--version` ahead of one (`ls --version --c` is rc 252 where aws prints
-    its version). What an earlier step settles is untouched - the
-    preliminary `--profile` / `--debug` scan still reports first, on every
-    Python.
-    Closing it would mean overriding the classification too
+    moved the check to the point of use. So below 3.12 a value that
+    ambiguously abbreviates one of the command's own options - `--exclude
+    --ss` against cp's `--sse*` family - is rejected where aws takes it as
+    the value. Closing it would mean overriding the classification too
     (`_parse_optional` / `_get_option_tuples`), far more private argparse
     surface than a corner input is worth.
-  - **Colored usage** (below Python 3.14). On a terminal, or under
-    `FORCE_COLOR`, Python 3.14's argparse colors the usage block an error
-    report closes with, and aws's build runs on 3.14. Here that comes from
-    the host interpreter and from nowhere else: on 3.14 a report is colored
-    as aws's is, on an older one never. The interpreter's color machinery is
-    not backported for a difference only a terminal shows. On 3.14 the
-    colors match aws's on every usage error checked, both on a Linux
-    pseudo-terminal and, on 2026-10-17, in Windows Terminal, where 3.14 also
-    asks the console whether it interprets escape sequences.
 - **Counted option values.** aws declares `--exclude` / `--include` with
-  `nargs=1` and `mb`'s `--tags` with `nargs=2`, which both words a missing
-  value by the count (`expected 1 argument`, `expected 2 arguments`) and lets
-  those tokens be taken however they look (`--exclude '-foo*'`,
+  `nargs=1` and `mb`'s `--tags` with `nargs=2`, which lets those tokens be
+  taken however they look (`--exclude '-foo*'`,
   `--exclude --include`, `mb --tags -k -v`). The second half is not aws's
   code but its interpreter: stock argparse gives a count-declared option
   option-like tokens only from Python 3.12 on (its nargs pattern became
@@ -192,9 +137,8 @@ solidified design is added here.
   exactly that boundary - the shipped distribution bundles 3.14, so consuming
   is what its users get. Each such option's action carries the count as
   `aws_nargs` (`AppendFilterAction`, mb's `_AppendTagsAction`) and
-  `_ParamValidationArgumentParser` reads the marker twice: for the wording,
-  and in a `_match_argument` override that applies the 3.12+ rule on every
-  supported Python. The consumption is visible beyond the option itself,
+  `_ParamValidationArgumentParser` reads the marker in a `_match_argument`
+  override that applies the 3.12+ rule on every supported Python. The consumption is visible beyond the option itself,
   since a swallowed token no longer counts as a positional:
   `cp --exclude --include x s3://a/ s3://b/` is aws's
   `Unknown options: s3://b/` (three paths, one too many) and
@@ -221,13 +165,13 @@ solidified design is added here.
   from a whole-token number (`^-\d+$|^-\d*\.\d+$`) to a prefix (`-\.?\d`,
   applied with `.match`), so `-1x` and `-.5x` became plain values. Since the
   shipped distribution bundles 3.14, `cp --storage-class -1x s3://a/k
-  s3://b/k` is aws's `Found invalid choice '-1x'` and
+  s3://b/k` is aws's invalid choice `-1x` and
   `ls --page-size -1x s3://a/` its `invalid literal for int()` at rc 255,
   where the older pattern would report a missing value.
   `_ParamValidationArgumentParser` therefore pins 3.14's pattern as a
   property (argparse's `__init__` assigns the host Python's over any plain
-  attribute), which covers every parser the dispatch builds - the first-pass
-  scan and the globals pass as much as a leaf - just as aws's one interpreter
+  attribute), which covers every parser the dispatch builds - the globals
+  pass as much as a leaf - just as aws's one interpreter
   covers its whole `CLIArgParser` family. `_find_command_token` reads the
   same constant, so the subcommand scan and the parsers never disagree.
   The effect is not confined to error text: a dash-led value or path shaped
@@ -434,11 +378,9 @@ numbers in the bold item labels below are that document's.
   `_reject_unparsable_endpoint` alongside), and marks each with the
   library's `CA_BUNDLE_ENVIRONMENT_VETTED` so the library's own guess at an
   empty `AWS_CA_BUNDLE` (made for a client a caller hands it) stands down
-  and refuses nothing aws would not. It runs where aws runs it, after
-  `session.client` has resolved the profile and the endpoint, so an undeclared
-  `--profile` and an empty `--region` (`Invalid endpoint`) still report first,
-  and a rejected retry mode still beats it (all measured). `--no-verify-ssl`
-  resolves to `False` ahead of the chain and is unaffected.
+  and refuses nothing aws would not. It runs where aws runs it, once
+  `session.client` has built the client. `--no-verify-ssl` resolves to
+  `False` ahead of the chain and is unaffected.
 - **The alignment with aws v2**: `build_client` and the botocore session every
   client is opened on absorb ten differences between the installed botocore on
   a host interpreter and the botocore aws v2 ships frozen (the CLI's exception
@@ -646,17 +588,11 @@ numbers in the bold item labels below are that document's.
      3 times and ends `(reached max retries: 2)` as under aws, where the
      per-client `Config` this used to be left it at legacy's 5 (measured).
      botocore then resolves and validates the whole retry configuration inside
-     `create_client`, exactly where aws's does, and that placement is what a
-     config carrying several mistakes reports: measured on the pinned aws-cli,
-     the profile's `services` section first, then the raw `[s3]` read, then the
-     `max_attempts` int cast, then `[s3] addressing_style`, and only then the
-     attempt range and the mode. Only the mode *vocabulary* is corrected, and
-     around `session.client` rather than ahead of it (`_create_client` /
-     `_reject_unsupported_retry_mode`): anything but `standard` / `adaptive` -
-     notably stock botocore's `legacy`, which aws v2 dropped and botocore still
-     counts as valid - is rejected with aws's exact wording
-     (`InvalidConfigError`, rc 255) once the client is built and every earlier
-     report has had its turn.
+     `create_client`. Only the mode *vocabulary* is corrected, once the client
+     is built (`_create_client` / `_reject_unsupported_retry_mode`): stock
+     botocore's `legacy`, which aws v2 dropped and botocore still counts as
+     valid, is refused there (`InvalidConfigError`, rc 255); botocore refuses
+     every other unknown mode itself.
   7. **`api_versions` is neutralized** - aws v2 dropped the setting and its
      bundled botocore declares no such config variable, so aws ignores the key
      outright, while the installed botocore still reads it in `create_client`,
@@ -701,9 +637,8 @@ numbers in the bold item labels below are that document's.
      flag's budget: a stalled STS ran to botocore's own default here where aws
      gave up on the flag's (measured, `--cli-read-timeout 2` against an 8 s
      stall - rc 255 and a read timeout on both tools now, where this was rc 254
-     carrying the server's own error). The read value is coerced first, aws's
-     registration order (`resolve_cli_timeouts`), so a run with both broken reports
-     the one aws reports; the clients this module builds pass the same two
+     carrying the server's own error). A value that is not an integer stops
+     the run there (255); the clients this module builds pass the same two
      values in their own `Config`, which botocore merges on top - the same
      number either way.
   10. **two environment variables the frozen build cannot read** - item 7's
@@ -785,15 +720,6 @@ fills it in).
 | `--bucket-name-prefix PREFIX` | `Prefix` of `ListBuckets` for bucket listing (ineffective in object listing = same as aws) |
 | `--bucket-region REGION` | `BucketRegion` of `ListBuckets` for bucket listing (same as above) |
 
-Like every `aws s3` subcommand, ls builds its S3 client in
-`S3Command._run_main` - after the parse layer (the `--query` compile, the
-endpoint scheme check, the positional and `--page-size` paramfile expansions,
-the `--page-size` coercion, the bucket-filter paramfiles) and **before** any
-path handling. This CLI builds it at the same point, which is what puts an
-empty region's `Invalid endpoint` 255 ahead of the readable-`fileb://`
-positional crash (design/aws-cli-option-handling.md section 2) rather than
-behind it; `website` shares the slot.
-
 When the target has no bucket name (`boto3-s3 ls` / `ls s3://`), it lists **all
 buckets**. The CLI normalizes every empty-bucket target to the bare `s3://`
 service root first - including `s3:///k`, whose leftover key aws-cli also drops
@@ -819,24 +745,17 @@ of [`testing.md`](./testing.md) section 9):
 ### 5.2 `rm`
 
 Equivalent to `aws s3 rm <S3Uri>`. As in aws, rm's path validation is strict: a
-non-`s3://` path is rc 252 ("Invalid argument type") - preceded by the shared
-head order of section 5.7 (the `--query` compile 252 -> `--endpoint-url`
-scheme 252 -> the `--cli-read/connect-timeout` conversions 255 ->
-`--page-size` paramfile expansion 252 -> its conversion 255 ->
-session profile 255, so `rm badpath --profile <bad>` is the profile's 255,
-like aws; `ls` and `presign` share the query/endpoint/timeout/paramfile/conversion
-prefix for their integer options).
+non-`s3://` path is rc 252 ("Invalid argument type").
 
 rm is an `S3TransferCommand` in aws, so it follows the family's construction
-order (section 5.7), its deletes riding the engine that order builds:
-the S3 client is built right after the session profile - before the fileb
-positional decode and before the path check above, so an empty region is 255
-ahead of both - and the `[s3]` runtime config is read and the transfer engine
-materialized right after that path check and the normalization that follows
-it (section 5.7: the refused ARN forms, the keyless trailing `/`), before the
-bucket-less form below. An invalid `[s3]` value is therefore 255 for every rm
-form, `--quiet` included (the report comes from the error handler, not the
-result printer), while still losing to the path-type and refused-ARN 252s. A CRT selection builds the CRT client there, and
+(section 5.7), its deletes riding the engine that construction builds: the
+path check above and the normalization that follows it (section 5.7: the
+refused ARN forms, the keyless trailing `/`) come first, then the S3 client,
+and then the `[s3]` runtime config is read and the transfer engine
+materialized, before the bucket-less form below. An invalid `[s3]` value is
+therefore 255 for every rm form, `--quiet` included (the report comes from
+the error handler, not the result printer). A CRT selection builds the CRT
+client there, and
 the resolved `TransferConfig` is threaded into `S3.rm`, whose deletes ride
 that client - batched - as aws's ride its manager ([`crt.md`](./crt.md)
 sections 4 and 6), so the `[s3]` keys that tune the CRT client reach them on
@@ -1000,14 +919,6 @@ and, on success, **outputs nothing** and is rc 0. The only options are
 WebsiteConfiguration is sent as-is** (it passes client-side validation; rejection
 is the server's responsibility = same as aws).
 
-Like every `aws s3` subcommand, website builds its S3 client in
-`S3Command._run_main` - after the parse layer (the `--query` compile, the
-endpoint scheme check, the positional and document-option paramfile expansions)
-and **before** any path handling. This CLI builds it at the same point, which is
-what puts an empty region's `Invalid endpoint` 255 ahead of the readable-`fileb://`
-positional crash below rather than behind it (the same slot `ls` uses; both were
-measured).
-
 Path handling follows the same procedure as aws's `_get_bucket_name`: `s3://` is
 optional -> strip **exactly one trailing slash** -> treat the whole remainder as
 the bucket name. Because aws **keeps a key (`s3://b/some/key`) folded into the
@@ -1050,46 +961,36 @@ which of the two names to adopt, the bucket-root normalization of a keyless
 `FileFormat`), shared between the CLI and the library. The filter bases are a
 separate derivation (`filters.py`, aws's `rootdir` - like aws keeps its two).
 
-**The construction order of the transfer family** (cp / mv / sync / rm - aws's
-`S3TransferCommand` subclasses) is a mirror of aws's own, because it decides
-exit codes. Every boundary below was measured against the pinned aws-cli in
-both directions (each step preempting every later one, and losing to every
-earlier one):
+**The construction of the transfer family** (cp / mv / sync / rm - aws's
+`S3TransferCommand` subclasses) follows aws's stages. Each step stops the run
+where aws stops it, with the code aws gives it; when several steps would fail,
+which one is reported is not matched ([`overview.md`](./overview.md) section
+3):
 
-1. **The parse layer** - `--query`, `--endpoint-url`, the paramfile
-   expansions, the integer coercions, the tokens the leaf parse left over,
-   the session profile. aws settles all of it before `_run_main` runs at
-   all, so it beats everything below (`cp ... --page-size abc` is the
-   coercion's 255, `--profile nosuch` the profile's, even when the client of
-   step 2 cannot be built). The leftover tokens are reported from inside
-   this sequence, not by the dispatcher that found them: aws expands every
-   argument's value first and raises `Unknown options` only then, so
-   `--page-size abc --bogus` is still the coercion's 255 while a bad profile
-   loses to the unknown option (both measured). The dispatcher parks the
-   tokens on the namespace and `Context.s3` - the `_run_main` slot of every
-   command, the single-path ones included - raises for them
-   (`reject_unknown_options`).
-2. **The S3 client** - aws's `S3Command._run_main`, which every `aws s3`
-   subcommand inherits. Built in `classify_paths` (cp / mv / sync) and right
-   after `ctx.s3(args)` in rm's `run()`. The only shape that fails here is an
-   *empty* region (`AWS_REGION=`, `AWS_DEFAULT_REGION=`, or a config
-   `region =`), whose endpoint resolves to `https://s3..amazonaws.com` -> 255,
-   preempting every check below. A merely *absent* region builds fine on S3's
-   global endpoint, which is why those checks keep their own codes in a
-   region-less environment.
-3. **The fileb positional decode** (rm only, section 5.2) - aws's
-   `_convert_path_args`.
-4. **All path validation** - aws's `add_paths`: the path-type gate, then
-   `_normalize_s3_trailing_slash` over the paths in order
+1. **The option values** - the paramfile expansions (252) and the integer
+   coercions (255). The tokens the leaf parse left over (`Unknown options`)
+   and `--query` were already checked by the dispatcher, right after the
+   parse.
+2. **The path-type gate and the normalization** - the local-local pair
+   (252), then `_normalize_s3_trailing_slash` over the paths in order
    (`transferargs.normalize_s3_path`: its `find_bucket_key` refuses the S3
-   Object Lambda and Outposts bucket ARNs - 252 ahead of every check after it
-   - and a keyless `s3://` path gains the trailing `/` every later step
-   re-reads, which turns an Outposts `.../accesspoint/ap:` into the key `/`),
-   then streaming, mv's onto-itself guard and resolver, the checksum / SSE-C
-   pairings, the missing local source, the `s3local` destination pre-create,
-   sync's directory-bucket rejection. Which of the checks after the
-   normalization a command runs, and in what relative order, is the one thing
-   the family does not share; each is recorded with its command.
+   Object Lambda and Outposts bucket ARNs (252), and a keyless `s3://` path
+   gains the trailing `/` every later step re-reads, which turns an Outposts
+   `.../accesspoint/ap:` into the key `/`). In `classify_paths` (cp / mv /
+   sync) and in rm's `run()`, which decodes a readable `fileb://` positional
+   first (aws's `_convert_path_args`, section 5.2).
+3. **The S3 client** - aws's `S3Command._run_main`, which every `aws s3`
+   subcommand inherits; built last in `classify_paths` and right after the
+   normalization in rm's `run()`. A schemeless `--endpoint-url` (252), an
+   undeclared profile (255) and an *empty* region (`AWS_REGION=`,
+   `AWS_DEFAULT_REGION=`, or a config `region =`, whose endpoint resolves to
+   `https://s3..amazonaws.com` -> 255) fail here. A merely *absent* region
+   builds fine on S3's global endpoint.
+4. **The rest of the path validation** - aws's `add_paths`: streaming, mv's
+   onto-itself guard and resolver, the checksum / SSE-C pairings, the
+   missing local source, the `s3local` destination pre-create, sync's
+   directory-bucket rejection. Which of these a command runs is recorded
+   with its command.
 5. **The `[s3]` runtime config and the transfer manager** - aws's
    `_get_transfer_manager`: `transferargs.resolve_transfer_config` (an invalid
    `[s3]` value is 255) then `transferargs.materialize_transfer_engine`, which
@@ -1204,45 +1105,26 @@ The library keeps botocore's default (crt.md section 1); the measured stake
 is the CRT engine's 1 GB upload, where CRC32's software implementation cost
 10% (benchmarks/RESULTS.md, 2026-09-06).
 
-The validation order of `run()` (corresponding to aws's stages; the
-combined-error cases are measured against the pinned aws-cli):
-**a top-level global that fails to parse, or a parse-time `--version` (252 /
-0**, settled during `_dispatch`'s globals pass itself - ahead of everything
-below, the invalid-subcommand rejection and the unknown-options report
-included; section 1) ->
-**`--query` compile (252**, aws resolves it at `top-level-args-parsed`, the
-first of the resolutions) -> **`--endpoint-url` scheme (252**, aws validates the
-value at parse time) -> **the `--cli-read-timeout` / `--cli-connect-timeout`
-coercions (255**, read before connect - aws's registration order at the same
-event; all three resolutions run in `_dispatch`'s top-level globals pass, so
-they also beat the invalid-choice / unknown-options / missing-argument
-rejections of the later stages, section 1) -> **the direct-option paramfile loads and the two
-integer coercions, interleaved per aws's `TRANSFER_ARGS` registration order**
+The checks of `run()`, in the order the code makes them (aws's stages; when
+several fail, which one is reported is not matched): **the direct-option
+paramfile loads and the two integer coercions**
 (`resolve_paramfile_values`, `commands/transferargs.py`: the `--sse-c-key`
 blob, `--sse-kms-key-id`, the `--sse-c-copy-source-key` blob, `--grants`, the
-free-string text block, `--progress-frequency`, then `--page-size` - each
-option's `file://`/`fileb://` load and, for the two integer options, its
-`int()` coercion happen together at that option's registration position, so a
-combined failure resolves to whichever option comes first: a load is 252, a
-bad `int()` is 255) -> **`--metadata` resolution (paramfile load 252, shorthand
-parse 252; a `fileb://`-loaded bytes value instead fails the string-only check
-as `InvalidValueError` 255**; resolved *after* both integer coercions,
-unlike the options above - the one value family the coercions beat) -> cp's
-**`--expected-size` paramfile (252)** -> **session
-profile resolution (255**, aws binds the profile at startup, so a bad
-`--profile` beats every post-parse usage error; an unresolvable *region*
-does NOT fail here, nor at client construction - an absent region builds on
-S3's global endpoint) -> **client
-creation** (step 2 above: 255 on an empty region or an invalid configuration,
-section 6; missing credentials are no construction failure either, they fail
-the first request) -> route type / streaming
-constraints (252) -> **checksum path
+free-string text block, `--progress-frequency`, then `--page-size`; a load is
+252, a bad `int()` is 255) -> **`--metadata` resolution (paramfile load 252,
+shorthand parse 252; a `fileb://`-loaded bytes value instead fails the
+string-only check as `InvalidValueError` 255)** -> cp's **`--expected-size`
+paramfile (252)** -> the route type (local-local 252) and the refused ARN
+forms (252) -> **client creation** (step 3 above: a schemeless
+`--endpoint-url` is 252; an undeclared profile, an empty region or an invalid
+configuration is 255, section 6; an absent region and missing credentials
+are no construction failure, the latter fail the first request) ->
+streaming constraints (252) -> **checksum path
 type** (`--checksum-algorithm` is locals3 / s3s3, `--checksum-mode` is s3local
 only. `Expected <param> parameter to be used with one of following path formats:
 ...` 252 - shared with mv) -> **a nonexistent single local
 src (255**, equivalent to aws's bare RuntimeError.
-`-` is excluded. aws-cli `_validate_path_args` checks this right after the
-checksum pairing and *before* SSE-C, so the 255 wins when both fail) -> **the
+`-` is excluded) -> **the
 s3local `--recursive` destination-directory pre-create (255** on an OSError -
 the dir_op half of the same `_validate_path_args`; sync shares it,
 unconditionally) -> the SSE-C pair (252) -> the `--no-overwrite` floor check
@@ -1303,8 +1185,8 @@ the recorded progress-display deviations (option-handling section 6).
 
 rc forms: **0 / 1 / 2 / 252 / 253 / 255**. 254 cannot occur (the transfer family
 folds every error after the start into 1). 255 is for the pre-pipeline general
-errors of the validation order above - the timeout and integer coercions,
-`--metadata`'s bytes, the session profile, client construction (an empty
+errors of the checks above - the timeout and integer coercions,
+`--metadata`'s bytes, client construction (an undeclared profile, an empty
 region, an invalid config), **a nonexistent single local src** (aws's bare
 RuntimeError -> general handler), the destination pre-create, the `[s3]` config
 and the transfer-manager construction.
@@ -1327,12 +1209,11 @@ code. This section records only the differences. The library side is `S3.mv`
 (`Unknown options` 252). `--validate-same-s3-paths` is added. streaming is
 **rejected post-parse in `run()`**: if either src / dest is `-`, it is 252 (`Streaming
 currently is only compatible with non-recursive cp commands` - the aws-cli wording
-stays "cp commands" even for mv. `mv - -` hits the local->local usage error
-first).
+stays "cp commands" even for mv).
 
 **mv-specific validation** (for s3s3, in `run()` after `classify_paths` has
-built the session-backed `S3` **and its client** - step 2 of the family's
-construction order in section 5.7):
+built the session-backed `S3` **and its client** - step 3 of the family's
+construction in section 5.7):
 
 1. **The same-path guard** (always): if the keyless-normalized URI (`s3://b` ->
    `s3://b/`) matches `S3Storage.same_path` (an exact match, or a `/`-terminated dest
@@ -1412,21 +1293,18 @@ strategy-derived `--delete` / `--size-only` / `--exact-timestamps`): **`--recurs
 and `--expected-size` are not declared** (`Unknown options` 252 - sync is always
 recursive and has no streaming form). `add_transfer_arguments(include_recursive=False)`.
 
-**Validation order** (the shared section 5.7 head first - the `--query`
-compile, the endpoint scheme check, the interleaved paramfile loads /
-coercions, `--metadata`, the session profile, then the client build - and
-after all of that):
+**Validation** (the shared section 5.7 steps first - the paramfile loads /
+coercions, `--metadata`, the route type, then the client build - and after
+all of that):
 
-1. Integer-option conversion (255; part of the shared head above)
+1. Integer-option conversion (255; part of the shared steps above)
 2. Route type: local->local is usage 252 (`usage: boto3-s3 sync <LocalPath>
    <S3Uri> or <S3Uri> <LocalPath> or <S3Uri> <S3Uri>` + `Error: Invalid argument
    type`), then the refused ARN forms (252, the normalization of section 5.7)
 3. If `-` is on either side, 252 (the wording stays "cp commands" - same as mv)
 4. Checksum path type 252 (the cp / mv-shared `validate_checksum_paths_type` -
    aws-cli `_validate_path_args` applies to sync too)
-5. A nonexistent locals3 src -> 255 (aws-cli `_validate_path_args` checks this
-   right after the checksum pairing and *before* SSE-C and the directory-bucket
-   check, so the 255 wins when more than one fails)
+5. A nonexistent locals3 src -> 255 (aws-cli `_validate_path_args`)
 6. The local destination-directory pre-create for a download (255 on an
    OSError - the same `_validate_path_args` half as cp's dir_op pre-create,
    run unconditionally for a local dest)
@@ -1475,9 +1353,7 @@ aws-cli gives it), these follow aws-cli v2's convention (aws-cli's
 `awscli/constants.py`).
 
 The specification belongs to [`exit-codes.md`](../docs/cli/exit-codes.md): what
-each code means, and which one wins when more than one thing is wrong (as
-measured, not promised). This
-section records how that is produced - the mapping function, the per-family
+each code means. This section records how that is produced - the mapping function, the per-family
 catches, and the aws-cli counterpart each one mirrors.
 [`exceptions.md`](./exceptions.md) section 5 and [`testing.md`](./testing.md)
 section 2 point here for the mechanism. A change to either half needs the other
@@ -1626,13 +1502,8 @@ server before the operation begins, so its resolution-API failure is plainly
 **The exception rule for mb / rb (the `S3Command` family)**: aws-cli's mb / rb
 catch the exceptions of the API call within the command and make them uniformly
 rc 1 (they do not turn it into 254 even when server-derived). `MbCommand.run` /
-`RbCommand.run` likewise return 1 with a local catch. Both build the client
-**before** their path checks (mirroring aws's `S3Command._run_main`, which builds
-the client in `super()._run_main()` ahead of the scheme / empty / `--x-s3` / key
-checks), so a client-construction failure takes precedence over a path usage
-error - e.g. `mb badpath --profile <bad>` is the construction error's 255, not
-the scheme 252, exactly like aws. (This means an `mb` / `rb` path usage error
-loads `boto3`; the import contract does not constrain usage-error paths.) Client creation is
+`RbCommand.run` likewise return 1 with a local catch. Both check the path's
+scheme before they build the client. Client creation is
 outside the local rc-1 catch: it translates botocore's construction-time errors
 into the library taxonomy so they reach the exit-code mapping instead of escaping
 as a traceback. The translation knows `NoCredentialsError` /
@@ -1644,20 +1515,19 @@ other `BotoCoreError` -> `InvalidConfigError` = 255 (aws's
 `GeneralExceptionHandler`), including `ProfileNotFound` for a bad `--profile`
 **and `PartialCredentialsError`** (e.g. an access key with no secret) - aws has
 no handler for either, so both are 255, not 253. A schemeless
-`--endpoint-url` is rejected up front as a usage error (252). As a final
+`--endpoint-url` is rejected as a usage error (252) when the client is
+built. As a final
 backstop, `_dispatch` maps any non-`Boto3S3Error` exception that still escapes a
 command to the same chain (credential/region 253, `ClientError` 254, else 255),
 so no path crashes with a traceback + rc 1 - except an `AssertionError`, which
-the backstop deliberately re-raises (a broken invariant crashes loudly). The
-three resolutions of the globals pass (section 1) carry the same backstop, for
-the same reason: aws resolves them inside its handler chain, so an
-`--endpoint-url` whose netloc `urlsplit` refuses (`http://[::1:9000` -> a bare
-`ValueError`) is its general report at 255 on both tools, and a `--query` too
-deep to compile is the ParamValidation 252 (its `_resolve_query` catches bare
-`Exception`; both measured). `main` closes the same chain around the
-dispatcher itself: whatever its own steps raise that no step claims - an
-alias whose `--endpoint-url` value `urlsplit` refuses, say - is reported
-through the same mapping, `AssertionError` excepted, as aws's entry point
+the backstop deliberately re-raises (a broken invariant crashes loudly). It
+covers `--query` and `--endpoint-url` too, which aws resolves inside its
+handler chain: an `--endpoint-url` whose netloc `urlsplit` refuses
+(`http://[::1:9000` -> a bare `ValueError`) is the general report at 255 on
+both tools, and a `--query` too deep to compile is the ParamValidation 252
+(its `_resolve_query` catches bare `Exception`; both measured). `main` closes
+the same chain around the dispatcher itself: whatever its own steps raise
+that no step claims is reported through the same mapping, `AssertionError` excepted, as aws's entry point
 reports whatever escapes its driver. The
 rc-255 special case is the rm-stage failure of `rb --force` (section 5.4). Note that even among direct descendants of the same
 `S3Command`, **website / presign have no local catch**: website's server
@@ -1667,16 +1537,13 @@ first place (section 5.5).
 **The conversion rule for integer options**: aws-cli converts integer-type
 options (`--page-size` / `--expires-in` / `--progress-frequency`) with a bare
 `int()`, and a failure (`ValueError`) reaches the general handler and becomes
-**rc 255** (not 252; including that it fires **before** the path-format check).
+**rc 255** (not 252).
 Because argparse's `type=int` would turn the same error into
 a usage error (252), it is not used; instead, each `run()` converts at the top via
 `parse_integer_option` in `commands/base.py` (before the client factory),
 raising `InvalidValueError` - the class
 `exit_code_for` sends to 255. The CLI timeouts' `_coerce_cli_timeout` uses the
-same class, but runs earlier: `_dispatch`'s top-level globals pass coerces both
-timeouts (read, then connect) ahead of every command-layer parse, aws's
-`top-level-args-parsed` timing (section 1; the client builders coerce the same
-strings again when they build). **The exception is cp's `--expected-size`**:
+same class, where the session and client builders coerce them. **The exception is cp's `--expected-size`**:
 because aws does a bare `int()` at submit time (within the pipeline) and **only on
 the streaming-upload route**, a non-integer there is not 255 but a `fatal error:`
 of **rc 1**; off the stream route, and under `--dryrun`, the value is never

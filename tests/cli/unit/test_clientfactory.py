@@ -274,16 +274,13 @@ class TestBuildClient:
         self, monkeypatch: pytest.MonkeyPatch, mode: str
     ) -> None:
         # aws v2's bundled botocore restricts retry modes to standard/adaptive
-        # and names those two in its report. The installed botocore accepts
-        # "legacy" (its own valid mode) and, for the rest, names all three -
-        # so every one of these values needs the aws report, measured on the
-        # pinned aws-cli at rc 255.
+        # (measured on the pinned aws-cli at rc 255). The installed botocore
+        # refuses the rest itself but accepts "legacy" (its own valid mode),
+        # which the client build refuses once more.
         monkeypatch.setenv("AWS_RETRY_MODE", mode)
         with pytest.raises(InvalidConfigError) as excinfo:
             clientfactory.build_client(_parse([]))
-        assert str(excinfo.value) == (
-            f'Invalid value provided to "mode": "{mode}" must be one of: "standard" or "adaptive"'
-        )
+        assert f'Invalid value provided to "mode": "{mode}"' in str(excinfo.value)
         assert exit_code_for(excinfo.value) == 255
 
     def test_empty_retry_env_is_present_and_fatal_like_aws(
@@ -954,7 +951,7 @@ class TestProfileSessionBinding:
     def test_every_entry_point_opens_its_session_the_same_way(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # One opener behind all four session builders: a site left on
+        # One opener behind all three session builders: a site left on
         # `Session(profile=...)` would silently reinstate the promotion.
         opened: list[Any] = []
         real_opener = clientfactory._open_botocore_session  # pyright: ignore[reportPrivateUsage]
@@ -966,13 +963,12 @@ class TestProfileSessionBinding:
 
         monkeypatch.setattr(clientfactory, "_open_botocore_session", recording)
         monkeypatch.setenv("AWS_PROFILE", "named")
-        clientfactory.validate_profile(_parse([]))
         clientfactory.build_client(_parse([]))
         clientfactory.build_service_client("sts", _parse([]))
         clientfactory.build_session(_parse([]))
-        assert len(opened) == 4
-        assert [session.instance_variables().get("profile") for session in opened] == [None] * 4
-        assert [session.get_config_variable("profile") for session in opened] == ["named"] * 4
+        assert len(opened) == 3
+        assert [session.instance_variables().get("profile") for session in opened] == [None] * 3
+        assert [session.get_config_variable("profile") for session in opened] == ["named"] * 3
 
 
 class TestCredentialCache:
@@ -1158,8 +1154,8 @@ class TestCredentialCache:
 
     def test_every_entry_point_gets_the_cache(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # aws emits `session-initialized` once per run, so no session may be
-        # left with botocore's in-memory dict: the sessions the startup gate
-        # and the non-S3 client builder open assume the same role.
+        # left with botocore's in-memory dict: the sessions every builder
+        # opens assume the same role.
         opened: list[Any] = []
         real_opener = clientfactory._open_botocore_session  # pyright: ignore[reportPrivateUsage]
 
@@ -1169,11 +1165,10 @@ class TestCredentialCache:
             return session
 
         monkeypatch.setattr(clientfactory, "_open_botocore_session", recording)
-        clientfactory.validate_profile(_parse([]))
         clientfactory.build_client(_parse([]))
         clientfactory.build_service_client("sts", _parse([]))
         clientfactory.build_session(_parse([]))
-        assert len(opened) == 4
+        assert len(opened) == 3
         for session in opened:
             for cache in self._caches(session):
                 assert isinstance(cache, JSONFileCache)
@@ -1182,11 +1177,11 @@ class TestCredentialCache:
     def test_an_unknown_profile_is_still_reported_the_same_way(self) -> None:
         # Injecting the cache builds the provider chain while the session is
         # opened, which is where an unknown profile now raises: pin that the
-        # startup gate still reports it with aws's wording and rc (measured
+        # session builder still reports it with aws's wording and rc (measured
         # against the pinned aws-cli: rc 255, `The config profile
         # (nosuchprofile) could not be found`).
         with pytest.raises(InvalidConfigError) as excinfo:
-            clientfactory.validate_profile(_parse(["--profile", "nosuchprofile"]))
+            clientfactory.build_session(_parse(["--profile", "nosuchprofile"]))
         assert exit_code_for(excinfo.value) == 255
         assert str(excinfo.value) == "The config profile (nosuchprofile) could not be found"
 
@@ -1670,15 +1665,8 @@ class TestSessionRetryPosture:
         assert _provider_client(session).meta.config.read_timeout is None
 
 
-class TestConfigErrorOrder:
-    """A config carrying several mistakes reports the one aws reports.
-
-    Measured on the pinned aws-cli, its order is: the profile's ``services``
-    section, then the raw ``[s3]`` read, then the ``max_attempts`` int cast,
-    then ``[s3] addressing_style``, and only then the attempt range and the
-    retry mode. Resolving the retry configuration before ``create_client``, as
-    this module used to, put the last two in front of all of them.
-    """
+class TestConfigErrors:
+    """A config mistake botocore or aws v2 refuses stops the client build (255)."""
 
     def _config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str) -> None:
         config = tmp_path / "config"
@@ -1689,106 +1677,6 @@ class TestConfigErrorOrder:
 
     _SERVICES = 'The profile is configured to use the services section but the "nope" '
     _ADDRESSING = "S3 addressing style bogus is invalid."
-
-    def test_a_missing_services_section_outranks_a_bad_retry_mode(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        self._config(tmp_path, monkeypatch, "[default]\nservices = nope\nretry_mode = legacy\n")
-        with pytest.raises(InvalidConfigError, match=self._SERVICES):
-            clientfactory.build_client(_parse([]))
-
-    def test_a_missing_services_section_outranks_a_bad_attempt_count(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        self._config(tmp_path, monkeypatch, "[default]\nservices = nope\nmax_attempts = abc\n")
-        with pytest.raises(InvalidConfigError, match=self._SERVICES):
-            clientfactory.build_client(_parse([]))
-
-    def test_a_missing_services_section_outranks_a_degenerate_s3_section(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        self._config(tmp_path, monkeypatch, "[default]\nservices = nope\ns3 =\n")
-        with pytest.raises(InvalidConfigError, match=self._SERVICES):
-            clientfactory.build_client(_parse([]))
-
-    def test_an_explicit_endpoint_stands_the_services_lookup_down(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # botocore consults the services section only when the client resolves
-        # its own endpoint, so with --endpoint-url the retry mode is what aws
-        # reports (measured).
-        self._config(tmp_path, monkeypatch, "[default]\nservices = nope\nretry_mode = legacy\n")
-        with pytest.raises(InvalidConfigError, match='Invalid value provided to "mode"'):
-            clientfactory.build_client(_parse(["--endpoint-url", "http://localhost:9000"]))
-
-    def test_a_degenerate_s3_section_outranks_a_bad_attempt_count(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        self._config(tmp_path, monkeypatch, "[default]\ns3 =\nmax_attempts = abc\n")
-        with pytest.raises(AttributeError, match="'str' object has no attribute 'get'"):
-            clientfactory.build_client(_parse([]))
-
-    def test_a_bad_attempt_count_outranks_a_bogus_addressing_style(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        self._config(
-            tmp_path,
-            monkeypatch,
-            "[default]\nmax_attempts = abc\ns3 =\n  addressing_style = bogus\n",
-        )
-        with pytest.raises(ValueError, match="invalid literal for int"):
-            clientfactory.build_client(_parse([]))
-
-    @pytest.mark.parametrize("broken", ["retry_mode = legacy", "max_attempts = 0"])
-    def test_a_bogus_addressing_style_outranks_the_retry_block(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, broken: str
-    ) -> None:
-        self._config(
-            tmp_path, monkeypatch, f"[default]\n{broken}\ns3 =\n  addressing_style = bogus\n"
-        )
-        with pytest.raises(InvalidConfigError, match=self._ADDRESSING):
-            clientfactory.build_client(_parse([]))
-
-    def test_a_bad_attempt_range_outranks_a_bad_retry_mode(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Both live in botocore's own Config validation, which checks the
-        # attempt count first (measured: aws reports the count).
-        self._config(tmp_path, monkeypatch, "[default]\nmax_attempts = 0\nretry_mode = legacy\n")
-        with pytest.raises(InvalidConfigError, match='Value provided to "max_attempts"'):
-            clientfactory.build_client(_parse([]))
-
-    @pytest.mark.parametrize("source", ["config", "env"])
-    @pytest.mark.parametrize("endpoint", ["http://a b/", "http://[::1]:x/"])
-    def test_a_legacy_retry_mode_outranks_an_invalid_endpoint(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str, endpoint: str
-    ) -> None:
-        # The installed botocore takes `legacy`, so a mode judged only after
-        # the client exists loses to everything botocore checks behind its own
-        # mode validation - the endpoint first of all (measured: aws reports
-        # the mode, this CLI reported `Invalid endpoint`).
-        self._config(
-            tmp_path, monkeypatch, "[default]\nretry_mode = legacy\n" if source == "config" else ""
-        )
-        if source == "env":
-            monkeypatch.setenv("AWS_RETRY_MODE", "legacy")
-        with pytest.raises(InvalidConfigError) as excinfo:
-            clientfactory.build_client(_parse(["--endpoint-url", endpoint]))
-        assert str(excinfo.value) == (
-            'Invalid value provided to "mode": "legacy" must be one of: "standard" or "adaptive"'
-        )
-
-    def test_a_refused_legacy_build_leaves_the_session_s_mode_alone(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # The mode is swapped only for the length of the build; what the
-        # session answers afterwards is what the configuration says.
-        self._config(tmp_path, monkeypatch, "[default]\nretry_mode = legacy\n")
-        args = _parse([])
-        session = clientfactory.build_session(args)
-        with pytest.raises(InvalidConfigError, match='"legacy"'):
-            clientfactory.build_client(args, session=session)
-        assert session._session.get_config_variable("retry_mode") == "legacy"  # pyright: ignore[reportPrivateUsage]
 
     @pytest.mark.parametrize(
         ("body", "expected"),
@@ -1802,7 +1690,6 @@ class TestConfigErrorOrder:
     def test_each_error_alone_is_unchanged(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str, expected: str
     ) -> None:
-        # The controls: reordering must not change what a single mistake says.
         self._config(tmp_path, monkeypatch, body)
         with pytest.raises(InvalidConfigError, match=expected):
             clientfactory.build_client(_parse([]))

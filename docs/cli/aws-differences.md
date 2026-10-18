@@ -40,10 +40,12 @@ bug worth reporting; an error report's wording, or which of two mistakes it
 names, is not.
 
 **Do not parse the console output.** Not because the wording differs: result
-lines, error text and warnings are aws's own, with this command's name
+lines, warnings and most error text are aws's own, with this command's name
 substituted for `aws` — the error prefix is `boto3-s3:`, not `aws:`, and usage
-lines read `boto3-s3 <subcommand>` where aws's read `aws s3 <subcommand>`. That
-is exactly what makes parsing fragile: the wording is aws's to change, and it
+lines read `boto3-s3 <subcommand>` where aws's read `aws s3 <subcommand>`. (A
+command line the parser rejects is reported in Python's own argparse words,
+which is one of the error reports not listed below.) That is exactly what
+makes parsing fragile: the wording is aws's to change, and it
 does change from one `aws` release to the next. Six of section 2's entries
 cover the text that differs on purpose — the progress display, help pages and
 `--debug` traces, the failure lines of a batched delete, the `--dryrun` line

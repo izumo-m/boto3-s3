@@ -55,10 +55,7 @@ class TestCommandTable:
 
     def test_help_displays_the_subcommand_placeholder(self) -> None:
         # The displayed name is `<subcommand>`, matching what this command's
-        # level is called in aws (`aws s3 <subcommand>`) and what the usage
-        # block in every top-level error says. The rejection message says a
-        # bare `subcommand` instead - argparse names a positional after its
-        # dest - which TestTopLevelErrorText pins.
+        # level is called in aws (`aws s3 <subcommand>`).
         for parser in (cli._build_stage1_parser(), cli.build_parser()):
             help_text = parser.format_help()
             assert "<subcommand> ...\n" in help_text

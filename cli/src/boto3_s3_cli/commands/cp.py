@@ -27,12 +27,9 @@ class CpCommand(Command):
         """Copy and return an ``aws s3 cp``-style exit code.
 
         Exit-code shape (design/cli.md section 5.7/6): pre-pipeline errors
-        keep their class, in aws's measured head order - the
-        ``--endpoint-url`` scheme, paramfile / blob loads, ``--metadata``
-        parsing (a readable
-        ``fileb://`` there decodes to 255 instead, the per-command
-        paramfile quirk), then the S3 client build (which an empty region
-        fails at 255, ahead of every usage error below), then path types,
+        keep their class - paramfile / blob loads, ``--metadata`` parsing (a
+        readable ``fileb://`` there decodes to 255 instead, the per-command
+        paramfile quirk), path types, the ``--endpoint-url`` scheme,
         the checksum/path-format pairing,
         SSE-C pairing,
         streaming with ``--recursive`` (either side) or a streaming
@@ -139,11 +136,8 @@ class CpCommand(Command):
         # aws builds the transfer manager here, before it decides anything about
         # the run: a CRT selection pays its construction even for a --dryrun.
         transferargs.materialize_transfer_engine(s3, client, transfer_config, operation="cp")
-        # After the [s3] runtime config: aws validates --case-conflict against
-        # S3 Express while building the run's instructions, past the transfer
-        # manager whose creation loads the config - so a bad [s3] value beats
-        # the invalid-mode 252 (measured: `Invalid size value: nope` rc 255
-        # wins over `--case-conflict skip` on a directory bucket).
+        # aws validates --case-conflict against S3 Express while building the
+        # run's instructions, past the transfer manager.
         case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="cp")
         options = transferargs.build_transfer_options(
             args,

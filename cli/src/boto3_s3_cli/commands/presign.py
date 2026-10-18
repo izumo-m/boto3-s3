@@ -6,7 +6,7 @@ import argparse
 import sys
 
 from boto3_s3 import InvalidConfigError
-from boto3_s3_cli import clientfactory, globalargs, output
+from boto3_s3_cli import output
 from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import (
     Command,
@@ -61,12 +61,6 @@ class PresignCommand(Command):
         Unlike mb/rb there is no local catch: with no request ever sent,
         nothing separates "started" from "not started".
         """
-        # aws's parse-time order (measured, design/cli.md section 6): the --query
-        # compile (252) leads, then the --endpoint-url scheme check (252), then
-        # the paramfile expansions (252, the positional path and --expires-in)
-        # precede the bare int() coercion (255).
-        globalargs.validate_query(args)
-        clientfactory.validate_endpoint_url(args)
         expand_positional_paramfile(args, "path", name="path", operation="presign")
         expand_integer_paramfile(args, "expires_in", operation="presign")
         expires_in = parse_integer_option(args.expires_in, operation="presign")

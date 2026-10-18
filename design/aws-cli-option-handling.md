@@ -69,9 +69,8 @@ nothing to act on.
 the JMESPath expression at `top-level-args-parsed`, independent of the
 response-formatter pipeline, so a malformed expression is still a usage error
 (rc 252) even though the compiled value is never applied to anything.
-`boto3-s3-cli`'s `globalargs.validate_query` matches this - every
-subcommand's `run()` calls it first, ahead of the `--endpoint-url` check
-(cli.md sections 5.7 and 6).
+`boto3-s3-cli`'s `globalargs.validate_query` matches this - the dispatcher
+calls it once the command line is parsed (cli.md section 2).
 
 `--color` is a no-op for a related reason: the parsed `color` global is
 consulted only by other parts of aws-cli (the table formatter, the error
@@ -435,7 +434,8 @@ The rest sit outside the pipeline:
   (`output.py`). Unreachable in practice - a total below 1 EiB never gets
   there - which is why this one is not in the user-facing list.
 
-Two further differences reach stderr from the **parser** rather than the
-display layer: the candidate order of an ambiguous-abbreviation report, and an
-ambiguous abbreviation used as an option value on Python 3.10 / 3.11. Both are
-recorded with their rationale in [`cli.md`](./cli.md) section 2.
+One further difference comes from the **parser** rather than the display
+layer: an ambiguous abbreviation used as an option value is rejected on
+Python 3.10 / 3.11, recorded with its rationale in [`cli.md`](./cli.md)
+section 2. The parser's own reports are argparse's wording rather than aws's,
+an error detail (same section).

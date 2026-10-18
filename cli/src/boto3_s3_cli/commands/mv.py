@@ -56,14 +56,11 @@ class MvCommand(Command):
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """Move and return an ``aws s3 mv``-style exit code.
 
-        The shape is cp's (design/cli.md section 6) with mv's own usage errors in
-        aws-cli order: the local-local pair 252, any
+        The shape is cp's (design/cli.md section 6) with mv's own usage
+        errors: the local-local pair 252, any
         ``-`` path 252 ("Streaming currently is only compatible with
         non-recursive cp commands"), and for s3->s3 the onto-itself guard /
-        ``--validate-same-s3-paths`` resolution / access-point warning - all
-        after the S3 client is built (``classify_paths``), the way aws orders
-        them, so an unusable region reports the *s3* endpoint's failure rather
-        than the resolver's s3control.
+        ``--validate-same-s3-paths`` resolution / access-point warning.
         Resolution failures keep their class: an unresolvable path 252, a
         failing s3control/sts call its translated category (a
         ClientError-caused failure 254, a transport failure 255).
@@ -84,10 +81,9 @@ class MvCommand(Command):
             self._validate_same_paths(args, ctx, head.s3, src, dest)
         transferargs.validate_checksum_paths_type(args, paths_type, operation="mv")
         if src_type == "local" and not os.path.exists(src):
-            # aws-cli's _validate_path_args checks the missing local source (its bare
-            # RuntimeError -> rc 255) right after the checksum/path pairing and
-            # before SSE-C (rc 252), so when both fail that order decides the exit
-            # code. NotFoundError without a ClientError cause maps to the same rc 255.
+            # aws-cli's _validate_path_args checks the missing local source (its
+            # bare RuntimeError -> rc 255). NotFoundError without a ClientError
+            # cause maps to the same rc 255.
             raise NotFoundError(f"The user-provided path {src} does not exist.", operation="mv")
         if args.recursive and paths_type == "s3local":
             # The dir_op half of aws's _validate_path_args: the s3local
@@ -122,10 +118,8 @@ class MvCommand(Command):
         # aws builds the transfer manager here, before it decides anything about
         # the run: a CRT selection pays its construction even for a --dryrun.
         transferargs.materialize_transfer_engine(s3, client, transfer_config, operation="mv")
-        # After the [s3] runtime config: aws validates --case-conflict against
-        # S3 Express past the transfer manager whose creation loads the
-        # config, so a bad [s3] value beats the invalid-mode 252 (measured
-        # on cp; mv shares aws's S3TransferCommand shape).
+        # aws validates --case-conflict against S3 Express while building the
+        # run's instructions, past the transfer manager.
         case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="mv")
         options = transferargs.build_transfer_options(
             args,
@@ -175,10 +169,8 @@ class MvCommand(Command):
         goes to stderr and the move proceeds (non-matching keys return before
         the warning branch).
 
-        A pure validator: the run's S3 client is already built (aws's
-        ``S3Command._run_main`` slot, ``classify_paths``), which is why an
-        unusable region reports the *s3* endpoint's failure rather than the
-        s3control endpoint the resolver below would otherwise reach first.
+        A pure validator: the run's S3 client is already built
+        (``classify_paths``).
         """
         norm_src = S3Storage.normalize_s3_uri(src)
         norm_dest = S3Storage.normalize_s3_uri(dest)

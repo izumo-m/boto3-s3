@@ -462,16 +462,6 @@ SCENARIOS: tuple[CpScenario, ...] = (
         expected_stderr_tokens_ours=("invalid literal",),
         expected_stderr_tokens_aws=("invalid literal",),
     ),
-    # -- the measured parse-to-validation head order (design/cli.md 5.7) -------
-    CpScenario(
-        # A bad --profile (255: aws binds the profile at startup) beats the
-        # local-local usage error (252). No server contact on either side.
-        name="cp_bad_profile_beats_usage",
-        argv=("cp", "src/a.txt", "dest/b.txt", "--profile", "boto3-s3-e2e-no-such-profile"),
-        local_src=_SRC_SINGLE,
-        expected_stderr_tokens_ours=("could not be found",),
-        expected_stderr_tokens_aws=("could not be found",),
-    ),
     CpScenario(
         # A direct-option paramfile failure (252, aws's parse-time expansion)
         # beats the missing local source (255).

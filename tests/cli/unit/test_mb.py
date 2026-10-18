@@ -14,9 +14,7 @@ from typing import Any
 import pytest
 from botocore.exceptions import ClientError
 
-from boto3_s3 import Boto3S3Error
 from boto3_s3_cli import cli
-from boto3_s3_cli.commands.base import Context
 from tests.utils.fakes3 import client_error
 from tests.utils.harness import (
     bucket_name_report,
@@ -113,15 +111,6 @@ class TestUsageErrors:
         assert rc == 252
         assert "Cannot use mb command with a directory bucket." in capsys.readouterr().err
 
-    def test_client_construction_error_beats_path_usage_error(self) -> None:
-        # aws builds the client before the path check, so a construction error
-        # (bad --profile / unresolved creds) wins over the path 252.
-        def boom(_args: Any) -> Any:
-            raise Boto3S3Error("Unable to locate credentials")
-
-        rc = cli.main(["mb", "bucket"], ctx=Context(client_factory=boom))
-        assert rc == 255  # the construction error, not the scheme 252
-
     def test_object_lambda_arn_is_252_not_1(self, capsys: pytest.CaptureFixture[str]) -> None:
         # The S3Storage.validate() rejection must stay outside mb's rc-1 catch.
         arn = "arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/my-ap"
@@ -139,19 +128,10 @@ class TestUsageErrors:
         assert "Cannot use mb command with a directory bucket." in capsys.readouterr().err
 
     def test_positional_missing_paramfile_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # aws expands the positional file:// at parse time, before the client
-        # build (so a bad reference beats a bad --profile). Names it 'path'.
+        # aws expands the positional file:// at parse time. Names it 'path'.
         rc = cli.main(["mb", "file:///no/x"], ctx=unused_ctx())
         assert rc == 252
         assert "Error parsing parameter 'path': Unable to load paramfile" in capsys.readouterr().err
-
-    def test_invalid_query_beats_client_construction(self) -> None:
-        # --query is compiled before the client is built, so its 252 wins over
-        # a construction failure's 255 (guards the head order).
-        def boom(_args: Any) -> Any:
-            raise Boto3S3Error("Unable to locate credentials")
-
-        assert cli.main(["mb", "s3://b", "--query", "]["], ctx=Context(client_factory=boom)) == 252
 
     def test_tags_missing_value_is_252(self) -> None:
         result = run_cli_in_process(["mb", "s3://b", "--tags", "K"], ctx=unused_ctx())

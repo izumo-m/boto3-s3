@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 
 from boto3_s3 import ValidationError
-from boto3_s3_cli import clientfactory, globalargs, usage
+from boto3_s3_cli import usage
 from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import (
     Command,
@@ -46,23 +46,13 @@ class WebsiteCommand(Command):
         defaults to us-east-1), while client construction's botocore failures
         - a bad ``--profile``, partial credentials - are 255.
         """
-        # aws's parse-time order (measured, design/cli.md section 6): the --query
-        # compile (252) leads, then the --endpoint-url scheme check (252), then
-        # the paramfile expansions (252) - the positional path and both document
-        # options are all expanded at parse time - before the request is built.
-        globalargs.validate_query(args)
-        clientfactory.validate_endpoint_url(args)
+        # The positional path and both document options are all expanded at
+        # parse time, as on aws.
         raw_paths = args.paths
         expand_positional_paramfile(args, "paths", name="paths", operation="website")
         paths_expanded = args.paths is not raw_paths
         expand_option_paramfile(args, "index_document", operation="website")
         expand_option_paramfile(args, "error_document", operation="website")
-        # Everything above is aws's parse layer; the client comes next, in
-        # aws's own slot (S3Command._run_main), ahead of all path handling. So
-        # an empty region is its "Invalid endpoint" 255 rather than the bytes
-        # crash just below, and a merely absent region still builds.
-        s3 = ctx.s3(args)
-        client = s3.client()
         # aws's _get_bucket_name: strip an optional s3://, strip ONE trailing
         # slash, then pass the remainder verbatim as the bucket name (no
         # key split - "b/k" fails botocore's bucket regex -> 252).
@@ -90,6 +80,8 @@ class WebsiteCommand(Command):
         if path.endswith("/"):
             path = path[:-1]
 
+        s3 = ctx.s3(args)
+        client = s3.client()
         # build_s3_storage keeps the strict ARN rejections; its bucket-less
         # carve-out is what keeps "s3:///k" from failing S3Storage.validate
         # before the rejection below can shape it aws's way.

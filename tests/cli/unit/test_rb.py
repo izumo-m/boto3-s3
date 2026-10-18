@@ -18,7 +18,6 @@ from typing import Any
 import pytest
 from botocore.exceptions import ClientError
 
-from boto3_s3 import Boto3S3Error
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
 from tests.utils.fakes3 import client_error
@@ -83,21 +82,14 @@ class TestOutput:
 
 
 class TestUsageErrors:
-    # rb builds the client before the path checks (aws order), so these paths
-    # consult the factory; a benign one keeps the assertion on the path error.
+    # A benign factory keeps the assertion on the path error for the checks
+    # made once the client is built.
     def test_no_scheme_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = cli.main(["rb", "bucket"], ctx=client_ctx(None))
         assert rc == 252
         err = capsys.readouterr().err
         assert "<S3Uri>\nError: Invalid argument type" in err
         assert "usage:" not in err  # rb raises aws's bare form, like mb
-
-    def test_client_construction_error_beats_path_usage_error(self) -> None:
-        # aws builds the client before the path check; a construction error wins.
-        def boom(_args: Any) -> Any:
-            raise Boto3S3Error("Unable to locate credentials")
-
-        assert cli.main(["rb", "bucket"], ctx=Context(client_factory=boom)) == 255
 
     @pytest.mark.parametrize("argv", [["rb", "s3://b/key"], ["rb", "s3://b/key", "--force"]])
     def test_key_part_is_252(self, argv: list[str], capsys: pytest.CaptureFixture[str]) -> None:
@@ -113,17 +105,10 @@ class TestUsageErrors:
         assert "Please specify a valid bucket name only. E.g. s3://\n" in capsys.readouterr().err
 
     def test_positional_missing_paramfile_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # aws expands the positional file:// at parse time, before the client
-        # build (so a bad reference beats a bad --profile). Names it 'path'.
+        # aws expands the positional file:// at parse time. Names it 'path'.
         rc = cli.main(["rb", "file:///no/x"], ctx=unused_ctx())
         assert rc == 252
         assert "Error parsing parameter 'path': Unable to load paramfile" in capsys.readouterr().err
-
-    def test_invalid_query_beats_client_construction(self) -> None:
-        def boom(_args: Any) -> Any:
-            raise Boto3S3Error("Unable to locate credentials")
-
-        assert cli.main(["rb", "s3://b", "--query", "]["], ctx=Context(client_factory=boom)) == 252
 
     def test_object_lambda_arn_is_252_not_1(self, capsys: pytest.CaptureFixture[str]) -> None:
         arn = "arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/my-ap"

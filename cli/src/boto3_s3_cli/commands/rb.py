@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 # Module-level imports are fine here: rb is loaded at dispatch (stage 2 of
 # the lazy dispatch), after the command is determined.
 from boto3_s3 import InvalidValueError, S3Storage, ValidationError
-from boto3_s3_cli import clientfactory, globalargs, output, usage
+from boto3_s3_cli import output, usage
 from boto3_s3_cli.commands.base import Command, Context, expand_positional_paramfile
 from boto3_s3_cli.commands.rm import RmCommand
 
@@ -48,44 +48,34 @@ class RbCommand(Command):
         bucket delete is not attempted. Every failure from delete_bucket
         onwards is rc 1 with one ``remove_bucket failed:`` line - aws's local
         catch spans the success line too, so an unwritable stdout is an rb
-        failure rather than the dispatcher's 255. aws builds the client
-        before validating the path (``S3Command._run_main``), so a
-        client-construction failure (a bad ``--profile``, partial credentials,
-        an empty region) takes precedence over a path usage error - we build it
-        first.
+        failure rather than the dispatcher's 255. A client-construction
+        failure (a bad ``--profile``, partial credentials, an empty region)
+        reaches main's exit-code mapping (config -> 253, other botocore -> 255).
         """
-        # Parse-time head (measured, design/cli.md section 6): the --query compile
-        # (252), the --endpoint-url scheme check (252), and the positional
-        # paramfile expansion (252) all precede the client build - they beat a
-        # bad --profile (255) the way aws's parse-time load-cli-arg does.
-        globalargs.validate_query(args)
-        clientfactory.validate_endpoint_url(args)
         expand_positional_paramfile(args, "path", name="path", operation="rb")
-        # Build the client up front, like aws's super()._run_main(), so a
-        # construction error precedes the path checks (config -> 253, other
-        # botocore -> 255), then validate the path.
-        s3 = ctx.s3(args)
-        client = s3.client()
-
         target: str = args.path
         if not target.startswith("s3://"):
             # aws rb: S3 paths only -> rc 252.
             raise ValidationError(usage.bare_single_uri_usage(), operation="rb")
 
         bucket_part, _, key_part = target[len("s3://") :].partition("/")
-        if not bucket_part:
+        if not bucket_part and key_part:
             # aws splits the path first: an empty bucket carrying a key is the
             # "specify a valid bucket name only" usage error (252, ending in a
-            # bare "s3://"); an empty bucket with no key goes to delete_bucket,
-            # where botocore's client-side validation fails inside rb's local
-            # catch -> rc 1 (the same botocore-shaped line as mb / rm). Both
-            # cases are handled before construction, which S3Storage.validate()
-            # would otherwise reject with library-internal wording.
-            if key_part:
-                raise ValidationError(
-                    f"Please specify a valid bucket name only. E.g. s3://{bucket_part}",
-                    operation="rb",
-                )
+            # bare "s3://").
+            raise ValidationError(
+                f"Please specify a valid bucket name only. E.g. s3://{bucket_part}",
+                operation="rb",
+            )
+
+        s3 = ctx.s3(args)
+        client = s3.client()
+        if not bucket_part:
+            # An empty bucket with no key goes to delete_bucket on aws, where
+            # botocore's client-side validation fails inside rb's local catch
+            # -> rc 1 (the same botocore-shaped line as mb / rm). Handled
+            # before construction, which S3Storage.validate() would otherwise
+            # reject with library-internal wording.
             # aws has no empty-bucket short-circuit: --force still runs the
             # inner rm --recursive first, and its (inevitable) failure aborts
             # at rc 255 before delete_bucket is attempted.

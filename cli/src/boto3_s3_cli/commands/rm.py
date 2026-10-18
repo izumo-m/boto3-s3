@@ -14,7 +14,7 @@ from boto3_s3 import (
     OpResult,
     ValidationError,
 )
-from boto3_s3_cli import clientfactory, filters, globalargs, output, usage
+from boto3_s3_cli import filters, output, usage
 from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import (
     Command,
@@ -131,57 +131,35 @@ class RmCommand(Command):
         listing entry the response left incomplete)
         prints one ``fatal error:`` line - all suppressed by ``--quiet``
         with the exit codes kept. Nothing maps to 254 here. Ahead of all of
-        that sit the client build and the ``[s3]`` runtime config, at aws's own
-        slots: an empty region is 255 before every check below, and an invalid
-        ``[s3]`` value 255 after the path check but before the rest.
+        that sit the client build and the ``[s3]`` runtime config, whose
+        failures stop the run at 255.
         """
-        # The aws parse-to-validation order (measured, design/cli.md section 6):
-        # the --query compile (252) leads, then the --endpoint-url scheme check
-        # (252), then the paramfile expansions (252, positional path and
-        # --page-size) beat the integer coercion (255), which beats the session
-        # profile resolution (255), which beats the path usage check below (252).
-        globalargs.validate_query(args)
-        clientfactory.validate_endpoint_url(args)
         expand_positional_paramfile(args, "paths", name="paths", operation="rm")
         expand_integer_paramfile(args, "page_size", operation="rm")
         page_size = parse_integer_option(args.page_size, operation="rm")
-        s3 = ctx.s3(args)
-        # aws's S3Command._run_main builds the client before _convert_path_args
-        # and before every path validation, so an empty region ("Invalid
-        # endpoint: https://s3..amazonaws.com", rc 255) preempts the fileb
-        # decode, the path-type 252, and the bucket-less synthesis below. A
-        # merely absent region builds fine (S3's global endpoint fallback), so
-        # those keep their codes.
-        client = s3.client()
         if isinstance(args.paths, bytes):
             # Intentional aws-cli bug parity: S3TransferCommand decodes a
             # positional fileb:// back through the filesystem encoding before
             # validating and executing it. This is why rm reaches its normal
             # rc-1 operation-error path while ls / website crash at rc 255.
-            # The decode sits at aws's slot - _convert_path_args runs after the
-            # whole option unpack loop and after the client build - so a bad
-            # --page-size paramfile (252) and a bad --profile (255) both beat
-            # an undecodable fileb positional (measured against the pinned aws:
-            # fileb bytes 0xff + missing page-size paramfile is aws 252, and
-            # the decode's UnicodeDecodeError 255 fires only after them).
             args.paths = args.paths.decode(sys.getfilesystemencoding())
         target: str = args.paths
         if not target.startswith("s3://"):
             # aws check_path_type: rm takes S3 paths only -> rc 252.
             raise ValidationError(usage.single_uri_usage("rm"), operation="rm")
-        # Next in aws's add_paths: the refused ARN forms (252, ahead of the
-        # [s3] config and the engine below) and the keyless trailing "/" whose
-        # re-read gives an Outposts "...:accesspoint/ap:" the key "/".
+        # Next in aws's add_paths: the refused ARN forms (252) and the keyless
+        # trailing "/" whose re-read gives an Outposts "...:accesspoint/ap:"
+        # the key "/".
         target = transferargs.normalize_s3_path(target)
 
+        s3 = ctx.s3(args)
+        client = s3.client()
         # rm is an S3TransferCommand in aws, so it reads and validates [s3] and
-        # builds a transfer manager exactly like cp - after the path check above
-        # (which a bad [s3] value loses to) and before everything below (which it
-        # beats, the bucket-less synthesis included). The deletes ride the
-        # engine but the library builds it later - with the deleter, or just
-        # before a single key's request (design/crt.md sections 4 and 6) - and
-        # its construction failures are aws's, so they must land at aws's
-        # point.
+        # builds a transfer manager exactly like cp, before anything is
+        # deleted. The deletes ride the engine but the library builds it later
+        # - with the deleter, or just before a single key's request
+        # (design/crt.md sections 4 and 6) - so its construction failures are
+        # brought forward here, where they stop the run as they do on aws.
         transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type="s3")
         transferargs.materialize_transfer_engine(s3, client, transfer_config, operation="rm")
 

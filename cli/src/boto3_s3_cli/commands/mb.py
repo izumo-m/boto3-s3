@@ -10,7 +10,7 @@ from typing import Any, ClassVar, cast
 # Module-level imports are fine here: mb is loaded at dispatch (stage 2 of
 # the lazy dispatch), after the command is determined.
 from boto3_s3 import S3Storage, ValidationError
-from boto3_s3_cli import clientfactory, globalargs, output, usage
+from boto3_s3_cli import output, usage
 from boto3_s3_cli.commands.base import Command, Context, expand_positional_paramfile
 
 
@@ -24,7 +24,7 @@ class _AppendTagsAction(argparse.Action):
     class reads the marker and reproduces that on every supported Python
     (``cli._ParamValidationArgumentParser._match_argument``), which stock
     argparse only does from 3.12 on. The real ``nargs=2`` stays, so a missing
-    token still reports aws's ``expected 2 arguments``.
+    token still fails the parse (252).
     """
 
     # The count aws declares; not an argparse attribute.
@@ -73,29 +73,18 @@ class MbCommand(Command):
         exception locally, even request-time credential errors, and its catch
         spans the success line too - an unwritable stdout is an mb failure, not
         the dispatcher's 255). The key part
-        of the path is silently dropped, exactly like aws. aws builds the client
-        before validating the path (``S3Command._run_main``), so a
-        client-construction failure (a bad ``--profile``, partial credentials,
-        an empty region) takes precedence over a path usage error - we build it
-        first to match (its 255 wins over the 252).
+        of the path is silently dropped, exactly like aws. A client-construction
+        failure (a bad ``--profile``, partial credentials, an empty region)
+        reaches main's exit-code mapping (config -> 253, other botocore -> 255).
         """
-        # Parse-time head (measured, design/cli.md section 6): the --query compile
-        # (252), the --endpoint-url scheme check (252), and the positional
-        # paramfile expansion (252) all precede the client build - they beat a
-        # bad --profile (255) the way aws's parse-time load-cli-arg does.
-        globalargs.validate_query(args)
-        clientfactory.validate_endpoint_url(args)
         expand_positional_paramfile(args, "path", name="path", operation="mb")
-        # Build the client up front, like aws's super()._run_main(), so a
-        # construction error precedes the path checks below (it reaches main's
-        # exit-code mapping: config -> 253, other botocore -> 255).
-        s3 = ctx.s3(args)
-        client = s3.client()
-
         target: str = args.path
         if not target.startswith("s3://"):
             # aws mb: S3 paths only -> rc 252.
             raise ValidationError(usage.bare_single_uri_usage(), operation="mb")
+
+        s3 = ctx.s3(args)
+        client = s3.client()
 
         bucket_part, _, _key_part = target[len("s3://") :].partition("/")
         if not bucket_part:

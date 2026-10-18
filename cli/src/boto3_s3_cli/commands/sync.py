@@ -44,14 +44,14 @@ class SyncCommand(Command):
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """Sync and return an ``aws s3 sync``-style exit code.
 
-        The shape is cp's (design/cli.md section 6) with sync's own usage errors in
-        aws-cli order: the local-local pair 252, any
+        The shape is cp's (design/cli.md section 6) with sync's own usage
+        errors: the local-local pair 252, any
         ``-`` path 252 ("Streaming currently is only compatible with
         non-recursive cp commands" - cp-worded even here), the checksum /
         SSE-C pairings 252, and an S3 Express directory bucket or one of
         its access points on either side 252 ("Cannot use sync command with
-        a directory bucket."; aws refuses the bucket only) - all
-        after the S3 client is built, the way aws orders them. A missing local source exits 255; the
+        a directory bucket."; aws refuses the bucket only). A missing local
+        source exits 255; the
         ``--exclude`` / ``--include`` patterns compile once and apply to both
         sides (rootless anchoring; design/sync.md section 1).
         """
@@ -69,10 +69,7 @@ class SyncCommand(Command):
         paths_type = head.paths_type  # "locals3" | "s3local" | "s3s3" here
         transferargs.validate_checksum_paths_type(args, paths_type, operation="sync")
         # aws-cli's _validate_path_args (one function) does BOTH the missing-source
-        # check and the s3local dest-dir creation, and runs entirely BEFORE
-        # _validate_sse_c_args and the directory-bucket check. So both 255 checks
-        # below precede the SSE-C / S3 Express 252 checks: when more than one
-        # fails, that order decides the exit code.
+        # check and the s3local dest-dir creation.
         if src_type == "local" and not os.path.exists(src):
             # Missing local source: aws's bare RuntimeError -> rc 255
             # (NotFoundError without a ClientError cause maps the same).
@@ -127,8 +124,7 @@ class SyncCommand(Command):
         # the run: a CRT selection pays its construction even for a --dryrun.
         transferargs.materialize_transfer_engine(s3, client, transfer_config, operation="sync")
         # After the engine is resolved: the upload checksum default is the
-        # engine's (nothing in build_transfer_options can fail, so the move
-        # past resolve_locations / compile_filter changes no error order).
+        # engine's.
         options = transferargs.build_transfer_options(
             args,
             case_conflict,

@@ -16,12 +16,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 # These exception names do not themselves import the AWS SDK.
 from boto3_s3 import InvalidValueError, ValidationError
 from boto3_s3_cli import paramfile, usage
-from boto3_s3_cli.clientfactory import (
-    build_client,
-    build_s3,
-    build_service_client,
-    validate_profile,
-)
+from boto3_s3_cli.clientfactory import build_client, build_s3, build_service_client
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -72,15 +67,7 @@ class Context:
         self.transfer_config: TransferConfig | None = transfer_config
 
     def s3(self, args: argparse.Namespace) -> S3:
-        """Build the command's `S3`, adapting an injected client factory if present.
-
-        Every command calls this once its own parse layer is done - the
-        paramfile expansions, the integer coercions, the shorthand parse - and
-        before anything else, which is the slot aws's ``_run_main`` occupies.
-        aws reports the tokens its leaf parse could not place at exactly that
-        boundary, so this is where `reject_unknown_options` runs.
-        """
-        reject_unknown_options(args)
+        """Build the command's `S3`, adapting an injected client factory if present."""
         if self._s3_factory is not None:
             return self._s3_factory(args)
 
@@ -89,7 +76,6 @@ class Context:
         if not self._client_factory_injected:
             return build_s3(args)
 
-        validate_profile(args)
         client_factory = self.client_factory
 
         class InjectedClientS3(S3):
@@ -141,25 +127,6 @@ class Context:
         if self._service_client_factory_injected:
             return self.service_client_factory(service, args, region=region)
         return build_service_client(service, args, region=region, session=s3.session)
-
-
-def reject_unknown_options(args: argparse.Namespace) -> None:
-    """Raise aws's ``Unknown options`` usage error for what the leaf parse left over.
-
-    The dispatcher parks those tokens on the namespace (``unknown_options``)
-    instead of reporting them on the spot, because aws does not either: its
-    ``BasicCommand.__call__`` first expands every argument's value - paramfile
-    load, integer coercion, shorthand and JSON parse - and only then raises
-    for the remainder, right before the command body runs. A value that fails
-    to expand therefore wins over an unknown option (measured:
-    ``presign s3://b/k --expires-in abc --bogus`` is the ``int()`` failure's
-    255, not this report's 252), while everything the command body checks
-    still loses to it. The wording is aws's customizations command layer's:
-    joined with "," and no space.
-    """
-    extras: list[str] | None = getattr(args, "unknown_options", None)
-    if extras:
-        raise ValidationError(f"Unknown options: {','.join(extras)}")
 
 
 def parse_integer_option(value: object, *, operation: str) -> int | None:

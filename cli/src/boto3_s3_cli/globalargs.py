@@ -39,16 +39,13 @@ PROFILE_ENV_VARS = ("AWS_PROFILE", "AWS_DEFAULT_PROFILE")
 
 
 def validate_query(args: argparse.Namespace) -> None:
-    """Reject an invalid ``--query`` JMESPath with aws's wording (rc 252).
+    """Reject an invalid ``--query`` JMESPath (rc 252).
 
-    aws-cli compiles ``--query`` at ``top-level-args-parsed`` (its globalargs
-    ``_resolve_query``) - before it resolves ``--endpoint-url`` and before any
-    paramfile expansion - so a bad expression is its ParamValidation 252 ahead
-    of every other head check (measured against the pinned aws-cli: it beats a bad
-    ``--endpoint-url``, a bad ``--page-size`` paramfile, and a bad
-    ``--profile``). Every command's ``run()`` calls this first. ``jmespath`` is
-    a botocore dependency that is always importable, and it is loaded only when
-    ``--query`` is actually present.
+    aws-cli compiles ``--query`` once the globals are parsed (its globalargs
+    ``_resolve_query``), so a bad expression stops the run with its
+    ParamValidation 252; the dispatcher calls this once the command line is
+    parsed. ``jmespath`` is a botocore dependency that is always importable,
+    and it is loaded only when ``--query`` is actually present.
 
     Every failure of the compile is that 252, not just the ``JMESPathError``
     family: aws's ``_resolve_query`` catches bare ``Exception``, so an
@@ -202,9 +199,8 @@ def add_common_arguments(
     )
     # Not argparse type=int on purpose: aws coerces these in a post-parse session
     # handler (globalargs._resolve_timeout), so a non-integer value raises there
-    # and exits 255 - not the parse-time 252 a type=int would give. The dispatch
-    # pre-pass coerces both up front at aws's top-level-args-parsed timing (read
-    # before connect), and the client builders coerce again when they build.
+    # and exits 255 - not the parse-time 252 a type=int would give. The session
+    # and client builders coerce them (clientfactory).
     conn.add_argument(
         "--cli-read-timeout",
         metavar="SECONDS",

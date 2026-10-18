@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `~/.aws/cli/alias` is no longer read: no alias applies, and a file there is no error; a shell alias does the same job.
 - The interactive auto-prompt and the `autoprompt` extra are gone: `--cli-auto-prompt` and `--no-cli-auto-prompt` are accepted and ignored, and `AWS_CLI_AUTO_PROMPT` and `cli_auto_prompt` are not read.
 - The config files are now read only when a subcommand runs: a broken config file or setting still stops every subcommand, but no longer `help` and `--version` (exit codes changed).
+- Command-line errors are now reported in Python's argparse words (`Unknown options: ...` aside), and when several things are wrong, which one is reported may differ from `aws` (exit codes changed).
 
 ## [0.9.0] - 2026-10-18
 

@@ -179,14 +179,12 @@ class AppendFilterAction(argparse.Action):
     The aws-cli ``AppendFilter`` equivalent: both options share ``dest``
     (``filters``) so the rule order is exactly the command-line order.
 
-    aws declares both options with ``nargs=1``, which has two visible effects:
-    a missing value is worded ``expected 1 argument``, and the following token
-    is taken as the pattern however it looks (``--exclude '-foo*'``).
+    aws declares both options with ``nargs=1``, so the following token is
+    taken as the pattern however it looks (``--exclude '-foo*'``).
     ``aws_nargs`` marks that count - the same marker ``mb``'s ``--tags``
     carries for its pair of tokens - and the parser base class
-    (``cli._ParamValidationArgumentParser``) reads it for both effects: its
-    message translation for the wording, its ``_match_argument`` hook for the
-    token. ``nargs`` itself stays unspecified: the action then keeps receiving
+    (``cli._ParamValidationArgumentParser``) reads it in its
+    ``_match_argument`` hook. ``nargs`` itself stays unspecified: the action then keeps receiving
     a plain string, and a real ``nargs=1`` would consume a dash-led token only
     on Python 3.12+, so it is the hook rather than the declaration that makes
     the behavior aws's on every supported version.
