@@ -13,8 +13,8 @@ Reference points:
   rarely shift within the v2 line.
 - The effective (functional) options and their mapping to S3 API
   parameters are derived from aws-cli's
-  `awscli/customizations/s3/`, the canonical parity
-  reference.
+  `awscli/customizations/s3/`, the canonical reference for
+  compatibility.
 
 ---
 
@@ -28,15 +28,15 @@ different things at each:
   sees presentation/transport CLI options. The only library-level
   "does not apply" case is an option that is valid only on certain
   transfer directions (section 4).
-- **CLI (`boto3-s3-cli`)** is the surface that must accept the full
-  `aws s3` flag set for parity. It maps the effective flags down to the
+- **CLI (`boto3-s3-cli`)** is the surface that accepts the full
+  `aws s3` flag set, as `aws s3` does. It maps the effective flags down to the
   library and is responsible for the options that have *no effect*
   (section 2) or are *not supported* (section 3).
 
 ## 2. Recognized-and-ignored (no-op) options - CLI
 
 Several `aws s3` global options have **no observable effect** on any
-`aws s3` subcommand. For parity, `boto3-s3-cli` **accepts them after
+`aws s3` subcommand. As aws-cli does, `boto3-s3-cli` **accepts them after
 parsing and then ignores them** (validating `choices` where aws-cli
 does, so an invalid value still errors the same way). Passing them
 changes nothing about the operation.
@@ -85,7 +85,7 @@ matches that.
 `--cli-error-format` controls the top-level CLI exception rendering in
 aws-cli. `boto3-s3-cli` accepts the flag but always uses aws-cli's
 default enhanced-style rendering; alternate legacy, text, JSON, YAML, and
-table renderings remain outside the parity target. In particular, parameter
+table renderings are not provided. In particular, parameter
 validation failures use `An error occurred (ParamValidation): <message>`.
 
 `--cli-binary-format base64` (the default) base64-decodes only the parameters
@@ -216,11 +216,11 @@ precedence among these inputs, the meaning of each mode, and the behavior when
 [`autoprompt.md`](./autoprompt.md) section 5.
 
 The exit codes above are **not contractual**: the auto-prompt UI is an
-interactive front-end, exempt from the exit-code charter (charter
-exception 2 - `overview.md` section 3), and aws-cli itself fails when it cannot acquire
-terminal control. The completion *candidates* are **not contractual either** -
-the whole auto-prompt surface is charter-exempt, so it favors **usability over
-aws parity** (it completes command-level choices like `--storage-class` that aws
+interactive front-end that is not compared with aws (`overview.md` section 3),
+and aws-cli itself fails when it cannot acquire terminal control. The
+completion *candidates* are **not contractual either** - the whole auto-prompt
+surface is left out of the comparison, so it favors **usability over matching
+aws** (it completes command-level choices like `--storage-class` that aws
 misses, and widens reachability where aws's parser drops completions - see
 [`autoprompt.md`](./autoprompt.md) section 2).
 
@@ -297,24 +297,27 @@ For completeness, the options that **do** have an effect:
   <System>/<release>`) and exits; handled entirely in `boto3-s3-cli`, with no
   library involvement.
 
-## 6. Console output: the parity target and its recorded deviations
+## 6. Console output: the compatibility target and its recorded deviations
 
-Console output is held to the **output parity charter**
+Console output is held to **functional compatibility**
 ([`overview.md`](./overview.md) section 3): under the same arguments and
-conditions the command writes what `aws s3` writes, byte for byte, after the
-normalization [`testing.md`](./testing.md) section 9 defines. A difference that
-survives that normalization is a divergence - a bug, or one of the deliberate
-deviations recorded below.
+conditions a successful run writes what `aws s3` writes, after the
+normalization of the output comparison criterion ([`testing.md`](./testing.md)
+section 9). A difference there that survives the normalization is a functional
+difference - a bug, or one of the deliberate deviations recorded below. In an
+error report aws's output is a reference rather than a target: a difference in
+an error's details (its wording, which of two mistakes is reported, the order
+of the reports) is neither a bug nor a deviation.
 
 The program name and the command hierarchy are **class 1** of that
 normalization rather than an exemption from it. The root tokens `aws` /
 `boto3-s3` and everything derived from them - usage lines, the `aws: [ERROR]:`
 / `boto3-s3: [ERROR]:` prefixes, aws's `<command> <subcommand>` level collapsed
 onto our single one - are rewritten on aws's side before the comparison, and
-the surrounding message is then compared in full, byte for byte.
+the surrounding message is then compared in full.
 
-The default enhanced-style parameter-validation envelope is therefore
-reproduced: parser failures, unknown options, path/option validation failures,
+The default enhanced-style parameter-validation envelope is reproduced as
+well: parser failures, unknown options, path/option validation failures,
 and auto-prompt flag conflicts use
 `An error occurred (ParamValidation): <message>`. This target is the default
 output of aws-cli; selecting another `--cli-error-format` does not alter
@@ -331,11 +334,17 @@ explicit `enhanced` keeps the envelope on aws and loses it here.
 ### Recorded deviations
 
 These are the places `boto3-s3-cli` deliberately displays something other than
-what `aws` displays. **The list is exhaustive for the display layer**: nothing
-here licenses an unrecorded difference, and a new one is added by the same
-explicit decision a new normalization rule takes. All but the last are
-user-reachable and are therefore carried in
-[`aws-differences.md`](../docs/cli/aws-differences.md) section 2 as well.
+what `aws` displays. **The list is exhaustive for the display layer's
+functional differences**: nothing here licenses an unrecorded one, and a new
+one is added by the same explicit decision a new normalization rule takes.
+The functional ones are carried in
+[`aws-differences.md`](../docs/cli/aws-differences.md) section 2 as well,
+except the last, which no real run reaches. The others are an error's details
+(the doubly-malformed listing entry, Ctrl-C's closing line, the
+directory-source failure line) or come only from an SDK version difference
+(botocore's own messages); the policy does not record those for users
+([`overview.md`](./overview.md) section 3), so they are kept here only as
+implementation notes.
 
 The first five are the output pipeline's (`progress.py`; the rendering thread
 itself mirrors aws-cli's `ResultProcessor`):
@@ -408,8 +417,8 @@ The rest sit outside the pipeline:
   page promises, not its typography.
 - **`--debug` traces** are the installed boto3 / botocore's, not aws's
   bundled ones, and this project additionally masks credentials that aws
-  prints in full - a safety feature beyond aws-cli, not a parity item
-  ([`masking.md`](./masking.md)).
+  prints in full - a safety feature beyond aws-cli, taken deliberately because
+  security comes before compatibility ([`masking.md`](./masking.md)).
 - **The `--version` line** names the four packages that decide this command's
   behavior (`boto3-s3-cli/<v> boto3-s3/<v> boto3/<v> botocore/<v>`) where aws
   names one, and it carries no `exe/<machine>` install-source token. This is
@@ -429,13 +438,13 @@ The rest sit outside the pipeline:
   because mirroring that rendering would cost the clear errno report
   (decided 2026-08-01).
 - **A message botocore itself writes is the installed botocore's wording**,
-  where aws prints its bundled fork's. This is not class 2: the same aws
-  version installed from PyPI still carries the fork, so the difference is ours
-  to record. It reaches the console on exactly one input on this surface - a
-  `max_attempts` below the minimum, which aws ends `greater than or equal to
-  one.` and this ends `greater than or equal to 1.` (rc 255 on both, measured
-  2026-08-08). Rewriting an SDK sentence to match would be a fragile string
-  patch on a report neither tool authors, so the difference is taken. The
+  where aws prints its bundled fork's. This is not class 2 (the same aws
+  version installed from PyPI still carries the fork), but it comes only from
+  an SDK version difference, which is not matched
+  ([`overview.md`](./overview.md) section 3). It reaches the console on
+  exactly one input on this surface - a `max_attempts` below the minimum,
+  which aws ends `greater than or equal to one.` and this ends `greater than
+  or equal to 1.` (rc 255 on both, measured 2026-08-08). The
   invalid-bucket-name report is the same family - the installed botocore words
   it, the names refused before any request included - and the rest of the
   fork's wording differences sit on aws's SSO / login paths, which this command
@@ -452,9 +461,7 @@ display layer: the candidate order of an ambiguous-abbreviation report, and an
 ambiguous abbreviation used as an option value on Python 3.10 / 3.11. Both are
 recorded with their rationale in [`cli.md`](./cli.md) section 2.
 
-The interactive auto-prompt is on no list at all, because it is outside the
-charter: the output parity charter carries its own interactive-UI exception,
-matching the exit code charter's second, and it covers the prompt's console
-output and its completion set alike
+The interactive auto-prompt is on no list at all, because it is not compared
+with aws: neither the prompt's console output nor its completion set
 ([`overview.md`](./overview.md) section 3, section 3 of this document,
 [`autoprompt.md`](./autoprompt.md) section 1).

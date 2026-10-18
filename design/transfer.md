@@ -89,7 +89,7 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   client); its handlers are per-instance
   bound methods, so register / unregister never disturb the application's or
   another run's handlers on a shared client. Being a library-only flag with no
-  `aws s3` equivalent, the forcing has no parity impact.
+  `aws s3` equivalent, the forcing does not affect compatibility with aws.
 - A `Transferrer` is **one instance with a single `TransferType` per cp / mv / sync
   run** (one run has a single byte direction). The client placement is: upload
   uses the dest client, download uses the src client, and an s3->s3 copy uses the
@@ -151,7 +151,8 @@ add nothing the `getattr` protocol uses.
    form (an endpoint serving `abc` or `W/"abc"` would get `"abc"` / `"W/"abc"`
    back where aws-cli returns what it was given). **In s3transfer
    0.17, even a copy fires a probe HeadObject against the source if either size
-   or etag is missing**, so providing both is a precondition for wire parity.
+   or etag is missing**, so providing both is a precondition for sending aws's
+   requests.
    Because the CRT manager's future meta does not have `provide_transfer_size` /
    `provide_object_etag`, both are guarded with `hasattr` before being called
    (CRT probes the size itself; isomorphic to aws-cli `ProvideSizeSubscriber`;
@@ -170,7 +171,7 @@ add nothing the `getattr` protocol uses.
 6. mv download + `LocalStorage(fsync=True)` only: `_FsyncDest` (section 11) - a
    library-only durability barrier fsyncing the downloaded file (and its parent
    dir on POSIX) just before `_DeleteSource`, so a durability failure flips the
-   future and the source is not deleted (off by default = aws parity).
+   future and the source is not deleted (off by default, matching aws).
 7. mv only: `_DeleteSource` (section 11) - after the path-specific subscribers and just
    before `_Completion` (the same slot where aws-cli places the DeleteSource
    family ahead of the Done recorder).
@@ -240,9 +241,7 @@ chain:
   produced it (no tags, since a multipart copy never carries them natively)
   rather than either fully tagged or deleted, and for `mv` the source-delete
   subscriber (which sits after this one in the chain) still runs and removes
-  the source. This mirrors aws-cli's own double-failure outcome rather than
-  being a gap to close - the exit-code charter (overview.md section 3) is what
-  requires reproducing it, not just tolerating it.
+  the source. This is aws-cli's own double-failure outcome.
 - **The tagging write and the annotation writes** (`all`, multipart, a tag
   set too large for the create header) go out in aws-cli's order, because
   both are `on_done` subscribers registered tags-first, as aws-cli's are:
@@ -380,7 +379,8 @@ chain:
   `create_warning`.
 - Parent-dir creation is the subscriber from section 3. The fact that s3transfer
   performs a filename-specified download via a temp file + rename is also
-  identical to aws (parity is automatic because it is the same library).
+  identical to aws (it matches automatically because it is the same
+  library).
 
 ## 6. streaming (`IOStorage` / `StdioStorage`)
 
@@ -454,9 +454,8 @@ The caller's stream is never closed by `IOStorage`.
   (`download failed:` + rc 1), while a failure only the buffered flush can
   raise arrives at interpreter shutdown instead, as the process's 120 with no
   failure line, the boundary between the two being the interpreter's stdout
-  buffer size rather than anything here
-  ([`aws-differences.md`](../docs/cli/aws-differences.md) section 2 records the
-  band). Only stdin is checked ahead of the transfer (`open("rb")` raises
+  buffer size rather than anything here (both fail either way, so which one
+  you get is an error detail, overview.md section 3). Only stdin is checked ahead of the transfer (`open("rb")` raises
   `ValidationError`, aws's `StdinMissingError` sentence); stdout has no
   counterpart on either side, so a process without one fails the item with
   `'NoneType' object has no attribute 'write'` from inside the transfer.
@@ -582,7 +581,7 @@ dest-existence check for download. We ported the same three faces:
   ([`storage.md`](./storage.md) section 2); the stream route never resolves
   its source this way, and aws is lenient there too.
 - **symlink-loop guard** (`detect_symlink_loops`, a **library extension**, default
-  off so `cp` / `mv` / `sync` keep aws parity - `aws s3` has no such option):
+  off so `cp` / `mv` / `sync` match aws - `aws s3` has no such option):
   off, a symlink cycle descends until the kernel's `ELOOP` / path-length
   boundary ends it with aws's `File does not exist.` warning battery and the
   walk skips the directory, exactly like aws-cli (the boundary comes long
@@ -730,7 +729,7 @@ dest-existence check for download. We ported the same three faces:
   verifies the response's checksum). What botocore can verify is the single
   (non-ranged) GET, whose response carries the checksum header; a ranged
   download gets no per-range checksum from S3, so its end-to-end validation is
-  the known divergence recorded in section 10.
+  the SDK version difference described in section 10.
 - The single-source HeadObject (`producers.head_single`, the download / copy point op)
   also `setdefault`s `ChecksumMode: ENABLED` when the client resolves
   `response_checksum_validation` to `when_supported` (the botocore default since
@@ -754,9 +753,9 @@ dest-existence check for download. We ported the same three faces:
   CRT-family algorithm fails (the library is a per-item failure ->
   `BatchError`; the CLI is an in-pipeline `upload failed: ... Missing Dependency:
   Using CRC32C requires an additional dependency. ...` / rc 1; aws is rc 0 with
-  the awscrt bundled in v2). Because the charter holds awscrt-dependent
-  features to parity only where the CRT stack is usable (overview.md section 3),
-  this failure does not count as a mismatch. On the download side, when the stored
+  the awscrt bundled in v2). awscrt is an optional extra, and a feature that
+  depends on it is unavailable without it (overview.md section 2), so this
+  failure is not a difference from aws. On the download side, when the stored
   checksum is a CRT-family one with no local implementation, botocore silently
   skips verification (result and rc unchanged). **This delegation of checksum
   computation to awscrt is independent of the transfer engine selection (section 2)**:
@@ -766,7 +765,7 @@ dest-existence check for download. We ported the same three faces:
   (cli.md section 4 - for symmetry, SigV4 is pinned to pure-Python) is not switched even
   when the CRT engine is in use.
 
-## 10. Known divergence (invisible in the result; recorded only)
+## 10. SDK version differences (not matched)
 
 - The default integrity checksum belongs to the installed botocore: pip's
   `DEFAULT_CHECKSUM_ALGORITHM` is `CRC32`, aws v2's bundled one is `CRC64NVME`,
@@ -795,7 +794,7 @@ dest-existence check for download. We ported the same three faces:
   feature - it exists only in the fork - so our classic ranged download
   completes without end-to-end validation: corruption that slips past TLS/TCP
   integrity would land renamed and SUCCEEDED where aws fails. Every
-  surrounding path is divergence-free: the non-ranged download is verified by
+  surrounding path agrees with aws: the non-ranged download is verified by
   botocore on both sides (section 9), the CRT engine passes
   `S3ChecksumConfig(validate_response=True)` on both sides so validation is
   the CRT client's own, identical by construction (crt.md section 6), and the
@@ -804,9 +803,10 @@ dest-existence check for download. We ported the same three faces:
   single-source point op, whose HeadObject response `head_single` already
   fetches with `ChecksumMode: ENABLED`, section 9). The trigger is narrow (an
   object stored as `ChecksumType=FULL_OBJECT` with a CRC value, at or above
-  the multipart threshold) and the divergence is observable only under actual
-  corruption, which no test lane can produce, so this is recorded as an
-  accepted deviation.
+  the multipart threshold) and the difference is observable only under actual
+  corruption, which no test lane can produce. It comes only from the
+  s3transfer that runs - an SDK version difference (overview.md section 3) -
+  so it is not matched.
 - Under `response_checksum_validation = when_required` (env
   `AWS_RESPONSE_CHECKSUM_VALIDATION` or the config key; not the default), pip
   s3transfer (0.19) skips the sizing HeadObject and opens every classic
@@ -826,10 +826,9 @@ dest-existence check for download. We ported the same three faces:
   (measured; rc 1 on both). A file destination is unaffected: `head_single`
   heads the source on both tools before either engine runs. Only the wire
   shape and that failure line differ, and only under that non-default
-  setting - recorded, not worked around, for the same reason as the
-  fork-only combine above: the divergence lives in the installed s3transfer,
-  not in this codebase. The user-facing entry is in
-  [`aws-differences.md`](../docs/cli/aws-differences.md).
+  setting - not worked around, for the same reason as the fork-only combine
+  above: the difference lives in the installed s3transfer (an SDK version
+  difference), not in this codebase.
 
 ## 11. mv (`is_move`: delete the source when the transfer succeeds)
 
@@ -855,7 +854,7 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
   done - isomorphic to aws-cli's `DeleteSourceSubscriber`), and `_Completion`
   aggregates it as `move failed` (rc 1). The bytes have already arrived.
 - **Durability barrier (`LocalStorage(fsync=True)`, a library extension; default
-  off = aws parity)**: s3transfer finalizes a filename download with a temp-file
+  off, matching aws)**: s3transfer finalizes a filename download with a temp-file
   write + `os.rename` and never fsyncs, so aws-cli deletes the durable S3 source
   while the downloaded bytes may still be only in the page cache - a crash between
   the two loses the move outright. When the download's destination `LocalStorage`
@@ -870,7 +869,7 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
   is not walked back to its own parent (the common case downloads into an existing
   tree); the mtime stamp (`_StampMtime`, registered just before `_FsyncDest`)
   has already run, so the fsync covers the final metadata too. The CLI leaves
-  this off to keep aws parity.
+  this off to match aws.
 - Cases where the deletion does not run: dryrun (no submit at all), filter
   exclusion, skip (no-overwrite's 412 / dest already exists, the glacier gate),
   transfer failure, a `LocalStorage(fsync=True)` durability failure (above). For
@@ -913,7 +912,7 @@ UPLOAD) or `s3open` (S3 source -> custom destination, a DOWNLOAD); `S3._run_tran
 custom side's bytes move through its `Storage.open(key, mode)` - the same
 primitive the stream path uses (section 6), generalized to a keyed, listable
 backend. The CLI never pairs a custom backend, so the open route is library-only
-and outside aws parity.
+and has no `aws s3` counterpart to compare with.
 
 - **bytes via `open`, the S3 side via s3transfer**: `opens3` hands `s3transfer`
   the fileobj from `plan.src.open(key, "rb")` to upload; `s3open` hands it the

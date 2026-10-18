@@ -42,7 +42,7 @@ CLI layer = aws-cli-faithful
 s3transfer lock is an arbitration to keep multiple processes of the same
 application from standing up a CRT client simultaneously (boto3 uses `'boto3'`,
 aws-cli uses `'aws-cli'`); it is not observable in a single process's output or
-return code, so it is out of scope for parity. Namespacing it by one's own
+return code, so it has no bearing on compatibility. Namespacing it by one's own
 product name is the convention of both. s3transfer stores the lock in a module
 global created once on the first `acquire_crt_s3_process_lock` and returns that
 stored object on every later call (the `name` argument is consulted only at
@@ -244,7 +244,7 @@ A verbatim port of `RuntimeConfig` from aws-cli `transferconfig.py`
 (`load_scoped_s3_config` pulls the known keys; `AWS_CONFIG_FILE` / `--profile`
 / the nested `s3 =` INI are honored through that reader), converts sizes (`8MB`), rates (`100MB/s` /
 `800Kb/s`), and bools, resolves the `default` -> `classic` alias, and validates
-invalid values. The wording for invalid values is byte-for-byte, raised as the
+invalid values. The wording for invalid values is aws-cli's, raised as the
 library's `InvalidConfigError` - aws-cli's class of the same name reaches the
 general handler with rc 255; ours maps to 255 too (exceptions.md section 2).
 
@@ -306,9 +306,9 @@ keys).
   `crt`, no chunksize): both tools single-put an exactly-8-MiB file and
   multipart 9 MiB, so the cutoffs coincide here and aws-c-s3's comparison is
   strictly-greater. A host whose dynamic default resolved differently would
-  part the two cutoffs; that residual is the bundled-vs-pip engine family
-  (charter exception 3), recorded rather than pinned. The `[s3]`
-  `multipart_threshold` key itself stays ignored either way, like aws. The classic-only keys (`io_chunksize` / `max_bandwidth` /
+  part the two cutoffs; that residual comes only from the bundled-vs-pip
+  engine, an SDK version difference (overview.md section 3), and is not
+  matched. The `[s3]` `multipart_threshold` key itself stays ignored either way, like aws. The classic-only keys (`io_chunksize` / `max_bandwidth` /
   `multipart_threshold` / `max_concurrent_requests`) and the classic-only
   attributes (queue size, in-memory chunk cap) are
   **not passed**. This is to
@@ -317,8 +317,7 @@ keys).
   by boto3's `_validate_crt_transfer_config` and fails the run - the library
   translates the rejection to a `ValidationError`, which the engine
   materialization ahead of the run (below) surfaces at rc 252 - where aws is
-  rc 0 (avoiding a charter violation; e2e:
-  `test_crt_ignores_classic_only_config`).
+  rc 0 (e2e: `test_crt_ignores_classic_only_config`).
 
 cp / mv / sync **and rm** call `transferargs.resolve_transfer_config(ctx, s3,
 paths_type=...)` - all four are `S3TransferCommand`s in aws, so all four read
@@ -352,7 +351,7 @@ routes (recursive, and the keyless folder-marker sweep) with their deleter,
 just before the listing; the single-key route just before its request; a
 dryrun never. Paying it at aws's slot is what makes the failure surfaces
 identical - the alternative, synthesizing awscrt's assertion ourselves, would
-rest the parity on a hand-written mirror of a third-party `assert`.
+rest the match on a hand-written mirror of a third-party `assert`.
 
 ### Entering the CRT engine without credentials
 
@@ -475,14 +474,15 @@ default-posture explicit `'crt'`) re-attempts the acquisition and rides the
 singleton only once the lock is held - classic under live contention - rather
 than inheriting the opt-in through the process singleton.
 
-## 5. Charter treatment
+## 5. Compatibility treatment
 
-The charter of [`overview.md`](./overview.md) section 3 holds the CRT mode to
-**parity against aws's CRT mode**; the CRT transfer engine is not a "hard to
-realize" feature under charter exception 2.
+Functional compatibility ([`overview.md`](./overview.md) section 3) holds the
+CRT mode to **aws's CRT mode**, on the same terms as the classic engine is
+held to aws's classic mode; the CRT transfer engine is not an exception.
 When the CRT stack is usable (awscrt present and s3transfer's CRT surface new
-enough - section 6), the exit code and output of CRT mode must match those of
-aws's CRT mode (enforced by the e2e CRT lane - testing.md).
+enough - section 6), the normal path of CRT mode matches aws's CRT mode, and
+in an error path what decides the functional outcome matches while the
+error's details need not (checked by the e2e CRT lane - testing.md).
 
 ## 6. Degradation and known differences (record)
 
@@ -517,10 +517,11 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   supplied through `AWS_ENDPOINT_URL_S3` is dialed over TLS and the transfer
   dies with `AWS_IO_SOCKET_CLOSED`, where `_derive_endpoint` reads the scheme
   off the endpoint the client actually resolved and the same run transfers.
-  The user sees a different exit code and a different S3 state, so this one is
-  recorded in [`aws-differences.md`](../docs/cli/aws-differences.md) section 2
-  too (testing.md section 9's recording rule); the measurement and the
-  mechanism stay in section 3.
+  The user sees a different exit code and a different S3 state - a functional
+  difference - so this one is recorded in
+  [`aws-differences.md`](../docs/cli/aws-differences.md) section 2 too
+  (testing.md section 9, the output comparison criterion); the measurement and
+  the mechanism stay in section 3.
 - **CRT configured x no resolvable region**: aligned.
   aws's factory hands `create_s3_crt_client` whatever its region chain
   answered, unvalidated, so an unresolved region reaches
@@ -540,8 +541,9 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   `boto3-s3[crt]` -> `boto3[crt]`, transfer.md section 9).
   - CLI: `resolve_transfer_client` stops it with a `ConfigurationError` (rc 253),
     preventing boto3's `MissingDependencyException` from slipping through `main`
-    and dying in a traceback (a CLI-specific degradation, not counted as a
-    mismatch).
+    and dying in a traceback (a CLI-specific degradation: a feature that
+    depends on the optional awscrt is unavailable without it, overview.md
+    section 2).
   - Direct library use: it passes boto3's `MissingDependencyException` through, as
     boto3 does (faithful). This is a deliberate exception to the backend-exception
     translation at the library boundary (exceptions.md section 1) - to reproduce boto3's
@@ -604,8 +606,8 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   the CLI's `cancelled: ctrl-c received` line where aws ends with an empty
   `fatal error:` line (its recorder renders the `KeyboardInterrupt`, whose
   `str()` is empty, as an error result) - the per-item lines and rc 1 match,
-  and the closing line stays ours deliberately (decided 2026-08-01; recorded
-  in docs/cli/aws-differences.md section 2).
+  and the closing line stays ours deliberately (decided 2026-08-01; what it
+  reports is an error detail, overview.md section 3).
 - **fio_options**: unavailable on any pip s3transfer
   ([`compatibility.md`](../docs/compatibility.md)). `_add_fio_options` probes
   `create_s3_crt_client`'s signature rather than a version, so the keys are
@@ -660,8 +662,8 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   `S3ChecksumConfig(validate_response=True)` on every GET, so response
   validation is the CRT client's own, identical by construction. The classic
   engine's ranged-download full-object combine validation (a feature of
-  aws-cli's bundled s3transfer fork that pip s3transfer lacks) is the known
-  divergence recorded in transfer.md section 10.
+  aws-cli's bundled s3transfer fork that pip s3transfer lacks) is the SDK
+  version difference described in transfer.md section 10.
 - **Upload checksum default**: pip s3transfer's CRT module stamps `CRC32` on
   an upload that names no checksum; aws-cli's bundled one stamps `CRC64NVME`
   (its bundled botocore's default). The library keeps boto3's (section 1):

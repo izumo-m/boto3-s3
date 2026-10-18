@@ -37,9 +37,8 @@ failures were already printed as `... failed:` lines while the run proceeded;
 a failure that stops the whole run prints one `fatal error:` line.
 
 Ctrl-C during a running transfer or delete is also 1, with a
-`cancelled: ctrl-c received` line — the one line `aws` words differently when
-no transfer is left to cancel
-([`aws-differences.md`](./aws-differences.md) section 2). `rb --force` is the
+`cancelled: ctrl-c received` line (`aws` words that line differently when no
+transfer is left to cancel). `rb --force` is the
 exception: Ctrl-C during its listing or its deletions is 255, the code of a
 deletion that fails there (section 2), and during the bucket removal itself
 130 (below).
@@ -174,7 +173,9 @@ The orderings worth knowing, because the answer is not the one you would guess:
 | an unusable `[s3]` value on `cp` / `mv` / `sync` / `rm`, with a bad path too | 252 | the path is validated first; without the path error it is 255 |
 | `mv --validate-same-s3-paths` whose lookup fails | 254 if the service answered, 255 if it could not be reached | the check calls out before the move begins |
 
-All of this matches `aws s3`, including the orderings above.
+All of this matches `aws s3` as measured, the orderings above included, but
+only what each code means is promised: which code wins when two things are
+wrong at once is not, so a script should not depend on these orderings.
 
 ## 3. Where this differs from `aws s3`
 
@@ -186,18 +187,14 @@ Two cases where the codes are deliberately not identical:
 - **A corrupted ranged download** exits 0 here and 1 under `aws`. See
   [`aws-differences.md`](./aws-differences.md) for how to get that check back.
 
-A few other paths settle on different codes too — a download body cut
-mid-stream, a plain-HTTP
-endpoint taken from the environment under the CRT engine, an `aws` plugin that
-imports `awscli` modules, exits, raises outside Python's `Exception` family or
+A few other paths settle on different codes too — a plain-HTTP endpoint
+taken from the environment under the CRT engine, an `aws` plugin that imports
+`awscli` modules, exits, raises outside Python's `Exception` family or
 unregisters one of the SDK's own handlers, a `[toplevel]` alias that leads to
 another `aws` command, a timeout typed beside an alias, a `cli_history`
-directory `aws` cannot create, an invalid
-`AWS_DEFAULTS_MODE` or `sts_regional_endpoints` value, the `PYTHON*`
-environment variables, a stdout or an error report that cannot be written, and
-a standard stream that cannot be set up at all. Section 2 of
-[`aws-differences.md`](./aws-differences.md) has each of them, with why it is
-not mirrored.
+directory `aws` cannot create, and the `PYTHON*` environment variables.
+Section 2 of [`aws-differences.md`](./aws-differences.md) has each of them,
+with why it is not mirrored.
 
 [`compatibility.md`](../compatibility.md) covers what else changes with the
 installed dependencies.

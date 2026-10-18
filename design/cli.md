@@ -1,11 +1,12 @@
 # boto3-s3-cli design (the CLI layer)
 
 `boto3-s3-cli` is the `aws s3`-compatible CLI distribution that sits on top of
-the `boto3-s3` library. Behaving exactly like `aws s3` (strict argument
-validation, the option system) is **this layer's responsibility**, while the
-library provides the building blocks from which parity can be achieved. For the
-responsibility split, see [`overview.md`](./overview.md) section 1; for the handling of
-individual options, see
+the `boto3-s3` library, a by-product of the library, which is the product.
+Functional compatibility with `aws s3` is the library's responsibility; this
+layer narrows the inputs to exactly `aws s3`'s (strict argument validation,
+the option system) and owns the output and the exit codes. For the
+responsibility split, see [`overview.md`](./overview.md) sections 1 and 3; for
+the handling of individual options, see
 [`aws-cli-option-handling.md`](./aws-cli-option-handling.md).
 
 This document records the solidified design for the implemented scope (currently
@@ -23,8 +24,7 @@ solidified design is added here.
   `main` always returns an int - with two deliberate escapes: an
   `AssertionError` is re-raised (a broken invariant should crash loudly, not
   fold into an rc; section 6), and a command-raised `SystemExit` is honored.
-  The exit codes for exceptions and usage errors are covered in section 6
-  (the implementation of the exit code parity charter).
+  The exit codes for exceptions and usage errors are covered in section 6.
 - `main` opens with aws's **preliminary `--profile` / `--debug` scan**
   (`_build_first_pass_parser`, aws's `FirstPassGlobalArgParser`, which it runs
   while the driver is still being constructed): a two-option
@@ -85,8 +85,7 @@ solidified design is added here.
   which is how aws reports a handler's `AssertionError`. aws-cli's own events
   are never emitted here, and a plugin that imports aws-cli's modules fails to
   import - the part of a plugin written against awscli's internals, recorded
-  in [`aws-differences.md`](../docs/cli/aws-differences.md) with the places
-  the installed SDK differs from aws's bundled one.
+  in [`aws-differences.md`](../docs/cli/aws-differences.md).
 - `_dispatch` opens by reading the **alias file** (`~/.aws/cli/alias`,
   section 9), which aws reads while it is still assembling its parser - so a
   file it cannot read aborts the run ahead of everything below, `--version` and
@@ -361,7 +360,7 @@ solidified design is added here.
   the wire across every supported Python.
 - **More wordings pinned to the official build.** The same rule reaches
   past argparse, wherever a report quotes text the interpreter wrote: what the
-  shipped distribution's 3.14 says is the parity target on every supported
+  shipped distribution's 3.14 says is what is matched on every supported
   Python, and the older text is rewritten into it.
   - `json` gave the two **trailing-comma** failures a message of their own in
     3.13, anchored on the comma rather than on the closing bracket, so
@@ -431,7 +430,7 @@ solidified design is added here.
 | `shorthand.py` | Parsing of map-type option values (`--metadata k=v,...` / JSON form / the `@=` paramfile operator). The grammar is a full port of aws's - csv lists, explicit lists and hash literals included - because that is what places aws's two error vocabularies: a value the grammar rejects is the parser's own `Error parsing parameter '<name>'`, while one it accepts but a map of strings cannot hold (bytes from `@=fileb://`, a list, a nested map) draws botocore's schema report instead, one line per offending key and no option name in it. A `[`-led value never reaches the grammar at all - aws short-circuits it to the JSON unpacker, which answers anything but a `{` document with a bare `Invalid JSON:` echo of the value |
 | `paramfile.py` | aws's local paramfile loaders (`file://` text, `fileb://` binary; the `get_paramfile` counterpart) shared by the option resolution and the shorthand `@=` operator. A load failure is a `ParamfileLoadError`, whose exit code the caller decides: `named_argument` (aws's `load-cli-arg` handler) turns it into the named argument's rc-252 parse error, and the shorthand's `@=` stays outside it for aws's bare rc 255 |
 | `output.py` | `aws s3`-compatible output formatting (`ls` listing lines, `rm` delete lines. Kept as pure functions; not turned into a class) |
-| `usage.py` | The single home of the aws-parity usage / error strings shared across subcommands (`single_uri_usage` / `bare_single_uri_usage` / `two_path_usage` / `invalid_bucket_name_message`); commands interpolate only their own name or value |
+| `usage.py` | The single home of the aws-matching usage / error strings shared across subcommands (`single_uri_usage` / `bare_single_uri_usage` / `two_path_usage` / `invalid_bucket_name_message`); commands interpolate only their own name or value |
 | `autoprompt/` | The completion engine for `--cli-auto-prompt` (a port of aws-cli's `autocomplete/` onto the `boto3-s3` surface = `model.py` / `parser.py` / `completers.py`, pure Python) + the prompt_toolkit implementation (`prompt.py`) + the injection ABC (`prompter.py`) + the SDK- and prompt_toolkit-free mode resolution the dispatcher runs before parsing (`resolve.py`). An opt-in extra. Design in [`autoprompt.md`](./autoprompt.md) |
 
 **Library consumption contract**: the CLI reaches `boto3_s3` only through its
@@ -446,8 +445,8 @@ core, `awsclicompare`, `crtsupport`, `masking`'s `SecretMaskingFilter`, and
 `is_outpost_alias_path` / `is_s3express_path` / `is_s3express_accesspoint_path`,
 and `s3storage`'s `s3express_unsupported_reason` and the
 `CA_BUNDLE_ENVIRONMENT_VETTED` mark).
-What the in-repo CLI needs, an external
-compatible-tool author needs too (overview.md's mission), so a CLI dependency
+What the in-repo CLI needs, any other application built on the library needs
+too (the library is the product, overview.md section 1), so a CLI dependency
 is met by *publishing* the symbol, never by importing a private one. Enforced
 by `tests/cli/unit/test_library_surface.py`, which walks every `boto3_s3`
 import (and module-alias attribute access) in the CLI sources against those
@@ -699,9 +698,9 @@ numbers in the bold item labels below are that document's.
      operation requires an additional dependency. Use pip install
      botocore[crt] ...`), which the library translates to the plain
      `ConfigurationError` of the crt-absence family - rc 253 like the `[s3]`
-     crt degradation (section 8), a state aws cannot reach (the charter
-     holds awscrt-dependent features to parity only where the CRT stack is
-     usable - overview.md section 3). An S3 on Outposts access point is the
+     crt degradation (section 8), a state aws cannot reach (awscrt-dependent
+     features are matched only where the CRT stack is usable - overview.md
+     section 2). An S3 on Outposts access point is the
      quiet member of that family: its ruleset offers `sigv4a` *and* `sigv4`, so with awscrt absent
      botocore falls through to the symmetric scheme instead of raising, and the
      presigned URL comes back at rc 0 signed `AWS4-HMAC-SHA256` with no
@@ -862,7 +861,7 @@ numbers in the bold item labels below are that document's.
   version action wraps to the terminal width through the help formatter, a custom
   action that keeps it to a single line writes the output to stdout. The numbering
   policy is in [`overview.md`](./overview.md) section 3.
-- **`--cli-binary-format`**: accepted for parity and the `choices` (`base64` /
+- **`--cli-binary-format`**: accepted as on aws and the `choices` (`base64` /
   `raw-in-base64-out`) are validated, but currently no command consumes it - a
   no-op. The blob argument of `aws s3 cp` (`--sse-c-key`) is
   **passed through** regardless of this setting (no base64 decode; only
@@ -892,7 +891,7 @@ fills it in).
 | flag | handling |
 |---|---|
 | `--recursive` | `S3.ls(recursive=True, on_entry=...)` (recursive listing, no `Delimiter`. Ineffective in bucket listing = same as aws) |
-| `--page-size N` | `S3Storage(uri, page_size=N)` (the listing page size is the storage's own config now, not an `ls` argument). No range validation (passed straight to the server as in aws: 0 yields 0 entries -> rc 1, a negative value yields `InvalidArgument` -> rc 254. Charter compliance) |
+| `--page-size N` | `S3Storage(uri, page_size=N)` (the listing page size is the storage's own config now, not an `ls` argument). No range validation (passed straight to the server as in aws: 0 yields 0 entries -> rc 1, a negative value yields `InvalidArgument` -> rc 254) |
 | `--request-payer [requester]` | `S3.ls(request_payer="requester")` (ineffective in bucket listing = same as aws) |
 | `--human-readable` | Formats the size in base-2 (CLI side, the library is not involved) |
 | `--summarize` | Total Objects / Total Size at the end (CLI side) |
@@ -918,8 +917,8 @@ listing the same way), which yields entries of `FileKind.BUCKET` (`mtime` =
 CreationDate). `scan` itself is object listing only, so a transfer never sees a
 bucket entry.
 
-Output (`aws s3 ls`'s own, byte for byte under the parity criterion of
-[`testing.md`](./testing.md) section 9):
+Output (`aws s3 ls`'s own, output-equal under the output comparison criterion
+of [`testing.md`](./testing.md) section 9):
 
 - Objects: `YYYY-MM-DD HH:MM:SS` (local tz) + size (right-aligned 10) + name
   (non-recursive = basename / recursive = full key).
@@ -1289,8 +1288,8 @@ awscrt, but it is not in the default dependencies and is an opt-in extra (the
 delegation chain `boto3-s3-cli[crt]` -> `boto3-s3[crt]` -> boto3's own
 `boto3[crt]`). In an environment without awscrt, only the CRT-family values
 become an in-pipeline failure (rc 1) and diverge from aws (v2 bundles awscrt),
-but this is allowed because the charter holds awscrt-dependent features to parity
-only where the CRT stack is usable (overview.md section 3, transfer.md section 9).
+but this is allowed because awscrt-dependent features are matched only where
+the CRT stack is usable (overview.md section 2, transfer.md section 9).
 Signing stays pure-Python via the pin of section 4.
 
 Without `--checksum-algorithm`, aws's default is its bundled botocore's
@@ -1378,8 +1377,8 @@ the interrupt until the lines are out and then lets it reach the
 dispatcher, whatever the run ended with). aws only reaches that line through a
 *cancelled transfer future*, so where none is in flight - before the first
 submit, during a dryrun, after the last completion - it closes with an empty
-`fatal error:` instead; the uniform line here is the recorded deviation
-(aws-differences.md section 2), not a claim of a match. Any other library exception ->
+`fatal error:` instead; the uniform line here is ours, an error detail
+(overview.md section 3), not a claim of a match. Any other library exception ->
 a single `fatal error:` line + 1 (a single s3 src's HeadObject 404 = `Key "..."
 does not exist`, a listing error, a malformed `--grants`, a non-integer
 `--expected-size`, an absent stdin, and case-conflict `error` are also here;
@@ -1582,10 +1581,11 @@ also aggregated into 1 by the transfer-exception rule. When src is a file, it is
 2 from a walk warning; when dest is a file, it is 1 from a per-item `[Errno 20]` -
 sync.md section 6).
 
-## 6. Exit codes (the implementation of the exit code parity charter)
+## 6. Exit codes
 
-Following the charter in [`overview.md`](./overview.md) section 3, these match aws-cli
-v2's convention (aws-cli's `awscli/constants.py`).
+Following [`overview.md`](./overview.md) section 3 (each code keeps the meaning
+aws-cli gives it), these follow aws-cli v2's convention (aws-cli's
+`awscli/constants.py`).
 
 The specification belongs to [`exit-codes.md`](../docs/cli/exit-codes.md): what
 each code means, and which one wins when more than one thing is wrong. This
@@ -1615,8 +1615,8 @@ the **refining subclasses are checked before their parents**: aws routes a
 post-parse value failure (`InvalidValueError`) or a bad / unusable config
 (`InvalidConfigError`) through its general handler, so both are 255 - not the
 252 / 253 of plain `ValidationError` / `ConfigurationError`
-([`exceptions.md`](./exceptions.md) section 2). Parity-covered parameter
-validation failures mapped to 252 use aws-cli's default enhanced-style
+([`exceptions.md`](./exceptions.md) section 2). Parameter validation
+failures mapped to 252 use aws-cli's default enhanced-style
 envelope, `An error occurred (ParamValidation): <message>`. This includes
 argparse failures, unknown options, plain `ValidationError`, and the
 auto-prompt flag conflict. The **code the envelope names is the handler's,
@@ -1907,11 +1907,12 @@ The overall design and the library side (boto3-faithful) are in
   multipart source annotation before creating the destination, matching
   aws-cli, while no new CLI option is exposed. The tempfile/deferred modes are
   library-only.
-- **Known deviation (classic ranged download)**: aws validates the full-object
-  checksum across the ranges of a classic ranged download (a feature of
-  aws-cli's bundled s3transfer fork that pip s3transfer lacks), so under
-  actual data corruption aws fails (rc 1) where we would report success.
-  Recorded with its exact trigger conditions in transfer.md section 10;
+- **SDK version difference (classic ranged download)**: aws validates the
+  full-object checksum across the ranges of a classic ranged download (a
+  feature of aws-cli's bundled s3transfer fork that pip s3transfer lacks), so
+  under actual data corruption aws fails (rc 1) where we would report success.
+  It comes only from the s3transfer difference and is not matched (overview.md
+  section 3; the trigger conditions are in transfer.md section 10);
   non-ranged downloads (botocore) and the CRT engine (the CRT client) validate
   identically to aws.
 
