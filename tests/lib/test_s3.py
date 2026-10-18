@@ -720,27 +720,31 @@ def _captured_transferrer_kwargs(monkeypatch: pytest.MonkeyPatch) -> dict[str, A
 
 
 class TestTransferConfigDefault:
-    """cp / mv / sync fall back to the instance ``transfer_config``; a per-call value wins."""
+    """cp / mv / sync fall back to the instance ``transfer_config``; a per-call value wins.
+
+    The transferrer receives the resolved config (`S3.resolve_transfer_config`),
+    which carries the given settings over.
+    """
 
     def test_instance_default_reaches_the_transferrer(
         self, _captured_transferrer_kwargs: dict[str, Any], tmp_path: Any
     ) -> None:
         src = tmp_path / "x.txt"
         src.write_text("hi")
-        marker = TransferConfig()
+        marker = TransferConfig(max_concurrency=3)
         with pytest.raises(_StopTransferError):
             S3(transfer_config=marker).cp(str(src), "s3://bucket/key")
-        assert _captured_transferrer_kwargs["transfer_config"] is marker
+        assert _captured_transferrer_kwargs["transfer_config"].max_concurrency == 3
 
     def test_per_call_overrides_instance_default(
         self, _captured_transferrer_kwargs: dict[str, Any], tmp_path: Any
     ) -> None:
         src = tmp_path / "x.txt"
         src.write_text("hi")
-        instance_tc, call_tc = TransferConfig(), TransferConfig()
+        instance_tc, call_tc = TransferConfig(max_concurrency=3), TransferConfig(max_concurrency=5)
         with pytest.raises(_StopTransferError):
             S3(transfer_config=instance_tc).cp(str(src), "s3://bucket/key", transfer_config=call_tc)
-        assert _captured_transferrer_kwargs["transfer_config"] is call_tc
+        assert _captured_transferrer_kwargs["transfer_config"].max_concurrency == 5
 
 
 class TestCrtAbsentCredentialsPosture:
@@ -857,6 +861,16 @@ class TestMaterializeCrtEngine:
     construction fail where aws's does.
     """
 
+    @pytest.fixture(autouse=True)
+    def _usable_crt(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # An explicit 'crt' resolves only with a usable stack, and claims the
+        # process's CRT slot - kept out of the test process.
+        from boto3_s3 import crtsupport
+
+        monkeypatch.setattr(crtsupport, "has_minimum_crt_version", lambda: True)
+        monkeypatch.setattr(crtsupport, "has_crt_s3transfer", lambda: True)
+        monkeypatch.setattr(crtsupport, "acquire_process_lock", lambda: True)
+
     def test_the_instance_postures_are_forwarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from boto3_s3 import crtsupport
 
@@ -879,10 +893,10 @@ class TestMaterializeCrtEngine:
             crt_sign_requests=False,
         )
         s3.materialize_crt_engine(client, transfer_config=config)  # pyright: ignore[reportArgumentType]
+        assert [entry.pop("config").preferred_transfer_client for entry in seen] == ["crt"]
         assert seen == [
             {
                 "client": client,
-                "config": config,
                 "endpoint": endpoint,
                 "session": session,
                 "allow_absent_credentials": True,
@@ -937,7 +951,7 @@ class TestMaterializeCrtEngine:
         config = TransferConfig(preferred_transfer_client="crt")
         client = SimpleNamespace(meta=SimpleNamespace(endpoint_url=None))
         S3(transfer_config=config).materialize_crt_engine(client)  # pyright: ignore[reportArgumentType]
-        assert seen == [config]
+        assert [resolved.preferred_transfer_client for resolved in seen] == ["crt"]
 
     def test_a_classic_selection_never_reads_the_crt_only_boto3_name(
         self, monkeypatch: pytest.MonkeyPatch
@@ -974,7 +988,7 @@ class TestMaterializeCrtEngine:
         client = SimpleNamespace(meta=SimpleNamespace(endpoint_url=None))
         config = TransferConfig(preferred_transfer_client="crt")
         S3(transfer_config=config).materialize_crt_engine(client)  # pyright: ignore[reportArgumentType]
-        assert built == [config]
+        assert [resolved.preferred_transfer_client for resolved in built] == ["crt"]
 
     @pytest.mark.parametrize(
         ("raised", "expected"),

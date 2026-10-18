@@ -1280,6 +1280,28 @@ class S3:
             setattr(client, CA_BUNDLE_ENVIRONMENT_VETTED, True)
         return client
 
+    def resolve_transfer_config(
+        self, transfer_config: TransferConfig | None = None, *, copy: bool = False
+    ) -> TransferConfig:
+        """The transfer config a ``cp`` / ``mv`` / ``sync`` / ``rm`` run uses.
+
+        *transfer_config* (this instance's ``transfer_config`` when none is
+        given) supplies the settings the caller set; the others come from the
+        profile's ``[s3]`` section of this instance's AWS config file, then
+        from ``aws s3``'s defaults, and the engine is picked as ``aws s3``
+        picks it - always classic for an S3-to-S3 *copy*
+        (`transferconfig.resolve_transfer_config`). The operations call this
+        themselves; an application calls it to hand the same config to
+        `materialize_crt_engine` and the run. A config this returned passes
+        through it unchanged, and so does a plain boto3 ``TransferConfig``.
+
+        Raises ``InvalidConfigError`` for an ``[s3]`` value ``aws s3`` would
+        reject, and ``ConfigurationError`` when the CRT engine is asked for
+        explicitly but its awscrt or s3transfer is missing or too old.
+        """
+        config = transfer_config if transfer_config is not None else self._transfer_config
+        return transferconfig.resolve_transfer_config(self.aws_config(), config, copy=copy)
+
     def materialize_crt_engine(
         self, client: S3Client, *, transfer_config: TransferConfig | None = None
     ) -> None:
@@ -1294,20 +1316,20 @@ class S3:
         calls this to pay the same construction (cross-process lock included)
         at the same point; the deletes then reuse what it built.
 
-        The engine is chosen from *transfer_config* (this instance's
-        ``transfer_config`` when none is given) with the same rule the transfer
-        ops apply, so a classic selection - explicit, or ``auto`` on a host the
-        CRT is not tuned for - makes this a no-op. Nothing is returned: the CRT
-        client is a process-wide singleton and a later transfer on a compatible
-        client reuses it.
+        The engine is chosen from *transfer_config* the way the transfer ops
+        choose it (`resolve_transfer_config`), so a classic selection -
+        explicit, or ``auto`` on a host the CRT is not tuned for - makes this a
+        no-op. Nothing is returned: the CRT client is a process-wide singleton
+        and a later transfer on a compatible client reuses it.
         """
-        config = transfer_config if transfer_config is not None else self._transfer_config
+        config = self.resolve_transfer_config(transfer_config)
         if not crtsupport.selects_crt(config):
             # The no-op a classic selection makes of the call below, taken
-            # here so the selection - and the MissingDependencyException an
-            # explicit 'crt' without a usable awscrt raises from it - stays
-            # outside the classifying seam below, which would turn that
-            # documented pass-through into a ConfigurationError.
+            # here so a plain boto3 config's selection - and the
+            # MissingDependencyException an explicit 'crt' without a usable
+            # awscrt raises from it - stays outside the classifying seam
+            # below, which would turn that pass-through into a
+            # ConfigurationError.
             return
         # Construction failures classified exactly as the transfer engine's
         # seam classifies them (`transfer.crt_engine_errors`); no operation is
@@ -1325,6 +1347,19 @@ class S3:
                 region=self._crt_region,
                 sign_requests=self._crt_sign_requests,
             )
+
+    def _run_transfer_config(
+        self,
+        transfer_config: TransferConfig | None,
+        src_storage: Storage,
+        dest_storage: Storage,
+        *,
+        operation: str,
+    ) -> TransferConfig:
+        """`resolve_transfer_config` for a run between these two sides."""
+        copy = isinstance(src_storage, S3Storage) and isinstance(dest_storage, S3Storage)
+        with _attributed_to(operation):
+            return self.resolve_transfer_config(transfer_config, copy=copy)
 
     def _crt_postures(self) -> dict[str, Any]:
         """This instance's CRT engine postures, as `S3Deleter` takes them."""
@@ -1361,27 +1396,24 @@ class S3:
         return LocalStorage(text)
 
     def aws_config(self) -> AwsConfig:
-        """Read this instance's AWS config file (``~/.aws/config``) - an explicit opt-in.
+        """Read this instance's AWS config file (``~/.aws/config``).
 
         Returns an `AwsConfig` reader over the config
         file resolved for this ``S3``'s ``session`` (or a default
         ``AWS_PROFILE``-aware session when none was given - the same resolution
-        `client` uses). Use it to surface profile settings the application
-        did not set itself - e.g. the ``[s3]`` transfer tuning::
+        `client` uses). The transfer operations read the profile's ``[s3]``
+        section through it (`resolve_transfer_config`); use it to surface any
+        other profile setting the application did not set itself::
 
-            chunksize = s3.aws_config().get_size("s3.multipart_chunksize", 8 * 1024**2)
+            region = s3.aws_config().get_str("region")
 
-        This is a building block offered **explicitly**: ``S3``'s own operations
-        (``cp`` / ``sync`` / ...) never read the config file on their own, so they
-        carry no hidden dependence on the ambient ``~/.aws/config``. The reader is
-        memoized per instance (the file is parsed once in the common case;
-        concurrent first calls may benignly recompute - see ``__init__``).
-        Without a ``session`` it follows ``boto3.DEFAULT_SESSION`` as `client`
-        does: a ``boto3.setup_default_session(profile_name=...)`` made after a
-        first read is picked up by the next one, rather than leaving the reader
-        on the profile the clients no longer use. Matching ``aws s3``'s
-        ``[s3]`` semantics on top of these values (the defaults table, validation,
-        the engine decision) is the CLI distribution's job, not the library's.
+        The reader is memoized per instance (the file is parsed once in the
+        common case; concurrent first calls may benignly recompute - see
+        ``__init__``). Without a ``session`` it follows
+        ``boto3.DEFAULT_SESSION`` as `client` does: a
+        ``boto3.setup_default_session(profile_name=...)`` made after a first
+        read is picked up by the next one, rather than leaving the reader on
+        the profile the clients no longer use.
         """
         source = self._session if self._session is not None else boto3.DEFAULT_SESSION
         memo = self._aws_config
@@ -1602,8 +1634,6 @@ class S3:
         ``ClientError`` cause, so the CLI maps it to the general rc).
         """
         _validate_transfer_options(options, operation="cp")
-        if transfer_config is None:
-            transfer_config = self._transfer_config
         src_storage = self.resolve(src)
         dest_storage = self.resolve(dest)
         # aws rejects the unsupported ARN families before any other check (its
@@ -1613,6 +1643,9 @@ class S3:
         # permissive; a stream side validates as a no-op.
         _validate_storage(src_storage, operation="cp")
         _validate_storage(dest_storage, operation="cp")
+        transfer_config = self._run_transfer_config(
+            transfer_config, src_storage, dest_storage, operation="cp"
+        )
         if isinstance(src_storage, IOStorage) or isinstance(dest_storage, IOStorage):
             self._cp_stream(
                 src_storage,
@@ -2055,14 +2088,15 @@ class S3:
         sts clients) when that risk applies.
         """
         _validate_transfer_options(options, operation="mv")
-        if transfer_config is None:
-            transfer_config = self._transfer_config
         src_storage = self.resolve(src)
         dest_storage = self.resolve(dest)
         # The strict location checks first, ahead of the stream gates and the
         # same-path check below - aws's order (see cp).
         _validate_storage(src_storage, operation="mv")
         _validate_storage(dest_storage, operation="mv")
+        transfer_config = self._run_transfer_config(
+            transfer_config, src_storage, dest_storage, operation="mv"
+        )
         if isinstance(src_storage, IOStorage):
             # A move deletes its source, which a stream cannot be (no delete).
             # The destination side is different: a single-object move onto a
@@ -2263,13 +2297,14 @@ class S3:
                 delete_filter=delete_filter,
                 no_overwrite=bool(options.get("no_overwrite", False)),
             )
-        if transfer_config is None:
-            transfer_config = self._transfer_config
         src_storage = self.resolve(src)
         dest_storage = self.resolve(dest)
         # The S3 Express floor gate waits for the directory-bucket refusal below.
         _validate_storage(src_storage, operation="sync", s3express=False)
         _validate_storage(dest_storage, operation="sync", s3express=False)
+        transfer_config = self._run_transfer_config(
+            transfer_config, src_storage, dest_storage, operation="sync"
+        )
         # A pre-cancelled token acts before this method's side effects (the
         # destination pre-create below, any lazily-deferred client build - a
         # caller-made S3Storage without a client; resolve() above already
@@ -2593,7 +2628,8 @@ class S3:
                 text = f"s3://{text}"
             target = S3Storage.normalize_s3_uri(text)
         storage = self._resolve_s3_target(target, operation="rm")
-        config = transfer_config if transfer_config is not None else self._transfer_config
+        with _attributed_to("rm"):
+            config = self.resolve_transfer_config(transfer_config)
         _raise_if_cancelled(cancel_token, "rm")
         if not storage.bucket and (recursive or not storage.key):
             # rm has no bucket-listing mode (scan is object listing only), so a

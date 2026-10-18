@@ -438,8 +438,9 @@ real CRT transfer from a fallback). A further case
 keys (`io_chunksize` / `max_bandwidth`) under CRT exit rc 0 like aws, not a
 traceback. The lane is gated by the e2e opt-in plus an `awscrt` import check.
 The selection matrix and `[s3]`
-parsing run as in-process units (`tests/cli/unit/test_engine_selection.py`,
-`test_runtimeconfig.py`, `tests/lib/test_crtsupport.py`) with awscrt and the
+parsing run as in-process units (`tests/lib/test_engine_selection.py`,
+`tests/lib/test_runtimeconfig.py`, `tests/lib/test_crtsupport.py`, and the
+CLI wiring in `tests/cli/unit/test_engine_selection.py`) with awscrt and the
 process lock monkeypatched.
 
 One CRT surface needs neither an endpoint nor the e2e opt-in:

@@ -194,11 +194,12 @@ transfer, with the other side always S3**.
 
 ## 6. Reading the AWS config file
 
-Operations never read the `[s3]` tuning section of `~/.aws/config` on their own:
-transfer settings come from arguments, never from ambient configuration.
-Credentials, region and profile still resolve through boto3's usual chain, which
-does read the file, and so do botocore's own client-level `s3` settings such as
-`addressing_style`. When you want a value from it yourself, ask:
+`cp` / `mv` / `sync` / `rm` read the `[s3]` tuning section of `~/.aws/config`
+the way `aws s3` does, filling the transfer settings you did not pass
+([`transfer-options.md`](./transfer-options.md)). Credentials, region and
+profile resolve through boto3's usual chain, which reads the file too, and so do
+botocore's own client-level `s3` settings such as `addressing_style`. When you
+want a value from it yourself, ask:
 
 ```python
 cfg = s3.aws_config()
@@ -217,8 +218,9 @@ sizes and rates are 1024-based, matching `aws s3`) and take your own default.
 A missing key returns that default; a value that will not convert raises
 `InvalidConfigError`, which `except ConfigurationError` catches.
 
-If you want `aws s3`'s own interpretation of `[s3]` — its defaults, its
-validation, its engine choice — use the `boto3-s3` command.
+`s3.resolve_transfer_config()` returns the config a run would use, with
+`aws s3`'s own interpretation of `[s3]` applied — its defaults, its validation,
+its engine choice.
 
 ## 7. One small file, one request
 

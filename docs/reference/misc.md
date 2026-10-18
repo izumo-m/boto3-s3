@@ -171,12 +171,12 @@ non-`None` default narrows the return to that type, while omitting it (or
 passing `None`) admits `None`.
 
 The reader holds no defaults table of its own — every getter takes the
-caller's default — and the operations never consult it, so none of `aws s3`'s
-own `[s3]` transfer settings applies to an operation implicitly
-([`S3.aws_config()`](./s3.md#aws_config)). The `[s3]` values are readable here
-all the same, as `cfg.profile().get_size("s3.multipart_chunksize", default)`;
-applying `aws s3`'s own interpretation of that section — its defaults table,
-its validation, its engine choice — is the `boto3-s3` command's job.
+caller's default. The transfer operations read the `[s3]` section through it
+and apply `aws s3`'s own interpretation of it — its defaults table, its
+validation, its engine choice
+([`S3.resolve_transfer_config`](./s3.md#resolve_transfer_config)); the values
+are readable here all the same, as
+`cfg.profile().get_size("s3.multipart_chunksize", default)`.
 
 **Caching.** The full config is parsed on first access and held, and the
 active profile's section is built once and held; both caches are per instance.

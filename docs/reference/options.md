@@ -261,12 +261,16 @@ explicitly-set `max_io_queue` is a classic-only option there and fails
 boto3's own CRT validation; the default needs no override on that lane.) `use_threads=False` selects a non-threaded executor for the
 classic engine, as in boto3.
 
-The library never reads the `[s3]` section of `~/.aws/config` — tuning comes
-from this object alone. `S3.aws_config()` is the explicit way to lift those
-file values into one ([`s3.md`](./s3.md)).
+A `cp` / `mv` / `sync` / `rm` run fills the settings this object leaves unset
+from the `[s3]` section of `~/.aws/config`, as `aws s3` reads it: a value
+passed to the constructor wins, then the `[s3]` value, then the default
+([`S3.resolve_transfer_config`](./s3.md#resolve_transfer_config)). A plain
+`boto3.s3.transfer.TransferConfig` is used as it is.
 
 `preferred_transfer_client` selects the transfer engine — `"auto"` (the
-default), `"classic"`, or `"crt"` — with boto3's own resolution semantics. It
+default), `"classic"`, or `"crt"` — resolved as `aws s3` resolves it
+([`S3.resolve_transfer_config`](./s3.md#resolve_transfer_config)); a plain
+boto3 config keeps boto3's own resolution. It
 is accepted on every supported boto3, including one whose base constructor does
 not take the parameter. Two settings override the choice: an S3-to-S3 copy runs
 on the classic engine regardless, since the CRT engine has no copy operation,

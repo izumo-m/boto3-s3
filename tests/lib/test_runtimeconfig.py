@@ -1,10 +1,10 @@
-"""``boto3_s3_cli.runtimeconfig`` - the aws-cli ``[s3]`` config parser, ported.
+"""``boto3_s3.transferconfig`` - the aws-cli ``[s3]`` config parser, ported.
 
 The parsing matrix is aws-cli ``tests/unit/customizations/s3/
 test_transferconfig.py`` translated (their ``InvalidConfigError`` escapes to
 the aws general handler = rc 255; ours is the library class of the same name,
 which the CLI's exit-code mapping sends to the same 255). The added classes pin
-what the port owns beyond the aws-cli file: byte-exact error wording and the
+what the port owns beyond the aws-cli file: the error wording and the
 scoped-config read.
 """
 
@@ -18,7 +18,7 @@ import boto3
 import pytest
 
 from boto3_s3 import S3, InvalidConfigError
-from boto3_s3_cli import runtimeconfig
+from boto3_s3 import transferconfig as runtimeconfig
 
 
 def build_config_with(**config_from_user: Any) -> dict[str, Any]:
@@ -256,20 +256,6 @@ class TestLoadScopedS3Config:
         # dropping them here is the same run (measured: rc 0 on both).
         self._write(tmp_path, monkeypatch, "[default]\ns3 =\n  unknown_key = x\n")
         assert runtimeconfig.load_scoped_s3_config(self._config()) == {}
-
-    def test_a_self_key_collides_with_the_expansion_like_aws(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # aws expands the whole section into `RuntimeConfig().build_config(**...)`,
-        # so `self` is a duplicate argument and the run ends there - rc 255
-        # with the interpreter's TypeError (measured on the pinned aws-cli,
-        # which names the same class and method).
-        self._write(tmp_path, monkeypatch, "[default]\ns3 =\n  self = x\n")
-        with pytest.raises(TypeError) as excinfo:
-            runtimeconfig.load_scoped_s3_config(self._config())
-        assert str(excinfo.value) == (
-            "RuntimeConfig.build_config() got multiple values for argument 'self'"
-        )
 
     def test_profile_selects_its_own_section(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -57,9 +57,9 @@ reads it.
 
 The aws-cli ``[s3]`` *runtime config* (the ``DEFAULTS`` table, value validation,
 the ``default`` -> ``classic`` alias, and the classic/CRT engine decision) is a
-separate, higher-level concern that lives in the CLI distribution
-(``boto3_s3_cli.runtimeconfig``); it is intentionally **not** folded into this
-general reader. The ``[s3]`` values are still reachable here - e.g.
+separate, higher-level concern that lives in `boto3_s3.transferconfig`, which
+reads the section through this reader; it is intentionally **not** folded into
+this general reader. The ``[s3]`` values are still reachable here - e.g.
 ``cfg.profile().get_size("s3.multipart_chunksize", default)``.
 """
 
@@ -77,11 +77,11 @@ __all__ = ["SIZE_SUFFIX", "AwsConfig", "ConfigSection", "split_size_suffix"]
 
 # aws-cli's human_readable_to_int suffix table (1024-based: "MB" == "MiB").
 # Reading a value written for `aws s3` must yield the same byte count. This is
-# the ONE home of the table and the suffix rule: the CLI's aws-verbatim
-# human_readable_to_int (boto3_s3_cli.runtimeconfig) shares them, while each
-# consumer keeps its own boundary guard and error wording - the library's
-# _parse_size below is deliberately hardened where the CLI port stays
-# aws-faithful (bare-"mb" edge included).
+# the ONE home of the table and the suffix rule: aws-cli's
+# human_readable_to_int (boto3_s3.transferconfig) shares them, while each
+# consumer keeps its own boundary guard and error wording - _parse_size below
+# is deliberately hardened where the port stays aws-faithful (bare-"mb" edge
+# included).
 SIZE_SUFFIX = {
     "kb": 1024,
     "mb": 1024**2,

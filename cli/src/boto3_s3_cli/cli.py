@@ -32,14 +32,14 @@ if TYPE_CHECKING:
 # library's boto3-faithful set_stream_logger (credential masking on by default -
 # design/masking.md). The library attaches no handler on import. "boto3_s3_cli"
 # is the counterpart of aws-cli's own "awscli" logger (clidriver._set_logging),
-# so the CLI's own debug lines (runtimeconfig's alias resolution) surface too.
+# so the CLI's own debug lines surface too.
 # urllib3 is deliberately omitted: it logs no credentials, only
 # connection-pool noise.
 _DEBUG_LOGGERS = ("boto3_s3", "boto3_s3_cli", "botocore", "boto3", "s3transfer")
 
-# aws-cli v2 exit-code conventions (awscli/constants.py). The
-# exit-code charter (design/overview.md section 3) requires matching them; see
-# design/cli.md section 6 for the full table.
+# aws-cli v2 exit-code conventions (awscli/constants.py). Each code keeps the
+# meaning aws-cli gives it (design/overview.md section 3); see design/cli.md
+# section 6 for the full table.
 _PARAM_VALIDATION_ERROR_RC = 252
 _CONFIGURATION_ERROR_RC = 253
 _CLIENT_ERROR_RC = 254

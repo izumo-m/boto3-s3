@@ -38,7 +38,6 @@ from boto3_s3_cli import (
     globalargs,
     output,
     paramfile,
-    runtimeconfig,
     shorthand,
     usage,
 )
@@ -909,23 +908,16 @@ def build_s3_storage(arg: str, *, client: Any, page_size: int | None = None) -> 
 
 
 def resolve_transfer_config(ctx: Context, s3: S3, *, paths_type: str) -> Any:
-    """The transfer config for this run: the injected one, else from ``[s3]``.
+    """The transfer config for this run, resolved by the library.
 
-    A test-injected ``ctx.transfer_config`` always wins (the existing
-    determinism lever). Otherwise the profile's ``[s3]`` section is read from
-    the exact session bound to *s3*, parsed (aws-cli's ``RuntimeConfig``), and
-    turned into a ``TransferConfig`` whose ``preferred_transfer_client`` carries
-    the aws-faithful engine decision (``runtimeconfig.resolve_transfer_client``).
-    Reading ``[s3]`` here - past the usage (252) and missing-source (255)
-    validations - matches aws's ordering (an invalid ``[s3]`` value loses to
-    both).
+    ``ctx.transfer_config`` (a test's determinism lever) supplies the settings
+    it sets; the rest come from the profile's ``[s3]`` section of the exact
+    session bound to *s3*, and the engine is picked as aws picks it
+    (`S3.resolve_transfer_config`). Called past the usage (252) and
+    missing-source (255) validations, so an invalid ``[s3]`` value loses to
+    both, as on aws.
     """
-    if ctx.transfer_config is not None:
-        return ctx.transfer_config
-    scoped = runtimeconfig.load_scoped_s3_config(s3.aws_config())
-    runtime_config = runtimeconfig.RuntimeConfig().build_config(**scoped)
-    resolved = runtimeconfig.resolve_transfer_client(runtime_config, paths_type=paths_type)
-    return runtimeconfig.build_transfer_config(scoped, runtime_config, resolved)
+    return s3.resolve_transfer_config(ctx.transfer_config, copy=paths_type == "s3s3")
 
 
 def materialize_transfer_engine(

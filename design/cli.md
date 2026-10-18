@@ -424,7 +424,6 @@ solidified design is added here.
 | `commands/base.py` | The `Command` ABC + `Context` (the injection point for runtime dependencies, section 3.1) |
 | `commands/<sub>.py` | The `Command` subclass for each subcommand (e.g., `LsCommand` in `ls.py`, `RmCommand` in `rm.py`) |
 | `commands/transferargs.py` | The surface shared by cp / mv / sync: the declaration equivalent to aws-cli `TRANSFER_ARGS` (`--expected-size` is cp-only opt-in, `--recursive` is opt-out for sync), validation of the SSE-C pair / checksum path types / case-conflict / S3 Express, conversion to `TransferOptions`, the non-stream location wiring (including the `--source-region` clone), transfer config resolution (`resolve_transfer_config`, section 8), and the tail of exit-code derivation |
-| `runtimeconfig.py` | The port of the aws-cli `[s3]` runtime config (`RuntimeConfig` / scoped reads / the transfer-engine decision tree / `TransferConfig` construction). section 8; design in [`crt.md`](./crt.md) |
 | `filters.py` | The order-preserving action for `--exclude` / `--include` + `FileFilter` construction. `compile_filter` is the aws `create_filter` + `Filter` equivalent: each side's already-built Storage contributes a base (aws's `rootdir`: `bucket/key`, or the absolutized local path; the parent for a single-file operation), every pattern is joined onto both bases with `os.path.join`, and the joined forms are fnmatched against each entry's full path, last match winning - glob characters in the base and cross-side application included, exactly like aws. When that is provably equivalent to matching the pattern against `FileInfo.compare_key` (plain bases, relative patterns, no nested s3<->s3 pair), it delegates to the specialized globsieve engine |
 | `progress.py` | `TransferPrinter`: aws-compatible rendering of transfer result lines / progress (section 5.7-5.9. Worker-thread callbacks only count (the rc inputs) and enqueue slim records; a dedicated printer thread renders in queue order - aws's `ResultProcessor` shape, but with a **bounded** queue (aws-cli-option-handling.md section 6). The verb is `TransferType.value` - mv is `move` on every path. A record with no `dest` is rendered with a single endpoint - sync's `delete:` lines) |
 | `shorthand.py` | Parsing of map-type option values (`--metadata k=v,...` / JSON form / the `@=` paramfile operator). The grammar is a full port of aws's - csv lists, explicit lists and hash literals included - because that is what places aws's two error vocabularies: a value the grammar rejects is the parser's own `Error parsing parameter '<name>'`, while one it accepts but a map of strings cannot hold (bytes from `@=fileb://`, a list, a nested map) draws botocore's schema report instead, one line per offending key and no option name in it. A `[`-led value never reaches the grammar at all - aws short-circuits it to the JSON unpacker, which answers anything but a `{` document with a bare `Invalid JSON:` echo of the value |
@@ -849,7 +848,7 @@ numbers in the bold item labels below are that document's.
   `botocore` / `boto3` / `s3transfer` loggers (via the library's
   `boto3_s3.set_stream_logger`, `mask_secrets=True`). `boto3_s3_cli` is the
   counterpart of aws-cli's own `awscli` logger, so the CLI's own debug lines
-  (runtimeconfig's alias resolution) surface too. Credentials (signatures, the
+  surface too. Credentials (signatures, the
   access key id, the session
   token, proxy credentials) are masked by `SecretMaskingFilter` (design in
   [`masking.md`](./masking.md)). `urllib3` is excluded (because it does not emit
@@ -1832,9 +1831,6 @@ The key implementation points are:
 - The help choices / help text are a static mirror of aws-cli's static
   tables (the same idiom as the `cli.json` mirror of section 4). They are not taken
   dynamically from botocore's models.
-- `runtimeconfig.py` loads only on a transfer path (post-dispatch), so it
-  imports botocore and the library's `TransferConfig` at module top; awscrt
-  stays behind `crtsupport`'s in-function imports.
 - The credential-chain gate (section 1) is the one startup step that
   reaches the SDK ahead of the help token, and it is meant to do so only
   in a run that then fails - which is not an informational exit: the
@@ -1852,12 +1848,14 @@ The key implementation points are:
 ## 8. Transfer-engine selection and the `[s3]` runtime config
 
 cp / mv / sync / rm read the transfer settings from the profile's `[s3]`
-section (`~/.aws/config`) and determine the transfer engine (classic / CRT);
-cp / mv / sync hand it to the library, while rm only builds it (section 5.2).
-The overall design and the library side (boto3-faithful) are in
-[`crt.md`](./crt.md). The key points on the CLI side (aws-cli-faithful):
+section (`~/.aws/config`) and determine the transfer engine (classic / CRT).
+The library does both for every run (`S3.resolve_transfer_config`, a port of
+aws-cli's `transferconfig.py` in `boto3_s3.transferconfig`); the CLI calls the
+same method ahead of its materialization slot and hands the result on, while
+rm only builds the engine (section 5.2). The design is in [`crt.md`](./crt.md)
+section 4. The key points as the CLI sees them:
 
-- **Reading and validating `[s3]`**: `runtimeconfig.load_scoped_s3_config` reads
+- **Reading and validating `[s3]`**: `transferconfig.load_scoped_s3_config` reads
   it through the command's `S3.aws_config()` (an `AwsConfig` over the very
   session the client was built on, so it carries aws-cli's
   `AWS_PROFILE` > `AWS_DEFAULT_PROFILE` precedence for free - section 4 item 5;
@@ -1875,12 +1873,13 @@ The overall design and the library side (boto3-faithful) are in
   `TransferManagerFactory`): `s3s3` -> unconditionally classic; `preferred` is
   `classic` -> classic; `crt` -> crt if awscrt is present *and* the installed
   s3transfer carries the CRT surface (>= 0.8.0) - if either is missing, a
-  plain `ConfigurationError` rc 253 = a CLI-specific degradation; `auto` -> crt
+  plain `ConfigurationError` rc 253 (awscrt is an optional extra); `auto` -> crt
   if `is_optimized_for_system()` and the lock can be acquired (an s3transfer
   without the CRT surface silently resolves classic), otherwise classic.
   Streaming does not force classic.
-- **`TransferConfig` construction** (`build_transfer_config`): pass only the keys
-  explicitly present in `[s3]` to the ctor (an unset one keeps boto3's
+- **`TransferConfig` construction** (`resolve_transfer_config`): pass the
+  settings the caller's config gave, and for the rest only the keys
+  explicitly present in `[s3]`, to the ctor (an unset one keeps boto3's
   `UNSET_DEFAULT` sentinel = "a CRT part_size only when `multipart_chunksize` is
   explicit" holds). The config is built **per engine** (the same as the aws-cli
   factory): classic gets all keys + `max_request_queue_size` +
@@ -1891,7 +1890,8 @@ The overall design and the library side (boto3-faithful) are in
   config validation, crt.md section 4). The resolved engine is placed in
   `preferred_transfer_client` (so the library does not re-resolve `auto`).
 - **Wiring**: each `run()` calls `transferargs.resolve_transfer_config(ctx, s3,
-  paths_type=...)`. A test-injected `ctx.transfer_config` always takes precedence.
+  paths_type=...)`, which calls `S3.resolve_transfer_config`. A test-injected
+  `ctx.transfer_config` supplies the settings it sets.
   `preferred_transfer_client` has no CLI option (config key only. Same as
   aws-cli).
 - **No credentials under CRT**: aws enters the CRT engine anyway and fails

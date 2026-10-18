@@ -99,9 +99,9 @@ class TestDebugWiring:
         self, restore_debug_loggers: None, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # The CLI's own logger is wired too (aws-cli's 'awscli' counterpart),
-        # so runtimeconfig's alias-resolution DEBUG line surfaces under --debug.
+        # so a CLI module's DEBUG line surfaces under --debug.
         cli._enable_debug_logging()
-        logging.getLogger("boto3_s3_cli.runtimeconfig").debug(
+        logging.getLogger("boto3_s3_cli.commands").debug(
             'Resolved %s configuration alias value "%s" to "%s"',
             "preferred_transfer_client",
             "default",

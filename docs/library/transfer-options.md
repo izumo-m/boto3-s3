@@ -62,10 +62,13 @@ requests, and a 1000-deep download IO queue (boto3's own class buffers a tenth
 of that; see [`options.md`](../reference/options.md#transferconfig)). Set it
 once on the `S3` object to apply everywhere, and per call to override.
 
-**Unlike `aws s3`, the library never reads the `[s3]` section of
-`~/.aws/config`** — tuning comes only from `TransferConfig`. To reuse the values
-already in your config file, read them with `s3.aws_config()` and pass them in;
-see [`s3-object.md`](./s3-object.md).
+**Like `aws s3`, `cp` / `mv` / `sync` / `rm` read the `[s3]` section of
+`~/.aws/config`** for the active profile. Each setting comes from the first
+of: what you pass to `TransferConfig`, the `[s3]` value, the default above —
+so `TransferConfig(max_concurrency=4)` overrides the concurrency and leaves the
+rest to the file. A plain `boto3.s3.transfer.TransferConfig` is used as it is.
+To keep a run free of the file, point `AWS_CONFIG_FILE` elsewhere, as for
+boto3 ([`S3.resolve_transfer_config`](../reference/s3.md#resolve_transfer_config)).
 
 `preferred_transfer_client` selects the engine — `"auto"` (the default),
 `"classic"`, or `"crt"`. S3-to-S3 copies always use the classic engine, since
