@@ -16,37 +16,35 @@ section 3.
 
 ---
 
-## 1. Position in the charter
+## 1. Position in the compatibility policy
 
-The exit code parity charter ([`overview.md`](./overview.md) section 3) lists the
-"interactive UI" as exception 2, placing it outside the scope of parity.
-Therefore:
+The interactive auto-prompt UI is not compared with aws
+([`overview.md`](./overview.md) section 3). Therefore:
 
 - Enabling auto-prompt imposes no exit code obligation (all rc values are
   non-contractual).
 - The degradation (refusal) when `prompt_toolkit` is absent "does not count as a
   mismatch," just like awscrt.
 - Console output (the appearance of the prompt and the completion menu) is
-  outside the **output parity charter** too, under that charter's own
-  interactive-UI exception ([`overview.md`](./overview.md) section 3;
+  not compared either ([`overview.md`](./overview.md) section 3;
   [`aws-cli-option-handling.md`](./aws-cli-option-handling.md) section 6).
 
-Because auto-prompt is an interactive UI, **it is entirely outside the scope of
-the charter**: in addition to rc and console output, **the set of completion
+Because auto-prompt is an interactive UI, **it is entirely outside the
+comparison**: in addition to rc and console output, **the set of completion
 candidates is not a contract either**. We port aws's completion engine
 (`autocomplete/`) as the foundation, but **we prioritize usability (completions
 appearing naturally) over matching aws** (next section).
 
-**Parity with aws's auto-prompt is an explicit non-goal.** Auto-prompt is
-interactive and never driven from a script, so there is no parity value to
-preserve here - and a completion that is *more* helpful than `aws s3`'s is itself
-a reason to reach for `boto3-s3`. The guiding rule is therefore one-directional:
-**where aws completes, we aim to complete too; where aws does not, we still
-may** when it helps the user finish the command. The first half is a goal, not
-an absolute: aws offers a `{}` autoclose candidate for the map-shaped
-`--metadata`, which this implementation does not. This is
-the opposite of the exit-code charter (which demands exact parity) precisely
-because the UI is charter-exempt.
+**Matching aws's auto-prompt is an explicit non-goal.** Auto-prompt is
+interactive and never driven from a script, so there is no compatibility value
+to preserve here - and a completion that is *more* helpful than `aws s3`'s is
+itself a reason to reach for `boto3-s3`. The guiding rule is therefore
+one-directional: **where aws completes, we aim to complete too; where aws does
+not, we still may** when it helps the user finish the command. The first half
+is a goal, not an absolute: aws offers a `{}` autoclose candidate for the
+map-shaped `--metadata`, which this implementation does not. This differs from
+the rest of the command, which is held to aws's function, precisely because the
+UI is not compared.
 
 ## 2. Completion policy (usability first)
 
@@ -139,8 +137,8 @@ they are guaranteed by
 ## 4. Architecture
 
 Dispatch remains the existing argparse (this does not break the execution path
-already guaranteed by the exit code charter / golden). Completion does not hack
-argparse; it layers an independent completer pipeline on top.
+already held to aws by the e2e comparison and the goldens). Completion does not
+hack argparse; it layers an independent completer pipeline on top.
 
 | module | role | dependencies |
 |---|---|---|
@@ -152,8 +150,8 @@ argparse; it layers an independent completer pipeline on top.
 
 **Single source = argparse**: the option set is derived from the argparse
 definition, so it does not drift (guaranteed by the test
-`test_offered_options_match_argparse_exactly`). The aws-parity option set itself
-is inherited from the ARG_TABLE mirror that the dispatch parser already
+`test_offered_options_match_argparse_exactly`). The option set aws accepts
+is itself inherited from the ARG_TABLE mirror that the dispatch parser already
 upholds.
 
 **Lazy import**: `model.py` / `parser.py` / `completers.py` are pure Python.
@@ -270,8 +268,8 @@ included. The rule is aws's rather than a friendlier one because the mode is
 not a UI matter alone: it decides what a non-interactive run does (measured:
 with `cli_auto_prompt = on` under `[profile X]`, `--profile X` without a
 terminal runs the command on aws, and stopped at rc 255 when this read
-followed the flag), and the block-valued `AttributeError` above has to fire
-for the same profile aws fires it for.
+followed the flag), and the block-valued `AttributeError` above fires for the
+same profile aws fires it for.
 
 **Difference when prompt_toolkit is absent** (section 6): an explicit flag gets the
 install guidance + 252. The env/config-driven case **silently falls back to
@@ -293,7 +291,7 @@ importing):
   that a prompt could not follow.
 - **Present** -> import `prompt.py` and run the prompt.
 
-All rc values are non-contractual (the charter's interactive-UI exemption,
+All rc values are non-contractual (the interactive UI is not compared,
 overview.md section 3; section 1 above). Reference implementation values:
 guidance refusal / mutual exclusion = 252, non-tty / prompt failure = 255, user
 cancel = 130 (Ctrl-C; Ctrl-D reaches it as EOF only on an *empty* buffer -
@@ -334,7 +332,8 @@ Test structure (`tests/cli/unit/test_autoprompt.py`):
   help/version into the prompt.
 
 The interactive prompt loop itself is outside the scope of golden/e2e (the
-harness is non-tty; aws places auto-prompt outside parity for the same reason).
+harness is non-tty, and the interactive UI is not compared with aws,
+overview.md section 3).
 
 ## 8. Packaging
 

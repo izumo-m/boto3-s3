@@ -223,8 +223,7 @@ Markdown links inside each half resolve relatively and need no prefix.
 - [`imports.md`](./imports.md) - import discipline (lazy root re-exports and the
   SDK-free top-level CLI help/version exits).
 - [`masking.md`](./masking.md) - credential masking for debug logs
-  (`set_stream_logger`, `SecretMaskingFilter`, parity of the replacement
-  notation).
+  (`set_stream_logger`, `SecretMaskingFilter`, the replacement notation).
 - [`aws-cli-option-handling.md`](./aws-cli-option-handling.md) - handling of
   `aws s3` options that are no-ops / unsupported.
 - [`autoprompt.md`](./autoprompt.md) - the design of `--cli-auto-prompt`
