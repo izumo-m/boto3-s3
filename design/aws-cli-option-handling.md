@@ -111,10 +111,11 @@ resolved at parse time before the command runs. (A list-valued argument - the
 `--exclude` / `--include` filter accumulation, `mb`'s two-token `--tags` - is
 not expanded: aws's paramfile hook rewrites only a plain string value, and
 boto3-s3-cli keeps those verbatim too.) `boto3-s3-cli` matches this on the positional
-too: `ls` / `rm` / `website`'s `<S3Uri>` positional (dest `paths`, aws's own
-`cli_name` for it) and `mb` / `rb` / `presign`'s (dest `path`) are both
-`file://`- / `fileb://`-expanded before dispatch (`expand_positional_paramfile`,
-`commands/base.py`), and so are the free-value options `--bucket-name-prefix`
+too: `ls` / `rm`'s `<S3Uri>` positional (dest `paths`, aws's own `cli_name`
+for it) and `mb` / `rb` / `presign`'s (dest `path`) are `file://`-expanded
+before dispatch (`expand_positional_paramfile`, `commands/base.py`; a
+`fileb://` there, and either prefix on `website`'s, is refused - below), and
+so are the free-value options `--bucket-name-prefix`
 / `--bucket-region` (`ls`) and `--index-document` / `--error-document`
 (`website`). On the transfer family (`cp` / `mv` / `sync`) the same expansion
 covers the free-string transfer options (`--content-type`,
@@ -137,20 +138,32 @@ the positional's `paths`/`path` or the option's `--flag` form).
 `fileb://` is not a free pass-through wherever it is accepted, though: only
 the two SSE-C key blobs (`--sse-c-key`, `--sse-c-copy-source-key`) take the
 loaded *bytes* verbatim into the request (a `string`-shaped request parameter
-untouched, as above). `--grants` also keeps its loaded bytes, but they flow
-into the grant *parsing* rather than a request parameter (as in aws, whose
-paramfile hands its grant handling the same bytes). Every other free-string
-option in the list above still runs a
+untouched, as above). Every other free-string option in the list above
+still runs a
 `fileb://` value through the same string-typed parameter check aws applies:
 `--content-type fileb://x` loads the bytes and then fails botocore's
 client-side check for a `string`-typed parameter (`Invalid type for
 parameter ...`, rc 252) rather than passing them through unchanged.
-`--metadata` is the one further exception: a *whole-value* `--metadata
-fileb://...` loads the bytes and then crashes indexing them inside aws's own
-shorthand parser (`'in <string>' requires string as left operand, not int`).
-`boto3-s3-cli` reproduces that crash verbatim: a missing file is still the
-paramfile's rc 252, but an *existing* one is aws's rc 255, not a clean usage
-error.
+
+Four paramfile uses are refused at 252 without reading the file, because aws
+mishandles them - aws bugs this CLI does not copy
+([`aws-differences.md`](../docs/cli/aws-differences.md) section 2):
+
+- **A `fileb://` path positional** (`ls`, `rm`, `mb`, `rb`, `presign`,
+  `website`). aws loads the bytes into the path and each command breaks its
+  own way: `mb` / `rb` / `presign` reject them as a string parameter (252),
+  `ls` and `website` crash in path handling (255), and `rm` decodes them
+  back into a path and deletes it.
+- **A `file://` path positional on `website`.** aws indexes the loaded text
+  as though it were still a one-element list, so its first character
+  becomes the bucket: a file holding `s3://mybucket` configures bucket `s`.
+- **A whole-value `--metadata fileb://...`.** aws loads the bytes and then
+  crashes indexing them in its shorthand parser (255).
+- **A lone `--grants file://...` or `fileb://...`.** aws unwraps the
+  one-element list before its paramfile hook, so its grant parser walks the
+  loaded text character by character (bytes int by int) and fails in flight,
+  or sends no grant at all for an empty file. With more than one `--grants`
+  value nothing is loaded on either tool.
 
 The `key@=...` shorthand form splits the same two outcomes differently, because
 the load happens one level down. aws wraps a paramfile failure into the
@@ -158,37 +171,17 @@ the load happens one level down. aws wraps a paramfile failure into the
 registers for *named* arguments; its shorthand parser calls the loader itself,
 so a reference it cannot load - missing, or binary through the text `file://` -
 skips that wrapping and reaches the general handler as **rc 255 with the bare
-`Unable to load paramfile ...` line**, naming no option. A reference that
-*does* load is then schema-checked like any map value, so a `fileb://` one is
-rejected for being bytes (rc 252, botocore's `Parameter validation failed:`
-wording rather than the parser's). `boto3-s3-cli` keeps that split by scoping
+`Unable to load paramfile ...` line**, naming no option. A `fileb://` one
+that *does* load is refused for being bytes, a map value being text (rc 252).
+`boto3-s3-cli` keeps that split by scoping
 its wrapper the same way (`paramfile.named_argument`, entered by the option and
 positional resolution and skipped by `shorthand.py`).
 
-**How far the operator reaches** follows from where aws arms it: per key/value
-pair, not per scalar. So it covers every element of a csv or explicit list -
-`a@=[file://f,plain]` loads the first and passes the second through, and the
-list is then the schema's error - while a hash literal re-arms it for each
-inner key, which *disarms* the outer one: in `a@={b=file://f}` the inner value
-stays the unresolved text. Both shapes end at the same schema report, since a
-map of strings holds neither a list nor a nested map, but which references
-were loaded on the way there is observable in it - and in whether a missing
-file turns the run into the bare rc 255 above.
-
-A **readable `fileb://` on a positional** (binary bytes where an `s3://` URI is
-expected) exposes inconsistent aws-cli bugs that `boto3-s3-cli` intentionally
-reproduces. aws loads the bytes into the positional and lets each command
-mishandle them differently: `mb` / `rb` / `presign` reject the bytes through
-string-parameter validation (rc 252); the transfer-command base decodes `rm`'s
-bytes back through the filesystem encoding, so it continues to the ordinary
-delete path (the invalid `s3://` regression case exits 1); and `ls` / `website`
-raise a `TypeError` / `AttributeError` inside path handling (rc 255, e.g.
-`'int' object has no attribute 'startswith'`). The implementation comments mark
-these branches as intentional bug compatibility. A dedicated subprocess e2e
-test asserts both the pinned aws-cli result and equality with `boto3-s3-cli`, so
-an aws-cli fix fails visibly and prompts a compatibility review. The
-missing-file case is unaffected: a `fileb:///nonexistent` positional is the
-parse-time load 252 on every subcommand.
+aws's grammar also builds lists (`k=a,b`, `k=[a,b]`) and nested maps
+(`k={a=b}`) and arms the operator inside them; a map of strings holds
+neither, so aws parses them and then rejects them with botocore's type
+report. `shorthand.py` refuses them where they start instead, with the
+parser's own 252, and accepts exactly the values aws accepts.
 
 ## 3. Auto-prompt / completion UI
 

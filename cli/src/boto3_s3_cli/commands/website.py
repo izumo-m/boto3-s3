@@ -7,12 +7,7 @@ import argparse
 from boto3_s3 import ValidationError
 from boto3_s3_cli import usage
 from boto3_s3_cli.commands import transferargs
-from boto3_s3_cli.commands.base import (
-    Command,
-    Context,
-    expand_option_paramfile,
-    expand_positional_paramfile,
-)
+from boto3_s3_cli.commands.base import Command, Context, expand_option_paramfile
 
 
 class WebsiteCommand(Command):
@@ -46,35 +41,24 @@ class WebsiteCommand(Command):
         defaults to us-east-1), while client construction's botocore failures
         - a bad ``--profile``, partial credentials - are 255.
         """
-        # The positional path and both document options are all expanded at
-        # parse time, as on aws.
-        raw_paths = args.paths
-        expand_positional_paramfile(args, "paths", name="paths", operation="website")
-        paths_expanded = args.paths is not raw_paths
+        # aws expands a paramfile on the positional, then indexes the value as
+        # though it were still a one-element list, so its first character
+        # becomes the bucket (a file holding "s3://mybucket" configures
+        # bucket "s"), and a fileb:// one crashes. Neither is copied: both
+        # prefixes are refused (docs/cli/aws-differences.md section 2).
+        path: str = args.paths
+        if path.startswith(("file://", "fileb://")):
+            raise ValidationError(
+                "Error parsing parameter 'paths': a file:// or fileb:// reference "
+                "cannot name the bucket; give the bucket itself",
+                operation="website",
+            )
+        # Both document options are expanded at parse time, as on aws.
         expand_option_paramfile(args, "index_document", operation="website")
         expand_option_paramfile(args, "error_document", operation="website")
         # aws's _get_bucket_name: strip an optional s3://, strip ONE trailing
         # slash, then pass the remainder verbatim as the bucket name (no
         # key split - "b/k" fails botocore's bucket regex -> 252).
-        if isinstance(args.paths, bytes):
-            # Intentional aws-cli bug parity: WebsiteCommand declares a
-            # one-element positional list, the URI handler unwraps it to bytes,
-            # and the command indexes those bytes as though the list remained.
-            # An empty payload dies at that index itself; any other indexes to
-            # an int with no startswith(), so aws exits 255 either way.
-            if not args.paths:
-                raise IndexError("index out of range")
-            raise AttributeError("'int' object has no attribute 'startswith'")
-        path: str = args.paths
-        if paths_expanded:
-            # The file:// half of the same bug: the unwrapped value is the
-            # loaded text, and indexing it takes its FIRST CHARACTER as the
-            # path (measured: a paramfile containing "s3://mybucket" makes aws
-            # PutBucketWebsite on bucket "s"; an empty file is aws's
-            # IndexError, rc 255 through the general handler). Reproducing it
-            # matters beyond the rc: using the full text would perform a write
-            # on a bucket aws never touches.
-            path = path[0]
         if path.startswith("s3://"):
             path = path[len("s3://") :]
         if path.endswith("/"):

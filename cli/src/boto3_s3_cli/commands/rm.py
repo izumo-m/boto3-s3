@@ -137,12 +137,6 @@ class RmCommand(Command):
         expand_positional_paramfile(args, "paths", name="paths", operation="rm")
         expand_integer_paramfile(args, "page_size", operation="rm")
         page_size = parse_integer_option(args.page_size, operation="rm")
-        if isinstance(args.paths, bytes):
-            # Intentional aws-cli bug parity: S3TransferCommand decodes a
-            # positional fileb:// back through the filesystem encoding before
-            # validating and executing it. This is why rm reaches its normal
-            # rc-1 operation-error path while ls / website crash at rc 255.
-            args.paths = args.paths.decode(sys.getfilesystemencoding())
         target: str = args.paths
         if not target.startswith("s3://"):
             # aws check_path_type: rm takes S3 paths only -> rc 252.

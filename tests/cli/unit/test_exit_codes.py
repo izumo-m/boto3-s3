@@ -775,8 +775,8 @@ class TestNegativeNumberClassification:
 class TestOptionValueResolution:
     """How a single option value is resolved before the run: the paramfile
     expansion (a bad reference is 252), the integer coercion (255), and the
-    ``--metadata`` map (252, with aws's own crashes at 255). Measured against
-    the pinned aws-cli."""
+    ``--metadata`` map (252). Measured against the pinned aws-cli, except the
+    paramfile uses aws mishandles, which are refused at 252 here."""
 
     _MISSING = "/nonexistent_src_for_option_value_test.txt"
 
@@ -829,13 +829,45 @@ class TestOptionValueResolution:
         rc = cli.main(["cp", self._MISSING, "s3://b/k", "--metadata", "fileb:///no/x"])
         assert rc == 252
 
-    def test_whole_value_metadata_fileb_existing_is_255(self, tmp_path: Path) -> None:
+    def test_whole_value_metadata_fileb_existing_is_252(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         # aws loads the bytes, then crashes indexing them in its map shorthand
-        # parser: a general 255, not the map's usage 252. Measured.
+        # parser (255) - an aws bug not copied: refused as a usage error.
         blob = tmp_path / "m.bin"
         blob.write_bytes(b"k=v")
         rc = cli.main(["cp", self._MISSING, "s3://b/k", "--metadata", f"fileb://{blob}"])
-        assert rc == 255
+        assert rc == 252
+        assert "a fileb:// reference is not supported" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("command", ["ls", "rm", "mb", "rb", "presign", "website"])
+    def test_positional_fileb_is_refused_on_every_command(
+        self, command: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws breaks a different way on each command (252, 255, or rm deleting
+        # the decoded path) - an aws bug not copied: one 252 everywhere, with
+        # nothing read or sent.
+        ref = tmp_path / "path.bin"
+        ref.write_bytes(b"s3://bucket/key")
+        rc = cli.main([command, f"fileb://{ref}"], ctx=unused_ctx())
+        assert rc == 252
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "fileb://" in captured.err
+        assert "cannot" in captured.err
+
+    def test_lone_grants_paramfile_is_refused(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws loads it and parses the text as grants one character at a time
+        # (rc 1 in flight) - an aws bug not copied.
+        ref = tmp_path / "g.txt"
+        ref.write_text("read=uri=http://acs.amazonaws.com/groups/global/AllUsers")
+        rc = cli.main(
+            ["cp", self._MISSING, "s3://b/k", "--grants", f"file://{ref}"], ctx=unused_ctx()
+        )
+        assert rc == 252
+        assert "Error parsing parameter '--grants'" in capsys.readouterr().err
 
     def test_free_string_option_fileb_is_a_param_validation_252(self, tmp_path: Path) -> None:
         # A fileb:// on a string-typed option loads bytes, which botocore

@@ -174,6 +174,11 @@ Two cases where the codes are deliberately not identical:
 - **The CRT transfer engine without the `crt` extra** exits 253; a CRT-only
   `--checksum-algorithm` without it fails per item at exit code 1 instead.
   `aws` v2 bundles awscrt, so neither situation can arise there.
+- **A `file://` or `fileb://` reference that `aws` mishandles** exits 252:
+  a `fileb://` path argument (on `aws`, 252, 255 or an `rm` that deletes
+  the decoded path, by command), either prefix as `website`'s bucket, a
+  whole `--metadata fileb://...` (255 on `aws`), and a single `--grants`
+  value with either prefix (on `aws`, 1 in flight, or 0 for an empty file).
 
 A few other paths settle on different codes too. Section 1 of
 [`aws-differences.md`](./aws-differences.md) lists every run that comes out

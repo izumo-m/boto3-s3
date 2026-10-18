@@ -21,7 +21,6 @@ from boto3_s3 import (
     CaseConflictMode,
     CopyPropsMode,
     InvalidConfigError,
-    InvalidValueError,
     LocalStorage,
     S3Storage,
     TransferOptions,
@@ -311,10 +310,10 @@ def resolve_paramfile_values(args: argparse.Namespace, *, operation: str) -> tup
     The ``file://`` / ``fileb://`` paramfile expansion (a bad reference is
     252) and, for the two ``integer`` options, the bare ``int()`` coercion
     (255): the SSE-C key blob, ``--sse-kms-key-id``, the copy-source blob,
-    ``--grants``, the free-string text block, then ``--progress-frequency``
-    and ``--page-size`` (paramfile then coercion). Returns the two coerced
-    integers. ``--metadata`` (a map) and cp's ``--expected-size`` are
-    resolved by ``classify_paths`` (``resolve_metadata_option`` /
+    the refusal of a ``--grants`` paramfile, the free-string text block, then
+    ``--progress-frequency`` and ``--page-size`` (paramfile then coercion).
+    Returns the two coerced integers. ``--metadata`` (a map) and cp's
+    ``--expected-size`` are resolved by ``classify_paths`` (``resolve_metadata_option`` /
     ``expand_option_paramfile``). ``build_transfer_options`` consumes the
     resolved values verbatim.
     """
@@ -345,24 +344,29 @@ def resolve_paramfile_values(args: argparse.Namespace, *, operation: str) -> tup
 
 
 def _resolve_grants(args: argparse.Namespace, *, operation: str) -> None:
-    """Apply aws's single-element paramfile unwrap to ``--grants`` in place.
+    """Refuse a lone ``--grants`` paramfile reference (252).
 
-    aws's ``URIArgumentHandler`` unwraps a length-1 list before the paramfile
-    map, so ``--grants file://g`` (a lone value) sends the file's text and
-    ``fileb://`` its bytes - the grant parser then consumes that verbatim
-    (a text file iterates character by character, bytes int by int, both
-    surfacing in-flight the way aws does). A multi-element ``--grants`` or a
-    prefix-less value stays the list argparse produced. Measured against the pinned
-    aws-cli: ``--grants file:///missing`` is the load 252.
+    aws unwraps a one-element list before its paramfile hook, so ``--grants
+    file://g`` loads the file and its grant parser then walks the text
+    character by character (bytes int by int) - an aws bug this CLI does not
+    copy (docs/cli/aws-differences.md section 2). The reference is refused
+    without being read. A multi-element ``--grants`` or a prefix-less value
+    stays the list argparse produced; a ``file://`` element there is a literal
+    grant on aws too, refused by the grant check in flight.
     """
     grants: object = args.grants
     if isinstance(grants, list):
         items = cast("list[object]", grants)
-        if len(items) == 1 and isinstance(items[0], str):
-            with paramfile.named_argument("--grants", operation=operation):
-                loaded = paramfile.get_paramfile(items[0], operation=operation)
-            if loaded is not None:
-                args.grants = loaded
+        if (
+            len(items) == 1
+            and isinstance(items[0], str)
+            and items[0].startswith(("file://", "fileb://"))
+        ):
+            raise ValidationError(
+                "Error parsing parameter '--grants': a file:// or fileb:// reference "
+                "is not supported; give each grant as an argument",
+                operation=operation,
+            )
 
 
 def _resolve_integer_option(args: argparse.Namespace, dest: str, *, operation: str) -> int | None:
@@ -381,24 +385,18 @@ def _resolve_integer_option(args: argparse.Namespace, dest: str, *, operation: s
 def resolve_metadata_option(args: argparse.Namespace, *, operation: str) -> None:
     """Resolve ``--metadata`` in place: paramfile, then the shorthand parse.
 
-    A ``file://`` whole-value reference loads the map text (252 on
-    a missing file); a ``fileb://`` one loads bytes and then aws crashes in
-    its shorthand parser (measured: rc 255 either way - a non-empty payload
-    indexes to an ``int`` that reaches ``in`` a string, an empty one fails a
-    step earlier with the bytes-vs-str ``TypeError``), so a missing file is
-    still the load 252 but an existing one is the 255.
+    A ``file://`` whole-value reference loads the map text (252 on a missing
+    file). A ``fileb://`` one is refused at 252 without being read: aws loads
+    the bytes and then crashes in its shorthand parser (rc 255), and no bytes
+    can be a map (docs/cli/aws-differences.md section 2).
     """
     if args.metadata is None:
         return
     if args.metadata.startswith("fileb://"):
-        with paramfile.named_argument("--metadata", operation=operation):
-            payload = paramfile.read_binary_paramfile(args.metadata, operation=operation)
-        if not payload:
-            raise InvalidValueError(
-                "a bytes-like object is required, not 'str'", operation=operation
-            )
-        raise InvalidValueError(
-            "'in <string>' requires string as left operand, not int", operation=operation
+        raise ValidationError(
+            "Error parsing parameter '--metadata': a fileb:// reference is not "
+            "supported; use file:// to read the map from a file",
+            operation=operation,
         )
     metadata_value = resolve_text_paramfile(args.metadata, "--metadata", operation=operation)
     args.metadata = shorthand.parse_map_option(

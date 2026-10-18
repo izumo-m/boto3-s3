@@ -27,9 +27,8 @@ class CpCommand(Command):
         """Copy and return an ``aws s3 cp``-style exit code.
 
         Exit-code shape (design/cli.md section 5.7/6): pre-pipeline errors
-        keep their class - paramfile / blob loads, ``--metadata`` parsing (a
-        readable ``fileb://`` there decodes to 255 instead, the per-command
-        paramfile quirk), path types, the ``--endpoint-url`` scheme,
+        keep their class - paramfile / blob loads, ``--metadata`` parsing,
+        path types, the ``--endpoint-url`` scheme,
         the checksum/path-format pairing,
         SSE-C pairing,
         streaming with ``--recursive`` (either side) or a streaming

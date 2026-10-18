@@ -5,13 +5,9 @@ wrong: duplicate-key rejection, escaped commas, quoted values with commas,
 and the ``@=`` paramfile operator
 (triangulated against the aws-cli awscli/shorthand.py).
 
-It also pins the two boundaries around the grammar, both of which decide which
-*wording* the user sees rather than the exit code: the JSON short-circuit that
-keeps ``[``- and ``{``-led values away from the parser entirely, and the schema
-report that answers a value the grammar accepts but a map of strings cannot
-hold. Every expected string here was measured byte for byte against the pinned
-aws-cli, and the parser itself was differentially fuzzed against aws-cli's
-``ShorthandParser`` over ~750k generated inputs.
+What a map of strings cannot hold - a list, a nested map, a JSON array or a
+non-string JSON value, bytes from ``@=fileb://`` - aws parses and then rejects;
+here it is refused while parsing. Either way it is a usage error (252).
 """
 
 from __future__ import annotations
@@ -83,9 +79,9 @@ class TestCsvSecondValueProbe:
     """aws's ``_csv_value`` second-value probe and its backtracking.
 
     An empty segment between pairs is absorbed, a trailing comma is aws's
-    ``'<second>'`` parse error, and a second value that does parse builds a
-    csv list. All expectations differentially verified against the pinned
-    aws-cli."""
+    ``'<second>'`` parse error, and a second value that does parse would build
+    a csv list, which is refused. Accepted inputs differentially verified
+    against the pinned aws-cli."""
 
     def test_empty_segment_between_pairs_is_absorbed(self) -> None:
         # The failed probe backtracks only to the nearest ',', so the empty
@@ -127,94 +123,29 @@ class TestCsvSecondValueProbe:
         with pytest.raises(ValidationError, match="Expected: '=', received: 'EOF'"):
             _parse("a=b,,")
 
-    def test_csv_list_shapes_reach_the_schema_report(self) -> None:
-        # A second value that parses forms a csv list - a well-formed value the
-        # string map cannot hold, so it is the schema's error, not the parser's.
-        with pytest.raises(ValidationError) as excinfo:
-            _parse("a=b,c")
-        assert str(excinfo.value) == (
-            "Parameter validation failed:\n"
-            "Invalid type for parameter a, value: ['b', 'c'], "
-            "type: <class 'list'>, valid types: <class 'str'>"
-        )
-        with pytest.raises(ValidationError) as excinfo:
-            _parse("a=b,c,d=e")
-        assert str(excinfo.value) == (
-            "Parameter validation failed:\n"
-            "Invalid type for parameter a, value: ['b', 'c'], "
-            "type: <class 'list'>, valid types: <class 'str'>"
-        )
+    @pytest.mark.parametrize("value", ["a=b,c", "a=b,c,d=e", "a=b, c"])
+    def test_csv_list_is_refused(self, value: str) -> None:
+        # A second value that parses would form a csv list, which a map of
+        # strings cannot hold (aws parses it, then rejects it - 252 too).
+        with pytest.raises(ValidationError, match="A value cannot be a list"):
+            _parse(value)
 
 
 class TestNonScalarShapes:
-    """The grammar's list and hash constructs, and the report they draw.
+    """The grammar's list and hash constructs, refused where they start.
 
-    aws parses ``k=[a,b]`` and ``k={a=b}`` happily - they are legal shorthand -
-    and only then discovers that a map of strings cannot hold them. The user
-    therefore gets botocore's type complaint, naming the key and printing the
-    parsed structure, rather than a syntax error with a caret. Every expected
-    string measured against the pinned aws-cli.
+    aws parses ``k=[a,b]`` and ``k={a=b}`` - they are legal shorthand - and
+    only then discovers that a map of strings cannot hold them; both end at
+    252.
     """
 
-    def test_explicit_list(self) -> None:
-        with pytest.raises(ValidationError) as excinfo:
-            _parse("k=[a,b]")
-        assert str(excinfo.value) == (
-            "Parameter validation failed:\n"
-            "Invalid type for parameter k, value: ['a', 'b'], "
-            "type: <class 'list'>, valid types: <class 'str'>"
-        )
+    @pytest.mark.parametrize("value", ["k=[a,b]", "k=[]", "k={a=b}", "k={a=[b,c]}", "a=1,c=[3"])
+    def test_list_and_hash_values_are_refused(self, value: str) -> None:
+        with pytest.raises(ValidationError, match="must be quoted"):
+            _parse(value)
 
-    def test_empty_explicit_list(self) -> None:
-        with pytest.raises(ValidationError) as excinfo:
-            _parse("k=[]")
-        assert str(excinfo.value) == (
-            "Parameter validation failed:\n"
-            "Invalid type for parameter k, value: [], "
-            "type: <class 'list'>, valid types: <class 'str'>"
-        )
-
-    def test_hash_literal(self) -> None:
-        with pytest.raises(ValidationError) as excinfo:
-            _parse("k={a=b}")
-        assert str(excinfo.value) == (
-            "Parameter validation failed:\n"
-            "Invalid type for parameter k, value: {'a': 'b'}, "
-            "type: <class 'dict'>, valid types: <class 'str'>"
-        )
-
-    def test_nested_constructs_render_as_plain_python_containers(self) -> None:
-        # Unlike the JSON route there is no OrderedDict here: the shorthand
-        # parser builds plain dicts and lists, and aws prints their bare repr.
-        with pytest.raises(ValidationError) as excinfo:
-            _parse("k={a=[b,c],d={e=f}}")
-        assert str(excinfo.value) == (
-            "Parameter validation failed:\n"
-            "Invalid type for parameter k, value: {'a': ['b', 'c'], 'd': {'e': 'f'}}, "
-            "type: <class 'dict'>, valid types: <class 'str'>"
-        )
-
-    def test_hash_literal_repeats_a_key_by_overwriting(self) -> None:
-        # Only the top level rejects a duplicate; aws's _hash_literal has no
-        # such guard, so the last write wins (measured: value ends up {'a': 'c'}).
-        with pytest.raises(ValidationError) as excinfo:
-            _parse("k={a=b,a=c}")
-        assert str(excinfo.value) == (
-            "Parameter validation failed:\n"
-            "Invalid type for parameter k, value: {'a': 'c'}, "
-            "type: <class 'dict'>, valid types: <class 'str'>"
-        )
-
-    def test_report_names_every_offending_key_in_map_order(self) -> None:
-        with pytest.raises(ValidationError) as excinfo:
-            _parse("a=1,2,b=ok,c=[3,4]")
-        assert str(excinfo.value) == (
-            "Parameter validation failed:\n"
-            "Invalid type for parameter a, value: ['1', '2'], "
-            "type: <class 'list'>, valid types: <class 'str'>\n"
-            "Invalid type for parameter c, value: ['3', '4'], "
-            "type: <class 'list'>, valid types: <class 'str'>"
-        )
+    def test_quoted_bracket_value_is_a_string(self) -> None:
+        assert _parse("k=\"[a,b]\",j='{c}'") == {"k": "[a,b]", "j": "{c}"}
 
     def test_opening_bracket_inside_a_value_stays_scalar(self) -> None:
         # The list / hash dispatch looks only at the first character of the
@@ -229,9 +160,9 @@ class TestNonScalarShapes:
 
 class TestAtEqualsParamfile:
     """The ``@=`` operator (aws grammar ``key "@=" [file-optional-values]``):
-    ``file://`` loads text, ``fileb://`` bytes, a prefix-less value passes
-    through (verified against the pinned aws-cli: ``--metadata a@=file://f`` parses
-    and transfers)."""
+    ``file://`` loads text, a prefix-less value passes through (verified
+    against the pinned aws-cli: ``--metadata a@=file://f`` parses and
+    transfers), and ``fileb://`` bytes are refused."""
 
     def test_plain_value_passes_through(self) -> None:
         assert _parse("a@=v") == {"a": "v"}
@@ -241,19 +172,16 @@ class TestAtEqualsParamfile:
         ref.write_text("loaded")
         assert _parse(f"a@=file://{ref}") == {"a": "loaded"}
 
-    def test_fileb_prefix_is_rejected_as_a_non_string_value(self, tmp_path: Path) -> None:
-        # aws schema-validates the shorthand result at parse time: a map value
-        # must be a string, so a fileb:// bytes load is its pre-pipeline
-        # ParamValidation (rc 252, measured) - never a transfer. The report is
-        # botocore's schema wording, with no "Error parsing parameter" prefix.
+    def test_fileb_prefix_is_refused_as_a_non_string_value(self, tmp_path: Path) -> None:
+        # A map value must be a string, so a fileb:// bytes load is a usage
+        # error (rc 252) - never a transfer.
         ref = tmp_path / "val.bin"
         ref.write_bytes(b"\x00\x01")
         with pytest.raises(ValidationError) as excinfo:
             _parse(f"a@=fileb://{ref}")
         assert str(excinfo.value) == (
-            "Parameter validation failed:\n"
-            "Invalid type for parameter a, value: b'\\x00\\x01', "
-            "type: <class 'bytes'>, valid types: <class 'str'>"
+            "Error parsing parameter '--metadata': the value of key 'a' must be "
+            "text, not the bytes of a fileb:// file"
         )
 
     def test_missing_paramfile_is_the_general_error(self, tmp_path: Path) -> None:
@@ -292,65 +220,23 @@ class TestAtEqualsParamfile:
         ref.write_text("x")
         assert _parse(f"k=1,a@=file://{ref}") == {"k": "1", "a": "x"}
 
-    def test_operator_reaches_every_element_of_a_list(self, tmp_path: Path) -> None:
-        # aws arms the operator per pair, not per value, so each element of the
-        # csv / explicit list is resolved; the list itself is then the schema's
-        # error (measured).
-        ref = tmp_path / "v.txt"
-        ref.write_text("loaded")
-        with pytest.raises(ValidationError) as excinfo:
-            _parse(f"a@=[file://{ref},plain]")
-        assert str(excinfo.value) == (
-            "Parameter validation failed:\n"
-            "Invalid type for parameter a, value: ['loaded', 'plain'], "
-            "type: <class 'list'>, valid types: <class 'str'>"
-        )
 
-    def test_operator_is_disarmed_inside_a_hash_literal(self, tmp_path: Path) -> None:
-        # aws's _hash_literal re-arms the operator per inner key, so the outer
-        # "@=" does not carry into the nested values.
-        ref = tmp_path / "v.txt"
-        ref.write_text("loaded")
-        with pytest.raises(ValidationError) as excinfo:
-            _parse(f"a@={{b=file://{ref}}}")
-        # The report embeds str(dict), whose values render as reprs - on
-        # Windows the path's backslashes come out doubled, so the expectation
-        # must be built the same way, not by interpolating the raw path.
-        value = {"b": f"file://{ref}"}
-        assert str(excinfo.value) == (
-            "Parameter validation failed:\n"
-            f"Invalid type for parameter a, value: {value}, "
-            "type: <class 'dict'>, valid types: <class 'str'>"
-        )
+class TestJsonRoute:
+    """A value led by ``[`` or ``{`` (after whitespace) is read as JSON, and
+    only an object whose values are all strings is a map."""
 
-
-class TestJsonShortCircuitGate:
-    """aws's ``_should_parse_as_shorthand`` short-circuit and the branch behind it.
-
-    A value whose leading non-whitespace character is ``[`` or ``{`` never
-    reaches the shorthand parser. The map branch it lands in then accepts only
-    ``{``, so a ``[`` lead gets a bare ``Invalid JSON:`` followed by the value
-    verbatim - no decoder detail, no ``JSON received:`` line, and no lstrip.
-    Measured byte for byte against the pinned aws-cli.
-    """
-
-    @pytest.mark.parametrize("value", ["[]", "[1,2]", '["a"]', "[a=b]", "[", '[{"a":"b"}]', "[1,]"])
-    def test_bracket_lead_is_the_bare_invalid_json_report(self, value: str) -> None:
-        with pytest.raises(ValidationError) as excinfo:
+    @pytest.mark.parametrize("value", ["[]", "[1,2]", '["a"]', "[a=b]", "[", "   []  "])
+    def test_bracket_lead_is_refused(self, value: str) -> None:
+        with pytest.raises(ValidationError, match="expected a JSON object"):
             _parse(value)
-        assert str(excinfo.value) == (
-            f"Error parsing parameter '--metadata': Invalid JSON:\n{value}"
-        )
 
-    def test_echoed_value_keeps_its_surrounding_whitespace(self) -> None:
-        with pytest.raises(ValidationError) as excinfo:
-            _parse("   []  ")
-        assert str(excinfo.value) == (
-            "Error parsing parameter '--metadata': Invalid JSON:\n   []  "
-        )
-
-    def test_brace_lead_still_takes_the_json_route(self) -> None:
+    def test_brace_lead_takes_the_json_route(self) -> None:
         assert _parse('  {"a": "b"}') == {"a": "b"}
+
+    @pytest.mark.parametrize("value", ['{"a": 1}', '{"a": "ok", "b": null}', '{"a": {}}'])
+    def test_non_string_values_are_refused(self, value: str) -> None:
+        with pytest.raises(ValidationError, match="must be a string"):
+            _parse(value)
 
 
 class TestJsonDecodeFailure:
@@ -394,56 +280,13 @@ class TestParseMapOptionErrors:
             _parse('{"a": }')
         assert "Error parsing parameter '--metadata'" in str(excinfo.value)
 
-    def test_json_non_string_values_get_the_schema_report(self) -> None:
-        # aws parses the JSON and then fails botocore's schema validation -
-        # no "Error parsing parameter" prefix, one line per offending key
-        # (measured against the pinned aws-cli).
-        with pytest.raises(ValidationError) as excinfo:
-            _parse('{"a": 1}')
-        assert str(excinfo.value) == (
-            "Parameter validation failed:\n"
-            "Invalid type for parameter a, value: 1, type: <class 'int'>, "
-            "valid types: <class 'str'>"
-        )
 
-    def test_json_schema_report_names_every_offending_key(self) -> None:
-        with pytest.raises(ValidationError) as excinfo:
-            _parse('{"a": 1, "b": "ok", "c": true}')
-        assert str(excinfo.value) == (
-            "Parameter validation failed:\n"
-            "Invalid type for parameter a, value: 1, type: <class 'int'>, "
-            "valid types: <class 'str'>\n"
-            "Invalid type for parameter c, value: True, type: <class 'bool'>, "
-            "valid types: <class 'str'>"
-        )
-
-    def test_json_nested_values_render_in_ordereddict_form(self) -> None:
-        # aws parses with object_pairs_hook=OrderedDict and its official
-        # build (Python 3.14) prints the 3.12+ OrderedDict repr; the hand
-        # formatter reproduces that text on every supported interpreter
-        # (measured byte-equal against the pinned aws-cli, empty map and
-        # deep nesting included).
-        with pytest.raises(ValidationError) as excinfo:
-            _parse('{"a": {"b": {"c": 1}}, "d": [1, "x", {"e": 2}], "f": {}}')
-        assert str(excinfo.value) == (
-            "Parameter validation failed:\n"
-            "Invalid type for parameter a, value: OrderedDict({'b': OrderedDict({'c': 1})}), "
-            "type: <class 'collections.OrderedDict'>, valid types: <class 'str'>\n"
-            "Invalid type for parameter d, value: [1, 'x', OrderedDict({'e': 2})], "
-            "type: <class 'list'>, valid types: <class 'str'>\n"
-            "Invalid type for parameter f, value: OrderedDict(), "
-            "type: <class 'collections.OrderedDict'>, valid types: <class 'str'>"
-        )
-
-
-class TestSyntaxErrorWordingParity:
-    """Byte-exact aws parser wording for the shorthand syntax-error paths.
-
-    Each expected string was measured against the pinned aws-cli
-    (``aws s3 cp ... --metadata <input>``): aws single-quote-wraps the offending
-    character literally (not via ``repr``), prefixes the echoed input line with
-    one space, and places the caret with ``ShorthandParseError._error_location``
-    (column counted from the last newline, value split around the next one).
+class TestSyntaxErrorWording:
+    """The parser's syntax-error reports, which follow aws's: the offending
+    character single-quote-wrapped literally (not via ``repr``), the echoed
+    input line prefixed with one space, and the caret placed as aws's
+    ``ShorthandParseError._error_location`` places it (column counted from the
+    last newline, value split around the next one).
     """
 
     def test_single_quote_actual_is_literal_wrapped(self) -> None:
@@ -487,12 +330,12 @@ class TestSyntaxErrorWordingParity:
             "  ^"
         )
 
-    def test_unterminated_single_quote_uses_aws_regex_name(self) -> None:
+    def test_unterminated_single_quote_names_the_quote(self) -> None:
         with pytest.raises(ValidationError) as excinfo:
             _parse("k='a,b")
         assert str(excinfo.value) == (
             "Error parsing parameter '--metadata': "
-            "Expected: '<singled quoted>', received: '<none>' for input:\n"
+            "Expected: '<single quoted>', received: '<none>' for input:\n"
             " k='a,b\n"
             "  ^"
         )

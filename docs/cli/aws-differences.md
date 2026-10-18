@@ -34,8 +34,9 @@ the CRT engine, a `REQUESTS_CA_BUNDLE` the CRT engine cannot use, a
 `[plugins]` section, an alias file, a `cli_history` directory `aws` cannot
 create, the modification time a download stamps in some local zones (and the
 `sync` runs that follow from it), a CRT-engine `mv` download whose source
-delete dies without a response, a help page that cannot be written, and the
-`PYTHON*` environment variables. A difference of that kind anywhere else is a
+delete dies without a response, a help page that cannot be written, a
+`file://` or `fileb://` reference `aws` mishandles, and the `PYTHON*`
+environment variables. A difference of that kind anywhere else is a
 bug worth reporting; an error report's wording, or which of two mistakes it
 names, is not.
 
@@ -224,6 +225,25 @@ that say outright that the run comes out differently, listed in section 1.
   `rb --force`, whose bucket removal then does not run). S3 itself never
   answers an unconditional delete this way; only an S3-compatible endpoint
   can.
+- **`file://` and `fileb://` are refused where `aws` mishandles them.** Each
+  of these exits 252 here, before anything is read or sent:
+  - **A `fileb://` path argument** of `ls`, `rm`, `mb`, `rb`, `presign` or
+    `website`. `aws` loads the bytes as the path, and each command breaks
+    its own way: `mb`, `rb` and `presign` exit 252, `ls` and `website` crash
+    at 255, and `rm` decodes the bytes back into a path and deletes it.
+  - **A `file://` bucket for `website`.** `aws` takes the first character of
+    the file as the bucket: a file holding `s3://mybucket` configures the
+    website of bucket `s`. A `fileb://` one is refused too.
+  - **A whole `--metadata fileb://...`.** `aws` crashes at 255; a map is
+    text, so use `file://`.
+  - **A single `--grants` value with either prefix.** `aws` loads the file
+    and reads it as grants one character at a time, so the run fails at exit
+    code 1, `--dryrun` included, while an empty file sends no grant and
+    succeeds. Give each grant as an argument instead.
+
+  Everywhere else the two prefixes work as on `aws`: a `file://` path
+  argument (other than `website`'s) is read as the path, and option values
+  load as before.
 - **A batched delete names a different operation when a key fails.** Deletes go
   out in batches here — up to a thousand keys per `DeleteObjects` request —
   where `aws` sends one `DeleteObject` per key. Batching is a settled design,

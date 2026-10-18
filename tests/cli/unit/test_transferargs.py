@@ -307,26 +307,16 @@ class TestParamfile:
 
 
 class TestGrantsParamfile:
-    """aws's URIArgumentHandler unwraps a length-1 --grants list, then applies
-    the paramfile map; a longer list or a prefix-less value stays a list."""
+    """A lone --grants file:// / fileb:// is refused unread (aws loads it and
+    parses the text character by character - a bug not copied); a longer
+    list or a prefix-less value stays a list."""
 
-    def test_single_element_file_prefix_is_unwrapped_and_loaded(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("prefix", ["file://", "fileb://"])
+    def test_single_element_paramfile_is_refused(self, prefix: str, tmp_path: Path) -> None:
         p = tmp_path / "g.txt"
         p.write_text("read=id=CANONICAL")
-        args = argparse.Namespace(grants=[f"file://{p}"])
-        transferargs._resolve_grants(args, operation="cp")
-        assert args.grants == "read=id=CANONICAL"
-
-    def test_single_element_fileb_prefix_loads_bytes(self, tmp_path: Path) -> None:
-        p = tmp_path / "g.bin"
-        p.write_bytes(b"read=id=X")
-        args = argparse.Namespace(grants=[f"fileb://{p}"])
-        transferargs._resolve_grants(args, operation="cp")
-        assert args.grants == b"read=id=X"
-
-    def test_single_element_missing_file_is_252(self) -> None:
-        args = argparse.Namespace(grants=["file:///nonexistent/boto3_s3_grants"])
-        with pytest.raises(ValidationError, match="Unable to load paramfile"):
+        args = argparse.Namespace(grants=[f"{prefix}{p}"])
+        with pytest.raises(ValidationError, match="Error parsing parameter '--grants'"):
             transferargs._resolve_grants(args, operation="cp")
 
     def test_single_element_without_prefix_stays_a_list(self) -> None:
@@ -351,7 +341,7 @@ class TestGrantsParamfile:
 
 class TestMetadataParamfile:
     """A whole-value --metadata paramfile: file:// text feeds the shorthand
-    parse; fileb:// loads bytes and then aws crashes in its parser (rc 255)."""
+    parse; fileb:// is refused unread (252; aws crashes in its parser)."""
 
     def test_whole_value_file_prefix_feeds_the_shorthand(self, tmp_path: Path) -> None:
         p = tmp_path / "m.txt"
@@ -360,28 +350,16 @@ class TestMetadataParamfile:
         transferargs.resolve_metadata_option(args, operation="cp")
         assert args.metadata == {"k": "v"}
 
-    def test_whole_value_fileb_prefix_existing_is_255(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("exists", [True, False])
+    def test_whole_value_fileb_prefix_is_refused(self, exists: bool, tmp_path: Path) -> None:
         p = tmp_path / "m.bin"
-        p.write_bytes(b"k=v")
+        if exists:
+            p.write_bytes(b"k=v")
         args = argparse.Namespace(metadata=f"fileb://{p}")
-        with pytest.raises(InvalidValueError) as excinfo:
+        with pytest.raises(ValidationError) as excinfo:
             transferargs.resolve_metadata_option(args, operation="cp")
-        assert str(excinfo.value) == "'in <string>' requires string as left operand, not int"
-
-    def test_whole_value_fileb_empty_payload_is_the_bytes_type_error(self, tmp_path: Path) -> None:
-        # An empty payload fails one step earlier in aws's parser: the
-        # bytes-vs-str TypeError, not the int-index one (measured).
-        p = tmp_path / "m.bin"
-        p.write_bytes(b"")
-        args = argparse.Namespace(metadata=f"fileb://{p}")
-        with pytest.raises(InvalidValueError) as excinfo:
-            transferargs.resolve_metadata_option(args, operation="cp")
-        assert str(excinfo.value) == "a bytes-like object is required, not 'str'"
-
-    def test_whole_value_fileb_missing_is_the_load_252(self) -> None:
-        args = argparse.Namespace(metadata="fileb:///nonexistent/boto3_s3_md")
-        with pytest.raises(ValidationError, match="Unable to load paramfile"):
-            transferargs.resolve_metadata_option(args, operation="cp")
+        assert not isinstance(excinfo.value, InvalidValueError)
+        assert "a fileb:// reference is not supported" in str(excinfo.value)
 
     def test_binary_file_via_text_prefix_hints_fileb(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

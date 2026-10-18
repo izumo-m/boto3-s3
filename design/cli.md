@@ -222,7 +222,7 @@ solidified design is added here.
 | `commands/transferargs.py` | The surface shared by cp / mv / sync: the declaration equivalent to aws-cli `TRANSFER_ARGS` (`--expected-size` is cp-only opt-in, `--recursive` is opt-out for sync), validation of the SSE-C pair / checksum path types / case-conflict / S3 Express, conversion to `TransferOptions`, the non-stream location wiring (including the `--source-region` clone), transfer config resolution (`resolve_transfer_config`, section 8), and the tail of exit-code derivation |
 | `filters.py` | The order-preserving action for `--exclude` / `--include` + `FileFilter` construction. `compile_filter` is the aws `create_filter` + `Filter` equivalent: each side's already-built Storage contributes a base (aws's `rootdir`: `bucket/key`, or the absolutized local path; the parent for a single-file operation), every pattern is joined onto both bases with `os.path.join`, and the joined forms are fnmatched against each entry's full path, last match winning - glob characters in the base and cross-side application included, exactly like aws. When that is provably equivalent to matching the pattern against `FileInfo.compare_key` (plain bases, relative patterns, no nested s3<->s3 pair), it delegates to the specialized globsieve engine |
 | `progress.py` | `TransferPrinter`: aws-compatible rendering of transfer result lines / progress (section 5.7-5.9. Worker-thread callbacks only count (the rc inputs) and enqueue slim records; a dedicated printer thread renders in queue order - aws's `ResultProcessor` shape, but with a **bounded** queue (aws-cli-option-handling.md section 6). The verb is `TransferType.value` - mv is `move` on every path. A record with no `dest` is rendered with a single endpoint - sync's `delete:` lines) |
-| `shorthand.py` | Parsing of map-type option values (`--metadata k=v,...` / JSON form / the `@=` paramfile operator). The grammar is a full port of aws's - csv lists, explicit lists and hash literals included - because that is what places aws's two error vocabularies: a value the grammar rejects is the parser's own `Error parsing parameter '<name>'`, while one it accepts but a map of strings cannot hold (bytes from `@=fileb://`, a list, a nested map) draws botocore's schema report instead, one line per offending key and no option name in it. A `[`-led value never reaches the grammar at all - aws short-circuits it to the JSON unpacker, which answers anything but a `{` document with a bare `Invalid JSON:` echo of the value |
+| `shorthand.py` | Parsing of map-type option values (`--metadata k=v,...` / JSON form / the `@=` paramfile operator). The grammar is aws's, cut down to scalar values: it accepts exactly what aws accepts, and refuses while parsing the lists and nested maps aws parses and then rejects, as well as bytes from `@=fileb://`. Every refusal is the parser's `Error parsing parameter '<name>'` (252). A `{`- or `[`-led value is read as JSON, and only an object of strings is accepted |
 | `paramfile.py` | aws's local paramfile loaders (`file://` text, `fileb://` binary; the `get_paramfile` counterpart) shared by the option resolution and the shorthand `@=` operator. A load failure is a `ParamfileLoadError`, whose exit code the caller decides: `named_argument` (aws's `load-cli-arg` handler) turns it into the named argument's rc-252 parse error, and the shorthand's `@=` stays outside it for aws's bare rc 255 |
 | `output.py` | `aws s3`-compatible output formatting (`ls` listing lines, `rm` delete lines. Kept as pure functions; not turned into a class) |
 | `usage.py` | The single home of the aws-matching usage / error strings shared across subcommands (`single_uri_usage` / `bare_single_uri_usage` / `two_path_usage` / `invalid_bucket_name_message`); commands interpolate only their own name or value |
@@ -924,8 +924,7 @@ which one is reported is not matched ([`overview.md`](./overview.md) section
    Object Lambda and Outposts bucket ARNs (252), and a keyless `s3://` path
    gains the trailing `/` every later step re-reads, which turns an Outposts
    `.../accesspoint/ap:` into the key `/`). In `classify_paths` (cp / mv /
-   sync) and in rm's `run()`, which decodes a readable `fileb://` positional
-   first (aws's `_convert_path_args`, section 5.2).
+   sync) and in rm's `run()` (section 5.2).
 3. **The S3 client** - aws's `S3Command._run_main`, which every `aws s3`
    subcommand inherits; built last in `classify_paths` and right after the
    normalization in rm's `run()`. A schemeless `--endpoint-url` (252), an
@@ -1056,11 +1055,11 @@ The checks of `run()`, in the order the code makes them (aws's stages; when
 several fail, which one is reported is not matched): **the direct-option
 paramfile loads and the two integer coercions**
 (`resolve_paramfile_values`, `commands/transferargs.py`: the `--sse-c-key`
-blob, `--sse-kms-key-id`, the `--sse-c-copy-source-key` blob, `--grants`, the
-free-string text block, `--progress-frequency`, then `--page-size`; a load is
-252, a bad `int()` is 255) -> **`--metadata` resolution (paramfile load 252,
-shorthand parse 252; a `fileb://`-loaded bytes value instead fails the
-string-only check as `InvalidValueError` 255)** -> cp's **`--expected-size`
+blob, `--sse-kms-key-id`, the `--sse-c-copy-source-key` blob, `--grants` (a
+lone `file://` / `fileb://` refused, 252), the free-string text block,
+`--progress-frequency`, then `--page-size`; a load is 252, a bad `int()` is
+255) -> **`--metadata` resolution (a whole-value `fileb://` refused 252,
+paramfile load 252, shorthand parse 252)** -> cp's **`--expected-size`
 paramfile (252)** -> the route type (local-local 252) and the refused ARN
 forms (252) -> **client creation** (step 3 above: a schemeless
 `--endpoint-url` is 252; an undeclared profile, an empty region or an invalid

@@ -16,7 +16,7 @@ import pytest
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
 from tests.utils.fakes3 import client_error
-from tests.utils.harness import bucket_name_report, built_client_ctx, client_ctx, unused_ctx
+from tests.utils.harness import bucket_name_report, client_ctx, unused_ctx
 
 
 class _FakeWebsiteClient:
@@ -238,9 +238,9 @@ class TestWebsiteExitCodeShape:
 
 
 class TestWebsiteParamfileAndQuery:
-    """aws expands the positional path and both document options via file:// at
-    parse time and compiles --query there; a bad reference / expression is its
-    252 before the request is built."""
+    """aws expands both document options via file:// at parse time and
+    compiles --query there; a bad reference / expression is its 252 before the
+    request is built. A paramfile positional is refused (252)."""
 
     def test_index_document_file_reference_is_expanded(self, tmp_path: Any) -> None:
         ref = tmp_path / "i.txt"
@@ -254,12 +254,18 @@ class TestWebsiteParamfileAndQuery:
         )
         assert client.calls[0]["WebsiteConfiguration"] == {"IndexDocument": {"Suffix": "home.html"}}
 
-    def test_positional_missing_paramfile_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = cli.main(["website", "file:///no/x"], ctx=unused_ctx())
+    @pytest.mark.parametrize("prefix", ["file://", "fileb://"])
+    def test_positional_paramfile_is_refused(
+        self, prefix: str, tmp_path: Any, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws takes the first character of a file:// text as the bucket (a
+        # file holding "s3://mybucket" configures bucket "s") and crashes on
+        # fileb:// bytes - an aws bug not copied: both are refused unread.
+        ref = tmp_path / "u.txt"
+        ref.write_text("s3://mybucket")
+        rc = cli.main(["website", f"{prefix}{ref}"], ctx=unused_ctx())
         assert rc == 252
-        assert (
-            "Error parsing parameter 'paths': Unable to load paramfile" in capsys.readouterr().err
-        )
+        assert "a file:// or fileb:// reference cannot name the bucket" in (capsys.readouterr().err)
 
     def test_index_document_missing_paramfile_is_252(
         self, capsys: pytest.CaptureFixture[str]
@@ -285,34 +291,3 @@ class TestWebsiteParamfileAndQuery:
         rc = cli.main(["website", "s3://b", "--query", "]["], ctx=unused_ctx())
         assert rc == 252
         assert "Bad value for --query ][" in capsys.readouterr().err
-
-    def test_readable_positional_paramfile_uses_only_its_first_character(
-        self, tmp_path: Any
-    ) -> None:
-        # The file:// half of aws's positional bug: the unwrapped value is the
-        # loaded text and the command indexes it, so only the FIRST character
-        # is the path (measured live: a paramfile containing "s3://mybucket"
-        # makes aws PutBucketWebsite on bucket "s" - it dials /s?website).
-        # Reproducing it matters beyond the rc: using the full text would
-        # write to a bucket aws never touches.
-        ref = tmp_path / "u.txt"
-        ref.write_text("s3://mybucket")
-        client = _FakeWebsiteClient()
-        rc = cli.main(
-            ["website", f"file://{ref}", "--index-document", "i.html"], ctx=client_ctx(client)
-        )
-        assert rc == 0
-        assert client.calls == [
-            {"Bucket": "s", "WebsiteConfiguration": {"IndexDocument": {"Suffix": "i.html"}}}
-        ]
-
-    def test_empty_readable_positional_paramfile_is_255(
-        self, tmp_path: Any, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # An empty paramfile leaves nothing to index: aws's IndexError, rc 255
-        # through the general handler (measured).
-        ref = tmp_path / "empty.txt"
-        ref.write_text("")
-        rc = cli.main(["website", f"file://{ref}"], ctx=built_client_ctx())
-        assert rc == 255
-        assert "string index out of range" in capsys.readouterr().err

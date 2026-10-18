@@ -224,33 +224,25 @@ def expand_integer_paramfile(args: argparse.Namespace, option: str, *, operation
 def expand_positional_paramfile(
     args: argparse.Namespace, dest: str, *, name: str, operation: str
 ) -> None:
-    """Apply aws's command-specific positional paramfile expansion in place.
+    """aws's parse-time paramfile expansion for a path positional, ``file://`` only.
 
-    Missing files remain the loader's rc 252 for every command. Readable
-    `fileb://` values are deliberately less uniform: aws-cli leaves the
-    bytes in the parsed positional, after which mb / rb / presign reject them
-    as string parameters (252), rm decodes them back to a path, and ls /
-    website crash in their own path handling (255). The callers retain those
-    downstream quirks so the exit codes stay compatible.
+    A ``file://`` reference loads the path as text (a missing or undecodable
+    file is the load 252). A ``fileb://`` one is refused at 252 without being
+    read: aws loads the bytes into the path, and each command then mishandles
+    them its own way - a crash on ls and website, a delete of the decoded path
+    on rm - an aws bug this CLI does not copy (docs/cli/aws-differences.md
+    section 2). *name* is the argument name the report carries.
     """
     value = getattr(args, dest, None)
     if not isinstance(value, str):
         return
-    with paramfile.named_argument(name, operation=operation):
-        loaded = paramfile.get_paramfile(value, operation=operation)
-    if loaded is None:
-        return
-    if isinstance(loaded, bytes) and operation in {"mb", "rb", "presign"}:
-        # Intentional aws-cli bug parity: these three commands happen to route
-        # positional bytes through string-parameter validation, while rm, ls,
-        # and website mishandle the same bytes differently.
+    if value.startswith("fileb://"):
         raise ValidationError(
-            "Parameter validation failed:\n"
-            f"Invalid type for parameter input, value: {loaded!r}, "
-            "type: <class 'bytes'>, valid types: <class 'str'>",
+            f"Error parsing parameter '{name}': a fileb:// reference cannot be a path; "
+            "use file:// to read the path from a file",
             operation=operation,
         )
-    setattr(args, dest, loaded)
+    _expand_string_paramfile(args, dest, name=name, operation=operation)
 
 
 def add_page_size_argument(parser: argparse.ArgumentParser) -> None:

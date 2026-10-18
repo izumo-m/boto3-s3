@@ -896,8 +896,7 @@ def _includes_endpoint_auth_path(args: argparse.Namespace) -> bool:
     commands' positionals arrive paramfile-expanded by client-build time; the
     transfer family's `paths` are consumed raw (a `file://` form there is
     just a local path string, hiding nothing S3-shaped). Non-string values
-    (the readable-`fileb://` quirk leaves
-    `bytes`) never name either shape and are skipped.
+    never name either shape and are skipped.
 
     presign's `path` is always an S3 reference - the command takes the target
     with or without the `s3://` scheme (unlike the transfer family, where a

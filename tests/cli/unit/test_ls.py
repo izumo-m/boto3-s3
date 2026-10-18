@@ -17,7 +17,7 @@ from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
 from tests.cli.unit.test_output import local_zone, needs_tzset
 from tests.utils.fakemodel import model_meta
-from tests.utils.harness import built_client_ctx, unused_ctx
+from tests.utils.harness import unused_ctx
 
 _MTIME = dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc)
 
@@ -368,28 +368,6 @@ class TestParamfileExpansion:
         ctx, client = _fake_ctx([{"Buckets": []}])
         assert cli.main(["ls", "--bucket-name-prefix", f"file://{ref}"], ctx=ctx) == 0
         assert client.calls[0]["Prefix"] == "al"
-
-    def test_positional_missing_fileb_reference_is_252(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # aws expands fileb:// as well as file://, so a missing one is the same
-        # load 252 (not the 254/1 of a literal path reaching the client).
-        rc = cli.main(["ls", "fileb:///no/x"], ctx=unused_ctx())
-        assert rc == 252
-        assert (
-            "Error parsing parameter 'paths': Unable to load paramfile" in capsys.readouterr().err
-        )
-
-    def test_positional_fileb_reference_reproduces_aws_type_bug_255(
-        self, tmp_path: Any, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # aws-cli leaves positional bytes in ListCommand and crashes when its
-        # path code calls bytes.startswith(str). Keep this bug-shaped rc 255.
-        ref = tmp_path / "u.bin"
-        ref.write_bytes(b"s3://bucket/p/")
-        rc = cli.main(["ls", f"fileb://{ref}"], ctx=built_client_ctx())
-        assert rc == 255
-        assert "startswith first arg must be bytes" in capsys.readouterr().err
 
     def test_page_size_missing_fileb_reference_is_252(
         self, capsys: pytest.CaptureFixture[str]
