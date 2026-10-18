@@ -88,15 +88,19 @@ maintaining high functional compatibility.
   ([`crt.md`](./crt.md)), and the interactive auto-prompt UI is not compared.
 - **Compatibility target**: the pinned aws-cli release the code is ported
   against, together with the boto3 / botocore / s3transfer / awscrt releases
-  of the same period. Older
-  aws-cli releases are not a target. Two version differences stand between
-  this project and that release: aws-cli bundles its own copies of botocore
-  and s3transfer, which differ from the PyPI releases this project runs on,
-  and the library also runs on SDKs as old as the floor (section 2). A
-  behavior that differs only because of such a version difference is not
-  matched: it is neither a bug nor a deviation to write down, and the library
-  does not compensate for it. The rules for errors below still hold on every
-  supported version.
+  of the same period. Older aws-cli releases are not a target. Two version
+  differences stand between this project and that release: aws-cli bundles
+  its own copies of botocore and s3transfer, which differ from the PyPI
+  releases this project runs on, and the library also runs on SDKs as old as
+  the floor (section 2). A behavior that differs only because of such a
+  version difference is not matched: it is neither a bug nor a deviation to
+  write down, and the library does not compensate for it. The CLI has one
+  exception: where aws-cli's bundled botocore differs from the PyPI one in a
+  way that changes a normal run's outcome (the request sent, its endpoint and
+  signature, the profile used, the retries made), the CLI configures the SDK
+  to match aws-cli; a difference that shows only in an error or in an unusual
+  environment is not compensated there either. The rules for errors below
+  still hold on every supported version.
 - **Security before compatibility**: where matching aws-cli would expose a
   secret or silently turn a protection off, the library and the CLI do not
   match it. For example, credentials are masked in debug logs

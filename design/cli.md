@@ -544,7 +544,10 @@ numbers in the bold item labels below are that document's.
   resolves to `False` ahead of the chain and is unaffected.
 - **The alignment with aws v2**: `build_client` and the botocore session every
   client is opened on absorb ten differences between the installed botocore on
-  a host interpreter and the botocore aws v2 ships frozen. Where a correction
+  a host interpreter and the botocore aws v2 ships frozen (the CLI's exception
+  to not compensating for SDK version differences, overview.md section 3:
+  items 1, 8 and 9 port aws-cli's own logic, the rest change a normal run's
+  requests, profile or retries). Where a correction
   belongs to the *session* rather than to a client kwarg, that is deliberate:
   the session is what the clients botocore builds for itself - chiefly the STS
   / SSO clients the credential chain creates - are built from, and a per-client
