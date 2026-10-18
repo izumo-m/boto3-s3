@@ -358,7 +358,7 @@ transfers, lists or deletes independently. A backend that declares
 backends ignore the flag, because the recursive listing each performs is
 already in that order: S3's `ListObjectsV2` is byte-ordered (S3 Express
 directory buckets and their access points excepted, whose unordered listings
-are why `sync` rejects them) and the local walk sorts for parity with `aws s3`. A non-recursive S3
+are why `sync` rejects them) and the local walk sorts as `aws s3` does. A non-recursive S3
 listing keeps its native shape instead, emitting a page's common prefixes ahead
 of its objects; a one-level local listing is sorted like the recursive walk.
 So a custom backend whose sort is expensive is the only

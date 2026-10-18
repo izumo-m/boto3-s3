@@ -67,10 +67,11 @@ that entry in the address space it came from, not necessarily an S3 key: a
 locally-originating error puts a filesystem path there and leaves `bucket`
 unset.
 
-The message is available as `str(exc)` and is display only. It tracks
-`aws s3` wording and changes whenever parity requires, so branch on the class
-and read the attributes; do not parse it. What is stable is class identity and
-the structured attributes — those two, and `BatchError`'s counters.
+The message is available as `str(exc)` and is display only. It follows
+`aws s3` wording where it can and may change in any release, so branch on the
+class and read the attributes; do not parse it. What is stable is class
+identity and the structured attributes — those two, and `BatchError`'s
+counters.
 
 No raise site constructs this class for a failure it can classify; a
 classified failure is always raised as one of the subclasses below. Direct base
