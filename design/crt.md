@@ -281,8 +281,12 @@ explicitly set** in `[s3]`, to the `TransferConfig` ctor, plus the
 always-passed, already-resolved `preferred_transfer_client` - and, under CRT,
 one derived pin described below (an unset tuning key stays at boto3's
 `UNSET_DEFAULT` sentinel = "part_size only when `multipart_chunksize` is
-explicit" holds). Attributes the caller set on its config after construction
-(the s3transfer knobs boto3's ctor does not take) carry over.
+explicit" holds). The result is a copy of the caller's config, so whatever the
+caller set on it - in the constructor or as an attribute afterwards - carries
+over and counts as given. Under a CRT engine the caller did not ask for (`auto`,
+or `[s3]`'s choice) the caller's classic-only settings stay but are not held
+to boto3's explicit-`crt` validation (`_crt_requested`): the CRT engine ignores
+them, as boto3's `auto` and aws-cli's CRT manager do.
 
 **The config is assembled per engine** (the same as aws-cli's factory
 building the classic `TransferConfig` and the CRT client from separate sets of

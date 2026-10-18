@@ -257,9 +257,13 @@ def acquire_process_lock() -> bool:
     """
     from s3transfer.crt import acquire_crt_s3_process_lock
 
-    # Typed as the lock object, but the documented contract returns None when
-    # another process holds it (same Any-cast as _initialize).
-    lock: Any = acquire_crt_s3_process_lock(PROCESS_LOCK_NAME)
+    # Under the creation lock, as `_initialize` acquires it: s3transfer
+    # checks for its stored lock and then creates one, so two threads
+    # resolving at once would each create one, and the second acquisition in
+    # one process fails. Typed as the lock object, but the documented contract
+    # returns None when another process holds it (same Any-cast as _initialize).
+    with _CREATION_LOCK:
+        lock: Any = acquire_crt_s3_process_lock(PROCESS_LOCK_NAME)
     return lock is not None
 
 
@@ -963,8 +967,14 @@ def _compare_identity(frozen_creds: Any, cred_wrapper: Any) -> bool:
 
 
 def _validate_crt_transfer_config(config: Any) -> None:
-    """boto3's explicit-'crt' validation: classic-only options must be unset."""
-    if config.preferred_transfer_client != "crt":
+    """boto3's explicit-'crt' validation: classic-only options must be unset.
+
+    A config `transferconfig.resolve_transfer_config` settled on CRT without
+    the caller asking for it (``auto``, or ``[s3]``'s choice) is not checked:
+    the CRT engine ignores classic-only options there, as boto3's ``auto``
+    and aws-cli's CRT manager do.
+    """
+    if config.preferred_transfer_client != "crt" or not getattr(config, "_crt_requested", True):
         return
     invalid_crt_args = [
         param

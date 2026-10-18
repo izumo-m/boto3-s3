@@ -342,6 +342,47 @@ class TestCallerSettings:
         assert config.max_in_memory_upload_chunks == 20
         assert config.max_in_memory_download_chunks == 6
 
+    def test_a_setting_assigned_after_construction_counts_as_given(self) -> None:
+        given = TransferConfig()
+        given.use_threads = False
+        given.max_request_concurrency = 3
+        given.target_bandwidth = 5
+        config = _build(
+            {"max_concurrent_requests": "20", "target_bandwidth": "9"}, "classic", given
+        )
+        assert config.use_threads is False
+        assert config.max_request_concurrency == 3
+        assert config.target_bandwidth == 5
+
+    def test_a_subclass_and_its_own_attributes_survive(self) -> None:
+        class Tuned(TransferConfig):
+            pass
+
+        given = Tuned(max_concurrency=4)
+        given.note = "kept"  # pyright: ignore[reportAttributeAccessIssue]
+        config = _build({}, "classic", given)
+        assert type(config) is Tuned
+        assert config.note == "kept"
+        assert config is not given  # a copy: the caller's object is left alone
+
+    @pytest.mark.parametrize("asked", [False, True])
+    def test_classic_only_settings_fail_only_an_asked_for_crt(self, asked: bool) -> None:
+        # boto3 rejects classic-only settings under an explicit 'crt'; a crt
+        # chosen by auto or by [s3] leaves them to the engine, which ignores
+        # them, as boto3's auto does.
+        given = (
+            TransferConfig(io_chunksize=_MIB, preferred_transfer_client="crt")
+            if asked
+            else TransferConfig(io_chunksize=_MIB)
+        )
+        config = _build({}, "crt", given)
+        if asked:
+            with pytest.raises(Exception, match="io_chunksize"):
+                crtsupport._validate_crt_transfer_config(config)  # pyright: ignore[reportPrivateUsage]
+        else:
+            crtsupport._validate_crt_transfer_config(config)  # pyright: ignore[reportPrivateUsage]
+            assert config.io_chunksize == _MIB
+
     def test_a_given_preference_is_resolved_like_the_sections(self) -> None:
         seen: list[tuple[str, bool]] = []
 

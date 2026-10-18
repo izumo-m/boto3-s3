@@ -47,6 +47,7 @@ since not every boto3 can tell its defaults apart, and is used as it is.
 
 from __future__ import annotations
 
+import copy as _copy
 import inspect
 import logging
 import os
@@ -487,53 +488,57 @@ def resolve_transfer_config(
 ) -> Boto3TransferConfig:
     """The config a ``cp`` / ``mv`` / ``sync`` / ``rm`` run uses.
 
-    Each setting comes from *config* when the caller gave it, else from the
-    ``[s3]`` section *aws_config* reads, else from aws-cli's default; the
-    engine is then picked by `resolve_transfer_client`. As aws-cli builds its
-    managers, ``[s3]`` keys the chosen engine does not consume are left out,
-    an ``[s3]`` part size under CRT also sets the threshold aws-c-s3 would
-    fall back to, and a classic engine keeps aws-cli's in-memory chunk caps.
+    Each setting comes from *config* when the caller set it - in the
+    constructor or as an attribute afterwards - else from the ``[s3]`` section
+    *aws_config* reads, else from aws-cli's default; the engine is then picked
+    by `resolve_transfer_client`. As aws-cli builds its managers, ``[s3]`` keys
+    the chosen engine does not consume are left out, an ``[s3]`` part size
+    under CRT also sets the threshold aws-c-s3 would fall back to, and a
+    classic engine keeps aws-cli's in-memory chunk caps.
 
-    A plain boto3 `TransferConfig` is returned as it is: every value in it
-    counts as the caller's. So is a config this function already returned.
+    The result is a copy of *config* (a fresh `TransferConfig` without one), so
+    a subclass and the caller's own attributes carry over. A plain boto3
+    `TransferConfig` is returned as it is: every value in it counts as the
+    caller's. So is a config this function already returned.
     """
     if config is not None and not isinstance(config, TransferConfig):
         return config
     if config is not None and config._resolved:  # pyright: ignore[reportPrivateUsage]
         return config
-    given: dict[str, Any] = dict(config._given) if config is not None else {}  # pyright: ignore[reportPrivateUsage]
+    effective = _copy.copy(config) if config is not None else TransferConfig()
+    given = _given_settings(effective)
     scoped = load_scoped_s3_config(aws_config)
     runtime_config = RuntimeConfig().build_config(**scoped)
-    preferred = given.pop("preferred_transfer_client", runtime_config["preferred_transfer_client"])
-    resolved = resolve_transfer_client(str(preferred), copy=copy)
+    if "preferred_transfer_client" in given:
+        preferred = str(effective.preferred_transfer_client)
+    else:
+        preferred = runtime_config["preferred_transfer_client"]
+    resolved = resolve_transfer_client(preferred, copy=copy)
     crt = resolved == "crt"
-    kwargs: dict[str, Any] = {"preferred_transfer_client": resolved}
+    effective.preferred_transfer_client = resolved
+    # boto3 rejects classic-only settings under an explicit 'crt' only; a crt
+    # the caller did not ask for is aws-cli's or auto's choice, under which the
+    # CRT engine just ignores them, as aws-cli's does.
+    setattr(effective, "_crt_requested", crt and "preferred_transfer_client" in given)  # noqa: B010
     for rc_key, ctor_key in _CTOR_KEYS.items():
         if ctor_key in given or rc_key not in scoped:
             continue
         if crt and rc_key not in _CRT_CONSUMED_KEYS:
             continue
-        kwargs[ctor_key] = runtime_config[rc_key]
+        setattr(effective, ctor_key, runtime_config[rc_key])
     if (
         crt
-        and "multipart_chunksize" in kwargs
-        and "multipart_threshold" not in given
+        and "multipart_chunksize" in scoped
         and "multipart_chunksize" not in given
+        and "multipart_threshold" not in given
     ):
         # The installed s3transfer stamps the config's threshold on every CRT
         # put, where aws-cli sends none and aws-c-s3 falls back to
         # max(part size, 5 MiB); pin that fallback so the same files go
         # multipart.
-        kwargs["multipart_threshold"] = max(
-            kwargs["multipart_chunksize"], _CRT_MIN_UPLOAD_PART_SIZE
+        effective.multipart_threshold = max(
+            runtime_config["multipart_chunksize"], _CRT_MIN_UPLOAD_PART_SIZE
         )
-    kwargs.update(given)
-    effective = TransferConfig(**kwargs)
-    if config is not None:
-        # Settings boto3's constructor does not take, set on the caller's
-        # object as attributes, carry over.
-        for attr in _ATTRIBUTE_ONLY:
-            setattr(effective, attr, getattr(config, attr))
     if not crt:
         defaults = _attribute_defaults()
         if (
@@ -546,6 +551,57 @@ def resolve_transfer_config(
                 setattr(effective, attr, _MAX_IN_MEMORY_CHUNKS)
     effective._resolved = True  # pyright: ignore[reportPrivateUsage]
     return effective
+
+
+# The settings `TransferConfig`'s constructor takes, with boto3's alias for the
+# attribute s3transfer reads where it has one.
+_SETTINGS = {
+    "multipart_threshold": None,
+    "max_concurrency": "max_request_concurrency",
+    "multipart_chunksize": None,
+    "num_download_attempts": None,
+    "max_io_queue": "max_io_queue_size",
+    "io_chunksize": None,
+    "use_threads": None,
+    "max_bandwidth": None,
+    "preferred_transfer_client": None,
+    "target_bandwidth": None,
+    "should_stream": None,
+    "disk_throughput": None,
+    "direct_io": None,
+    "annotation_temp_dir": None,
+}
+
+
+def _raw(config: Any, attr: str) -> Any:
+    """*attr* as stored, boto3's ``UNSET_DEFAULT`` sentinel included."""
+    get_deep_attr = getattr(config, "get_deep_attr", None)
+    if get_deep_attr is not None:
+        try:
+            return get_deep_attr(attr)
+        except AttributeError:
+            return None
+    return getattr(config, attr, None)
+
+
+def _given_settings(config: TransferConfig) -> set[str]:
+    """The settings the caller gave *config*, in its constructor or afterwards.
+
+    A constructor argument is recorded (`TransferConfig._given`); an attribute
+    set afterwards is found by comparing the stored value - under either of
+    boto3's names for it - with a fresh config's, whose defaulted values are
+    boto3's ``UNSET_DEFAULT`` sentinel where boto3 has one.
+    """
+    given = set(config._given)  # pyright: ignore[reportPrivateUsage]
+    fresh = TransferConfig()
+    for name, alias in _SETTINGS.items():
+        for attr in (name, alias):
+            if attr is None:
+                continue
+            value, default = _raw(config, attr), _raw(fresh, attr)
+            if value is not default and value != default:
+                given.add(name)
+    return given
 
 
 # s3transfer's settings that boto3's constructor does not take.

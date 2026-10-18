@@ -334,8 +334,8 @@ s3.sync(src, dest, update_filter=EtagComparison(part_size=16 * 1024 * 1024))   #
   `EtagComparison(s3)` reads it from that `s3`'s active profile
   (`[s3] multipart_chunksize`, else 8 MiB) - an *explicit* config read through
   the `s3` you pass: its `session`, or boto3's default session for an `S3`
-  built without one (the library never reads config on its own;
-  `EtagComparison()` is a plain 8 MiB constant). An explicit `part_size=` wins
+  built without one (`EtagComparison()` is a plain 8 MiB constant: the
+  transfer operations' own `[s3]` read does not reach a comparison). An explicit `part_size=` wins
   over `s3`. The value must match what the object was uploaded with, or every
   multipart object reads as differing (the rclone `--s3-chunk-size` constraint);
   the *effective* size has a 5 MiB floor / 5 GiB ceiling and auto-grows past S3's
