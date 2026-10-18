@@ -90,9 +90,10 @@ maintaining high functional compatibility.
   against, together with the boto3 / botocore / s3transfer / awscrt releases
   of the same period. Older aws-cli releases are not a target. Two version
   differences stand between this project and that release: aws-cli bundles
-  its own copies of botocore and s3transfer, which differ from the PyPI
-  releases this project runs on, and the library also runs on SDKs as old as
-  the floor (section 2). A behavior that differs only because of such a
+  its own Python and its own copies of botocore and s3transfer, which differ
+  from the Python and the PyPI releases this project runs on, and the library
+  also runs on SDKs as old as the floor and on every supported Python
+  (section 2). A behavior that differs only because of such a
   version difference is not matched: it is neither a bug nor a deviation to
   write down, and the library does not compensate for it. The CLI has one
   exception: where aws-cli's bundled botocore differs from the PyPI one in a

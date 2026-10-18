@@ -9,7 +9,8 @@ protections this command keeps on, `aws` bugs it does not copy) and the other
 differences a run can show. It does not record a difference in an error's
 details — its wording, which of two simultaneous mistakes is reported, the
 order of the reports — nor one that comes only from the installed botocore /
-s3transfer differing from the copies aws-cli bundles; neither is a bug
+s3transfer or the Python this command runs on differing from the copies
+aws-cli bundles; neither is a bug
 ([`../../design/overview.md`](../../design/overview.md) section 3).
 
 For what each option does, run `boto3-s3 <subcommand> help`; every option is an
@@ -35,11 +36,10 @@ SDK's own handlers, a `[toplevel]` alias that leads to another `aws` command,
 a timeout typed beside an alias, a `cli_history` directory `aws` cannot
 create, the modification time a download stamps in some local zones (and the
 `sync` runs that follow from it), a CRT-engine `mv` download whose source
-delete dies without a response, a help page that cannot be written, an
-ambiguous option abbreviation under Python 3.10 and 3.11, a malformed
-instance-metadata endpoint, and the `PYTHON*` environment variables. A difference of that kind anywhere else is a bug worth
-reporting; an error report's wording, or which of two mistakes it names, is
-not.
+delete dies without a response, a help page that cannot be written, and the
+`PYTHON*` environment variables. A difference of that kind anywhere else is a
+bug worth reporting; an error report's wording, or which of two mistakes it
+names, is not.
 
 **Do not parse the console output.** Not because the wording differs: result
 lines, error text and warnings are aws's own, with this command's name
@@ -402,15 +402,6 @@ that say outright that the run comes out differently, listed in section 1.
   `boto3-s3-cli/<v> boto3-s3/<v> boto3/<v> botocore/<v> Python/<v>
   <System>/<release>` — and has no `exe/<machine>` install-source token to
   report. Anything keying on the `aws-cli/<version>` token will not match.
-- **An ambiguous option abbreviation under Python 3.10 and 3.11.** On
-  those Python releases only, an ambiguous abbreviation is reported by the
-  parse that meets it before that parse reports anything else, wherever the
-  abbreviation sits: a value that itself ambiguously abbreviates one of the
-  command's options (`--exclude --ss`) is rejected here where `aws` takes it
-  as the value, and a `--version` before it gives way to it
-  (`ls --version --c` exits 252 here and prints the version on `aws`). It
-  does not change which options exist;
-  [`../../design/cli.md`](../../design/cli.md) section 2 records why.
 - **Interactive prompt.** `--cli-auto-prompt` needs the `autoprompt` extra, and
   its completions are not the same as aws's: values of every option that has a
   fixed choice list are completed (`aws` omits some), bucket and key names are
@@ -496,20 +487,6 @@ that say outright that the run comes out differently, listed in section 1.
   metadata (`md/command#s3.ls` and the like). Visible only to the server and
   in `--debug` traces; anything keying on the aws-cli User-Agent (bucket
   policies, access-log analytics) will classify these requests differently.
-- **A malformed instance-metadata endpoint is judged by the installed
-  Python.** Whether `AWS_EC2_METADATA_SERVICE_ENDPOINT` (or the profile key
-  `ec2_metadata_service_endpoint`) is a usable URL is botocore's check, and
-  that check leans on the interpreter's URL parser, whose rules have moved
-  between Python releases. A value only some releases refuse — a scheme that
-  starts with a digit (`1http://…`, taken below Python 3.11), a bracketed
-  host that is not an IPv6 address (taken by older patch releases) — ends
-  every run at 255 on `aws` and may run normally here, or the reverse,
-  depending on the Python this command is installed under. Every endpoint
-  that is a well-formed URL, and every one that plainly is not, is treated
-  alike on both. (The S3 endpoint itself, and the STS or SSO endpoint the
-  credential chain uses, wherever they come from, are checked for that
-  leading digit by the rule `aws`'s Python applies, and read the same on
-  every host.)
 - **The `PYTHON*` environment variables reach this command and not `aws`.**
   The official `aws` distribution is a frozen interpreter running in isolated
   mode, so the interpreter ignores that whole family; this command runs on

@@ -77,7 +77,8 @@ deliberate deviation recorded in
 [`aws-differences.md`](../docs/cli/aws-differences.md) (the error rules in
 overview.md section 3 can call for one). A mismatch in an error's details
 (which of two mistakes is reported, say), or one that comes only from an SDK
-version difference, is not a bug: the scenario is changed, not the code.
+or Python version difference, is not a bug: the scenario is changed, not the
+code.
 
 The interactive auto-prompt UI is not compared (overview.md section 3); it
 cannot run on the aws side anyway, so it is unit-tested instead of diffed.
@@ -822,9 +823,10 @@ on where it is (overview.md section 3):
 - In an error report - a failure's wording, which of two mistakes is
   reported, the order of the reports - it is an **error detail**: a test may
   pin it, but a difference from aws there is neither a bug nor recorded.
-- A difference that comes only from an SDK version difference (an older SDK,
-  or pip botocore / s3transfer where aws-cli bundles its own copies) is
-  neither a bug nor recorded, wherever it is.
+- A difference that comes only from an SDK or Python version difference (an
+  older SDK, pip botocore / s3transfer where aws-cli bundles its own copies,
+  or a Python other than the one aws-cli bundles) is neither a bug nor
+  recorded, wherever it is.
 
 ### Where the criterion applies
 
