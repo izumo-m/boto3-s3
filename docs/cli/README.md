@@ -1,15 +1,16 @@
 # The `boto3-s3` command
 
-`boto3-s3-cli` installs one command, **`boto3-s3`**, built to be a
-command-for-command replacement for `aws s3`. It implements every subcommand:
+`boto3-s3-cli` installs one command, **`boto3-s3`**: `aws s3`'s command line,
+built on the [`boto3-s3`](https://pypi.org/project/boto3-s3/) library. It
+implements every subcommand:
 
 ```
 cp   ls   mb   mv   presign   rb   rm   sync   website
 ```
 
 It takes the same arguments and global options, reads the same `~/.aws`
-configuration, and returns the same exit codes. In most cases an existing script
-works by replacing the `aws s3` prefix with `boto3-s3`.
+configuration, and returns exit codes with the same meanings. In most cases an
+existing script works by replacing the `aws s3` prefix with `boto3-s3`.
 
 It runs on your own Python interpreter and reuses your installed boto3, so the
 package stays small enough to drop into a Lambda deployment package alongside

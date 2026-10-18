@@ -46,9 +46,11 @@ exceptions in `asyncio` and `concurrent.futures`.
 
 Programming mistakes are not wrapped on the synchronous paths. A `TypeError`
 raised by a `filter` predicate, a `KeyboardInterrupt`, a `SystemExit` — all
-pass straight through. `on_result` and `on_progress` must not raise at all:
-beyond what an operation's reference page states, the library makes no promise
-about a callback that does.
+pass straight through. So does an exception `on_result` raises: it ends the
+run and reaches the caller as it is, whichever thread the callback ran on.
+Even so, keep `on_result` and `on_progress` from raising: beyond that and what
+an operation's reference page states, the library makes no promise about a
+callback that does.
 
 Every class in the tree has its own entry in the API reference,
 [`exceptions.md`](../reference/exceptions.md) — the exact conditions that raise
@@ -62,9 +64,9 @@ attributes**.
 Every [`Boto3S3Error`](../reference/exceptions.md#boto3s3error) carries
 `operation`, `bucket` and `key`. `BatchError` adds its counters and leaves
 `bucket` and `key` empty — it stands for a whole run rather than one entry.
-Message strings are **display only** — they track `aws s3`'s wording and change
-whenever parity requires it, so branch on the class and read the attributes,
-and never parse `str(exc)`.
+Message strings are **display only** — they mostly follow `aws s3`'s wording,
+but the wording is not part of the contract and can change in any release, so
+branch on the class and read the attributes, and never parse `str(exc)`.
 
 The context attributes are best-effort. `operation=None` is a legitimate value
 rather than a gap: it means no single operation was in scope — while a client is

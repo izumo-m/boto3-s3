@@ -1,18 +1,17 @@
 # boto3-s3 user guide
 
-Every `aws s3` operation, as a Python library and as a drop-in command.
+Every `aws s3` operation, as a Python library, and as a command built on it.
 
 ```bash
 pip install boto3-s3          # the library
-pip install boto3-s3-cli      # the `boto3-s3` command, a drop-in for `aws s3`
+pip install boto3-s3-cli      # the `boto3-s3` command, `aws s3`'s command line
 ```
 
 - **`boto3-s3`** — the library. Run the operations from Python, in your own
   process, with your own boto3 clients. Results come back as objects instead of
   console output to parse.
-- **`boto3-s3-cli`** — installs the **`boto3-s3` command**, a
-  command-for-command replacement for `aws s3`: the same invocation behaves the
-  same way.
+- **`boto3-s3-cli`** — installs the **`boto3-s3` command**, `aws s3`'s
+  command line on top of the library: the same invocation does the same work.
 
 Either works on its own. The library never shells out, so it needs neither `aws`
 nor `boto3-s3` on `PATH`.
@@ -23,8 +22,8 @@ nor `boto3-s3` on `PATH`.
 `aws s3` with it, and where to look things up.
 
 - [`cli/exit-codes.md`](./cli/exit-codes.md) — the codes a script can branch on.
-- [`cli/aws-differences.md`](./cli/aws-differences.md) — what parity covers and
-  where behavior differs from `aws s3`.
+- [`cli/aws-differences.md`](./cli/aws-differences.md) — what compatibility
+  covers and where behavior differs from `aws s3`.
 - [`cli/configuration.md`](./cli/configuration.md) — the configuration files,
   environment variables and `[s3]` tuning keys the command reads.
 

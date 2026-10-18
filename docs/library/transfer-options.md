@@ -174,7 +174,7 @@ s3.sync(LocalStorage("./site", follow_symlinks=False), "s3://bucket/site/")
 ```
 
 `follow_symlinks` matches `aws s3`. `detect_symlink_loops` is an addition, off
-by default to preserve that parity: without it a symlink cycle descends until
+by default to keep that behavior: without it a symlink cycle descends until
 the operating system stops it, exactly as `aws s3` does; with it, a directory
 that resolves to one of its own ancestors is skipped with a warning.
 

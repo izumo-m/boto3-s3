@@ -272,8 +272,8 @@ What this pair deliberately does not do:
   large for a single `PutObject` fails with S3's own error.
 - **no `Content-Type` guessing** on upload, and no other object shaping —
   `put_file` sends the bytes and nothing else.
-- **no mtime stamping** on a download, and none of `cp`'s `aws s3` parity gates
-  (glacier, `--no-overwrite`, case conflicts).
+- **no mtime stamping** on a download, and none of the checks `cp` makes as
+  `aws s3` does (glacier, `--no-overwrite`, case conflicts).
 
 So reach for `cp` / `sync` for large objects, for whole trees, and whenever you
 want the `aws s3` behavior; reach for these two when one small object is the
