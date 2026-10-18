@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-18
+
 - Added `is_s3express_accesspoint_path`, `LocalStorage.exists()` / `ensure_directory()` and a `transfer_config` for `rm` and `S3Deleter`; `S3PathResolver` and `has_underlying_s3_path` now cover an S3 Express access point, which `sync` refuses, and an empty local path is rejected instead of meaning the working directory.
 - `S3FileInfo.etag` now holds the ETag exactly as S3 returned it, quotes included, so a multipart download from an endpoint serving another form no longer fails its `If-Match`; `EtagComparison.content_differs` takes either form.
 - Failures now take the library's exception classes on every path and engine: an incomplete response or a timestamp the host cannot represent is `MalformedResponseError`, and a request's, a local file's or a configuration's error no longer arrives as a bare built-in or botocore exception.
@@ -108,7 +110,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release.
 
-[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.11.1...HEAD
+[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.12.0...HEAD
+[0.12.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.11.1...boto3-s3-v0.12.0
 [0.11.1]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.11.0...boto3-s3-v0.11.1
 [0.11.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.10.0...boto3-s3-v0.11.0
 [0.10.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.9.0...boto3-s3-v0.10.0

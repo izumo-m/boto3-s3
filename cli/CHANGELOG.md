@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-18
+
 - `--copy-props all` writes a multipart copy's oversized tags and its annotations in `aws`'s order, with `aws`'s requests only.
 - The `[plugins]` section is now loaded like `aws` loads it: a plugin that cannot be imported or initialized stops every command, and a plugin's handlers on SDK events run.
 - A `[toplevel]` `s3` entry in `~/.aws/cli/alias` now applies to every command, as it does to every `aws s3` one.
@@ -107,7 +109,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release.
 
-[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.8.1...HEAD
+[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.9.0...HEAD
+[0.9.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.8.1...boto3-s3-cli-v0.9.0
 [0.8.1]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.8.0...boto3-s3-cli-v0.8.1
 [0.8.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.7.0...boto3-s3-cli-v0.8.0
 [0.7.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.6.1...boto3-s3-cli-v0.7.0
