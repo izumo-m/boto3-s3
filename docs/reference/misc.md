@@ -505,7 +505,7 @@ one `DeleteObjects` call for the keys XML 1.0 can carry, plus one
 `DeleteObject` call per key it cannot. It is the machinery behind
 [`rm`](./operations/rm.md) and
 [`sync(delete_filter=...)`](./operations/sync.md), and is usable directly. The
-rationale, the parity analysis and the error model in full are
+rationale, the comparison with aws-cli and the error model in full are
 [`../../design/deleter.md`](../../design/deleter.md).
 
 ```python
