@@ -25,14 +25,13 @@ Under the same arguments and configuration you get **the same resulting S3
 state and local files, the same `sync` decisions, the same result lines on
 success, the same conditions failing, and an exit code with the same
 meaning**, bar the entries in section 2 that say outright that the run comes
-out differently. Those are a recursive delete whose listing dies part way or whose endpoint fails its batch requests, a
-Ctrl-C during deletes under the CRT engine, a delete answered `412`, a CRT
-download that cannot put its file in place, a `mv` between two spellings of
-one Outposts object, an S3 Express access point, a plain-HTTP endpoint named
-anywhere but `--endpoint-url` under the CRT engine, a `REQUESTS_CA_BUNDLE`
-the CRT engine cannot use, an `aws` plugin that imports `awscli` modules,
-exits, raises outside Python's `Exception` family or unregisters one of the
-SDK's own handlers, a `[toplevel]` alias that leads to another `aws` command,
+out differently. Those are a recursive delete whose listing dies part way or
+whose endpoint fails its batch requests, a Ctrl-C during deletes under the CRT
+engine, a delete answered `412`, a CRT download that cannot put its file in
+place, a `mv` between two spellings of one Outposts object, an S3 Express
+access point, a plain-HTTP endpoint named anywhere but `--endpoint-url` under
+the CRT engine, a `REQUESTS_CA_BUNDLE` the CRT engine cannot use, a
+`[plugins]` section, a `[toplevel]` alias that leads to another `aws` command,
 a timeout typed beside an alias, a `cli_history` directory `aws` cannot
 create, the modification time a download stamps in some local zones (and the
 `sync` runs that follow from it), a CRT-engine `mv` download whose source
@@ -441,47 +440,12 @@ that say outright that the run comes out differently, listed in section 1.
   the command line unless the alias's value sets them itself: rereading the
   value resets both to their defaults. This command keeps the
   typed values, so a run that times out here can complete there.
-- **An `aws` plugin's hooks into `aws` itself do not run.** Both tools load
-  `[plugins]` alike — with `cli_legacy_plugin_path` set, every other entry is
-  imported and its `awscli_initialize` called on every invocation, and a
-  plugin that cannot be imported or initialized stops the run before anything
-  happens (exit code 255, or 252 for a parameter-validation error). What a
-  plugin registers on the SDK's own events (`before-call.s3.PutObject`,
-  `after-call`, `needs-retry` and the like) runs as it does on `aws`. Two
-  parts of a plugin are written against `aws`'s own code and cannot run here:
-  handlers on `aws`'s own events (`building-command-table`,
-  `top-level-args-parsed`, `session-initialized` and the rest) are registered
-  but never called, and **a plugin that imports `awscli` modules fails to
-  import here** — exit code 255 with `No module named 'awscli'`, where `aws`
-  runs it and the command.
-- **A plugin meets the installed SDK, not `aws`'s bundled one.** Fewer
-  clients are built, so the events
-  of building one (`creating-client-class`, `choose-service-name`) fire fewer
-  times; and a recursive `rm`, `sync --delete` and `rb --force` delete
-  through `DeleteObjects`, so no per-key `DeleteObject` event fires for those
-  keys. While the plugins initialize, an event a plugin emits reaches only
-  the handlers plugins registered — on `aws` it reaches `aws`'s own too — and
-  an `unregister` aimed at one of the SDK's own handlers takes effect, or
-  fails, when the run first builds a client: a `--version` or a usage error
-  that builds none is unaffected, where `aws` already applied it, or stopped
-  at exit code 255. Which built-in functions can be a handler is the
-  interpreter's call: under Python 3.10 one such as `print` is accepted while
-  the plugins load and fails when its event fires, where `aws` (on Python
-  3.14) refuses it at load.
-- **A plugin that exits or raises outside `Exception` is not ignored.** A
-  plugin — while it loads, or from a handler — that calls
-  `sys.exit()` ends the run with the status it asked for, and one that raises
-  a `BaseException` that is not an `Exception` (`GeneratorExit`, its own
-  subclass) is reported like any other failure: exit code 255 with its
-  message, or the failed line of the transfer it stopped. An
-  `AssertionError` from a handler is such an ordinary failure on both tools.
-  This holds wherever the handler runs, a transfer's worker thread included.
-  `aws` handles neither of the first two the way Python would: one that
-  reaches its entry point (an `ls` listing) ends the run at exit code 0 with
-  nothing written, one raised while it lists or heads for a transfer or
-  delete ends it with `fatal error: 7` (the status as the message) at 1, and
-  one raised inside a request it sends for an item reports that item done -
-  a `mv` then deletes its source though nothing was sent (measured).
+- **`[plugins]` is not read.** `aws` loads the plugins the config file's
+  `[plugins]` section names (with `cli_legacy_plugin_path` set, every other
+  entry is imported and its `awscli_initialize` called on every invocation),
+  so their handlers run and a plugin that cannot be loaded stops `aws` before
+  anything happens. This command loads none: the section is ignored, a broken
+  entry is no error, and no plugin's handler runs.
 - **User-Agent.** Requests identify themselves as the installed
   `Boto3`/`Botocore`, not as `aws-cli`, and carry none of aws's command
   metadata (`md/command#s3.ls` and the like). Visible only to the server and

@@ -65,7 +65,7 @@ class TestExceptionText:
         assert usage.exception_text(renamed) == "something else"
 
     def test_a_cause_chain_that_loops_ends_at_the_loop(self) -> None:
-        # A plugin's `raise e from e` (or two exceptions naming each other)
+        # A `raise e from e` (or two exceptions naming each other)
         # must not recurse: the text is the one they share.
         looped = ValueError("self-caused")
         looped.__cause__ = looped

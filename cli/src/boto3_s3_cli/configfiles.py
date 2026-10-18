@@ -2,8 +2,7 @@
 
 aws-cli builds its botocore session - and with it the session-backed error
 handler chain - before it parses anything beyond the preliminary ``--profile``
-/ ``--debug`` scan, and building it loads the whole merged config (its
-``create_clidriver`` hands ``session.full_config`` to ``load_plugins``). Three
+/ ``--debug`` scan, and building it loads the whole merged config. Three
 outcomes of that load are visible on the command line long before any S3 call,
 so the dispatcher reproduces them from ``configparser`` alone - the AWS SDK
 must stay unimported on the informational exits (design/imports.md):
@@ -33,7 +32,6 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Mapping
-from types import MappingProxyType
 from typing import NamedTuple, TypeAlias
 from urllib.parse import urlsplit
 
@@ -131,14 +129,11 @@ class ConfigScan(NamedTuple):
     credentials-file section *updating* the config file's same-named profile
     key by key (measured: a ``cli_timestamp_format`` in the credentials file
     overrides the config file's, while some other key there leaves it
-    standing). ``plugins`` is the config file's ``[plugins]`` section - the
-    ``full_config["plugins"]`` aws's ``create_clidriver`` hands its plugin
-    loader (a credentials-file ``[plugins]`` is a profile there, not this).
+    standing).
     """
 
     unparseable: str | None
     profiles: Mapping[str, Mapping[str, ConfigValue]]
-    plugins: Mapping[str, ConfigValue] = MappingProxyType({})
 
     def declares(self, profile: str | None) -> bool:
         """Whether botocore's scoped-config read would accept ``profile``.
@@ -322,7 +317,6 @@ def config_file_path() -> str:
 def scan() -> ConfigScan:
     """Parse both files once, in botocore's order."""
     profiles: dict[str, dict[str, ConfigValue]] = {}
-    plugins: Mapping[str, ConfigValue] = MappingProxyType({})
     for path, is_credentials in (
         (config_file_path(), False),
         (_resolve_path(*_CREDENTIALS_FILE), True),
@@ -339,9 +333,7 @@ def scan() -> ConfigScan:
         found = sections if is_credentials else _config_file_profiles(sections)
         for name, options in found.items():
             profiles.setdefault(name, {}).update(options)
-        if not is_credentials:
-            plugins = sections.get("plugins", plugins)
-    return ConfigScan(None, profiles, plugins)
+    return ConfigScan(None, profiles)
 
 
 def _resolve_path(env_var: str, default: str) -> str:

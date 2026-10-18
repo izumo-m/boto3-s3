@@ -1652,3 +1652,19 @@ class TestCredentialChainSettings:
         for name, value in env.items():
             monkeypatch.setenv(name, value)
         assert configfiles.scan().credential_chain_suspect(None) is suspect
+
+
+class TestPluginsSectionIsNotRead:
+    """``[plugins]`` is ignored: no plugin loads, and a broken entry is no error."""
+
+    def test_a_broken_entry_does_not_stop_the_run(
+        self, config: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        config.write_text(
+            "[plugins]\n"
+            f"cli_legacy_plugin_path = {tmp_path / 'nowhere'}\n"
+            "broken = boto3_s3_no_such_plugin\n"
+        )
+        assert cli.main(["--version"]) == 0
+        assert "boto3_s3_no_such_plugin" not in capsys.readouterr().err
+        assert "boto3_s3_no_such_plugin" not in sys.modules

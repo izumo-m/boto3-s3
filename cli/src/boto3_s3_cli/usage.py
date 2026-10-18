@@ -138,7 +138,7 @@ def exception_text(exc: BaseException) -> str:
     """
     seen = {id(exc)}
     cause = exc.__cause__
-    # A cause chain can loop (a plugin's ``raise e from e``): stop at the
+    # A cause chain can loop (``raise e from e``): stop at the
     # first exception already visited.
     while cause is not None and id(cause) not in seen and str(exc) == str(cause):
         seen.add(id(cause))

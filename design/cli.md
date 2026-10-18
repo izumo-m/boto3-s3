@@ -43,8 +43,8 @@ solidified design is added here.
   `configparser` plus the `shlex` split botocore names its `[profile "..."]`
   sections with; the informational exits must not import the SDK,
   [`imports.md`](./imports.md)). aws builds its botocore session immediately
-  after the preliminary scan and hands the whole merged config to
-  `load_plugins`, so a file that is not valid INI settles the run right
+  after the preliminary scan and reads the whole merged config, so a file
+  that is not valid INI settles the run right
   there: `Unable to parse config file: <path>` at rc 255 (botocore's
   `ConfigParseError` through aws's general handler), ahead of the auto-prompt
   rejection, `--version`, the help token and every parse below. Both of
@@ -58,34 +58,9 @@ solidified design is added here.
   the credentials file, the latter updating the former key by key like
   botocore's `full_config`), which section 6 uses to decide whether a report
   still carries its envelope and which `ConfigScan.scoped` reads
-  `cli_timestamp_format` out of (below). The scan also keeps the config
-  file's `[plugins]` section, and `plugins.load` then does what aws's
-  `load_plugins` does with it, on every invocation, `--version` and the help
-  token included: when the section sets `cli_legacy_plugin_path`, that value
-  is split onto `sys.path`, every other entry is imported, and each module's
-  `awscli_initialize` is called (without that entry nothing is imported). A
-  plugin that fails to import or initialize ends the run there through aws's
-  entry-point handlers (`_build_driver`): a botocore parameter-validation
-  failure at 252 with its envelope, anything else with `str()` of the
-  exception at 255 (measured: `No module named '<name>'`, `module '<name>'
-  has no attribute 'awscli_initialize'`). Two cases part from that chain on
-  purpose: a `SystemExit` ends the run with the status it carries, and a
-  `BaseException` outside `Exception` is reported at 255 like one, where
-  aws's chain claims neither and exits 0 silently. The emitter a plugin
-  registers on is an SDK-free port of the one aws hands it (botocore's
-  `HierarchicalEmitter`, without stock botocore's event aliaser), so its
-  checks, its name splitting, its unregister walk and the plugin's own
-  emits behave and fail as they do while aws loads plugins. Every call that
-  changed it is replayed onto every botocore session this CLI opens, right
-  after botocore's built-ins (`plugins.attach` in `_open_botocore_session`),
-  where aws's session has them, so a handler on a botocore event fires as it
-  does under aws. The replay wraps each handler so that an `AssertionError`
-  - kept loud for this CLI's own invariants - or a `BaseException` outside
-  `Exception` is re-raised as an ordinary `Exception` with the same message,
-  which is how aws reports a handler's `AssertionError`. aws-cli's own events
-  are never emitted here, and a plugin that imports aws-cli's modules fails to
-  import - the part of a plugin written against awscli's internals, recorded
-  in [`aws-differences.md`](../docs/cli/aws-differences.md).
+  `cli_timestamp_format` out of (below). The config file's `[plugins]`
+  section, which aws loads next, is not read
+  ([`aws-differences.md`](../docs/cli/aws-differences.md)).
 - `_dispatch` opens by reading the **alias file** (`~/.aws/cli/alias`,
   section 9), which aws reads while it is still assembling its parser - so a
   file it cannot read aborts the run ahead of everything below, `--version` and
@@ -597,8 +572,8 @@ numbers in the bold item labels below are that document's.
      positionals name none of four targets (`"s3v4"` under `--sse aws:kms`, as
      aws sets it; the generic `v4` is the name aws's endpoint resolution hands
      its requests, which botocore's own `choose-signer` handler then turns into
-     the S3 signer - a pinned `s3v4` left that choice to the next handler, a
-     plugin's included): an MRAP ARN, an S3 Outposts
+     the S3 signer - a pinned `s3v4` left that choice to the next handler):
+     an MRAP ARN, an S3 Outposts
      access-point ARN, an S3 Outposts access-point *alias*, and an S3 Express
      directory bucket. For those four
      the pin stands down: an explicit `signature_version` suppresses botocore's
@@ -1778,9 +1753,7 @@ no handler for either, so both are 255, not 253. A schemeless
 backstop, `_dispatch` maps any non-`Boto3S3Error` exception that still escapes a
 command to the same chain (credential/region 253, `ClientError` 254, else 255),
 so no path crashes with a traceback + rc 1 - except an `AssertionError`, which
-the backstop deliberately re-raises (a broken invariant crashes loudly). One
-raised by a plugin's handler is no invariant of this CLI's: the plugin replay
-re-raises it as an ordinary `Exception` before it gets here (section 1). The
+the backstop deliberately re-raises (a broken invariant crashes loudly). The
 three resolutions of the globals pass (section 1) carry the same backstop, for
 the same reason: aws resolves them inside its handler chain, so an
 `--endpoint-url` whose netloc `urlsplit` refuses (`http://[::1:9000` -> a bare

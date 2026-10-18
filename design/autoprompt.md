@@ -230,12 +230,11 @@ Behavior per mode:
 - **on-partial** -> first **run as-is**, and fall back to the prompt and
   re-dispatch **only when rc is 252 (usage error)** (the on-partial branch in
   aws-cli's `clidriver.py`). A 252 does not prove the run had no effect - an
-  external alias's command can end with it, and a plugin's handler can raise a
-  parameter-validation failure after a request - so the run after the prompt is
+  external alias's command can end with it - so the run after the prompt is
   the user's choice, as on aws, and never automatic: without `prompt_toolkit`
   (section 6) there is no trial at all. That run is preceded by what aws's new
-  driver does (`create_clidriver`): the config is read and the plugins are
-  loaded and initialized again (`_build_driver`); `on` keeps its driver. The
+  driver does (`create_clidriver`): the config is read again
+  (`_build_driver`); `on` keeps its driver. The
   usage messages from the attempt (argparse's usage
   block / `Unknown options` / 252 `ValidationError`) are **silenced**
   (`_dispatch(suppress_usage_errors=True)` = aws's

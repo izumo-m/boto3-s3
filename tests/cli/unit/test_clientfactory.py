@@ -398,8 +398,8 @@ class TestBuildClient:
     def test_the_pin_leaves_botocores_signer_choice_to_answer(self) -> None:
         # The pin is the generic `v4` aws's endpoint resolution hands its
         # requests, so botocore's own bare `choose-signer` handler turns it
-        # into the S3 signer and answers: a later bare registration (a
-        # plugin's `disable_signing`) is never reached, and a handler on
+        # into the S3 signer and answers: a later bare registration (an
+        # event handler's `disable_signing`) is never reached, and a handler on
         # `choose-signer.s3` sees the `v4` / `v4-query` aws hands it
         # (measured against the pinned aws-cli). An `s3v4` pin passed
         # botocore's handler by and let the bare registration unsign it.

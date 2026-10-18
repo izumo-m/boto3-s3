@@ -648,7 +648,7 @@ class TestOnPartialRuns:
     ) -> None:
         # Nothing to fall back to, so the silenced trial would only be run
         # again: whatever it did before its 252 (an external alias's command,
-        # a request a plugin handler then failed) would happen twice. The one
+        # say) would happen twice. The one
         # run is the ordinary one, its usage report included.
         monkeypatch.setenv("AWS_CLI_AUTO_PROMPT", "on-partial")
         monkeypatch.setattr(importlib.util, "find_spec", lambda name, package=None: None)
@@ -664,63 +664,42 @@ class TestOnPartialRuns:
         assert runs == [["cp"]]
         assert "the following arguments are required" in capsys.readouterr().err
 
-    def test_the_run_after_the_prompt_reloads_config_and_plugins(
+    def test_the_run_after_the_prompt_reads_the_config_again(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # aws builds a new driver for the run after its prompt
-        # (`create_clidriver`): the plugins are imported and initialized
-        # again (measured: `awscli_initialize` runs twice).
-        from boto3_s3_cli import plugins
-
+        # (`create_clidriver`), which reads the config files again.
         monkeypatch.setenv("AWS_CLI_AUTO_PROMPT", "on-partial")
-        loads: list[object] = []
-        monkeypatch.setattr(plugins, "load", lambda section: loads.append(section))
+        scans: list[object] = []
+        scan = configfiles.scan
+
+        def counted() -> configfiles.ConfigScan:
+            scans.append(None)
+            return scan()
+
+        monkeypatch.setattr(configfiles, "scan", counted)
         prompter = _FakePrompter(["--version"])
         assert cli.main(["cp"], ctx=Context(auto_prompter=prompter)) == 0
-        assert len(loads) == 2
+        assert len(scans) >= 2
 
-    def test_a_failed_rebuild_is_reported_with_the_entry_point_s_envelope(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-        tmp_path: Path,
+    def test_a_config_that_stops_parsing_fails_the_rebuild(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
     ) -> None:
-        # aws reports a new driver that cannot be built through its entry
-        # point's chain, which has no session: the envelope stays even after
-        # the trial run bound a profile no file declares (measured on a pty).
-        from botocore.exceptions import ParamValidationError
-
-        from boto3_s3_cli import plugins
-
+        # The second driver reads the file again, so one that broke in between
+        # ends the run there with botocore's wording (255).
         config = tmp_path / "config"
         config.write_text("[default]\n")
         monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
-        monkeypatch.setenv("AWS_PROFILE", "undeclared")
         monkeypatch.setenv("AWS_CLI_AUTO_PROMPT", "on-partial")
-        loads: list[object] = []
 
-        def load(section: object) -> None:
-            loads.append(section)
-            if len(loads) == 2:
-                raise ParamValidationError(report="second init says no")
+        class _BreakingPrompter(_FakePrompter):
+            def prompt_for_args(self, argv: list[str]) -> list[str]:
+                config.write_text("not ini [\n")
+                return super().prompt_for_args(argv)
 
-        monkeypatch.setattr(plugins, "load", load)
-        prompter = _FakePrompter(["--version"])
-        assert cli.main(["cp"], ctx=Context(auto_prompter=prompter)) == 252
-        assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
-            "Parameter validation failed:\nsecond init says no\n"
-        )
-
-    def test_an_explicit_prompt_reloads_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # `on` prompts before the first run and keeps its driver.
-        from boto3_s3_cli import plugins
-
-        loads: list[object] = []
-        monkeypatch.setattr(plugins, "load", lambda section: loads.append(section))
-        prompter = _FakePrompter(["--version"])
-        assert cli.main(["--cli-auto-prompt", "cp"], ctx=Context(auto_prompter=prompter)) == 0
-        assert len(loads) == 1
+        prompter = _BreakingPrompter(["--version"])
+        assert cli.main(["cp"], ctx=Context(auto_prompter=prompter)) == 255
+        assert "Unable to parse config file" in capsys.readouterr().err
 
 
 def _resolve_from_files(argv: list[str] | None = None) -> str:

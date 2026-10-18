@@ -21,7 +21,7 @@ from boto3_s3 import (
     InvalidValueError,
     ValidationError,
 )
-from boto3_s3_cli import alias, configfiles, globalargs, plugins, usage
+from boto3_s3_cli import alias, configfiles, globalargs, usage
 from boto3_s3_cli.autoprompt import resolve
 from boto3_s3_cli.commands.base import Command, Context, reject_unknown_options
 
@@ -890,23 +890,14 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
 
 
 def _build_driver() -> int | None:
-    """aws's `create_clidriver`, as far as it can fail: the config read, the plugins.
+    """aws's `create_clidriver`, as far as it can fail: the config read.
 
     aws reads the whole merged config while it is still constructing the
     driver, so a file that is not valid INI settles the run here - ahead of
     the auto-prompt rejection, --version, the help token and every parse
     below (all measured), and with botocore's own wording through aws's
-    general handler (255). Only the preliminary scan outranks it. aws then
-    loads its plugins from that same config read (`plugins` - the `[plugins]`
-    section with a `cli_legacy_plugin_path`), so a plugin that fails to import
-    or initialize ends the run here too - `--version` and the help token
-    included (measured) - through aws's entry-point handlers: a
-    parameter-validation failure at 252 with its envelope, a Ctrl-C at 130
-    (`main`'s), anything else at 255 with its message. Two cases part from
-    aws's chain on purpose. A `SystemExit` passes, honoring the exit the
-    plugin asked for, and the rest of the `BaseException` family is reported
-    at 255 like an `Exception`, where aws's chain claims neither, so its run
-    ends at rc 0 with nothing written - a failure reported as a success
+    general handler (255). Only the preliminary scan outranks it. The
+    `[plugins]` section aws then loads is not read here
     (docs/cli/aws-differences.md).
 
     Returns the rc of the report it wrote, or None to go on.
@@ -922,21 +913,6 @@ def _build_driver() -> int | None:
             f"Unable to parse config file: {_config_scan.unparseable}", rc=_GENERAL_ERROR_RC
         )
         return _GENERAL_ERROR_RC
-    try:
-        plugins.load(_config_scan.plugins)
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException as exc:
-        rc = _GENERAL_ERROR_RC
-        # A plugin raising botocore's own exception has imported botocore
-        # already; looking it up there keeps this path SDK-free otherwise.
-        botocore_exceptions = sys.modules.get("botocore.exceptions")
-        if botocore_exceptions is not None and isinstance(
-            exc, botocore_exceptions.ParamValidationError
-        ):
-            rc = _PARAM_VALIDATION_ERROR_RC
-        _write_error(exc, rc=rc)
-        return rc
     return None
 
 
@@ -996,8 +972,7 @@ def _main(argv: list[str] | None, ctx: Context | None) -> int:
             # With no prompt to fall back to, the trial run would be the only
             # one worth having: run it as the ordinary run, reports and all.
             # Running it silenced and then again would repeat whatever it did
-            # before its 252 - an external alias's command, a request a plugin
-            # handler failed after.
+            # before its 252 - an external alias's command, say.
             return _dispatch(raw, ctx)
         # Run the command as-is; only a usage error (rc 252) falls back to
         # prompting (aws-cli's on-partial branch in clidriver's _do_main). The
@@ -1018,14 +993,14 @@ def _run_auto_prompt(
     The ``prompt_toolkit`` dependency is opt-in (the ``autoprompt`` extra). When
     it is absent and the prompt was *explicitly* requested (``--cli-auto-prompt``)
     we reject with an install hint and rc 252 (non-contractual; the interactive
-    UI is outside the exit-code charter - overview.md section 3 exception 2). When it is
+    UI is not compared with aws - overview.md section 3). When it is
     absent but the prompt was only *config/env-driven*, we fall through to normal
     dispatch instead - a missing optional dep must not break every command. An
     injected ``ctx.auto_prompter`` (tests) bypasses the dependency probe.
 
     ``rebuild`` is the on-partial fall-back's: aws builds a new driver for the
-    run after its prompt (`create_clidriver`), so the config is read and the
-    plugins are loaded and initialized again before the completed command runs.
+    run after its prompt (`create_clidriver`), so the config is read again
+    before the completed command runs.
     """
     prompter = ctx.auto_prompter
     if prompter is None:

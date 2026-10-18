@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 
 # These exception names do not themselves import the AWS SDK.
 from boto3_s3 import ConfigurationError, InvalidConfigError, InvalidValueError, ValidationError
-from boto3_s3_cli import checksumdefault, configfiles, plugins, s3errormsg, usage
+from boto3_s3_cli import checksumdefault, configfiles, s3errormsg, usage
 from boto3_s3_cli.globalargs import PROFILE_ENV_VARS
 
 if TYPE_CHECKING:
@@ -151,9 +151,6 @@ def _open_botocore_session(args: argparse.Namespace) -> BotocoreSession:
             "max_attempts": ("max_attempts", "AWS_MAX_ATTEMPTS", 3, int),
         }
     )
-    # The `[plugins]` handlers go on next, after botocore's built-ins, where
-    # aws's plugin loader puts them on its own session.
-    plugins.attach(session.get_component("event_emitter"))
     if args.profile:
         session.set_config_variable("profile", args.profile)
     session.set_config_variable("api_versions", {})
@@ -1131,9 +1128,7 @@ def build_client(
     # hands its requests: botocore keeps a requested name as the request's
     # `auth_type`, and its own `choose-signer` handler turns `v4` into the S3
     # signer (`s3v4`) and answers there, while an `s3v4` there is passed by
-    # and left to whatever handler comes next - a plugin's bare
-    # `choose-signer` registration, which aws never reaches (measured: a
-    # plugin registering `disable_signing` there unsigned every request).
+    # and left to whatever handler comes next.
     # Every `choose-signer` handler also sees `v4` / `v4-query`, as on aws.
     # The pin stands down when the command targets an MRAP ARN, an S3 Outposts
     # access point (ARN or `--op-s3` alias), or an S3 Express directory

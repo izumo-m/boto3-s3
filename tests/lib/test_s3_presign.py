@@ -175,7 +175,7 @@ class TestPresign:
         # The CLI pins the generic `v4`: botocore registers no downgrade for
         # it and answers `v4-query` with the S3 signer itself, so the library
         # stays out of the way - a `choose-signer.s3` handler the caller
-        # registered (a CLI plugin's) still sees the presign, as on aws.
+        # registered (a caller's own) still sees the presign, as on aws.
         import boto3
         from botocore.config import Config
 

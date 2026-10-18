@@ -82,14 +82,9 @@ same reason it is inert there, which is why `--no-cli-pager` is among the
 options accepted and ignored
 (see [`aws-differences.md`](./aws-differences.md)).
 
-The `[plugins]` section is read the way `aws` reads it: when it sets
-`cli_legacy_plugin_path`, every other entry is imported from there and its
-`awscli_initialize` called, on every invocation, and a plugin that cannot be
-imported or initialized stops the command before it does anything (exit code
-255, or 252 for a parameter-validation error). A plugin's handlers on the
-SDK's own events run as they do under `aws`; what it hooks into `aws`'s own
-command machinery does not, and the installed SDK is not quite `aws`'s
-bundled one (see [`aws-differences.md`](./aws-differences.md)).
+The `[plugins]` section is not read: no `aws` plugin is loaded, and a
+section that names one is no error
+(see [`aws-differences.md`](./aws-differences.md)).
 
 ## 3. Transfer tuning: the `[s3]` section
 

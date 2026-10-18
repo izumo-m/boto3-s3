@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- The `[plugins]` section of the config file is no longer read: no `aws` plugin is loaded, and a section naming one is no error.
+
 ## [0.9.0] - 2026-10-18
 
 - `--copy-props all` writes a multipart copy's oversized tags and its annotations in `aws`'s order, with `aws`'s requests only.
