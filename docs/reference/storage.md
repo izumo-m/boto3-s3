@@ -310,9 +310,10 @@ their own held state.
 ### validate()
 
 Runs deferred strict validation on this location. Construction is permissive,
-so an operation — or the CLI at its parity point — calls this to reject a
-malformed location loudly before use. The base implementation is a concrete
-no-op; `S3Storage` and `LocalStorage` override it. Idempotent.
+so an operation — or the CLI at the point where `aws s3` makes the same check —
+calls this to reject a malformed location loudly before use. The base
+implementation is a concrete no-op; `S3Storage` and `LocalStorage` override it.
+Idempotent.
 
 When an operation runs the check, a `Boto3S3Error` raised here that names no
 operation is stamped with that operation's name; a direct call leaves
@@ -365,7 +366,7 @@ may stream its natural order for those and pay the sort only for `sync`.
 
 The built-ins ignore the flag because they are ordered either way, with
 carve-outs worth stating exactly. `LocalStorage` sorts regardless of `sort`:
-its walk sorts every directory's children for `aws s3` parity, and its
+its walk sorts every directory's children to match `aws s3`, and its
 non-recursive one-level scan runs the same sort — but that ordering is the
 walker's, so an injected `walker` whose `finalize_children` re-orders or
 prunes decides it instead. `S3Storage` relies on `ListObjectsV2`
@@ -494,7 +495,7 @@ without being passed them; their per-entry meanings are on `LocalScanOptions`
 the enumeration and loop settings shape a walk and do not apply to resolving
 one entry.
 
-`fsync` is a destination-side durability knob, default off for `aws s3` parity.
+`fsync` is a destination-side durability knob, default off to match `aws s3`.
 When set, a `mv` whose download lands in this storage flushes the file to disk
 before the S3 source is deleted, and on POSIX its parent directory as well — a
 directory has no fsyncable handle on Windows, where the file flush alone is the
@@ -828,9 +829,9 @@ ends in `/`, and a `dir_op` on the service root formats it as `/`.
 Rejects the malformed forms deferred from construction, raising
 `ValidationError` ([`./exceptions.md`](./exceptions.md)) for an S3 Object
 Lambda ARN, an Outposts *bucket* ARN, or a key with no bucket. The library
-calls it before an operation and the CLI at its parity point, so a malformed
-location fails loudly instead of reaching the API as a cryptic botocore error.
-Idempotent.
+calls it before an operation and the CLI at the point where `aws s3` makes the
+same check, so a malformed location fails loudly instead of reaching the API as
+a cryptic botocore error. Idempotent.
 
 Each rejection carries what identifies the offending location. The two ARN
 forms report the whole ARN as `bucket` and leave `key` unset — the whole ARN,
@@ -1057,9 +1058,9 @@ s3transfer's own download lane has — so:
   destination: the call fails with `AccessDeniedError` and leaves it as it was;
 - missing parent directories are created.
 
-Nothing stamps the local file's mtime: that is the transfer lanes' AWS CLI
-parity behavior, and here the caller holds the returned info and decides. The
-returned `S3FileInfo` is shaped like `get_fileinfo`'s — the full key,
+Nothing stamps the local file's mtime: that is the transfer lanes' behavior,
+matching the AWS CLI, and here the caller holds the returned info and decides.
+The returned `S3FileInfo` is shaped like `get_fileinfo`'s — the full key,
 `ContentLength` as `size`, `LastModified` as `mtime`, the ETag as returned, the
 storage class, the key's basename as `compare_key` — and carries the whole
 `GetObject` response minus its transport metadata and its body under `head`.
@@ -1089,9 +1090,9 @@ single PUT fails with S3's own error rather than being split. Use `S3.cp` for
 multipart, parallelism or resumption.
 
 No `ContentType` is sent and no MIME guessing happens: guessing an upload's type
-from its name is the transfer lanes' AWS CLI parity behavior (`guess_mime_type`),
-not this lane's. Shape the object through `S3.cp`'s transfer options, or call
-`put_object` on the client directly.
+from its name is the transfer lanes' behavior, matching the AWS CLI
+(`guess_mime_type`), not this lane's. Shape the object through `S3.cp`'s
+transfer options, or call `put_object` on the client directly.
 
 `key` addresses the object exactly as `get_fileinfo`'s does. The returned
 `S3FileInfo` carries the full key, the local file's size (taken from the open
@@ -1682,8 +1683,9 @@ The list arrives **unsorted**, so pruning here happens before the sort; call
 `super().finalize_children` or `normalize_sort` for byte order. **Dropping a
 `DIRECTORY` child prunes its whole subtree**, because the walk never descends
 what this does not return — a saving `aws s3` cannot make, since it vets every
-file, which is why this is the right seam for a non-parity backup walk and not
-the default. A backup walker normally customizes only this method.
+file, which is why this is the right seam for a backup walk that need not
+match `aws s3`, and not the default. A backup walker normally customizes only
+this method.
 
 Note that a `finalize_children` override prunes by its own rules and never sees
 `options.filter`, so it does not by itself justify setting
