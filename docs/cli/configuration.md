@@ -169,57 +169,13 @@ credentials file is read for it too, winning over `~/.aws/config`.
 
 ## 5. Aliases: `~/.aws/cli/alias`
 
-The `[command s3]` section of `~/.aws/cli/alias` — the same file, at the same
-fixed path, that `aws` reads (`AWS_CONFIG_FILE` does not move it) — declares
-extra subcommands:
+`~/.aws/cli/alias` is not read: neither its `[command s3]` nor its `[toplevel]`
+section applies, and a file there is no error. Use your shell's own aliases or
+functions instead:
 
-```ini
-[command s3]
-lsr = ls --recursive
-recent = !sh -c 'boto3-s3 ls "$1" | sort | tail' sh
+```bash
+alias lsr='boto3-s3 ls --recursive'
 ```
-
-`boto3-s3 lsr s3://bucket` then runs `ls --recursive s3://bucket`, and
-`boto3-s3 recent s3://bucket` runs the shell command with `s3://bucket`
-appended. Because this CLI *is* `aws s3`, `[command s3]` is the section that
-applies. The `[toplevel]` section declares commands beside `aws s3`, so only
-its `s3` entry reaches this CLI — and it replaces `aws s3` itself, so every
-invocation runs through it:
-
-```ini
-[toplevel]
-s3 = s3 --endpoint-url http://localhost:9000
-```
-
-sends every `boto3-s3` command to that endpoint, as it does every `aws s3` one.
-Its value is read like `aws`'s top level: global options, then the command name
-(`s3`, or another `[toplevel]` entry - an external one, say - to chain to),
-then anything to place ahead of what was typed; a `!` value runs a shell command with everything typed after
-the global options. A chain that ends at another `aws` command has nothing to
-run here (see [`aws-differences.md`](./aws-differences.md)).
-
-The section header must be spelled `command` followed by a single ASCII space,
-as `aws` requires. Extra spaces are fine (`[command  s3]` is the same section),
-but any other whitespace — a tab, a space before `command` — makes the section
-declare nothing at all, on either tool.
-
-- A value that starts with `!` is a **shell command line**. The invocation's
-  remaining arguments are appended (quoted, so a space inside one is safe) and
-  the command's exit status becomes this command's.
-- Any other value is **CLI arguments**. They are split with shell quoting rules
-  and placed ahead of what was typed, then parsed again — so an alias may
-  expand to another alias, and a global option in the value (say `--region`)
-  applies to the run, overriding one typed on the command line - though, as
-  under `aws`, credentials fetched for a role still use the region typed or
-  configured, not the alias's. `--debug` and
-  `--profile` are refused there, as they are under `aws`, and `--ca-bundle`
-  there changes nothing, as under `aws` (`--no-verify-ssl` does apply).
-- An alias named after a built-in subcommand **replaces** it and proxies to it,
-  dropping the first word of the expansion: `ls = ls --recursive` makes every
-  `ls` recursive.
-
-A file that is not valid INI aborts the run with exit code 255 before anything
-else, `--version` and `help` included — again matching `aws`.
 
 ## 6. Cached temporary credentials
 

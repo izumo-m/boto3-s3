@@ -18,7 +18,6 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -85,39 +84,3 @@ class TestTheVariableIsDropped:
         )
         assert result.returncode == 0, result.stderr
         assert "X-Amz-Algorithm=AWS4-ECDSA-P256-SHA256" in result.stdout
-
-
-class TestTheVariableStillReachesChildren:
-    """aws ignores the variable but passes the environment on untouched."""
-
-    def test_child_environ_puts_the_value_back(self) -> None:
-        result = _run(
-            "import boto3_s3_cli; print(repr(boto3_s3_cli.child_environ()['BOTO_DISABLE_CRT']))",
-            BOTO_DISABLE_CRT="true",
-        )
-        assert result.returncode == 0, result.stderr
-        assert result.stdout.strip() == "'true'"
-
-    def test_child_environ_adds_nothing_when_it_was_never_set(self) -> None:
-        result = _run(
-            "import boto3_s3_cli; print('BOTO_DISABLE_CRT' in boto3_s3_cli.child_environ())"
-        )
-        assert result.returncode == 0, result.stderr
-        assert result.stdout.strip() == "False"
-
-    @pytest.mark.skipif(sys.platform == "win32", reason="the external alias here is an sh command")
-    def test_an_external_alias_sees_what_the_invocation_was_given(self, tmp_path: Path) -> None:
-        home = tmp_path / "home"
-        (home / ".aws" / "cli").mkdir(parents=True)
-        (home / ".aws" / "cli" / "alias").write_text(
-            "[command s3]\nshow = !sh -c 'echo \"${BOTO_DISABLE_CRT-unset}\"' sh\n"
-        )
-        result = _run(
-            "from boto3_s3_cli.cli import main; raise SystemExit(main())",
-            "show",
-            BOTO_DISABLE_CRT="true",
-            HOME=str(home),
-            USERPROFILE=str(home),
-        )
-        assert result.returncode == 0, result.stderr
-        assert result.stdout.strip() == "true"

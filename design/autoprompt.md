@@ -229,9 +229,7 @@ Behavior per mode:
   with the auto-prompt flags removed (to prevent an infinite re-prompt loop).
 - **on-partial** -> first **run as-is**, and fall back to the prompt and
   re-dispatch **only when rc is 252 (usage error)** (the on-partial branch in
-  aws-cli's `clidriver.py`). A 252 does not prove the run had no effect - an
-  external alias's command can end with it - so the run after the prompt is
-  the user's choice, as on aws, and never automatic: without `prompt_toolkit`
+  aws-cli's `clidriver.py`). The run after the prompt is the user's choice, as on aws, and never automatic: without `prompt_toolkit`
   (section 6) there is no trial at all. That run is preceded by what aws's new
   driver does (`create_clidriver`): the config is read again
   (`_build_driver`); `on` keeps its driver. The

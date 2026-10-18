@@ -1411,18 +1411,14 @@ class TestCredentialChainSettings:
     ) -> None:
         # The scan decides when the chain is built early; botocore decides
         # whether the run stops. Should the two ever disagree - the scan
-        # suspecting what botocore takes - the run goes on, and the session
-        # opened for the check must not cost the process its SSLKEYLOGFILE,
-        # which an external alias's child still has to see.
+        # suspecting what botocore takes - the run goes on.
         from boto3_s3_cli import configfiles
 
         monkeypatch.setattr(
             configfiles.ConfigScan, "credential_chain_suspect", lambda self, profile: True
         )
-        monkeypatch.setenv("SSLKEYLOGFILE", "/nonexistent/keys.log")
         assert cli.main(["help"]) == 0
         assert capsys.readouterr().err == ""
-        assert os.environ["SSLKEYLOGFILE"] == "/nonexistent/keys.log"
 
     @pytest.mark.parametrize(
         "endpoint",
@@ -1652,19 +1648,3 @@ class TestCredentialChainSettings:
         for name, value in env.items():
             monkeypatch.setenv(name, value)
         assert configfiles.scan().credential_chain_suspect(None) is suspect
-
-
-class TestPluginsSectionIsNotRead:
-    """``[plugins]`` is ignored: no plugin loads, and a broken entry is no error."""
-
-    def test_a_broken_entry_does_not_stop_the_run(
-        self, config: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        config.write_text(
-            "[plugins]\n"
-            f"cli_legacy_plugin_path = {tmp_path / 'nowhere'}\n"
-            "broken = boto3_s3_no_such_plugin\n"
-        )
-        assert cli.main(["--version"]) == 0
-        assert "boto3_s3_no_such_plugin" not in capsys.readouterr().err
-        assert "boto3_s3_no_such_plugin" not in sys.modules

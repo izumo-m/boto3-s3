@@ -6,6 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - The `[plugins]` section of the config file is no longer read: no `aws` plugin is loaded, and a section naming one is no error.
+- `~/.aws/cli/alias` is no longer read: no alias applies, and a file there is no error; a shell alias does the same job.
 
 ## [0.9.0] - 2026-10-18
 

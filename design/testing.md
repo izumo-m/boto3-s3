@@ -659,7 +659,7 @@ for the dev stack (section 4).
 The skips a Windows run reports are the platform's, not gaps in the setup:
 anything that sets `TZ` mid-process (`time.tzset` is POSIX-only),
 chmod-revoked access and POSIX permission bits (`skip_if_chmod_is_inert` in
-`tests/utils/host.py`), `sh`-based external aliases, `mkfifo`, a path whose
+`tests/utils/host.py`), `mkfifo`, a path whose
 `..` follows a symlinked directory (Windows folds `..` before the filesystem
 sees the path; a Windows-only twin pins what `aws.exe` does instead), the POSIX
 `dir_fd` walk fast path (Windows length limits follow the `LongPathsEnabled`

@@ -90,10 +90,8 @@ def _classic_aws_config(tmp_path_factory: pytest.TempPathFactory) -> Path:
 @pytest.fixture(autouse=True)
 def _moto_isolation(monkeypatch: pytest.MonkeyPatch, _classic_aws_config: Path) -> None:
     """Force fake AWS credentials so moto never sees the host's real ones."""
-    # The dispatch reads ~/.aws/cli/alias on every invocation (aws's hardcoded
-    # path) and the credential cache writes ~/.aws/cli/cache, so ~ must point
-    # away from the developer's home: their own alias file would change what
-    # every CLI test dispatches, and an unreadable one would fail them all.
+    # The credential cache writes ~/.aws/cli/cache, and botocore reads the
+    # files under ~/.aws, so ~ must point away from the developer's home.
     home = _classic_aws_config.parent / "home"
     home.mkdir(exist_ok=True)
     monkeypatch.setenv("HOME", str(home))

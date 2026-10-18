@@ -61,10 +61,9 @@ solidified design is added here.
   `cli_timestamp_format` out of (below). The config file's `[plugins]`
   section, which aws loads next, is not read
   ([`aws-differences.md`](../docs/cli/aws-differences.md)).
-- `_dispatch` opens by reading the **alias file** (`~/.aws/cli/alias`,
-  section 9), which aws reads while it is still assembling its parser - so a
-  file it cannot read aborts the run ahead of everything below, `--version` and
-  the help token included.
+- aws reads its **alias file** (`~/.aws/cli/alias`) next, while it is still
+  assembling its parser; this CLI does not read it
+  ([`aws-differences.md`](../docs/cli/aws-differences.md)).
 - Then comes the aws-shaped **top-level globals pass**: a
   globals-only `parse_known_args` over the full argv (aws's `MainArgParser`)
   that both *consumes* the globals - its remainder is the only token stream
@@ -362,9 +361,6 @@ solidified design is added here.
     it, so `paramfile.read_text_paramfile` strips that tail. The neighboring
     `unknown encoding: <codec>` needs nothing - it reads the same on every
     version.
-  - A self-referential alias ends as `RecursionError`, whose message gained
-    its short form in 3.12; the alias runner reports the fixed
-    `maximum recursion depth exceeded` on every host (section 9).
   - A body-less S3 error answer carries the host's **status phrase** as its
     message (botocore fills it from `http.client.responses`), and 3.13
     renamed four of them (413 `Content Too Large`, 414 `URI Too Long`, 416
@@ -393,7 +389,6 @@ solidified design is added here.
 | `configfiles.py` | The SDK-free (stdlib `configparser` / `shlex`) pre-dispatch read of aws's config and credentials files: the parse failure that aborts the run at rc 255, the profile map the error rendering consults, and the scoped read of `cli_timestamp_format` behind the rc-253 gate (sections 1 and 6). Also the single home of "which file / which env profile", shared with `clientfactory.resolve_profile` and the auto-prompt resolution |
 | `clientfactory.py` | `build_client(args) -> S3Client` (the connection/authentication layer, section 4) + `build_service_client(service, args, *, region=None)` (the s3control / sts client used by mv's path validation, section 5.8). Both open their botocore session through `_open_botocore_session` (the profile / `api_versions` / retry / timeout / credential-cache alignment of section 4) and create their client through `_create_client`, the single seam that carries aws's retry-mode vocabulary and installs the CONNECT pin - a seam rather than `_open_botocore_session` because `build_client` may be handed a session built elsewhere. Every S3 client the first one builds carries aws's message rewriter (`s3errormsg`) |
 | `proxytunnel.py` | The CONNECT request the official aws distribution sends (section 2): a copy of CPython 3.12+'s tunnel opener, installed onto urllib3's `HTTPConnection` by `clientfactory._create_client` on the host interpreters whose own opener still writes `CONNECT ... HTTP/1.0` with no `Host`. Every precondition - no urllib3, no opener to read, an opener that already writes aws's shape - declines quietly, so it is a no-op on 3.12+ and idempotent |
-| `alias.py` | The SDK-free read of `~/.aws/cli/alias` and the two things an entry can be: a shell command line or CLI arguments (section 9). `cli.py` owns where they resolve; this module owns the file, the splitting and the shell quoting |
 | `s3errormsg.py` | aws's `after-call.s3` handler (its `s3errormsg` customization), ported verbatim: it rewrites two "requires Signature Version 4" messages and the cross-region `PermanentRedirect` in place, so every report carrying a service message - the top-level `[ERROR]` line and the per-item `upload failed:` / `download failed:` lines alike - reads as aws's. aws registers it on its session; here `build_client` registers it on each S3 client it builds, the CLI's only S3 client builder. The library stays boto3-faithful and never rewrites a service message |
 | `checksumdefault.py` | aws's default request checksum (`CRC64NVME`, its bundled botocore's `DEFAULT_CHECKSUM_ALGORITHM`) reproduced on the CLI side: `default_algorithm(client)` feeds an upload run's `TransferOptions` (section 5.7, `--checksum-algorithm`), and `register(client)` - attached by `build_client` - stamps it at `provide-client-params.s3.*` on every other request whose operation names a `ChecksumAlgorithm` member, exactly where botocore would stamp its own (under `when_required`, only the checksum-required operations). Only where botocore can compute CRC64NVME. The library keeps botocore's default |
 | `commands/base.py` | The `Command` ABC + `Context` (the injection point for runtime dependencies, section 3.1) |
@@ -558,10 +553,8 @@ numbers in the bold item labels below are that document's.
      it binds as itself and aws signs with an empty region scope, rather than
      being walked past to `AWS_DEFAULT_REGION` and the profile. Only the builder
      that opened the session binds it, and only from the `--region` the user
-     typed: aws binds once, in `_handle_top_level_args`, ahead of any alias, so
-     an alias's `--region` reaches the clients alone (the dispatcher keeps the
-     typed value aside, `typed_region`), and `--source-region`'s client leaves
-     the session alone. Rebinding either way signed `AssumeRole` in a region
+     typed: aws binds once, in `_handle_top_level_args`, and
+     `--source-region`'s client leaves the session alone. Rebinding signed `AssumeRole` in a region
      aws never used, and with no other region source made a run aws fails
      (rc 1 / 253) succeed (measured). The library
      keeps stock botocore order on purpose (the boto3=library / aws=CLI split, as
@@ -802,9 +795,7 @@ numbers in the bold item labels below are that document's.
       checksum families, where here an MRAP target was rc 253, an Outposts one
       silently fell back to plain SigV4, and a CRT-family
       `--checksum-algorithm` failed. The package's `__init__` pops it before
-      any module of this CLI can reach botocore, and keeps the value so
-      `child_environ()` can hand it to the child of an external alias - which
-      is what aws does with it, ignoring it and passing it on (all measured).
+      any module of this CLI can reach botocore (all measured).
       Both drops are the CLI's: an application that imports `boto3_s3` alone
       keeps whatever its own interpreter and environment decide.
 - **Recognized and ignored (no-op, section 2)**: `--output` / `--query` / `--no-paginate`
@@ -1443,8 +1434,8 @@ construction order in section 5.7):
    uses the original URI). The clients go via `Context.service_client_factory`:
    the src-side s3control uses `--source-region`, and when that is unspecified
    names no region at all, like sts: both then land on the session's region,
-   which is a truthy typed `--region` (an alias's never binds it, item 1 of
-   section 4) or the rest of the chain - so `--region ""`
+   which is a truthy typed `--region` (item 1 of section 4) or the rest of the
+   chain - so `--region ""`
    resolves the source side through `AWS_REGION` and the like, as aws's does
    (its ARG_TABLE default is dead) - while the dest side's s3control is handed
    `--region` itself (a transcription of aws-cli `from_session`). An outposts **alias** is unresolvable, 252, and a missing MRAP
@@ -1892,115 +1883,3 @@ section 4. The key points as the CLI sees them:
   section 3; the trigger conditions are in transfer.md section 10);
   non-ranged downloads (botocore) and the CRT engine (the CRT client) validate
   identically to aws.
-
-## 9. Aliases (`~/.aws/cli/alias`)
-
-aws registers an alias injector on the suffix-less `building-command-table`
-event, so it fires for `building-command-table.s3` too and the `[command s3]`
-section of `~/.aws/cli/alias` becomes subcommands of `aws s3`. That table is
-this CLI's whole surface, so the same section is the one mapped here.
-`[toplevel]` adds commands beside the services, and only its `s3` entry
-reaches this surface (below). The file lives at aws's
-hardcoded path (`AWS_CONFIG_FILE` does not move it) and is read by `alias.py`
-with `configparser` alone, like the config scan of section 1 - the
-informational exits must not import the SDK ([`imports.md`](./imports.md)).
-
-- **Load timing.** aws reads the file while it is still assembling its parser
-  (its `_add_aliases`), so an unreadable one settles the run before the
-  top-level parse: `Unable to parse config file: <path>` / `The specified
-  config file (<path>) could not be found.` at rc 255, beating `--version`,
-  the help token and a bad global, with only the preliminary scan and the
-  config-file read of section 1 above it (all measured). `_dispatch` therefore
-  loads it as its first act.
-- **Which sections exist at all.** aws re-keys a section onto a command
-  lineage only when its raw name *literally* starts with `command ` -
-  `command` and one ASCII space - and then splits the whole name on
-  whitespace (its `AliasLoader._normalize_key_names`). So `[command  s3]`,
-  `[command s3 ]` and `[command s3\tls]` are live, while `[command\ts3]`,
-  `[ command s3]`, `[\tcommand s3]` and any NBSP / vertical-tab / form-feed /
-  ideographic-space separator name nothing at all: no lineage ever looks such
-  a section up, so its entries are unreachable and nothing reports the
-  spelling. `alias.load` applies the same two steps and drops what they do not
-  re-key (the whole matrix measured on both tools).
-- **The `[toplevel]` `s3` entry.** aws's top-level injector writes a
-  `[toplevel]` entry over the command of its name, keeping the built-in aside
-  as the entry's proxy, so an `s3` entry replaces `aws s3` itself and every
-  invocation of this CLI runs through it (`_run_toplevel_command`, called by
-  `_dispatch` where aws calls its command: after the globals pass, its three
-  resolutions and the `session-initialized` gates, so a broken global or
-  config still wins). An external value runs over everything the globals pass
-  left, the subcommand and the help token included. An internal one goes
-  through aws's main parser - the globals parser plus the command name as a
-  positional whose choices are `s3` and the `[toplevel]` names
-  (`_build_service_alias_parser`) - so a value without a name is `the
-  following arguments are required: command`, an unknown one `argument
-  command: Found invalid choice`, and a `--` before or right after the name
-  is used up on every supported Python. Its globals apply as a `[command
-  s3]` alias's do (`_apply_alias_globals`), what the parse leaves goes ahead
-  of the user's arguments, and the name is looked up again: `s3` from the
-  `s3` entry is the built-in it proxies (on to `_resolve_command`, so the
-  `[command s3]` aliases and the help token still apply), another
-  `[toplevel]` name is that entry, whose own `s3` leads back to the `s3`
-  entry - a cycle ends as aws's recursion failure (all measured). A name
-  aws would run and this CLI cannot (another service; an entry proxying the
-  built-in of its own name) is reported as the invalid choice, recorded in
-  [`aws-differences.md`](../docs/cli/aws-differences.md).
-- **Resolution.** `_resolve_command` looks the subcommand name up in the alias
-  entries *before* the built-in table, because aws's injector writes into that
-  table - so an alias shadows a built-in of the same name. The name is also
-  added to the invalid-choice parser's choices, which is why a typo can be
-  answered with an alias as its near miss (measured).
-- **External aliases** (`name = !cmd`): the value after the `!` plus the
-  invocation's remaining arguments, each shell-quoted (aws's
-  `compat_shell_quote`, Windows rule included), joined into one command line
-  for `subprocess.call(shell=True)`. Its status is the run's, so a `!exit 7`
-  alias exits 7 and an unknown program exits the shell's 127 (measured). The
-  shell is the point of the feature; the command line comes from the user's
-  own file, at the same trust level as a shell rc file. A failure of the
-  *launch* itself - an embedded NUL in the command line, an argument list past
-  the OS limit - is one more unexpected failure: aws registers no handler for
-  it either, so it travels to the entry point's general chain and is reported
-  as `str(exc)` at rc 255 rather than escaping as a traceback (measured, both
-  shapes). The child inherits `child_environ()`, which hands back the one
-  variable the package drops on import (section 4 item 10).
-- **Internal aliases**: the value is `shlex`-split (an unbalanced quote is
-  aws's `InvalidAliasException` wording at rc 255), then run through the
-  globals parser exactly as aws runs it through its main parser - so a global
-  option in the value is taken out and applied, **overriding** one the user
-  typed, while `--debug` and `--profile` are refused in aws's own scan order
-  (`--debug` blamed first). `--ca-bundle` is the one global that is parsed but
-  not applied: aws folds it into its verification setting while the user's
-  own arguments are parsed, and the alias's copy lands after that fold, where
-  nothing reads it (measured: an alias's bundle is never trusted, an empty one
-  never refused; `--no-verify-ssl` does apply). What the globals parser leaves
-  is placed ahead of the user's arguments and re-resolved, which is what makes
-  alias-to-alias chains work - and what makes an alias that expands to itself
-  end as aws's `maximum recursion depth exceeded` at rc 255. A `--` leading the
-  value is used up as on the command line (section 1): aws parses the value
-  behind its service token, so the marker still keeps what follows from being
-  read as globals but does not reach the command.
-- **Shadowing a built-in** proxies to that built-in with the *first* token of
-  the combined arguments dropped, aws's own rule (`ls = ls --recursive` makes
-  every `ls` recursive; `ls = cp` still runs `ls`; `ls =` eats the user's first
-  argument - all measured).
-- **A section named after a subcommand is aws's crash, mirrored.** Injecting
-  into a leaf's empty table makes aws build a parser through the path that
-  copies the argument table with `required = False`, which argparse rejects for
-  the positional every one of these commands declares: every invocation of that
-  subcommand, its help included, reports `'required' is an invalid argument for
-  positionals` at rc 255 while the other subcommands run normally, and the
-  entries in the section are never reached. `_run_command` reproduces exactly
-  that, before the leaf parse. An *empty* such section is inert on both tools.
-  **Which** section a subcommand consults is decided by the lineage it was
-  reached by, because aws sets a subcommand's lineage while it builds the table
-  the subcommand sits in: `[command s3 <sub>]` when it comes through this CLI's
-  command table (directly, or after a non-shadow alias re-entered the
-  resolution), and the bare `[command <sub>]` when an alias of its own name
-  proxied to it - an alias replaces the built-in in that table and keeps it
-  aside as its proxy, so the proxied one never receives a lineage
-  (`alias.COMMAND_LINEAGE` / `SHADOW_LINEAGE`, passed down by `_run_command`).
-  The proxied built-in is the one whose *name* equals the alias's, whatever the
-  value names (`ls = rm --dryrun` still breaks on `[command ls]`); the rule
-  survives alias chains and the help token does not escape it; and an
-  **external** shadow alias reaches no built-in at all, so neither section
-  applies. All of it measured in both directions.

@@ -647,8 +647,7 @@ class TestOnPartialRuns:
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # Nothing to fall back to, so the silenced trial would only be run
-        # again: whatever it did before its 252 (an external alias's command,
-        # say) would happen twice. The one
+        # again: whatever it did before its 252 would happen twice. The one
         # run is the ordinary one, its usage report included.
         monkeypatch.setenv("AWS_CLI_AUTO_PROMPT", "on-partial")
         monkeypatch.setattr(importlib.util, "find_spec", lambda name, package=None: None)

@@ -16,26 +16,8 @@ __all__ = ["__version__"]
 # that: this package's ``__init__`` runs before any module of it, so nothing
 # can have reached botocore yet, and what the environment says about CRT
 # reaches botocore no more than it reaches aws's.
-#
-# The removed value is kept rather than discarded, because a child process
-# should still see what its parent's environment said: aws ignores the
-# variable itself but passes it on untouched (measured), which `child_environ`
-# reproduces for the external aliases this CLI launches.
 _DISABLE_CRT_ENV = "BOTO_DISABLE_CRT"
-_disabled_crt = os.environ.pop(_DISABLE_CRT_ENV, None)
-
-
-def child_environ() -> dict[str, str]:
-    """The environment a process this CLI launches should inherit.
-
-    ``os.environ`` with this package's own edit undone - the BOTO_DISABLE_CRT
-    the import above removed goes back - so a child sees what aws would have
-    handed it.
-    """
-    environ = dict(os.environ)
-    if _disabled_crt is not None:
-        environ[_DISABLE_CRT_ENV] = _disabled_crt
-    return environ
+os.environ.pop(_DISABLE_CRT_ENV, None)
 
 
 def __getattr__(name: str) -> Any:

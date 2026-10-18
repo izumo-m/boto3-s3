@@ -309,8 +309,7 @@ def _drop_tls_key_log() -> None:
     session builds - writing TLS session keys aws would not write, and failing
     every client-building command (``presign`` included, rc 255) when the path
     cannot be opened. Dropping the variable as the session opens reproduces
-    aws's outcome; an external ``!`` alias opens no session, so the child
-    process this CLI launches still receives it, exactly as under aws.
+    aws's outcome.
     """
     os.environ.pop("SSLKEYLOGFILE", None)
 
@@ -576,17 +575,9 @@ def build_credential_chain(args: argparse.Namespace) -> None:
     (`_inject_credential_cache`), with the same ``ProfileNotFound`` swallow
     aws applies; everything else propagates raw, for the dispatcher to report
     through aws's general handler. The session is discarded - a run that gets
-    past this opens its own - so the one thing opening it does to the process
-    is undone: ``SSLKEYLOGFILE`` goes back into the environment, because what
-    follows may be an external alias, whose child process must still receive
-    it (`_drop_tls_key_log`).
+    past this opens its own.
     """
-    key_log = os.environ.get("SSLKEYLOGFILE")
-    try:
-        _open_botocore_session(args)
-    finally:
-        if key_log is not None:
-            os.environ["SSLKEYLOGFILE"] = key_log
+    _open_botocore_session(args)
 
 
 def build_session(args: argparse.Namespace) -> Boto3Session:
@@ -625,8 +616,7 @@ def build_s3(args: argparse.Namespace) -> S3:
     config and IMDS are all fixed by then. The same value is what the CRT
     posture below declares, so client and engine can never disagree on it, and
     `_bind_region` puts it on the session so the clients *botocore* builds
-    resolve it too - unless an alias's ``--region`` replaced the typed one,
-    which reaches the clients only (`typed_region`).
+    resolve it too.
     """
     from boto3_s3 import S3
 
@@ -753,22 +743,6 @@ def _region_chain(session: BotocoreSession) -> str | None:
         return None
 
 
-# The namespace attribute an alias leaves the typed ``--region`` under when its
-# own value replaces ``region`` (`typed_region`).
-TYPED_REGION = "typed_region"
-
-
-def typed_region(args: argparse.Namespace) -> str | None:
-    """The ``--region`` the user typed, before an alias's value replaced it.
-
-    aws binds the session's region from the arguments it parsed itself, ahead
-    of any alias (``_handle_top_level_args``); an alias's ``--region`` only
-    rewrites the parsed globals its clients are built from. The dispatcher
-    keeps the typed value under `TYPED_REGION` when an alias replaces it.
-    """
-    return cast("str | None", getattr(args, TYPED_REGION, args.region))
-
-
 def _bind_region(
     botocore_session: BotocoreSession, args: argparse.Namespace, resolved: str | None
 ) -> None:
@@ -797,25 +771,20 @@ def _bind_region(
     this CLI walked on to ``AWS_DEFAULT_REGION`` and the profile and signed in
     a region aws never used.
 
-    The flag that binds is the one the user typed (`typed_region`): an
-    alias's ``--region`` reaches the clients but not aws's session, so with
-    no other region an alias-carried one leaves aws's ``AssumeRole`` without
-    a region (rc 253) where binding it signed there (measured). Neither does
-    a client built for another region bind anything - only the builder that
+    A client built for another region binds nothing - only the builder that
     opened the session does, so ``--source-region``'s client leaves the
     credential chain in the run's own region, as aws's source client does.
 
     *resolved* is the answer `_resolve_region` already computed for
     ``args.region``, so the chain - whose last link is the IMDS probe - is
-    walked once per invocation. Only the falsy-flag corner and an alias's
-    replacement ask it again, no client's region being able to carry that
-    answer. Nothing is bound when the chain resolved nothing, which leaves the
-    session on botocore's identical answer.
+    walked once per invocation. Only the falsy-flag corner asks it again, no
+    client's region being able to carry that answer. Nothing is bound when the
+    chain resolved nothing, which leaves the session on botocore's identical
+    answer.
     """
-    typed = typed_region(args)
-    if typed:
-        region = typed
-    elif typed is None and args.region is None:
+    if args.region:
+        region = args.region
+    elif args.region is None:
         region = resolved
     else:
         region = _region_chain(botocore_session)

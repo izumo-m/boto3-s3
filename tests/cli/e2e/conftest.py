@@ -79,8 +79,8 @@ def _moto_isolation() -> None:
 def _isolated_home() -> Generator[None, None, None]:
     """Point ``~`` at a throwaway directory for the duration.
 
-    Both tools read ``~/.aws/config``, ``~/.aws/credentials`` and
-    ``~/.aws/cli/alias``, and the pinned aws writes
+    Both tools read ``~/.aws/config`` and ``~/.aws/credentials`` (and the
+    pinned aws ``~/.aws/cli/alias``), and the pinned aws writes
     ``~/.aws/cli/cache/session.db`` on every command that builds a client
     (``--version`` alone does not). Against the developer's home, the host's
     settings would steer both sides of every comparison and each run would

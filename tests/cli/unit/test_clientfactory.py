@@ -1616,26 +1616,6 @@ class TestRegionSessionBinding:
         clientfactory.build_client(source_args, session=s3.session)
         assert self._session_of(s3).get_config_variable("region") is None
 
-    @pytest.mark.parametrize(
-        ("typed", "expected"),
-        [(None, None), ("us-west-2", "us-west-2"), ("", None)],
-        ids=["none-typed", "typed", "empty-typed"],
-    )
-    def test_an_alias_region_reaches_the_client_but_not_the_session(
-        self, typed: str | None, expected: str | None
-    ) -> None:
-        # aws binds the session from the arguments it parsed itself, before
-        # any alias runs; an alias's `--region` rewrites only the globals the
-        # clients are built from (measured: `myls = ls --region eu-west-1`
-        # lists in eu-west-1 while `AssumeRole` goes to the typed region, or
-        # fails NoRegion, rc 253, with none).
-        args = _parse([] if typed is None else ["--region", typed])
-        setattr(args, clientfactory.TYPED_REGION, args.region)
-        args.region = "eu-west-1"
-        s3 = clientfactory.build_s3(args)
-        assert s3.client().meta.region_name == "eu-west-1"
-        assert self._session_of(s3).get_config_variable("region") == expected
-
     def test_the_region_chain_is_still_walked_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Binding must not cost a second walk: the chain's last link is the
         # IMDS probe (seconds on a host with no region and no metadata
@@ -1886,15 +1866,6 @@ class TestTlsKeyLogIsIgnored:
     ) -> None:
         monkeypatch.setenv("SSLKEYLOGFILE", str(tmp_path / "absent" / "keys.log"))
         assert clientfactory.build_client(_parse([])).meta.service_model.service_name == "s3"
-
-    def test_a_child_process_still_receives_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # aws passes the variable on untouched, and an external `!` alias -
-        # the only child this CLI launches - runs without opening a session,
-        # so the environment it inherits still carries it.
-        from boto3_s3_cli import child_environ
-
-        monkeypatch.setenv("SSLKEYLOGFILE", "/tmp/keys.log")
-        assert child_environ()["SSLKEYLOGFILE"] == "/tmp/keys.log"
 
 
 class TestUsEast1RegionalEndpointIsIgnored:

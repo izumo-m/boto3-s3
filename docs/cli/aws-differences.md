@@ -31,8 +31,7 @@ engine, a delete answered `412`, a CRT download that cannot put its file in
 place, a `mv` between two spellings of one Outposts object, an S3 Express
 access point, a plain-HTTP endpoint named anywhere but `--endpoint-url` under
 the CRT engine, a `REQUESTS_CA_BUNDLE` the CRT engine cannot use, a
-`[plugins]` section, a `[toplevel]` alias that leads to another `aws` command,
-a timeout typed beside an alias, a `cli_history` directory `aws` cannot
+`[plugins]` section, an alias file, a `cli_history` directory `aws` cannot
 create, the modification time a download stamps in some local zones (and the
 `sync` runs that follow from it), a CRT-engine `mv` download whose source
 delete dies without a response, a help page that cannot be written, and the
@@ -426,20 +425,11 @@ that say outright that the run comes out differently, listed in section 1.
   swallows every failure of that machinery, so a directory it cannot write
   changes nothing observable there either — the file simply stops being touched
   once a script switches over.
-- **A `[toplevel]` alias can only lead back to `s3`.** An `s3` entry in the
-  `[toplevel]` section of `~/.aws/cli/alias` replaces `aws s3` on both tools,
-  and this command follows it the same way: the global options in its value,
-  an external (`!`) command, a chain through other `[toplevel]` entries. Where
-  the chain names another command instead — another service
-  (`s3 = s3api ...`), `help`, or an entry proxying a built-in service of its
-  own name — `aws` runs that command; this one has none to run and stops with
-  exit code 252 (`argument command: Found invalid choice '<name>'`).
-- **An alias keeps the timeouts typed with it.** On `aws`, running any
-  internal alias — a `[command s3]` one, or any command under a `[toplevel]`
-  `s3` entry — drops `--cli-read-timeout` and `--cli-connect-timeout` typed on
-  the command line unless the alias's value sets them itself: rereading the
-  value resets both to their defaults. This command keeps the
-  typed values, so a run that times out here can complete there.
+- **`~/.aws/cli/alias` is not read.** `aws` reads that file on every
+  invocation: its `[command s3]` entries add or replace `aws s3` subcommands,
+  and a `[toplevel]` `s3` entry replaces `aws s3` itself. This command applies
+  none of them, and a file there is no error; a shell alias or function does
+  the same job.
 - **`[plugins]` is not read.** `aws` loads the plugins the config file's
   `[plugins]` section names (with `cli_legacy_plugin_path` set, every other
   entry is imported and its `awscli_initialize` called on every invocation),
