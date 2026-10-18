@@ -11,35 +11,42 @@ For term definitions, see [`glossary.md`](./glossary.md).
 
 ## 1. Purpose
 
-Make the equivalent of all `aws s3` subcommands (`cp` / `ls` / `mb` / `mv` /
-`presign` / `rb` / `rm` / `sync` / `website`) usable from Python. The project is
-structured in two layers.
+Make the `aws s3` command a Python library: every subcommand (`cp` / `ls` /
+`mb` / `mv` / `presign` / `rb` / `rm` / `sync` / `website`) runs in-process,
+keeps the command's path rules, filters and `sync` decisions, and transfers
+through the engines `aws s3` itself uses (`s3transfer` and the CRT). Other
+projects offer `aws s3 sync` from Python, but they run the `aws` command
+underneath, implement only part of it, or lack `s3transfer` and CRT support.
+Running the `aws` command is not always an option either: aws-cli is a large
+package, which can make it unsuitable for a container such as a Lambda
+function.
 
-- **`boto3-s3`** - the library itself. The **building blocks** that provide
-  `aws s3`-equivalent operations through its own Python API (the `S3` entry
-  point, whose methods mirror the `aws s3` subcommands - it is an independent
-  implementation, not a boto3 client wrapper, though it uses boto3 / botocore /
-  s3transfer underneath). It is the foundation for assembling `aws s3`-compatible
-  tools, and it **may behave more permissively than aws-cli** for convenience
-  (e.g., the `S3Storage` constructor also accepts `"bucket/key"` with the
-  `s3://` prefix omitted).
-- **`boto3-s3-cli`** - the CLI distribution that sits on top of `boto3-s3`. It
-  exposes the `aws s3`-compatible `boto3-s3` command. **Behaving exactly like
-  `aws s3` (strict argument validation, etc.) is this layer's responsibility**
-  (e.g., making `mb` / `rb` / `rm` reject an omitted `s3://` is done on the CLI
-  side).
+The project ships two packages.
+
+- **`boto3-s3`** - the library, which is the product. It provides `aws s3`'s
+  operations through its own Python API (one entry point whose methods mirror
+  the `aws s3` subcommands - it is an independent implementation, not a boto3
+  client wrapper, though it uses boto3 / botocore / s3transfer underneath). It
+  **may behave more permissively than aws-cli** for convenience (e.g.,
+  accepting an S3 path with the `s3://` prefix omitted).
+- **`boto3-s3-cli`** - a by-product: the `boto3-s3` command, built on the
+  library with `aws s3`'s command line. Anyone who wants a CLI is served by
+  aws-cli itself. This layer owns what only a command line has: strict
+  argument validation (e.g., rejecting an S3 path without `s3://` where
+  `aws s3` rejects it), result lines and exit codes. Its e2e suite is also
+  where the library is compared with `aws s3` command for command.
 
 ### Intended direction (important)
 
-The goal is **"using the `boto3-s3` library, you can build a tool compatible
-with the `aws s3` command."** This **does not mean that the library itself
-behaves exactly identically to the `aws s3` command**. The library provides
-permissive building blocks that can achieve parity, and the responsibility of
-matching `aws s3` exactly (tightening) is borne by the CLI distribution
-(`boto3-s3-cli`).
+The goal is **`aws s3` as a library**: what an application would get by
+running `aws s3`, it gets by calling `boto3-s3`. The library is held to
+`aws s3`'s function (section 3) for every input `aws s3` accepts, and may
+accept more (a superset). It does not reproduce the command line itself:
+narrowing the inputs to exactly `aws s3`'s, and printing and exiting as
+`aws s3` does, are the CLI's job.
 
 The aim is to deliver performance equal to or better than `aws s3` while
-maintaining high functional compatibility (parity).
+maintaining high functional compatibility.
 
 ## 2. Supported scope
 
@@ -58,100 +65,113 @@ maintaining high functional compatibility (parity).
 
 ## 3. Design policy
 
-- **Parity first**: when there are multiple valid implementation options,
-  **prefer the one with higher parity with aws-cli**. When aws-cli's behavior is
-  ambiguous, read the aws-cli source as the primary
-  source rather than third-party documentation.
+- **Functional compatibility**: in the normal path, each library operation
+  does what its `aws s3` subcommand does under the corresponding arguments and
+  the same conditions: the same objects and files are transferred, deleted or
+  created, with the same content, properties and request headers; `sync`
+  makes the same decisions; an option means the same thing. The CLI does the
+  same, and a successful run prints what `aws s3` prints (its result lines,
+  `ls`'s listing). In the semi-abnormal and abnormal paths, aws-cli's behavior
+  is the reference rather than a target to match in full. What decides the
+  functional outcome is matched: a run carries on past a per-item failure
+  where `aws s3` carries on (a `sync` that meets an error keeps going), and
+  stops before it starts where `aws s3` stops. The details of a particular
+  error are not: its wording, which of two simultaneous mistakes is reported,
+  the order of the reports. A functional difference is either a bug or a
+  deliberate deviation written down in
+  [`aws-differences.md`](../docs/cli/aws-differences.md); a difference in an
+  error's details is neither, and is not written down. One source of
+  deliberate functional deviation is settled: S3 objects are deleted in
+  batches ([`deleter.md`](./deleter.md)) where aws-cli deletes one key per
+  request; batching is not to be traded back for per-key deletes. The CRT
+  transfer engine is held to aws's CRT mode on the same terms
+  ([`crt.md`](./crt.md)), and the interactive auto-prompt UI is not compared.
+- **Compatibility target**: the pinned aws-cli release the code is ported
+  against, together with the boto3 / botocore / s3transfer / awscrt releases
+  of the same period. Older
+  aws-cli releases are not a target. Two version differences stand between
+  this project and that release: aws-cli bundles its own copies of botocore
+  and s3transfer, which differ from the PyPI releases this project runs on,
+  and the library also runs on SDKs as old as the floor (section 2). A
+  behavior that differs only because of such a version difference is not
+  matched: it is neither a bug nor a deviation to write down, and the library
+  does not compensate for it. The rules for errors below still hold on every
+  supported version.
+- **Security before compatibility**: where matching aws-cli would expose a
+  secret or silently turn a protection off, the library and the CLI do not
+  match it. For example, credentials are masked in debug logs
+  ([`masking.md`](./masking.md)), where aws-cli prints them. Such a deviation
+  is a functional difference and is written down in
+  [`aws-differences.md`](../docs/cli/aws-differences.md).
+- **Errors take the intended behavior, not aws-cli's**: how a failure is
+  detected, reported and classified follows these rules rather than aws-cli's
+  implementation.
+  1. A failure is never reported as a success. An item that failed is a failed
+     item, and the exit code says so, even where aws-cli loses the failure and
+     reports success.
+  2. A failure is reported so that its cause can be seen: not as a traceback,
+     and with the original exception kept as its cause.
+  3. A per-item failure leaves the other items running; a failure the run
+     cannot proceed past (configuration, credentials, a missing destination)
+     stops it before it starts.
+  4. The library's exceptions classify the failures within its own reach: the
+     SDK, S3 and local files. How the caller's code fails is the next item.
+- **The caller's code is the caller's responsibility**: code the caller
+  writes and hands to the library - a stream, a storage backend, a filter, a
+  callback - is outside the library's reach. The library answers for its own
+  code and for what it reaches through the SDK, S3, the local file system and
+  Python's standard I/O streams (a file, a pipe, standard input and output, an
+  in-memory buffer).
+  1. Each place that takes the caller's code documents the contract it relies
+     on (the standard stream contract, the storage protocol, thread safety
+     where the code runs on a worker thread). The library relies on that
+     contract and neither checks it nor works around a breach: what code that
+     breaks it leads to is not specified, and is not a library bug.
+  2. The caller's code reports its own failures with the library's
+     exceptions, and one it raises is recorded as it is. Any other exception
+     from a stream or a storage backend fails that item as the library's base
+     exception, with the original kept as its cause. An interrupt (Ctrl-C, a
+     request to exit) cancels the item and reaches the caller. An exception
+     from a filter or a callback reaches the caller as it is: a filter decides
+     on an item and a callback reports on one, so their failure is not the
+     item's.
+- **Exit codes** (the CLI): follow the meaning aws-cli gives each value
+  ([`exit-codes.md`](../docs/cli/exit-codes.md)). Matching aws-cli's value in
+  every corner (two mistakes at once, say) is not a goal.
+- **Compatibility first**: when there are several valid implementation
+  options, prefer the one closer to aws-cli's function. When aws-cli's behavior
+  is ambiguous, measure it against the pinned `aws` and read the aws-cli source
+  rather than third-party documentation.
 - **Symbol-name traceability against aws-cli**: parity work depends on reading
   this codebase side by side with the aws-cli source. When a symbol here (a
   class, function, or option/config key) corresponds to an aws-cli counterpart,
   keep the same name with the same meaning, or an extended form whose
-  correspondence remains easy to trace (e.g., the CLI's
-  `human_readable_to_int` keeps aws-cli's function name because it is a
-  faithful port - same boundary behavior and failure wording, though the
-  failure is re-raised as the taxonomy's `InvalidConfigError`). Renaming such a symbol to something unrelated - or reusing an
+  correspondence remains easy to trace (e.g., a function ported from aws-cli
+  keeps aws-cli's name even where it re-raises its failure as the library's
+  exception). Renaming such a symbol to something unrelated - or reusing an
   aws-cli name for a different meaning - obscures the port; a change (including
   a refactoring) that would significantly break this correspondence is
   rejected.
-- **Responsibility boundary for parity**: the layer that ultimately guarantees
-  full compatibility with `aws s3` is the **CLI layer (`boto3-s3-cli`)**. The
-  library layer only needs to provide building blocks from which a compatible
-  tool can be built, and it may be a superset that is more permissive than
-  aws-cli for convenience (the CLI layer narrows it just enough to match
-  `aws s3`). "Parity first" is a tie-breaker for design decisions; it does not
-  require the library API to behave identically to `aws s3` in every detail.
-- **exit code parity (charter)**: the exit code of `boto3-s3 <subcommand>`
-  **must match** that of `aws s3 <subcommand>` under the same arguments and the
-  same conditions, **whether on success or error**. This holds for any arguments
-  and values. A mismatch is a bug, and it must be detectable by e2e tests. There
-  are only four exceptions.
-  1. Extension options that do not exist in `aws s3`. The CLI declares none:
-     its option surface is exactly `aws s3`'s, so this exception is currently
-     unused. `--version` is *not* one of them - aws accepts it under any
-     `aws s3` subcommand through its global argument handling (version line,
-     rc 0) and the CLI matches that.
-  2. When it depends on a feature that is hard to realize (e.g., the CLI's
-     interactive UI)
-  3. Behavior differences rooted in the transfer engine underneath: aws-cli
-     bundles its own s3transfer fork while this project rides pip
-     `s3transfer`, and an observable difference (exit code, output, requests
-     sent, failure timing) that originates in a behavior difference between
-     those two engines is outside both parity charters. A difference noticed
-     is recorded as a known divergence in the design docs. Where the library
-     can easily compensate - a default value, a public class attribute, a
-     subscriber - it aims to behave like the bundled fork anyway; deciding
-     not to compensate is legitimate and is recorded together with its
-     reason.
-  4. Behavior differences rooted in batched deletion: S3 objects are deleted
-     in batched `DeleteObjects` requests ([`deleter.md`](./deleter.md)) where
-     aws-cli sends one `DeleteObject` per key, and an observable difference
-     (exit code, output, requests sent, the objects left after an interrupted
-     or failing run) that originates in batching is **accepted**. Batching is
-     settled and is not to be traded back for per-key deletes. Such a
-     difference is not a question to reopen: it is recorded as a known
-     divergence (deleter.md section 4, and
-     [`aws-differences.md`](../docs/cli/aws-differences.md) where a user can
-     observe it), and where the deleter can cheaply narrow it toward aws-cli's
-     per-key outcome - re-sending a key on its own - it does so.
-
-  awscrt-dependent features (the CRT transfer engine, CRT-family checksums,
-  SigV4a signing) are subject to this charter whenever the CRT stack is usable,
-  and a mismatch there is a bug; the **CRT transfer engine**
-  (`[s3] preferred_transfer_client`) takes parity against "aws's CRT mode" on
-  the same terms (design in [`crt.md`](./crt.md); enforced by the e2e CRT lane).
-  Where the stack is not usable only the relevant features fail, and that is not
-  a mismatch. What "usable" requires is in
-  [`compatibility.md`](../docs/compatibility.md).
-- **output parity (charter)**: what `boto3-s3 <subcommand>` writes to stdout and
-  stderr **must match** what `aws s3 <subcommand>` writes under the same
-  arguments and the same conditions, byte for byte, after a defined
-  normalization. That normalization tolerates only what follows from the two
-  being different implementations of one command - program identity (the
-  command's name and its command hierarchy), leakage of implementation
-  internals (tracebacks, addresses, install paths), and run-to-run
-  nondeterminism (execution and interleaving order included) - so a difference
-  of those kinds is not a parity divergence. Everything the normalization does
-  not cover is comparable surface, where a difference **is** a divergence: a
-  bug, or a deliberate deviation that has been written down. The three classes,
-  each with the test that decides membership, are defined in
-  [`testing.md`](./testing.md) section 9. This charter has three exceptions,
-  matching the exit code charter's second, third and fourth: an **interactive
-  UI** (`--cli-auto-prompt`) is outside it, its console output and its
-  completion candidates alike, and so are an observable difference rooted in
-  the bundled-vs-pip `s3transfer` engine difference and one rooted in batched
-  deletion, each recorded as a known divergence the same way.
+- **Responsibility boundary for compatibility**: functional compatibility is
+  the **library's** responsibility, for every input `aws s3` accepts; the
+  library may be a superset that is more permissive than aws-cli for
+  convenience. The **CLI layer (`boto3-s3-cli`)** narrows the inputs just
+  enough to match `aws s3`, and owns argument validation, output and exit
+  codes. "Compatibility first" is a tie-breaker for design decisions; it does
+  not require the library API to behave identically to `aws s3` in every
+  detail.
 - **OS-dependent behavior**: host-OS-dependent behavior such as path separators
   and case sensitivity is matched to aws-cli on each supported OS.
 - **Unsatisfiable option combinations**: prefer making a mutually-exclusive or
   meaningless option combination **unrepresentable in the API** over policing it
-  at runtime - e.g. `sync`'s size/timestamp tuners live inside `AwsCliComparison`
-  (the `update_filter=None` default), so they cannot be paired with a content
-  `update_filter=`. Where a combination cannot be designed away, raise vs ignore is
-  decided per case and discussed beforehand (the library may fail loud where
-  aws-cli is silent; the CLI keeps aws exit-code parity).
+  at runtime - e.g., options that only tune one of `sync`'s comparison methods
+  belong to that method, so they cannot be paired with another. Where a
+  combination cannot be designed away, raise vs ignore is decided per case and
+  discussed beforehand (the library may fail loud where aws-cli is silent; the
+  CLI follows aws's exit code meanings).
 - **Versioning**: `boto3-s3` and `boto3-s3-cli` are versioned independently.
-- Changes that might break aws-cli compatibility are not undertaken
-  unilaterally; discuss them beforehand.
+- Changes that might break functional compatibility with aws-cli are not
+  undertaken unilaterally; discuss them beforehand.
 
 ## 4. Documentation index
 
