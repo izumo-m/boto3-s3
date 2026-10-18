@@ -302,11 +302,8 @@ output of aws-cli; selecting another `--cli-error-format` does not alter
 
 aws drops that envelope - keeping the exit code - when the run names a profile
 no config file declares, because it renders the envelope through the session
-that fails to resolve. That degradation is reproduced
-([`cli.md`](./cli.md) section 6). Its one gap follows from the paragraph above:
-aws consults neither the session nor the config once `--cli-error-format` or
-`AWS_CLI_ERROR_FORMAT` sets the format, so an undeclared profile plus an
-explicit `enhanced` keeps the envelope on aws and loses it here.
+that fails to resolve. That rendering detail is not reproduced: the envelope
+stays here ([`cli.md`](./cli.md) section 6).
 
 ### Recorded deviations
 

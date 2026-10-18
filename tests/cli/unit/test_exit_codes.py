@@ -558,12 +558,11 @@ class TestUnresolvedConfigReports:
         )
 
     def test_another_rc_leaves_the_same_exception_bare(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # The envelope belongs to the handler, not to the exception: aws's
         # rc-254 and rc-255 handlers format nothing, so the same botocore error
         # reported at another rc must render bare.
-        monkeypatch.setattr(cli, "_enhanced_envelope", True)
         cli._write_error(NoCredentialsError(), rc=255)
         assert capsys.readouterr().err == "boto3-s3: [ERROR]: Unable to locate credentials\n"
 
@@ -604,14 +603,13 @@ class TestUnresolvedConfigReports:
         assert capsys.readouterr().err == "boto3-s3: [ERROR]: \n"
 
     def test_an_empty_message_with_a_code_keeps_the_envelope(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # The other half of that ordering: aws's handler envelopes first and
         # its formatter tests the result, so an empty detail under a code
         # renders the envelope - stripped of the space the empty detail left,
         # never the prefix alone. Unreachable today (only rc 252 / 253 carry a
         # code, and both always carry a message); the mechanism is aws's.
-        monkeypatch.setattr(cli, "_enhanced_envelope", True)
         cli._write_error("", rc=252)
         assert (
             capsys.readouterr().err == "boto3-s3: [ERROR]: An error occurred (ParamValidation):\n"

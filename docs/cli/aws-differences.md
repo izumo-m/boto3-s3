@@ -54,10 +54,10 @@ tool (below).
 
 Because the text is aws's, so are its envelopes: parameter-validation errors
 use `An error occurred (ParamValidation): <message>`, and so do the
-exit-code 253 reports this command shares with `aws` — unresolved credentials,
-an unresolved region, and an unusable `cli_timestamp_format` (`An error
-occurred (Configuration): ...`); the 253 an uninstalled dependency produces is
-this command's own and has no envelope
+exit-code 253 reports for unresolved credentials and an unresolved region.
+The 253 an uninstalled dependency produces is this command's own and has no
+envelope, and neither has the 253 of an unusable `cli_timestamp_format`, which
+`aws` reports as `An error occurred (Configuration): ...`
 (see [`exit-codes.md`](./exit-codes.md)). The credentials and region reports
 also keep
 aws's hint verbatim, which is why the credentials error tells you to run
@@ -66,8 +66,8 @@ read the same credentials and config files, so configuring credentials with
 `aws` — or by any other means — is what fixes the run either way. The
 unresolved-region report points at `aws configure` for the same reason.
 `aws` drops the envelope when the profile you named does not exist in any
-config file, keeping the exit code, and so does this command. Where the two
-part is the error format — `--cli-error-format`, `AWS_CLI_ERROR_FORMAT` and
+config file, keeping the exit code; this command keeps it. The two also part
+on the error format — `--cli-error-format`, `AWS_CLI_ERROR_FORMAT` and
 the profile key `cli_error_format`: `aws` acts on all three, this command
 accepts every value and ignores it. On `aws`, `enhanced` puts the envelope
 back in that dropped-envelope situation (as the option or the variable — the

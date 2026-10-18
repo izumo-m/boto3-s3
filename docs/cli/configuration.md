@@ -155,9 +155,12 @@ The profile key `cli_timestamp_format` takes `wire` or `iso8601`, exactly as
 listing timestamps of `ls` are rendered the same way either way, as they are
 under `aws s3`.
 
-What it does do is fail the run when the value is neither: exit code 253, ahead
-of the command itself — a `help` page included. That matches `aws`, where the
-check happens as the session comes up.
+What it does do is stop every subcommand when the value is neither: exit code
+253, as under `aws`. `help` and `--version` do not read the config files, so
+they still work under such a value; `aws` checks it as its session comes up
+and fails them too. `cli_binary_format` is checked the same way: a value other
+than `base64` or `raw-in-base64-out` stops every subcommand with exit code
+255, unless `--cli-binary-format` is given.
 
 The value is read from the selected profile only — a `[profile x]` setting
 applies under `--profile x` or `AWS_PROFILE=x`, not otherwise — and the shared

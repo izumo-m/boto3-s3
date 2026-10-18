@@ -38,27 +38,15 @@ solidified design is added here.
   rather than the top-level block. Only the
   failure is reproduced: the values themselves come from the globals pass
   below, which parses them again.
-- Next comes the **config-file scan** (`configfiles.scan`, stdlib only -
-  `configparser` plus the `shlex` split botocore names its `[profile "..."]`
-  sections with; the informational exits must not import the SDK,
-  [`imports.md`](./imports.md)). aws builds its botocore session immediately
-  after the preliminary scan and reads the whole merged config, so a file
-  that is not valid INI settles the run right
-  there: `Unable to parse config file: <path>` at rc 255 (botocore's
-  `ConfigParseError` through aws's general handler), ahead of
-  `--version`, the help token and every parse below. Both of
-  botocore's files are read in its order - the config file, then the shared
-  credentials file - and its rules apply: the path must name a file (a
-  directory or a missing path is simply "no config file"), `configparser`
-  must accept it (a non-UTF-8 byte counts as a parse failure), and an
-  indented `key = value` block must split on `=` (parsed one level deep and
-  kept, so a value can be a map). The same scan collects the merged **profile
-  map** (`[default]` / `[profile <name>]` in the config file, every section of
-  the credentials file, the latter updating the former key by key like
-  botocore's `full_config`), which section 6 uses to decide whether a report
-  still carries its envelope and which `ConfigScan.scoped` reads
-  `cli_timestamp_format` out of (below). The config file's `[plugins]`
-  section, which aws loads next, is not read
+- Nothing before the command reads aws's config or credentials files. aws
+  builds its botocore session right after the preliminary scan, so a broken
+  file or setting fails even its `help` and `--version`; here botocore reads
+  the files when a command opens its session (section 6), so the
+  informational exits succeed under a broken config and stay SDK-free
+  ([`imports.md`](./imports.md)). This is the accepted ordering difference of
+  [`overview.md`](./overview.md) section 3: every command that does anything
+  still stops, with an exit code of the same meaning. The config file's
+  `[plugins]` section, which aws loads at the same point, is not read
   ([`aws-differences.md`](../docs/cli/aws-differences.md)).
 - aws reads its **alias file** (`~/.aws/cli/alias`) next, while it is still
   assembling its parser; this CLI does not read it
@@ -95,58 +83,6 @@ solidified design is added here.
   in `s3 cp -h`; `s3 ls --h` still abbreviates to `--human-readable`; and
   `s3 help --help` breaks the exactly-`help` remainder into an invalid
   choice `help` - all measured on 2.36.40).
-- Between those resolutions and the help-token rule sits the
-  **`cli_timestamp_format` gate** (`ConfigScan.invalid_timestamp_format`),
-  aws's only rc-253 `Configuration` failure on this surface (section 6). aws
-  validates the setting in the first handler of its `session-initialized`
-  event, which it emits after binding `--profile` and before handing the argv
-  to any command layer, so an unknown value is the run's outcome ahead of the
-  help token, an invalid subcommand, unknown options and missing arguments,
-  while `--version`, the preliminary scan, the
-  unparseable-config abort, the three global
-  resolutions and the unknown-codec `AWS_CLI_OUTPUT_ENCODING` gate (section 6)
-  all still outrank it (all measured). The value comes from the scan's profile
-  map scoped to the profile aws would have bound - `--profile` under its truthy guard, then
-  the env chain - and an *undeclared* profile stands the gate down, because
-  botocore raises `ProfileNotFound` there and aws's handler catches it and
-  keeps its `iso8601` default. Right behind it sits the **`cli_binary_format`
-  gate** (`ConfigScan.invalid_binary_format`, aws's next `session-initialized`
-  handler): a config value other than `base64` / `raw-in-base64-out` fails at
-  rc 255 with aws's bare, unenveloped lookup error (a string value's
-  `KeyError` repr), ahead of the help token and every command layer, while an
-  explicit `--cli-binary-format` skips the config read (measured; with both
-  settings broken, the timestamp report wins). The last of these startup
-  gates is the **credential-chain gate**. aws's handler that installs the
-  credential cache asks its session for the provider chain, and building
-  that chain is where botocore converts and validates the IMDS settings:
-  `metadata_service_timeout` and `metadata_service_num_attempts` through
-  `int`, `ec2_metadata_service_endpoint_mode` against its two modes,
-  `ec2_metadata_service_endpoint` for being a URL - each as its environment
-  variable or its config key. A bad one is aws's general rc 255 with
-  botocore's own text, behind the two gates above and ahead of the help
-  token and every command layer (measured:
-  `AWS_METADATA_SERVICE_TIMEOUT=abc aws s3 help` is 255).
-  `ConfigScan.credential_chain_suspect` decides whether the build *would*
-  fail, with botocore's own tests applied without importing it - the very
-  `int` it converts with, its two modes, a verbatim copy of its endpoint
-  check (pinned against the installed botocore by test) - read in
-  botocore's order, and for those configurations the dispatcher builds the
-  chain for real (`clientfactory.build_credential_chain`), so the report is
-  botocore's own and a configuration that passes keeps the informational
-  exits SDK-free (section 7). The order is part of the copy: under a
-  profile no file declares, botocore's first read that misses the
-  environment raises the `ProfileNotFound` aws swallows, and nothing it
-  would have read afterwards is examined, the endpoint - checked last -
-  least of all. The copy has to hold in both directions: a refusal it
-  misses leaves `help` at rc 0 where aws exits 255, and a suspicion
-  botocore does not share loads the SDK ahead of the help page. What it
-  copies is the installed botocore on the host interpreter, though, not
-  aws's: botocore's endpoint check rests on `urlsplit`, whose rules moved
-  between Python releases (a digit-led scheme is one below 3.11; bracketed
-  hosts are validated only by later patch releases), so an endpoint only
-  some releases refuse follows the host here, as it does at the client
-  build - the gate does not pin it the way `validate_endpoint_url` pins
-  the same `urlsplit` property for this CLI's own `--endpoint-url` check.
 - The first `--` stops the globals pass (argparse semantics, verified
   identical on 3.10 and aws's bundled 3.14) and the marker survives in the
   remainder for stage 2's parse to honor, so the tail stays positional all
@@ -385,7 +321,6 @@ solidified design is added here.
 |---|---|
 | `cli.py` | Two-stage dispatch (the aws-clidriver lazy-command-table shape): the globals pass consumes the globals off the full argv, the command scan matches its remainder against `_COMMAND_TABLE` (the registry: name -> module, class, help - no command module imported), stage 2 imports the matched module, builds its real parser and runs it. Wires `--debug`, maps exceptions to exit codes; the full `build_parser()` builds the whole surface for tests |
 | `globalargs.py` | Common option definitions (the parent; the aws-cli `globalargs.py` counterpart) |
-| `configfiles.py` | The SDK-free (stdlib `configparser` / `shlex`) pre-dispatch read of aws's config and credentials files: the parse failure that aborts the run at rc 255, the profile map the error rendering consults, and the scoped read of `cli_timestamp_format` behind the rc-253 gate (sections 1 and 6). Also the single home of "which file / which env profile", shared with `clientfactory.resolve_profile` |
 | `clientfactory.py` | `build_client(args) -> S3Client` (the connection/authentication layer, section 4) + `build_service_client(service, args, *, region=None)` (the s3control / sts client used by mv's path validation, section 5.8). Both open their botocore session through `_open_botocore_session` (the profile / `api_versions` / retry / timeout / credential-cache alignment of section 4) and create their client through `_create_client`, the single seam that carries aws's retry-mode vocabulary and installs the CONNECT pin - a seam rather than `_open_botocore_session` because `build_client` may be handed a session built elsewhere. Every S3 client the first one builds carries aws's message rewriter (`s3errormsg`) |
 | `proxytunnel.py` | The CONNECT request the official aws distribution sends (section 2): a copy of CPython 3.12+'s tunnel opener, installed onto urllib3's `HTTPConnection` by `clientfactory._create_client` on the host interpreters whose own opener still writes `CONNECT ... HTTP/1.0` with no `Host`. Every precondition - no urllib3, no opener to read, an opener that already writes aws's shape - declines quietly, so it is a no-op on 3.12+ and idempotent |
 | `s3errormsg.py` | aws's `after-call.s3` handler (its `s3errormsg` customization), ported verbatim: it rewrites two "requires Signature Version 4" messages and the cross-region `PermanentRedirect` in place, so every report carrying a service message - the top-level `[ERROR]` line and the per-item `upload failed:` / `download failed:` lines alike - reads as aws's. aws registers it on its session; here `build_client` registers it on each S3 client it builds, the CLI's only S3 client builder. The library stays boto3-faithful and never rewrites a service message |
@@ -690,12 +625,10 @@ numbers in the bold item labels below are that document's.
      to locate credentials`. Redeclaring the variable restores the order
      without that promotion, and the env read stays present-wins, an empty
      value included (`AWS_PROFILE=` -> the empty profile -> ProfileNotFound,
-     matching aws). `resolve_profile` answers the other question - *whose keys
-     do I read* - for the pre-dispatch gates, which parse the config files
-     themselves before any session exists (section 1); it applies the same two
-     rules over the same `PROFILE_ENV_VARS`. Everything that reads through a
-     session inherits the order instead of restating it, the `[s3]` scoped
-     read (`load_scoped_s3_config`, section 8) included, so the transfer config
+     matching aws). Everything that reads through a session inherits the
+     order instead of restating it - the `cli_timestamp_format` /
+     `cli_binary_format` check (section 6) and the `[s3]` scoped read
+     (`load_scoped_s3_config`, section 8) included - so the transfer config
      and the client can never land on *different* profiles when both env vars
      are set. This correction is the CLI layer's alone: the library
      (`S3.client`'s `boto3.client` fallback) stays boto3/botocore-faithful and
@@ -1557,9 +1490,9 @@ reviewed with it.
 | 1 | A subcommand-specific "no result" etc. (`ls` is a specified key / prefix with 0 entries), **all errors after the start of rm / cp / mv / sync / mb / rb** (below; the rm stage of `rb --force` is the 255 below) | the convention of the S3-family commands / a task failure of the transfer family |
 | 2 | **A transfer that completed with warnings only** (cp / mv / sync's glacier skip, an mtime stamp failure, an unreadable local file, etc. section 5.7) | a task warning of the transfer family |
 | 252 | A usage error (an unknown option = `Unknown options: ...`, an invalid choice / value), a client-side `ValidationError` | `PARAM_VALIDATION_ERROR_RC` |
-| 253 | `ConfigurationError` (credentials / region unresolved, so their reports are enveloped and carry aws's hint (below); an absent awscrt x the `[s3] preferred_transfer_client=crt` degradation section 8 or an MRAP target's SigV4a section 4 item 4, which aws cannot reach and which stay bare), plus the pre-dispatch `cli_timestamp_format` gate (section 1), enveloped `Configuration` and raising nothing | `CONFIGURATION_ERROR_RC`, from its `NoCredentialsErrorHandler` / `NoRegionErrorHandler` / `ConfigurationErrorHandler` - three of its four rc-253 handlers, the `PagerErrorHandler` being the one with no counterpart here (below) |
+| 253 | `ConfigurationError` (credentials / region unresolved, so their reports are enveloped and carry aws's hint (below); an absent awscrt x the `[s3] preferred_transfer_client=crt` degradation section 8 or an MRAP target's SigV4a section 4 item 4, which aws cannot reach and which stay bare), plus an unknown `cli_timestamp_format`, checked when a command opens its session (below) and also bare | `CONFIGURATION_ERROR_RC`, from its `NoCredentialsErrorHandler` / `NoRegionErrorHandler` / `ConfigurationErrorHandler` - three of its four rc-253 handlers, the `PagerErrorHandler` being the one with no counterpart here (below) |
 | 254 | A server-side error (a `Boto3S3Error` whose `__cause__` is a botocore `ClientError`) | `CLIENT_ERROR_RC` |
-| 255 | Any other general error (including `TransportError`, a `NotFoundError` with no `ClientError` cause such as a missing local source, the refining `InvalidValueError` / `InvalidConfigError` (below), an unparseable config / credentials file caught by the pre-dispatch scan (section 1), and any otherwise-uncaught exception via `_dispatch`'s backstop - a `BrokenPipeError` from the `ls \| head` pipeline included, since aws has no special case for it either: both tools report `[Errno 32] Broken pipe` here and the *process* then exits **120**, the interpreter's shutdown flush having failed on the closed pipe as well (measured)), **a failure of the rm stage of `rb --force`** (section 5.4) | `GENERAL_ERROR_RC` |
+| 255 | Any other general error (including `TransportError`, a `NotFoundError` with no `ClientError` cause such as a missing local source, the refining `InvalidValueError` / `InvalidConfigError` (below), an unparseable config / credentials file, an unknown `cli_binary_format` or an IMDS setting botocore refuses - each found when a command opens its session (below) - and any otherwise-uncaught exception via `_dispatch`'s backstop - a `BrokenPipeError` from the `ls \| head` pipeline included, since aws has no special case for it either: both tools report `[Errno 32] Broken pipe` here and the *process* then exits **120**, the interpreter's shutdown flush having failed on the closed pipe as well (measured)), **a failure of the rm stage of `rb --force`** (section 5.4) | `GENERAL_ERROR_RC` |
 
 The mapping is `cli.exit_code_for`. It prioritizes "**whether the server was
 reached** (whether it derives from `ClientError`)" over the library's exception
@@ -1607,14 +1540,28 @@ Of aws's **two other rc-253 handlers**, only one is reachable here.
 not implement. `ConfigurationErrorHandler` (`Configuration`) claims the
 `ConfigurationError` aws's own customizations raise, and one of them lands
 inside the mapped surface: `cli_timestamp_format` set to anything other than
-`wire` or `iso8601` is rc 253 `An error occurred (Configuration): Unknown
-cli_timestamp_format value: <value>, valid values are "wire" or "iso8601"`,
-ahead even of a help token. The gate is reproduced (section 1), and it is the
-one report here whose envelope code is named by the caller rather than derived
-from an exception, because no exception carries it: the check is a
-pre-dispatch read, not a failure of the command. It can never be seen degraded
-- the undeclared profile that would strip the envelope also stands the gate
-down.
+`wire` or `iso8601` stops the run at rc 253. aws checks the setting when its
+session starts, so it fails every invocation, `help` and `--version`
+included. Here `clientfactory._reject_unknown_cli_formats` checks it, with
+`cli_binary_format` (rc 255; an explicit `--cli-binary-format` replaces the
+config value), every time `_open_botocore_session` opens a session - so every
+command stops, while `help` and `--version`, which open none, succeed (the
+accepted ordering difference of section 1). Both values come from botocore's
+scoped config, so the profile is the one the session is bound to; an undeclared
+profile makes that read raise `ProfileNotFound`, which aws's handlers catch,
+and the check stands down the same way, leaving the profile to the session's
+other reads (rc 255). The report is this CLI's own `ConfigurationError` /
+`InvalidConfigError`, bare: aws's `Configuration` envelope and its `KeyError`
+text for the binary format are not reproduced
+([`overview.md`](./overview.md) section 3).
+
+The same session open is where the other config failures stop a command: a
+config or credentials file botocore cannot parse (`Unable to parse config
+file: <path>`, rc 255) and an IMDS setting botocore refuses while it builds the
+credential chain (`metadata_service_timeout`, `metadata_service_num_attempts`,
+`ec2_metadata_service_endpoint_mode`, `ec2_metadata_service_endpoint`; rc 255
+with botocore's text), which `_inject_credential_cache` builds. aws reaches
+both at startup too, so they also fail its `help` and `--version`.
 
 The **accepted values change nothing on this surface**. On aws the setting
 swaps botocore's timestamp parser for one that keeps the wire string (`wire`)
@@ -1626,38 +1573,10 @@ all-buckets listing and `--human-readable --summarize` were byte-identical
 under `wire`, `iso8601` and no setting at all. So only the validation is
 implemented; there is no parser to swap.
 
-**The envelope disappears when the run names a profile no config file
-declares**, and the exit code does not change. aws renders it through its
-session: the handler asks the session for `cli_error_format`, the scoped-config
-read behind it raises botocore's `ProfileNotFound`, and the renderer's blanket
-catch turns that into "no structured render", falling back to the bare
-`<prog>: [ERROR]: <message>` while still returning its own rc. `_write_error`
-reproduces it from the profile map the section-1 config scan collected, and the
-message it degrades is unchanged - the usage block, difflib's spelling
-suggestions and the missing-subcommand report's own embedded `[ERROR]` line
-(which is why that one renders as two prefixed lines either way) all survive.
-**When** it applies follows aws's session, not the option: botocore reads
-`AWS_PROFILE` / `AWS_DEFAULT_PROFILE` while the session is being built, so an
-undeclared profile named there degrades everything `_dispatch` reports - the
-top-level globals parse and the three resolutions included - whereas
-`--profile` is bound by aws's `_handle_top_level_args`, after that parse and
-after the event those resolutions hang off, so it degrades only the command
-layers below (measured both ways). Errors raised before `_dispatch` - the
-preliminary scan - never degrade, matching aws's
-entry-point handler chain, which is constructed without a session. A profile is
-"declared" if the merged map has it; `--profile ""` is ignored under aws's
-truthy guard, while an empty env value names the empty profile and is
-undeclared. The degradation is the renderer's, so it applies to every code
-alike - but only the 252 family can be seen degraded: an undeclared profile
-makes the scoped-config read raise `ProfileNotFound` (255) before credentials
-or a region are ever resolved, so no rc-253 report co-occurs with it
-(measured). One residual, of the `--cli-error-format` family already excluded
-above: aws skips the session read entirely whenever the format is set outside
-the config file - by the option, or by `AWS_CLI_ERROR_FORMAT`, which its chain
-resolves ahead of the scoped-config provider - so an undeclared profile
-combined with either `--cli-error-format enhanced` or
-`AWS_CLI_ERROR_FORMAT=enhanced` keeps the envelope there and loses it here
-(both measured).
+**The envelope stays when the run names a profile no config file declares.**
+aws renders the envelope through its session, so there the profile's
+`ProfileNotFound` costs a 252 report its envelope (the rc is unchanged); that
+rendering detail is not reproduced.
 
 **A report the output codec cannot write replaces the run's code with 255.**
 `AWS_CLI_OUTPUT_ENCODING` re-encodes the stream each report goes out on (aws's
@@ -1665,7 +1584,7 @@ combined with either `--cli-error-format enhanced` or
 `_set_preferred_output_encoding` at every site that writes one), and
 reconfiguring an encoding resets the error handler to `strict`, so a character
 the codec lacks makes the write *raise* rather than be escaped. That is the
-second way into the bare form above: aws wraps the enveloped write alone, so
+way into the bare form: aws wraps the enveloped write alone, so
 it is dropped and the message rewritten unenveloped - and when that write
 raises too, the failure escapes the handler that was reporting and aws's
 entry-point chain reports *it* through the general handler instead. `main`'s
@@ -1675,8 +1594,8 @@ message rather than the 252 it had earned - the same inversion on both tools,
 measured, with the second report left unguarded exactly as aws leaves it. An
 *unknown* codec never gets that far: a gate rejects it up front at rc 255,
 from aws's own slot for the check - after the top-level args are bound and
-before `session-initialized`, so it beats the `cli_timestamp_format` gate of
-section 1.
+before `session-initialized`, so it beats every failure a command meets when
+it opens its session.
 
 **The exception rule for rm / cp / mv / sync (the transfer-family commands)**:
 aws-cli's transfer family (rm / cp / mv / sync) aggregates errors after the start
@@ -1780,12 +1699,8 @@ The key implementation points are:
 - The help choices / help text are a static mirror of aws-cli's static
   tables (the same idiom as the `cli.json` mirror of section 4). They are not taken
   dynamically from botocore's models.
-- The credential-chain gate (section 1) is the one startup step that
-  reaches the SDK ahead of the help token, and it is meant to do so only
-  in a run that then fails - which is not an informational exit: the
-  config scan applies botocore's own tests to the IMDS settings, in
-  botocore's order, without importing it, and a randomized comparison
-  against really building the chain holds the two together.
+- Nothing ahead of the help token reads the config files (section 1), so
+  the two exits stay SDK-free whatever the files hold.
 
 ## 8. Transfer-engine selection and the `[s3]` runtime config
 

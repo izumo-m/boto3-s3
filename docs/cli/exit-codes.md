@@ -94,8 +94,9 @@ needs). Not every such case lands here:
   as a usage error (252).
 
 Of the S3 Express refusals, then, only `ls`, `presign` and `website` land here.
-An unusable `cli_timestamp_format` in the profile lands here too, and
-it lands early: ahead of the command itself, a `help` page included
+An unusable `cli_timestamp_format` in the profile lands here too: every
+subcommand stops on it. `help` and `--version` do not read the config files,
+so they still work, where `aws` fails them as well
 ([`configuration.md`](./configuration.md)).
 
 Unresolved credentials and an unresolved region are reported with the same
@@ -130,14 +131,12 @@ number, or an unexpected internal error. `aws` documents 255 as a catch-all
 whose specific cases may narrow over time; treat it the same way and do not
 branch on it to identify a particular failure.
 
-A config file that cannot be parsed is 255 as well, and it outranks almost
-everything else: `~/.aws/config` (or `AWS_CONFIG_FILE`) and `~/.aws/credentials`
-(or `AWS_SHARED_CREDENTIALS_FILE`) are read before the command line is, so a
-broken one is reported instead of whatever else the command would have done —
-`help` and `--version` included. The one thing read earlier is `--profile` /
-`--debug`, so a malformed one of those (`--profile` with no value, `--debug=1`)
-is still the 252 you would get with a working config. `aws` behaves the same way
-on both counts.
+A config file that cannot be parsed is 255 as well — `~/.aws/config` (or
+`AWS_CONFIG_FILE`) or `~/.aws/credentials` (or `AWS_SHARED_CREDENTIALS_FILE`)
+— and so are an unusable `cli_binary_format` in the profile and an unusable
+instance-metadata setting (`AWS_METADATA_SERVICE_TIMEOUT=abc`). Every
+subcommand stops on them. `help` and `--version` do not read the config
+files, so they still work, where `aws` fails them with 255 too.
 
 ## 2. When more than one thing is wrong
 
@@ -166,7 +165,6 @@ The orderings worth knowing, because the answer is not the one you would guess:
 | `mb` / `rb` with both a bad path and a bad `--profile` | 255 | the profile error is detected before the path is validated |
 | a non-integer `--page-size`, `--expires-in` or `--progress-frequency`, with a bad path too | 255 | the number is parsed before the path is validated |
 | the same non-integer value, with an option the subcommand does not have too | 255 | option values are converted before the unknown option is reported; alone, the unknown option is 252 |
-| `help`, an unknown subcommand, or a usage error in a subcommand's own arguments, with an unusable instance-metadata setting (`AWS_METADATA_SERVICE_TIMEOUT=abc`) | 255 | the credential chain is set up, and its settings checked, once the global options are parsed and before any subcommand is looked at |
 | `cp --expected-size` with a non-integer | 1 when uploading a stream (0 under `--dryrun`), 0 otherwise | the value is read only on the streaming route, and never on a dry run |
 | `rb --force` whose object deletion fails | 255 | the bucket removal never runs |
 | a region set to an empty value, with a bad path or option pairing too | 255 without an endpoint URL; with one (`--endpoint-url` or the environment) the path or option check's own code, 252 or 1 | every subcommand builds its S3 client before it validates paths, and an empty region has no endpoint to derive; an explicit endpoint sidesteps the derivation and the build succeeds (a region merely *unset* builds fine either way, so those checks keep their own codes) |

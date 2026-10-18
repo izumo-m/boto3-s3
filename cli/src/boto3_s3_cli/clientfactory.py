@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 
 # These exception names do not themselves import the AWS SDK.
 from boto3_s3 import ConfigurationError, InvalidConfigError, InvalidValueError, ValidationError
-from boto3_s3_cli import checksumdefault, configfiles, s3errormsg, usage
+from boto3_s3_cli import checksumdefault, s3errormsg, usage
 from boto3_s3_cli.globalargs import PROFILE_ENV_VARS
 
 if TYPE_CHECKING:
@@ -74,30 +74,6 @@ def _pin_python_sigv4_signers() -> None:
     )
 
 
-def resolve_profile(args: argparse.Namespace) -> str | None:
-    """The profile the invocation's config reads apply to (aws-cli precedence).
-
-    ``--profile`` (truthy only) > ``configfiles.env_profile`` > ``None``
-    (the ``default`` profile). The ``--profile`` guard is aws-cli's truthy test
-    (its ``_handle_top_level_args`` binds the profile only ``if getattr(args,
-    'profile', False)``), so an empty ``--profile ""`` is ignored and the env
-    chain wins - matching aws, which then reaches the server (rc 254) rather
-    than raising ProfileNotFound. The env chain is instead present-wins, an
-    empty value included (``AWS_PROFILE=`` selects the empty profile ->
-    ProfileNotFound, like aws), so `aws s3` parity holds even when both env
-    vars are set. Only the CLI layer corrects this; the library (boto3.client
-    fallback) stays boto3/botocore-faithful and keeps stock order on purpose.
-
-    This answers "which profile's keys do I read" for the callers that parse
-    the config files themselves (the startup gates).
-    The session `_open_botocore_session` opens is *not* built from it - see
-    there for why only the flag may be bound.
-    """
-    if args.profile:
-        return args.profile
-    return configfiles.env_profile()
-
-
 def _open_botocore_session(args: argparse.Namespace) -> BotocoreSession:
     """Open a botocore session the way aws-cli's driver opens its own.
 
@@ -135,9 +111,10 @@ def _open_botocore_session(args: argparse.Namespace) -> BotocoreSession:
     the session default client config (`_default_client_config`) reach the same
     clients for the same reason.
 
-    Finally the temporary-credential providers get their on-disk cache, the
-    last thing aws does to a session before running a command
-    (`_inject_credential_cache`).
+    Finally the two output-format settings are checked
+    (`_reject_unknown_cli_formats`) and the temporary-credential providers get
+    their on-disk cache (`_inject_credential_cache`), the last things aws does
+    to a session before running a command.
     """
     import botocore.session
 
@@ -158,8 +135,58 @@ def _open_botocore_session(args: argparse.Namespace) -> BotocoreSession:
     _drop_tls_key_log()
     session.set_default_client_config(_default_client_config(args))
     _check_every_client(session)
+    _reject_unknown_cli_formats(session, args)
     _inject_credential_cache(session)
     return session
+
+
+# The values aws's `cli_timestamp_format` and `cli_binary_format`
+# customizations accept; the comparison is exact and case-sensitive.
+_TIMESTAMP_FORMATS = ("wire", "iso8601")
+_BINARY_FORMATS = ("base64", "raw-in-base64-out")
+
+
+def _reject_unknown_cli_formats(session: BotocoreSession, args: argparse.Namespace) -> None:
+    """Stop on a ``cli_timestamp_format`` / ``cli_binary_format`` aws refuses.
+
+    aws checks both settings in the selected profile when its session starts,
+    so a value it does not accept stops every command: rc 253 for the
+    timestamp format, rc 255 for the binary format (design/cli.md section 6).
+    This CLI uses neither value for anything else - its listings print the
+    same line under every timestamp format, and no option here takes binary
+    data - so the check is all that is left of them. An empty value is a
+    value and is refused. An explicit ``--cli-binary-format`` replaces the
+    config value, and argparse has already held it to the two choices.
+
+    The values are read from botocore's scoped config. A profile no file
+    declares makes that read raise ``ProfileNotFound``, which aws's handlers
+    catch, falling back to their defaults; the check stands down the same way
+    and leaves the profile to the session's other reads, which report it. A
+    config file botocore cannot parse fails here with botocore's own error,
+    which the callers report at rc 255.
+    """
+    from botocore.exceptions import ProfileNotFound
+
+    try:
+        scoped = session.get_scoped_config()
+    except ProfileNotFound:
+        return
+    timestamp_format = scoped.get("cli_timestamp_format")
+    if timestamp_format is not None and timestamp_format not in _TIMESTAMP_FORMATS:
+        raise ConfigurationError(
+            f"Unknown cli_timestamp_format value: {timestamp_format}, "
+            'valid values are "wire" or "iso8601"'
+        )
+    binary_format = scoped.get("cli_binary_format")
+    if (
+        args.cli_binary_format is None
+        and binary_format is not None
+        and binary_format not in _BINARY_FORMATS
+    ):
+        raise InvalidConfigError(
+            f"Unknown cli_binary_format value: {binary_format}, "
+            'valid values are "base64" or "raw-in-base64-out"'
+        )
 
 
 def _check_every_client(session: BotocoreSession) -> None:
@@ -558,26 +585,6 @@ def validate_profile(args: argparse.Namespace) -> None:
         _open_botocore_session(args).get_scoped_config()
     except BotoCoreError as exc:
         raise InvalidConfigError(str(exc)) from exc
-
-
-def build_credential_chain(args: argparse.Namespace) -> None:
-    """Build botocore's credential provider chain, at aws's startup slot.
-
-    aws reaches for the chain while it is still starting up - the
-    ``session-initialized`` handler that installs the credential cache - so
-    whatever botocore raises while building it (a non-integer IMDS timeout or
-    attempt count, an unknown IMDS endpoint mode, a malformed IMDS endpoint)
-    stops the run there, ahead of the help token and every command layer. The
-    dispatcher calls this at that slot when its config scan says the build
-    could fail (``ConfigScan.credential_chain_suspect``).
-
-    Opening a session the way the run's own will be opened is what builds it
-    (`_inject_credential_cache`), with the same ``ProfileNotFound`` swallow
-    aws applies; everything else propagates raw, for the dispatcher to report
-    through aws's general handler. The session is discarded - a run that gets
-    past this opens its own.
-    """
-    _open_botocore_session(args)
 
 
 def build_session(args: argparse.Namespace) -> Boto3Session:

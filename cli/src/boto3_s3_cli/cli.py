@@ -18,7 +18,7 @@ from boto3_s3 import (
     InvalidValueError,
     ValidationError,
 )
-from boto3_s3_cli import configfiles, globalargs, usage
+from boto3_s3_cli import globalargs, usage
 from boto3_s3_cli.commands.base import Command, Context, reject_unknown_options
 
 if TYPE_CHECKING:
@@ -126,25 +126,6 @@ _TOO_FEW_ARGUMENTS = (
 )
 
 
-# This run's snapshot of aws's config files, and whether an rc-252 report can
-# still carry the enhanced envelope. aws renders that envelope through its
-# session - the handler asks it for `cli_error_format` - so a session bound to
-# a profile no config file declares raises `ProfileNotFound` inside the
-# renderer, which swallows the failure and writes the bare report instead; the
-# rc is decided separately and stays 252. `_main` takes the snapshot once (like
-# the session caching `full_config`) and resets the flag, `_dispatch` re-decides
-# it at the two points where aws's session learns the profile. `_main` is the
-# only route into `_dispatch`, so the snapshot is never consulted stale.
-_config_scan = configfiles.ConfigScan(None, {})
-_enhanced_envelope = True
-
-# aws's report for a `cli_timestamp_format` its timestamp-format customization
-# does not accept, verbatim (its ConfigurationError; the code the envelope
-# names is its ConfigurationErrorHandler's).
-_UNKNOWN_TIMESTAMP_FORMAT = (
-    'Unknown cli_timestamp_format value: {}, valid values are "wire" or "iso8601"'
-)
-
 # aws's codec override for the streams it reports errors on, and the
 # interpreter variable it still honors as a fallback (its compat.py).
 _OUTPUT_ENCODING_ENV_VAR = "AWS_CLI_OUTPUT_ENCODING"
@@ -169,10 +150,11 @@ def _unresolved_config_report(exc: BaseException) -> tuple[str, str] | None:
     this CLI's own (an absent awscrt, an SDK floor shortfall), aws cannot reach
     them, and they carry no such cause - so they stay bare.
 
-    aws's other reachable rc-253 handler, `Configuration`, claims no exception
+    aws's other reachable rc-253 handler, `Configuration`, has no counterpart
     here: its one failure on this surface (an unknown `cli_timestamp_format`)
-    is a pre-dispatch gate that names its code directly. `Pager` belongs to
-    the output pager, which this CLI does not implement.
+    is this CLI's own `ConfigurationError`, raised where the session is opened
+    (`clientfactory`), so it stays bare as well. `Pager` belongs to the output
+    pager, which this CLI does not implement.
     """
     # Imported here, on a path where credential / region resolution has already
     # loaded the SDK, so the informational exits stay SDK-free (design/imports.md).
@@ -222,19 +204,17 @@ def _set_preferred_output_encoding(stream: TextIO) -> None:
             reconfigure(encoding=encoding)
 
 
-def _write_error(message: object, *, rc: int | None = None, code: str | None = None) -> None:
+def _write_error(message: object, *, rc: int | None = None) -> None:
     """Write one CLI error, adding the enhanced envelope required by `rc`.
 
     aws renders every enveloped report through one formatter, so the code it
     names comes from whichever handler claimed the exception: `ParamValidation`
     for the whole rc-252 family, and - for the two rc-253 failures aws reaches
     through a botocore exception on the surface implemented here - one of the
-    codes `_unresolved_config_report` supplies. A caller that already knows
-    which handler aws would use passes `code` itself, for a failure this CLI
-    settles without an exception (the `cli_timestamp_format` gate). The rcs
-    below envelope nothing: an rc-254 `ClientError` already carries `An error
-    occurred (<Code>) when calling ...` in its own text, and aws's general
-    rc-255 handler formats nothing.
+    codes `_unresolved_config_report` supplies. The other rcs envelope
+    nothing: an rc-254 `ClientError` already carries `An error occurred
+    (<Code>) when calling ...` in its own text, and aws's general rc-255
+    handler formats nothing.
 
     The three steps below are aws's own sequence, and their order is
     observable. Its handler builds the enveloped message first and hands the
@@ -258,34 +238,25 @@ def _write_error(message: object, *, rc: int | None = None, code: str | None = N
     enveloped or not, exactly as aws's does.
     """
     detail = usage.exception_text(message) if isinstance(message, BaseException) else str(message)
-    if code is None:
-        if rc == _PARAM_VALIDATION_ERROR_RC:
-            code = "ParamValidation"
-        elif rc == _CONFIGURATION_ERROR_RC and isinstance(message, BaseException):
-            report = _unresolved_config_report(message)
-            if report is not None:
-                code, detail = report
+    code: str | None = None
+    if rc == _PARAM_VALIDATION_ERROR_RC:
+        code = "ParamValidation"
+    elif rc == _CONFIGURATION_ERROR_RC and isinstance(message, BaseException):
+        report = _unresolved_config_report(message)
+        if report is not None:
+            code, detail = report
     _set_preferred_output_encoding(sys.stderr)
-    # The degradation is the renderer's, so it costs any code its envelope
-    # while leaving the message the handler built - aws's fallback writes the
-    # extracted `Message`, hints included. Only the rc-252 family can be
-    # observed degraded: an undeclared profile makes botocore raise
-    # `ProfileNotFound` (rc 255) before credentials or a region are ever
-    # resolved, so no rc-253 report co-occurs with it (measured) - the
-    # `Configuration` gate reads the same undeclared profile and stands down
-    # for the same reason.
-    if code is not None and _enhanced_envelope:
+    if code is not None:
         try:
             _write_report(f"An error occurred ({code}): {detail}")
             return
         except Exception:
-            # The other way into the degraded form: aws's renderer wraps the
-            # whole enveloped write in a `try`, so a codec that cannot
-            # represent the report drops it there and the bare message is
-            # written instead - unenveloped, and only then allowed to fail
-            # (measured: the position the codec error names is the bare
-            # message's, and rc 252 becomes aws's 255 through that second
-            # failure).
+            # aws's renderer wraps the whole enveloped write in a `try`, so a
+            # codec that cannot represent the report drops it there and the
+            # bare message is written instead - unenveloped, and only then
+            # allowed to fail (measured: the position the codec error names
+            # is the bare message's, and rc 252 becomes aws's 255 through
+            # that second failure).
             pass
     _write_report(detail)
 
@@ -823,39 +794,8 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
         return rc
 
 
-def _build_driver() -> int | None:
-    """aws's `create_clidriver`, as far as it can fail: the config read.
-
-    aws reads the whole merged config while it is still constructing the
-    driver, so a file that is not valid INI settles the run here - ahead of
-    --version, the help token and every parse
-    below (all measured), and with botocore's own wording through aws's
-    general handler (255). Only the preliminary scan outranks it. The
-    `[plugins]` section aws then loads is not read here
-    (docs/cli/aws-differences.md).
-
-    Returns the rc of the report it wrote, or None to go on.
-    """
-    global _config_scan, _enhanced_envelope
-    # aws's entry point reports these through a chain built without a
-    # session, so the enhanced envelope applies.
-    _enhanced_envelope = True
-    _config_scan = configfiles.scan()
-    if _config_scan.unparseable is not None:
-        _write_error(
-            f"Unable to parse config file: {_config_scan.unparseable}", rc=_GENERAL_ERROR_RC
-        )
-        return _GENERAL_ERROR_RC
-    return None
-
-
 def _main(argv: list[str] | None, ctx: Context | None) -> int:
     """The body of `main` (split out so its Ctrl-C backstop wraps everything)."""
-    global _enhanced_envelope
-    # Nothing has built a session yet, so every report below the preliminary
-    # scan is rendered the enhanced way (aws's entry-point handler chain is
-    # constructed without one).
-    _enhanced_envelope = True
     if ctx is None:
         ctx = Context()
     raw = list(sys.argv[1:] if argv is None else argv)
@@ -868,9 +808,6 @@ def _main(argv: list[str] | None, ctx: Context | None) -> int:
         _build_first_pass_parser().parse_known_args(raw)
     except SystemExit:
         return _PARAM_VALIDATION_ERROR_RC
-    rc = _build_driver()
-    if rc is not None:
-        return rc
     return _dispatch(raw, ctx)
 
 
@@ -890,17 +827,9 @@ def _dispatch(argv: list[str], ctx: Context) -> int:
     subcommand is determined the SDK may load - the aws-clidriver-shaped lazy
     command table.
     """
-    global _enhanced_envelope
-    # aws's CLIDriver.main: from here down its session-backed handler chain does
-    # the rendering, and that session already read the profile env vars while it
-    # was being constructed. So a profile named there and declared nowhere costs
-    # every report below its envelope - the top-level parse and the resolutions
-    # right after it included, which a bad --profile (bound further down) leaves
-    # alone.
-    _enhanced_envelope = _config_scan.declares(configfiles.env_profile())
     # aws reads `~/.aws/cli/alias` here; this CLI does not
     # (docs/cli/aws-differences.md).
-
+    #
     # aws-shaped top-level pass: aws parses the globals over the full argv
     # (MainArgParser.parse_known_args), REMOVES them, and resolves them - the
     # --query compile (252), the --endpoint-url scheme check (252), then the
@@ -927,10 +856,10 @@ def _dispatch(argv: list[str], ctx: Context) -> int:
     # --output bad` blames --output, `s3 ls -h --output bad` blames --output
     # rather than the unknown -h, `s3 bogus --version` prints the version).
     # Both exits end the run right here, written by the parser itself: the
-    # report through `_write_error` like every other one (so the codec, the
-    # envelope and its degraded forms apply to it unchanged), the version line
-    # by its action. A zero exit can only be --version - the globals parser
-    # declares no help option.
+    # report through `_write_error` like every other one (so the codec and
+    # the envelope apply to it unchanged), the version line by its action. A
+    # zero exit can only be --version - the globals parser declares no help
+    # option.
     try:
         head, remainder = _build_globals_parser().parse_known_args(argv)
     except SystemExit as exc:
@@ -958,21 +887,12 @@ def _dispatch(argv: list[str], ctx: Context) -> int:
         rc = _exit_code_for_unexpected(exc)
         _write_error(exc, rc=rc)
         return rc
-    # aws's _handle_top_level_args binds --profile onto the session here, after
-    # emitting the event the three resolutions above hang off. The ordering is
-    # observable: a bad --profile leaves those errors and the top-level parse
-    # enhanced and only degrades the command layers below, where a bad
-    # AWS_PROFILE degrades all of them (measured). The truthy guard is aws's, so
-    # --profile "" leaves the env chain in force, like `resolve_profile`.
-    if head.profile:
-        _enhanced_envelope = _config_scan.declares(head.profile)
     # aws validates AWS_CLI_OUTPUT_ENCODING right here: after handling the
     # top-level args and before `session-initialized` (clidriver.main calls
     # compat.validate_preferred_output_encoding between the two), so an
-    # unknown codec beats both config gates below, the help token, an invalid
-    # subcommand and every leaf error, while the three resolutions above, an
-    # unparseable config file and a parse-time --version still win (all
-    # measured). The validation is separate from the application on purpose,
+    # unknown codec beats the help token, an invalid subcommand and every leaf
+    # error, while the three resolutions above and a parse-time --version
+    # still win (all measured). The validation is separate from the application on purpose,
     # aws's own split: `_set_preferred_output_encoding` swallows an unknown
     # codec so a report can still be written, and this gate is what makes one
     # impossible to reach with the codec still unknown.
@@ -986,68 +906,6 @@ def _dispatch(argv: list[str], ctx: Context) -> int:
                 rc=_GENERAL_ERROR_RC,
             )
             return _GENERAL_ERROR_RC
-    # aws emits `session-initialized` right after binding --profile, and the
-    # first handler on it validates `cli_timestamp_format` against the now-bound
-    # profile's scoped config. So an unknown value settles the run here: after
-    # the three resolutions above (a bad --endpoint-url / --query is still their
-    # 252, a bad --cli-read-timeout still its 255) and ahead of everything the
-    # command layers decide - the help token, an invalid subcommand, unknown
-    # options, missing arguments (all measured). `--version` and the
-    # preliminary scan escape it by exiting further up.
-    invalid_format = _config_scan.invalid_timestamp_format(clientfactory.resolve_profile(head))
-    if invalid_format is not None:
-        _write_error(
-            _UNKNOWN_TIMESTAMP_FORMAT.format(invalid_format),
-            rc=_CONFIGURATION_ERROR_RC,
-            code="Configuration",
-        )
-        return _CONFIGURATION_ERROR_RC
-    # aws's next `session-initialized` handler resolves `cli_binary_format`
-    # (its binary-format customization), so a bad value in the bound profile
-    # settles the run here - after the timestamp gate above (measured: with
-    # both broken, the timestamp report wins) and ahead of the help token and
-    # every command layer. An explicit --cli-binary-format never consults the
-    # config (argparse restricted it to the valid choices already), and the
-    # bad value renders as aws's bare KeyError - its repr through the general
-    # rc-255 handler, no envelope.
-    if head.cli_binary_format is None:
-        invalid_binary = _config_scan.invalid_binary_format(clientfactory.resolve_profile(head))
-        if invalid_binary is not None:
-            # An indented block parses to a map, which aws's table lookup
-            # rejects as an unhashable key - its official build's (Python
-            # 3.14) TypeError text, pinned across hosts like the argparse
-            # corners; a string renders as the KeyError's repr.
-            message = (
-                "cannot use 'dict' as a dict key (unhashable type: 'dict')"
-                if isinstance(invalid_binary, dict)
-                else f"{invalid_binary!r}"
-            )
-            _write_error(message, rc=_GENERAL_ERROR_RC)
-            return _GENERAL_ERROR_RC
-    # The next `session-initialized` handler that can stop a run installs the
-    # credential cache, and reaching for the provider chain there makes
-    # botocore build it - which is where the IMDS settings are converted and
-    # validated (a non-integer `metadata_service_timeout` or
-    # `metadata_service_num_attempts`, an unknown
-    # `ec2_metadata_service_endpoint_mode`, a malformed
-    # `ec2_metadata_service_endpoint`; environment variable and config key
-    # alike). A bad one therefore settles the run here, at aws's general rc
-    # 255 with botocore's own text: behind the two gates above and ahead of
-    # the help token and every command layer (measured:
-    # `AWS_METADATA_SERVICE_TIMEOUT=abc aws s3 help` is rc 255). The scan
-    # says whether the build would fail, by botocore's own tests; the failure
-    # is botocore's own, raised by building the chain for real, so every
-    # configuration that passes keeps the SDK unimported on the informational
-    # exits.
-    if _config_scan.credential_chain_suspect(clientfactory.resolve_profile(head)):
-        try:
-            clientfactory.build_credential_chain(head)
-        except AssertionError:
-            raise
-        except Exception as exc:
-            rc = _exit_code_for_unexpected(exc)
-            _write_error(exc, rc=rc)
-            return rc
     return _resolve_command(tokens, head, ctx)
 
 

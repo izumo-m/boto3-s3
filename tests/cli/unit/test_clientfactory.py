@@ -834,28 +834,6 @@ class TestBuildClient:
             clientfactory.build_client(_parse(["--profile", "boto3_s3_from_flag"]))
         assert "boto3_s3_from_flag" in str(excinfo.value)
 
-    def test_empty_profile_flag_falls_through_to_env_chain(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # aws's _handle_top_level_args binds --profile only under a truthy guard,
-        # so --profile "" is ignored and the env chain wins (aws then reaches the
-        # server, rc 254, not ProfileNotFound). resolve_profile matches: the empty
-        # flag falls through to AWS_PROFILE.
-        monkeypatch.setenv("AWS_PROFILE", "boto3_s3_from_aws_profile")
-        assert clientfactory.resolve_profile(_parse(["--profile", ""])) == (
-            "boto3_s3_from_aws_profile"
-        )
-
-    def test_empty_profile_flag_with_no_env_is_the_default_profile(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # With the flag empty and no profile env, resolve_profile yields None so
-        # boto3 uses the default profile - aws reaches the server rather than
-        # failing on an empty profile name.
-        monkeypatch.delenv("AWS_PROFILE", raising=False)
-        monkeypatch.delenv("AWS_DEFAULT_PROFILE", raising=False)
-        assert clientfactory.resolve_profile(_parse(["--profile", ""])) is None
-
     def test_partial_credentials_map_to_255_not_253(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # aws has no handler for PartialCredentialsError -> GeneralExceptionHandler
         # (255), unlike NoCredentials/NoRegion (253). build_client maps it to

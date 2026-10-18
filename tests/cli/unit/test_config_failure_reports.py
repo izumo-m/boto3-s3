@@ -1,27 +1,23 @@
-"""What a broken profile / config file does to the error reports (design/cli.md section 6).
+"""What the config files do to a run (design/cli.md section 6).
 
-Three aws behaviors that only show up once the config files are involved:
+botocore reads aws's config and credentials files when a command opens its
+session, and that read is where a broken setting stops the run:
 
-- a *named* profile no file declares makes botocore's scoped-config read
-  raise inside aws's error renderer, which falls back to the bare report -
-  the `ParamValidation` envelope disappears while the exit code stays 252;
-- a file that is not valid INI replaces the run's outcome entirely with
-  botocore's `Unable to parse config file` at rc 255;
-- an unknown `cli_timestamp_format` in the selected profile replaces it with
-  aws's `Configuration` report at rc 253.
+- a file that is not valid INI fails the command with botocore's
+  `Unable to parse config file` at rc 255;
+- an unknown `cli_timestamp_format` in the selected profile fails it at
+  rc 253, an unknown `cli_binary_format` at rc 255;
+- an IMDS setting botocore refuses while it builds the credential chain fails
+  it at rc 255, with botocore's own text.
 
-Every expectation here was measured against the pinned aws-cli under the
-`aws [options] s3 <subcommand>` -> `boto3-s3 [options] <subcommand>` mapping
-(the leading blank line aws prints before each report, and the program name,
-are class-1 rules of the parity normalization - design/testing.md section 9).
+`help` and `--version` open no session, so none of these reach them. The rest
+of the file pins how `AWS_CLI_OUTPUT_ENCODING`, `--cli-error-format` and
+`cli_history` act on the reports.
 """
 
 from __future__ import annotations
 
 import io
-import os
-import random
-import re
 import sys
 from pathlib import Path
 from typing import ClassVar
@@ -38,18 +34,13 @@ _USAGE_BLOCK = (
     "  boto3-s3 <subcommand> help\n"
 )
 _ENVELOPE = "An error occurred (ParamValidation): "
-# The invalid-subcommand report in both renderings - the workhorse contrast of
-# this file. Two blank lines: the message ends with the newline `_check_value`
-# adds, and the usage block is joined on after another.
+# The invalid-subcommand report. Two blank lines: the message ends with the
+# newline `_check_value` adds, and the usage block is joined on after another.
 _INVALID_CHOICE = f"argument subcommand: Found invalid choice 'bogus'\n\n\n{_USAGE_BLOCK}"
-_DEGRADED_INVALID_CHOICE = f"boto3-s3: [ERROR]: {_INVALID_CHOICE}"
 _ENVELOPED_INVALID_CHOICE = f"boto3-s3: [ERROR]: {_ENVELOPE}{_INVALID_CHOICE}"
 
 # The three failures the top-level pass settles (its own parse, then the
-# `--query` and `--endpoint-url` resolutions), as argv + report body. The
-# ordering claim of section 6 is that a bad `--profile` leaves all three
-# enveloped while a bad `AWS_PROFILE` degrades all three, so both sides are
-# parametrized over this one list.
+# `--query` and `--endpoint-url` resolutions), as argv + report body.
 _RESOLUTION_ERRORS = [
     (
         ["ls", "--output", "bad"],
@@ -66,12 +57,24 @@ _RESOLUTION_ERRORS = [
     ),
 ]
 
+# Commands that open a session: two that succeed without a server (so a
+# setting that is accepted shows as rc 0) and a listing.
+_SESSION_COMMANDS = [
+    ["presign", "s3://bucket/key"],
+    ["rm", "s3://bucket/key", "--dryrun"],
+    ["ls", "s3://bucket/p/"],
+]
+_SESSION_COMMAND_IDS = ["presign", "rm-dryrun", "ls"]
+# The one used where any session-opening command will do.
+_PRESIGN = ["presign", "s3://bucket/key"]
 
-# aws's report for a `cli_timestamp_format` its timestamp-format customization
-# rejects, with the value it echoes back left to `format`.
 _TIMESTAMP_REPORT = (
-    "boto3-s3: [ERROR]: An error occurred (Configuration): Unknown cli_timestamp_format "
-    'value: {}, valid values are "wire" or "iso8601"\n'
+    "boto3-s3: [ERROR]: Unknown cli_timestamp_format value: {}, "
+    'valid values are "wire" or "iso8601"\n'
+)
+_BINARY_REPORT = (
+    "boto3-s3: [ERROR]: Unknown cli_binary_format value: {}, "
+    'valid values are "base64" or "raw-in-base64-out"\n'
 )
 
 
@@ -91,300 +94,15 @@ def config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return path
 
 
-class TestUndeclaredProfileDropsTheEnvelope:
-    """A `--profile` / env profile no file declares degrades the 252 reports."""
-
-    def test_invalid_subcommand_loses_the_envelope(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        assert cli.main(["--profile", "nosuch", "bogus"]) == 252
-        assert capsys.readouterr().err == _DEGRADED_INVALID_CHOICE
-
-    def test_spelling_suggestions_survive_the_degraded_report(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # Only the envelope goes; the message and the usage block are the
-        # normal ones, difflib's suggestion included.
-        assert cli.main(["--profile", "nosuch", "lss"]) == 252
-        assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: argument subcommand: Found invalid choice 'lss'\n"
-            "\nMaybe you meant:\n"
-            "\n  * ls\n"
-            f"\n{_USAGE_BLOCK}"
-        )
-
-    def test_unknown_options_loses_the_envelope(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        assert cli.main(["--profile", "nosuch", "cp", "a", "b", "c"]) == 252
-        assert capsys.readouterr().err == "boto3-s3: [ERROR]: Unknown options: c\n"
-
-    def test_missing_subcommand_renders_two_error_records(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # aws's missing-subcommand message carries its own `[ERROR]` line
-        # inside it, so dropping the envelope leaves two prefixed lines.
-        assert cli.main(["--profile", "nosuch"]) == 252
-        assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: usage: boto3-s3 [options] <subcommand> [parameters]\n"
-            "boto3-s3: [ERROR]: too few arguments\n"
-        )
-
-    def test_leaf_parse_error_loses_the_envelope(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        assert cli.main(["--profile", "nosuch", "ls", "--page-size"]) == 252
-        assert capsys.readouterr().err == (
-            f"boto3-s3: [ERROR]: argument --page-size: expected one argument\n\n{_USAGE_BLOCK}"
-        )
-
-    def test_profile_after_the_subcommand_degrades_too(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # The globals pass consumes --profile from either side, and so does
-        # aws's main parser, so the position makes no difference.
-        assert cli.main(["cp", "a", "b", "c", "--profile", "nosuch"]) == 252
-        assert capsys.readouterr().err == "boto3-s3: [ERROR]: Unknown options: c\n"
-
-    @pytest.mark.parametrize("env", ["AWS_PROFILE", "AWS_DEFAULT_PROFILE"])
-    def test_the_env_vars_degrade_like_the_flag(
-        self,
-        config: Path,
-        env: str,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        monkeypatch.setenv(env, "nosuch")
-        assert cli.main(["bogus"]) == 252
-        assert capsys.readouterr().err == _DEGRADED_INVALID_CHOICE
-
-    def test_an_empty_env_profile_names_the_empty_profile(
-        self,
-        config: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        # The env read is present-wins, so `AWS_PROFILE=` selects a profile
-        # nothing declares (measured: aws degrades here too).
-        monkeypatch.setenv("AWS_PROFILE", "")
-        assert cli.main(["bogus"]) == 252
-        assert capsys.readouterr().err == _DEGRADED_INVALID_CHOICE
-
-    def test_an_explicit_default_with_no_config_file_degrades(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # botocore only skips the existence check when *nothing* named a
-        # profile; `--profile default` is a name like any other.
-        assert cli.main(["--profile", "default", "bogus"]) == 252
-        assert capsys.readouterr().err == _DEGRADED_INVALID_CHOICE
-
-    def test_a_nonexistent_config_file_alone_changes_nothing(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        assert not config.exists()
-        assert cli.main(["bogus"]) == 252
-        assert capsys.readouterr().err == _ENVELOPED_INVALID_CHOICE
-
-    def test_an_undeclared_profile_never_reaches_an_rc_253_report(
-        self,
-        config: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        # The degradation is the renderer's, so on aws it would cost the rc-253
-        # reports their envelope too - but it cannot be observed there: the
-        # undeclared profile makes botocore raise `ProfileNotFound` while the
-        # session reads its scoped config, long before credentials or a region
-        # are resolved, so the run is the bare 255 below and never the 253
-        # (measured: no credentials at all plus `AWS_PROFILE=nosuch` reports
-        # this, not `Unable to locate credentials`).
-        monkeypatch.setenv("AWS_PROFILE", "nosuch")
-        assert cli.main(["ls", "s3://bucket/p/"]) == 255
-        assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: The config profile (nosuch) could not be found\n"
-        )
-
-    def test_the_degradation_does_not_leak_into_the_next_run(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # The rendering decision lives in module state (aws keeps it on its
-        # session, of which a process gets one). Two in-process runs must not
-        # share it. The second argv fails in the preliminary scan, upstream of
-        # where the dispatch re-decides the rendering, so only `_main`'s reset
-        # can restore the envelope there.
-        assert cli.main(["--profile", "nosuch", "bogus"]) == 252
-        assert capsys.readouterr().err == _DEGRADED_INVALID_CHOICE
-        assert cli.main(["--profile"]) == 252
-        assert capsys.readouterr().err == (
-            f"boto3-s3: [ERROR]: {_ENVELOPE}argument --profile: expected one argument\n"
-            "\nusage: boto3-s3 [--profile PROFILE] [--debug]\n"
-        )
-        assert cli.main(["bogus"]) == 252
-        assert capsys.readouterr().err == _ENVELOPED_INVALID_CHOICE
-
-
-class TestDeclaredProfilesKeepTheEnvelope:
-    """The envelope only goes when the profile really is undeclared."""
-
-    @pytest.mark.parametrize(
-        "argv",
-        [["--profile", "good", "bogus"], ["--profile", "two words", "bogus"]],
-        ids=["plain", "shell-quoted-section"],
-    )
-    def test_a_declared_profile_keeps_it(
-        self, config: Path, argv: list[str], capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        config.write_text('[profile good]\nregion = us-east-1\n[profile "two words"]\nregion = x\n')
-        assert cli.main(argv) == 252
-        assert capsys.readouterr().err == _ENVELOPED_INVALID_CHOICE
-
-    def test_a_credentials_only_profile_counts_as_declared(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # botocore merges the credentials file's section names into the
-        # profile map purely so this lookup succeeds.
-        (config.parent / "credentials").write_text("[credsonly]\naws_access_key_id = a\n")
-        assert cli.main(["--profile", "credsonly", "bogus"]) == 252
-        assert capsys.readouterr().err == _ENVELOPED_INVALID_CHOICE
-
-    def test_a_profile_prefixed_section_is_not_a_profile(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # `[profilefoo]` is plain configuration, not `[profile foo]`.
-        config.write_text("[profilefoo]\nregion = us-east-1\n")
-        assert cli.main(["--profile", "foo", "bogus"]) == 252
-        assert capsys.readouterr().err == _DEGRADED_INVALID_CHOICE
-
-    def test_the_flag_overrides_a_bad_env_profile(
-        self,
-        config: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        config.write_text("[profile good]\nregion = us-east-1\n")
-        monkeypatch.setenv("AWS_PROFILE", "nosuch")
-        assert cli.main(["--profile", "good", "bogus"]) == 252
-        assert capsys.readouterr().err == _ENVELOPED_INVALID_CHOICE
-
-    def test_an_empty_flag_leaves_the_env_chain_in_force(
-        self,
-        config: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        # aws binds --profile under a truthy guard, so `--profile ""` is
-        # ignored and the (declared) env profile still decides.
-        config.write_text("[profile good]\nregion = us-east-1\n")
-        monkeypatch.setenv("AWS_PROFILE", "good")
-        assert cli.main(["--profile", "", "bogus"]) == 252
-        assert capsys.readouterr().err == _ENVELOPED_INVALID_CHOICE
-
-    def test_the_config_path_expands_environment_variables(
-        self,
-        config: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        # botocore expands `$VAR` in the path before `~`, so a config named
-        # that way is found - here proved by the profile it declares being
-        # seen (measured on aws, which reads the same file).
-        config.write_text("[profile good]\nregion = us-east-1\n")
-        monkeypatch.setenv("BOTO3_S3_TEST_CONFIG_DIR", str(config.parent))
-        monkeypatch.setenv("AWS_CONFIG_FILE", "$BOTO3_S3_TEST_CONFIG_DIR/config")
-        # Left unexpanded the path would name no file, the profile would look
-        # undeclared, and the report would come out degraded.
-        assert cli.main(["--profile", "good", "bogus"]) == 252
-        assert capsys.readouterr().err == _ENVELOPED_INVALID_CHOICE
-
-
-class TestWhatABadProfileCannotReach:
-    """The stages that run before aws's session learns the profile."""
-
-    def test_the_preliminary_scan_keeps_the_envelope(
-        self, config: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # aws handles this one with the entry-point chain, built without a
-        # session, so no config read can reach it.
-        monkeypatch.setenv("AWS_PROFILE", "nosuch")
-        assert cli.main(["--profile"]) == 252
-        assert capsys.readouterr().err == (
-            f"boto3-s3: [ERROR]: {_ENVELOPE}argument --profile: expected one argument\n"
-            "\nusage: boto3-s3 [--profile PROFILE] [--debug]\n"
-        )
-
-    @pytest.mark.parametrize(
-        ("argv", "message"), _RESOLUTION_ERRORS, ids=["globals-parse", "query", "endpoint"]
-    )
-    def test_the_flag_binds_after_the_top_level_pass(
-        self, config: Path, argv: list[str], message: str, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # aws's `_handle_top_level_args` binds --profile after the main parse
-        # and after emitting the event those resolutions hang off, so all
-        # three stay enhanced under a bad --profile (measured).
-        assert cli.main(["--profile", "nosuch", *argv]) == 252
-        assert capsys.readouterr().err == f"boto3-s3: [ERROR]: {_ENVELOPE}{message}"
-
-    @pytest.mark.parametrize(
-        ("argv", "message"), _RESOLUTION_ERRORS, ids=["globals-parse", "query", "endpoint"]
-    )
-    def test_an_env_profile_reaches_them_all(
-        self,
-        config: Path,
-        argv: list[str],
-        message: str,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        # The other half of the same ordering: botocore reads the env vars
-        # while the session is being built, so nothing inside the driver
-        # escapes the degradation - the very same three reports, unenveloped.
-        monkeypatch.setenv("AWS_PROFILE", "nosuch")
-        assert cli.main(argv) == 252
-        assert capsys.readouterr().err == f"boto3-s3: [ERROR]: {message}"
-
-
 class TestUnparseableConfigFile:
-    """An invalid INI file replaces the run's outcome with rc 255."""
+    """An invalid INI file fails every command at rc 255, with botocore's report."""
 
-    @pytest.mark.parametrize(
-        "argv",
-        [["bogus"], ["cp", "a", "b", "c"], [], ["--version"], ["help"], ["ls", "s3://b/"]],
-        ids=["invalid-choice", "unknown-options", "bare", "version", "help", "valid-command"],
-    )
-    def test_it_preempts_every_outcome(
+    @pytest.mark.parametrize("argv", _SESSION_COMMANDS, ids=_SESSION_COMMAND_IDS)
+    def test_it_fails_every_command(
         self, config: Path, argv: list[str], capsys: pytest.CaptureFixture[str]
     ) -> None:
         config.write_text("[[[broken\n")
         assert cli.main(argv) == 255
-        assert capsys.readouterr().err == (
-            f"boto3-s3: [ERROR]: Unable to parse config file: {config}\n"
-        )
-
-    def test_the_preliminary_scan_still_outranks_it(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # aws reads the config while constructing the driver, which its
-        # first-pass --profile / --debug parse precedes.
-        config.write_text("[[[broken\n")
-        assert cli.main(["--profile"]) == 252
-        assert "Unable to parse config file" not in capsys.readouterr().err
-
-    def test_it_beats_an_undeclared_profile(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        config.write_text("[[[broken\n")
-        assert cli.main(["--profile", "nosuch", "bogus"]) == 255
-        assert capsys.readouterr().err == (
-            f"boto3-s3: [ERROR]: Unable to parse config file: {config}\n"
-        )
-
-    def test_an_unsplittable_nested_block_is_a_parse_error(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # botocore parses an indented block one level deep and reports a line
-        # with no `=` as a config parse failure.
-        config.write_text("[default]\ns3 =\n   no_equals_here\n")
-        assert cli.main(["bogus"]) == 255
         assert capsys.readouterr().err == (
             f"boto3-s3: [ERROR]: Unable to parse config file: {config}\n"
         )
@@ -394,130 +112,53 @@ class TestUnparseableConfigFile:
     ) -> None:
         credentials = config.parent / "credentials"
         credentials.write_text("[[[broken\n")
-        assert cli.main(["bogus"]) == 255
+        assert cli.main(_PRESIGN) == 255
         assert capsys.readouterr().err == (
             f"boto3-s3: [ERROR]: Unable to parse config file: {credentials}\n"
         )
 
-    def test_the_config_file_is_reported_first_when_both_are_broken(
+    def test_an_unsplittable_nested_block_is_a_parse_error(
         self, config: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        config.write_text("[[[broken\n")
-        (config.parent / "credentials").write_text("[[[broken\n")
-        assert cli.main(["bogus"]) == 255
+        # botocore parses an indented block one level deep and reports a line
+        # with no `=` as a config parse failure.
+        config.write_text("[default]\ns3 =\n   no_equals_here\n")
+        assert cli.main(_PRESIGN) == 255
         assert capsys.readouterr().err == (
             f"boto3-s3: [ERROR]: Unable to parse config file: {config}\n"
         )
 
-    def test_a_directory_is_not_a_config_file(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "[[[broken\n",
+            "[default]\ncli_timestamp_format = bogus\n",
+            "[default]\ncli_binary_format = bogus\n",
+        ],
+        ids=["unparseable", "timestamp-format", "binary-format"],
+    )
+    @pytest.mark.parametrize("argv", [["help"], ["--version"]], ids=["help", "version"])
+    def test_the_informational_exits_do_not_read_it(
+        self, config: Path, text: str, argv: list[str], capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # A directory at the config path is simply "no config file" rather than
-        # a parse failure (measured on aws). This pins the outcome, not the
-        # route to it: `configparser.read` also declines to open a directory,
-        # so the `isfile` guard and a bare existence check agree here.
-        config.mkdir()
-        assert cli.main(["bogus"]) == 252
-        assert capsys.readouterr().err == _ENVELOPED_INVALID_CHOICE
-
-    def test_the_reported_path_is_the_expanded_one(
-        self, config: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # botocore expands `$VAR` before `~` and reports what it expanded to,
-        # so the message names a path the user can open (measured on aws).
-        config.write_text("[[[broken\n")
-        monkeypatch.setenv("BOTO3_S3_TEST_CONFIG_DIR", str(config.parent))
-        # Joined with the host separator: the reported path is the expanded
-        # string itself, so a "/" written here would be what Windows reports.
-        monkeypatch.setenv("AWS_CONFIG_FILE", os.path.join("$BOTO3_S3_TEST_CONFIG_DIR", "config"))
-        assert cli.main(["bogus"]) == 255
-        assert capsys.readouterr().err == (
-            f"boto3-s3: [ERROR]: Unable to parse config file: {config}\n"
-        )
+        # They open no session, so a broken config file never reaches them
+        # (aws reads the config first and fails them too; the difference is
+        # accepted, design/cli.md section 6).
+        config.write_text(text)
+        assert cli.main(argv) == 0
+        assert capsys.readouterr().err == ""
 
 
 class TestInvalidTimestampFormat:
-    """An unknown `cli_timestamp_format` ends the run at rc 253.
+    """An unknown `cli_timestamp_format` fails every command at rc 253."""
 
-    aws validates the setting in the first handler of its `session-initialized`
-    event, which it emits after binding `--profile` and before handing the argv
-    to any command layer. Every expectation was measured against the pinned
-    aws-cli.
-    """
-
-    @pytest.mark.parametrize(
-        "argv",
-        [
-            ["ls", "s3://bucket/p/"],
-            ["ls", "help"],
-            ["help"],
-            [],
-            ["bogus"],
-            ["cp", "a", "b"],
-            ["ls", "--bogus"],
-        ],
-        ids=[
-            "listing",
-            "subcommand-help",
-            "help",
-            "bare",
-            "invalid-choice",
-            "cp",
-            "unknown-option",
-        ],
-    )
-    def test_it_preempts_every_command_outcome(
+    @pytest.mark.parametrize("argv", _SESSION_COMMANDS, ids=_SESSION_COMMAND_IDS)
+    def test_it_fails_every_command(
         self, config: Path, argv: list[str], capsys: pytest.CaptureFixture[str]
     ) -> None:
         config.write_text("[default]\ncli_timestamp_format = bogus\n")
         assert cli.main(argv) == 253
         assert capsys.readouterr().err == _TIMESTAMP_REPORT.format("bogus")
-
-    def test_the_version_flag_still_wins(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # `--version` is a parse-time action of the top-level pass, which runs
-        # before aws emits the event this hangs off.
-        config.write_text("[default]\ncli_timestamp_format = bogus\n")
-        assert cli.main(["--version"]) == 0
-        assert capsys.readouterr().err == ""
-
-    def test_the_preliminary_scan_still_outranks_it(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        config.write_text("[default]\ncli_timestamp_format = bogus\n")
-        assert cli.main(["--profile"]) == 252
-        assert "cli_timestamp_format" not in capsys.readouterr().err
-
-    def test_an_unparseable_config_outranks_it(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # The setting lives in the file that cannot be read, so the parse
-        # failure is all aws ever reports.
-        config.write_text("[[[broken\ncli_timestamp_format = bogus\n")
-        assert cli.main(["ls", "s3://bucket/p/"]) == 255
-        assert capsys.readouterr().err == (
-            f"boto3-s3: [ERROR]: Unable to parse config file: {config}\n"
-        )
-
-    @pytest.mark.parametrize(
-        ("argv", "message"), _RESOLUTION_ERRORS, ids=["globals-parse", "query", "endpoint"]
-    )
-    def test_the_global_resolutions_outrank_it(
-        self, config: Path, argv: list[str], message: str, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # aws hangs those on `top-level-args-parsed`, emitted one step earlier
-        # than `session-initialized`, so all three keep their 252.
-        config.write_text("[default]\ncli_timestamp_format = bogus\n")
-        assert cli.main(argv) == 252
-        assert capsys.readouterr().err == f"boto3-s3: [ERROR]: {_ENVELOPE}{message}"
-
-    def test_the_timeout_coercion_outranks_it(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        config.write_text("[default]\ncli_timestamp_format = bogus\n")
-        assert cli.main(["--cli-read-timeout", "abc", "ls"]) == 255
-        assert "invalid literal for int()" in capsys.readouterr().err
 
     @pytest.mark.parametrize("value", ["wire", "iso8601", "  wire  "])
     def test_the_accepted_values_change_nothing(
@@ -525,14 +166,14 @@ class TestInvalidTimestampFormat:
     ) -> None:
         # configparser strips the value, so the padded form is the plain one.
         config.write_text(f"[default]\ncli_timestamp_format ={value}\n")
-        assert cli.main(["help"]) == 0
+        assert cli.main(_PRESIGN) == 0
         assert capsys.readouterr().err == ""
 
     def test_an_absent_key_is_the_iso8601_default(
         self, config: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         config.write_text("[default]\nregion = us-east-1\n")
-        assert cli.main(["help"]) == 0
+        assert cli.main(_PRESIGN) == 0
         assert capsys.readouterr().err == ""
 
     @pytest.mark.parametrize("value", ["", "WIRE"], ids=["empty", "wrong-case"])
@@ -540,9 +181,9 @@ class TestInvalidTimestampFormat:
         self, config: Path, value: str, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # An empty value is a value, not an absent key, and the comparison is
-        # case-sensitive (both measured).
+        # case-sensitive (both measured on aws).
         config.write_text(f"[default]\ncli_timestamp_format = {value}\n")
-        assert cli.main(["help"]) == 253
+        assert cli.main(_PRESIGN) == 253
         assert capsys.readouterr().err == _TIMESTAMP_REPORT.format(value)
 
     def test_the_key_is_case_insensitive(
@@ -550,32 +191,25 @@ class TestInvalidTimestampFormat:
     ) -> None:
         # configparser lowercases option names, as botocore's parse does.
         config.write_text("[default]\nCLI_TIMESTAMP_FORMAT = bogus\n")
-        assert cli.main(["help"]) == 253
+        assert cli.main(_PRESIGN) == 253
         assert capsys.readouterr().err == _TIMESTAMP_REPORT.format("bogus")
 
-    def test_an_indented_block_is_reported_as_the_map_botocore_builds(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # botocore parses an indented `key = value` block into a dict, and the
-        # report interpolates whatever it parsed (measured).
-        config.write_text("[default]\ncli_timestamp_format =\n  wire = x\n")
-        assert cli.main(["help"]) == 253
-        assert capsys.readouterr().err == _TIMESTAMP_REPORT.format("{'wire': 'x'}")
 
-
-class TestWhichProfileTheTimestampFormatComesFrom:
-    """The setting is read from the scoped config of the profile aws bound."""
+class TestWhichProfileTheFormatsComeFrom:
+    """Both settings are read from the scoped config of the selected profile."""
 
     def test_an_unselected_profiles_value_is_ignored(
         self, config: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        config.write_text("[default]\n[profile p]\ncli_timestamp_format = bogus\n")
-        assert cli.main(["help"]) == 0
+        config.write_text(
+            "[default]\n[profile p]\ncli_timestamp_format = bogus\ncli_binary_format = bogus\n"
+        )
+        assert cli.main(_PRESIGN) == 0
         assert capsys.readouterr().err == ""
 
     def test_the_flag_selects_it(self, config: Path, capsys: pytest.CaptureFixture[str]) -> None:
         config.write_text("[default]\n[profile p]\ncli_timestamp_format = bogus\n")
-        assert cli.main(["--profile", "p", "help"]) == 253
+        assert cli.main(["--profile", "p", *_PRESIGN]) == 253
         assert capsys.readouterr().err == _TIMESTAMP_REPORT.format("bogus")
 
     @pytest.mark.parametrize("env", ["AWS_PROFILE", "AWS_DEFAULT_PROFILE"])
@@ -586,63 +220,42 @@ class TestWhichProfileTheTimestampFormatComesFrom:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        config.write_text("[default]\n[profile p]\ncli_timestamp_format = bogus\n")
+        config.write_text("[default]\n[profile p]\ncli_binary_format = bogus\n")
         monkeypatch.setenv(env, "p")
-        assert cli.main(["help"]) == 253
-        assert capsys.readouterr().err == _TIMESTAMP_REPORT.format("bogus")
-
-    def test_a_declared_flag_profile_restores_the_envelope_first(
-        self,
-        config: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        # The gate runs *after* --profile re-decides the rendering, so a
-        # declared flag profile lifts the degradation an undeclared env profile
-        # imposed and the report comes out enveloped (measured: aws is rc 253
-        # `An error occurred (Configuration): ...` for this exact combination).
-        config.write_text("[default]\n[profile p]\ncli_timestamp_format = bogus\n")
-        monkeypatch.setenv("AWS_PROFILE", "nosuch")
-        assert cli.main(["--profile", "p", "ls", "help"]) == 253
-        assert capsys.readouterr().err == _TIMESTAMP_REPORT.format("bogus")
+        assert cli.main(_PRESIGN) == 255
+        assert capsys.readouterr().err == _BINARY_REPORT.format("bogus")
 
     def test_a_selected_clean_profile_shadows_the_default_section(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
+        self, config: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws's scoped config is the one profile's options, not a merge with
-        # `[default]`, so selecting a clean profile silences the setting.
+        # The scoped config is the one profile's options, not a merge with
+        # `[default]`, so selecting a clean profile silences the setting. The
+        # environment selects it: a `--profile` would also turn off the
+        # environment credentials the presign signs with.
         config.write_text("[default]\ncli_timestamp_format = bogus\n[profile p]\n")
-        assert cli.main(["--profile", "p", "help"]) == 0
+        monkeypatch.setenv("AWS_PROFILE", "p")
+        assert cli.main(_PRESIGN) == 0
         assert capsys.readouterr().err == ""
 
     def test_an_empty_flag_leaves_the_env_chain_in_force(
         self, config: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws's truthy guard again: `--profile ""` binds nothing, so the
-        # default section still decides.
+        # aws's truthy guard: `--profile ""` binds nothing, so the default
+        # section still decides.
         config.write_text("[default]\ncli_timestamp_format = bogus\n")
-        assert cli.main(["--profile", "", "help"]) == 253
+        assert cli.main(["--profile", "", *_PRESIGN]) == 253
         assert capsys.readouterr().err == _TIMESTAMP_REPORT.format("bogus")
 
-    @pytest.mark.parametrize("argv", [["--profile", "nosuch", "help"], ["help"]])
-    def test_an_undeclared_profile_falls_back_to_the_default_format(
-        self,
-        config: Path,
-        argv: list[str],
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
+    def test_an_undeclared_profile_is_reported_as_itself(
+        self, config: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # botocore raises `ProfileNotFound` for the scoped-config read and aws's
-        # handler catches exactly that, keeping its `iso8601` default - so the
-        # `[default]` section's bad value is never seen (measured). This is also
-        # why an rc-253 `Configuration` report can never come out degraded: the
-        # undeclared profile that would strip the envelope also stands the check
-        # down.
+        # The format check stands down on botocore's `ProfileNotFound`, as
+        # aws's handlers do, and the session's other reads report the profile.
         config.write_text("[default]\ncli_timestamp_format = bogus\n")
-        if argv == ["help"]:
-            monkeypatch.setenv("AWS_PROFILE", "nosuch")
-        assert cli.main(argv) == 0
-        assert capsys.readouterr().err == ""
+        assert cli.main(["--profile", "nosuch", *_PRESIGN]) == 255
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: The config profile (nosuch) could not be found\n"
+        )
 
     def test_the_credentials_file_is_part_of_the_scoped_config(
         self, config: Path, capsys: pytest.CaptureFixture[str]
@@ -651,54 +264,48 @@ class TestWhichProfileTheTimestampFormatComesFrom:
         # setting written there is read like any other.
         config.write_text("[default]\n")
         (config.parent / "credentials").write_text("[default]\ncli_timestamp_format = bogus\n")
-        assert cli.main(["help"]) == 253
+        assert cli.main(_PRESIGN) == 253
         assert capsys.readouterr().err == _TIMESTAMP_REPORT.format("bogus")
 
-    def test_the_credentials_file_wins_over_the_config_file(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # The merge is per key, credentials last (botocore's `full_config`).
-        config.write_text("[default]\ncli_timestamp_format = wire\n")
-        (config.parent / "credentials").write_text("[default]\ncli_timestamp_format = bogus\n")
-        assert cli.main(["help"]) == 253
-        assert capsys.readouterr().err == _TIMESTAMP_REPORT.format("bogus")
 
-    def test_the_credentials_file_can_repair_the_config_file(
+class TestInvalidBinaryFormat:
+    """An unknown `cli_binary_format` fails every command at rc 255."""
+
+    @pytest.mark.parametrize("argv", _SESSION_COMMANDS, ids=_SESSION_COMMAND_IDS)
+    def test_it_fails_every_command(
+        self, config: Path, argv: list[str], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        config.write_text("[default]\ncli_binary_format = bogus\n")
+        assert cli.main(argv) == 255
+        assert capsys.readouterr().err == _BINARY_REPORT.format("bogus")
+
+    def test_an_explicit_flag_never_consults_the_config(
         self, config: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        config.write_text("[default]\ncli_timestamp_format = bogus\n")
-        (config.parent / "credentials").write_text("[default]\ncli_timestamp_format = wire\n")
-        assert cli.main(["help"]) == 0
+        # aws reads `--cli-binary-format` first; argparse already restricted
+        # the flag to the valid choices, so a broken config value is never
+        # read (measured on aws: the run proceeds).
+        config.write_text("[default]\ncli_binary_format = bogus\n")
+        assert cli.main(["--cli-binary-format", "base64", *_PRESIGN]) == 0
         assert capsys.readouterr().err == ""
 
-    def test_a_credentials_section_updates_rather_than_replaces(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
+    @pytest.mark.parametrize("value", ["base64", "raw-in-base64-out"])
+    def test_the_accepted_values_change_nothing(
+        self, config: Path, value: str, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # The other half of "per key": a credentials section that carries some
-        # *other* key leaves the config file's setting standing, where a
-        # wholesale replacement would drop it (measured: aws is still rc 253).
-        config.write_text("[default]\ncli_timestamp_format = bogus\n")
-        (config.parent / "credentials").write_text("[default]\nregion = us-west-2\n")
-        assert cli.main(["help"]) == 253
-        assert capsys.readouterr().err == _TIMESTAMP_REPORT.format("bogus")
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "[default]\ncli_timestamp_format = bogus\n[profile default]\nregion = us-east-1\n",
-            "[profile default]\ncli_timestamp_format = bogus\n[default]\nregion = us-east-1\n",
-        ],
-        ids=["default-first", "profile-default-first"],
-    )
-    def test_a_later_section_claims_the_profile_outright(
-        self, config: Path, text: str, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # `[default]` and `[profile default]` name the same profile; botocore's
-        # loop assigns whole sections, so the later one replaces the earlier
-        # rather than merging into it (measured both ways round).
-        config.write_text(text)
-        assert cli.main(["help"]) == 0
+        config.write_text(f"[default]\ncli_binary_format = {value}\n")
+        assert cli.main(_PRESIGN) == 0
         assert capsys.readouterr().err == ""
+
+    @pytest.mark.parametrize("value", ["", "Base64"], ids=["empty", "wrong-case"])
+    def test_an_empty_or_wrong_case_value_is_refused(
+        self, config: Path, value: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # An empty value is a value, and aws's lookup is case-sensitive (both
+        # measured on aws: rc 255).
+        config.write_text(f"[default]\ncli_binary_format = {value}\n")
+        assert cli.main(_PRESIGN) == 255
+        assert capsys.readouterr().err == _BINARY_REPORT.format(value)
 
 
 class TestUnknownOutputEncoding:
@@ -706,9 +313,9 @@ class TestUnknownOutputEncoding:
 
     aws validates the variable between handling the top-level args and
     emitting `session-initialized` (`validate_preferred_output_encoding`), so
-    the report is its general handler's - no envelope - and it beats both
-    config gates and every command layer while the top-level resolutions
-    still win. Every expectation was measured against the pinned aws-cli.
+    the report is its general handler's - no envelope - and it beats every
+    command layer while the top-level resolutions still win. Every
+    expectation was measured against the pinned aws-cli.
     """
 
     _REPORT = "boto3-s3: [ERROR]: Unknown codec `{}` specified for AWS_CLI_OUTPUT_ENCODING.\n"
@@ -731,12 +338,11 @@ class TestUnknownOutputEncoding:
         assert cli.main(argv) == 255
         assert capsys.readouterr().err == self._REPORT.format("nosuch")
 
-    def test_it_preempts_both_config_gates(
+    def test_it_preempts_both_format_checks(
         self, config: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws's check runs before `session-initialized`, which both config
-        # gates hang off (measured: the codec report wins over a broken
-        # `cli_timestamp_format` and a broken `cli_binary_format`).
+        # The codec is checked before any command opens its session, where
+        # the two format settings are checked (aws reports the codec too).
         config.write_text("[default]\ncli_timestamp_format = bogus\ncli_binary_format = bogus\n")
         monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "nosuch")
         assert cli.main(["ls", "s3://bucket/p/"]) == 255
@@ -794,16 +400,6 @@ class TestUnknownOutputEncoding:
         monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "nosuch")
         assert cli.main(["--cli-read-timeout", "abc", "ls"]) == 255
         assert "invalid literal for int()" in capsys.readouterr().err
-
-    def test_an_unparseable_config_outranks_it(
-        self, config: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        config.write_text("[[[broken\n")
-        monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "nosuch")
-        assert cli.main(["ls", "s3://bucket/p/"]) == 255
-        assert capsys.readouterr().err == (
-            f"boto3-s3: [ERROR]: Unable to parse config file: {config}\n"
-        )
 
 
 class TestOutputEncodingIsApplied:
@@ -939,118 +535,6 @@ class TestOutputEncodingIsApplied:
         assert sys.stderr.encoding == "utf-8"
 
 
-class TestInvalidBinaryFormat:
-    """An unknown `cli_binary_format` in the selected profile ends the run at rc 255.
-
-    aws resolves the setting in its `session-initialized` binary-format
-    customization, whose handler table the value indexes directly - the report
-    is the bare KeyError repr through the general handler, after the timestamp
-    gate and ahead of every command layer. Every expectation was measured
-    against the pinned aws-cli.
-    """
-
-    @pytest.mark.parametrize(
-        "argv",
-        [
-            ["ls", "s3://bucket/p/"],
-            ["help"],
-            ["ls", "help"],
-            ["bogus"],
-            ["cp", "--badopt"],
-        ],
-        ids=["listing", "help", "subcommand-help", "invalid-choice", "unknown-option"],
-    )
-    def test_it_preempts_every_command_outcome(
-        self, config: Path, argv: list[str], capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        config.write_text("[default]\ncli_binary_format = bogus\n")
-        assert cli.main(argv) == 255
-        assert capsys.readouterr().err == "boto3-s3: [ERROR]: 'bogus'\n"
-
-    def test_the_timestamp_gate_outranks_it(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # aws registers the timestamp customization first on
-        # `session-initialized`, so with both broken the timestamp report is
-        # the run's outcome (measured: rc 253).
-        config.write_text("[default]\ncli_timestamp_format = nope\ncli_binary_format = bogus\n")
-        assert cli.main(["ls", "s3://bucket/p/"]) == 253
-        assert capsys.readouterr().err == _TIMESTAMP_REPORT.format("nope")
-
-    def test_an_explicit_flag_never_consults_the_config(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # aws reads `parsed_args.cli_binary_format` first; argparse already
-        # restricted the flag to the valid choices, so a broken config value
-        # is simply never read (measured: the run proceeds).
-        config.write_text("[default]\ncli_binary_format = bogus\n")
-        assert cli.main(["--cli-binary-format", "base64", "help"]) == 0
-        assert capsys.readouterr().err == ""
-
-    @pytest.mark.parametrize("value", ["base64", "raw-in-base64-out"])
-    def test_the_accepted_values_change_nothing(
-        self, config: Path, value: str, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        config.write_text(f"[default]\ncli_binary_format = {value}\n")
-        assert cli.main(["help"]) == 0
-        assert capsys.readouterr().err == ""
-
-    @pytest.mark.parametrize("value", ["", "Base64"], ids=["empty", "wrong-case"])
-    def test_the_rejected_value_renders_as_its_repr(
-        self, config: Path, value: str, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # An empty value is a value, and the table lookup is case-sensitive
-        # (both measured: aws prints `''` and `'Base64'`).
-        config.write_text(f"[default]\ncli_binary_format = {value}\n")
-        assert cli.main(["help"]) == 255
-        assert capsys.readouterr().err == f"boto3-s3: [ERROR]: {value!r}\n"
-
-    def test_an_indented_block_is_the_unhashable_key_report(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # botocore parses the block into a map, which aws's table lookup
-        # rejects as an unhashable dict key - its official build's (Python
-        # 3.14) TypeError text, pinned across hosts (measured).
-        config.write_text("[default]\ncli_binary_format =\n  b = x\n")
-        assert cli.main(["help"]) == 255
-        assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: cannot use 'dict' as a dict key (unhashable type: 'dict')\n"
-        )
-
-    def test_an_undeclared_profile_stands_the_gate_down(
-        self, config: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # aws's handler catches `ProfileNotFound` and keeps its `base64`
-        # default, so the run proceeds to whatever the command decides
-        # (measured: `help` pages at rc 0).
-        config.write_text("[default]\ncli_binary_format = bogus\n")
-        monkeypatch.setenv("AWS_PROFILE", "nosuch")
-        assert cli.main(["help"]) == 0
-        assert capsys.readouterr().err == ""
-
-    def test_an_unselected_profiles_value_is_ignored(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        config.write_text("[default]\n[profile p]\ncli_binary_format = bogus\n")
-        assert cli.main(["help"]) == 0
-        assert capsys.readouterr().err == ""
-
-    def test_the_flag_selects_the_profile(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        config.write_text("[default]\n[profile p]\ncli_binary_format = bogus\n")
-        assert cli.main(["--profile", "p", "help"]) == 255
-        assert capsys.readouterr().err == "boto3-s3: [ERROR]: 'bogus'\n"
-
-    def test_the_version_flag_still_wins(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        config.write_text("[default]\ncli_binary_format = bogus\n")
-        assert cli.main(["--version"]) == 0
-        assert capsys.readouterr().err == ""
-
-
-# Every value aws's error-format choice list accepts.
 _ERROR_FORMATS = ["enhanced", "legacy", "json", "yaml", "text", "table"]
 
 
@@ -1085,16 +569,6 @@ class TestTheErrorFormatIsAcceptedAndIgnored:
         monkeypatch.setenv("AWS_CLI_ERROR_FORMAT", value)
         assert cli.main(["bogus"]) == 252
         assert capsys.readouterr().err == _ENVELOPED_INVALID_CHOICE
-
-    @pytest.mark.parametrize("value", _ERROR_FORMATS)
-    def test_it_never_restores_a_dropped_envelope(
-        self, config: Path, value: str, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # aws's `enhanced` puts the envelope back in exactly this situation
-        # (measured on the pinned aws-cli); here the report stays degraded
-        # whatever the value.
-        assert cli.main(["--profile", "nosuch", "--cli-error-format", value, "bogus"]) == 252
-        assert capsys.readouterr().err == _DEGRADED_INVALID_CHOICE
 
     def test_an_unknown_value_is_still_rejected(
         self, config: Path, capsys: pytest.CaptureFixture[str]
@@ -1137,16 +611,11 @@ class TestCliHistoryIsNotRead:
 
 
 class TestCredentialChainSettings:
-    """A setting botocore rejects while building the credential chain ends the run early.
+    """An IMDS setting botocore refuses fails every command at rc 255.
 
-    aws builds the provider chain during startup - its `session-initialized`
-    handler that installs the credential cache asks the session for it - and
-    botocore converts and validates the IMDS settings while it does. A bad
-    one is therefore aws's general rc 255, with botocore's own text, ahead of
-    the help token and every command layer and behind the timestamp and
-    binary-format gates. Every expectation was measured against the pinned
-    aws-cli; this CLI used to build the chain only inside the command, so
-    `help` paged at rc 0 and a usage error kept its 252.
+    botocore converts and checks these settings while it builds the credential
+    provider chain, which every command does when it opens its session (the
+    credential cache is installed there). The report is botocore's own text.
     """
 
     _SETTINGS: ClassVar[list[tuple[str, str, str, str]]] = [
@@ -1176,14 +645,6 @@ class TestCredentialChainSettings:
             "Invalid endpoint EC2 Instance Metadata endpoint: not_a_url",
         ),
     ]
-    _ARGVS: ClassVar[list[list[str]]] = [
-        ["help"],
-        ["ls", "help"],
-        ["bogus"],
-        ["ls", "--bogus"],
-        ["ls", "--page-size"],
-        [],
-    ]
 
     @pytest.fixture(autouse=True)
     def _clean(self, config: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1191,9 +652,9 @@ class TestCredentialChainSettings:
         for env_var, _key, _value, _report in self._SETTINGS:
             monkeypatch.delenv(env_var, raising=False)
 
-    @pytest.mark.parametrize("argv", _ARGVS)
+    @pytest.mark.parametrize("argv", _SESSION_COMMANDS, ids=_SESSION_COMMAND_IDS)
     @pytest.mark.parametrize(("env_var", "key", "value", "report"), _SETTINGS)
-    def test_a_bad_environment_value_beats_help_and_every_usage_error(
+    def test_a_bad_environment_value_fails_every_command(
         self,
         env_var: str,
         key: str,
@@ -1220,136 +681,8 @@ class TestCredentialChainSettings:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         config.write_text(f"[default]\nregion = us-east-1\n{key} = {value}\n")
-        assert cli.main(["help"]) == 255
+        assert cli.main(_PRESIGN) == 255
         assert capsys.readouterr().err == f"boto3-s3: [ERROR]: {report}\n"
-
-    def test_an_empty_variable_is_a_value_too(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # botocore's environment read is present-wins, so the empty string is
-        # what `int` is handed (measured: rc 255 on `aws s3 help`).
-        monkeypatch.setenv("AWS_METADATA_SERVICE_NUM_ATTEMPTS", "")
-        assert cli.main(["help"]) == 255
-        assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: invalid literal for int() with base 10: ''\n"
-        )
-
-    def test_the_variable_shadows_a_bad_config_key(
-        self, config: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        config.write_text("[default]\nmetadata_service_timeout = abc\n")
-        monkeypatch.setenv("AWS_METADATA_SERVICE_TIMEOUT", "5")
-        assert cli.main(["help"]) == 0
-
-    def test_an_undeclared_profile_hides_its_config_keys_but_not_the_variable(
-        self, config: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # The chain is built for the bound profile. One no file declares has
-        # no keys to read - aws swallows the ProfileNotFound of this step -
-        # so the help page still shows; the environment is read before the
-        # profile and still stops the run (measured, both).
-        config.write_text("[default]\nmetadata_service_timeout = abc\n")
-        assert cli.main(["--profile", "nope", "help"]) == 0
-        capsys.readouterr()
-        monkeypatch.setenv("AWS_METADATA_SERVICE_TIMEOUT", "abc")
-        assert cli.main(["--profile", "nope", "help"]) == 255
-        assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: invalid literal for int() with base 10: 'abc'\n"
-        )
-
-    @pytest.mark.parametrize(
-        ("env", "suspect"),
-        [
-            # The first read goes to the profile and stops the build: nothing
-            # behind it is looked at, however broken.
-            ({"AWS_METADATA_SERVICE_NUM_ATTEMPTS": "x"}, False),
-            ({"AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE": "bogus"}, False),
-            ({"AWS_EC2_METADATA_SERVICE_ENDPOINT": "http://a..b"}, False),
-            # The endpoint is *read* ahead of the mode (and checked after
-            # it), so a broken mode behind a missing endpoint is not reached.
-            (
-                {
-                    "AWS_METADATA_SERVICE_TIMEOUT": "5",
-                    "AWS_METADATA_SERVICE_NUM_ATTEMPTS": "2",
-                    "AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE": "bogus",
-                },
-                False,
-            ),
-            # A broken value ahead of that read is still reached.
-            ({"AWS_METADATA_SERVICE_TIMEOUT": "x"}, True),
-            ({"AWS_METADATA_SERVICE_TIMEOUT": "5", "AWS_METADATA_SERVICE_NUM_ATTEMPTS": "x"}, True),
-            (
-                {
-                    "AWS_METADATA_SERVICE_TIMEOUT": "5",
-                    "AWS_METADATA_SERVICE_NUM_ATTEMPTS": "2",
-                    "AWS_EC2_METADATA_SERVICE_ENDPOINT": "http://ok.example",
-                    "AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE": "bogus",
-                },
-                True,
-            ),
-            # The endpoint is checked last, after every other read: without
-            # the final one in the environment, the profile is hit first.
-            (
-                {
-                    "AWS_METADATA_SERVICE_TIMEOUT": "5",
-                    "AWS_METADATA_SERVICE_NUM_ATTEMPTS": "2",
-                    "AWS_EC2_METADATA_SERVICE_ENDPOINT": "http://a..b",
-                    "AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE": "ipv4",
-                },
-                False,
-            ),
-            (
-                {
-                    "AWS_METADATA_SERVICE_TIMEOUT": "5",
-                    "AWS_METADATA_SERVICE_NUM_ATTEMPTS": "2",
-                    "AWS_EC2_METADATA_SERVICE_ENDPOINT": "http://a..b",
-                    "AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE": "ipv4",
-                    "AWS_EC2_METADATA_V1_DISABLED": "false",
-                },
-                True,
-            ),
-            # The mode is read before the endpoint is checked, so without
-            # it in the environment the profile is hit there - whatever the
-            # two booleans behind it say.
-            (
-                {
-                    "AWS_METADATA_SERVICE_TIMEOUT": "5",
-                    "AWS_METADATA_SERVICE_NUM_ATTEMPTS": "2",
-                    "AWS_EC2_METADATA_SERVICE_ENDPOINT": "http://a..b",
-                    "AWS_IMDS_USE_IPV6": "false",
-                    "AWS_EC2_METADATA_V1_DISABLED": "false",
-                },
-                False,
-            ),
-        ],
-    )
-    def test_an_undeclared_profile_cuts_the_reads_where_botocore_stops(
-        self,
-        env: dict[str, str],
-        suspect: bool,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        """botocore reads the settings in order, and the profile ends the build.
-
-        For a profile no file declares, the first setting missing from the
-        environment sends botocore to the profile, whose ``ProfileNotFound``
-        aws swallows - abandoning the chain build with everything after that
-        read unexamined (measured on aws: rc 0 on ``help`` for the False
-        rows, 255 for the True ones). The scan has to stop at the same read,
-        or it builds the chain - and loads the SDK - for a help page that
-        then prints normally.
-        """
-        from boto3_s3_cli import configfiles
-
-        for name in ("AWS_IMDS_USE_IPV6", "AWS_EC2_METADATA_V1_DISABLED"):
-            monkeypatch.delenv(name, raising=False)
-        for name, value in env.items():
-            monkeypatch.setenv(name, value)
-        monkeypatch.setenv("AWS_PROFILE", "nope")
-        assert configfiles.scan().credential_chain_suspect("nope") is suspect
-        assert cli.main(["help"]) == (255 if suspect else 0)
-        capsys.readouterr()
 
     def test_the_selected_profile_s_key_is_the_one_read(
         self, config: Path, capsys: pytest.CaptureFixture[str]
@@ -1357,263 +690,6 @@ class TestCredentialChainSettings:
         config.write_text(
             "[default]\nregion = us-east-1\n[profile p]\nmetadata_service_timeout = abc\n"
         )
-        assert cli.main(["help"]) == 0
+        assert cli.main(_PRESIGN) == 0
         capsys.readouterr()
-        assert cli.main(["--profile", "p", "help"]) == 255
-
-    def test_the_earlier_gates_and_the_version_still_win(
-        self, config: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        monkeypatch.setenv("AWS_METADATA_SERVICE_TIMEOUT", "abc")
-        assert cli.main(["--version"]) == 0
-        assert cli.main(["ls", "--endpoint-url", "bad"]) == 252
-        capsys.readouterr()
-        config.write_text("[default]\ncli_timestamp_format = bogus\n")
-        assert cli.main(["help"]) == 253
-        assert capsys.readouterr().err == _TIMESTAMP_REPORT.format("bogus")
-        config.write_text("[default]\ncli_binary_format = bogus\n")
-        assert cli.main(["help"]) == 255
-        assert capsys.readouterr().err == "boto3-s3: [ERROR]: 'bogus'\n"
-
-    def test_a_suspect_botocore_accepts_changes_nothing_but_the_timing(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # The scan decides when the chain is built early; botocore decides
-        # whether the run stops. Should the two ever disagree - the scan
-        # suspecting what botocore takes - the run goes on.
-        from boto3_s3_cli import configfiles
-
-        monkeypatch.setattr(
-            configfiles.ConfigScan, "credential_chain_suspect", lambda self, profile: True
-        )
-        assert cli.main(["help"]) == 0
-        assert capsys.readouterr().err == ""
-
-    @pytest.mark.parametrize(
-        "endpoint",
-        [
-            "http://a..b",
-            "http://a-.b",
-            "http://a.-b",
-            "http://" + "x" * 64,
-            "http://" + "y" * 256,
-            "http://[::1::2]",
-            "http://[1:2:3]",
-            "http://[:]",
-            "http://a_b",
-            "http://",
-            "http://a/\tb",
-        ],
-    )
-    def test_an_endpoint_botocore_refuses_stops_help_and_usage_errors(
-        self, endpoint: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # Shapes that look like URLs and that botocore's host test still
-        # refuses (measured on aws: rc 255 on `help`, on an unknown
-        # subcommand and on an unknown option alike). A scan that only knew
-        # the plainly valid shape let every one of them through.
-        monkeypatch.setenv("AWS_EC2_METADATA_SERVICE_ENDPOINT", endpoint)
-        for argv in (["help"], ["bogus"], ["ls", "--bogus"]):
-            assert cli.main(argv) == 255
-            assert capsys.readouterr().out == ""
-
-    @pytest.mark.parametrize(
-        "endpoint",
-        [
-            "",
-            "HTTP://169.254.169.254",
-            "ftp://metadata.example",
-            "http://169.254.169.254/latest/",
-            "http://metadata.example.",
-            "http://[fd00:ec2::254]",
-            "http://[fe80::1%25eth0]:80",
-            "http://user:pw@metadata.example:1338/x?y#z",
-        ],
-    )
-    def test_an_endpoint_botocore_takes_leaves_help_sdk_free(
-        self, endpoint: str, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # The other direction: botocore checks the host, not the scheme, and
-        # ignores an empty value altogether, so none of these may send the
-        # dispatcher to the SDK ahead of the help token.
-        from boto3_s3_cli import configfiles
-
-        monkeypatch.setenv("AWS_EC2_METADATA_SERVICE_ENDPOINT", endpoint)
-        assert configfiles.scan().credential_chain_suspect(None) is False
-
-    def test_the_scan_agrees_with_building_the_chain(
-        self, config: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Random configurations: the scan's verdict against the real build.
-
-        The scan is a copy of what botocore reads and checks - which
-        settings, in which order, where an undeclared profile cuts the reads
-        short - and a copy is only as good as its comparison with the
-        original. Each draw spreads values, valid and not, over the
-        environment and one config section, picks a declared, an undeclared
-        or no profile, and asks botocore to build its provider chain; the
-        ``ProfileNotFound`` aws swallows at this step counts as no failure.
-        """
-        import botocore.session
-        from botocore.exceptions import ProfileNotFound
-
-        from boto3_s3_cli import configfiles
-
-        settings = [
-            ("AWS_METADATA_SERVICE_TIMEOUT", "metadata_service_timeout", ["5", "x", ""]),
-            ("AWS_METADATA_SERVICE_NUM_ATTEMPTS", "metadata_service_num_attempts", ["2", "1.5"]),
-            (
-                "AWS_EC2_METADATA_SERVICE_ENDPOINT",
-                "ec2_metadata_service_endpoint",
-                ["http://169.254.169.254", "http://a..b", "", "nourl"],
-            ),
-            (
-                "AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE",
-                "ec2_metadata_service_endpoint_mode",
-                ["ipv4", "IPv6", "bogus", ""],
-            ),
-            ("AWS_IMDS_USE_IPV6", "imds_use_ipv6", ["true", "x"]),
-            ("AWS_EC2_METADATA_V1_DISABLED", "ec2_metadata_v1_disabled", ["false", "x"]),
-        ]
-        rng = random.Random(8)
-        verdicts = {True: 0, False: 0}
-        for _ in range(600):
-            lines: list[str] = []
-            for env_var, key, values in settings:
-                monkeypatch.delenv(env_var, raising=False)
-                if rng.random() < 0.5:
-                    monkeypatch.setenv(env_var, rng.choice(values))
-                if rng.random() < 0.4:
-                    lines.append(f"{key} = {rng.choice(values)}\n")
-            section = rng.choice(["default", "profile p"])
-            config.write_text(f"[{section}]\n{''.join(lines)}")
-            profile = rng.choice([None, "p", "nope"])
-            if profile is None:
-                monkeypatch.delenv("AWS_PROFILE", raising=False)
-            else:
-                monkeypatch.setenv("AWS_PROFILE", profile)
-            try:
-                botocore.session.Session().get_component("credential_provider")
-                fails = False
-            except ProfileNotFound:
-                fails = False
-            except Exception:
-                fails = True
-            suspect = configfiles.scan().credential_chain_suspect(profile)
-            assert suspect is fails, (profile, section, lines, dict(os.environ))
-            verdicts[fails] += 1
-        # Both outcomes have to be well represented for agreement to mean much.
-        assert min(verdicts.values()) > 100, verdicts
-
-    def test_the_endpoint_test_is_botocore_s_own(self) -> None:
-        """The scan's copy of botocore's endpoint check, against the original.
-
-        The patterns are copied because the scan must not import the SDK; a
-        botocore that changes them has to fail here, not drift.
-        """
-        from botocore import compat, utils
-
-        from boto3_s3_cli import configfiles
-
-        assert configfiles._IPV6_ADDRZ_RE.pattern == compat.IPV6_ADDRZ_RE.pattern  # pyright: ignore[reportPrivateUsage]
-        assert configfiles._UNSAFE_URL_CHARS == compat.UNSAFE_URL_CHARS  # pyright: ignore[reportPrivateUsage]
-        # The DNS-host pattern lives inside botocore's function, so it is
-        # read off the function's constants; the length bound beside it is a
-        # small integer no interpreter is obliged to keep there, and is held
-        # by the boundary inputs below instead.
-        dns_constants = utils.is_valid_endpoint_url.__code__.co_consts
-        assert configfiles._DNS_HOST_RE.pattern in dns_constants  # pyright: ignore[reportPrivateUsage]
-        assert configfiles._DNS_HOST_RE.flags & ~re.UNICODE == re.IGNORECASE  # pyright: ignore[reportPrivateUsage]
-
-        def botocore_refuses(endpoint: str) -> bool:
-            if not endpoint:
-                return False  # the IMDS fetcher ignores an empty custom endpoint
-            try:
-                return not utils.is_valid_uri(endpoint)
-            except Exception:
-                return True
-
-        # The boundaries a random draw rarely lands on: label and host
-        # lengths either side of the limits, in the first label and the last,
-        # with and without the trailing dot, and digits outside ASCII.
-        label63, label64 = "x" * 63, "x" * 64
-        host255 = ".".join(["y" * 63] * 3 + ["z" * 63])
-        boundaries = [
-            f"http://{label63}",
-            f"http://{label64}",
-            f"http://{label63}.b",
-            f"http://{label64}.b",
-            f"http://a.{label63}",
-            f"http://a.{label64}",
-            f"http://{host255}",
-            f"http://{host255}.",
-            f"http://{host255[:-1]}.",
-            f"http://{host255}z",
-            "http://a.",
-            "http://a..",
-            "http://-a",
-            "http://a-",
-            "http://a-b",
-            "http://\u0661\u0662\u0663",
-            "http://a\uff11",
-            "http://[::1]",
-            "http://[::1%25eth0]",
-            "http://[::ffff:1.2.3.4]",
-        ]
-        assert len(host255) == 255
-        for endpoint in boundaries:
-            assert configfiles._imds_endpoint_refused(endpoint) is botocore_refuses(endpoint), repr(  # pyright: ignore[reportPrivateUsage]
-                endpoint
-            )
-
-        pieces = ["http://", "HTTP://", "ftp://", "//", "", "a", "A", "1", "-", ".", "..", "_", ":"]
-        pieces += ["::", "[", "]", "%25", "eth0", "/", "?", "@", " ", "\t", "\u00e9", "fd00", "254"]
-        pieces += ["x" * 63, "x" * 64, "y" * 250, ":80", ":x", "[::1]", "[1.2.3.4]", "[:]", "ffff"]
-        rng = random.Random(8)
-        for _ in range(4000):
-            endpoint = "".join(rng.choice(pieces) for _ in range(rng.randint(1, 6)))
-            assert configfiles._imds_endpoint_refused(endpoint) is botocore_refuses(endpoint), repr(  # pyright: ignore[reportPrivateUsage]
-                endpoint
-            )
-
-    @pytest.mark.parametrize(
-        ("env", "body", "suspect"),
-        [
-            ({}, "", False),
-            ({"AWS_METADATA_SERVICE_TIMEOUT": "5"}, "", False),
-            ({"AWS_METADATA_SERVICE_TIMEOUT": " 5 "}, "", False),
-            ({"AWS_METADATA_SERVICE_TIMEOUT": "5.0"}, "", True),
-            ({"AWS_METADATA_SERVICE_TIMEOUT": ""}, "", True),
-            ({"AWS_METADATA_SERVICE_NUM_ATTEMPTS": "x"}, "", True),
-            ({}, "metadata_service_num_attempts = 3\n", False),
-            ({}, "metadata_service_num_attempts = three\n", True),
-            ({}, "metadata_service_timeout =\n  a = b\n", True),
-            ({"AWS_METADATA_SERVICE_TIMEOUT": "5"}, "metadata_service_timeout = abc\n", False),
-            ({"AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE": "IPv6"}, "", False),
-            ({"AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE": "dual"}, "", True),
-            ({}, "ec2_metadata_service_endpoint_mode = ipv4\n", False),
-            ({"AWS_EC2_METADATA_SERVICE_ENDPOINT": "http://169.254.169.254"}, "", False),
-            ({"AWS_EC2_METADATA_SERVICE_ENDPOINT": "http://[fd00:ec2::254]/"}, "", False),
-            ({"AWS_EC2_METADATA_SERVICE_ENDPOINT": "http://localhost:1338"}, "", False),
-            ({"AWS_EC2_METADATA_SERVICE_ENDPOINT": "http://localhost:1338/latest/"}, "", False),
-            ({"AWS_EC2_METADATA_SERVICE_ENDPOINT": "169.254.169.254"}, "", True),
-            ({"AWS_EC2_METADATA_SERVICE_ENDPOINT": "http://a b"}, "", True),
-            ({"AWS_EC2_METADATA_SERVICE_ENDPOINT": ""}, "", False),
-            ({}, "ec2_metadata_service_endpoint = not a url\n", True),
-            ({}, "ec2_metadata_service_endpoint =\n  a = b\n", True),
-        ],
-    )
-    def test_what_sends_the_dispatcher_to_build_the_chain(
-        self,
-        env: dict[str, str],
-        body: str,
-        suspect: bool,
-        config: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        from boto3_s3_cli import configfiles
-
-        config.write_text(f"[default]\n{body}")
-        for name, value in env.items():
-            monkeypatch.setenv(name, value)
-        assert configfiles.scan().credential_chain_suspect(None) is suspect
+        assert cli.main(["--profile", "p", *_PRESIGN]) == 255
