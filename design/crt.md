@@ -520,7 +520,7 @@ error's details need not (checked by the e2e CRT lane - testing.md).
   The user sees a different exit code and a different S3 state - a functional
   difference - so this one is recorded in
   [`aws-differences.md`](../docs/cli/aws-differences.md) section 2 too
-  (testing.md section 9, the output comparison criterion); the measurement and
+  (overview.md section 3); the measurement and
   the mechanism stay in section 3.
 - **CRT configured x no resolvable region**: aligned.
   aws's factory hands `create_s3_crt_client` whatever its region chain

@@ -1531,8 +1531,8 @@ class Transferrer:
         extra_args = requestparams.map_put_object_params(self._options, self._operation)
         # A directory source is handed through to fail like aws-cli ([Errno 21]
         # Is a directory, rc 1; aws words the failed line differently, its CRT
-        # lane's untranslated "Unknown Error Code" included - a recorded
-        # deliberate difference, docs/cli/aws-differences.md section 2);
+        # lane's untranslated "Unknown Error Code" included - a deliberate
+        # difference, design/aws-cli-option-handling.md section 6);
         # botocore's default checksum wrapper would otherwise open it and mask
         # the read failure as an opaque rewind error, so detect it and surface
         # the OS error directly. A stream (src_fileobj) is never a directory.

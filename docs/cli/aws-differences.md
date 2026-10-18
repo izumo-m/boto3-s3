@@ -37,8 +37,8 @@ a timeout typed beside an alias, a `cli_history` directory `aws` cannot
 create, the modification time a download stamps in some local zones (and the
 `sync` runs that follow from it), a CRT-engine `mv` download whose source
 delete dies without a response, a help page that cannot be written, an
-ambiguous option abbreviation under Python 3.10 and 3.11, and the `PYTHON*`
-environment variables. A difference of that kind anywhere else is a bug worth
+ambiguous option abbreviation under Python 3.10 and 3.11, a malformed
+instance-metadata endpoint, and the `PYTHON*` environment variables. A difference of that kind anywhere else is a bug worth
 reporting; an error report's wording, or which of two mistakes it names, is
 not.
 
@@ -51,8 +51,8 @@ does change from one `aws` release to the next. Six of section 2's entries
 cover the text that differs on purpose — the progress display, help pages and
 `--debug` traces, the failure lines of a batched delete, the `--dryrun` line
 of a directory copied without `--recursive`, the `--version` line, and the
-history warning `aws` writes and this command has not. Where an error report
-is worded differently from aws's, this file does not list it. The interactive
+history warning `aws` writes and this command has not. Other error reports
+worded differently from aws's are not listed. The interactive
 prompt (`--cli-auto-prompt`) is not compared with `aws` at all, its output
 included. And the ordering of concurrent output is not reproducible on either
 tool (below).
@@ -201,13 +201,14 @@ comes out differently, listed in section 1.
   `aws` v2 — uploads, deletes, bucket configuration writes, the annotation
   writes a `--copy-props all` multipart copy sends — as long as the installed
   botocore can compute it, which takes awscrt (the `crt` extra). Without
-  awscrt the installed botocore's own default (`CRC32`) stands instead; `aws`
-  always bundles awscrt. None of these changes the result or the exit code;
+  awscrt the installed botocore's own default stands instead (`CRC32` on
+  current botocore; [`../compatibility.md`](../compatibility.md) for older
+  ones); `aws` always bundles awscrt. None of these changes the result or the exit code;
   what differs is the checksum left on an uploaded object (a full-object
   CRC64NVME against a composite CRC32). An explicit `--checksum-algorithm`
   makes the two agree regardless. The batched deletes the CRT engine sends
-  carry the installed botocore's own default even with awscrt (`CRC32`);
-  `aws` sends no such request — its deletes go one key at a time, with no
+  carry the installed botocore's own default even with awscrt; `aws` sends
+  no such request — its deletes go one key at a time, with no
   checksum.
 - **Output back-pressure.** `aws` queues result lines without limit, so a stalled
   reader grows memory. Here the queue is bounded: a reader that falls far enough

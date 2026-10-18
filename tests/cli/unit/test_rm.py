@@ -348,7 +348,7 @@ class TestExitCodeShape:
         # The rc is the match; the line is uniform here by design, where aws
         # words it `fatal error: ` when - as in this interrupt on the first
         # listing page - it has nothing in flight to cancel
-        # (docs/cli/aws-differences.md).
+        # (design/aws-cli-option-handling.md section 6).
         class _InterruptPaginatorClient:
             def get_paginator(self, _name: Any) -> Any:
                 class _Paginator:
@@ -402,7 +402,7 @@ class TestExitCodeShape:
         assert "Invalid bucket name" in result.stderr
         # botocore raised it, so the report is botocore's whole one - the
         # one-line truncation belongs to the synthesized reports below
-        # (docs/cli/aws-differences.md section 2).
+        # (design/aws-cli-option-handling.md section 6).
         assert "Bucket name must match the regex" in result.stderr
 
     def test_empty_bucket_with_key_dryrun_is_rc_0(self) -> None:

@@ -679,7 +679,8 @@ class TestStreaming:
         # stays for the pre-pipeline spans (test_exit_codes). The rc is the
         # match; the line is uniform here by design, where aws words it
         # `fatal error: ` when - as in this pre-first-submit interrupt - it has
-        # no cancelled transfer to report (docs/cli/aws-differences.md).
+        # no cancelled transfer to report (design/aws-cli-option-handling.md
+        # section 6).
         (tmp_path / "a.txt").write_bytes(b"x")
 
         def interrupt(*_args: object, **_kwargs: object) -> object:

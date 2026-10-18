@@ -187,14 +187,10 @@ Two cases where the codes are deliberately not identical:
 - **A corrupted ranged download** exits 0 here and 1 under `aws`. See
   [`aws-differences.md`](./aws-differences.md) for how to get that check back.
 
-A few other paths settle on different codes too — a plain-HTTP endpoint
-taken from the environment under the CRT engine, an `aws` plugin that imports
-`awscli` modules, exits, raises outside Python's `Exception` family or
-unregisters one of the SDK's own handlers, a `[toplevel]` alias that leads to
-another `aws` command, a timeout typed beside an alias, a `cli_history`
-directory `aws` cannot create, and the `PYTHON*` environment variables.
-Section 2 of [`aws-differences.md`](./aws-differences.md) has each of them,
-with why it is not mirrored.
+A few other paths settle on different codes too. Section 1 of
+[`aws-differences.md`](./aws-differences.md) lists every run that comes out
+differently, and its section 2 has each of them, with why it is not
+mirrored.
 
 [`compatibility.md`](../compatibility.md) covers what else changes with the
 installed dependencies.

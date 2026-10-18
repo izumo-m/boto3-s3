@@ -337,14 +337,17 @@ These are the places `boto3-s3-cli` deliberately displays something other than
 what `aws` displays. **The list is exhaustive for the display layer's
 functional differences**: nothing here licenses an unrecorded one, and a new
 one is added by the same explicit decision a new normalization rule takes.
-The functional ones are carried in
-[`aws-differences.md`](../docs/cli/aws-differences.md) section 2 as well,
-except the last, which no real run reaches. The others are an error's details
-(the doubly-malformed listing entry, Ctrl-C's closing line, the
-directory-source failure line) or come only from an SDK version difference
-(botocore's own messages); the policy does not record those for users
-([`overview.md`](./overview.md) section 3), so they are kept here only as
-implementation notes.
+Those a user sees on a successful run (the pipeline's five, the help pages
+and `--debug` traces, the `--version` line, the missing `cli_history`
+warning, and the `--dryrun` line of a directory-source copy below) and the
+batched delete's failure line are carried in
+[`aws-differences.md`](../docs/cli/aws-differences.md) section 2 as well. The
+rest are kept here only as implementation notes: an interrupted `mv`'s record,
+an error's details (the doubly-malformed listing entry, Ctrl-C's closing line,
+the directory-source failure line), a difference that comes only from an SDK
+version (botocore's own messages) - none of which the policy records for users
+([`overview.md`](./overview.md) section 3) - and the last, which no real run
+reaches.
 
 The first five are the output pipeline's (`progress.py`; the rendering thread
 itself mirrors aws-cli's `ResultProcessor`):
@@ -436,7 +439,9 @@ The rest sit outside the pipeline:
   `[Errno 21]` report (`./d`) where aws threads the trailing-separator form
   through its engines — under CRT an untranslated `Unknown Error Code` —
   because mirroring that rendering would cost the clear errno report
-  (decided 2026-08-01).
+  (decided 2026-08-01). Under `--dryrun` the same threading shows in the
+  previewed line of a successful run (`upload: d/ to s3://bkt/` on aws,
+  `upload: ./d to s3://bkt/d` here), which aws-differences.md records.
 - **A message botocore itself writes is the installed botocore's wording**,
   where aws prints its bundled fork's. This is not class 2 (the same aws
   version installed from PyPI still carries the fork), but it comes only from

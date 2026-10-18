@@ -151,7 +151,7 @@ class TestWebsiteExitCodeShape:
     def test_empty_uri_is_param_validation_252(self, capsys: pytest.CaptureFixture[str]) -> None:
         # The empty name survives the fold intact and rides on to botocore, so
         # the report is botocore's whole one - the truncation below never
-        # applies here (measured; docs/cli/aws-differences.md section 2).
+        # applies here (measured; design/aws-cli-option-handling.md section 6).
         rc = cli.main(["website", "s3://", "--index-document", "i.html"], ctx=_real_client_ctx())
         err = capsys.readouterr().err
         assert rc == 252

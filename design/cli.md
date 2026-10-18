@@ -1588,7 +1588,8 @@ aws-cli gives it), these follow aws-cli v2's convention (aws-cli's
 `awscli/constants.py`).
 
 The specification belongs to [`exit-codes.md`](../docs/cli/exit-codes.md): what
-each code means, and which one wins when more than one thing is wrong. This
+each code means, and which one wins when more than one thing is wrong (as
+measured, not promised). This
 section records how that is produced - the mapping function, the per-family
 catches, and the aws-cli counterpart each one mirrors.
 [`exceptions.md`](./exceptions.md) section 5 and [`testing.md`](./testing.md)

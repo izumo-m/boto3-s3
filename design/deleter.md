@@ -292,9 +292,10 @@ that - so a key never gets fewer attempts than aws-cli gives it.
   which `sync`'s `ExitStack` does before the transferrer has drained, the
   deleter being entered later - so the final flush races the in-flight copies
   and the copy usually wins. Either way the outcome is execution order under
-  concurrency - run nondeterminism, which no output comparison holds to one
-  order ([`testing.md`](./testing.md) section 9, class 3): no ordering is
-  added to settle it, and aws-differences.md tells the reader not to run the command. A key containing XML 1.0-forbidden controls, surrogate code points,
+  concurrency, which functional compatibility does not extend to
+  ([`glossary.md`](./glossary.md)): no ordering is added to settle it, and
+  aws-differences.md tells the reader not to run the command. A key
+  containing XML 1.0-forbidden controls, surrogate code points,
   or `U+FFFE` / `U+FFFF` cannot be carried in a `DeleteObjects` body; it falls
   back to `DeleteObject`, preserving aws-cli behavior without sacrificing
   batching for the other keys. A key containing a carriage return takes the
