@@ -72,6 +72,12 @@ see [`s3-object.md`](./s3-object.md).
 the CRT engine has no copy operation. See
 [`compatibility.md`](../compatibility.md) for what the CRT engine needs.
 
+The classic engine does not check a download split into ranges (a single
+object at or above the multipart threshold) against the checksum stored with
+the object, as it checks a download that comes in one piece, so a corruption
+that got past TLS and TCP would land as a success. The CRT engine checks both;
+select `"crt"` when that matters.
+
 ## 2. Refusing to overwrite
 
 `no_overwrite=True` skips anything already present at the destination, silently

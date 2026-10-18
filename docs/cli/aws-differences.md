@@ -24,8 +24,7 @@ Under the same arguments and configuration you get **the same resulting S3
 state and local files, the same `sync` decisions, the same result lines on
 success, the same conditions failing, and an exit code with the same
 meaning**, bar the entries in section 2 that say outright that the run comes
-out differently. Those are a corrupted ranged download, a recursive delete
-whose listing dies part way or whose endpoint fails its batch requests, a
+out differently. Those are a recursive delete whose listing dies part way or whose endpoint fails its batch requests, a
 Ctrl-C during deletes under the CRT engine, a delete answered `412`, a CRT
 download that cannot put its file in place, a `mv` between two spellings of
 one Outposts object, an S3 Express access point, a plain-HTTP endpoint named
@@ -141,19 +140,9 @@ syncing with `--delete` onto such a directory.
 
 ## 2. Behavior differences
 
-The first can leave you with something wrong without saying so: a corrupted
-ranged download is a silent success here. The rest are visible, or make no
-difference to the result — except the ones that say outright that the run
-comes out differently, listed in section 1.
+These are visible, or make no difference to the result — except the ones
+that say outright that the run comes out differently, listed in section 1.
 
-- **Corrupted ranged downloads are not detected by the classic engine.** For a
-  single-object download at or above the multipart threshold, `aws` verifies the
-  reassembled object and fails on a mismatch; here such a corruption — one that
-  got past TLS and TCP integrity — would be reported as a success. **If that
-  matters to you, install the `crt` extra and set
-  `preferred_transfer_client = crt`**, which validates exactly as `aws` does.
-  Downloads below the threshold are verified on both tools, so only large
-  single-object downloads are affected.
 - **An `mv` download whose source delete dies without a response hangs `aws`
   under the CRT engine.** With `preferred_transfer_client = crt`, an `mv` from
   S3 to a local path downloads on the CRT client and then deletes the source

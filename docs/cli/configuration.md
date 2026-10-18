@@ -151,6 +151,12 @@ To see which engine a run actually used, pass `--debug`. Set
 `preferred_transfer_client = crt` when you need to be sure: that form fails
 rather than falling back.
 
+The classic engine does not check a download split into ranges (a single
+object at or above the multipart threshold) against the checksum stored with
+the object, as it checks a download that comes in one piece, so a corruption
+that got past TLS and TCP would land as a success. The CRT engine checks both;
+set `preferred_transfer_client = crt` when that matters.
+
 ## 4. `cli_timestamp_format`
 
 The profile key `cli_timestamp_format` takes `wire` or `iso8601`, exactly as
