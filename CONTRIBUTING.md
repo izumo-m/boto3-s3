@@ -5,14 +5,16 @@ suite, and the coding and commit conventions. For the project's purpose, scope,
 and design policy, start with [`design/overview.md`](design/overview.md).
 
 The project is in beta and preparing for 1.0. Changes that might break the
-public API or aws-cli compatibility must be discussed before implementation.
+public API or functional compatibility with aws-cli must be discussed before
+implementation.
 
 ## Project layout
 
 The repository is a [uv](https://docs.astral.sh/uv/) workspace with two packages:
 
 - `src/boto3_s3/` — **`boto3-s3`**, the library.
-- `cli/` — **`boto3-s3-cli`**, the `boto3-s3` command (an `aws s3` drop-in).
+- `cli/` — **`boto3-s3-cli`**, the `boto3-s3` command (a by-product: an
+  `aws s3`-compatible command line built on the library).
 - `tests/` — the test suite (see [`design/testing.md`](design/testing.md)).
 - `docs/` — the user documentation (the command, the library guide, the API
   reference).
@@ -75,7 +77,7 @@ Ruff is configured for a line length of 100 and a Python 3.10 target.
 
 ## Tests
 
-`uv run pytest` runs the whole suite **except** the end-to-end parity tests,
+`uv run pytest` runs the whole suite **except** the end-to-end comparison tests,
 which self-skip unless pointed at a live endpoint — so no Docker is needed for
 the default run.
 
@@ -86,7 +88,7 @@ server (RustFS, the dev stack) and compares their behavior:
 scripts/install-awscli.sh    # pin aws to the reference source version — idempotent
 scripts/compose-up.sh        # start the dev stack, wait for its buckets
 source scripts/dev-env.sh    # point AWS tooling and the e2e gate at it
-uv run pytest tests/cli/e2e  # run the parity suite
+uv run pytest tests/cli/e2e  # run the comparison suite
 scripts/compose.sh down      # tear the stack down
 ```
 
@@ -101,16 +103,18 @@ the tree, with a pinned `aws.exe` — by the procedure in
 [`design/testing.md`](design/testing.md) section 8.
 
 The commands above are the ones to run; [`design/testing.md`](design/testing.md) is
-where the reasoning lives — the test tiers, the exit-code charter's detection
+where the reasoning lives — the test tiers, the exit-code comparison's detection
 surface, the golden contract, and why the stack is pinned the way it is. It
 points back here rather than repeating the commands.
 
 ## Conventions
 
-- **Parity is the contract.** Behavior, options, and exit codes follow `aws s3`.
-  When you add or change a subcommand or option, extend the matching scenarios
-  and tests so parity stays enforced (see [`design/testing.md`](design/testing.md)
-  and the exit-code charter in [`design/overview.md`](design/overview.md)).
+- **Functional compatibility is the contract.** Behavior and options follow
+  `aws s3`, and exit codes carry the meanings aws-cli gives them; error details
+  such as wording need not match. When you add or change a subcommand or
+  option, extend the matching scenarios and tests so the comparison keeps
+  covering it (see [`design/testing.md`](design/testing.md) and the design
+  policy in [`design/overview.md`](design/overview.md) section 3).
 - **Typed.** The library ships type information (`py.typed`); keep public APIs
   typed and basedpyright clean.
 - **English.** All version-controlled files are written in English.

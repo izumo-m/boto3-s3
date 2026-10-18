@@ -5,7 +5,10 @@
 [![License](https://img.shields.io/pypi/l/boto3-s3-cli)](https://github.com/izumo-m/boto3-s3/blob/main/LICENSE)
 
 An `aws s3`-compatible command line, built on the
-[`boto3-s3`](https://pypi.org/project/boto3-s3/) library.
+[`boto3-s3`](https://pypi.org/project/boto3-s3/) library. The library is the
+product and this command is a by-product of it: anyone who just wants the
+`aws s3` command can use aws-cli itself. It can still help where aws-cli is
+slow to start or too large to install (below).
 
 ```bash
 pip install boto3-s3-cli
@@ -30,27 +33,30 @@ boto3-s3 sync ./build s3://my-bucket/build/ --delete
 
 ## What it is
 
-`boto3-s3-cli` installs one command, **`boto3-s3`**, designed as a
-command-for-command replacement for `aws s3` with every subcommand:
+`boto3-s3-cli` installs one command, **`boto3-s3`**, with every `aws s3`
+subcommand:
 
 ```
 cp   ls   mb   mv   presign   rb   rm   sync   website
 ```
 
 It takes the `aws s3` arguments and global options, reads the same `~/.aws`
-configuration, and treats an exit-code mismatch as a bug. Existing commands and
-scripts can generally replace the `aws s3` prefix with `boto3-s3`; argument
-handling, resulting S3 state, and exit codes are tested against `aws s3`. The
-codes a script can branch on are listed in
+configuration, and does what `aws s3` does: the same transfers and `sync`
+decisions, and on success the same result lines. Argument handling, resulting
+S3 state, and exit codes are tested against `aws s3`. Exit codes carry the
+meanings aws-cli gives them; the codes a script can branch on are listed in
 [`docs/cli/exit-codes.md`](https://github.com/izumo-m/boto3-s3/blob/main/docs/cli/exit-codes.md).
 
-This CLI is the strict compatibility layer over the more permissive Python
-library. It applies aws-compatible path validation, configuration resolution,
-transfer defaults, output behavior, and error handling. Human-readable wording
-is not guaranteed to be byte-for-byte identical. The interactive UI,
-differences that come from the installed `s3transfer` rather than the fork
-aws-cli bundles, and a few aws-cli edge-case failures that were deliberately
-cleaned up, are the other documented exceptions.
+Over the more permissive Python library, this CLI narrows the inputs to what
+`aws s3` accepts and owns argument validation, output, and exit codes.
+Compatibility is functional rather than full: when something fails, the
+outcome follows `aws s3` (a failed item leaves the others running; a run that
+cannot proceed stops before it starts), but the details of an error, such as
+its wording or which of two mistakes is reported, may differ. Deliberate
+differences, such as batched deletes and credentials masked in debug output,
+are listed in
+[`docs/cli/aws-differences.md`](https://github.com/izumo-m/boto3-s3/blob/main/docs/cli/aws-differences.md);
+the interactive auto-prompt UI is not compared.
 
 ## Packaging & startup
 
