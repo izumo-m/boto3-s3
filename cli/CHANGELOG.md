@@ -5,6 +5,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-18
+
+- `--copy-props all` writes a multipart copy's oversized tags and its annotations in `aws`'s order, with `aws`'s requests only.
+- The `[plugins]` section is now loaded like `aws` loads it: a plugin that cannot be imported or initialized stops every command, and a plugin's handlers on SDK events run.
+- A `[toplevel]` `s3` entry in `~/.aws/cli/alias` now applies to every command, as it does to every `aws s3` one.
+- `--sse aws:kms` now signs an MRAP, Outposts or S3 Express target with plain SigV4 like `aws`, `--no-sign-request` included (it used the endpoint's own signer, or sent the request unsigned).
+- More `aws` parity in failure and interruption corners: a transfer or delete whose connection is closed or times out before any response prints nothing and does not fail the run where `aws` loses it too, `sync` carries on through an unsorted listing, `--delete` included, and `cp` / `mv --case-conflict` pair one against the destination the way `aws` does, a run cut short by Ctrl-C or a fatal error prints no result line after its first cancelled transfer, and a stdout or stderr that cannot be written no longer silences the other one's result lines (exit codes changed).
+- Under the CRT engine, `rm` and `sync --delete` now delete on the CRT client like `aws` (still batched), so the CRT's retry policy and error text apply, a missing credential's included; a role's or SSO's credential that fails to refresh now fails each transfer and leaves `--dryrun` completing, as with `aws`, and the CRT engine runs on boto3 1.34 to 1.41 with the `crt` extra; on either engine a key S3 reports with a transient error, and every key of a batch request that fails as a whole, is now sent again on its own like `aws` instead of failing (a missing bucket's failure lines included; exit codes changed).
+- A profile's `cli_auto_prompt` is now read like `aws` reads it: from the profile the environment selects, no longer from the one `--profile` names; and without the `autoprompt` extra, `on-partial` no longer runs a command twice.
+- More `aws` parity at startup: `--version` with stdout closed no longer ends in a traceback, and runs carrying two mistakes at once (an unknown option beside a bad option value, an unusable instance-metadata setting, `retry_mode = legacy` beside a bad endpoint) now report the one `aws` reports (exit codes changed in those corners); a role's or SSO's credentials are now fetched as `aws` fetches them: in its region when `--source-region` or an alias's `--region` names another, and never under an empty CA bundle or a digit-led endpoint.
+- On every host interpreter, an HTTPS proxy now receives aws's `Host` header for an IPv6-literal endpoint, and a report quoting Python's own text (an over-long number, a trailing comma in a `credential_process` answer) reads as `aws`'s.
+- A download to stdout (`cp s3://… -`) whose body is cut and retried no longer writes its first bytes twice, and a CRT download whose file could not be put in place (a name too long, a directory at the destination) now fails instead of reporting success (where `mv` deleted the object).
+- More `aws` parity in the subcommands: `rm` on an Outposts access point ARN closed with `:` no longer deletes the whole access point and its line keeps the `:`, unsupported ARNs and refused bucket names are reported as and when `aws` reports them, a `sync` or recursive `cp` destination typed with `..` after a symlinked directory is created where `aws` creates it, and a Ctrl-C now waits for a single `rm`'s delete and for a finished run's last result lines (exit codes changed in those corners).
+- An S3 Express access point (`--xa-s3`) is now refused by `sync` and treated by `--case-conflict` as its directory bucket is, and `mv` warns about one and resolves it under `--validate-same-s3-paths`; `aws` does none of these, losing objects through `sync` and `mv` and skipping them under `--case-conflict` (exit codes changed). `presign` now signs one with S3 Express session credentials, like `aws`.
+- On an SDK too old for them, `mb --tags` and `-an` bucket names, the newer `--checksum-algorithm` values and S3 Express directory buckets and access points are now refused up front with the version they need, and an explicit CRT engine whose `crt` extra brought a too-old awscrt now names the boto3 upgrade instead of the extra (exit codes changed).
+- More `aws` parity on Windows and with S3-compatible endpoints: on Windows, `--exclude` / `--include` now match a `\` in a key as a separator and lower-case by Windows's rules, and a file whose name is all extension (`.json`) is uploaded untyped; a timestamp sent without a zone no longer stops `sync`, a download from an endpoint serving its ETag in another form (unquoted, weak, empty) no longer fails, and an unreadable `mime.types` fails each upload instead of the run (exit codes changed).
+
 ## [0.8.1] - 2026-09-07
 
 - The default request checksum is now `CRC64NVME` like `aws` wherever the installed botocore can compute it; without awscrt, botocore's `CRC32` stays.
@@ -92,7 +109,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release.
 
-[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.8.1...HEAD
+[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.9.0...HEAD
+[0.9.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.8.1...boto3-s3-cli-v0.9.0
 [0.8.1]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.8.0...boto3-s3-cli-v0.8.1
 [0.8.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.7.0...boto3-s3-cli-v0.8.0
 [0.7.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.6.1...boto3-s3-cli-v0.7.0

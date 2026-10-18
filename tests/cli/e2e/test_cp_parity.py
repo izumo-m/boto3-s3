@@ -7,11 +7,11 @@ wiped between the sides and at the end. Comparison covers the unconditional
 rc (exit-code charter, design/overview.md section 3), the masked/sorted stdout, the
 bucket end state, the local destination tree, the probe object's HeadObject
 fields, and the live per-side download-mtime assertion. ``diff_only``
-scenarios carry outcomes that are endpoint-relative (``--sse``, GLACIER
-storage class, negative page size: MinIO and real S3 answer differently) or
-runner-relative (an uncreatable recursive destination depends on the runner's
-privileges - root creates anything); both CLIs always agree, so the rc
-comparison still holds and no golden is written.
+scenarios carry outcomes that are endpoint-relative (GLACIER storage class:
+the dev stack and real S3 answer differently; negative page size: moto cannot
+replay it) or runner-relative (an uncreatable recursive destination
+depends on the runner's privileges - root creates anything); both CLIs always
+agree, so the rc comparison still holds and no golden is written.
 """
 
 from __future__ import annotations
@@ -108,12 +108,14 @@ def test_cp_parity(scenario: CpScenario, bucket: str, s3_client: Any, tmp_path: 
         )
 
         if scenario.undefined_on_case_insensitive_dest and is_case_insensitive(tmp_path):
-            # aws's own rc/output are racy here (the twin downloads' rename
-            # race - see the scenario field's docstring), so there is nothing
-            # stable to diff or record: pin only ours' deterministic side.
-            assert ours.result.rc == 0, (
-                f"[{scenario.name}] ours must stay deterministic on a "
-                f"case-insensitive destination:\n"
+            # The outcome is racy here on both tools (the twin downloads'
+            # rename race - see the scenario field's docstring), so there is
+            # nothing stable to diff or record. What ours can be held to is
+            # the range the race allows - both land, one loses the rename, or
+            # one cannot be stamped - and the warning below.
+            assert ours.result.rc in (0, 1, 2), (
+                f"[{scenario.name}] ours left the outcomes the twin race allows "
+                f"on a case-insensitive destination:\n"
                 f"  ours rc={ours.result.rc} stderr={ours.result.stderr.strip()!r}"
             )
             assert_stderr_tokens(
@@ -124,7 +126,7 @@ def test_cp_parity(scenario: CpScenario, bucket: str, s3_client: Any, tmp_path: 
             )
             return
 
-        if not scenario.diff_only:
+        if not scenario.diff_only and not scenario.frozen_golden:
             if update_goldens_enabled():
                 write_golden(
                     "cp",

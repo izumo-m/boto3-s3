@@ -84,9 +84,17 @@ Every item that reaches the operation layer produces **exactly one outcome
 record**: `SUCCEEDED` / `FAILED` / `SKIPPED` / `DRYRUN` / `CANCELLED`. An item
 that never reaches it - filtered out during enumeration, or never enumerated
 because the run died first - produces nothing. The delete lane carries one
-carve-out: a cancellation can also discard `S3Deleter`-buffered entries
-(accepted but not yet dispatched) without a record
-([`deleter.md`](./deleter.md) section 2). Three pre-submission gates carve out
+carve-out: `S3Deleter` entries accepted but never run produce no record - the
+unsent buffer, which a cancellation or an exception that ends the run (a
+listing failure part-way through, say) discards, a dispatched batch an
+immediate cancellation stopped before its request started, and a key of a
+started batch due a request of its own - XML-incompatible, a re-send of a
+transient per-key failure, any key of a batch request that failed as a
+whole - that an abandoned run had not sent yet ([`deleter.md`](./deleter.md)
+sections 2-3). `rm`'s blind single-key delete carries another: under a held
+Ctrl-C it records a delete that went through and nothing else - a failure,
+or any outcome after a second Ctrl-C (below); `rm` never emits `CANCELLED`.
+Three pre-submission gates carve out
 the other direction: each consumes the item it blocks with an advisory instead
 of an outcome, so that item never reaches the operation layer and gets no
 terminal record - a glacier-blocked source without `ignore_glacier_warnings`
@@ -98,6 +106,35 @@ item (a walk warning has no transfer item at all, and a `NOTICE` may precede
 the same item's real outcome). Aggregate counts always agree with the records: the
 engine's rollup counters and `BatchError`'s fields are the per-outcome record
 counts ([`exceptions.md`](./exceptions.md) section 4).
+
+One carve-out mirrors aws-cli rather than the rule: an item whose request died
+without a response produces no record and no count. aws-cli's per-item
+completion handler (`DoneResultSubscriber`) checks for S3's conditional-write
+rejection with `exception.response.get("Error", {}).get("Code")`, botocore's
+`HTTPClientError` family (a connection closed before the response, a read
+timeout) carries `response = None`, and s3transfer's callback runner swallows
+the `AttributeError` that follows - so the item prints no line and the run
+exits 0 when nothing else failed (measured on cp / mv / recursive cp / rm
+against a 127.0.0.1 server closing every connection). `s3storage.lost_like_aws`
+evaluates that same expression on the exception aws-cli would hold (an
+in-pipeline translation is judged by its botocore cause; only the botocore
+family qualifies), `drop_like_aws` logs what it drops at debug level, and the routes
+aws-cli sends through that handler with a botocore client apply it: the
+transfer engine's terminal (`Transferrer._record_failure`, after the
+cancellation branch as in aws-cli), the S3 deleter's per-key requests, and the
+blind single-key `rm` (no record, no `BatchError`). A run whose engine is the
+CRT sends its deletes on the CRT client, as aws-cli does
+(`deleter.crt_delete_sender`; an S3-to-S3 sync stays classic whatever the
+preference), and a dead request there is an awscrt error, which never
+qualifies - aws-cli's CRT client reports it too. A batched `DeleteObjects` that dies this way loses nothing
+by itself - aws-cli never sends one - so its keys go out again one
+`DeleteObject` each and take their own outcomes ([`deleter.md`](./deleter.md)
+section 3). Failures outside that handler, or that reach it without a
+`response`, stay failures: a refused connection or connect timeout
+(botocore's `ConnectionError` family has no `response` attribute), a
+download's read timeout (s3transfer retries it and raises
+`RetriesExceededError`), an awscrt error, a synchronous local or
+custom-backend delete, the single-call operations.
 
 A cancellation (on the classic engine: a fatal elsewhere in the run,
 `CancelToken` immediate mode, a Ctrl-C; on the CRT engine: a `CancelToken`
@@ -111,8 +148,30 @@ cancel only - see below) resolves the accepted transfer items like this:
 - work never accepted (a graceful cancel stops the submission loop before the
   next item) produces no record.
 
+`rm`'s blind single-key delete (one request, no engine) keeps the same rule
+for a Ctrl-C: aws sends it on a transfer-manager worker whose shutdown waits
+for it, so the request runs on a worker here too and the interrupt is held
+until it settles - a completed delete is recorded, then the
+`KeyboardInterrupt` is raised. A failed one is not recorded: on aws's
+transfer futures a completion wins over the cancel mark and a failure does
+not - for the same reason a transfer item that fails after the
+cancellation reports `CANCELLED`, an outcome `rm` does not emit. A second
+Ctrl-C keeps the wait but drops the record (aws's executor threads are
+joined as it exits, so its request still completes, unreported); a third
+stops the wait.
+
 On the CRT engine, `CANCELLED` is reserved for the cancel this run's
-`CancelToken` ordered - the one revocation aws-cli has no counterpart for.
+`CancelToken` ordered - the one revocation aws-cli has no counterpart for -
+and for an item whose stored outcome is itself an interrupt, which is
+`CANCELLED` wherever it occurs and re-raised to the caller
+(`Transferrer._record_failure`). On the CRT engine that is a download whose
+sink raised `KeyboardInterrupt` / `SystemExit`: awscrt puts what the write
+callback raised on the future as it is. An upload's reader raising one is not
+stored that way (awscrt turns `KeyboardInterrupt` into its own
+`AWS_ERROR_UNKNOWN`, a `FAILED`, and does not return from a `SystemExit`),
+nor is a classic threaded download's sink (upstream's IO task swallows it and
+the item reports `SUCCEEDED`); both are upstream's behaviour, measured and
+left as it is.
 Every other CRT cancellation (awscrt's `AWS_ERROR_S3_CANCELED`) reports
 `FAILED` with the error carrying awscrt's cancellation wording - aws-cli's
 measured classification: a fatal or Ctrl-C folding its CRT manager counts
@@ -129,7 +188,15 @@ cut short, and the run raises `BatchError` in place of the swallowed
 interrupt (on the other windows the run still ends with the fatal or the
 re-raised `KeyboardInterrupt` itself). The classic engine settles every
 revoked item with s3transfer's `CancelledError` shapes and re-raises a
-drain-time interrupt, so none of this arises there.
+drain-time interrupt, so none of this arises there. A `CancelledError` a task
+itself raised - a caller's stream throwing `concurrent.futures.CancelledError`
+or the library's own, nobody having ordered a cancel - wears the type but is
+not a revocation, and the item is `FAILED` (the library's type is reported as
+the base error with the throw as its cause, so a `FAILED` record never carries
+the type that means "revoked"). The classic coordinator settles such a throw
+as a failure and says so; the CRT engine keeps no such status and never
+produces either type itself, so there the type counts as a revocation only
+when this run's cancel token ordered one.
 
 A graceful cancel (`CancelMode.GRACEFUL`, the default) is a drain: accepted
 items run to completion and report their real outcomes, so no `CANCELLED`
@@ -164,7 +231,8 @@ the ETag, as `{"ETag": "\"...\""}` (quoted, the raw S3 form):
 
 The default ETag comes from s3transfer's `future.meta.etag`; only what s3transfer
 exposes is surfaced, so on an old s3transfer (or the CRT engine) it may be `None`
-- a documented degradation ([`overview.md`](./overview.md) section 2).
+- a documented degradation ([`compatibility.md`](../docs/compatibility.md)
+section 1; for the CRT engine, [`crt.md`](./crt.md) section 3).
 
 ### `capture_response` - the full S3 responses
 

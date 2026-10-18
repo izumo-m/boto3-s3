@@ -8,7 +8,7 @@ passes that ``None`` straight to ``awscrt.s3.S3Client``, whose
 no message, and aws's general exception handler renders it as the prefix alone
 at rc 255. The transfer manager is built before the run is decided, so every
 transfer command reports it - ``--dryrun`` and ``--quiet`` included - and so
-does ``rm``, which builds the engine like aws and then deletes without it.
+does ``rm``, which builds the engine like aws before its deletes ride it.
 
 These run the real awscrt: the whole point is that the assertion is awscrt's
 own, not a hand-written mirror of it. `tests/cli/unit/test_engine_selection.py`
@@ -138,8 +138,8 @@ def test_no_resolvable_region_is_awscrts_own_empty_report(
 
 def test_a_resolvable_region_builds_the_engine_and_runs(tmp_path: Path) -> None:
     # The control: with a region the construction succeeds, so the run proceeds
-    # to the (unreachable) endpoint and fails there instead - rm never routes
-    # its deletes through the engine it just built.
+    # to the (unreachable) endpoint and fails there instead, its delete sent on
+    # the engine it just built.
     result = _run_cli(
         tmp_path,
         "crt",

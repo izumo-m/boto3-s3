@@ -86,6 +86,26 @@ class TestCliImportContract:
             """
         )
 
+    def test_valid_imds_settings_keep_the_help_token_sdk_free(self) -> None:
+        # The dispatcher builds botocore's credential chain ahead of the help
+        # token only for a configuration that could make the build fail
+        # (ConfigScan.credential_chain_suspect); settings botocore accepts
+        # must not cost the informational exits their SDK-free start.
+        _run_fresh(
+            """
+            import os
+            os.environ["AWS_METADATA_SERVICE_TIMEOUT"] = "5"
+            os.environ["AWS_METADATA_SERVICE_NUM_ATTEMPTS"] = "3"
+            os.environ["AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE"] = "ipv6"
+            os.environ["AWS_EC2_METADATA_SERVICE_ENDPOINT"] = "http://[fd00:ec2::254]"
+            assert main(["help"]) == 0
+            assert_no_heavy_imports()
+            assert_no_command_modules()
+            assert_no_library_modules()
+            assert_no_logging()
+            """
+        )
+
     def test_version_is_sdk_and_command_free(self) -> None:
         # The boto3/botocore tokens must come from distribution metadata, not
         # from importing the packages.

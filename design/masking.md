@@ -130,9 +130,7 @@ masked debug output the supported way (run the CLI with `--debug`, or call
 ### 3.4 The `http.client` wire dump is not handled
 
 As in section 2, the `http.client` wire dump does not appear under the default
-`--debug`. If a wire-dump output option is added in the future, the monkeypatch-
-style redactor is reintroduced at that point (binding the global install/uninstall
-to the ON/OFF of debug rather than to a per-operation scope).
+`--debug`.
 
 ## 4. Replacement notation (parity)
 
@@ -149,20 +147,36 @@ over-masking, with the credential scope still preserved.
 
 ### 4.1 Target patterns
 
-We pick up the URL/query forms, the plain `Header: value` line form (how
-botocore's `AWSPreparedRequest` repr renders headers), and the **dict-repr form**
-that s3transfer logs for a task's kwargs (`'X-Amz-Security-Token': '...'` /
-`'SSECustomerKey': '...'`, including `b'...'`).
+We pick up the URL/query forms, the **dict-repr form** - how botocore's
+`AWSPreparedRequest` repr renders its headers (`'X-Amz-Security-Token': '...'`)
+and how s3transfer logs a task's kwargs (`'SSECustomerKey': '...'`), including
+`b'...'` - and the plain `name: value` line form (the canonical request
+`botocore.auth` logs, and an older botocore's request repr).
+
+The patterns that take their value as a bare run (the signature, token,
+web-identity, MFA and SSE-C header rows below) stop it at whitespace, a
+separator (`&`, `,`), a quote, an escape, or the `<` / `>` of a logged XML
+body - no real signature, token or header-form key carries any of those (hex,
+base64, a JWT, percent-encoding) - so an object key or a metadata value that
+happens to be spelled like a secret's name (`om/Signature=1.txt` in a
+DeleteObjects body) is masked up to the next element and no further; the
+later keys of that batch stay readable. The credential rows stop at the same
+characters and at the `/` or `%` that begins the signing scope. Two rows take
+their value another way: the boto3-parameter SSE-C key runs to its closing
+quote, since the raw key is arbitrary bytes, and the plain
+`Proxy-Authorization:` line runs to the end of its line (or an escape or
+`<` / `>` before it). A text-shaped SigV2 header is kept apart from the real
+one by the signature's shape instead (the table's SigV2 row).
 
 | Target | Example (input -> output) | Notation |
 |---|---|---|
 | Access Key ID (`AKIA`/`ASIA`, leading `Credential=`/`X-Amz-Credential=`, `AWSAccessKeyId=`) | `Credential=AKIA...MPLE/2026...` -> `Credential=***MPLE/2026...` | `***` + last 4. Scope (after `/` or `%2F`) preserved |
 | Signature (`X-Amz-Signature=` / `Signature=` / `Signature:\n`) | `Signature=abcd...` -> `Signature=***` | `***` |
-| SigV2 Authorization header (`AWS <access-key-id>:<signature>`, legacy `signature_version='s3'`) | `AWS AKIA...MPLE:frJI...` -> `AWS ***MPLE:***` | `***` (id tail-revealed) |
-| Session token (`X-Amz-Security-Token=` / `X-Amz-Security-Token:` / `'X-Amz-Security-Token': '...'`, case-insensitive) | `'X-Amz-Security-Token': 'FQo...'` -> `'X-Amz-Security-Token': '***'` | `***` |
+| SigV2 Authorization header (`AWS <access-key-id>:<signature>`, legacy `signature_version='s3'`) | `AWS AKIA...MPLE:frJI...` -> `AWS ***MPLE:***` | `***`; the id follows the Access Key ID rule (`AWS minioadmin:frJI...` -> `AWS ***:***`). Matched by the signature's shape (an HMAC-SHA1's base64), so an object key or a metadata value written `AWS <word>:<text>` is left alone |
+| Session token (`X-Amz-Security-Token=` / `X-Amz-Security-Token:` / `'X-Amz-Security-Token': '...'`, case-insensitive; the S3 Express `x-amz-s3session-token` in the same forms, and the bare `SecurityToken=` query parameter of botocore's SigV2 request signer) | `'X-Amz-Security-Token': 'FQo...'` -> `'X-Amz-Security-Token': '***'` | `***` |
 | SSO bearer token (`x-amz-sso_bearer_token` header, dict / colon form - the `sso GetRoleCredentials` request botocore logs at DEBUG; the token mints role credentials for every account/role the user can access) | `'x-amz-sso_bearer_token': 'aoal-...'` -> `'x-amz-sso_bearer_token': '***'` | `***` |
 | sso-oidc token-endpoint bodies (`"accessToken"` / `"refreshToken"` / `"idToken"` / `"clientSecret"` in a CreateToken / RegisterClient `Response body:` line) | `"accessToken": "aoat-..."` -> `"accessToken": "***"` | `***` |
-| STS / metadata-service response-body credentials (`<SecretAccessKey>`/`<SessionToken>` XML; quote-agnostic `SecretAccessKey`/`SessionToken`/`Token` key-value in JSON bodies and the metadata fetchers' dict reprs) | `<SecretAccessKey>wJal...</SecretAccessKey>` -> `<SecretAccessKey>***</SecretAccessKey>`, `'Token': 'FQo...'` -> `'Token': '***'` | `***`. `ContinuationToken` / `NextToken` are kept (quote-anchored key) |
+| STS / metadata-service response-body credentials (`<SecretAccessKey>`/`<SessionToken>` XML; quote-agnostic `SecretAccessKey`/`SessionToken`/`Token` key-value in JSON bodies and the metadata fetchers' dict reprs; the `AccessKeyId` beside them in both forms, SSO's `accessKeyId` included, follows the Access Key ID rule) | `<SecretAccessKey>wJal...</SecretAccessKey>` -> `<SecretAccessKey>***</SecretAccessKey>`, `'Token': 'FQo...'` -> `'Token': '***'` | `***`. `ContinuationToken` / `NextToken` are kept (quote-anchored key) |
 | Signature-mismatch byte-dump (`<CanonicalRequestBytes>` / `<StringToSignBytes>` in a `SignatureDoesNotMatch` response body - a hex dump that reconstructs the signed headers) | `<CanonicalRequestBytes>78 2d 61 ...</CanonicalRequestBytes>` -> `<CanonicalRequestBytes>***</CanonicalRequestBytes>` | `***` (whole dump) |
 | Signature-mismatch echo (`<SignatureProvided>` in the same body; the header/query `Signature` patterns never match this XML element) | `<SignatureProvided>frJI...</SignatureProvided>` -> `<SignatureProvided>***</SignatureProvided>` | `***` |
 | Web-identity / SAML request tokens (`WebIdentityToken` / `SAMLAssertion` in the unsigned STS call's logged request dict, and the urlencoded query form) | `'WebIdentityToken': 'eyJ...'` -> `'WebIdentityToken': '***'` | `***` |
@@ -176,9 +190,9 @@ that s3transfer logs for a task's kwargs (`'X-Amz-Security-Token': '...'` /
 ## 5. Wiring (library / CLI)
 
 - **library**: `boto3_s3.set_stream_logger(name, level, ..., mask_secrets=True)` is
-  exposed (its home module is `boto3_s3.masking`, re-exposed through the 3-layer
-  export). Users get masked debug logs by default, with the same ergonomics as
-  boto3.
+  exposed (its home module is `boto3_s3.masking`, re-exported lazily from the
+  package root; [`imports.md`](./imports.md) section 3). Users get masked
+  debug logs by default, with the same ergonomics as boto3.
 - **CLI**: on `--debug`, `cli._enable_debug_logging` calls
   `set_stream_logger(name, DEBUG, stream=sys.stderr, mask_secrets=True)` for each
   logger in `_DEBUG_LOGGERS` (`boto3_s3` / `boto3_s3_cli` / `botocore` / `boto3` /

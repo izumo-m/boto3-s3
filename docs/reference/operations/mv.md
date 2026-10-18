@@ -124,16 +124,20 @@ listed, transferred or deleted:
   reported as `s3://b/k - s3://b/`.
 
 `cp`'s two stream-destination guards are not among them: `mv` applies them at
-its own entry point, in its own wording. `recursive=True` with a stream `dest`
-is refused because a stream is a single endpoint, and `no_overwrite` with a
-stream destination because there is no existing destination to check — which
-for a move would mean deleting the source anyway. The four checks run in this
-order: stream source, recursive stream destination, `no_overwrite` with a
-stream destination, same-object move.
+its own entry point, attributed to `mv` — the recursive guard in its own
+wording, the `no_overwrite` guard with `cp`'s message. `recursive=True` with a
+stream `dest` is refused because a stream is a single endpoint, and
+`no_overwrite` with a stream destination because there is no existing
+destination to check — which for a move would mean deleting the source anyway.
+The four checks run in this order: stream source, recursive stream destination,
+`no_overwrite` with a stream destination, same-object move.
 
 The same-object guard is textual. Two paths that reach the same underlying
-bucket through an access point ARN, an access point alias or a multi-region
-access point are not detected by it; resolve them yourself with
+bucket through an access point ARN, an access point alias, a multi-region
+access point, or an access point of an S3 Express directory bucket (`--xa-s3`)
+and the directory bucket itself are not detected by it — and S3 may then accept
+the copy onto itself, which a directory bucket does, so the delete that follows
+removes the only copy (measured on real S3); resolve them yourself with
 [`S3PathResolver`](../misc.md#s3pathresolver) beforehand when that risk
 applies. The library never builds the `s3control` / `sts` clients such a
 resolution needs.
@@ -161,10 +165,10 @@ is rejected with `ValidationError` before any bytes move
 ### Raises
 
 Everything [`cp.md`](./cp.md#raises) lists, plus the two `mv`-specific
-`ValidationError` cases above, `mv`'s own wording for `cp`'s two
-stream-destination guards, and the extra `DELETE` capability requirement. A
-source that could not be deleted is not a separate exception: it is that item's
-`FAILED` record, aggregated into
+`ValidationError` cases above, `cp`'s two stream-destination guards raised
+from `mv`'s own entry point (the recursive one in `mv`'s wording), and the
+extra `DELETE` capability requirement. A source that could not be deleted is not
+a separate exception: it is that item's `FAILED` record, aggregated into
 [`BatchError`](../exceptions.md#batcherror) with the rest.
 
 ## boto3_s3.mv

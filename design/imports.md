@@ -14,7 +14,10 @@ usage errors, and subcommand help may all import the AWS SDK freely.
    AWS SDK module, any per-command module (the `commands` package's shared
    `base` infrastructure may load), or any library module beyond the lazy
    `boto3_s3` root and its pure `exceptions`. Version tokens for installed
-   SDK distributions come from package metadata.
+   SDK distributions come from package metadata. A `[plugins]` entry is
+   imported on those exits too, as aws imports it (design/cli.md section 1);
+   what the plugin itself imports is its own, and the emitter it registers
+   on is SDK-free.
 
 ## 2. Export surface
 
@@ -48,10 +51,12 @@ to exactly this contract - the "Library consumption contract" in
   `compat` module),
   and `transferconfig.py` (the re-export home for the public `TransferConfig`:
   boto3's subclass plus the CRT fields and `annotation_temp_dir`, crt.md
-  section 2) imports `boto3.s3.transfer`. The bare-import contract holds because the lazy root
+  section 2) imports `boto3.s3.transfer`, while `transfer.py` imports
+  `s3transfer` directly. The bare-import contract holds because the lazy root
   defers those *module* loads, not because the modules defer the SDK -
   touching a root symbol homed in one of them pays the SDK import.
-  `crtsupport.py` keeps all of awscrt / `s3transfer.crt` in-function, so the
+  `crtsupport.py` (and `crtrequest.py`, the deletes' route onto the same CRT
+  client) keeps all of awscrt / `s3transfer.crt` in-function, so the
   classic path works with awscrt absent (when awscrt *is* installed, botocore
   itself imports it eagerly - the classic path avoids requiring awscrt, not
   its import cost).

@@ -57,11 +57,13 @@ def enhance_error_msg(parsed: dict[str, Any] | None, **kwargs: Any) -> None:
             "Signature Version 4.  " + REGION_ERROR_MSG
         )
     elif _is_permanent_redirect_message(parsed):
+        # Read in aws's order, the endpoint first: a response carrying
+        # neither element then fails on the same name there and here.
+        endpoint = parsed["Error"]["Endpoint"]
         message: str = parsed["Error"]["Message"]
         # aws drops the message's final character - the period ending "Please
         # send all future requests to this endpoint." - so the endpoint reads
         # as its continuation.
-        endpoint = parsed["Error"]["Endpoint"]
         parsed["Error"]["Message"] = f"{message[:-1]}: {endpoint}\n{REGION_ERROR_MSG}"
     elif _is_kms_sigv4_error_message(parsed):
         parsed["Error"]["Message"] += ENABLE_SIGV4_MSG

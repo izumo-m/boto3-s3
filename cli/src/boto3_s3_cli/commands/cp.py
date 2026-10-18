@@ -9,7 +9,7 @@ import os
 # or up front when auto-prompt builds the full command model.
 from boto3_s3 import NotFoundError, StdioStorage, ValidationError
 from boto3_s3.transferplan import item_paths, plan_transfer
-from boto3_s3_cli import filters
+from boto3_s3_cli import filters, usage
 from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import Command, Context
 
@@ -41,8 +41,9 @@ class CpCommand(Command):
         Express case-conflict rejection are 252; the bare integer
         conversion, the session profile resolution, the missing local
         source, and the ``--recursive`` destination-directory pre-create
-        are 255; client creation (unresolvable credentials/region) is
-        253 - while everything raised by the transfer pipeline is rc 1
+        are 255 - while everything raised by the transfer pipeline is rc 1,
+        credentials that cannot be located included (the client builds
+        without them; the first request fails)
         (``AssertionError`` excepted - an internal bug, re-raised):
         per-item failures stream ``<kind> failed:`` lines, anything that
         kills the run (a listing error, the single-source 404, a bad
@@ -168,7 +169,10 @@ class CpCommand(Command):
             # `cp - s3://b/k --expected-size abc --dryrun` is rc 0, measured).
             expected_size = None
             if src == "-" and args.expected_size is not None and not args.dryrun:
-                expected_size = int(args.expected_size)
+                try:
+                    expected_size = int(args.expected_size)
+                except ValueError as exc:
+                    raise ValueError(usage.int_error_message(exc)) from None
             s3.cp(
                 src_location,  # type: ignore[arg-type]
                 dest_location,  # type: ignore[arg-type]

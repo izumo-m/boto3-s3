@@ -145,8 +145,12 @@ instead of becoming `DRYRUN` records.
 
 `expected_size` is the multipart sizing hint for a streaming upload, in bytes.
 It reaches the engine only on that route; on every other route it is accepted
-and ignored. Without it, an upload from a stream of unknown length buffers up
-to the multipart threshold before deciding how to send the object.
+and ignored. It applies to a stream the engine cannot size — one that is not
+seekable, `sys.stdin` say — and is ignored for a seekable stream, whose length
+the engine reads itself. It is a hint for planning the parts, never the byte
+count: the whole stream is sent whatever the hint says, and the record reports
+the bytes counted. Without it, an upload from a stream of unknown length
+buffers up to the multipart threshold before deciding how to send the object.
 
 `on_progress` receives byte-level
 [`TransferProgress`](../results.md#transferprogress) updates for submitted
@@ -205,7 +209,8 @@ so `src_info` is `None` as well.
 The outcomes `cp` emits:
 
 - `SUCCEEDED` — the item transferred. `bytes_transferred` is the item's size,
-  or the size the engine resolved when the item had none. `extra_info` carries
+  or, when the item had none (a stream, a custom backend's entry), the size the
+  engine resolved or the bytes it reported moving. `extra_info` carries
   `{"ETag": …}` for a download or a copy — the source object's ETag — and is
   `None` for an upload unless `capture_response=True` supplies it.
 - `FAILED` — the item's transfer failed; `error` is the translated exception.
@@ -233,7 +238,9 @@ The outcomes `cp` emits:
   the same item's real outcome.
 - `DRYRUN` — under `dryrun=True`, one per item that reached the submit step.
 - `CANCELLED` — an accepted item revoked before it could complete, by an
-  immediate cancellation, a fatal error elsewhere in the run, or `Ctrl-C`.
+  immediate cancellation, a fatal error elsewhere in the run, or `Ctrl-C`. On
+  the CRT engine only a cancellation `cancel_token` ordered reports it; every
+  other CRT cancellation reports `FAILED`.
 
 The archived-object gate behind that warning and its
 `ignore_glacier_warnings` skip runs on downloads and copies only; an upload
@@ -244,13 +251,14 @@ restored-object carve-out is read from the single-object `HeadObject`'s
 even a restored object is skipped
 ([`../options.md`](../options.md#transferoptions)).
 
-Records for submitted transfers arrive on the engine's worker threads, and the
-warnings an enumeration raises — the source walk or listing, and the
+Records for submitted transfers arrive on the engine's worker threads, the
+`SKIPPED` of a conditional write S3 answers with `PreconditionFailed` among
+them. The warnings an enumeration raises — the source walk or listing, and the
 `case_conflict` destination walk — arrive on that scan's prefetch worker, so
-they can interleave with transfer records. Dry-run records, skips, notices, the
-warnings the single-object source resolution raises and the per-item warnings
-the producers raise (the archived source, the oversize upload, the parent
-reference) are emitted inline on the calling thread
+they can interleave with transfer records. Dry-run records, the other two
+skips, notices, the warnings the single-object source resolution raises and the
+per-item warnings the producers raise (the archived source, the oversize
+upload, the parent reference) are emitted inline on the calling thread
 ([`README.md`](./README.md#on_result)).
 
 ### Raises
@@ -268,23 +276,36 @@ reference) are emitted inline on the calling thread
   `copy_props` / `annotation_copy_mode`; an unrecognized `case_conflict` value,
   refused on every route including the streaming one, whose single item builds
   no gate; a `TransferConfig` carrying classic-only settings with
-  `preferred_transfer_client="crt"`; a
+  `preferred_transfer_client="crt"`, rejected when the CRT engine is built —
+  for an upload or a download, not for an S3-to-S3 copy, which runs on the
+  classic engine either way, and never under `dryrun`; a
   `StdioStorage` used as a source in a process with no `sys.stdin`; and a
   case-fold collision under `CaseConflictMode.ERROR`, raised from inside
   enumeration. A `StdioStorage` *destination* has no such precondition,
   matching the AWS CLI — see `BatchError` below.
 - [`NotFoundError`](../exceptions.md#notfounderror) — a local source path that
   does not exist, checked before any item work and worded as the AWS CLI words
-  it; a single S3 source whose `HeadObject` answers 404; a single
-  custom-backend source `get_fileinfo` cannot resolve.
+  it (the check asks the kernel about the path as typed, like the AWS CLI's:
+  a source typed through a symlinked directory and `..` is admitted, and the
+  walk or stat then warns "File does not exist." for the lexical form, exit
+  code 2, as the AWS CLI does — on Windows, which folds `..` before the
+  filesystem sees the path, both refuse it as missing); a single S3 source
+  whose `HeadObject` answers 404; a single custom-backend source
+  `get_fileinfo` cannot resolve.
 - [`ConfigurationError`](../exceptions.md#configurationerror), or its
   [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement —
-  `no_overwrite` on an SDK without conditional writes, or `copy_props=ALL` on
-  one without the annotations model, both raised as the engine is built and
-  before any item is submitted; and credentials, region, profile or endpoint
-  that will not resolve while a client is being built — during resolution for a
-  bare `"s3://…"` argument, or on the deferred build of a caller-supplied
-  `S3Storage` that carries none.
+  `no_overwrite` on an SDK without conditional writes, `copy_props=ALL` on
+  one without the annotations model, or a `checksum_algorithm` newer than its
+  S3 model, all raised as the run sets up its transfers, before any item is
+  submitted — under `dryrun` too; an S3 Express bucket or access point the
+  SDK predates, raised before the run; a profile,
+  region, endpoint or partial credentials that will not resolve while a client
+  is being built — during resolution for a bare `"s3://…"` argument, or on the
+  deferred build of a caller-supplied `S3Storage` that carries none; and
+  credentials missing when a listing or a single-object `HeadObject` first
+  needs them. Where the first request is an item's own transfer — an upload, or
+  a download to a stream — missing credentials fail that item instead
+  (`BatchError` below).
 - The enumeration's own rejection, translated to its category and propagated:
   [`AccessDeniedError`](../exceptions.md#accessdeniederror),
   [`NotFoundError`](../exceptions.md#notfounderror) or
@@ -308,7 +329,7 @@ reference) are emitted inline on the calling thread
 - Anything `filter` itself raises. A predicate's exception surfaces on the
   consuming side of the enumeration and aborts the run; the engine then cancels
   the transfers it had accepted. `on_result` and `on_progress` must not raise —
-  the library states no contract for a callback that does
+  `cp` states no contract for a callback that does
   ([`README.md`](./README.md#on_result)).
 
 ## boto3_s3.cp

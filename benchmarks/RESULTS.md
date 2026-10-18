@@ -114,7 +114,7 @@ Notes:
 
 - Against real S3 the differential is narrower than against MinIO and has a
   different shape. Where the work is many small requests, both tools wait
-  on the same round trips: small-file cp lands at 0.85-0.94 (classic) and
+  on the same round trips: small-file cp lands at 0.83-0.94 (classic) and
   0.73-0.91 (crt), and a changed-file sync at 0.84-0.89. The listing,
   compare, and delete paths keep a clear lead (ls 0.53-0.56, no-op sync
   0.47-0.51, rm 0.37, delete-sync 0.40-0.41). The 1 GB classic upload is at
@@ -125,8 +125,9 @@ Notes:
   tree an hour earlier on m7i showed the same (1.16). The CRT download is at
   parity (0.99 and 1.06, both tools at 1.0-1.2 GiB/s). This was the one row
   that flagged; the cause and the fix are in the follow-up below.
-- Peak RSS: ours runs at 60-85% of aws on every classic row (the listing,
-  sync, and rm rows sit at 65-75 MiB against 87-134); on the CRT large-file
+- Peak RSS: ours runs at 52-89% of aws on every classic row (the listing
+  and rm rows sit at 67-70 MiB against 87-134, the changed-file sync at
+  100-125 against 124-140); on the CRT large-file
   rows both tools are dominated by the CRT's buffers (440-520 MiB each,
   ratios 0.86-1.06).
 - Graviton3 against the 4th-gen Xeon: in-process the same code runs 1.05x
@@ -172,7 +173,7 @@ bundled botocore would stamp it: first on the library's CRT lane alone
 (`eb5711c`, the commit the confirmation runs below measured), then moved to
 the CLI layer for both engines and every checksummed request, with the
 library back on boto3's defaults (the commit after it; design/cli.md
-section 4). Confirmation runs, everything else as above:
+section 5.7). Confirmation runs, everything else as above:
 
 | instance | crt cp_upload_large | crt cp_download_large | results files |
 |---|---|---|---|
@@ -318,7 +319,8 @@ Notes:
 
 Environment: as the 2026-07-14 entry, except aws-cli is now the pinned
 2.36.1 (`exe/x86_64.ubuntu.26`) and the package version strings are
-boto3-s3 0.7.0 / boto3-s3-cli 0.5.0 (the working tree at the commit above);
+boto3-s3 0.7.0 / boto3-s3-cli 0.5.0 (as the run recorded them; the tree at
+the commit above declares boto3-s3-cli 0.6.0);
 boto3/botocore 1.43.44, s3transfer 0.19.0, awscrt 0.32.2, Python 3.10.20.
 
 ### E2E (medians in seconds; ratio = net ours / net aws, < 1 is ours faster)
@@ -369,6 +371,8 @@ Notes:
   noise floor - the ratio reads 0.90 (2026-07-14), then 1.06 and 1.18 on two
   runs today: parity within noise, in a lane this cycle's changes do not
   touch (the CRT data plane bypasses the response parser).
+
+## 2026-07-14 - first official baseline
 
 - Commit: `82b977f` (`perf(crt): reuse the caller's session for CRT request
   serialization`), clean working tree.

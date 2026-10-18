@@ -188,6 +188,65 @@ class TestAliasGlobals:
         )
         assert seen == ["eu-west-1", "eu-west-1"]
 
+    def test_the_typed_region_is_kept_for_the_session(self, alias_file: Path) -> None:
+        # aws binds its session's region from the typed arguments before the
+        # alias runs, so the credential chain's STS stays in the typed region
+        # (or none) while the request signs with the alias's (measured).
+        from boto3_s3_cli import clientfactory
+
+        alias_file.write_text("[command s3]\ng = ls --region eu-west-1\n")
+        typed: list[str | None] = []
+
+        def factory(args: Any) -> Any:
+            from tests.utils.recorder import make_recording_client
+
+            typed.append(clientfactory.typed_region(args))
+            client, _calls = make_recording_client(_EMPTY_PAGE)
+            return client
+
+        ctx = Context(client_factory=factory)  # pyright: ignore[reportArgumentType]
+        assert cli.main(["g", "s3://bkt", "--region", "ap-south-1"], ctx=ctx) == 0
+        assert cli.main(["g", "s3://bkt"], ctx=ctx) == 0
+        assert typed == ["ap-south-1", None]
+
+    def test_a_value_the_resolution_cannot_take_is_reported_not_raised(
+        self, alias_file: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # urlsplit rejects this netloc with a bare ValueError, which no step
+        # of the alias layer claims. aws reports it through its entry point's
+        # general handler (measured, rc 255); here it left as a traceback.
+        alias_file.write_text("[command s3]\nx = ls --endpoint-url http://[::1\n")
+        assert cli.main(["x", "s3://bkt"], ctx=unused_ctx()) == 255
+        assert capsys.readouterr().err == "boto3-s3: [ERROR]: Invalid IPv6 URL\n"
+
+    def test_that_report_survives_a_codec_that_cannot_write_it(
+        self, alias_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Measured on the pinned aws-cli: the alias's value names a character
+        # `ascii` lacks, the general report cannot be written, and the run
+        # ends at rc 255 on the codec's own message (position 23 there, five
+        # less for the shorter program name).
+        import io
+        import sys
+
+        # A fullwidth `@` in the netloc is what every supported Python's
+        # urlsplit refuses (its NFKC check), with the netloc in the message.
+        # The alias file is read in the locale's codec, as aws reads it, so
+        # it is written in that codec too - which not every codec can do.
+        try:
+            alias_file.write_text("[command s3]\ny = ls --endpoint-url http://a\uff20b\n")
+        except UnicodeEncodeError:
+            pytest.skip("the locale's codec cannot spell the test character")
+        raw = io.BytesIO()
+        stream = io.TextIOWrapper(raw, encoding="utf-8", newline="", write_through=True)
+        monkeypatch.setattr(sys, "stderr", stream)
+        monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "ascii")
+        assert cli.main(["y", "s3://bkt"], ctx=unused_ctx()) == 255
+        assert raw.getvalue() == (
+            b"boto3-s3: [ERROR]: 'ascii' codec can't encode character '\\uff20' "
+            b"in position 28: ordinal not in range(128)\n"
+        )
+
     @pytest.mark.parametrize("option", ["--debug", "--profile p"])
     def test_debug_and_profile_are_refused(
         self, alias_file: Path, option: str, capsys: pytest.CaptureFixture[str]
@@ -237,6 +296,80 @@ class TestAliasGlobals:
         alias_file.write_text("[command s3]\nv = ls --version\n")
         assert cli.main(["v"], ctx=unused_ctx()) == 0
         assert capsys.readouterr().out.startswith("boto3-s3-cli/")
+
+    @pytest.mark.parametrize("value", ["/no/such/bundle.pem", "''"])
+    def test_a_ca_bundle_in_the_value_changes_nothing(self, alias_file: Path, value: str) -> None:
+        # aws folds --ca-bundle into its verification setting while the
+        # typed arguments are parsed; the alias's copy arrives after that
+        # fold, where nothing reads it - a bundle it names is never trusted,
+        # and an empty one is not refused (measured: `x = rm ... --ca-bundle
+        # ''` dry-runs at rc 0, a bundle trusting a self-signed server still
+        # fails verification).
+        alias_file.write_text(f"[command s3]\nx = ls --ca-bundle {value}\n")
+        seen: list[object] = []
+
+        def factory(args: Any) -> Any:
+            from tests.utils.recorder import make_recording_client
+
+            seen.append(args.ca_bundle)
+            client, _calls = make_recording_client(_EMPTY_PAGE)
+            return client
+
+        ctx = Context(client_factory=factory)  # pyright: ignore[reportArgumentType]
+        assert cli.main(["x", "s3://bkt"], ctx=ctx) == 0
+        assert seen == [None]
+
+    def test_no_verify_ssl_in_the_value_is_applied(self, alias_file: Path) -> None:
+        alias_file.write_text("[command s3]\nx = ls --no-verify-ssl\n")
+        seen: list[object] = []
+
+        def factory(args: Any) -> Any:
+            from tests.utils.recorder import make_recording_client
+
+            seen.append(args.no_verify_ssl)
+            client, _calls = make_recording_client(_EMPTY_PAGE)
+            return client
+
+        ctx = Context(client_factory=factory)  # pyright: ignore[reportArgumentType]
+        assert cli.main(["x", "s3://bkt"], ctx=ctx) == 0
+        assert seen == [True]
+
+
+class TestALeadingDoubleDash:
+    """aws parses a value behind its service token, which uses a leading ``--`` up."""
+
+    def test_it_is_used_up_but_still_keeps_globals_out(self, alias_file: Path) -> None:
+        # `x = -- rm --dryrun` + `x s3://bkt/k` dry-runs (measured on aws).
+        alias_file.write_text("[command s3]\nx = -- rm --dryrun\n")
+        result, calls = run_recorded([], ["x", "s3://bkt/k"])
+        assert (result.rc, result.stdout, calls) == (0, "(dryrun) delete: s3://bkt/k\n", [])
+
+    def test_a_shadow_alias_drops_the_name_after_it(self, alias_file: Path) -> None:
+        alias_file.write_text("[command s3]\nrm = -- rm\n")
+        result, calls = run_recorded([], ["rm", "s3://bkt/k", "--dryrun"])
+        assert (result.rc, result.stdout, calls) == (0, "(dryrun) delete: s3://bkt/k\n", [])
+
+    def test_what_follows_it_is_no_global(
+        self, alias_file: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Measured: aws answers `x = -- --version` with `Unknown options:
+        # --version` rather than printing its version.
+        alias_file.write_text("[command s3]\nx = -- --version\n")
+        assert cli.main(["x"], ctx=unused_ctx()) == 252
+        assert capsys.readouterr().err.startswith(
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+        )
+
+    def test_a_later_one_keeps_its_marker(
+        self, alias_file: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Measured: `x = --region us-west-2 -- rm` + `x s3://bkt/k --dryrun`
+        # is `Unknown options: --dryrun` on aws too.
+        alias_file.write_text("[command s3]\nx = --region us-west-2 -- rm\n")
+        assert cli.main(["x", "s3://bkt/k", "--dryrun"], ctx=unused_ctx()) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): Unknown options: --dryrun\n"
+        )
 
 
 class TestShadowingABuiltIn:
@@ -355,9 +488,10 @@ class TestReportsAndSections:
         ],
     )
     def test_other_sections_declare_nothing_here(self, alias_file: Path, text: str) -> None:
-        # `[toplevel]` names services (no counterpart here), another command's
-        # section is another command's, and the section name is case-sensitive
-        # - all measured as an invalid choice on aws.
+        # A `[toplevel]` entry sits beside `aws s3`, not under it (only an
+        # `s3` entry reaches this surface), another command's section is
+        # another command's, and the section name is case-sensitive - all
+        # measured as an invalid choice on aws.
         alias_file.write_text(text)
         assert cli.main(["who"], ctx=unused_ctx()) == 252
 
@@ -549,6 +683,121 @@ class TestWhichLeafSectionApplies:
             "[command s3]\nls = !sh -c 'exit 7'\n"
         )
         assert cli.main(["ls", "s3://bkt"], ctx=unused_ctx()) == 7
+
+
+class TestTopLevelS3Alias:
+    """A ``[toplevel]`` entry named ``s3`` replaces ``aws s3`` itself.
+
+    aws's injector writes it over the built-in ``s3`` command (kept aside as
+    its proxy), so every invocation of this CLI runs through it. All measured
+    against the pinned aws-cli.
+    """
+
+    def test_a_global_in_the_value_applies_to_every_run(self, alias_file: Path) -> None:
+        alias_file.write_text("[toplevel]\ns3 = s3 --region eu-west-1\n")
+        seen: list[str | None] = []
+        ctx = TestAliasGlobals()._region_ctx(seen)  # pyright: ignore[reportPrivateUsage]
+        assert cli.main(["ls", "s3://bkt", "--region", "ap-south-1"], ctx=ctx) == 0
+        assert seen == ["eu-west-1"]
+
+    def test_what_the_value_leaves_precedes_the_typed_arguments(self, alias_file: Path) -> None:
+        alias_file.write_text("[toplevel]\ns3 = s3 rm --dryrun\n")
+        result, calls = run_recorded([], ["s3://bkt/k"])
+        assert (result.rc, result.stdout, calls) == (0, "(dryrun) delete: s3://bkt/k\n", [])
+
+    def test_a_double_dash_around_the_command_name_is_used_up(self, alias_file: Path) -> None:
+        for value in ("s3 -- rm --dryrun", "-- s3 rm --dryrun"):
+            alias_file.write_text(f"[toplevel]\ns3 = {value}\n")
+            result, _calls = run_recorded([], ["s3://bkt/k"])
+            assert (result.rc, result.stdout) == (0, "(dryrun) delete: s3://bkt/k\n")
+
+    def test_the_command_alias_section_still_applies_below_it(self, alias_file: Path) -> None:
+        alias_file.write_text(
+            "[toplevel]\ns3 = s3 --region eu-west-1\n[command s3]\nd = rm --dryrun\n"
+        )
+        result, calls = run_recorded([], ["d", "s3://bkt/k"])
+        assert (result.rc, result.stdout, calls) == (0, "(dryrun) delete: s3://bkt/k\n", [])
+
+    @pytest.mark.parametrize(
+        ("value", "message"),
+        [
+            ("s3 =", "the following arguments are required: command"),
+            ("s3 = --region eu-west-1", "the following arguments are required: command"),
+            ("s3 = ls", "argument command: Found invalid choice 'ls'"),
+            # Another service has nothing to run here; aws would run it.
+            ("s3 = s3api", "argument command: Found invalid choice 's3api'"),
+            ("s3 = s3 --output bad", "argument --output: Found invalid choice 'bad'"),
+        ],
+    )
+    def test_a_value_the_main_parser_refuses_is_its_usage_error(
+        self, alias_file: Path, capsys: pytest.CaptureFixture[str], value: str, message: str
+    ) -> None:
+        alias_file.write_text(f"[toplevel]\n{value}\n")
+        assert cli.main(["rm", "s3://bkt/k", "--dryrun"], ctx=unused_ctx()) == 252
+        err = capsys.readouterr().err
+        assert err.startswith(
+            f"boto3-s3: [ERROR]: An error occurred (ParamValidation): {message}\n"
+        )
+        assert err.endswith(_USAGE_BLOCK)
+
+    @pytest.mark.parametrize("flag", ["debug", "profile"])
+    def test_debug_and_profile_are_refused(
+        self, alias_file: Path, capsys: pytest.CaptureFixture[str], flag: str
+    ) -> None:
+        value = "--debug" if flag == "debug" else "--profile x"
+        alias_file.write_text(f"[toplevel]\ns3 = s3 {value}\n")
+        assert cli.main(["rm", "s3://bkt/k", "--dryrun"], ctx=unused_ctx()) == 255
+        assert capsys.readouterr().err == (
+            f'boto3-s3: [ERROR]: Global parameter "--{flag}" detected in alias "s3" '
+            "which is not supported in subcommand aliases.\n"
+        )
+
+    def test_version_in_the_value_prints_and_exits(
+        self, alias_file: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        alias_file.write_text("[toplevel]\ns3 = s3 --version\n")
+        assert cli.main(["rm", "s3://bkt/k"], ctx=unused_ctx()) == 0
+        assert capsys.readouterr().out.startswith("boto3-s3-cli/")
+
+    def test_a_chain_back_to_s3_is_aws_s_recursion_failure(
+        self, alias_file: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The other entry's `s3` is the `s3` entry again, not the built-in it
+        # proxies, so the two re-enter each other until the stack runs out.
+        alias_file.write_text("[toplevel]\ns3 = mys3\nmys3 = s3 --region eu-west-1\n")
+        assert cli.main(["rm", "s3://bkt/k", "--dryrun"], ctx=unused_ctx()) == 255
+        assert capsys.readouterr().err == "boto3-s3: [ERROR]: maximum recursion depth exceeded\n"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="an sh command")
+    def test_a_chain_to_an_external_entry_runs_it(self, alias_file: Path, tmp_path: Path) -> None:
+        written = tmp_path / "args"
+        alias_file.write_text(f"[toplevel]\ns3 = ext\next = !sh -c 'echo \"$@\" > {written}' sh\n")
+        assert cli.main(["rm", "s3://bkt/k"], ctx=unused_ctx()) == 0
+        assert written.read_text() == "rm s3://bkt/k\n"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="an sh command")
+    def test_an_external_value_runs_over_everything_typed(
+        self, alias_file: Path, tmp_path: Path
+    ) -> None:
+        # The globals are consumed first; the rest, the subcommand included,
+        # is appended (measured: `!echo ext` + `rm s3://b/k --region x
+        # --dryrun` echoes `ext rm s3://b/k --dryrun`).
+        written = tmp_path / "args"
+        alias_file.write_text(
+            f'[toplevel]\ns3 = !sh -c \'printf "%s\\n" "$@" > {written}; exit 7\' sh\n'
+        )
+        rc = cli.main(["rm", "s3://bkt/k", "--region", "x", "--dryrun"], ctx=unused_ctx())
+        assert rc == 7
+        assert written.read_text() == "rm\ns3://bkt/k\n--dryrun\n"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="an sh command")
+    def test_the_help_token_reaches_an_external_value(
+        self, alias_file: Path, tmp_path: Path
+    ) -> None:
+        written = tmp_path / "args"
+        alias_file.write_text(f"[toplevel]\ns3 = !sh -c 'echo \"$@\" > {written}' sh\n")
+        assert cli.main(["help"], ctx=unused_ctx()) == 0
+        assert written.read_text() == "help\n"
 
 
 class TestUnreadableAliasFile:

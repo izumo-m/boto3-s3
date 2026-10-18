@@ -51,6 +51,9 @@ def test_presign_parity(scenario: PresignScenario, bucket: str, s3_client: Any) 
         ours_lines = normalize_presign_stdout(
             ours_result.stdout, bucket=bucket, mask_region=mask_region
         )
+        golden_lines = normalize_presign_stdout(
+            aws_result.stdout, bucket=bucket, mask_region=mask_region, drop_session_token=True
+        )
 
         if update_goldens_enabled():
             write_golden(
@@ -59,7 +62,7 @@ def test_presign_parity(scenario: PresignScenario, bucket: str, s3_client: Any) 
                     scenario=scenario.name,
                     argv=list(scenario.argv),
                     rc=aws_result.rc,
-                    stdout_lines=aws_lines,
+                    stdout_lines=golden_lines,
                     aws_version=detect_aws_version(),
                 ),
             )
@@ -67,7 +70,7 @@ def test_presign_parity(scenario: PresignScenario, bucket: str, s3_client: Any) 
             assert_matches_golden(
                 load_golden("presign", scenario.name),
                 rc=aws_result.rc,
-                stdout_lines=aws_lines,
+                stdout_lines=golden_lines,
                 side="aws",
                 compare_stdout=scenario.compare_stdout,
             )

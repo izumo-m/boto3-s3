@@ -45,13 +45,17 @@ Two caveats are inherent to ETag comparison and are the caller's to manage:
   transfer config. The *effective* part size has a 5 MiB floor and 5 GiB ceiling
   and auto-grows past S3's 10000-part limit (s3transfer's ``ChunksizeAdjuster``),
   so a requested ``part_size`` below 5 MiB is clamped up.
-- **the object must be unencrypted or SSE-S3.** SSE-KMS / SSE-C / DSSE objects
-  carry an opaque, non-MD5 ETag that cannot be reconstructed, and a listing does
-  not reveal an object's encryption - so an upload / download against such a
-  bucket treats every object as differing and re-copies it each run (an
-  s3-to-s3 pair compares the opaque strings directly, so identical strings -
-  rare, since re-encryption changes them - do skip). Use the default
-  ``update_filter=None`` there instead.
+- **the object must be unencrypted or SSE-S3, outside S3 Express.** SSE-KMS /
+  SSE-C / DSSE objects, and every object in an S3 Express directory bucket
+  (SSE-S3 there included, measured on real S3), carry an opaque, non-MD5 ETag
+  that cannot be reconstructed, and a listing does not reveal an object's
+  encryption - so an upload / download against such a bucket treats every
+  object as differing and re-copies it each run (an s3-to-s3 pair compares
+  the opaque strings directly, so identical strings - rare, since
+  re-encryption changes them - do skip). Use the default
+  ``update_filter=None`` there instead. ``sync`` refuses S3 Express locations
+  outright, so for their objects this concerns a direct ``content_differs``
+  call.
 
 The copy decision runs on whatever thread drives the ``update_filter`` lane -
 ``sync``'s calling thread by default, or a pool worker under
@@ -68,6 +72,7 @@ import os
 from typing import TYPE_CHECKING
 
 from boto3_s3.comparator import READ_CHUNK, ContentComparison
+from boto3_s3.exceptions import InvalidConfigError, ValidationError
 from boto3_s3.types import S3FileInfo
 
 if TYPE_CHECKING:
@@ -91,7 +96,8 @@ class EtagComparison(ContentComparison):
     ``SyncPair``s - both
     sides present by construction (a new, source-only entry is ``create_filter``'s
     lane): an s3-to-s3 pair compares the listings' ETags
-    directly (as strings, whatever their form); an upload / download
+    directly (as strings, each without the quotes S3 wraps it in, whatever
+    their form otherwise); an upload / download
     reconstructs the readable (non-S3) side's
     single- or multipart ETag (at ``part_size``) and compares - there, a
     missing / non-MD5
@@ -113,6 +119,14 @@ class EtagComparison(ContentComparison):
       ``s3``-derived default, so ``EtagComparison(s3, part_size=...)`` uses the
       explicit value and does not consult ``s3``.
     - ``EtagComparison()`` uses ``DEFAULT_PART_SIZE`` (boto3's 8 MiB).
+
+    A part size has to be a positive integer. An explicit ``part_size`` that
+    is not one raises ``ValidationError``, and a profile whose
+    ``multipart_chunksize`` is zero or negative raises ``InvalidConfigError``
+    (the setting aws-cli itself refuses) - both at construction, where the
+    mistake is, rather than as an arithmetic error from the first multipart
+    ETag a sync meets. Anything from 1 up is accepted and adjusted per file
+    (the module docstring's floor, ceiling and part limit).
 
     When ``check_size`` is true (the default) a pair whose two sides have
     known, differing sizes is treated as differing (copy) before any ETag work.
@@ -146,8 +160,21 @@ class EtagComparison(ContentComparison):
         part_size: int | None = None,
         check_size: bool = True,
     ) -> None:
-        if part_size is None and s3 is not None:
+        if part_size is not None:
+            # The type is checked with the range: a float (8.0, from arithmetic)
+            # would be held here and only fail in the first multipart read.
+            if (
+                not isinstance(part_size, int)  # pyright: ignore[reportUnnecessaryIsInstance]
+                or part_size < 1
+            ):
+                raise ValidationError(f"part_size must be a positive integer (got {part_size!r})")
+        elif s3 is not None:
             part_size = s3.aws_config().get_size("s3.multipart_chunksize", DEFAULT_PART_SIZE)
+            if part_size < 1:
+                # aws-cli's own check of this setting, in its words.
+                raise InvalidConfigError(
+                    f"Value for multipart_chunksize must be a positive integer: {part_size}"
+                )
         self.part_size = DEFAULT_PART_SIZE if part_size is None else part_size
         self.check_size = check_size
 
@@ -179,8 +206,10 @@ class EtagComparison(ContentComparison):
         from its current position to the end and is never closed - it stays the
         caller's, as does whatever it raises, which propagates unchanged.
 
-        ``etag`` is the object's ETag, dequoted (what ``S3FileInfo.etag``
-        carries). Missing or empty is indeterminate -> ``True``, with nothing
+        ``etag`` is the object's ETag, with or without the double quotes S3
+        wraps it in: ``S3FileInfo.etag`` and a boto3 response's ``ETag`` can be
+        passed as they are, and so can the bare hex. Missing or empty is
+        indeterminate -> ``True``, with nothing
         opened or read. An ETag bearing a ``-<n>`` suffix is reconstructed as a
         multipart ETag at ``part_size`` (adjusted per file exactly as an upload
         would chunk it), any other as the whole-stream hex MD5 - so the module
@@ -201,6 +230,7 @@ class EtagComparison(ContentComparison):
         safeguard, and the reason a size is worth passing. ``check_size=False``
         ignores ``s3_size`` entirely.
         """
+        etag = _bare_etag(etag)
         if not etag:
             return True  # no ETag to compare against -> indeterminate
         multipart = "-" in etag
@@ -294,9 +324,32 @@ def _taxonomy_error(exc: OSError, *, operation: str, key: str) -> Boto3S3Error:
     return translate_os_error(exc, operation=operation, key=key)
 
 
+def _bare_etag(etag: str | None) -> str | None:
+    """An ETag without the double quotes S3 wraps it in.
+
+    ``S3FileInfo.etag`` holds the response's own text, quotes included, while
+    an ETag computed from bytes is the bare hex - so the quotes come off here,
+    at the comparison. Only a matched surrounding pair is removed: an already
+    bare value passes through (``content_differs`` accepts both forms), and
+    anything else - a weak ``W/"..."`` validator, say - is left as it is, which
+    never equals a computed ETag and so reads as differing.
+    """
+    if etag and len(etag) >= 2 and etag[0] == etag[-1] == '"':
+        return etag[1:-1]
+    return etag
+
+
 def _s3_etag(info: object) -> str | None:
-    """The dequoted ETag of an S3 listing entry, or ``None`` for any other side."""
-    return info.etag if isinstance(info, S3FileInfo) else None
+    """The bare ETag of an S3 listing entry, or ``None`` when there is none to compare.
+
+    ``None`` for a side that is not an S3 entry, for an entry without an ETag,
+    and for one whose ETag is empty once the quotes are off (``""`` or
+    ``'""'``): an empty value identifies no content, so two of them must not
+    read as the same object.
+    """
+    if not isinstance(info, S3FileInfo):
+        return None
+    return _bare_etag(info.etag) or None
 
 
 def _etag_differs(a: str | None, b: str | None) -> bool:

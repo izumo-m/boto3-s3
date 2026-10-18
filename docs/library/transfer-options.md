@@ -1,7 +1,7 @@
 # Transfer options
 
 `cp` / `mv` / `sync` take the `aws s3` transfer options as snake_case keyword
-arguments, plus a few the command has no flag for. Each accepts the same values
+arguments, plus one the command has no flag for. Each accepts the same values
 as the `aws s3` option of the same name, so `aws`'s own reference — or
 `boto3-s3 cp help`, if you installed the command — says what any one of them
 means.
@@ -29,7 +29,8 @@ Grouped by what they control:
 - **Archived objects** — `force_glacier_transfer`, `ignore_glacier_warnings`
 - **Streams and annotations** — `annotation_copy_mode`, and `cp`'s
   `expected_size`, a size hint for uploading from a stream
-  ([`streams.md`](./streams.md)). The command has no flag for either.
+  ([`streams.md`](./streams.md)). The command has no flag for
+  `annotation_copy_mode`; `expected_size` is `boto3-s3 cp --expected-size`.
 
 Those are the themes, not the whole list. The complete set of option keys, and
 the exact contract of each, is
@@ -74,7 +75,9 @@ the CRT engine has no copy operation. See
 ## 2. Refusing to overwrite
 
 `no_overwrite=True` skips anything already present at the destination, silently
-and successfully — a skip, not a failure.
+and successfully — a skip, not a failure. Two exceptions: a download into a
+custom `Storage` backend has no existence check and overwrites, and a download
+into a stream rejects the option with `ValidationError`.
 
 How it is enforced depends on direction. Uploads and copies attach a conditional
 header, so the check happens at S3 and is free of races. Downloads check whether
@@ -98,9 +101,11 @@ multipart copy does not**. `copy_props` says what to do about that
 | `all` | metadata, tags, and object annotations |
 
 Two behaviors worth knowing. Specifying an explicit property such as
-`content_type` makes even a single-request copy replace rather than copy the
-rest, matching `aws s3`. And specifying `metadata_directive` yourself disables
-the whole mechanism.
+`content_type` switches even a single-request copy to
+`MetadataDirective=REPLACE`; except under `none`, the other metadata
+properties are then read from the source and re-sent, so they still carry over,
+matching `aws s3`. And specifying `metadata_directive` yourself disables the
+whole mechanism.
 
 Under `default` and `all`, tags too large for the request header are applied
 after the copy succeeds. If that call fails, the destination is deleted on a
@@ -116,7 +121,7 @@ stages the source annotations
 | --- | --- |
 | `AnnotationCopyMode.PRELOAD_MEMORY` | the default — reads every payload into memory before the copy starts |
 | `AnnotationCopyMode.PRELOAD_TEMPFILE` | same timing, but stages the payloads in a temporary file |
-| `AnnotationCopyMode.DEFERRED` | reads them as the copy proceeds, for the lowest overhead |
+| `AnnotationCopyMode.DEFERRED` | reads them after the multipart copy completes — no preload, but a failed read leaves the copied object in place |
 
 ## 4. Archived objects
 
@@ -139,9 +144,12 @@ download does about it
 | value | what happens |
 | --- | --- |
 | `ignore` | the default — no check runs, so the later object overwrites the earlier file |
-| `skip` | the colliding entry is skipped, with a warning |
-| `warn` | it is transferred anyway, with a warning |
+| `skip` | the colliding entry is skipped, with a notice |
+| `warn` | it is transferred anyway, with a notice |
 | `error` | the run fails |
+
+The two notices are worded as the AWS CLI's warnings, but they arrive as
+`NOTICE` records that enter no count — they are not the warnings of section 6.
 
 ## 6. Warnings are counted separately from failures
 

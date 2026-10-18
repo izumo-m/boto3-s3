@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -22,7 +23,8 @@ import pytest
 # the library defers this import so it stays SDK-free.
 s3transfer_crt = pytest.importorskip("s3transfer.crt")
 from botocore import UNSIGNED  # noqa: E402
-from botocore.exceptions import MissingDependencyException  # noqa: E402
+from botocore.config import Config  # noqa: E402
+from botocore.exceptions import ClientError, MissingDependencyException  # noqa: E402
 
 from boto3_s3 import crtsupport  # noqa: E402
 from boto3_s3.transferconfig import TransferConfig  # noqa: E402
@@ -54,7 +56,7 @@ class FakeClient:
         self.meta = SimpleNamespace(
             region_name=region,
             endpoint_url=endpoint,
-            config=SimpleNamespace(signature_version=signature_version, s3=s3_config),
+            config=Config(signature_version=signature_version, s3=s3_config),
         )
         self._endpoint = SimpleNamespace(http_session=SimpleNamespace(_verify=verify))
         self._creds = make_creds() if creds is _DEFAULT_CREDS else creds
@@ -243,15 +245,18 @@ class TestCreateCrtTransferManager:
         assert kwargs["target_throughput"] is None
         assert kwargs["crt_credentials_provider"] == "crt-provider"
         [(_, client_kwargs)] = stubs.serializer_args
+        serializer_config = client_kwargs.pop("config")
         assert client_kwargs == {
             "region_name": "us-east-1",
             "endpoint_url": "http://127.0.0.1:9000",
-            # The client's own Config rides along so the serializer's nested
-            # client keeps the caller's endpoint/addressing settings (the CLI's
-            # us-east-1 regional pin included - aws v2's bundled botocore is
-            # regional-only there, stock botocore is not).
-            "config": client.meta.config,
         }
+        # The client's own Config rides along so the serializer's nested
+        # client keeps the caller's endpoint/addressing settings (the CLI's
+        # us-east-1 regional pin included - aws v2's bundled botocore is
+        # regional-only there, stock botocore is not), with the `s3` keys it
+        # leaves out pinned to botocore's defaults (`_serializer_config`).
+        assert serializer_config.signature_version == client.meta.config.signature_version
+        assert serializer_config.s3 == crtsupport._S3_CONFIG_DEFAULTS  # pyright: ignore[reportPrivateUsage]
         [manager_kwargs] = stubs.manager_kwargs
         assert manager_kwargs["crt_s3_client"] is stubs.crt_client
         assert manager_kwargs["config"] is config
@@ -604,16 +609,25 @@ class TestCreateCrtTransferManager:
             (True, None),
             (False, False),
             ("/etc/ca.pem", "/etc/ca.pem"),
-            ("", False),
-            ("   ", "   "),
         ],
-        ids=["default", "disabled", "ca-bundle", "empty-ca-bundle", "whitespace-ca-bundle"],
+        ids=["default", "disabled", "ca-bundle"],
     )
     def test_verify_mapping(self, stubs: CrtStubs, botocore_verify: Any, expected: Any) -> None:
         client = FakeClient(verify=botocore_verify)
         crtsupport.create_crt_transfer_manager(client, None)  # pyright: ignore[reportArgumentType]
         [kwargs] = stubs.create_kwargs
         assert kwargs["verify"] == expected
+
+    @pytest.mark.parametrize("botocore_verify", ["", "   "], ids=["empty", "whitespace"])
+    def test_empty_ca_bundle_is_refused(self, stubs: CrtStubs, botocore_verify: str) -> None:
+        # Never read as "verification off": botocore's own InvalidConfigError,
+        # before any CRT client exists.
+        from botocore.exceptions import InvalidConfigError as BotocoreInvalidConfigError
+
+        client = FakeClient(verify=botocore_verify)
+        with pytest.raises(BotocoreInvalidConfigError, match="Invalid CA bundle"):
+            crtsupport.create_crt_transfer_manager(client, None)  # pyright: ignore[reportArgumentType]
+        assert stubs.create_kwargs == []
 
     def test_plain_config_is_not_forwarded_to_the_manager(
         self, stubs: CrtStubs, caplog: pytest.LogCaptureFixture
@@ -649,6 +663,205 @@ class TestCreateCrtTransferManager:
         assert crtsupport.create_crt_transfer_manager(FakeClient(), config) is not None  # pyright: ignore[reportArgumentType]
 
 
+class TestCreateCrtRequestSender:
+    """The engine's client as a sender of single requests (the deleter's route)."""
+
+    @pytest.fixture
+    def senders(self, monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, Any, dict[str, Any]]]:
+        from boto3_s3 import crtrequest
+
+        built: list[tuple[Any, Any, dict[str, Any]]] = []
+
+        class Sender:
+            def __init__(self, crt_client: Any, session: Any, client_kwargs: Any) -> None:
+                built.append((crt_client, session, client_kwargs))
+
+        monkeypatch.setattr(crtrequest, "CrtRequestSender", Sender)
+        return built
+
+    def test_it_rides_the_engines_client_and_serializer_wiring(
+        self, stubs: CrtStubs, senders: list[Any]
+    ) -> None:
+        client = FakeClient(endpoint="http://127.0.0.1:9000")
+        config = TransferConfig(preferred_transfer_client="crt")
+        first = crtsupport.create_crt_request_sender(client, config)  # pyright: ignore[reportArgumentType]
+        again = crtsupport.create_crt_request_sender(client, config)  # pyright: ignore[reportArgumentType]
+        assert first is not None and first is again  # built once per engine
+        [(crt_client, session, client_kwargs)] = senders
+        assert crt_client is stubs.crt_client
+        [(serializer_session, serializer_kwargs)] = stubs.serializer_args
+        assert session is serializer_session
+        assert client_kwargs == serializer_kwargs
+        # Construction went through the transfer engine's own path.
+        assert len(stubs.manager_kwargs) == 2
+
+    def test_the_serializers_own_edits_do_not_reach_the_sender(
+        self, stubs: CrtStubs, senders: list[Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # s3transfer's serializer writes into the client arguments it is given
+        # (service_name, a merged unsigned config); the sender's own client
+        # build would then fail with "multiple values for 'service_name'".
+        class Serializer:
+            def __init__(self, session: Any, client_kwargs: dict[str, Any]) -> None:
+                client_kwargs["service_name"] = "s3"
+                client_kwargs["config"] = "merged"
+
+        monkeypatch.setattr(s3transfer_crt, "BotocoreCRTRequestSerializer", Serializer)
+        client = FakeClient()
+        config = TransferConfig(preferred_transfer_client="crt")
+        assert crtsupport.create_crt_request_sender(client, config) is not None  # pyright: ignore[reportArgumentType]
+        [(_, _, client_kwargs)] = senders
+        assert "service_name" not in client_kwargs
+        assert isinstance(client_kwargs["config"], Config)
+
+    def test_a_classic_fallback_is_none(self, stubs: CrtStubs, senders: list[Any]) -> None:
+        stubs.lock = None  # another process holds the CRT slot
+        client = FakeClient()
+        config = TransferConfig(preferred_transfer_client="crt")
+        assert crtsupport.create_crt_request_sender(client, config) is None  # pyright: ignore[reportArgumentType]
+        assert senders == []
+
+    def test_an_incompatible_client_is_none(self, stubs: CrtStubs, senders: list[Any]) -> None:
+        config = TransferConfig(preferred_transfer_client="crt")
+        assert crtsupport.create_crt_request_sender(FakeClient(), config) is not None  # pyright: ignore[reportArgumentType]
+        other = FakeClient(region="eu-west-1")
+        assert crtsupport.create_crt_request_sender(other, config) is None  # pyright: ignore[reportArgumentType]
+        assert len(senders) == 1
+
+
+class TestSingletonPinNormalization:
+    """The endpoint and Config pins compare what botocore resolves, not the spelling.
+
+    A second client spelled differently but shaping the same URL used to be
+    sent to classic for nothing - silently, with the CRT engine's throughput
+    lost (measured: ``Config()`` against ``Config(s3={})``, a trailing slash
+    on an explicit endpoint).
+    """
+
+    @pytest.mark.parametrize(
+        ("first", "second"),
+        [
+            ({"s3_config": None}, {"s3_config": {}}),
+            ({"s3_config": None}, {"s3_config": {"addressing_style": "auto"}}),
+            (
+                {"s3_config": {"addressing_style": "auto", "use_accelerate_endpoint": False}},
+                {"s3_config": None},
+            ),
+            ({"endpoint": "http://127.0.0.1:9000"}, {"endpoint": "http://127.0.0.1:9000/"}),
+            ({"endpoint": "http://127.0.0.1:9000"}, {"endpoint": "HTTP://127.0.0.1:9000"}),
+            ({"endpoint": "http://minio.local:9000"}, {"endpoint": "http://MINIO.local:9000"}),
+        ],
+        ids=[
+            "none-vs-empty",
+            "none-vs-auto",
+            "defaults-vs-none",
+            "trailing-slash",
+            "scheme-case",
+            "host-case",
+        ],
+    )
+    def test_an_equivalent_spelling_rides_the_singleton(
+        self, stubs: CrtStubs, first: dict[str, Any], second: dict[str, Any]
+    ) -> None:
+        assert crtsupport.create_crt_transfer_manager(FakeClient(**first), None) is not None  # pyright: ignore[reportArgumentType]
+        assert crtsupport.create_crt_transfer_manager(FakeClient(**second), None) is not None  # pyright: ignore[reportArgumentType]
+        assert len(stubs.create_kwargs) == 1
+
+    def test_a_flag_left_none_matches_one_set_false(self, stubs: CrtStubs) -> None:
+        assert crtsupport.create_crt_transfer_manager(FakeClient(), None) is not None  # pyright: ignore[reportArgumentType]
+        spelled = FakeClient()
+        spelled.meta.config.use_fips_endpoint = False
+        spelled.meta.config.use_dualstack_endpoint = False
+        assert crtsupport.create_crt_transfer_manager(spelled, None) is not None  # pyright: ignore[reportArgumentType]
+        assert len(stubs.create_kwargs) == 1
+
+    @pytest.mark.parametrize(
+        ("first", "second"),
+        [
+            ({"s3_config": None}, {"s3_config": {"addressing_style": "path"}}),
+            ({"s3_config": None}, {"s3_config": {"use_arn_region": False}}),
+            ({"s3_config": None}, {"s3_config": {"us_east_1_regional_endpoint": "regional"}}),
+            ({"endpoint": "http://127.0.0.1:9000"}, {"endpoint": "http://127.0.0.1:9000/base"}),
+            ({"endpoint": "http://127.0.0.1:9000"}, {"endpoint": "http://localhost:9000"}),
+            ({"endpoint": "http://127.0.0.1:9000"}, {"endpoint": "https://127.0.0.1:9000"}),
+        ],
+        ids=["path-style", "arn-region", "regional", "endpoint-path", "another-host", "scheme"],
+    )
+    def test_a_different_setting_still_falls_back(
+        self, stubs: CrtStubs, first: dict[str, Any], second: dict[str, Any]
+    ) -> None:
+        assert crtsupport.create_crt_transfer_manager(FakeClient(**first), None) is not None  # pyright: ignore[reportArgumentType]
+        assert crtsupport.create_crt_transfer_manager(FakeClient(**second), None) is None  # pyright: ignore[reportArgumentType]
+
+    def test_a_fips_flag_set_true_still_falls_back(self, stubs: CrtStubs) -> None:
+        assert crtsupport.create_crt_transfer_manager(FakeClient(), None) is not None  # pyright: ignore[reportArgumentType]
+        fips = FakeClient()
+        fips.meta.config.use_fips_endpoint = True
+        assert crtsupport.create_crt_transfer_manager(fips, None) is None  # pyright: ignore[reportArgumentType]
+
+
+class _RefreshingCreds:
+    """A lazily refreshed credentials stand-in: resolving it is counted, and may fail."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.resolutions = 0
+        self._fail = fail
+
+    def get_frozen_credentials(self) -> Any:
+        self.resolutions += 1
+        if self._fail:
+            raise ClientError(
+                {"Error": {"Code": "AccessDenied", "Message": "not authorized"}}, "AssumeRole"
+            )
+        return SimpleNamespace(access_key="AK", secret_key="SK", token=None)
+
+
+class TestCredentialsIdentity:
+    """The credentials half of the compatibility check matches by object first.
+
+    One session's clients share one credentials object, and aws-cli's factory
+    wraps it unresolved - a refresh that fails (an expired SSO token, a refused
+    AssumeRole) lands inside the delegate, per item, and a dryrun never
+    triggers it. boto3's frozen comparison resolves it ahead of every
+    transfer instead, so the check recognizes the singleton's own object
+    without resolving and keeps the comparison for any other.
+    """
+
+    def test_the_object_the_engine_was_built_with_is_never_resolved(self, stubs: CrtStubs) -> None:
+        creds = _RefreshingCreds(fail=True)
+        first = crtsupport.create_crt_transfer_manager(FakeClient(creds=creds), None)  # pyright: ignore[reportArgumentType]
+        second = crtsupport.create_crt_transfer_manager(FakeClient(creds=creds), None)  # pyright: ignore[reportArgumentType]
+        assert first is not None and second is not None
+        assert creds.resolutions == 0
+        assert len(stubs.manager_kwargs) == 2
+
+    def test_another_object_is_compared_by_value(self, stubs: CrtStubs) -> None:
+        built_with = _RefreshingCreds()
+        assert (
+            crtsupport.create_crt_transfer_manager(FakeClient(creds=built_with), None) is not None
+        )  # pyright: ignore[reportArgumentType]
+        same_identity = _RefreshingCreds()
+        assert (
+            crtsupport.create_crt_transfer_manager(FakeClient(creds=same_identity), None)
+            is not None
+        )  # pyright: ignore[reportArgumentType]
+        # The newcomer is frozen, the singleton's resolved through its delegate.
+        assert (same_identity.resolutions, built_with.resolutions) == (1, 1)
+        other = FakeClient(creds=make_creds("OTHERKEY"))
+        assert crtsupport.create_crt_transfer_manager(other, None) is None  # pyright: ignore[reportArgumentType]
+
+    def test_resolving_another_object_raises_what_botocore_raised(self, stubs: CrtStubs) -> None:
+        # boto3-faithful here: the engine seams classify it (transfer.crt_engine_errors).
+        assert (
+            crtsupport.create_crt_transfer_manager(FakeClient(creds=_RefreshingCreds()), None)
+            is not None
+        )  # pyright: ignore[reportArgumentType]
+        with pytest.raises(ClientError):
+            crtsupport.create_crt_transfer_manager(
+                FakeClient(creds=_RefreshingCreds(fail=True)), None
+            )  # pyright: ignore[reportArgumentType]
+
+
 class TestFioOptions:
     def test_skipped_when_create_fn_lacks_the_parameter(self, stubs: CrtStubs) -> None:
         config = TransferConfig(should_stream=True, disk_throughput=1_000_000_000, direct_io=True)
@@ -680,8 +893,9 @@ class TestCrtRegionPosture:
     """Where the CRT client's region comes from (design/crt.md section 6).
 
     boto3 reads it off the built client; aws-cli resolves its own region chain,
-    which yields ``None`` where botocore invents ``aws-global`` - and ``None``
-    is what awscrt refuses. `CLIENT_REGION` keeps boto3's source; any other
+    which yields ``None`` where the client carries the ``aws-global``
+    pseudo-region (the regional mode the CLI pins) - and ``None`` is what
+    awscrt refuses. `CLIENT_REGION` keeps boto3's source; any other
     value is the caller's declaration and rides verbatim.
     """
 
@@ -926,3 +1140,130 @@ class TestBotocoreSession:
 
         monkeypatch.setattr(boto3, "DEFAULT_SESSION", None)
         assert isinstance(crtsupport._botocore_session(None), Session)
+
+
+class _RequestStoppedError(Exception):
+    """Raised from ``before-send`` once the request has been seen."""
+
+
+class TestSerializerConfig:
+    """The Config the CRT serializer's own client is built with.
+
+    The serializer builds a second botocore client to address the CRT's
+    requests; what it is handed has to shape those requests the way the
+    transfer client shapes its own (design/crt.md section 3).
+    """
+
+    @staticmethod
+    def _user_agent(client: Any) -> str:
+        seen: list[str] = []
+
+        def stop(request: Any, **_kwargs: Any) -> None:
+            seen.append(request.headers["User-Agent"].decode())
+            raise _RequestStoppedError
+
+        client.meta.events.register("before-send.s3.*", stop)
+        with pytest.raises(_RequestStoppedError):
+            client.head_bucket(Bucket="b")
+        return seen[0]
+
+    def _serializer_client(self, client: Any, session: Any) -> Any:
+        return session.create_client(
+            "s3",
+            region_name="us-east-1",
+            endpoint_url="http://127.0.0.1:9",
+            config=crtsupport._serializer_config(client),  # pyright: ignore[reportPrivateUsage]
+            aws_access_key_id="AKID",
+            aws_secret_access_key="secret",
+        )
+
+    def test_the_app_id_reaches_the_crt_requests(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # `client.meta.config` holds the client's own preliminary User-Agent;
+        # handed on verbatim it read as a caller-supplied one and froze the
+        # header in botocore's legacy form - no `app/<id>`, no
+        # `cfg/retry-mode`, `Botocore/<v>` twice - where classic's requests
+        # and aws's CRT ones carry them (measured).
+        import botocore.session
+
+        monkeypatch.setenv("AWS_SDK_UA_APP_ID", "myapp")
+        session = botocore.session.Session()
+        client = session.create_client("s3", region_name="us-east-1")
+        user_agent = self._user_agent(self._serializer_client(client, session))
+        assert "app/myapp" in user_agent
+        assert "cfg/retry-mode" in user_agent
+        assert user_agent.count("Botocore/") == 1
+
+    def test_another_sessions_app_id_does_not_name_the_requests(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Restoring the header's own form must not let the serializer's
+        # session supply what the client has none of: X's `sdk_ua_app_id`
+        # named the CRT's requests of a client of Y that carries no app id,
+        # whose classic requests carry none (measured).
+        import botocore.session
+
+        config = tmp_path / "config"
+        config.write_text("[profile x]\nsdk_ua_app_id = xapp\n[profile y]\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        monkeypatch.delenv("AWS_SDK_UA_APP_ID", raising=False)
+        client = botocore.session.Session(profile="y").create_client("s3", region_name="us-east-1")
+        serializer = self._serializer_client(client, botocore.session.Session(profile="x"))
+        assert "app/" not in self._user_agent(serializer)
+
+    def test_a_second_client_with_another_app_id_still_shares_the_engine(self) -> None:
+        # The engine's serializer names its requests after the client it was
+        # built for. Only the User-Agent differs for a second client, so it
+        # keeps the CRT engine rather than losing it to a name.
+        import botocore.session
+
+        session = botocore.session.Session()
+        first = session.create_client(
+            "s3", region_name="us-east-1", config=Config(**{"user_agent_appid": "aaa"})
+        )
+        second = session.create_client(
+            "s3", region_name="us-east-1", config=Config(**{"user_agent_appid": "bbb"})
+        )
+        same = session.create_client(
+            "s3", region_name="us-east-1", config=Config(**{"user_agent_appid": "aaa"})
+        )
+        shape = crtsupport._serializer_config_shape  # pyright: ignore[reportPrivateUsage]
+        assert shape(first) == shape(second) == shape(same)
+
+    def test_a_callers_own_user_agent_still_rides(self) -> None:
+        import botocore.session
+
+        session = botocore.session.Session()
+        client = session.create_client(
+            "s3", region_name="us-east-1", config=Config(user_agent="MyApp/1.0")
+        )
+        assert self._user_agent(self._serializer_client(client, session)).startswith("MyApp/1.0")
+
+    def test_another_sessions_profile_does_not_reshape_the_requests(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `S3(session=X)` with `S3Storage(uri, client=<a client of Y>)`: the
+        # serializer is built from X, whose profile filled in what Y's client
+        # left out - X's `addressing_style = virtual` put the CRT's requests
+        # on a virtual host while classic's went path-style (measured).
+        import botocore.session
+
+        config = tmp_path / "config"
+        config.write_text(
+            "[profile x]\ns3 =\n    addressing_style = virtual\n"
+            "use_fips_endpoint = true\n[profile y]\n"
+        )
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        client = botocore.session.Session(profile="y").create_client("s3", region_name="us-east-1")
+        serializer = self._serializer_client(client, botocore.session.Session(profile="x"))
+        assert serializer.meta.config.s3["addressing_style"] == "auto"
+        assert not serializer.meta.config.use_fips_endpoint
+        seen: list[str] = []
+
+        def stop(request: Any, **_kwargs: Any) -> None:
+            seen.append(request.url)
+            raise _RequestStoppedError
+
+        serializer.meta.events.register("before-send.s3.*", stop)
+        with pytest.raises(_RequestStoppedError):
+            serializer.head_object(Bucket="bkt", Key="k")
+        assert seen == ["http://127.0.0.1:9/bkt/k"]

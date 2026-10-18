@@ -9,10 +9,10 @@ import io
 import os
 import re
 import sys
-from collections.abc import Generator, Iterable
+from collections.abc import Generator, Iterable, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from difflib import get_close_matches
-from typing import NoReturn, TextIO, cast
+from typing import TYPE_CHECKING, NoReturn, TextIO, cast
 
 from boto3_s3 import (
     Boto3S3Error,
@@ -21,9 +21,12 @@ from boto3_s3 import (
     InvalidValueError,
     ValidationError,
 )
-from boto3_s3_cli import alias, configfiles, globalargs
+from boto3_s3_cli import alias, configfiles, globalargs, plugins, usage
 from boto3_s3_cli.autoprompt import resolve
-from boto3_s3_cli.commands.base import Command, Context
+from boto3_s3_cli.commands.base import Command, Context, reject_unknown_options
+
+if TYPE_CHECKING:
+    from _typeshed import SupportsWrite
 
 # Loggers a masked stderr handler is attached to under --debug, via the
 # library's boto3-faithful set_stream_logger (credential masking on by default -
@@ -252,13 +255,17 @@ def _write_error(message: object, *, rc: int | None = None, code: str | None = N
     bare region assertion, which the CRT construction converts at rc 255, and
     the rc-255 general handler envelopes nothing.
 
+    An exception's text is `usage.exception_text`'s: aws prints `str(exc)`,
+    so where that text is the interpreter's own the wording is aws's bundled
+    3.14's, whatever this host runs (design/cli.md section 2).
+
     Stripping last is what keeps the multi-line reports clean: they end with
     the newline their usage block carries, which must not surface as a trailing
     blank line. A message carrying its own embedded `[ERROR]` line (the
     missing-subcommand report) therefore renders as two prefixed lines,
     enveloped or not, exactly as aws's does.
     """
-    detail = str(message)
+    detail = usage.exception_text(message) if isinstance(message, BaseException) else str(message)
     if code is None:
         if rc == _PARAM_VALIDATION_ERROR_RC:
             code = "ParamValidation"
@@ -433,10 +440,39 @@ class _ParamValidationArgumentParser(argparse.ArgumentParser):
                 return f"argument {option}: expected 1 argument"
         return message
 
+    def _print_message(self, message: str, file: SupportsWrite[str] | None = None) -> None:
+        """Write a page the way Python 3.14's argparse does, on every Python.
+
+        Two things differ on Python 3.10, and both only show once a standard
+        stream is unusable: the stream given may be absent (a closed
+        descriptor leaves ``sys.stdout`` ``None``), which 3.14 answers by
+        falling back to stderr, and the write itself may fail, which 3.14
+        drops instead of raising. Without them a help page requested with
+        both streams closed is a traceback and rc 1 on the floor Python,
+        where aws - and this CLI on a newer one - exits 0.
+        """
+        if message:
+            stream = file or sys.stderr
+            with contextlib.suppress(AttributeError, OSError):
+                stream.write(message)
+
     def error(self, message: str) -> NoReturn:
         report = f"{self._aws_error_message(message)}\n\n{self.format_usage()}"
         _write_error(report, rc=_PARAM_VALIDATION_ERROR_RC)
         self.exit(2)
+
+
+def _print_help(parser: argparse.ArgumentParser) -> None:
+    """Print a help page to stdout - and nowhere else when stdout is closed.
+
+    aws hands its help page to a renderer that writes to descriptor 1 on its
+    own, so with stdout closed the page is written nowhere and the run still
+    exits 0 (measured). argparse would instead fall back to stderr for a
+    missing stdout, which is right for the version line (`_VersionAction`)
+    and wrong here.
+    """
+    if sys.stdout is not None:
+        parser.print_help(sys.stdout)
 
 
 def _find_command_token(tokens: list[str]) -> int:
@@ -827,11 +863,93 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
         # either, aws lets the error escape its entry point as well.
         _write_error(exc, rc=_GENERAL_ERROR_RC)
         return _GENERAL_ERROR_RC
+    except AssertionError:
+        # An internal-invariant violation, kept loud (see `_run_command`).
+        raise
+    except Exception as exc:
+        # The rest of that chain: whatever escapes aws's driver - not only a
+        # command - reaches its entry point's handlers and is reported there,
+        # never as a traceback. A command's failures are settled inside
+        # `_run_command`; this is the same mapping for the dispatcher's own
+        # steps, where an exception no step claims can still be raised by the
+        # user's input (an alias whose `--endpoint-url` value `urlsplit`
+        # rejects with a bare ValueError - measured as rc 255 on aws).
+        rc = _exit_code_for_unexpected(exc)
+        try:
+            _write_error(exc, rc=rc)
+        except UnicodeError as unwritable:
+            # The codec cannot represent this report either. A raise inside
+            # this clause is out of the `UnicodeError` clause's reach, so the
+            # same second step is taken here: the codec error is the report,
+            # at rc 255 and unguarded (measured: an alias whose endpoint
+            # value carries a character `ascii` lacks is the codec's own
+            # message at 255 on aws).
+            _write_error(unwritable, rc=_GENERAL_ERROR_RC)
+            return _GENERAL_ERROR_RC
+        return rc
+
+
+def _build_driver() -> int | None:
+    """aws's `create_clidriver`, as far as it can fail: the config read, the plugins.
+
+    aws reads the whole merged config while it is still constructing the
+    driver, so a file that is not valid INI settles the run here - ahead of
+    the auto-prompt rejection, --version, the help token and every parse
+    below (all measured), and with botocore's own wording through aws's
+    general handler (255). Only the preliminary scan outranks it. aws then
+    loads its plugins from that same config read (`plugins` - the `[plugins]`
+    section with a `cli_legacy_plugin_path`), so a plugin that fails to import
+    or initialize ends the run here too - `--version` and the help token
+    included (measured) - through aws's entry-point handlers: a
+    parameter-validation failure at 252 with its envelope, a Ctrl-C at 130
+    (`main`'s), anything else at 255 with its message. Two cases part from
+    aws's chain on purpose. A `SystemExit` passes, honoring the exit the
+    plugin asked for, and the rest of the `BaseException` family is reported
+    at 255 like an `Exception`, where aws's chain claims neither, so its run
+    ends at rc 0 with nothing written - a failure reported as a success
+    (docs/cli/aws-differences.md).
+
+    Returns the rc of the report it wrote, or None to go on.
+    """
+    global _config_scan, _enhanced_envelope
+    # aws's entry point reports these through a chain built without a
+    # session, so the enhanced envelope applies - also after an on-partial
+    # trial run has bound a profile no file declares.
+    _enhanced_envelope = True
+    _config_scan = configfiles.scan()
+    if _config_scan.unparseable is not None:
+        _write_error(
+            f"Unable to parse config file: {_config_scan.unparseable}", rc=_GENERAL_ERROR_RC
+        )
+        return _GENERAL_ERROR_RC
+    try:
+        plugins.load(_config_scan.plugins)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:
+        rc = _GENERAL_ERROR_RC
+        # A plugin raising botocore's own exception has imported botocore
+        # already; looking it up there keeps this path SDK-free otherwise.
+        botocore_exceptions = sys.modules.get("botocore.exceptions")
+        if botocore_exceptions is not None and isinstance(
+            exc, botocore_exceptions.ParamValidationError
+        ):
+            rc = _PARAM_VALIDATION_ERROR_RC
+        _write_error(exc, rc=rc)
+        return rc
+    return None
+
+
+def _prompt_toolkit_installed() -> bool:
+    """Is the `autoprompt` extra's ``prompt_toolkit`` there (without importing it)?"""
+    import importlib.util
+
+    return importlib.util.find_spec("prompt_toolkit") is not None
 
 
 def _main(argv: list[str] | None, ctx: Context | None) -> int:
     """The body of `main` (split out so its Ctrl-C backstop wraps everything)."""
-    global _config_scan, _enhanced_envelope
+    global _enhanced_envelope
     # Nothing has built a session yet, so every report below the preliminary
     # scan is rendered the enhanced way (aws's entry-point handler chain is
     # constructed without one).
@@ -851,17 +969,9 @@ def _main(argv: list[str] | None, ctx: Context | None) -> int:
         _build_first_pass_parser().parse_known_args(raw)
     except SystemExit:
         return _PARAM_VALIDATION_ERROR_RC
-    # aws reads the whole merged config next, while it is still constructing the
-    # driver, so a file that is not valid INI settles the run here - ahead of
-    # the auto-prompt rejection, --version, the help token and every parse below
-    # (all measured), and with botocore's own wording through aws's general
-    # handler (255). Only the preliminary scan above outranks it.
-    _config_scan = configfiles.scan()
-    if _config_scan.unparseable is not None:
-        _write_error(
-            f"Unable to parse config file: {_config_scan.unparseable}", rc=_GENERAL_ERROR_RC
-        )
-        return _GENERAL_ERROR_RC
+    rc = _build_driver()
+    if rc is not None:
+        return rc
     if resolve.AUTO_PROMPT_FLAG in raw and resolve.NO_AUTO_PROMPT_FLAG in raw:
         _write_error(
             "Both --cli-auto-prompt and --no-cli-auto-prompt cannot be specified at the same time.",
@@ -882,19 +992,27 @@ def _main(argv: list[str] | None, ctx: Context | None) -> int:
     if mode == "on":
         return _run_auto_prompt(raw, ctx, explicit=resolve.AUTO_PROMPT_FLAG in raw)
     if mode == "on-partial":
-        # Run the command as-is; only a usage error (rc 252, which aws-cli and we
-        # both raise before any S3 call) falls back to prompting (aws-cli's
-        # on-partial branch in clidriver's _do_main). The usage message is silenced on
-        # this trial so the prompt isn't buried under it (aws's
-        # SilenceParamValidationMsgErrorHandler).
+        if ctx.auto_prompter is None and not _prompt_toolkit_installed():
+            # With no prompt to fall back to, the trial run would be the only
+            # one worth having: run it as the ordinary run, reports and all.
+            # Running it silenced and then again would repeat whatever it did
+            # before its 252 - an external alias's command, a request a plugin
+            # handler failed after.
+            return _dispatch(raw, ctx)
+        # Run the command as-is; only a usage error (rc 252) falls back to
+        # prompting (aws-cli's on-partial branch in clidriver's _do_main). The
+        # usage message is silenced on this trial so the prompt isn't buried
+        # under it (aws's SilenceParamValidationMsgErrorHandler).
         rc = _dispatch(raw, ctx, suppress_usage_errors=True)
         if rc != _PARAM_VALIDATION_ERROR_RC:
             return rc
-        return _run_auto_prompt(raw, ctx, explicit=False)
+        return _run_auto_prompt(raw, ctx, explicit=False, rebuild=True)
     return _dispatch(raw, ctx)
 
 
-def _run_auto_prompt(raw_argv: list[str], ctx: Context, *, explicit: bool) -> int:
+def _run_auto_prompt(
+    raw_argv: list[str], ctx: Context, *, explicit: bool, rebuild: bool = False
+) -> int:
     """Run the interactive prompt, then re-dispatch the completed argv once.
 
     The ``prompt_toolkit`` dependency is opt-in (the ``autoprompt`` extra). When
@@ -904,12 +1022,14 @@ def _run_auto_prompt(raw_argv: list[str], ctx: Context, *, explicit: bool) -> in
     absent but the prompt was only *config/env-driven*, we fall through to normal
     dispatch instead - a missing optional dep must not break every command. An
     injected ``ctx.auto_prompter`` (tests) bypasses the dependency probe.
+
+    ``rebuild`` is the on-partial fall-back's: aws builds a new driver for the
+    run after its prompt (`create_clidriver`), so the config is read and the
+    plugins are loaded and initialized again before the completed command runs.
     """
     prompter = ctx.auto_prompter
     if prompter is None:
-        import importlib.util
-
-        if importlib.util.find_spec("prompt_toolkit") is None:
+        if not _prompt_toolkit_installed():
             if not explicit:
                 return _dispatch(raw_argv, ctx)
             _write_error(
@@ -941,6 +1061,10 @@ def _run_auto_prompt(raw_argv: list[str], ctx: Context, *, explicit: bool) -> in
     completed = [
         a for a in completed if a not in (resolve.AUTO_PROMPT_FLAG, resolve.NO_AUTO_PROMPT_FLAG)
     ]
+    if rebuild:
+        rc = _build_driver()
+        if rc is not None:
+            return rc
     return _dispatch(completed, ctx)
 
 
@@ -1013,28 +1137,16 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
     # downstream, the invalid-subcommand error included (measured: `s3 bogus
     # --output bad` blames --output, `s3 ls -h --output bad` blames --output
     # rather than the unknown -h, `s3 bogus --version` prints the version).
-    # Those two exits are replayed from the capture; falling through to the
-    # command scan would blame the subcommand first.
-    pre_stdout, pre_stderr = io.StringIO(), io.StringIO()
+    # Both exits end the run right here, written by the parser itself: the
+    # report through `_write_error` like every other one (so the codec, the
+    # envelope and its degraded forms apply to it unchanged), the version line
+    # by its action. A zero exit can only be --version - the globals parser
+    # declares no help option.
     try:
-        with (
-            contextlib.redirect_stdout(pre_stdout),
-            contextlib.redirect_stderr(pre_stderr),
-        ):
+        with _silencer(suppress_usage_errors):
             head, remainder = _build_globals_parser().parse_known_args(argv)
     except SystemExit as exc:
-        if not exc.code:
-            # --version fired - the globals parser's only zero-exit action
-            # (it declares no help option).
-            sys.stdout.write(pre_stdout.getvalue())
-            return 0
-        if not suppress_usage_errors:
-            # Replayed onto the real stream, so the codec `_write_error`
-            # applies to a live report has to be applied here too - the
-            # capture buffer it was written into could not take it.
-            _set_preferred_output_encoding(sys.stderr)
-            sys.stderr.write(pre_stderr.getvalue())
-        return _PARAM_VALIDATION_ERROR_RC
+        return 0 if not exc.code else _PARAM_VALIDATION_ERROR_RC
     tokens = remainder[1:] if argv[:1] == ["--"] else remainder
     # Deferred so importing `cli` does not drag the client builders in; the
     # module itself reaches the AWS SDK only from inside its functions, so the
@@ -1126,9 +1238,38 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
             )
             _write_error(message, rc=_GENERAL_ERROR_RC)
             return _GENERAL_ERROR_RC
+    # The next `session-initialized` handler that can stop a run installs the
+    # credential cache, and reaching for the provider chain there makes
+    # botocore build it - which is where the IMDS settings are converted and
+    # validated (a non-integer `metadata_service_timeout` or
+    # `metadata_service_num_attempts`, an unknown
+    # `ec2_metadata_service_endpoint_mode`, a malformed
+    # `ec2_metadata_service_endpoint`; environment variable and config key
+    # alike). A bad one therefore settles the run here, at aws's general rc
+    # 255 with botocore's own text: behind the two gates above and ahead of
+    # the help token and every command layer (measured:
+    # `AWS_METADATA_SERVICE_TIMEOUT=abc aws s3 help` is rc 255). The scan
+    # says whether the build would fail, by botocore's own tests; the failure
+    # is botocore's own, raised by building the chain for real, so every
+    # configuration that passes keeps the SDK unimported on the informational
+    # exits.
+    if _config_scan.credential_chain_suspect(clientfactory.resolve_profile(head)):
+        try:
+            clientfactory.build_credential_chain(head)
+        except AssertionError:
+            raise
+        except Exception as exc:
+            rc = _exit_code_for_unexpected(exc)
+            _write_error(exc, rc=rc)
+            return rc
     try:
-        return _resolve_command(
-            tokens, head, ctx, aliases, suppress_usage_errors=suppress_usage_errors
+        return _run_toplevel_command(
+            alias.SERVICE_NAME,
+            tokens,
+            head,
+            ctx,
+            aliases,
+            suppress_usage_errors=suppress_usage_errors,
         )
     except Boto3S3Error as exc:
         # The alias layer's own failures (an unparseable value, a global it
@@ -1152,6 +1293,84 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
         return _GENERAL_ERROR_RC
 
 
+def _run_toplevel_command(
+    name: str,
+    tokens: list[str],
+    head: argparse.Namespace,
+    ctx: Context,
+    aliases: alias.AliasTable,
+    *,
+    suppress_usage_errors: bool,
+) -> int:
+    """Run what aws's top-level command table holds under ``name``.
+
+    Under ``s3`` that is the built-in ``aws s3`` - this CLI - unless the alias
+    file's ``[toplevel]`` section has an ``s3`` entry, which aws's injector
+    writes over it (keeping the built-in aside as the entry's proxy), so every
+    invocation runs through the alias (measured). An external one is a shell
+    command line over everything the globals pass left. An internal one is
+    read by aws's main parser - the globals plus the command name it must
+    start with - so a global in it is applied over the user's like a
+    ``[command s3]`` alias's (``--debug`` / ``--profile`` refused alike), what
+    the parse leaves goes ahead of the user's arguments, and the command it
+    names is looked up in that table again: ``s3`` from the ``s3`` entry
+    itself is the built-in it proxies, any other ``[toplevel]`` name is that
+    alias (whose own ``s3`` leads back to the ``s3`` entry, so a cycle ends as
+    aws's recursion failure). A command outside this surface - another
+    service, or an alias proxying a built-in of its own name - has nothing to
+    run here and is reported as aws reports a name its table lacks
+    (docs/cli/aws-differences.md).
+    """
+    value = aliases.toplevel.get(name)
+    if value is None:
+        return _resolve_command(
+            tokens, head, ctx, aliases, suppress_usage_errors=suppress_usage_errors
+        )
+    if alias.is_external(value):
+        return _run_external_alias(value, tokens)
+    expanded = alias.split_value(name, value)
+    parser = _build_service_alias_parser(aliases.toplevel)
+    try:
+        with _silencer(suppress_usage_errors):
+            parsed, remainder = parser.parse_known_args(expanded)
+    except SystemExit as exc:
+        return 0 if not exc.code else _PARAM_VALIDATION_ERROR_RC
+    command = vars(parsed).pop("command")
+    _apply_alias_globals(name, parser, parsed, head)
+    tokens = remainder + tokens
+    if command == name:
+        if name == alias.SERVICE_NAME:
+            return _resolve_command(
+                tokens, head, ctx, aliases, suppress_usage_errors=suppress_usage_errors
+            )
+        # aws proxies to the built-in service this alias shadows.
+        try:
+            with _silencer(suppress_usage_errors):
+                _build_service_alias_parser({}).parse_known_args([command])
+        except SystemExit:
+            return _PARAM_VALIDATION_ERROR_RC
+    return _run_toplevel_command(
+        command, tokens, head, ctx, aliases, suppress_usage_errors=suppress_usage_errors
+    )
+
+
+def _build_service_alias_parser(toplevel: Mapping[str, str]) -> _ParamValidationArgumentParser:
+    """aws's main parser, as a ``[toplevel]`` alias's value meets it.
+
+    The globals, then the command name as a positional whose choices are the
+    top-level table - here ``s3`` and the ``[toplevel]`` names - so a value
+    without one is ``the following arguments are required: command`` and a
+    name outside them ``argument command: Found invalid choice '<name>'``
+    (measured). argparse's ``--`` handling then matches aws's on every
+    supported Python: a ``--`` before or right after the command name is used
+    up, a later one stays in the remainder.
+    """
+    parser = _build_globals_parser()
+    names = [name for name in toplevel if name != alias.SERVICE_NAME]
+    parser.add_argument("command", choices=[alias.SERVICE_NAME, *names])
+    return parser
+
+
 def _resolve_command(
     tokens: list[str],
     head: argparse.Namespace,
@@ -1170,7 +1389,7 @@ def _resolve_command(
     of the user's arguments, which is what makes alias-to-alias chains work.
     """
     if tokens == ["help"]:
-        _build_stage1_parser().print_help()
+        _print_help(_build_stage1_parser())
         return 0
 
     index = _find_command_token(tokens)
@@ -1256,41 +1475,24 @@ def _run_alias(
     expansion that names something else (``ls = cp``) still run ``ls``.
     """
     if alias.is_external(value):
-        try:
-            return alias.run_external(value, arguments)
-        except AssertionError:
-            raise
-        except Exception as exc:
-            # Launching the shell can fail on the command line itself (an
-            # embedded NUL, an argument list past the OS limit). aws registers
-            # no handler for that either, so it travels to the entry point's
-            # general chain and is reported like any other unexpected failure -
-            # `str(exc)` at rc 255, never a traceback (measured).
-            rc = _exit_code_for_unexpected(exc)
-            _write_error(exc, rc=rc)
-            return rc
+        return _run_external_alias(value, arguments)
     expanded = alias.split_value(name, value)
-    # Same capture-and-replay as the top-level pass: a global in the value can
-    # fail to parse (rc 252, silenced on the on-partial trial like any other
-    # usage error) or be a `--version` that prints and exits 0 (measured).
-    pre_stdout, pre_stderr = io.StringIO(), io.StringIO()
+    # The same two exits as the top-level pass: a global in the value can fail
+    # to parse (rc 252, silenced on the on-partial trial like any other usage
+    # error) or be a `--version` that prints and exits 0 (measured).
     parser = _build_globals_parser()
     try:
-        with (
-            contextlib.redirect_stdout(pre_stdout),
-            contextlib.redirect_stderr(pre_stderr),
-        ):
+        with _silencer(suppress_usage_errors):
             parsed, remainder = parser.parse_known_args(expanded)
     except SystemExit as exc:
-        if not exc.code:
-            sys.stdout.write(pre_stdout.getvalue())
-            return 0
-        if not suppress_usage_errors:
-            _set_preferred_output_encoding(sys.stderr)
-            sys.stderr.write(pre_stderr.getvalue())
-        return _PARAM_VALIDATION_ERROR_RC
+        return 0 if not exc.code else _PARAM_VALIDATION_ERROR_RC
     _apply_alias_globals(name, parser, parsed, head)
-    tokens = remainder + arguments
+    # aws parses the value behind the service token (`s3 <value>`), so a
+    # leading `--` is used up against that token exactly as on the command
+    # line (`_dispatch`): it still keeps what follows from being read as
+    # globals, but does not reach the command (measured: `x = -- rm --dryrun`
+    # runs the dry run, `x = --region us-west-2 -- rm` keeps its marker).
+    tokens = (remainder[1:] if expanded[:1] == ["--"] else remainder) + arguments
     if name in _COMMAND_TABLE:
         # The built-in runs as this alias's proxy, which is how aws detaches it
         # from the command table - so the section it consults is the shadow
@@ -1307,6 +1509,23 @@ def _run_alias(
     return _resolve_command(tokens, head, ctx, aliases, suppress_usage_errors=suppress_usage_errors)
 
 
+def _run_external_alias(value: str, arguments: list[str]) -> int:
+    """Run an external (``!``-led) alias over ``arguments``; its status is the run's."""
+    try:
+        return alias.run_external(value, arguments)
+    except AssertionError:
+        raise
+    except Exception as exc:
+        # Launching the shell can fail on the command line itself (an
+        # embedded NUL, an argument list past the OS limit). aws registers
+        # no handler for that either, so it travels to the entry point's
+        # general chain and is reported like any other unexpected failure -
+        # `str(exc)` at rc 255, never a traceback (measured).
+        rc = _exit_code_for_unexpected(exc)
+        _write_error(exc, rc=rc)
+        return rc
+
+
 def _apply_alias_globals(
     name: str,
     parser: argparse.ArgumentParser,
@@ -1321,7 +1540,9 @@ def _apply_alias_globals(
     checked in aws's own order, so a value carrying both blames ``--debug``.
     The values it keeps then go through the same resolutions the top-level
     pass runs, which is where a bad ``--endpoint-url`` or ``--query`` in an
-    alias is rejected, before they are copied over the user's.
+    alias is rejected, before they are copied over the user's. A replaced
+    ``--region`` leaves the user's own value behind for the session
+    (`clientfactory.typed_region`).
     """
     from boto3_s3_cli import clientfactory
 
@@ -1335,7 +1556,19 @@ def _apply_alias_globals(
     globalargs.validate_query(parsed)
     clientfactory.validate_endpoint_url(parsed)
     clientfactory.resolve_cli_timeouts(parsed)
+    if "region" in updates and not hasattr(head, clientfactory.TYPED_REGION):
+        # aws bound its session's region from the user's own arguments before
+        # any alias ran; the alias's value reaches the clients alone.
+        setattr(head, clientfactory.TYPED_REGION, head.region)
     for dest in updates:
+        if dest == "ca_bundle":
+            # aws folds `--ca-bundle` into its `verify_ssl` while the user's
+            # own arguments are parsed, and that folded value is the one its
+            # clients read. The alias's copy lands on `ca_bundle` after the
+            # fold, where nothing reads it: an alias's `--ca-bundle` neither
+            # trusts its certificate nor fails empty (measured).
+            # `--no-verify-ssl` is the verification an alias can change.
+            continue
         setattr(head, dest, getattr(parsed, dest))
 
 
@@ -1370,7 +1603,7 @@ def _run_command(
         # page, rc 0 - even where a normal parse would fail or run a listing.
         # The globals are already stripped, so a `help` wrapped in globals
         # still pages (aws: `s3 presign help --region us-east-1` pages).
-        _build_command_parser(name, command).print_help()
+        _print_help(_build_command_parser(name, command))
         return 0
     # The top-level pass's namespace carries every parsed global (either side
     # of the subcommand - all consumed there) plus their defaults; the leaf
@@ -1383,18 +1616,23 @@ def _run_command(
             )
     except SystemExit as exc:
         return 0 if not exc.code else _PARAM_VALIDATION_ERROR_RC
-    if extras:
-        # aws-cli wording again ("," with no space) - exercised by the ported
-        # test_errors_out_with_extra_arguments.
-        if not suppress_usage_errors:
-            _write_error(f"Unknown options: {','.join(extras)}", rc=_PARAM_VALIDATION_ERROR_RC)
-        return _PARAM_VALIDATION_ERROR_RC
+    # What the leaf parse could not place is parked, not reported: aws expands
+    # every argument's value before it raises `Unknown options`, so the report
+    # belongs to the command's own sequence (`reject_unknown_options`, run
+    # from `Context.s3`) - exercised by the ported
+    # test_errors_out_with_extra_arguments.
+    args.unknown_options = extras
 
     if getattr(args, "debug", False):
         _enable_debug_logging()
 
     try:
-        return command.run(args, ctx)
+        rc = command.run(args, ctx)
+        # Every command builds its `S3`, which is where the leftovers are
+        # reported; one that returned without doing so must still not accept
+        # them silently.
+        reject_unknown_options(args)
+        return rc
     except Boto3S3Error as exc:
         rc = exit_code_for(exc)
         if not (suppress_usage_errors and rc == _PARAM_VALIDATION_ERROR_RC):

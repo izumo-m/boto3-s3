@@ -14,28 +14,41 @@ The repository is a [uv](https://docs.astral.sh/uv/) workspace with two packages
 - `src/boto3_s3/` — **`boto3-s3`**, the library.
 - `cli/` — **`boto3-s3-cli`**, the `boto3-s3` command (an `aws s3` drop-in).
 - `tests/` — the test suite (see [`design/testing.md`](design/testing.md)).
-- `docs/` — design and reference documentation.
-- `scripts/` — helpers for the e2e environment (the local MinIO stack and the
+- `docs/` — the user documentation (the command, the library guide, the API
+  reference).
+- `design/` — design documents and developer runbooks.
+- `benchmarks/` — the performance benchmark harness and its recorded results
+  (see [`design/benchmark.md`](design/benchmark.md)).
+- `scripts/` — helpers for the e2e environment (the local dev S3 stack and the
   pinned aws-cli install).
 
 ## Setup
 
 Prerequisites:
 
-- Python 3.10+ (`.python-version` pins development to the 3.10 floor).
-- [uv](https://docs.astral.sh/uv/getting-started/installation/).
+- [mise](https://mise.jdx.dev/getting-started.html). It installs the uv
+  version pinned in `mise.toml` — the one CI uses — and uv provisions
+  everything else: Python (`.python-version` pins development to the 3.10
+  floor) and the dev tools (`uv.lock`).
 - For any end-to-end run: the `aws` CLI v2 at the pinned reference version.
   Install it into `.venv/bin` with `scripts/install-awscli.sh` (below); an
   arbitrary `aws` found on `PATH` may behave differently and invalidate the
   goldens.
-- For the local MinIO end-to-end environment: Docker with Compose. A run against
-  real S3 does not need Docker.
+- For the local end-to-end environment (the dev S3 stack): Docker with Compose.
+  A run against real S3 does not need Docker.
 
-Install the workspace and its dev tools into a local virtualenv:
+Install the pinned uv, then the workspace and its dev tools into a local
+virtualenv:
 
 ```bash
+mise install
 uv sync --all-packages
 ```
+
+The commands here assume mise is
+[activated](https://mise.jdx.dev/getting-started.html#activate-mise) in your
+shell, so `uv` resolves to the pinned one; otherwise prefix them with
+`mise exec --`.
 
 (A bare `uv sync` installs only the library; without the `cli` workspace member
 the `tests/cli` suite fails at collection.)
@@ -45,8 +58,11 @@ Run any tool through `uv run` so it uses that environment, e.g. `uv run pytest`.
 ## Quality gates
 
 Run these before every commit that changes Python code or test data; all must
-pass. A docs-only commit can skip them: ruff and basedpyright act only on the
-Python sources, and the test suite does not read the documentation.
+pass. A docs-only commit can skip ruff and basedpyright, which act only on the
+Python sources; when it touches `docs/reference/`, still run
+`uv run pytest tests/lib/test_reference_docs.py`, which checks the symbol index
+in `docs/reference/README.md` against the package's exports and the files that
+page links to.
 
 ```bash
 uv run ruff format       # format
@@ -63,20 +79,22 @@ Ruff is configured for a line length of 100 and a Python 3.10 target.
 which self-skip unless pointed at a live endpoint — so no Docker is needed for
 the default run.
 
-The e2e suite runs `boto3-s3` and the real `aws` command against a local MinIO
-endpoint and compares their behavior:
+The e2e suite runs `boto3-s3` and the real `aws` command against a local S3
+server (RustFS, the dev stack) and compares their behavior:
 
 ```bash
 scripts/install-awscli.sh    # pin aws to the reference source version — idempotent
-scripts/compose-up.sh        # start MinIO, wait for buckets to be provisioned
-source scripts/minio-env.sh  # point AWS tooling and the e2e gate at MinIO
+scripts/compose-up.sh        # start the dev stack, wait for its buckets
+source scripts/dev-env.sh    # point AWS tooling and the e2e gate at it
 uv run pytest tests/cli/e2e  # run the parity suite
 scripts/compose.sh down      # tear the stack down
 ```
 
 Goldens are the recorded real-aws behavior that the in-process suite replays.
-Regenerate them against a clean MinIO with `UPDATE_GOLDENS=1 uv run pytest
-tests/cli/e2e`, and review the diff before committing.
+Regenerate them against a clean dev stack with `UPDATE_GOLDENS=1 uv run pytest
+tests/cli/e2e`, and review the diff before committing. How the dev stack
+answers differently from real S3, and what the tests do about it, is in
+[`design/endpoint-fidelity.md`](design/endpoint-fidelity.md).
 
 The same suite runs on Windows — from a WSL2 shell, against an NTFS copy of
 the tree, with a pinned `aws.exe` — by the procedure in

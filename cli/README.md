@@ -17,7 +17,7 @@ boto3-s3 sync ./build s3://my-bucket/build/ --delete
 ## Why use it
 
 - **Fast startup.** In a representative Linux measurement, syncing a directory
-  that contained one small file was about 2.2x faster than aws-cli v2.
+  that contained one small file was about 1.7x faster than aws-cli v2.
 - **Compact installation.** A default dependency-complete installation was
   about 31.5 MiB, compared with about 268 MiB for the corresponding aws-cli v2
   installation.
@@ -47,9 +47,10 @@ codes a script can branch on are listed in
 This CLI is the strict compatibility layer over the more permissive Python
 library. It applies aws-compatible path validation, configuration resolution,
 transfer defaults, output behavior, and error handling. Human-readable wording
-is not guaranteed to be byte-for-byte identical. The interactive UI, and a few
-aws-cli edge-case failures that were deliberately cleaned up, are the other
-documented exceptions.
+is not guaranteed to be byte-for-byte identical. The interactive UI,
+differences that come from the installed `s3transfer` rather than the fork
+aws-cli bundles, and a few aws-cli edge-case failures that were deliberately
+cleaned up, are the other documented exceptions.
 
 ## Packaging & startup
 
@@ -83,7 +84,7 @@ included:
 | **Increase when boto3 is already installed** | **2.1 MiB** |
 | aws-cli v2 self-contained installation | 268 MiB |
 
-The two `boto3-s3` project wheels total about 300 KiB compressed. These figures
+The two `boto3-s3` project wheels total about 430 KiB compressed. These figures
 are illustrative rather than guarantees: startup time and size vary with the
 Python version, platform, filesystem, dependency versions, installation method,
 and S3 endpoint.

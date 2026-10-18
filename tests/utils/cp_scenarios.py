@@ -14,9 +14,10 @@ segments masked, result lines sorted).
 
 Charter note (design/overview.md section 3): the exit code is compared for *every*
 scenario, unconditionally. ``diff_only`` marks endpoint-relative outcomes
-(``--sse`` / ``--storage-class GLACIER`` are rejected by MinIO and accepted
-by real S3 - both CLIs always agree, which is exactly the charter assertion;
-the rc-1-on-MinIO shape must not be frozen into a golden). The cp exit-code
+(``--storage-class GLACIER`` is rejected by the dev stack and accepted by
+real S3 - both CLIs always agree, which is exactly the charter assertion;
+the dev stack's rc 1 must not be recorded in a golden). Every such change
+names its design/endpoint-fidelity.md row. The cp exit-code
 shape: in-pipeline errors are rc 1 (``... failed:`` / ``fatal error:``),
 warnings-only runs are rc 2, the missing local source is 255.
 
@@ -129,14 +130,19 @@ class CpScenario(BaseScenario):
     # Directories created with an explicit mode (workdir-relative -> mode),
     # e.g. a read-only parent for the uncreatable-destination scenario.
     local_dirs: Mapping[str, int] = field(default_factory=dict)
-    # aws's own outcome is racy on a case-insensitive destination (its warn
-    # text: "may result in ... race conditions between concurrent downloads",
-    # observed as a remove->rename [WinError 183] collision between the twin
-    # downloads). On such a filesystem there is no stable aws behavior to
-    # diff or record: e2e pins only ours' deterministic side (rc 0 + stderr
-    # tokens) and the golden tiers stand down (no capture, no replay). This
-    # is the one carve-out from the unconditional-rc charter note above -
-    # where aws itself is nondeterministic, no defined rc exists to match.
+    # The outcome is racy on a case-insensitive destination (aws's warn text:
+    # "may result in ... race conditions between concurrent downloads"): the
+    # twin downloads commit through s3transfer's Windows rename, a remove
+    # followed by a rename, and when the two interleave one fails with
+    # [WinError 183] (rc 1); a twin whose file the other just removed cannot
+    # be stamped (rc 2). Both tools share that code path and both lose the
+    # race - measured on a Windows host over 150 runs each: aws 67 times at
+    # rc 1 and 3 at rc 2, ours 2 and 1. On such a filesystem there is no
+    # stable behavior to diff or record: e2e holds ours to the range the
+    # race allows (rc 0 / 1 / 2) plus its stderr tokens, and the golden tiers
+    # stand down (no capture, no replay). This is the one carve-out from the
+    # unconditional-rc charter note above - where aws itself is
+    # nondeterministic, no defined rc exists to match.
     undefined_on_case_insensitive_dest: bool = False
 
 
@@ -257,10 +263,9 @@ SCENARIOS: tuple[CpScenario, ...] = (
     ),
     CpScenario(
         # The .json guess is suppressed, so the object takes the server-side
-        # default for an untyped PUT. That default is endpoint-specific in
-        # general, but moto and MinIO both answer binary/octet-stream, so the
-        # probe both catches a resurrected guess (application/json) and stays
-        # portable across the golden's capture (MinIO) and replay (moto).
+        # default for an untyped PUT: binary/octet-stream on real S3
+        # (2026-10-15) and moto, so the moto replay catches a resurrected
+        # client-side guess (application/json).
         name="cp_upload_no_guess_mime",
         argv=(
             "cp",
@@ -271,6 +276,10 @@ SCENARIOS: tuple[CpScenario, ...] = (
         head_key="up/data.json",
         head_fields=("ContentType",),
         local_src=_SRC_JSON,
+        frozen_golden=(
+            "endpoint-fidelity T17: the dev stack guesses application/json from"
+            " the key itself, so live it cannot tell a client-side guess apart"
+        ),
     ),
     CpScenario(
         name="cp_upload_metadata",
@@ -344,13 +353,18 @@ SCENARIOS: tuple[CpScenario, ...] = (
         head_fields=("StorageClass",),
     ),
     CpScenario(
-        # MinIO accepts the ACL form (rc 0); applied semantics are not
-        # asserted - rc/stdout parity is the contract here.
+        # Applied ACL semantics are not asserted - rc/stdout parity is the
+        # contract here. endpoint-fidelity T5: real S3 rejects ACLs on a new
+        # bucket (ACLs disabled, rc 1) while the dev stack and moto accept
+        # them (rc 0), so no golden can serve both a real-S3 capture and the
+        # moto replay.
         name="cp_upload_acl_public_read",
         argv=("cp", "src/a.txt", f"s3://{BUCKET_TOKEN}/up/key.txt", "--acl", "public-read"),
         local_src=_SRC_SINGLE,
+        diff_only=True,
     ),
     CpScenario(
+        # endpoint-fidelity T5: as cp_upload_acl_public_read.
         name="cp_upload_grants_uri",
         argv=(
             "cp",
@@ -360,6 +374,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
             "read=uri=http://acs.amazonaws.com/groups/global/AllUsers",
         ),
         local_src=_SRC_SINGLE,
+        diff_only=True,
     ),
     CpScenario(
         name="cp_upload_multipart",
@@ -380,27 +395,24 @@ SCENARIOS: tuple[CpScenario, ...] = (
         name="cp_upload_dir_no_recursive",
         argv=("cp", "src", f"s3://{BUCKET_TOKEN}/x"),
         local_src=_SRC_SINGLE,
-        # ours synthesizes EISDIR on every host; aws hits EISDIR at open on
-        # POSIX but ENOENT on Windows (opening "src\" fails there).
+        # ours synthesizes EISDIR on every host. endpoint-fidelity T6: aws's
+        # cause differs by host and transport - EISDIR at open on POSIX over
+        # http, ENOENT on Windows (opening "src\" fails there), "Need to
+        # rewind the stream" over https - so its token is the common prefix.
         expected_stderr_tokens_ours=("upload failed", "Is a directory"),
-        expected_stderr_tokens_aws=(
-            "upload failed",
-            "Is a directory" if os.name != "nt" else "[Errno 2]",
-        ),
+        expected_stderr_tokens_aws=("upload failed",),
     ),
     CpScenario(
         # A filter on that same doomed upload matches aws's local_format form
         # of the source - `<abspath>/`, trailing separator - not the bare
         # path: `--exclude src` does not exclude it, so the run still reaches
         # the directory and fails at rc 1 like the unfiltered scenario.
+        # endpoint-fidelity T6: the aws token as in the unfiltered scenario.
         name="cp_upload_dir_no_recursive_exclude",
         argv=("cp", "src", f"s3://{BUCKET_TOKEN}/x", "--exclude", "src"),
         local_src=_SRC_SINGLE,
         expected_stderr_tokens_ours=("upload failed", "Is a directory"),
-        expected_stderr_tokens_aws=(
-            "upload failed",
-            "Is a directory" if os.name != "nt" else "[Errno 2]",
-        ),
+        expected_stderr_tokens_aws=("upload failed",),
     ),
     CpScenario(
         # The complement: the separator-terminated pattern is what matches a
@@ -417,15 +429,15 @@ SCENARIOS: tuple[CpScenario, ...] = (
         expected_stderr_tokens_aws=("upload failed",),
     ),
     CpScenario(
-        # MinIO rejects SSE without KMS (rc 1), real S3 accepts (rc 0): the
-        # unconditional rc comparison holds either way (website precedent).
+        # SSE-S3: real S3, moto, and the dev stack accept it (rc 0); the dev
+        # stack needs the master key set in scripts/compose.dev.yaml.
         name="cp_upload_sse",
         argv=("cp", "src/a.txt", f"s3://{BUCKET_TOKEN}/up/key.txt", "--sse"),
         local_src=_SRC_SINGLE,
-        diff_only=True,
     ),
     CpScenario(
-        # MinIO: InvalidStorageClass (rc 1); real S3 accepts (rc 0).
+        # endpoint-fidelity T9: the dev stack answers InvalidStorageClass
+        # (rc 1), real S3 and moto accept (rc 0).
         name="cp_upload_storage_class_glacier",
         argv=(
             "cp",
@@ -579,8 +591,9 @@ SCENARIOS: tuple[CpScenario, ...] = (
         capture_tree=True,
     ),
     CpScenario(
-        # MinIO answers InvalidArgument for MaxKeys=-1 (rm precedent); the
-        # message text is endpoint-specific.
+        # Negative page size -> server InvalidArgument on both sides (rm
+        # precedent). diff_only: moto raises an internal IndexError for
+        # MaxKeys=-1 instead, so the scenario cannot replay there.
         name="cp_download_page_size_negative",
         argv=("cp", f"s3://{BUCKET_TOKEN}/pg/", "dest", "--recursive", "--page-size", "-1"),
         seed=_SEED_PAGED,
@@ -617,10 +630,12 @@ SCENARIOS: tuple[CpScenario, ...] = (
         head_fields=("ContentType", "Metadata"),
     ),
     CpScenario(
-        # MinIO has no annotations API and rejects the pre-copy listing, while
-        # real S3 completes the copy. This live-only scenario compares both
+        # endpoint-fidelity T10: the dev stack has no annotations API and
+        # rejects the pre-copy listing, while real S3 completes the copy;
+        # moto has no annotations either. This live-only scenario compares
         # exit code and bucket end state on either endpoint; in particular,
-        # the MinIO failure must leave no cp/big.bin destination like aws-cli.
+        # the dev stack's failure must leave no cp/big.bin destination, as
+        # aws-cli's does.
         name="cp_copy_props_all_multipart",
         argv=(
             "cp",
@@ -633,8 +648,9 @@ SCENARIOS: tuple[CpScenario, ...] = (
         diff_only=True,
     ),
     CpScenario(
-        # Metadata is dropped under copy-props none; the resulting default
-        # ContentType is endpoint-specific, so only Metadata is probed.
+        # Metadata is dropped under copy-props none. endpoint-fidelity T14:
+        # the resulting default ContentType is unverified on real S3, so only
+        # Metadata is probed.
         name="cp_copy_props_none",
         argv=(
             "cp",
@@ -768,6 +784,9 @@ SCENARIOS: tuple[CpScenario, ...] = (
         capture_tree=True,
     ),
     CpScenario(
+        # endpoint-fidelity T7: real S3 and the dev stack honor If-None-Match
+        # on CopyObject (no copy, rc 0) while moto ignores it and overwrites,
+        # so no golden can serve both capture and replay.
         name="cp_no_overwrite_copy_exists",
         argv=(
             "cp",
@@ -778,6 +797,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         seed={"d/a.txt": b"download body\n", "cp/a.txt": b"old-copy"},
         head_key="cp/a.txt",
         head_fields=("ContentLength",),
+        diff_only=True,
     ),
     # -- checksum options -------------------------------------------------------
     CpScenario(
@@ -791,7 +811,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         ),
         local_src=_SRC_SINGLE,
         # The stored checksum is a deterministic function of the bytes, so
-        # moto and MinIO agree - probe it to prove the algorithm reached the
+        # moto and the dev stack agree - probe it to prove the algorithm reached the
         # PUT (rc/stdout alone never observed the checksum).
         head_key="up/key.txt",
         head_fields=("ChecksumSHA256",),
@@ -810,7 +830,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
     CpScenario(
         # The CRT-backed algorithm family (needs awscrt - installed here by
         # the dev group's botocore[crt]; the dist leaves CRT to the opt-in
-        # `crt` extra); aws accepts it against MinIO (rc 0).
+        # `crt` extra); real S3, moto, and the dev stack accept it (rc 0).
         name="cp_checksum_xxhash64",
         argv=(
             "cp",

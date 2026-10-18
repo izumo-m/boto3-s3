@@ -47,7 +47,7 @@ class ApiCall(NamedTuple):
 
 
 def make_recording_client(
-    parsed_responses: list[dict[str, Any] | Exception],
+    parsed_responses: list[dict[str, Any] | BaseException],
     *,
     region: str = "us-east-1",
     service: str = "s3",
@@ -57,8 +57,10 @@ def make_recording_client(
 
     Leftover responses are allowed (mirroring the aws-cli harness); a call
     beyond the last canned response fails the test. A canned entry that is an
-    ``Exception`` is raised instead of returned - the aws-cli harness's
-    ``http_response.status_code = 500`` cases port as a canned ``ClientError``.
+    ``BaseException`` is raised instead of returned - the aws-cli harness's
+    ``http_response.status_code = 500`` cases port as a canned ``ClientError``,
+    and a ``KeyboardInterrupt`` entry stands for a Ctrl-C landing inside that
+    request (the use_threads=False lane runs it on the calling thread).
     *region* feeds ``client.meta.region_name`` for commands that read it
     (``mb``'s LocationConstraint); *endpoint_url* feeds
     ``client.meta.endpoint_url`` for consumers that compare it (the CRT
@@ -86,7 +88,7 @@ def make_recording_client(
                 f"unexpected API call {operation_name}: parsed_responses exhausted"
             )
         response = remaining.pop(0)
-        if isinstance(response, Exception):
+        if isinstance(response, BaseException):
             raise response
         return response
 

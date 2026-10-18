@@ -1,0 +1,6 @@
+# Pins the development toolchain; run `mise install` after cloning.
+# mise provisions only uv: uv provisions Python from .python-version and the
+# dev tools (ruff, basedpyright, pytest, ...) from uv.lock. The CI and release
+# workflows install uv from this file too, so bump it here only.
+[tools]
+uv = "0.12.18"

@@ -25,7 +25,13 @@ from boto3.s3.transfer import TransferConfig
 from boto3_s3 import GlobFilter
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3.comparator import ParallelFilter, SyncPair
-from boto3_s3.exceptions import BatchError, CancelledError, NotFoundError, ValidationError
+from boto3_s3.exceptions import (
+    BatchError,
+    CancelledError,
+    NotFoundError,
+    TransportError,
+    ValidationError,
+)
 from boto3_s3.localstorage import LocalStorage
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
@@ -40,7 +46,7 @@ from boto3_s3.types import (
     TransferOptions,
     TransferType,
 )
-from tests.utils.fakes3 import MTIME, get_response, listing
+from tests.utils.fakes3 import MTIME, crt_sender_factory, get_response, listing
 from tests.utils.host import skip_if_chmod_is_inert
 from tests.utils.recorder import make_recording_client, ops
 
@@ -463,17 +469,43 @@ class TestSyncUpload:
         assert [r.outcome for r in results] == [OpOutcome.WARNED]
         assert f"Skipping file {src}{os.sep}. File does not exist." in str(results[0].error)
 
-    def test_directory_bucket_destination_is_rejected(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("bucket", ["b--use1-az4--x-s3", "ap--use1-az4--xa-s3"])
+    def test_directory_bucket_destination_is_rejected(self, tmp_path: Path, bucket: str) -> None:
         # An S3 Express directory bucket lists in unspecified order, so the
         # sorted merge-join (and --delete) cannot run on it; the library
         # rejects with aws-cli's exact wording
         # (_validate_not_s3_express_bucket_for_sync) before any client call.
+        # An access point of one (--xa-s3) lists the same way - aws-cli's test
+        # misses it, and on real S3 one delete_filter run removed 18 of 20
+        # objects the source also had - so it is rejected too.
         src = tmp_path / "src"
         src.mkdir()
         client, calls = make_recording_client([])
         with pytest.raises(ValidationError) as excinfo:
-            S3().sync(str(src), S3Storage("s3://b--use1-az4--x-s3/p", client=client))
+            S3().sync(str(src), S3Storage(f"s3://{bucket}/p", client=client))
         assert str(excinfo.value) == "Cannot use sync command with a directory bucket."
+        assert calls == []
+
+    def test_directory_bucket_refusal_comes_before_the_sdk_floor_gate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # On a botocore that predates S3 Express the sync refusal still wins:
+        # upgrading would not make sync usable on a directory bucket or one of
+        # its access points, so the floor gate (an upgrade hint) must not come
+        # first.
+        import botocore.utils
+
+        from boto3_s3 import s3storage
+
+        monkeypatch.delattr(botocore.utils, "S3ExpressIdentityResolver")
+        monkeypatch.setattr(s3storage, "version", lambda _name: "1.31.0")
+        src = tmp_path / "src"
+        src.mkdir()
+        client, calls = make_recording_client([])
+        with pytest.raises(ValidationError, match="Cannot use sync command"):
+            S3().sync(str(src), S3Storage("s3://b--use1-az4--x-s3/p", client=client))
+        with pytest.raises(ValidationError, match="Cannot use sync command"):
+            S3().sync(str(src), S3Storage("s3://b--use1-az4--xa-s3/p", client=client))
         assert calls == []
 
     def test_cancel_token_aborts_between_pairs(self, tmp_path: Path) -> None:
@@ -615,6 +647,25 @@ class TestSyncDownload:
         assert [call.params["Key"] for call in calls[1:]] == ["d/new.txt", "d/touched.txt"]
         assert (out / "new.txt").read_bytes() == b"payload"
 
+    def test_a_zoneless_listing_stamp_is_judged_as_local_time(self, tmp_path: Path) -> None:
+        # An endpoint whose LastModified carries no zone: aws-cli reads it as
+        # local time and judges the pair; a naive value left as it was ended
+        # the run on "can't subtract offset-naive and offset-aware datetimes".
+        out = tmp_path / "out"
+        naive = datetime(2025, 1, 1, 12, 0, 0)
+        local = naive.astimezone()  # the same wall clock, read as local time
+        _write(out, "old.txt", b"xx", mtime=local - timedelta(hours=1))  # local older -> skip
+        _write(out, "touched.txt", b"xx", mtime=local + timedelta(hours=1))  # newer -> download
+        page = {
+            "Contents": [
+                {"Key": f"d/{name}", "Size": 2, "LastModified": naive, "ETag": '"e"'}
+                for name in ("old.txt", "touched.txt")
+            ]
+        }
+        client, calls = make_recording_client([page, get_response()])
+        S3().sync(S3Storage("s3://bucket/d", client=client), str(out), transfer_config=_SERIAL)
+        assert [call.params["Key"] for call in calls[1:]] == ["d/touched.txt"]
+
     def test_exact_timestamps_downloads_on_any_skew(self, tmp_path: Path) -> None:
         # Both skew directions: local-older is the discriminating case (the
         # default skips it), local-newer pins that exact_timestamps still
@@ -669,8 +720,81 @@ class TestSyncDownload:
         assert (workdir / "out").is_dir()
         assert not (elsewhere / "out").exists()
 
+    @pytest.mark.skipif(
+        os.name == "nt", reason="Windows folds `..` before the filesystem sees the path"
+    )
+    def test_a_destination_the_kernel_finds_is_not_created_lexically(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `lsub/../out` is sub/out to the kernel (lsub -> sub/other) and
+        # <cwd>/out to abspath. aws-cli's pre-check asks the kernel, finds the
+        # directory and creates nothing; its destination walk then looks for
+        # the lexical form and warns (rc 2, measured). Ours created <cwd>/out
+        # from the lexical test and so never warned (rc 0).
+        (tmp_path / "sub" / "other").mkdir(parents=True)
+        (tmp_path / "sub" / "out").mkdir()
+        (tmp_path / "lsub").symlink_to(tmp_path / "sub" / "other")
+        monkeypatch.chdir(tmp_path)
+        client, _calls = make_recording_client([listing()])
+        results: list[OpResult] = []
+        S3().sync(
+            S3Storage("s3://bucket/d", client=client),
+            LocalStorage("lsub/../out"),
+            transfer_config=_SERIAL,
+            on_result=results.append,
+        )
+        assert not (tmp_path / "out").exists()
+        assert [(r.outcome, str(r.error)) for r in results] == [
+            (OpOutcome.WARNED, f"Skipping file {tmp_path / 'out'}{os.sep}. File does not exist.")
+        ]
+
+    @pytest.mark.skipif(
+        os.name == "nt", reason="Windows folds `..` before the filesystem sees the path"
+    )
+    def test_a_destination_the_kernel_does_not_find_is_created_where_it_resolves(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The other half of the same aws-cli pre-check: makedirs on the typed
+        # path, so the directory appears under the link's target.
+        (tmp_path / "sub" / "other").mkdir(parents=True)
+        (tmp_path / "lsub").symlink_to(tmp_path / "sub" / "other")
+        monkeypatch.chdir(tmp_path)
+        client, _calls = make_recording_client([listing()])
+        S3().sync(
+            S3Storage("s3://bucket/d", client=client),
+            LocalStorage("lsub/../new"),
+            transfer_config=_SERIAL,
+        )
+        assert (tmp_path / "sub" / "new").is_dir()
+        assert not (tmp_path / "new").exists()
+
+    def test_an_existing_file_written_with_a_trailing_separator_fails_the_creation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The typed path keeps the separator abspath strips. `out/` over an
+        # existing file does not exist as typed, so the creation is attempted
+        # and fails before anything is listed - aws-cli's rc 255 (`[Errno 17]
+        # File exists: 'out/'`, measured on Linux). Written `out`, the same
+        # file passes the check and every item fails instead. Which error the
+        # OS gives mkdir is its own: EEXIST on Linux and Windows, ENOTDIR on
+        # macOS (seen on the macOS CI runner).
+        (tmp_path / "out").write_bytes(b"keep")
+        monkeypatch.chdir(tmp_path)
+        client, calls = make_recording_client([])
+        with pytest.raises(TransportError) as excinfo:
+            S3().sync(
+                S3Storage("s3://bucket/d", client=client),
+                LocalStorage("out" + os.sep),
+                transfer_config=_SERIAL,
+            )
+        assert isinstance(excinfo.value.__cause__, (FileExistsError, NotADirectoryError))
+        assert excinfo.value.operation == "sync"
+        assert calls == []
+        assert (tmp_path / "out").read_bytes() == b"keep"
+
+    @pytest.mark.parametrize("bucket", ["b--use1-az4--x-s3", "ap--use1-az4--xa-s3"])
     def test_directory_bucket_source_is_rejected_after_dest_dir_creation(
-        self, tmp_path: Path
+        self, tmp_path: Path, bucket: str
     ) -> None:
         # The rejection guards the source side too, and sits after the s3local
         # dest-dir creation - aws creates the directory and then fails
@@ -678,7 +802,7 @@ class TestSyncDownload:
         out = tmp_path / "out"
         client, calls = make_recording_client([])
         with pytest.raises(ValidationError) as excinfo:
-            S3().sync(S3Storage("s3://b--use1-az4--x-s3/p", client=client), str(out))
+            S3().sync(S3Storage(f"s3://{bucket}/p", client=client), str(out))
         assert str(excinfo.value) == "Cannot use sync command with a directory bucket."
         assert out.is_dir()
         assert calls == []
@@ -879,6 +1003,64 @@ class TestSyncCopy:
         )
         assert ops(calls) == ["ListObjectsV2", "ListObjectsV2"]
         assert results == []
+
+
+class TestLaneFilterShapes:
+    """A lane filter outside its shapes is refused before anything runs.
+
+    ``update_filter=None`` is the aws-cli default, so ``delete_filter=None`` is
+    the natural slip; it passed the ``is False`` test and reached the lane as a
+    predicate, so the run listed both sides, submitted the new entries and only
+    then died with ``TypeError: 'NoneType' object is not callable``.
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "value"),
+        [
+            ("create_filter", None),
+            ("delete_filter", None),
+            ("create_filter", 0),
+            ("delete_filter", 1),
+            ("update_filter", 0),
+        ],
+    )
+    def test_a_wrong_shape_is_refused_before_any_request(
+        self, tmp_path: Path, name: str, value: object
+    ) -> None:
+        src = tmp_path / "src"
+        src.mkdir()
+        _write(src, "a.txt", b"a")
+        client, calls = make_recording_client([])
+        with pytest.raises(ValidationError, match=f"sync: {name} must be") as exc_info:
+            S3().sync(str(src), S3Storage("s3://bucket/p/", client=client), **{name: value})  # pyright: ignore[reportArgumentType]
+        assert exc_info.value.operation == "sync"
+        assert calls == []
+
+    @pytest.mark.parametrize("name", ["create_filter", "update_filter", "delete_filter"])
+    def test_a_parallel_filter_wrapping_no_callable_is_refused_too(
+        self, tmp_path: Path, name: str
+    ) -> None:
+        # The container passed the shape check whatever it wrapped, so
+        # ParallelFilter(None, pool) still listed both sides, uploaded and
+        # then died on the pool with the same TypeError (measured on MinIO).
+        src = tmp_path / "src"
+        src.mkdir()
+        _write(src, "a.txt", b"a")
+        client, calls = make_recording_client([])
+        with ThreadPoolExecutor(1) as pool:
+            wrapped = ParallelFilter(cast("Any", None), pool)
+            with pytest.raises(ValidationError, match=f"sync: {name}'s ParallelFilter") as exc_info:
+                S3().sync(str(src), S3Storage("s3://bucket/p/", client=client), **{name: wrapped})  # pyright: ignore[reportArgumentType]
+        assert exc_info.value.operation == "sync"
+        assert calls == []
+
+    def test_update_filter_none_stays_the_default(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        src.mkdir()
+        _write(src, "a.txt", b"a")
+        client, calls = make_recording_client([listing(("p/a.txt", 1)), {}])
+        S3().sync(str(src), S3Storage("s3://bucket/p/", client=client), update_filter=None)
+        assert ops(calls) == ["ListObjectsV2", "PutObject"]
 
 
 class TestParallelFilter:
@@ -1259,3 +1441,81 @@ class TestParallelFilter:
         assert len(errors) == 1
         assert isinstance(errors[0], ValueError)
         assert str(errors[0]) == "decide blew up"
+
+
+class TestDeletesOnTheCrtEngine:
+    """Which client the sync's deletes ride.
+
+    An upload's deletes ride the CRT client when the run selects the CRT
+    engine, as aws-cli's ride its CRT client, and a request that dies there is
+    reported; an S3-to-S3 sync always runs on aws-cli's classic client
+    (`_compute_transfer_client_type`), so its deletes stay on botocore, where
+    the same request is lost (`lost_like_aws`).
+    """
+
+    @pytest.fixture
+    def built(self, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+        # The deletes' engine alone (its own rule is pinned in test_deleter);
+        # the transfers fall back to classic rather than building a real CRT
+        # engine, a process-wide singleton, in a unit test.
+        from boto3_s3 import crtsupport
+        from boto3_s3 import deleter as deleter_module
+
+        built: list[Any] = []
+        monkeypatch.setattr(deleter_module, "crt_delete_sender", crt_sender_factory(built))
+        monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", lambda *_a, **_k: None)
+        return built
+
+    @staticmethod
+    def _crt() -> Any:
+        from boto3.s3.transfer import TransferConfig
+
+        return TransferConfig(preferred_transfer_client="crt")
+
+    @staticmethod
+    def _dead() -> Exception:
+        from botocore.exceptions import ConnectionClosedError
+
+        return ConnectionClosedError(endpoint_url="http://h/")
+
+    def test_an_s3_to_s3_sync_stays_on_botocore_whatever_the_preference(
+        self, built: list[Any]
+    ) -> None:
+        src_client, _ = make_recording_client([listing()])
+        dest_client, dest_calls = make_recording_client(
+            [listing(("p/z.txt", 1)), self._dead(), self._dead()]
+        )
+        results: list[OpResult] = []
+        S3().sync(
+            S3Storage("s3://src-b/p", client=src_client),
+            S3Storage("s3://dest-b/p", client=dest_client),
+            delete_filter=True,
+            on_result=results.append,
+            transfer_config=self._crt(),
+        )
+        assert built == []
+        assert ops(dest_calls) == ["ListObjectsV2", "DeleteObjects", "DeleteObject"]
+        assert results == []
+
+    def test_an_upload_sync_deletes_on_the_crt_client(
+        self, built: list[Any], tmp_path: Path
+    ) -> None:
+        awscrt_exceptions = pytest.importorskip("awscrt.exceptions")
+        dead = awscrt_exceptions.from_code(1051)
+        client, calls = make_recording_client([listing(("p/z.txt", 1)), dead, dead])
+        results: list[OpResult] = []
+        with pytest.raises(BatchError):
+            S3(crt_allow_lockless=True).sync(
+                str(tmp_path),
+                S3Storage("s3://bucket/p", client=client),
+                delete_filter=True,
+                on_result=results.append,
+                transfer_config=self._crt(),
+            )
+        ((sender, _, kwargs),) = built
+        # The dead batch, then the key on its own (test_deleter pins why).
+        assert [op for op, _ in sender.calls] == ["DeleteObjects", "DeleteObject"]
+        assert kwargs["crt_allow_lockless"] is True
+        assert ops(calls) == ["ListObjectsV2", "DeleteObjects", "DeleteObject"]
+        assert [r.outcome for r in results] == [OpOutcome.FAILED]
+        assert str(results[0].error) == "AWS_IO_SOCKET_CLOSED: socket is closed."

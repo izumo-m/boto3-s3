@@ -3,14 +3,15 @@
 The suite under `benchmarks/` exists to detect performance regressions
 against the goal stated in [overview.md](overview.md) section 1: performance
 equal to or better than `aws s3`. It is a local, manually run harness - it is
-not part of pytest (`testpaths` stays `tests`), not run in CI (shared runners
+not part of pytest (`testpaths` stays `tests`; only the harness's own unit
+tests, `tests/benchmarks/`, run there), not run in CI (shared runners
 make wall-clock thresholds meaningless), and nothing in it ships with either
 package.
 
 Two comparison axes, by design:
 
 1. **Same-run differential against the pinned `aws` binary** (E2E mode). Both
-   CLIs run back-to-back against the same local MinIO endpoint inside one
+   CLIs run back-to-back against the same local dev stack endpoint inside one
    run, so host noise hits both sides and cancels in the ratio. This is the
    primary regression signal on a noisy host (WSL2).
 2. **History against boto3-s3's own past runs.** Every run stores a JSONL
@@ -20,11 +21,11 @@ Two comparison axes, by design:
 ## Quick start
 
 ```
-scripts/compose-up.sh                  # MinIO stack (same as the e2e suite)
+scripts/compose-up.sh                  # dev S3 stack (same as the e2e suite)
 source scripts/bench-env.sh            # the lane's interpreter + environment
 uv sync --all-packages --locked        # provisions .venv-bench on first use
 scripts/install-awscli.sh              # pinned aws -> .venv-bench/bin/aws
-source scripts/minio-env.sh            # endpoint + credentials env
+source scripts/dev-env.sh              # endpoint + credentials env
 uv run python -m benchmarks run        # both modes, classic engine
 ```
 
@@ -41,7 +42,7 @@ uv run python -m benchmarks list
 ```
 
 Exit codes: 0 clean, 1 when a regression flag fired, 2 on harness or
-environment errors. Missing MinIO *variables* fail fast with the setup
+environment errors. Missing dev stack *variables* fail fast with the setup
 commands; the endpoint itself is not probed, so an unreachable stack surfaces
 only when the first S3 call fails.
 
@@ -67,14 +68,14 @@ readable across it.
 
 ## Modes
 
-**E2E** runs both CLIs as subprocesses against MinIO and measures wall-clock
-per invocation, warmup discarded, then N rounds with the side order
+**E2E** runs both CLIs as subprocesses against the dev stack and measures
+wall-clock per invocation, warmup discarded, then N rounds with the side order
 alternating every round (drift cancels in the median ratio). It owns the
 dedicated bucket `boto3-s3-bench` - created at run start, force-deleted on
 exit (on real S3 the name gets a per-run suffix, since that namespace is
 global); the e2e test suite's `boto3-s3-e2e` (contractually empty) is never
-touched. Destinations are purged between invocations so MinIO's tmpfs stays
-bounded. By default the endpoint must be the local MinIO stack;
+touched. Destinations are purged between invocations so the dev stack's tmpfs
+stays bounded. By default the endpoint must be the local dev stack;
 `BOTO3_S3_BENCH_ALLOW_REMOTE=1` (exactly `1`) opts into a non-local endpoint,
 or into real S3 with no endpoint override at all (how the EC2 lane runs,
 below). A real-S3 run takes its credentials from the environment or an
@@ -105,8 +106,8 @@ mechanism); `--engine both` adds a CRT pass over the transfer scenarios for
 aws and boto3-s3 alike. On the CRT lane the harness passes `--endpoint-url`
 explicitly to both sides - the same workaround as the e2e CRT parity tests,
 because aws's CRT client reads `use_ssl` from the CLI argument only and an
-env-only `AWS_ENDPOINT_URL_S3` makes it dial TLS to MinIO's http endpoint
-(`AWS_IO_SOCKET_CLOSED`).
+env-only `AWS_ENDPOINT_URL_S3` makes it dial TLS to the dev stack's http
+endpoint (`AWS_IO_SOCKET_CLOSED`).
 
 A scenario that fails (unexpected rc, verification mismatch) is skipped and
 recorded - in the run summary, and under `failures` in the results file's
@@ -210,7 +211,7 @@ The in-process `inproc_sync_changed_20k` gets the same shape from the stub:
 2k local files differ in size from the pre-rendered listing.
 
 The single-object rows measure two different things depending on the link.
-Against MinIO on localhost a 64 MB object moves in a few hundredths of a
+Against the dev stack on localhost a 64 MB object moves in a few hundredths of a
 second, so `cp_upload_large` / `cp_download_large` there are the CPU cost of
 multipart orchestration, not throughput - and on the CRT lane the aws side can
 finish inside its own startup constant, which the report renders as `-`. For a
@@ -257,14 +258,14 @@ scenarios flag on `median now / median baseline`.
 
 ## Recording a baseline on EC2
 
-The local lane runs against MinIO on `127.0.0.1`: no round-trip latency, no
-TLS, unbounded bandwidth, static keys. That is the right *differential* - host
-noise hits both CLIs and cancels in the ratio - but the wrong *absolute*
-picture of where `aws s3` actually runs. The EC2 lane records a baseline in a
-representative environment (a quiet, fixed-performance instance against real S3
-in one region) whose "instance type + AMI + region" someone else can
-reproduce. It is not a per-commit lane; run it when recording a baseline for
-[RESULTS.md](../benchmarks/RESULTS.md).
+The local lane runs against the dev stack on `127.0.0.1`: no round-trip
+latency, no TLS, unbounded bandwidth, static keys. That is the right
+*differential* - host noise hits both CLIs and cancels in the ratio - but the
+wrong *absolute* picture of where `aws s3` actually runs. The EC2 lane records
+a baseline in a representative environment (a quiet, fixed-performance
+instance against real S3 in one region) whose "instance type + AMI + region"
+someone else can reproduce. It is not a per-commit lane; run it when recording
+a baseline for [RESULTS.md](../benchmarks/RESULTS.md).
 
 ```
 python -m benchmarks ec2 setup-iam            # once, needs an administrator
@@ -370,14 +371,16 @@ runs both modes against real S3.
   either, and record the entry in RESULTS.md with the instance type, Ubuntu
   release and AMI, region, and Python version.
 - **A clean shell.** The launcher refuses to start if the shell is configured
-  for MinIO (`AWS_ENDPOINT_URL_S3` or the dev static key), because those would
-  redirect its S3 calls. Run it from a shell that has not sourced
-  `scripts/minio-env.sh`.
+  for the dev stack (`AWS_ENDPOINT_URL_S3` or the dev static key), because
+  those would redirect its S3 calls. Run it from a shell that has not sourced
+  `scripts/dev-env.sh`.
 
 Cross-run `--baseline` comparison stays like-for-like only within one lane,
 which is one instance type on one Ubuntu release; an x86-64 and a Graviton
 run are two baselines to read side by side, not a regression pair, and the
-lane scoping enforces that.
+lane scoping enforces that. The local lane is like-for-like only within one
+dev stack server: runs before 2026-10-17 were against MinIO, later ones
+against RustFS.
 
 ## Reading the numbers on this host
 

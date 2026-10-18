@@ -121,6 +121,7 @@ from boto3_s3.exceptions import (
     Boto3S3Error,
     NotFoundError,
     TransportError,
+    ValidationError,
 )
 from boto3_s3.storage import Storage, StorageCapability
 from boto3_s3.types import FileInfo, FileKind, LocalFileInfo, LocalScanOptions, ScanOptions
@@ -131,6 +132,29 @@ if TYPE_CHECKING:
 
 # aws-cli EPOCH_TIME: the stamp used when a file's mtime cannot be represented.
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+# aws-cli's warning for that fallback (skip_file=False: the file is kept).
+_INVALID_TIMESTAMP = "File has an invalid timestamp. Passing epoch time as timestamp."
+
+
+def _warn_unrepresentable_mtime(info: LocalFileInfo, notify: Callable[[str], None]) -> None:
+    """Send aws-cli's invalid-timestamp warning for a final scan-time record.
+
+    ``stat_info`` stamps a regular file's record silently, because the
+    recursive walk re-stats the leaf at its turn (``restat_leaf``), which is
+    where aws-cli takes the timestamp and warns. A record the walk keeps as
+    built - a one-level scan's child - draws its warning here instead; a link's
+    own stat (``S_IFLNK``) already warned in ``stat_info``, and a directory
+    carries no timestamp.
+    """
+    st = info.stat_result
+    if (
+        info.kind is FileKind.FILE
+        and st is not None
+        and not stat_module.S_ISLNK(st.st_mode)
+        and _size_mtime(st)[1] is None
+    ):
+        notify(_INVALID_TIMESTAMP)
+
 
 # Boundary thresholds for the full-path fallback (see
 # LocalFileGenerator.crosses_full_path_boundary). The fast walk vets each entry
@@ -666,7 +690,11 @@ class LocalFileGenerator:
           runs on the path - normally ``File does not exist.``, rc 2 - and the
           leaf is dropped, warned or not, like aws-cli's ``_safely_get_file_stats``
           returning nothing. Without this the stale record was submitted and the
-          transfer failed to open it (rc 1);
+          transfer failed to open it (rc 1). The complete view first tries the
+          link's own lstat (``_lstat_leaf``): a leaf that became a dangling
+          link or a loop is kept as that lstat leaf, warned only when this
+          walk follows links - ``classify_child``'s failed-follow rule, at
+          the leaf's turn;
         - it says ``S_IFDIR``: the returned record is the promoted directory
           (built from this same stat, which is the **followed** one
           ``os.path.isdir`` takes), which ``walk_dir`` descends. Without this the
@@ -676,9 +704,12 @@ class LocalFileGenerator:
           refreshed from this stat, so what is transferred and what ``sync``
           compares are the file as of its turn - aws-cli takes every leaf's size
           and timestamp here, never at scan time. The unrepresentable-timestamp
-          fallback stamps ``EPOCH_TIME`` as ``stat_info`` does, and warns only
-          when the scan's stat was still representable, so one file draws
-          aws-cli's one warning rather than two.
+          fallback stamps ``EPOCH_TIME`` as ``stat_info`` does and sends the one
+          warning aws-cli sends for the file, here rather than at scan time:
+          so it sorts among the walk's other warnings as aws-cli's does (a
+          sibling directory's warnings come first), and a timestamp that
+          became representable since the scan draws none (``stat_info`` stamps
+          the scan-time record silently).
 
         ``is_symlink`` is left as classified: re-testing it would cost a second
         syscall per leaf, and aws-cli carries no such flag.
@@ -703,6 +734,15 @@ class LocalFileGenerator:
         try:
             st = os.stat(path)
         except (OSError, ValueError):
+            if options.enumerate_all_entries:
+                # The complete view's rule for a link whose follow fails
+                # (classify_child's): warn when this walk follows links, keep
+                # the entry as the link's own lstat leaf either way - a leaf
+                # that became a dangling link or a loop since the scan is that
+                # case at its turn. Gone altogether (no lstat either) drops it.
+                fallback = self._lstat_leaf(path, info, options=options, notify=notify)
+                if fallback is not None:
+                    return fallback
             # aws-cli runs its battery on the path the stat failed on and skips
             # the leaf either way (a battery that finds nothing wrong - the race
             # healed between the two calls - still yields no file stats).
@@ -721,15 +761,52 @@ class LocalFileGenerator:
             return self.promoted_directory(info, st, is_symlink=is_link)
         size, mtime = _size_mtime(st)
         if mtime is None:
-            if classified is None or _size_mtime(classified)[1] is not None:
-                # First unrepresentable now, so this is aws-cli's one warning for
-                # the file; if the scan's stat was unrepresentable too, stat_info
-                # already sent it.
-                notify("File has an invalid timestamp. Passing epoch time as timestamp.")
+            # aws-cli's one warning for the file, sent where aws-cli sends it -
+            # at the leaf's turn, from this stat (the scan-time record was
+            # stamped silently), so it sorts among the other warnings as
+            # aws-cli's does and a timestamp that healed since the scan draws
+            # none.
+            notify(_INVALID_TIMESTAMP)
             mtime = self.EPOCH_TIME
         info.size = size
         info.mtime = mtime
         info.stat_result = st
+        return info
+
+    def _lstat_leaf(
+        self,
+        path: str,
+        info: LocalFileInfo,
+        *,
+        options: LocalScanOptions,
+        notify: Callable[[str], None],
+    ) -> LocalFileInfo | None:
+        """``info`` refreshed as the link's own lstat leaf, or ``None`` when even that is gone.
+
+        The yield-time counterpart of ``symlink_child``'s fallback for the
+        complete view: the followed stat failed, so the record describes the
+        link itself (``size`` / ``mtime`` / ``stat_result`` from lstat,
+        ``is_symlink`` set), warned "File does not exist." only when this walk
+        follows links - a no-follow walk keeps a link silently. A path that is
+        no link at all (the stat failed for another reason) is left to the
+        caller's battery.
+        """
+        try:
+            lst = os.lstat(path)
+        except OSError:
+            return None
+        if not stat_module.S_ISLNK(lst.st_mode):
+            return None
+        if options.follow_symlinks:
+            notify(f"Skipping file {path}. File does not exist.")
+        size, mtime = _size_mtime(lst)
+        if mtime is None:
+            notify(_INVALID_TIMESTAMP)
+            mtime = self.EPOCH_TIME
+        info.size = size
+        info.mtime = mtime
+        info.stat_result = lst
+        info.is_symlink = True
         return info
 
     def promoted_directory(
@@ -803,7 +880,7 @@ class LocalFileGenerator:
         if not is_directory:
             size, mtime = _size_mtime(st)
             if mtime is None:
-                notify("File has an invalid timestamp. Passing epoch time as timestamp.")
+                notify(_INVALID_TIMESTAMP)
                 mtime = self.EPOCH_TIME
         return LocalFileInfo(
             key=key,
@@ -842,7 +919,11 @@ class LocalFileGenerator:
         ``triggers_warning`` battery on ``dir_path`` as passed, which is the
         aws-cli warning its own re-test before descending would emit, and yields
         an empty list (the walk goes on); if the battery sees nothing wrong, the
-        ``OSError`` propagates instead. ``sym_depth`` (the
+        ``OSError`` propagates instead. With symlinks not followed that re-test
+        first strips the separator and tests the name itself, as aws-cli's
+        ``should_ignore_file`` does at the top of each descent: a directory
+        that became a symlink is skipped silently rather than followed, and
+        the battery names the stripped path. ``sym_depth`` (the
         number of followed symlinks from the walk root down to ``dir_path``) lets
         a child near the symlink-loop / path-length limit be re-vetted by full
         path (``crosses_full_path_boundary``), so it warn-skips like aws-cli
@@ -870,6 +951,18 @@ class LocalFileGenerator:
         children: list[WalkChild] = []
         dir_fd: int | None = None
         use_fd = self.have_dir_fd
+        # aws-cli's should_ignore_file runs again at the top of each descent,
+        # and with symlinks not followed it strips the separator to test the
+        # name itself: a directory that became a symlink since its parent's
+        # scan is skipped silently - never followed - and its battery (below)
+        # names the stripped path. The open through the separator-terminated
+        # path would follow that link, so the two probes aws-cli spends here
+        # (isdir + islink, only when not following) run first.
+        probe = dir_path
+        if not options.follow_symlinks and probe.endswith(os.sep) and os.path.isdir(probe):
+            probe = probe[:-1]
+            if os.path.islink(probe):
+                return []
         try:
             if use_fd:
                 dir_fd = os.open(dir_path, self.dir_open_flags)
@@ -883,9 +976,11 @@ class LocalFileGenerator:
             # whose ``os.stat`` raises ``ENOTDIR`` / ``ENOENT`` and warns through
             # the battery, and still-a-directory-but-unreadable warns through the
             # ``should_ignore_file`` at the top of the recursion. Establishing
-            # this scan *is* that re-test, so run the same battery on ``dir_path``
-            # as given - it keeps the separator every descended child was
-            # addressed with, and aws-cli's warning keeps it too - then keep
+            # this scan *is* that re-test, so run the same battery on ``probe``:
+            # ``dir_path`` as given - it keeps the separator every descended
+            # child was addressed with, and aws-cli's warning keeps it too - or,
+            # when symlinks are not followed, the separator-stripped form
+            # aws-cli's should_ignore_file rebinds - then keep
             # walking (a warning, rc 2) instead of failing the run. If the probes
             # see nothing wrong (e.g. fd exhaustion resolved by the probe's
             # close), re-raise like aws-cli's ``listdir`` would - never prune
@@ -898,7 +993,7 @@ class LocalFileGenerator:
             # dropping the directory.
             if dir_fd is not None:
                 os.close(dir_fd)
-            if not self.triggers_warning(dir_path, notify):
+            if not self.triggers_warning(probe, notify):
                 raise
             return []
         try:
@@ -1009,9 +1104,13 @@ class LocalFileGenerator:
         ``entry_stat_result`` **once** and threads that one value through the
         rest (so nothing below re-stats or re-checks for ``None``). Symlinks are
         decided first on a free ``d_type`` test: no-follow returns an lstat leaf
-        only in the complete view and otherwise skips it. A followed stat that
+        only in the complete view and otherwise skips it - silently when
+        ``os.path.islink`` agrees, else through the full-path battery, the way
+        aws-cli's lstat-based test lands where the directory grants no search
+        permission. A followed stat that
         comes back ``None`` warns; the complete view then falls back to the link's
-        lstat, while the normal view skips it. A stat that
+        lstat (whose own timestamp warning still goes out), while the normal
+        view skips it. A stat that
         says ``S_IFLNK`` (only an lstat-style override produces one) is its own
         vetting-free leaf, like ``symlink_child``; then
         the normal view's ``should_ignore_entry`` vets that valid stat, and the kind is keyed on
@@ -1026,12 +1125,30 @@ class LocalFileGenerator:
             if options.enumerate_all_entries and not options.follow_symlinks:
                 return self.symlink_child(entry, full, notify=notify)
             if not options.follow_symlinks:
-                return None
+                if os.path.islink(full):
+                    return None
+                # The entry's type says symlink, but aws-cli's own test - an
+                # lstat by full path - fails here (the directory grants no
+                # search permission, or the entry raced away), so aws-cli takes
+                # it for a non-link and vets it by full path: normally "File
+                # does not exist.", a warning and rc 2 rather than the silent
+                # skip. Only when the battery finds nothing wrong does the entry
+                # go on to be classified.
+                if self.triggers_warning(full, notify):
+                    return None
         st = self.entry_stat_result(entry)
         if st is None:
             notify(f"Skipping file {full}. File does not exist.")
             if options.enumerate_all_entries and entry.is_symlink():
-                return self.symlink_child(entry, full, notify=lambda _body: None)
+                # That warning is sent; symlink_child must not repeat it when
+                # the lstat fails too. What the link's own stat has to say -
+                # a timestamp the host cannot render - still goes out, as it
+                # does for the same leaf built at its turn (`_lstat_leaf`).
+                def own_stat_warnings(body: str) -> None:
+                    if body == _INVALID_TIMESTAMP:
+                        notify(body)
+
+                return self.symlink_child(entry, full, notify=own_stat_warnings)
             return None
         if stat_module.S_ISLNK(st.st_mode):
             # Only an lstat-style entry_stat_result override produces this mode:
@@ -1224,11 +1341,18 @@ class LocalFileGenerator:
         those three - rather than adding to the record - pairs with that seam;
         everything else this stamps survives to the stream. The record built
         here is what a link leaf and a non-recursive scan keep as is.
+
+        The invalid-timestamp warning is sent from here only for a link's own
+        stat (``S_IFLNK``), which no re-stat follows; a regular file's record
+        is stamped silently, and its warning is ``restat_leaf``'s (at the
+        leaf's turn, where aws-cli warns) or, for a one-level scan that keeps
+        this record, the scan's.
         """
         size, mtime = _size_mtime(st)
         if mtime is None:
-            # skip_file=False in aws-cli: warn but keep the file, stamped epoch.
-            notify("File has an invalid timestamp. Passing epoch time as timestamp.")
+            # skip_file=False in aws-cli: keep the file, stamped epoch.
+            if stat_module.S_ISLNK(st.st_mode):
+                notify(_INVALID_TIMESTAMP)
             mtime = self.EPOCH_TIME
         return LocalFileInfo(
             key=full.replace(os.sep, "/"),
@@ -1240,7 +1364,7 @@ class LocalFileGenerator:
 
 
 def translate_os_error(
-    exc: OSError,
+    exc: OSError | ValueError,
     *,
     operation: str | None,
     key: str | None,
@@ -1249,6 +1373,10 @@ def translate_os_error(
     """Map an ``OSError`` to the library taxonomy (the local mirror of
     ``s3storage.translate_boto_error``): missing path -> ``NotFoundError``,
     permission -> ``AccessDeniedError``, everything else -> ``TransportError``.
+    A ``ValueError`` is a path the OS calls refuse before asking the
+    filesystem - an embedded NUL, a lone surrogate the filesystem encoding
+    cannot carry (``UnicodeEncodeError``) - and maps to ``ValidationError``:
+    the caller supplied it.
 
     Shared by the local-filesystem failure paths that raise into the taxonomy
     (this backend's single-entry and I/O operations, the engines'
@@ -1259,6 +1387,8 @@ def translate_os_error(
     ``str(exc)`` when the caller carries aws-cli wording of its own.
     """
     text = str(exc) if message is None else message
+    if isinstance(exc, ValueError):
+        return ValidationError(text, operation=operation, key=key)
     if isinstance(exc, FileNotFoundError):
         return NotFoundError(text, operation=operation, key=key)
     if isinstance(exc, PermissionError):
@@ -1332,6 +1462,15 @@ class LocalStorage(Storage):
         # entry. Binding the cwd here also keeps a relative path resolving
         # consistently if the process later chdir's.
         self._abspath = os.path.abspath(self._path)
+        # The same anchor without abspath's lexical normalization, for
+        # ``exists``: ``..`` folded by abspath and ``..`` resolved by the
+        # kernel name different files once a symlinked directory is involved.
+        # An absolute path needs no anchor, and must not ask for one: getcwd
+        # fails in a process whose working directory has been removed, where
+        # abspath above - which consults it for a relative path only - works.
+        self._unnormalized = (
+            self._path if os.path.isabs(self._path) else os.path.join(os.getcwd(), self._path)
+        )
         # How this local source is read: symlink interpretation, whether every
         # metadata-readable native entry is enumerated before filtering, and
         # whether recursive descent guards against symlink cycles. Seeded into
@@ -1363,11 +1502,61 @@ class LocalStorage(Storage):
         """The construction-time absolute form of `path`.
 
         The anchor every scan, `get_fileinfo`, and transfer plan resolves
-        against (see `__init__`); existence checks and directory creation in
-        the operations use it too, so a relative `path` keeps meaning the same
-        directory even if the process chdir's after construction.
+        against (see `__init__`), so a relative `path` keeps meaning the same
+        directory even if the process chdir's after construction. The
+        operations' source existence check and destination directory creation
+        ask `exists` / `ensure_directory` instead, which hand the path to the
+        kernel as typed (anchored at the same working directory) rather than
+        in this lexical form.
         """
         return self._abspath
+
+    def exists(self) -> bool:
+        """Whether the location exists, asked the way aws-cli's pre-check asks.
+
+        aws-cli's ``_validate_path_args`` runs ``os.path.exists`` on the path
+        as typed - the kernel's resolution - while its generator then looks
+        for the lexical ``abspath`` form. The two differ once ``..`` follows a
+        symlinked directory: ``lsub/../x`` is ``sub/x`` to the kernel and
+        ``<cwd>/x`` to ``abspath``. aws-cli admits such a source and its
+        generator warns "File does not exist." (rc 2); testing ``abspath``
+        here refused it up front instead (rc 1). This asks the kernel, anchored
+        at the construction-time working directory like `abspath`, so the
+        operations admit what aws-cli admits and the walk / `get_fileinfo`
+        then answer for the lexical form. Windows has no such gap - it folds
+        ``..`` out of a path before the filesystem sees it, so the typed path
+        is already the lexical one - and there ``aws.exe`` refuses that
+        source as missing up front (measured), as this does. An empty path
+        does not exist (Python's own ``os.path.exists("")``; ``os.path.join``
+        would make it the working directory).
+        """
+        if not self._path:
+            return False
+        return os.path.exists(self._unnormalized)
+
+    def ensure_directory(self) -> None:
+        """Create the location as a directory unless it exists, as aws-cli's pre-check does.
+
+        aws-cli's ``_validate_path_args`` creates a directory destination
+        with a bare ``os.path.exists`` / ``os.makedirs`` on the path as typed,
+        so this tests `exists` and creates the same typed, construction-anchored
+        path - not the lexical ``abspath`` form the transfer then writes
+        under. The typed path keeps what ``abspath`` folds away - a trailing
+        separator, a ``..`` - and the kernel reads those: an existing *file*
+        written ``out/`` does not exist as typed and fails the creation
+        (written ``out`` it exists, and the transfer fails per item instead);
+        ``missing/../out`` creates ``missing/`` on the way and then fails on
+        an existing ``out``; and behind a symlinked directory ``..`` names the
+        link target's parent, so a destination the kernel finds there is not
+        created lexically (a ``sync`` then warns about the missing lexical
+        directory) and one it does not find is created where the kernel
+        resolves it. Each of these is aws-cli's own outcome, measured. (The
+        ``..`` cases are POSIX's: Windows folds ``..`` before the filesystem
+        sees the path, leaving the trailing separator the only difference.)
+        An ``OSError`` propagates for the caller to translate.
+        """
+        if not self.exists():
+            os.makedirs(self._unnormalized)
 
     @property
     def fsync(self) -> bool:
@@ -1382,6 +1571,24 @@ class LocalStorage(Storage):
     def walker(self) -> LocalFileGenerator:
         """The ``LocalFileGenerator`` driving this backend's directory walk."""
         return self._walker
+
+    @override
+    def validate(self) -> None:
+        """Reject an empty path (``Storage.validate``).
+
+        ``""`` is not a location: Python's own path functions treat it as a
+        path that does not exist (``os.path.exists("")`` is ``False``), while
+        ``os.path.abspath`` alone would silently make it the working
+        directory - a ``sync`` with ``delete_filter`` onto ``""`` then deleted
+        the working directory's files. aws-cli refuses it as a source and as a
+        directory destination; the one place it means the working directory
+        there, the destination of a single download, the CLI layer spells as
+        ``"."`` itself. Construction stays permissive, like every backend's; the
+        operations call this before use. ``os.PathLike`` never yields ``""``
+        (``pathlib.Path("")`` is ``"."``).
+        """
+        if not self._path:
+            raise ValidationError("A local path must not be empty.")
 
     @override
     def as_text(self) -> str:
@@ -1548,6 +1755,7 @@ class LocalStorage(Storage):
                 root_anchor, strip=strip, options=options, notify=notify
             ):
                 info.storage = options.storage
+                _warn_unrepresentable_mtime(info, notify)
                 if item_filter is None or item_filter(info):
                     yield info
             return
@@ -1586,6 +1794,9 @@ class LocalStorage(Storage):
             # scan_children stamps compare_key only; stamp the producing backend
             # here (options.storage == self, forced by scan_pages) before the filter.
             info.storage = options.storage
+            # This record is kept as scanned (no yield-time re-stat), so its
+            # timestamp warning is due here.
+            _warn_unrepresentable_mtime(info, notify)
             if item_filter is None or item_filter(info):
                 yield info
 
@@ -1598,7 +1809,10 @@ class LocalStorage(Storage):
         ``follow_symlinks=False`` symlink, or a definitively absent path (``ENOENT`` /
         ``ENOTDIR`` - including a broken symlink when following), is a silent ``None``; a special /
         unreadable file warns via ``notify`` and returns ``None`` (aws-cli's
-        warn-and-skip); a regular file or directory returns a ``LocalFileInfo`` (no
+        warn-and-skip; an unreadable directory is named with the trailing
+        separator aws-cli's ``local_format`` gives a directory source, except
+        when symlinks are not followed, where aws-cli strips it again before
+        its battery); a regular file or directory returns a ``LocalFileInfo`` (no
         type check, so a directory is returned and fails later at open). A stat error
         other than absence (e.g. a permission error reaching the path) is raised -
         existence could not be determined. ``compare_key`` is the caller's to stamp.
@@ -1621,20 +1835,31 @@ class LocalStorage(Storage):
             # is False, aws-cli's own existence probe treats it as gone - so return
             # None per get_fileinfo's contract, not a raised transport error.
             return None
-        except OSError as exc:
-            raise translate_os_error(exc, operation="get_fileinfo", key=None) from exc
+        except (OSError, ValueError) as exc:
+            # operation=None, like open / delete: the storage cannot know which
+            # operation resolves the path, so the operation layer fills the
+            # name in (attribute_failure); key names the path, the entry's own
+            # address space (exceptions.md).
+            raise translate_os_error(exc, operation=None, key=path.replace(os.sep, "/")) from exc
         if _is_special_mode(st.st_mode):
             notify(
                 f"Skipping file {path}. File is character special device, "
                 "block special device, FIFO, or socket."
             )
             return None
-        if not is_readable(path, stat_module.S_ISDIR(st.st_mode)):
-            notify(f"Skipping file {path}. File/Directory is not readable.")
+        is_dir = stat_module.S_ISDIR(st.st_mode)
+        if not is_readable(path, is_dir):
+            # aws-cli's local_format names a directory source with a trailing
+            # separator, and its no-follow check strips it again before the
+            # battery - so the warning keeps the separator only when following
+            # (measured: `.../d/. File/Directory is not readable.` by default,
+            # `.../d.` under --no-follow-symlinks).
+            shown = path + os.sep if is_dir and follow_symlinks else path
+            notify(f"Skipping file {shown}. File/Directory is not readable.")
             return None
         size, mtime = get_file_stat(path, st)
         if mtime is None:
-            notify("File has an invalid timestamp. Passing epoch time as timestamp.")
+            notify(_INVALID_TIMESTAMP)
             mtime = _EPOCH
         return LocalFileInfo(
             key=path.replace(os.sep, "/"),
@@ -1683,8 +1908,11 @@ class LocalStorage(Storage):
             if parent:
                 os.makedirs(parent, exist_ok=True)
             return cast("BinaryIO", open(target, "wb"))
-        except OSError as exc:
-            raise translate_os_error(exc, operation="open", key=key) from exc
+        except (OSError, ValueError) as exc:
+            # operation=None: the storage cannot know which operation opened
+            # it; the operation layer fills the name in (attribute_failure).
+            # key names the file opened, as get_fileinfo / delete name theirs.
+            raise translate_os_error(exc, operation=None, key=target.replace(os.sep, "/")) from exc
 
     @override
     def delete(self, info: FileInfo) -> None:
@@ -1692,8 +1920,10 @@ class LocalStorage(Storage):
         target = to_native_path(info.key)
         try:
             os.remove(target)
-        except OSError as exc:
-            raise translate_os_error(exc, operation="delete", key=info.key) from exc
+        except (OSError, ValueError) as exc:
+            # operation=None, like open: an mv's source delete and a sync's
+            # orphan removal both reach this and stamp their own name.
+            raise translate_os_error(exc, operation=None, key=info.key) from exc
 
     @override
     def get_fileinfo(

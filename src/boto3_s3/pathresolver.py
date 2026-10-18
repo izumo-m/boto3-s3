@@ -7,6 +7,10 @@ S3 on Outposts access point ARN, or a Multi-Region Access Point ARN can hide
 the bucket a path really lands in, so ``mv`` would copy an object onto
 itself and then delete it. Resolving first lets a caller compare the real
 ``s3://bucket/key`` pairs (``S3Storage.same_path``) before moving anything.
+One shape is added to aws-cli's: an access point of an S3 Express directory
+bucket (``--xa-s3``), which aws-cli neither warns about nor resolves, and
+whose same-key move onto its directory bucket deletes the object on real S3
+(the directory bucket accepts the copy onto itself).
 
 Following the library's connection model, the resolver takes its
 ``s3control`` and ``sts`` clients from the caller (build them with the
@@ -17,9 +21,10 @@ string probes - ``has_underlying_s3_path`` / ``is_mrap_path`` /
 callable without any client. aws-cli's
 ``from_session`` constructor is deliberately not ported.
 
-This module stays SDK-free at import time (design/imports.md): the first path
-*split* lazily pulls in ``s3storage`` (and with it ``botocore.exceptions``),
-and a client is touched only when a resolution actually calls one.
+This module stays SDK-free at import time (design/imports.md): constructing a
+resolver, or the first path *split*, lazily pulls in ``s3storage`` (and with
+it ``botocore.exceptions``). Construction reads each client's CA bundle
+setting; a client is called only when a resolution needs it.
 """
 
 from __future__ import annotations
@@ -27,10 +32,11 @@ from __future__ import annotations
 import re
 from typing import Any, NamedTuple
 
-from boto3_s3.exceptions import ValidationError
+from boto3_s3.exceptions import ConfigurationError, ValidationError
 
 # aws-cli regexes, verbatim. ``has_underlying_s3_path`` and the resolution
-# dispatch share them; the suffix forms (-s3alias / --op-s3) have no regex.
+# dispatch share them; the suffix forms (-s3alias / --op-s3 / --xa-s3) have no
+# regex.
 _S3_ACCESSPOINT_ARN_TO_ACCOUNT_NAME_REGEX = re.compile(
     r"^arn:aws.*:s3:[a-z0-9\-]+:(?P<account>[0-9]{12}):accesspoint[:/](?P<name>[a-z0-9\-]{3,50})$"
 )
@@ -50,18 +56,18 @@ _HOST_LABEL_REGEX = re.compile(r"^(?!-)[a-zA-Z\d-]{1,63}(?<!-)$")
 def has_underlying_s3_path(path: str) -> bool:
     """Whether *path*'s bucket part may resolve to a different real bucket.
 
-    True for the three ARN shapes above and for the access-point alias
-    suffixes (``-s3alias``, Outposts ``--op-s3``). Pure string inspection -
-    this is what gates aws's "may resolve to same underlying s3 object(s)"
-    warning when validation is off.
+    True for the three ARN shapes above, for the access-point alias
+    suffixes (``-s3alias``, Outposts ``--op-s3``) and for an S3 Express
+    access point (``--xa-s3``, which aws's test misses). Pure string
+    inspection - this is what gates aws's "may resolve to same underlying s3
+    object(s)" warning when validation is off.
     """
     bucket, _key = _split_bucket_key(path)
     return bool(
         _S3_ACCESSPOINT_ARN_TO_ACCOUNT_NAME_REGEX.match(bucket)
         or _S3_OUTPOST_ACCESSPOINT_ARN_TO_ACCOUNT_REGEX.match(bucket)
         or _S3_MRAP_ARN_TO_ACCOUNT_ALIAS_REGEX.match(bucket)
-        or bucket.endswith("-s3alias")
-        or bucket.endswith("--op-s3")
+        or bucket.endswith(("-s3alias", "--op-s3", "--xa-s3"))
     )
 
 
@@ -176,12 +182,33 @@ def is_s3express_path(path: str) -> bool:
     return bucket.endswith("--x-s3")
 
 
+def is_s3express_accesspoint_path(path: str) -> bool:
+    """Whether an ``s3://`` path names an access point of an S3 Express directory
+    bucket (the ``--xa-s3`` suffix).
+
+    The endpoint rules sign a request through such an access point
+    ``sigv4-s3express`` exactly as they sign the directory bucket itself, off
+    the ``accessPointSuffix`` they read from the bucket part, so the same pin
+    stand-down applies as for `is_s3express_path`. It is a separate probe
+    because aws-cli's own ``is_s3express_bucket`` tests only ``--x-s3``. The
+    places built on that test - the ``sync`` rejection and the
+    ``--case-conflict`` branch - take this suffix too, where aws does not:
+    an access point lists its directory bucket's keys in the same unordered
+    way, which those places exist to keep from the sorted pairing. The
+    ``s3://`` scheme is required for the same reason as there.
+    """
+    if not path.startswith("s3://"):
+        return False
+    bucket, _key = _split_bucket_key(path)
+    return bucket.endswith("--xa-s3")
+
+
 def _split_bucket_key(path: str) -> tuple[str, str]:
     """Scheme-stripped ``(bucket, key)`` via the S3 grammar on ``S3Storage``.
 
     Deferred import: ``s3storage`` top-imports ``botocore.exceptions``, and this
     module must stay SDK-free at import time (its docstring's contract) - the
-    same pattern as ``_api_errors`` below.
+    same pattern as ``_request`` below.
     """
     from boto3_s3.s3storage import S3Storage
 
@@ -252,10 +279,19 @@ class S3PathResolver:
     ``s3control_client`` answers ``GetAccessPoint`` /
     ``ListMultiRegionAccessPoints``; ``sts_client`` supplies the account id
     when an alias carries none. Both are used lazily - a path with a plain
-    bucket name resolves to itself without any API call.
+    bucket name resolves to itself without any API call. A client whose CA
+    bundle setting is empty or whitespace-only, or either client while
+    ``AWS_CA_BUNDLE`` is set but empty or whitespace-only, is refused at construction with
+    ``InvalidConfigError`` (`s3storage.reject_empty_ca_bundle`).
     """
 
     def __init__(self, *, s3control_client: Any, sts_client: Any) -> None:
+        # Deferred import: keeps this module SDK-free at import time.
+        from boto3_s3.s3storage import reject_empty_ca_bundle, s3_errors
+
+        with s3_errors(operation="mv"):
+            reject_empty_ca_bundle(s3control_client, check_environment=True)
+            reject_empty_ca_bundle(sts_client, check_environment=True)
         self._s3control_client = s3control_client
         self._sts_client = sts_client
 
@@ -268,6 +304,17 @@ class S3PathResolver:
         path comes back unchanged.
         """
         bucket, key = _split_bucket_key(path)
+        if bucket.endswith("--xa-s3"):
+            # An S3 Express access point, by name or ARN: a botocore that
+            # predates the shape routes the lookup to the plain s3control
+            # endpoint, which answers NoSuchAccessPoint for one that exists
+            # (measured on 1.37.23), so such an SDK gets the floor message
+            # instead, before any request.
+            from boto3_s3.s3storage import s3express_unsupported_reason
+
+            reason = s3express_unsupported_reason(bucket)
+            if reason is not None:
+                raise ConfigurationError(reason, operation="mv")
         match = _S3_ACCESSPOINT_ARN_TO_ACCOUNT_NAME_REGEX.match(bucket)
         if match:
             return self._resolve_accesspoint_arn(match.group("account"), match.group("name"), key)
@@ -278,7 +325,10 @@ class S3PathResolver:
         match = _S3_MRAP_ARN_TO_ACCOUNT_ALIAS_REGEX.match(bucket)
         if match:
             return self._resolve_mrap_alias(match.group("account"), match.group("alias"), key)
-        if bucket.endswith("-s3alias"):
+        if bucket.endswith(("-s3alias", "--xa-s3")):
+            # An S3 Express access point's GetAccessPoint takes its name as
+            # an alias's (measured on real S3: it answers with the directory
+            # bucket); aws-cli does not resolve it.
             return self._resolve_accesspoint_alias(bucket, key)
         if bucket.endswith("--op-s3"):
             raise ValidationError(
@@ -303,12 +353,14 @@ class S3PathResolver:
         return [f"s3://{bucket}/{key}" for bucket in buckets]
 
     def _get_access_point_bucket(self, account: str, name: str) -> str:
-        with self._api_errors():
-            return self._s3control_client.get_access_point(AccountId=account, Name=name)["Bucket"]
+        with self._request():
+            response = self._s3control_client.get_access_point(AccountId=account, Name=name)
+        return self._required(response, "Bucket")
 
     def _get_account_id(self) -> str:
-        with self._api_errors():
-            return self._sts_client.get_caller_identity()["Account"]
+        with self._request():
+            response = self._sts_client.get_caller_identity()
+        return self._required(response, "Account")
 
     def _get_mrap_buckets(self, account: str, alias: str) -> list[str]:
         next_token: str | None = None
@@ -316,11 +368,14 @@ class S3PathResolver:
             args: dict[str, Any] = {"AccountId": account}
             if next_token:
                 args["NextToken"] = next_token
-            with self._api_errors():
+            with self._request():
                 response = self._s3control_client.list_multi_region_access_points(**args)
-            for access_point in response["AccessPoints"]:
-                if access_point["Alias"] == alias:
-                    return [region["Bucket"] for region in access_point["Regions"]]
+            for access_point in self._required(response, "AccessPoints"):
+                if self._required(access_point, "Alias") == alias:
+                    return [
+                        self._required(region, "Bucket")
+                        for region in self._required(access_point, "Regions")
+                    ]
             next_token = response.get("NextToken")
             if not next_token:
                 raise ValidationError(
@@ -330,19 +385,34 @@ class S3PathResolver:
                 )
 
     @staticmethod
-    def _api_errors() -> Any:
-        """Translate botocore errors, keeping ``__cause__`` (CLI rc 254).
+    def _request() -> Any:
+        """Report whatever one s3control / sts request raised as a ``Boto3S3Error``.
 
-        aws lets the raw ClientError escape to its generic 254 handler
-        (a failing GetCallerIdentity exits 254); the
-        library shape for that is a translated ``Boto3S3Error`` with
-        the ClientError as its cause. Deferred import: keeps this module
-        SDK-free at import time (the path split already lazily loads
-        ``s3storage`` the same way, so by resolution time it is warm).
+        `s3storage.s3_request`, keeping ``__cause__``: aws lets the raw
+        ClientError escape to its generic 254 handler (a failing
+        GetCallerIdentity exits 254), and anything else botocore raises inside
+        the request - a reply value its parser cannot convert, an unparsable
+        ``CreationDate`` - to its general 255 one with the exception's text;
+        the library shape for both is a translated ``Boto3S3Error`` with the
+        original as its cause, whose text the CLI prints unchanged. Deferred
+        import: keeps this module SDK-free at import time (the path split
+        already lazily loads ``s3storage`` the same way, so by resolution time
+        it is warm).
         """
-        from boto3_s3.s3storage import s3_errors
+        from boto3_s3.s3storage import s3_request
 
-        return s3_errors(operation="mv")
+        return s3_request(operation="mv")
+
+    @staticmethod
+    def _required(entry: Any, element: str) -> Any:
+        """Read an element of a reply aws reads by subscript (`s3storage.read_required`).
+
+        aws dies on the ``KeyError`` naming a missing element; here that is a
+        ``MalformedResponseError`` with the same text, read in aws's order.
+        """
+        from boto3_s3.s3storage import read_required
+
+        return read_required(entry, element, operation="mv")
 
 
 __all__ = [
@@ -351,5 +421,6 @@ __all__ = [
     "is_mrap_path",
     "is_outpost_alias_path",
     "is_outpost_path",
+    "is_s3express_accesspoint_path",
     "is_s3express_path",
 ]

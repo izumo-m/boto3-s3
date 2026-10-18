@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from boto3_s3_cli import s3errormsg
 
 _REDIRECT_MESSAGE = (
@@ -97,3 +99,12 @@ def test_an_error_without_a_message_is_left_alone() -> None:
     parsed: dict[str, Any] = {"Error": {"Code": "404"}}
     s3errormsg.enhance_error_msg(parsed=parsed)
     assert parsed == {"Error": {"Code": "404"}}
+
+
+def test_a_bare_permanent_redirect_fails_on_the_element_aws_reads_first() -> None:
+    # aws reads the endpoint before the message, so a response carrying
+    # neither names `Endpoint` in the failure line (measured through a fake
+    # S3 answering `<Error><Code>PermanentRedirect</Code></Error>`).
+    with pytest.raises(KeyError) as excinfo:
+        s3errormsg.enhance_error_msg({"Error": {"Code": "PermanentRedirect"}})
+    assert excinfo.value.args == ("Endpoint",)

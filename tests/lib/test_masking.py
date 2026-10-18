@@ -3,7 +3,9 @@
 import io
 import logging
 import pathlib
+import subprocess
 import sys
+import textwrap
 from collections.abc import Generator
 from contextlib import contextmanager
 
@@ -225,10 +227,103 @@ class TestMaskTextNotation:
 
     def test_sigv2_authorization_header_signature_masked(self) -> None:
         # Legacy SigV2 header `AWS <id>:<sig>` (signature_version='s3'): the
-        # signature after the colon is a secret; the id is tail-revealed.
-        out = m.mask_text(f"{{'Authorization': 'AWS {ACCESS_KEY_ID}:{SIGNATURE}'}}")
-        assert SIGNATURE not in out
+        # signature after the colon - an HMAC-SHA1's base64, the shape the
+        # rule is pinned to - is a secret; the id is tail-revealed.
+        sig = "frJIUN8DYpKDtOLCwo//yllqDzg="
+        out = m.mask_text(f"{{'Authorization': 'AWS {ACCESS_KEY_ID}:{sig}'}}")
+        assert sig not in out
         assert "AWS ***MPLE:***" in out
+
+    def test_sigv2_authorization_header_non_aws_shaped_id_masks_entirely(self) -> None:
+        # An S3-compatible endpoint's id (MinIO's `minioadmin`) in the same
+        # header: the signature is still masked, and the id masks entirely
+        # instead of leaking (no tail reveal for a non-AWS-shaped id).
+        sig = "frJIUN8DYpKDtOLCwo//yllqDzg="
+        out = m.mask_text(f"headers={{'Authorization': 'AWS minioadmin:{sig}'}}")
+        assert out == "headers={'Authorization': 'AWS ***:***'}"
+
+    def test_sigv2_authorization_header_plain_line_form(self) -> None:
+        sig = "frJIUN8DYpKDtOLCwo//yllqDzg="
+        out = m.mask_text(f"Authorization: AWS minioadmin:{sig}\nDate: x")
+        assert out == "Authorization: AWS ***:***\nDate: x"
+
+    def test_sigv2_rule_leaves_text_shaped_like_the_header_alone(self) -> None:
+        # With the id unconstrained, the signature's shape (an HMAC-SHA1's
+        # base64: 27 characters and one '=') is what separates the header from
+        # an object key or a metadata value written `AWS <word>:<text>`. Those
+        # must survive, and so must everything after them on the line: a logged
+        # DeleteObjects body carries every key of the batch.
+        key_line = "{'bucket': 'bkt', 'key': 'AWS reports:q1.csv', 'extra_args': {}}"
+        assert m.mask_text(key_line) == key_line
+        body = (
+            "'body': b'<Delete><Object><Key>AWS notes:2025.txt</Key></Object>"
+            "<Object><Key>b-second.txt</Key></Object><Quiet>true</Quiet></Delete>'"
+        )
+        assert m.mask_text(body) == body
+        note = "'Metadata': {'note': 'AWS account:123456789012'}"
+        assert m.mask_text(note) == note
+
+    @pytest.mark.parametrize(
+        "trigger",
+        [
+            "Signature=1",
+            "Signature: approved",
+            "X-Amz-Signature=1",
+            "AWSAccessKeyId=x",
+            "SecurityToken=t",
+            "x-amz-security-token:t",
+            "WebIdentityToken=w",
+            "SAMLAssertion=s",
+            "TokenCode=1",
+            "x-amz-server-side-encryption-customer-key:k",
+            "Proxy-Authorization: x",
+            "Credential=AKIDX",
+        ],
+    )
+    def test_a_value_stops_at_the_next_xml_element(self, trigger: str) -> None:
+        # The SigV2 rule's sibling: a keyed value pattern used to run through
+        # the `<` of a logged XML body, so an object key written like a
+        # secret's name in a DeleteObjects body masked every later key of the
+        # batch with it (and the Proxy-Authorization line form ran to the
+        # record's end). The value itself still masks - up to the element.
+        body = (
+            f"'body': b'<Delete><Object><Key>om/{trigger}.txt</Key></Object>"
+            "<Object><Key>om/b.txt</Key></Object><Object><Key>om/c.txt</Key></Object>"
+            "<Quiet>true</Quiet></Delete>'"
+        )
+        masked = m.mask_text(body)
+        assert "<Object><Key>om/b.txt</Key></Object>" in masked
+        assert "<Object><Key>om/c.txt</Key></Object>" in masked
+        assert "<Quiet>true</Quiet></Delete>'" in masked
+
+    def test_a_credential_value_stops_at_the_next_xml_element(self) -> None:
+        # The credential value already stopped at the scope's `/`, which
+        # happened to fall inside `</Key>`: the key's closing tag lost its
+        # `<`, and a key without a later `/` would have run on. It stops at
+        # the element now, like every other bare-run value.
+        body = "'body': b'<Delete><Object><Key>om/Credential=AKIDX.txt</Key></Object></Delete>'"
+        assert m.mask_text(body) == (
+            "'body': b'<Delete><Object><Key>om/Credential=***</Key></Object></Delete>'"
+        )
+
+    def test_credentials_body_access_key_id_follows_the_id_rule(self) -> None:
+        # The id beside the secrets in an STS / metadata / SSO credentials body:
+        # an AWS-shaped one keeps its tail, one of another shape (what an
+        # S3-compatible endpoint's STS issues) masks entirely instead of
+        # passing through - in the XML, dict-repr and camel-cased JSON forms.
+        xml = "<AccessKeyId>7ASECVI8W0BHU4WALTZI</AccessKeyId><SecretAccessKey>s</SecretAccessKey>"
+        assert (
+            m.mask_text(xml)
+            == "<AccessKeyId>***</AccessKeyId><SecretAccessKey>***</SecretAccessKey>"
+        )
+        xml_aws = f"<AccessKeyId>{ACCESS_KEY_ID}</AccessKeyId>"
+        assert m.mask_text(xml_aws) == "<AccessKeyId>***MPLE</AccessKeyId>"
+        kv = "{'AccessKeyId': '7ASECVI8W0BHU4WALTZI', 'SecretAccessKey': 's'}"
+        assert m.mask_text(kv) == "{'AccessKeyId': '***', 'SecretAccessKey': '***'}"
+        sso = '{"roleCredentials": {"accessKeyId": "7ASECVI8W0BHU4WALTZI", "sessionToken": "t"}}'
+        assert (
+            m.mask_text(sso) == '{"roleCredentials": {"accessKeyId": "***", "sessionToken": "***"}}'
+        )
 
     def test_sigv4_header_not_touched_by_sigv2_rule(self) -> None:
         # `AWS4-HMAC-SHA256 ...` must not match the SigV2 `AWS <id>:` shape.
@@ -540,6 +635,30 @@ class TestPackageLogger:
         importlib.import_module("boto3_s3.s3storage")  # the registering module
         handlers = logging.getLogger("boto3_s3").handlers
         assert [type(h) for h in handlers].count(logging.NullHandler) == 1
+
+    def test_crtsupport_on_its_own_registers_the_same_handler(self) -> None:
+        # crtsupport is a documented surface reachable without s3storage, and
+        # its manager builder warns (a config the installed s3transfer cannot
+        # take): a fresh interpreter that imports only it must still find the
+        # NullHandler - and one, not one per module, once both registering
+        # modules have loaded.
+        code = textwrap.dedent(
+            """
+            import logging
+            import sys
+
+            import boto3_s3.crtsupport
+
+            assert "boto3_s3.s3storage" not in sys.modules
+            handlers = logging.getLogger("boto3_s3").handlers
+            assert [type(h) for h in handlers].count(logging.NullHandler) == 1, handlers
+            import boto3_s3.s3storage
+
+            handlers = logging.getLogger("boto3_s3").handlers
+            assert [type(h) for h in handlers].count(logging.NullHandler) == 1, handlers
+            """
+        )
+        subprocess.run([sys.executable, "-c", code], check=True)
 
 
 class TestSetStreamLogger:

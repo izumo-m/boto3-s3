@@ -88,6 +88,10 @@ class TestUsageErrors:
             ["sync", "s3://mybucket--use1-az4--x-s3/p", "s3://plain/p"],
             ["sync", "s3://plain/p", "s3://mybucket--use1-az4--x-s3/p"],
             ["sync", "s3://mybucket--use1-az4--x-s3", "dl"],
+            # An access point of a directory bucket: aws runs it (its test is
+            # --x-s3 only) and --delete then loses objects; refused here.
+            ["sync", "s3://myap--use1-az4--xa-s3/p", "s3://plain/p"],
+            ["sync", "s3://myap--use1-az4--xa-s3", "dl"],
         ],
     )
     def test_directory_buckets_are_rejected(

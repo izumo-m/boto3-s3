@@ -34,10 +34,12 @@ queue has room (the bounded-queue paragraph below is the deliberate
 exception). Because a
 single thread renders in queue order, line ordering and the ``\\r`` padding
 protocol are exactly the single-threaded behavior. Use the printer as a
-context manager around the run: ``__exit__`` drains and joins the thread, so
-by the time the command returns every line has been written. A dead output
-stream (``BrokenPipeError`` on a closed pipe) stops rendering but keeps
-draining - the run and its exit code are unaffected.
+context manager around the run: ``__exit__`` drains the queue and waits for
+the thread, so by the time the command returns every line has been written
+(a Ctrl-C there is held until then, as ``finish`` describes). A write the
+stream refuses (``BrokenPipeError`` on a closed pipe) drops that one line and
+rendering goes on with the next record, as aws's result processor does - the
+run and its exit code are unaffected.
 
 One deliberate deviation from aws-cli: the queue is **bounded**
 (``_QUEUE_MAX`` records) where aws's result queue is unbounded. aws never
@@ -69,6 +71,7 @@ in-process tests capture the printer thread's output (rm precedent).
 
 from __future__ import annotations
 
+import _thread
 import queue
 import sys
 import threading
@@ -78,6 +81,7 @@ from typing import TYPE_CHECKING, TextIO
 
 from boto3_s3 import OpOutcome
 from boto3_s3.localstorage import LocalStorage
+from boto3_s3_cli import output
 from boto3_s3_cli.output import human_readable_size, uni_write
 
 if TYPE_CHECKING:
@@ -97,6 +101,23 @@ _QUEUE_MAX = 10_000
 
 # Queue sentinel: drain what remains, then stop the printer thread.
 _SHUTDOWN = object()
+
+# The longest a `_wait_set` waits between two looks for a Ctrl-C's handler.
+_WAKE_SLICE = 0.1
+
+
+def _wait_set(event: threading.Event, wake: _thread.LockType) -> None:
+    """Wait for *event*, woken by *wake* - the setter releases it after setting.
+
+    The same wait as the library's single rm (``boto3_s3.s3``, whose
+    docstring has the reasons): no ``Event.wait`` - its Python-level
+    ``Condition`` can be left half-taken by an interrupt - but a raw lock's
+    timed acquire, one C call that returns as soon as the setter releases
+    and lets a Ctrl-C's handler run between slices on Windows before Python
+    3.14. The event's flag says whether it is set.
+    """
+    while not event.is_set():
+        wake.acquire(timeout=_WAKE_SLICE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,9 +210,23 @@ class TransferPrinter:
         # Set by finish(): the callbacks then drop records instead of feeding
         # a queue whose consumer is gone (see finish for the deadlock chain).
         self._finished = False
-        # printer-thread-only state (no lock: one thread owns them)
+        # Set by the first CANCELLED record (under the lock). aws's
+        # ResultProcessor disables every handler once it has processed the
+        # first error result - the CtrlCResult / fatal ErrorResult a cancelled
+        # classic future mints, which is what a CANCELLED record is - and only
+        # drains the queue after it: nothing later is printed or counted, a
+        # success that completed (an mv's source already deleted) included.
+        self._stopped = False
+        # printer-thread-only state (no lock: one thread owns them), except
+        # _output_dead: set by finish() on a second Ctrl-C to stop the output
         self._progress_length = 0
         self._output_dead = False
+        # Set when the printer thread leaves its loop, then _drained_wake
+        # released: finish() waits on the pair rather than on Thread.join
+        # (see finish).
+        self._drained = threading.Event()
+        self._drained_wake = _thread.allocate_lock()
+        self._drained_wake.acquire()
 
     @property
     def wants_progress(self) -> bool:
@@ -211,7 +246,28 @@ class TransferPrinter:
         self.finish()
 
     def finish(self) -> None:
-        """Drain the queue and stop the printer thread (idempotent)."""
+        """Drain the queue and stop the printer thread (idempotent).
+
+        A Ctrl-C here lands past the run, where aws's recorder waits for its
+        printer: the interrupt escapes to aws's dispatcher (rc 130) while that
+        ordinary thread still writes every queued line (measured). So the
+        first interrupt is held and the wait goes on with the output alive;
+        a second one stops the output and still waits for the printer to
+        reach the shutdown marker (one write at most - a daemon left writing
+        can abort the process at interpreter shutdown, `Fatal Python error:
+        _enter_buffered_busy`); a third gives up on a printer wedged on a
+        stalled stream. The held interrupt is raised once the printer is
+        done.
+
+        Nothing on this thread takes a Python-level lock while interrupts may
+        land - an interrupt between a ``Condition``'s lock steps leaves the
+        lock held (the other side then blocks for good) or released twice.
+        So the shutdown marker goes in from a throwaway low-level thread (the
+        put blocks while a stalled printer has the queue full), and the wait
+        is `_wait_set`'s on the event the printer sets - not ``Thread.join``,
+        which on Python 3.10 to 3.12 marks a thread finished when interrupted
+        while it runs, and not ``Event.wait``.
+        """
         thread = self._thread
         if thread is None:
             return
@@ -224,8 +280,22 @@ class TransferPrinter:
         # wedged in put() at ~10k would then deadlock the prefetch join at
         # generator close.
         self._finished = True
-        self._queue.put(_SHUTDOWN)
-        thread.join()
+        interrupt: KeyboardInterrupt | None = None
+        marked = False
+        while True:
+            try:
+                if not marked:
+                    _thread.start_new_thread(self._queue.put, (_SHUTDOWN,))
+                    marked = True
+                _wait_set(self._drained, self._drained_wake)
+                break
+            except KeyboardInterrupt as exc:
+                if interrupt is None:
+                    interrupt = exc
+                elif not self._output_dead:
+                    self._output_dead = True
+                else:
+                    raise
         # Discard anything that slipped in around the flag flip, freeing any
         # producer already blocked on a full queue; later stray puts find a
         # queue with room and simply go unread.
@@ -234,6 +304,8 @@ class TransferPrinter:
                 self._queue.get_nowait()
             except queue.Empty:
                 break
+        if interrupt is not None:
+            raise interrupt
 
     # -- callbacks (worker / submitting threads: count and enqueue, never write) --
 
@@ -241,6 +313,8 @@ class TransferPrinter:
         """Update thread-safe byte/file totals and enqueue a throttled meter snapshot."""
         snapshot: _ProgressSnapshot | None = None
         with self._lock:
+            if self._stopped:
+                return
             if self._start is None:
                 # aws anchors the transfer-speed denominator at the first queued
                 # result, not at construction (results.py _record_queued_result);
@@ -301,6 +375,11 @@ class TransferPrinter:
         """Reconcile terminal counters and enqueue the result shape aws-cli prints."""
         record: _ResultRecord | None = None
         with self._lock:
+            if self._stopped and result.outcome is not OpOutcome.NOTICE:
+                # aws's processor has disabled its handlers (`_stopped`). A
+                # NOTICE never went through them: aws writes those straight
+                # to stderr.
+                return
             if result.outcome is OpOutcome.NOTICE:
                 # Display-only advisory text (the case-conflict messages):
                 # aws prints these straight to stderr, bypassing both its
@@ -343,13 +422,15 @@ class TransferPrinter:
                     self.failed += 1
                 elif result.outcome is OpOutcome.WARNED:
                     self.warned += 1
+                elif result.outcome is OpOutcome.CANCELLED:
+                    self._stopped = True
                 if not self._quiet and self._prints(result.outcome):
                     record = _ResultRecord(
                         result.outcome,
                         result.transfer_type.value,
                         result.src,
                         result.dest,
-                        str(result.error) if result.error is not None else "",
+                        output.error_text(result.error) if result.error is not None else "",
                     )
         if record is not None and not self._finished:
             self._queue.put(record)  # outside the lock, like the snapshot
@@ -367,7 +448,14 @@ class TransferPrinter:
     # -- rendering (the printer thread) ----------------------------------------
 
     def _drain(self) -> None:
-        """Render queued records until shutdown, disabling output after stream failure."""
+        """Render queued records until shutdown, each one's write failure its own."""
+        try:
+            self._render_until_shutdown()
+        finally:
+            self._drained.set()
+            self._drained_wake.release()
+
+    def _render_until_shutdown(self) -> None:
         while True:
             record = self._queue.get()
             if record is _SHUTDOWN:
@@ -382,15 +470,19 @@ class TransferPrinter:
                     assert isinstance(record, _ResultRecord)
                     self._render_result(record)
             except Exception:
-                # A dead stream (BrokenPipeError on a closed pipe, a full
-                # non-blocking pty, ...): stop rendering but keep draining so
-                # no worker ever blocks on the queue. The rc inputs live on
-                # the worker side and are unaffected; cli._dispatch's general
-                # backstop covers the process-level contract (report + 255) for
-                # a write failure that does escape a command.
-                # An unencodable key is not a dead stream: _uni_write handles
-                # UnicodeEncodeError inline, so it never reaches here.
-                self._output_dead = True
+                # A stream that cannot take the line (BrokenPipeError on a
+                # closed pipe, a full device, a full non-blocking pty, ...):
+                # drop this record's write and go on with the next one, as
+                # aws's ResultProcessor goes on past each handler's failure -
+                # stdout dying must not silence the failure lines stderr can
+                # still take, nor a dead stderr the success lines. The rc
+                # inputs live on the worker side and are unaffected;
+                # cli._dispatch's general backstop covers the process-level
+                # contract (report + 255) for a write failure that does escape
+                # a command. An unencodable key is not a dead stream:
+                # _uni_write handles UnicodeEncodeError inline, so it never
+                # reaches here.
+                pass
 
     def _render_result(self, record: _ResultRecord) -> None:
         """Render one terminal result with aws-cli's stream and wording rules."""
@@ -470,7 +562,7 @@ class TransferPrinter:
         try:
             self._uni_write(sys.stdout, " " * self._progress_length + "\r")
         except Exception:
-            self._output_dead = True
+            pass  # a dead stdout: nothing to blot out
 
     def _uni_write(self, stream: TextIO, text: str) -> None:
         """The shared ``uni_print`` port (``output.uni_write``), kept as a

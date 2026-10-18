@@ -1,15 +1,15 @@
 """The shared scenario base for the per-command parity/golden tables.
 
 Every ``tests/utils/<cmd>_scenarios.py`` table extends ``BaseScenario``
-with its command-specific inputs (seeds, workdir trees, probe keys); the six
+with its command-specific inputs (seeds, workdir trees, probe keys); the
 fields here and ``resolve_argv`` are the contract every suite consumes.
 A suite consults only the flags it supports (e.g. the presign suites carry no
 ``diff_only`` scenario and do not filter on it, replaying every scenario as a
 golden).
 
 Charter note (design/overview.md section 3): the exit code is compared for
-*every* scenario, unconditionally - ``compare_stdout`` / ``diff_only`` only
-relax stdout and golden handling, never the rc.
+*every* scenario, unconditionally - ``compare_stdout`` / ``diff_only`` /
+``frozen_golden`` only relax stdout and golden handling, never the rc.
 
 The flag fields are keyword-only (``KW_ONLY``): subclasses append their own
 positional fields (``seed`` and friends) directly after ``argv``, so the
@@ -35,6 +35,12 @@ class BaseScenario:
     # True => live aws-vs-ours diff only: no golden written or checked, and no
     # functional replay. For endpoint-relative outcomes and moto fidelity gaps.
     diff_only: bool = False
+    # Non-empty => the committed golden matches real S3 and moto but not the
+    # dev stack, so the e2e tier neither rewrites it (UPDATE_GOLDENS) nor
+    # drift-checks it; the functional replay and the live aws-vs-ours diff
+    # still run. The text says how the dev stack differs and names the
+    # design/endpoint-fidelity.md row.
+    frozen_golden: str = ""
     expected_stderr_tokens_ours: tuple[str, ...] = ()
     expected_stderr_tokens_aws: tuple[str, ...] = ()
     # True => stderr must be exactly empty on BOTH sides (a --quiet contract:

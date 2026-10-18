@@ -14,7 +14,11 @@ at once in probes/fixA/p2-all-extension-content-type.py).
 from __future__ import annotations
 
 import mimetypes
+import ntpath
+import os
+import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -63,6 +67,253 @@ class TestFrozenTable:
     )
     def test_guessed_type(self, name: str, expected: str | None) -> None:
         assert _guess_content_type(name) == expected
+
+
+class _NtPathOs:
+    """``transfer.os`` as a Windows host sees it: ``os.path`` is ``ntpath``, the rest real."""
+
+    path = ntpath
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(os, name)
+
+
+class TestAlgorithmPin:
+    """The guess runs CPython 3.14's algorithm whatever interpreter hosts it.
+
+    aws's bundled 3.14 splits a file path with the host's ``os.path`` and only
+    a scheme-prefixed name with ``posixpath``; interpreters before 3.13 split
+    every name with ``posixpath``, so on Windows a name that is all extension
+    (``C:\\d\\.json``) kept ``.json`` and went up typed where aws sends it
+    untyped (measured against aws.exe under Python 3.10, 8 of 12 names).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _frozen_layers_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(transfer, "_mime_db", None)
+        monkeypatch.setattr(mimetable, "KNOWNFILES", [])
+        monkeypatch.setattr(
+            mimetypes.MimeTypes, "read_windows_registry", lambda self, strict=True: None
+        )
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            (r"C:\d\.json", None),
+            (r"C:\d\.tar.gz", None),
+            (r"C:\d\..txt", None),
+            (r"C:\d\a.json", "application/json"),
+            (r"C:\d\b.TGZ", "application/x-tar"),
+            (r"\\srv\share\.txt", None),
+            (r"\\srv\share\a.txt", "text/plain"),
+            (r"C:\dir.d\x", None),
+            (r"C:\dir.d\x.png", "image/png"),
+        ],
+    )
+    def test_a_windows_path_splits_with_ntpath(
+        self, monkeypatch: pytest.MonkeyPatch, name: str, expected: str | None
+    ) -> None:
+        monkeypatch.setattr(transfer, "os", _NtPathOs())
+        assert _guess_content_type(name) == expected
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            # A scheme-like prefix: the URL branch, split with posixpath.
+            ("notes:a.txt", "text/plain"),
+            ("http://h/p.png?x=1", "image/png"),
+            ("http://h/p.png#frag", "image/png"),
+            # One character is a drive letter, not a scheme: the file branch.
+            ("c:a.txt", "text/plain"),
+            # data: URLs answer their media type.
+            ("data:image/png;base64,xx", "image/png"),
+            ("data:text/plain;charset=utf-8,abc", "text/plain"),
+            ("data:,abc", "text/plain"),
+            ("data:nocomma", None),
+            # Plain paths, extension case, aliases and encodings.
+            ("/tmp/a.b/c", None),
+            ("f.JPG", "image/jpeg"),
+            # An encoding suffix peels case-sensitively: ".GZ" is a type, ".gz" an encoding.
+            ("f.tar.GZ", "application/gzip"),
+            ("f.gz", None),
+            ("f.svgz", "image/svg+xml"),
+            (".bashrc", None),
+            ("", None),
+        ],
+    )
+    def test_the_url_and_path_branches(self, name: str, expected: str | None) -> None:
+        assert _guess_content_type(name) == expected
+
+    def test_a_name_urlparse_refuses_fails_the_item(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # 3.14's guess_type parses the name as a URL first, and urlparse
+        # refuses an unmatched bracket after a scheme-like prefix with
+        # ValueError. A local path never starts that way, but an open-route
+        # key can; inside aws's queued subscriber that is the item's failure,
+        # so it is here too, not the run's.
+        from boto3_s3 import S3, BatchError, OpResult, S3Storage
+        from boto3_s3.transferconfig import TransferConfig
+        from tests.utils.recorder import make_recording_client
+
+        with pytest.raises(ValueError):
+            _guess_content_type("scheme://[unmatched/a.txt")
+        refused = ValueError("Invalid IPv6 URL")
+        monkeypatch.setattr(
+            transfer, "_guess_content_type", lambda _name: (_ for _ in ()).throw(refused)
+        )
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "a.txt").write_text("a")
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        with pytest.raises(BatchError):
+            S3().cp(
+                str(src),
+                S3Storage("s3://b/p/", client=client),
+                recursive=True,
+                transfer_config=TransferConfig(use_threads=False),
+                on_result=results.append,
+            )
+        assert len(results) == 1 and results[0].error is not None
+        assert str(results[0].error) == "Invalid IPv6 URL"
+
+    @pytest.mark.skipif(
+        sys.version_info < (3, 13), reason="the host's guess_type is the older algorithm"
+    )
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "a.txt",
+            "f.TGZ",
+            "f.tar.gz",
+            "f.gz",
+            ".json",
+            "..txt",
+            "dir.d/x",
+            "notes:a.txt",
+            "http://h/p.png?x=1",
+            "data:image/png;base64,xx",
+            "data:,abc",
+            "c:a.txt",
+            "",
+            "/abs/.hidden",
+            "/abs/dir.d/.hidden.txt",
+            "f.svgz",
+            "f.Z",
+            "f.bz2",
+            "f.tbz2",
+        ],
+    )
+    def test_matches_the_host_interpreter_from_3_13(self, name: str) -> None:
+        # From 3.13 the stdlib runs the same algorithm, so it is the oracle.
+        assert _guess_content_type(name) == transfer._mime_types().guess_type(name)[0]
+
+
+class TestUnreadableOverlay:
+    """A knownfiles entry that exists but cannot be read fails the item, not the run.
+
+    aws guesses the type inside s3transfer's queued subscriber, so an
+    `OSError` from `mimetypes.init` reading `/etc/mime.types` is that item's
+    `upload failed: ... [Errno 13] Permission denied: '/etc/mime.types'` and
+    the run goes on - every item fails the same way, and a sync still
+    deletes. Raised out of the submit loop, it ended the run as one
+    `fatal error:` and leaked a bare `PermissionError` from the library
+    (measured against aws 2.36.40 in a mount namespace, 2026-10-06).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _unreadable_mime_types(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        overlay = tmp_path / "mime.types"
+        overlay.write_text("text/x-probe probe\n")
+        monkeypatch.setattr(transfer, "_mime_db", None)
+        monkeypatch.setattr(mimetable, "KNOWNFILES", [str(overlay)])
+        # MimeTypes() runs the stdlib's own init() when nothing has yet, which
+        # would read the host's knownfiles through the refusing `read` below
+        # and name /etc/mime.types first; the frozen store never needs it.
+        monkeypatch.setattr(mimetypes, "inited", True)
+
+        def refuse(self: mimetypes.MimeTypes, filename: str, strict: bool = True) -> None:
+            raise PermissionError(13, "Permission denied", filename)
+
+        monkeypatch.setattr(mimetypes.MimeTypes, "read", refuse)
+        self.overlay = overlay
+        # OSError renders the filename with repr(), so the expectation is built
+        # the same way (a Windows path's backslashes double there).
+        self.expected_message = str(PermissionError(13, "Permission denied", str(overlay)))
+
+    def _tree(self, tmp_path: Path) -> Path:
+        src = tmp_path / "src"
+        src.mkdir(parents=True)
+        (src / "a.txt").write_text("a")
+        (src / "b.json").write_text("{}")
+        return src
+
+    def test_every_item_fails_with_the_os_error_and_the_run_goes_on(self, tmp_path: Path) -> None:
+        from boto3_s3 import S3, BatchError, OpOutcome, OpResult, S3Storage
+        from boto3_s3.transferconfig import TransferConfig
+        from tests.utils.recorder import make_recording_client
+
+        client, calls = make_recording_client([])
+        results: list[OpResult] = []
+        with pytest.raises(BatchError) as info:
+            S3().cp(
+                str(self._tree(tmp_path)),
+                S3Storage("s3://b/p/", client=client),
+                recursive=True,
+                transfer_config=TransferConfig(use_threads=False),
+                on_result=results.append,
+            )
+        assert info.value.failed == 2
+        assert [r.outcome for r in results] == [OpOutcome.FAILED, OpOutcome.FAILED]
+        for result in results:
+            assert result.error is not None
+            assert str(result.error) == self.expected_message
+        assert calls == []
+
+    def test_an_explicit_content_type_or_no_guess_never_reads_the_overlay(
+        self, tmp_path: Path
+    ) -> None:
+        from boto3_s3 import S3, OpOutcome, OpResult, S3Storage
+        from boto3_s3.transferconfig import TransferConfig
+        from tests.utils.recorder import make_recording_client
+
+        for case, options in enumerate(({"content_type": "text/x-a"}, {"guess_mime_type": False})):
+            client, calls = make_recording_client([{}, {}])
+            results: list[OpResult] = []
+            S3().cp(
+                str(self._tree(tmp_path / f"case{case}")),
+                S3Storage("s3://b/p/", client=client),
+                recursive=True,
+                transfer_config=TransferConfig(use_threads=False),
+                on_result=results.append,
+                **options,
+            )
+            assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED, OpOutcome.SUCCEEDED]
+            assert [c.operation for c in calls] == ["PutObject", "PutObject"]
+
+    def test_a_stream_source_never_reads_the_overlay(self) -> None:
+        # A stream has no name to guess from, and aws's stream submitter
+        # attaches no guessing subscriber at all: the upload goes through,
+        # untyped, whatever state the host's mime.types is in.
+        import io
+
+        from boto3_s3 import S3, IOStorage, OpOutcome, OpResult, S3Storage
+        from boto3_s3.transferconfig import TransferConfig
+        from tests.utils.recorder import make_recording_client
+
+        client, calls = make_recording_client([{}])
+        results: list[OpResult] = []
+        S3().cp(
+            IOStorage(io.BytesIO(b"x")),
+            S3Storage("s3://b/k", client=client),
+            transfer_config=TransferConfig(use_threads=False),
+            on_result=results.append,
+        )
+        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED]
+        [put] = calls
+        assert put.operation == "PutObject"
+        assert "ContentType" not in put.params
 
 
 class TestHostOverlays:

@@ -1,7 +1,7 @@
 """Shared test harness: CLI runners, bucket seeding/cleanup, ls normalization.
 
 Used by every CLI test tier (``tests/cli/``): the awscli ports and unit tests
-run the CLI in-process, the functional (moto) and e2e (MinIO / real S3)
+run the CLI in-process, the functional (moto) and e2e (dev stack / real S3)
 suites additionally need seeding, cleanup, and output normalization.
 """
 
@@ -62,6 +62,24 @@ DATE_TOKEN = "<DATE>"
 AMZ_DATE_TOKEN = "<AMZ_DATE>"
 SIGNATURE_TOKEN = "<SIGNATURE>"
 REGION_TOKEN = "<REGION>"
+
+
+def bucket_name_report(name: str) -> str:
+    """botocore's client-side bad-bucket-name report for *name*, as aws prints it.
+
+    The bytes the pinned aws writes (measured: ``aws s3 mb s3://``, ``aws s3
+    website s3://bkt/key``) - the ``ParamValidationError`` text with the regex
+    tail. A literal, not botocore's function, so a test pins the wording rather
+    than restating the code under test.
+    """
+    return (
+        "Parameter validation failed:\n"
+        f'Invalid bucket name "{name}": Bucket name must match the regex '
+        '"^[a-zA-Z0-9.\\-_]{1,255}$" or be an ARN matching the regex '
+        '"^arn:(aws).*:(s3|s3-object-lambda):[a-z\\-0-9]*:[0-9]{12}:accesspoint[/:]'
+        "[a-zA-Z0-9\\-.]{1,63}$|^arn:(aws).*:s3-outposts:[a-z\\-0-9]+:[0-9]{12}:"
+        'outpost[/:][a-zA-Z0-9\\-]{1,63}[/:]accesspoint[/:][a-zA-Z0-9\\-]{1,63}$"'
+    )
 
 
 class CliResult(NamedTuple):
@@ -149,9 +167,11 @@ def _run_subprocess(
     # PYTHONUTF8=1 fixes the child's stdio at UTF-8, the encoding the capture
     # below decodes. Left alone, a Windows child writes the host's codepage
     # (cp932 and cp1252 measured on two hosts) and its non-ASCII output would
-    # come back as U+FFFD. The pinned aws.exe honors the same variable
-    # (measured), so both sides of a parity pair move together -
-    # PYTHONIOENCODING would not, aws.exe ignores it. UTF-8 mode also pins the
+    # come back as U+FFFD. The pinned aws.exe honors the variable for its
+    # error reports alone (aws's own code reads it back for those streams; its
+    # frozen interpreter ignores it), so an error report moves to UTF-8 on both
+    # sides while aws.exe's result lines keep the host codepage (measured) -
+    # PYTHONIOENCODING moves neither, aws.exe ignores it. UTF-8 mode also pins the
     # child's locale.getpreferredencoding(), so a subprocess test of the
     # file:// paramfile encoding must set AWS_CLI_FILE_ENCODING itself.
     proc_env = {**os.environ, "PYTHONUTF8": "1", **(env or {})}
@@ -287,22 +307,21 @@ def seed_bucket(client: Any, bucket: str, seed: Mapping[str, int | bytes]) -> No
     """Put one object per entry: an ``int`` means ``b"x" * size``, ``bytes``
     are the exact body (transfer scenarios compare downloaded content).
 
-    A zero-byte PUT to a trailing-slash key (directory marker) leaves MinIO's
-    connection unable to answer the next request on it, which then stalls for
-    the client's full read timeout before a retry on a fresh connection
-    succeeds (observed on both minio/minio and pgsty/minio; real S3 and moto
-    are unaffected). ``Connection: close`` on those PUTs makes the server
-    close the poisoned connection so it is never reused.
+    endpoint-fidelity T1: after a zero-byte PUT, the next PUT with a body on
+    the same connection waits for the client's full read timeout (observed on
+    MinIO and on the dev stack; real S3 and moto are unaffected).
+    ``Connection: close`` on zero-byte PUTs makes the server close the
+    connection so it is never reused.
     """
     for key, spec in seed.items():
         body = spec if isinstance(spec, bytes) else b"x" * spec
-        is_marker = key.endswith("/") and not body
-        if is_marker:
+        is_empty = not body
+        if is_empty:
             client.meta.events.register_first("before-send.s3.PutObject", _add_connection_close)
         try:
             client.put_object(Bucket=bucket, Key=key, Body=body)
         finally:
-            if is_marker:
+            if is_empty:
                 client.meta.events.unregister("before-send.s3.PutObject", _add_connection_close)
 
 
@@ -432,19 +451,23 @@ def head_object_fields(
     return {field: response.get(field) for field in fields}
 
 
-def _normalize_presign_url(url: str, *, bucket: str, mask_region: str | None) -> str:
+def _normalize_presign_url(
+    url: str, *, bucket: str, mask_region: str | None, drop_session_token: bool
+) -> str:
     parts = urllib.parse.urlsplit(url)
     path = parts.path
     if parts.netloc.startswith(f"{bucket}."):
         # Virtual-host style (the moto replay runs without an endpoint
         # override): canonicalize to path-style so it compares equal to a
-        # path-style capture (MinIO's IP endpoint).
+        # path-style capture (the dev stack's IP endpoint).
         path = f"/{bucket}{path}"
     normalized = f"{ENDPOINT_TOKEN}{path}".replace(bucket, BUCKET_TOKEN)
     if not parts.query:
         return normalized
     params: list[str] = []
     for key, value in urllib.parse.parse_qsl(parts.query, keep_blank_values=True):
+        if key == "X-Amz-Security-Token" and drop_session_token:
+            continue
         if key == "X-Amz-Date":
             value = AMZ_DATE_TOKEN
         elif key == "X-Amz-Signature":
@@ -467,14 +490,14 @@ def _normalize_presign_url(url: str, *, bucket: str, mask_region: str | None) ->
 
 
 def normalize_presign_stdout(
-    stdout: str, *, bucket: str, mask_region: str | None = None
+    stdout: str, *, bucket: str, mask_region: str | None = None, drop_session_token: bool = False
 ) -> list[str]:
     """Normalize ``presign`` stdout (a URL line) for goldens / comparison.
 
     The endpoint (``scheme://netloc``) is masked after canonicalizing a
     virtual-host URL (bucket in the netloc) to path-style, so the moto
     replay (no endpoint override -> virtual-host) compares equal to the
-    MinIO capture (IP endpoint -> path-style). Query values are
+    dev stack capture (IP endpoint -> path-style). Query values are
     percent-decoded for readable goldens, and the time/credential-dependent
     ones are masked: ``X-Amz-Date``, ``X-Amz-Signature``, and the access
     key + date inside ``X-Amz-Credential``. The credential scope keeps its
@@ -485,11 +508,23 @@ def normalize_presign_stdout(
     parameter *order* included (botocore emits a fixed order),
     ``X-Amz-Expires``, ``X-Amz-SignedHeaders``, and the key path. Non-URL
     lines just get the bucket tokenized.
+
+    *drop_session_token* removes ``X-Amz-Security-Token`` for the golden
+    comparisons: the parameter is there only when the credentials are
+    temporary, which differs between a capture and a replay. Two CLIs run on
+    the same credentials compare with it kept.
     """
     lines: list[str] = []
     for line in stdout.splitlines():
         if line.startswith(("http://", "https://")):
-            lines.append(_normalize_presign_url(line, bucket=bucket, mask_region=mask_region))
+            lines.append(
+                _normalize_presign_url(
+                    line,
+                    bucket=bucket,
+                    mask_region=mask_region,
+                    drop_session_token=drop_session_token,
+                )
+            )
         else:
             lines.append(line.replace(bucket, BUCKET_TOKEN))
     return lines
@@ -558,14 +593,17 @@ def fetch_url(url: str) -> tuple[int, bytes]:
 
 
 def bucket_exists(client: Any, bucket: str) -> bool:
-    """Whether *bucket* exists (HeadBucket; any ClientError counts as "no")."""
-    from botocore.exceptions import ClientError
+    """Whether the account owns *bucket*, read from ListBuckets.
 
-    try:
-        client.head_bucket(Bucket=bucket)
-    except ClientError:
-        return False
-    return True
+    endpoint-fidelity T4: real S3 answers HeadBucket from a cache that lags
+    behind the account's bucket list - a name queried before it existed
+    keeps answering 404 for about half a minute after the create, and a
+    bucket that held objects keeps answering 200 for minutes after the
+    delete - while ListBuckets reflects both at once (measured 2026-10-17).
+    Listing also never queries the name itself, so it cannot plant that
+    cached 404.
+    """
+    return any(entry["Name"] == bucket for entry in client.list_buckets().get("Buckets", []))
 
 
 def create_bucket_in_region(client: Any, bucket: str) -> None:
@@ -574,7 +612,7 @@ def create_bucket_in_region(client: Any, bucket: str) -> None:
     Real S3 rejects a plain CreateBucket outside us-east-1 with
     ``IllegalLocationConstraintException``, so any other region must be passed
     as ``CreateBucketConfiguration.LocationConstraint``; us-east-1 (the region
-    MinIO reports) forbids the field and takes the plain form. The mb/rb parity
+    the dev stack reports) forbids the field and takes the plain form. The mb/rb parity
     suites pre-create their sibling bucket through here so their run_e2e.sh
     lane works in any region.
     """
@@ -591,17 +629,40 @@ def create_bucket_in_region(client: Any, bucket: str) -> None:
 def force_delete_bucket(client: Any, bucket: str) -> None:
     """Purge *bucket* and delete it; a missing bucket is a no-op.
 
-    The bucket-lifecycle suites (mb/rb) reset their sibling bucket with this
-    between the aws and boto3-s3 runs and in fixture teardown.
+    The bucket-lifecycle suites (mb/rb) clear their sibling buckets with this
+    before and after each test (the e2e fixtures). A bucket the account does
+    not own is left untouched without a request naming it
+    (endpoint-fidelity T4: see `bucket_exists`).
     """
     from botocore.exceptions import ClientError
 
+    if not bucket_exists(client, bucket):
+        return
     try:
         delete_under(client, bucket, "")
         client.delete_bucket(Bucket=bucket)
     except ClientError as exc:
         if exc.response.get("Error", {}).get("Code") not in ("NoSuchBucket", "404"):
             raise
+
+
+def settle_bucket_existence(
+    client: Any, bucket: str, *, exists: bool, timeout: float = 20.0
+) -> None:
+    """Wait until `bucket_exists` answers *exists* for *bucket*, or *timeout* runs out.
+
+    endpoint-fidelity T4: a safety net for real S3's lag behind a bucket
+    create or delete (`bucket_exists` already reads the source that keeps
+    up). The mb/rb e2e suites call this after a successful run with the
+    state the command should have left; on timeout they capture whatever
+    is then listed, so a command that really failed to create or delete
+    still diverges. The dev stack and moto answer at once.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    while bucket_exists(client, bucket) != exists and time.monotonic() < deadline:
+        time.sleep(1.0)
 
 
 def capture_bucket_state(client: Any, bucket: str) -> tuple[bool, list[str] | None]:

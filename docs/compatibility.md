@@ -1,10 +1,18 @@
 # Which `boto3` version each feature needs
 
-**`boto3` 1.43.31 or newer has everything.** Four of the entries below
-additionally need the `crt` extra.
+**`boto3` 1.43.31 or newer has everything but `MD5`, which `botocore` cannot
+compute (below).** Four of the entries below additionally need the `crt`
+extra.
 
 If you cannot upgrade, the table says what each feature needs; below the version
-listed, that feature is not supported. Check what you have with
+listed, that feature is not supported. Unless its row says otherwise, a feature
+you ask for by name — an option, a bucket kind, a checksum algorithm — through
+an `S3` operation or the `boto3-s3` command is refused there before any request
+is sent — bar the path resolution `mv --validate-same-s3-paths` runs first —
+while a `Storage` or `S3Deleter` used directly may not be checked;
+[`library/errors.md`](./library/errors.md) and
+[`cli/exit-codes.md`](./cli/exit-codes.md) say what each refusal raises or
+exits with. Check what you have with
 `boto3-s3 --version`, or `python -c "import boto3; print(boto3.__version__)"`.
 
 **Upgrading `boto3` is the one move that matters.** It pins `botocore` and
@@ -16,16 +24,19 @@ bound, so a newer `boto3` is picked up as it is.
 
 | Feature | Needs |
 | --- | --- |
-| the CRT transfer engine | boto3 >= 1.29.7, plus the `crt` extra |
+| the CRT transfer engine | boto3 >= 1.34.6, plus the `crt` extra: the engine needs awscrt >= 0.19.18 (boto3's own minimum), and the extra's awscrt is pinned by botocore, whose 1.34.6 is the first to pin one at that minimum — boto3 1.34.6 is the first that cannot resolve to an older botocore. An endpoint on a non-standard port (MinIO's 9000, say) additionally needs the awscrt botocore 1.40.12 and later pin (boto3 >= 1.40.12 for the same reason; older ones dial the standard port only). Below boto3 1.42.0 the `[s3]` keys the transfer manager reads (`multipart_chunksize`) do not reach the engine — `target_bandwidth` still does — and the warning that says so shows under `--debug` only |
 | S3 Express directory buckets (a bucket name ending `--x-s3`) | boto3 >= 1.33.2 |
+| S3 Express access points (a name ending `--xa-s3`) | boto3 >= 1.37.24 |
 | `ls --bucket-name-prefix` / `--bucket-region` | boto3 >= 1.35.42 |
 | `no_overwrite` / `--no-overwrite` on upload | boto3 >= 1.36.0 |
 | `checksum_algorithm` = `CRC64NVME` | boto3 >= 1.36.0, plus the `crt` extra |
+| `ChecksumComparison` recognizing a multipart (`COMPOSITE`) checksum whose value carries no part count | boto3 >= 1.36.0 (below it the response's `ChecksumType` is not parsed, so an upload or download of such an object is copied on every run) |
 | `mb --tags` (`CreateBucketConfiguration.Tags`) | boto3 >= 1.39.2 |
-| `no_overwrite` / `--no-overwrite` on copy | boto3 >= 1.41.0 |
+| `no_overwrite` / `--no-overwrite` on copy | boto3 >= 1.40.61 |
 | `[s3]` tuning reaching the CRT transfer manager | boto3 >= 1.42.0 |
 | `mb` on an account-regional bucket (a name ending `-an`) | boto3 >= 1.42.67 |
-| `checksum_algorithm` = `MD5` / `SHA512` | boto3 >= 1.42.94 |
+| `checksum_algorithm` = `SHA512` | boto3 >= 1.42.94 |
+| `checksum_algorithm` = `MD5` | not usable: the S3 model lists it, but `botocore` cannot compute it, so an upload with it fails per item |
 | `checksum_algorithm` = the `XXHASH` family | boto3 >= 1.42.94, plus the `crt` extra |
 | S3 object annotations (GA 2026-06) | boto3 >= 1.43.31 |
 | `copy_props=ALL` / `--copy-props all` | boto3 >= 1.43.31 |
@@ -47,8 +58,10 @@ Missing awscrt fails only the features that need it, and nothing else changes.
 
 The CLI's default request checksum is aws's `CRC64NVME` when the installed
 botocore can compute it (boto3 1.36 or later with awscrt 0.23.4 or later);
-otherwise botocore's own `CRC32` default stands. The library leaves botocore's
-default in place either way; name `checksum_algorithm` to choose.
+otherwise botocore's own default stands — `CRC32` from boto3 1.36 on, and
+below it no default checksum at all (an upload carries `Content-MD5`). The
+library leaves botocore's default in place either way; name
+`checksum_algorithm` to choose.
 How it fails differs by feature: `preferred_transfer_client = crt` is refused
 before the run starts (exit code 253), while an explicit CRT-only
 `--checksum-algorithm` fails inside the run as a per-item

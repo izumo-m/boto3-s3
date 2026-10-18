@@ -48,10 +48,10 @@ class Comparator:
 
 `transfer_type` is the run's direction. `S3.sync` constructs the comparator
 with the direction its route classification produced — `UPLOAD`, `DOWNLOAD` or
-`COPY` (see [`./options.md`](./options.md) for the enum). The field is stamped
-onto emitted pairs verbatim and is not validated or interpreted, so a caller
-driving `Comparator` directly may pass any `TransferType` member and will read
-it back on every pair.
+`COPY` (see [`./results.md`](./results.md#transfertype) for the enum). The
+field is stamped onto emitted pairs verbatim and is not validated or
+interpreted, so a caller driving `Comparator` directly may pass any
+`TransferType` member and will read it back on every pair.
 
 The dataclass is frozen and takes the field positionally
 (`Comparator(transfer_type)`) or by keyword. It holds no other state, so one
@@ -77,13 +77,14 @@ chooses the key it joins on.
 backend promises for a scan requested with `ScanOptions(sort=True)`
 ([`./storage.md`](./storage.md)); S3 listings arrive in that order and the local
 walk sorts to match. Given ordered inputs the output is ordered too: emitted
-pairs ascend by `compare_key`. A merge-join cannot pair an unordered stream —
-the same key would surface as a `SrcOnlyPair` and a `DestOnlyPair` instead of
-one `SyncPair`, which under `sync`'s delete lane means deleting an entry that
-exists on both sides — so rather than mis-pair, the join refuses: the first
-strict descent on either side raises `ValidationError` (below). This is also
-why `sync` requires `SORTABLE_SCAN` of a custom backend and rejects S3 Express
-directory buckets outright.
+pairs ascend by `compare_key`. The order is not checked. An unordered stream is
+merged step for step the way the AWS CLI merges one, each step comparing only
+the two entries in hand, so a key that arrives out of order surfaces as a
+`SrcOnlyPair` and a `DestOnlyPair` instead of one `SyncPair` — which under
+`sync`'s delete lane means deleting an entry that exists on both sides, as
+`aws s3 sync` does against an S3-compatible endpoint whose listing does not
+sort. This is why `sync` requires `SORTABLE_SCAN` of a custom backend and
+rejects S3 Express directory buckets and their access points outright.
 
 Both streams are consumed lazily and only one entry of each is held at a time,
 so page-by-page listings pair without either side being materialized. Draining
@@ -93,18 +94,8 @@ leaves the rest of both inputs unconsumed; releasing whatever they hold open is
 the caller's business, which is what `sync` does with its two listing
 generators.
 
-Raises: a `ValidationError` from the pull that first sees a key smaller than the
-one before it on the same side. The message names the side (`source` /
-`destination`) and the offending key pair. It guards against a backend that
-declares `SORTABLE_SCAN` and then yields out of order, and against an
-S3-compatible endpoint whose `ListObjectsV2` does not sort. The check is a plain
-comparison rather than an `assert`, so it is in force under `python -O` too —
-the failure it catches is destructive, not a mere internal-invariant bug. Equal
-consecutive keys pass; only a strict descent is rejected. Detection is as late
-as the descent itself, so pairs already yielded stand — whatever the caller did
-with them stays done — while the offending entry is never paired and nothing
-past it is read. Anything the input iterables raise propagates unchanged —
-`compare` catches nothing.
+Raises: nothing of its own. Anything the input iterables raise propagates
+unchanged — `compare` catches nothing.
 
 ## SyncPair
 
@@ -241,8 +232,9 @@ default rule is replaced rather than combined. The content strategies
 [`ChecksumComparison`](#checksumcomparison) are `PairFilter`s of this kind.
 
 Contract of a call: it is invoked once per `SyncPair` that reaches the update
-lane, on `sync`'s calling thread and in ascending `compare_key` order, unless
-the filter was wrapped in `ParallelFilter`. Its argument always has both sides
+lane, on `sync`'s calling thread and in the merge's order - ascending
+`compare_key` whenever both listings arrive in key order - unless the filter
+was wrapped in `ParallelFilter`. Its argument always has both sides
 populated. Returning `False` drops the pair silently — no transfer is submitted
 and no `on_result` record is emitted for it. Raising aborts the run: the
 exception propagates out of `sync` rather than being recorded as a per-item
@@ -280,17 +272,19 @@ a callback that wants it for the update pairs must call
 [`AwsCliComparison`](#awsclicomparison) itself.
 
 Contract of a call: it is invoked once per pair the `Comparator` emits,
-serially, on `sync`'s calling thread, in ascending `compare_key` order — across
-all three shapes, one interleaved stream. Callers may rely on that order; it is
-what lets one callback keep a streaming cursor or journal over the whole pair
-stream. Raising aborts the run rather than being recorded as a per-item failure.
+serially, on `sync`'s calling thread, in the merge's order — across all three
+shapes, one interleaved stream, ascending by `compare_key` whenever both
+listings arrive in key order (an S3-compatible endpoint that does not sort
+breaks that, as it breaks the pairing - [`Comparator`](#comparator)). Callers
+may rely on that order for ordered listings; it is what lets one callback keep
+a streaming cursor or journal over the whole pair stream. Raising aborts the run rather than being recorded as a per-item failure.
 The visibility `filter` still runs first on both sides, so a pruned key never
 arrives.
 
 Because it is one serial stream by contract, a `MergedPairFilter` cannot be
 wrapped in [`ParallelFilter`](#parallelfilter), and `pair_filter` is exclusive
-with the three lane filters and with `no_overwrite=True`; each combination
-raises `ValidationError`. See
+with a non-default value of any of the three lane filters and with
+`no_overwrite=True`; each combination raises `ValidationError`. See
 [`./operations/sync.md`](./operations/sync.md#s3sync) for the parameter itself.
 
 ## AwsCliComparison
@@ -372,8 +366,10 @@ class EtagComparison:
 `s3` is consulted for one thing only: the multipart part size. It is read as
 `[s3] multipart_chunksize` from that instance's active profile through
 [`S3.aws_config()`](./s3.md#aws_config), falling back to `DEFAULT_PART_SIZE`.
-The read happens in the constructor and is tied to the passed `S3`; no ambient
-or default session is consulted, and nothing else is taken from the object.
+The read happens in the constructor, through the passed `S3`'s own config
+resolution — its `session`, or, for an `S3` built without one, boto3's default
+session (a fresh `AWS_PROFILE`-aware one when none is set up) — and nothing
+else is taken from the object.
 
 `part_size` pins the part size explicitly. It overrides the `s3`-derived value,
 so `EtagComparison(s3, part_size=...)` uses the explicit value and does not
@@ -394,7 +390,9 @@ skip a copy — MD5 can collide, and the size is independent evidence.
 `transfer_type`. After the `check_size` step:
 
 - both sides `S3FileInfo`: the two listings' stored ETags are compared as
-  strings, whatever form they take, and no bytes are read.
+  strings — each with its one surrounding pair of double quotes removed,
+  whatever form it takes otherwise — and no bytes are read. An entry with no
+  ETag, or an empty one, reads as differing.
 - exactly one side `S3FileInfo`: the other is the readable side. Its bytes are
   read through the backend stamped on its `storage` attribute, as
   `storage.open(info.compare_key, "rb")` ([`./storage.md`](./storage.md)), so
@@ -415,7 +413,12 @@ without which the part split cannot be reconstructed.
 request rather than the split used: per file it is adjusted the way an upload
 would chunk that file — grown until the file fits S3's 10000-part limit, then
 clamped into S3's 5 MiB to 5 GiB part bounds (s3transfer's
-`ChunksizeAdjuster`). A `part_size` below 5 MiB therefore compares at 5 MiB.
+`ChunksizeAdjuster`). A `part_size` below 5 MiB is therefore raised to at
+least 5 MiB, and for a file too large for 10000 parts it grows from the value
+given, not from 5 MiB. The request itself has to be a positive integer: an
+explicit `part_size` that is not one raises `ValidationError`, and a profile
+whose `multipart_chunksize` is zero or negative raises `InvalidConfigError`,
+both when the strategy is constructed.
 The value must still reproduce the boundaries the object was uploaded with:
 supplying that upload's `multipart_chunksize` is the reliable way, and a
 multipart object uploaded with a different one reconstructs to a different ETag
@@ -423,12 +426,17 @@ and is re-copied on every run. A single-part object compares regardless of the
 setting.
 
 **Which objects it can judge.** An ETag is a reconstructible MD5 only for an
-unencrypted or SSE-S3 object. SSE-KMS, SSE-C and DSSE objects carry an opaque
-ETag that is not an MD5, and a listing does not reveal an object's encryption,
+unencrypted or SSE-S3 object outside S3 Express. SSE-KMS, SSE-C and DSSE
+objects, and every object in an S3 Express directory bucket (SSE-S3 there
+included, measured on real S3), carry an opaque ETag that is not an MD5, and a
+listing does not reveal an object's encryption,
 so on upload and download every such object reads as differing and is copied on
 every run; an s3-to-s3 pair still compares the two opaque strings directly and
-does skip when they are equal. Use the default judgment or
-[`ChecksumComparison`](#checksumcomparison) against such a bucket.
+does skip when they are equal. Use the default judgment against such a
+bucket, or [`ChecksumComparison`](#checksumcomparison) for SSE-KMS and DSSE
+objects. (`sync` refuses S3 Express directory buckets and their access points,
+so in a sync this strategy never meets their objects; a direct
+`content_differs` call reads them as differing.)
 
 Raises, from the constructor:
 [`InvalidConfigError`](./exceptions.md#invalidconfigerror) when `s3` is given
@@ -438,11 +446,14 @@ without a session.
 
 Raises, from a call: an `OSError` raised while reading the readable side is
 translated into the library taxonomy —
-[`NotFoundError`](./exceptions.md#notfounderror) for a file removed between the
-listing and the compare,
+[`NotFoundError`](./exceptions.md#notfounderror) for a missing file,
 [`AccessDeniedError`](./exceptions.md#accessdeniederror) for a permission
 failure, [`TransportError`](./exceptions.md#transporterror) otherwise —
-carrying `operation="sync"` and the entry's key. Whatever else a
+carrying `operation="sync"` and the entry's compare key. A `LocalStorage`
+readable side translates its own `open` failure first, the same way but
+unnamed, so a file removed between the listing and the compare surfaces as a
+`NotFoundError` whose `operation` is `"sync"` when the strategy ran under
+`sync` and `None` when it was called directly. Whatever else a
 custom backend raises propagates unchanged. Either way the exception aborts the
 `sync` run rather than being recorded as a per-item failure, as
 [`PairFilter`](#pairfilter) states for any raising predicate.
@@ -465,8 +476,10 @@ stream. A path is opened `"rb"` here and closed again. A stream is read from its
 current position to the end and is **never** closed: it stays the caller's, and
 so does its failure mode (see Raises).
 
-`etag` is required and keyword-only: the object's ETag **dequoted**, the form
-[`S3FileInfo.etag`](./results.md#s3fileinfo) carries. `None` or an empty string
+`etag` is required and keyword-only: the object's ETag, with or without the
+double quotes S3 wraps it in — [`S3FileInfo.etag`](./results.md#s3fileinfo) and
+a boto3 response's `ETag` can be passed as they are, and so can the bare hex.
+`None` or an empty string
 is indeterminate and returns `True` with nothing opened or read. An ETag bearing
 a `-<n>` suffix is reconstructed as `MD5(concatenated part MD5s) + "-<n>"`, any
 other as the hex MD5 of the whole stream — the same two forms, at the same
@@ -501,10 +514,13 @@ reads the S3 side's checksum with `GetObjectAttributes` and recomputes that
 same algorithm over the other side's bytes. Like `EtagComparison` it replaces
 the size-and-time judgment rather than composing with it. Unlike it, no part
 size has to be supplied — a multipart object's part boundaries come back from
-S3, so the comparison is exact — encryption does not affect it, and it works
-against objects any tool uploaded with a checksum. The cost is one
-`GetObjectAttributes` per object consulted. Choosing between the two content
-strategies is [`../library/sync-content.md`](../library/sync-content.md).
+S3, so the comparison is exact — SSE-S3, SSE-KMS and DSSE encryption do not
+affect it, and it works against objects any tool uploaded with a checksum. An
+SSE-C object is the exception: reading its checksum needs the customer key,
+which the strategy never sends, so it reads as indeterminate and is copied.
+The cost is one `GetObjectAttributes` per object consulted. Choosing between
+the two content strategies is
+[`../library/sync-content.md`](../library/sync-content.md).
 
 ```python
 class ChecksumComparison:
@@ -560,8 +576,22 @@ that is an [`S3FileInfo`](./results.md#s3fileinfo) and the `check_size` step
 runs first.
 
 - both sides `S3FileInfo`: each object's stored checksum is fetched and the two
-  are compared by algorithm and value string. No bytes are read, and the
-  `ObjectParts` pagination is skipped since the value strings compare directly.
+  are compared by algorithm, kind (`FULL_OBJECT` or `COMPOSITE`) and digest. No
+  bytes are read, and the `ObjectParts` pagination is skipped since the stored
+  digests compare directly. What a copy stores depends on how it is made
+  (measured on real S3). Below the sync's `multipart_threshold` it is one
+  `CopyObject`, which keeps the source's algorithm as a `FULL_OBJECT`
+  checksum: a `FULL_OBJECT` source then compares equal to its copy, a
+  `COMPOSITE` one never does. At or above it the copy goes part by part, and
+  unless the sync names an algorithm S3 stores it as `CRC64NVME`
+  `FULL_OBJECT`, so a source with any other checksum never compares equal.
+  A `COMPOSITE` source stays comparable only when the copy names its
+  algorithm in `checksum_algorithm` and splits it the same way —
+  `multipart_chunksize` at the source's part size, and `multipart_threshold`
+  low enough that the copy is part by part at all (measured: `CRC32C` and
+  `SHA256` copied once, then skipped). A `FULL_OBJECT` source in another
+  algorithm past the threshold has no such remedy: named, the copy becomes a
+  `COMPOSITE`. Whatever never compares equal is copied again on every run.
 - exactly one side `S3FileInfo`: that side's checksum is fetched and the
   readable side's bytes are read through its `storage`
   ([`./storage.md`](./storage.md)) and hashed with the same algorithm —
@@ -571,26 +601,38 @@ runs first.
   `UPLOAD`, the `src` location for anything else.
 - neither side `S3FileInfo`: the pair is copied.
 
+A `COMPOSITE` checksum is recognized by the response's `ChecksumType` or by a
+part count appended to the value (`<digest>-<n>`), whichever the endpoint
+sends: some send the digest bare and name the kind only in `ChecksumType`.
+The digests are compared without the count; a count that is present has to
+agree as well — with the other side's on an s3-to-s3 pair, with the number of
+parts listed on an upload or download. Reading `ChecksumType` needs boto3 1.36
+or later ([`../compatibility.md`](../compatibility.md)); under an older one a
+bare `COMPOSITE` digest is taken for a `FULL_OBJECT` one, so an upload or
+download of that object is copied on every run (two S3 sides that both send
+it bare still compare equal).
+
 **What reads as indeterminate**, and is therefore copied rather than skipped:
 an object carrying no native checksum; an algorithm outside `crc32`, `crc32c`,
 `crc64nvme`, `sha1` and `sha256`; a `crc32c` / `crc64nvme` object past
 `pure_max_size` with no `awscrt`; a `COMPOSITE` object whose part sizes could
-not be read in full; two S3 sides whose stored checksums use different
-algorithms; a readable side whose `storage` or `compare_key` is `None`; a
+not be read in full (no part listing, a part without a size, a continuation
+marker that does not move past the page it came with); two S3 sides whose
+stored checksums use different algorithms or are of different kinds; a
+readable side whose `storage` or `compare_key` is `None`; a
 readable side longer than the sum of the parts, an appended tail the per-part
 digests would not otherwise see; and any `ClientError` from a
 `GetObjectAttributes` call — a 404, a denied `s3:GetObjectAttributes`, an
-SSE-C object whose customer key was not supplied, a failure part way through
-the pagination. A per-object rejection never aborts the run.
+SSE-C object (no customer key is sent), a failure part way through the
+pagination. A per-object rejection never aborts the run.
 
 Checksum computation is `zlib` for `crc32` and `hashlib` for `sha1` / `sha256`.
 `crc32c` and `crc64nvme` use `awscrt` when it is installed and a bundled
 pure-Python implementation otherwise, which is what `pure_max_size` bounds.
 
 Raises, from the constructor: whatever `S3.resolve` and the client build raise
-for locations, credentials, a region or an `endpoint_url` that do not resolve —
-[`ConfigurationError`](./exceptions.md#configurationerror),
-[`InvalidConfigError`](./exceptions.md#invalidconfigerror) or the
+for a profile, a region, an `endpoint_url` or partial credentials that do not
+resolve — [`InvalidConfigError`](./exceptions.md#invalidconfigerror) or the
 [`Boto3S3Error`](./exceptions.md#boto3s3error) base — plus the `TypeError`
 `os.fspath` raises for an argument that is not a `Location`.
 
@@ -649,18 +691,35 @@ future per entry.
 
 **What wrapping changes.** For a stateless predicate the decisions themselves
 are unchanged: the same entries are acted on and the run ends the same way,
-only faster. A stateful predicate can observe the concurrency. What does change
-is ordering, in the ways below and no others.
+only faster — with one exception: a wrapped `delete_filter` on a local
+destination lets the pair loop advance while delete decisions are still
+outstanding, so anything that relied on an orphan being gone before a later
+entry is handled no longer holds. A tree that aliases itself through a
+symlinked directory can list one file under both names and fail the second
+delete ([`./operations/sync.md`](./operations/sync.md#s3sync)); a new
+entry that needs an orphan file's name as a directory — `a` to delete, `a/b`
+to create — is transferred while `a` is still there and fails, after which `a`
+is deleted and the run raises `BatchError` (running it again creates `a/b`);
+and on a case-insensitive filesystem, where an orphan and a new entry that
+differ only in case are one file and its survival is a matter of timing even
+on the plain lane when the new entry sorts first (as it is for `aws s3`;
+[`../cli/aws-differences.md`](../cli/aws-differences.md)), wrapping makes it
+so in the other order too — `A.txt` to delete, `a.txt` to create — where a
+decision that takes longer than the transfer removes the new file while both
+operations are recorded as succeeded. A stateful predicate
+can observe the concurrency. Otherwise what changes is ordering, in the ways
+below and no others.
 
 Pooled decisions are consumed in completion order, so surviving entries are
-submitted out of `compare_key` order. For real transfers and for batched S3
-deletes that is not observable — the transfer engine and the deleter reorder
-work on their own anyway, and `on_result` is not ordered in either case.
-Records the lane's action emits inline follow that ordering: dry-run records,
-and orphan deletions against a local or custom destination, still fire on
-`sync`'s calling thread — only the decision moves to the pool — but arrive in
-the completion order of the pooled decisions rather than in `compare_key`
-order. A lane left unwrapped decides inline in `compare_key` order.
+submitted out of `compare_key` order. For real transfers that is not
+observable — the transfer engine reorders work on its own anyway, and
+`on_result` is not ordered there. Every other record the lane's action produces
+follows that ordering: dry-run records, and orphan deletions against a local or
+custom destination, still fire on `sync`'s calling thread — only the decision
+moves to the pool — and the batched S3 deleter emits its records in submission
+order, so all of them arrive in the completion order of the pooled decisions
+rather than in `compare_key` order. A lane left unwrapped decides inline in
+`compare_key` order.
 
 Parallelizing `create_filter` specifically makes the case-conflict gate's
 "first key wins" resolution non-deterministic — which variant of a

@@ -64,11 +64,16 @@ Raises:
   (`"s3://"`). No request is sent in these cases.
 - [`ConfigurationError`](../exceptions.md#configurationerror), or its
   [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement —
-  a client had to be built and credentials, region, profile or endpoint were
-  unresolvable. This covers a string or `os.PathLike` target, whose client is
-  this instance's `client()`, and an `S3Storage` constructed without a
-  `client`, which builds its default on first use; `mb` reads the location
-  constraint from that client, so the failure precedes the request.
+  a client had to be built from a profile, region, endpoint or partial
+  credentials that will not resolve. This covers a string or `os.PathLike`
+  target, whose client is this instance's `client()`, and an `S3Storage`
+  constructed without a `client`, which builds its default on first use; `mb`
+  reads the location constraint from that client, so the failure precedes the
+  request. Missing credentials fail no build: they raise `ConfigurationError`
+  when the `CreateBucket` request is signed. An SDK whose S3 model predates
+  what the request carries — `tags` (botocore 1.39.2), a `-an` bucket name
+  (1.42.67) — or an S3 Express location it predates raises `ConfigurationError`
+  naming the version, before the request.
 - The `CreateBucket` rejection itself, translated to its category:
   [`AccessDeniedError`](../exceptions.md#accessdeniederror),
   [`NotFoundError`](../exceptions.md#notfounderror),
@@ -77,6 +82,11 @@ Raises:
   category table does not list (`BucketAlreadyOwnedByYou`, for instance). The
   originating botocore `ClientError` is kept on `__cause__`. The full mapping
   is in [`../exceptions.md`](../exceptions.md).
+- [`Boto3S3Error`](../exceptions.md#boto3s3error) itself — any other exception
+  the `CreateBucket` call raised from inside botocore, such as a redirect loop
+  ending in `RecursionError` or a response missing an element botocore reads;
+  the original is kept on `__cause__`, the same capture a per-item failure
+  gets. `AssertionError` alone is not translated.
 
 ## boto3_s3.mb
 

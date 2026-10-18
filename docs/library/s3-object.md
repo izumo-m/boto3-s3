@@ -25,8 +25,8 @@ S3(session=None, *, endpoint_url=None, config=None,
   or `rm` the difference is severalfold.
 - **`endpoint_url`**, **`config`** — passed on when building clients, for an
   S3-compatible endpoint or a `botocore.config.Config`.
-- **`transfer_config`** — the default `TransferConfig` for `cp` / `mv` / `sync`.
-  Any call can override it.
+- **`transfer_config`** — the default `TransferConfig` for `cp` / `mv` / `sync`
+  / `rm` (for `rm`, the engine its deletes ride). Any call can override it.
 - **`reusable_after_interrupt`** — how Ctrl-C is handled: clean up first, or exit fast.
   `True` (the default) re-raises `KeyboardInterrupt` only after every resource
   has been reclaimed, so the next operation still works. `False` treats Ctrl-C
@@ -36,8 +36,9 @@ S3(session=None, *, endpoint_url=None, config=None,
   that lands in its transfer drain, so a CRT run cut short there raises
   `BatchError` with the cancelled items counted as failures instead. Only
   `KeyboardInterrupt` is affected — every other exception reclaims fully.
-- **`crt_allow_absent_credentials`** — whether the CRT transfer engine may be
-  used by a client that resolved no credentials. `False` (the default) drops
+- **`crt_allow_absent_credentials`** — whether the CRT transfer engine (which
+  carries the deletes too, when selected) may be used by a client that
+  resolved no credentials. `False` (the default) drops
   to the classic engine and reports `Unable to locate credentials`; `True`
   attempts the transfer and lets it fail inside the CRT credentials delegate,
   which is what `aws s3` does. Only reproducing aws's output needs it.
@@ -52,9 +53,11 @@ S3(session=None, *, endpoint_url=None, config=None,
   `CLIENT_REGION` (the default) reads it off the client that was built, which
   is what boto3 does. Passing your own already-resolved region uses that value
   instead, `None` included — and `None` is the whole point: when nothing
-  configures a region, botocore quietly gives the client the `aws-global`
-  pseudo-region, while `aws s3` resolves its own chain to `None` and awscrt
-  then refuses to build a client at all. Only reproducing that refusal needs
+  configures a region, botocore quietly gives the client one anyway
+  (`us-east-1` by default, the `aws-global` pseudo-region under the regional
+  endpoint mode the `boto3-s3` command pins), while `aws s3` resolves its own
+  chain to `None` and awscrt then refuses to build a client at all. Only
+  reproducing that refusal needs
   it. Like the flag above it does nothing unless
   `TransferConfig.preferred_transfer_client` selects the CRT engine.
 - **`crt_sign_requests`** — whether the CRT transfer engine signs its
@@ -96,6 +99,8 @@ S3-to-S3 copy is the clear case — the instance default cannot express it. Buil
 each client and wrap each URL:
 
 ```python
+from boto3_s3 import S3Storage
+
 s3.cp(
     S3Storage("s3://src-bucket/data/", client=src_client),
     S3Storage("s3://dest-bucket/data/", client=dest_client),
@@ -138,8 +143,9 @@ jobs = [
 ]
 
 with concurrent.futures.ThreadPoolExecutor() as pool:
-    for path, dest in jobs:
-        pool.submit(s3.cp, str(path), dest)
+    futures = [pool.submit(s3.cp, str(path), dest) for path, dest in jobs]
+for future in futures:
+    future.result()  # re-raises a failed copy's error
 ```
 
 Do not use bare `"s3://..."` arguments for this: each operation would build its
@@ -191,7 +197,8 @@ transfer, with the other side always S3**.
 Operations never read the `[s3]` tuning section of `~/.aws/config` on their own:
 transfer settings come from arguments, never from ambient configuration.
 Credentials, region and profile still resolve through boto3's usual chain, which
-does read the file. When you want a value from it yourself, ask:
+does read the file, and so do botocore's own client-level `s3` settings such as
+`addressing_style`. When you want a value from it yourself, ask:
 
 ```python
 cfg = s3.aws_config()
@@ -245,7 +252,7 @@ app.put_file("./cache/manifest.json", key="manifest.json")
 ```
 
 Both return an `S3FileInfo` for the object — the full key, the size, the
-dequoted ETag, and the whole response under `head` — so a download needs no
+ETag as S3 returned it, and the whole response under `head` — so a download needs no
 follow-up `HeadObject` for the object's mtime or storage class either. (An
 upload's info describes what `PutObject` answered, which carries no timestamp.)
 
@@ -256,7 +263,8 @@ intact with no leftovers, readers never see a half-written file, a symlink at
 the destination is replaced rather than written through, and missing parent
 directories are created. One thing goes further than `cp`'s lane: an existing
 file's permission bits survive the replacement, rather than the replaced file
-coming back with whatever bits a fresh one gets.
+coming back with whatever bits a fresh one gets. (On Windows a read-only file
+cannot be replaced at all: the download fails and leaves it as it was.)
 
 What this pair deliberately does not do:
 

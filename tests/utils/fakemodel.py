@@ -3,13 +3,14 @@ SDK-capability probes read, with no API calls, plus the same surface as a
 ``meta`` a hand-rolled fake client can carry.
 
 `conditional_write_unsupported_reason` / `annotations_copy_unsupported_reason`
-(with the CLI and library gates built on those two) and the ``ListBuckets``
-filter gate decide support by introspecting
-``client.meta.service_model.operation_model(op).input_shape.members`` for a
-member (``IfNoneMatch`` / ``AnnotationDirective`` / ``Prefix`` /
-``BucketRegion``). A real client always carries them on the current botocore,
-so to exercise the old-botocore path these fakes report only the members they
-are told to.
+(with the CLI and library gates built on those two), the ``ListBuckets``
+filter gate and the ``CreateBucket`` gate of ``S3.mb`` decide support by
+introspecting ``client.meta.service_model.operation_model(op).input_shape.members``
+for a member (``IfNoneMatch`` / ``AnnotationDirective`` / ``Prefix`` /
+``BucketRegion`` / ``BucketNamespace``), or for a member of a member
+(``CreateBucketConfiguration.Tags``). A real client always carries them on the
+current botocore, so to exercise the old-botocore path these fakes report only
+the members they are told to.
 """
 
 from __future__ import annotations
@@ -20,7 +21,18 @@ from typing import Any
 
 class _Shape:
     def __init__(self, members: Collection[str]) -> None:
-        self.members = {name: object() for name in members}
+        # A dotted name ("CreateBucketConfiguration.Tags") nests: the outer
+        # member is itself a shape carrying the inner one.
+        self.members: dict[str, Any] = {}
+        nested: dict[str, list[str]] = {}
+        for name in members:
+            outer, dot, inner = name.partition(".")
+            if dot:
+                nested.setdefault(outer, []).append(inner)
+            else:
+                self.members[name] = object()
+        for outer, inner_names in nested.items():
+            self.members[outer] = _Shape(inner_names)
 
 
 class _OperationModel:
@@ -50,10 +62,17 @@ class _ModelOnlyClient:
 
 def model_meta(members_by_op: Mapping[str, Collection[str] | None]) -> Any:
     """A ``client.meta`` stand-in whose operation models carry exactly the
-    named input members (e.g. ``{"ListBuckets": {"Prefix"}}``); an op mapped to
+    named input members (e.g. ``{"ListBuckets": {"Prefix"}}``, or a dotted
+    ``"CreateBucketConfiguration.Tags"`` for a member's member); an op mapped to
     ``None`` has no input shape, and an unnamed op has no members. For a fake
     client that answers real calls and must also satisfy a capability probe."""
     return _Meta(members_by_op)
+
+
+def model_client(members_by_op: Mapping[str, Collection[str] | None]) -> Any:
+    """A client whose S3 model carries exactly the named input members per op
+    (the shapes `model_meta` describes), with no API calls."""
+    return _ModelOnlyClient(members_by_op)
 
 
 def model_only_client(ops_with_member: set[str], member: str = "IfNoneMatch") -> Any:

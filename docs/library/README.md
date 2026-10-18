@@ -18,7 +18,8 @@ s3.cp("./report.csv", "s3://my-bucket/report.csv")
 s3.rm("s3://my-bucket/tmp/", recursive=True)
 ```
 
-`S3()` uses your default AWS credentials, exactly as `boto3.Session()` would.
+`S3()` builds its clients with `boto3.client("s3")`, so it uses your default AWS
+credentials exactly as boto3's own default session would.
 For a profile, a region, an S3-compatible endpoint, or faster listings, see
 [`s3-object.md`](./s3-object.md).
 

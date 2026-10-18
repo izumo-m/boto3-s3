@@ -55,9 +55,13 @@ MASK_REVEAL_LEN = 4
 # Value terminator for matches taken from URLs, headers, and the repr() of a
 # headers dict: a run of characters that are not whitespace, a separator, or a
 # quote. Stops at whitespace, the leading backslash of an escaped ``\r\n``, the
-# ``&`` query boundary, the ``,`` Authorization-component boundary, and the
-# ``'`` / ``"`` that close a value inside a dict repr.
-_VALUE = r"[^\s\\&,'\"]+"
+# ``&`` query boundary, the ``,`` Authorization-component boundary, the
+# ``'`` / ``"`` that close a value inside a dict repr, and the ``<`` / ``>``
+# of a logged XML body: an object key written ``Signature=x`` inside a
+# DeleteObjects body would otherwise be masked through to the body's end,
+# every later ``<Key>`` with it. No real signature, token or key carries
+# either character (hex, base64, base64url, a JWT, percent-encoding).
+_VALUE = r"[^\s\\&,'\"<>]+"
 
 # Access Key ID literal (AWS long-term ``AKIA`` / temporary ``ASIA``).
 _ACCESS_KEY_ID_RE = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}")
@@ -74,9 +78,9 @@ _SIGNATURE_RE = re.compile(
 # Leading Access Key ID of a Credential value (``Credential=`` /
 # ``X-Amz-Credential=``); the signing scope after the ``/`` (header form) or the
 # percent-encoded ``%2F`` (presigned-query form) is non-secret and kept, so the
-# value stops at ``/`` and ``%``.
+# value stops at ``/`` and ``%`` - and at ``<`` / ``>`` like ``_VALUE``.
 _CREDENTIAL_RE = re.compile(
-    r"(?P<key>(?:X-Amz-Credential|Credential)=)(?P<val>[^\s\\&,/'\"%]+)",
+    r"(?P<key>(?:X-Amz-Credential|Credential)=)(?P<val>[^\s\\&,/'\"%<>]+)",
     re.IGNORECASE,
 )
 # SigV2 ``AWSAccessKeyId=`` query parameter (id with no scope).
@@ -98,8 +102,9 @@ _AWS_ACCESS_KEY_ID_PARAM_RE = re.compile(
 # instead spells it ``x-amz-security-token``, covered above); the word
 # boundary keeps
 # ``XSecurityToken``-style superstrings unmatched, and the quote-or-separator
-# anchor keeps XML ``<SessionToken>`` to its own pattern.
-_TOKEN_VALUE = r"[^\s'\"&,\\}]+"
+# anchor keeps XML ``<SessionToken>`` to its own pattern. ``<`` / ``>`` end
+# the value for the same reason as in ``_VALUE``.
+_TOKEN_VALUE = r"[^\s'\"&,\\}<>]+"
 _SECURITY_TOKEN_RE = re.compile(
     rf"(?P<key>(?:x-amz-(?:security|s3session)-token|\bSecurityToken)['\"]?\s*[:=]\s*(?:b?['\"])?)"
     rf"(?P<val>{_TOKEN_VALUE})",
@@ -181,11 +186,19 @@ _SSE_C_PARAM_RE = re.compile(
 
 # SigV2 (HmacV1) Authorization header ``AWS <access-key-id>:<signature>`` (legacy
 # signature_version='s3'; non-default for the library, never for the CLI which
-# pins s3v4). Mask the signature after the colon; the access key id in the kept
-# prefix is tail-revealed by ``_ACCESS_KEY_ID_RE`` afterwards. SigV4's
+# pins SigV4). The signature after the colon is fully masked, and the id goes
+# through ``_reveal_access_key`` like every other id slot, so an id of any
+# shape - an S3-compatible endpoint's ``minioadmin``, say - is covered: an
+# AWS-shaped id keeps its tail, anything else masks entirely. The id runs to
+# the first colon, and the signature is pinned to its own shape - the base64
+# of an HMAC-SHA1, 27 characters and one ``=`` - because with the id
+# unconstrained that shape is all that separates the header from an object
+# key or a metadata value written ``AWS <word>:<text>``, which a value
+# pattern as loose as the token one swallowed to the next quote (a logged
+# DeleteObjects body, every key of the batch included). SigV4's
 # ``AWS4-HMAC-SHA256 ...`` does not match (no space before the digit).
 _SIGV2_AUTH_HEADER_RE = re.compile(
-    rf"(?P<key>AWS (?:AKIA|ASIA)[0-9A-Z]{{16}}:)(?P<val>{_TOKEN_VALUE})"
+    r"(?P<key>\bAWS )(?P<id>[^\s'\"\\:]+):(?P<val>[A-Za-z0-9+/]{27}=)"
 )
 
 # STS / metadata-service response-body temporary credentials. botocore logs the
@@ -198,13 +211,22 @@ _SIGV2_AUTH_HEADER_RE = re.compile(
 # (IMDS's invalid-JSON path logs no body),
 # where the session token rides under the key ``Token``. The key/value regex is
 # therefore quote-agnostic and includes ``Token``; the quote anchored directly
-# to the key name keeps ``ContinuationToken`` / ``NextToken`` unmasked, and
-# ``AccessKeyId`` is left for the standalone id regex to tail-reveal.
+# to the key name keeps ``ContinuationToken`` / ``NextToken`` unmasked. The
+# ``AccessKeyId`` beside them has a slot of its own (both forms, and SSO's
+# camel-cased ``accessKeyId``) through ``_reveal_access_key``: an AWS-shaped
+# id would be tail-revealed by the standalone id regex anyway, but an id of
+# another shape - what an S3-compatible endpoint's STS issues - has no shape
+# for that regex to find, and the promise is that such an id masks entirely
+# wherever a keyed slot carries it.
 _STS_BODY_XML_CRED_RE = re.compile(
     r"(?P<key><(?:SecretAccessKey|SessionToken)>)(?P<val>[^<]+)", re.IGNORECASE
 )
 _CRED_BODY_KV_RE = re.compile(
     r"(?P<key>['\"](?:SecretAccessKey|SessionToken|Token)['\"]\s*:\s*b?['\"])(?P<val>[^'\"]+)",
+    re.IGNORECASE,
+)
+_CRED_BODY_ACCESS_KEY_ID_RE = re.compile(
+    r"(?P<key><AccessKeyId>|['\"]AccessKeyId['\"]\s*:\s*b?['\"])(?P<val>[^<'\"]+)",
     re.IGNORECASE,
 )
 
@@ -248,13 +270,14 @@ def _mask_proxy_userinfo(m: re.Match[str]) -> str:
 
 # Proxy-Authorization header value (defensive: it surfaces only in an
 # ``http.client`` wire dump, which this project does not emit). The quoted form
-# is the dict repr; the plain form is the raw ``name: value`` header line.
+# is the dict repr; the plain form is the raw ``name: value`` header line,
+# whose value ends at the line, an escape, or the ``<`` of a logged body.
 _PROXY_AUTH_QUOTED_RE = re.compile(
     r"(?P<key>['\"]?Proxy-Authorization['\"]?\s*[:=]\s*b?['\"])[^'\"]*",
     re.IGNORECASE,
 )
 _PROXY_AUTH_PLAIN_RE = re.compile(
-    r"(?P<key>Proxy-Authorization\s*:\s*)[^\r\n\\]*",
+    r"(?P<key>Proxy-Authorization\s*:\s*)[^\r\n\\<>]*",
     re.IGNORECASE,
 )
 
@@ -291,11 +314,15 @@ def mask_text(text: str, *, extra_secrets: Iterable[str] = ()) -> str:
     text = _SSE_C_PARAM_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _STS_BODY_XML_CRED_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _CRED_BODY_KV_RE.sub(lambda m: m.group("key") + MASK, text)
+    text = _CRED_BODY_ACCESS_KEY_ID_RE.sub(
+        lambda m: m.group("key") + _reveal_access_key(m.group("val")), text
+    )
     text = _BYTE_DUMP_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _SIGNATURE_PROVIDED_RE.sub(lambda m: m.group("key") + MASK, text)
     text = _SIGNATURE_RE.sub(lambda m: m.group("key") + MASK, text)
-    # Before _ACCESS_KEY_ID_RE so the kept ``AWS <id>:`` prefix is tail-revealed.
-    text = _SIGV2_AUTH_HEADER_RE.sub(lambda m: m.group("key") + MASK, text)
+    text = _SIGV2_AUTH_HEADER_RE.sub(
+        lambda m: m.group("key") + _reveal_access_key(m.group("id")) + ":" + MASK, text
+    )
     text = _CREDENTIAL_RE.sub(lambda m: m.group("key") + _reveal_access_key(m.group("val")), text)
     text = _AWS_ACCESS_KEY_ID_PARAM_RE.sub(
         lambda m: m.group("key") + _reveal_access_key(m.group("val")), text

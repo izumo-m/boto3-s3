@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from dateutil.tz import tzlocal
 
 from boto3_s3 import FileKind
+from boto3_s3_cli import usage
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -128,15 +129,25 @@ def format_summary(total_objects: int, total_size: int, *, human_readable: bool)
     return f"\nTotal Objects: {total_objects}\n{'Total Size: ':>15}{size}\n"
 
 
-def format_delete(bucket: str, key: str, *, dryrun: bool) -> str:
-    """One ``rm`` success line (aws-cli results.py SUCCESS/DRY_RUN_FORMAT)."""
+def format_delete(location: str, *, dryrun: bool) -> str:
+    """One ``rm`` success line (aws-cli results.py SUCCESS/DRY_RUN_FORMAT).
+
+    ``location`` is the object as aws-cli names it on the line: the record's
+    ``src`` (``s3://bucket/key`` for a listed entry, the target as written on
+    the single-key route).
+    """
     prefix = "(dryrun) " if dryrun else ""
-    return f"{prefix}delete: s3://{bucket}/{key}"
+    return f"{prefix}delete: {location}"
 
 
-def format_delete_failed(bucket: str, key: str, error: BaseException | None) -> str:
+def error_text(error: object) -> str:
+    """A failure's text as aws's line prints it (`usage.exception_text` for an exception)."""
+    return usage.exception_text(error) if isinstance(error, BaseException) else str(error)
+
+
+def format_delete_failed(location: str, error: BaseException | None) -> str:
     """One ``rm`` per-key failure line (aws-cli results.py FAILURE_FORMAT)."""
-    return f"delete failed: s3://{bucket}/{key} {error}"
+    return f"delete failed: {location} {error_text(error)}"
 
 
 def format_make_bucket(bucket: str) -> str:
@@ -146,7 +157,7 @@ def format_make_bucket(bucket: str) -> str:
 
 def format_make_bucket_failed(path: str, error: object) -> str:
     """The ``mb`` failure line (the original path argument, like aws-cli)."""
-    return f"make_bucket failed: {path} {error}"
+    return f"make_bucket failed: {path} {error_text(error)}"
 
 
 def format_remove_bucket(bucket: str) -> str:
@@ -156,4 +167,4 @@ def format_remove_bucket(bucket: str) -> str:
 
 def format_remove_bucket_failed(path: str, error: object) -> str:
     """The ``rb`` failure line (the original path argument, like aws-cli)."""
-    return f"remove_bucket failed: {path} {error}"
+    return f"remove_bucket failed: {path} {error_text(error)}"

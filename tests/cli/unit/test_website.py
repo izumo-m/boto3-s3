@@ -16,7 +16,7 @@ import pytest
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
 from tests.utils.fakes3 import client_error
-from tests.utils.harness import built_client_ctx, client_ctx, unused_ctx
+from tests.utils.harness import bucket_name_report, built_client_ctx, client_ctx, unused_ctx
 
 
 class _FakeWebsiteClient:
@@ -180,7 +180,25 @@ class TestWebsiteExitCodeShape:
         client = _FakeWebsiteClient()
         rc = cli.main(["website", "s3:///k", "--index-document", "i.html"], ctx=client_ctx(client))
         assert rc == 252
-        assert 'Parameter validation failed:\nInvalid bucket name "/k"\n' in capsys.readouterr().err
+        assert f"{bucket_name_report('/k')}\n" in capsys.readouterr().err
+        assert client.calls == []
+
+    @pytest.mark.parametrize("sep", ["/", ":"])
+    def test_an_outposts_access_point_closed_with_a_colon_is_refused(
+        self, sep: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws passes "...accesspoint/ap:" whole as the Bucket and botocore's
+        # name check refuses it (rc 252, no request; measured). The split
+        # here eats the ":" as the key separator and would leave a keyless
+        # access point to configure.
+        name = (
+            f"arn:aws:s3-outposts:us-west-2:123456789012:outpost{sep}"
+            f"op-01234567890123456{sep}accesspoint{sep}ap:"
+        )
+        client = _FakeWebsiteClient()
+        rc = cli.main(["website", f"s3://{name}", "--index-document", "i"], ctx=client_ctx(client))
+        assert rc == 252
+        assert f"{bucket_name_report(name)}\n" in capsys.readouterr().err
         assert client.calls == []
 
     def test_bucketless_key_schemeless_folds_into_the_bucket_name(
@@ -189,7 +207,7 @@ class TestWebsiteExitCodeShape:
         client = _FakeWebsiteClient()
         rc = cli.main(["website", "/k", "--index-document", "i.html"], ctx=client_ctx(client))
         assert rc == 252
-        assert 'Parameter validation failed:\nInvalid bucket name "/k"\n' in capsys.readouterr().err
+        assert f"{bucket_name_report('/k')}\n" in capsys.readouterr().err
         assert client.calls == []
 
     def test_extra_positional_is_unknown_options_252(

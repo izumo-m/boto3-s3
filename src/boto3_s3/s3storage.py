@@ -35,16 +35,18 @@ import stat as stat_module
 import sys
 from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import closing, contextmanager, suppress
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from importlib.metadata import version
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 import boto3
+import botocore.utils
 from botocore.exceptions import (
     BotoCoreError,
     ClientError,
     EndpointConnectionError,
     HTTPClientError,
+    IncompleteReadError,
     MissingDependencyException,
     NoCredentialsError,
     NoRegionError,
@@ -55,18 +57,23 @@ from botocore.exceptions import (
 from botocore.exceptions import (
     ConnectionError as BotoConnectionError,
 )
+from botocore.exceptions import (
+    InvalidConfigError as BotocoreInvalidConfigError,
+)
 from typing_extensions import override
 
 from boto3_s3.exceptions import (
     AccessDeniedError,
+    BatchError,
     Boto3S3Error,
     ConfigurationError,
     InvalidConfigError,
+    MalformedResponseError,
     NotFoundError,
     TransportError,
     ValidationError,
 )
-from boto3_s3.localstorage import translate_os_error
+from boto3_s3.localstorage import is_special_file, translate_os_error
 from boto3_s3.storage import Storage, StorageCapability, sieve_pages
 from boto3_s3.types import (
     FileInfo,
@@ -87,12 +94,17 @@ if TYPE_CHECKING:
 # logging HOWTO's rule for libraries): the library reports through `logging` and
 # never prints, so a WARNING it emits where the application configured no
 # handler - the deleter's unattributable-entry guard - must not reach stderr
-# through Python's `lastResort` handler. Registered here because every path
-# that logs imports this module: the deleter and the transfer engine directly,
-# and the CRT support's one warning fires inside the manager builder only the
-# transfer engine calls. A configured handler (the CLI's --debug stream logger,
+# through Python's `lastResort` handler. Registered here because the deleter
+# and the transfer engine import this module, and again in `crtsupport`, a
+# documented surface reachable on its own whose warning fires inside the
+# manager builder; both registrations skip a handler already present, so the
+# logger carries one. A configured handler (the CLI's --debug stream logger,
 # an application's root handler) still sees every record.
-logging.getLogger("boto3_s3").addHandler(logging.NullHandler())
+_package_logger = logging.getLogger("boto3_s3")
+if not any(isinstance(h, logging.NullHandler) for h in _package_logger.handlers):
+    _package_logger.addHandler(logging.NullHandler())
+
+logger = logging.getLogger(__name__)
 
 # S3Storage.open implements only "rb" (a GetObject read convenience, chiefly for
 # a content-based sync filter that reads an object's bytes). "wb" stays
@@ -118,6 +130,9 @@ _OPEN_WRITE_NOT_IMPLEMENTED = (
 # 3). Membership differs: the factory's construction-scoped catch maps every
 # other BotoCoreError to InvalidConfigError, while this general translator
 # lists only the known config shapes and keeps anything unlisted at the base.
+# botocore's own InvalidConfigError family is one of those shapes: a
+# source_profile loop, a missing services section, an empty CA bundle
+# (`reject_empty_ca_bundle`).
 _UNRESOLVED_CONFIG_ERRORS: tuple[type[BaseException], ...] = (
     NoCredentialsError,
     NoRegionError,
@@ -125,15 +140,55 @@ _UNRESOLVED_CONFIG_ERRORS: tuple[type[BaseException], ...] = (
 _INVALID_CONFIG_ERRORS: tuple[type[BaseException], ...] = (
     PartialCredentialsError,
     ProfileNotFound,
+    BotocoreInvalidConfigError,
 )
 # Both halves of botocore's transport tree: ConnectionError (endpoint /
 # connect-timeout / proxy) and HTTPClientError (read timeout, a closed
-# connection - "An HTTP Client raised an unhandled exception").
+# connection - "An HTTP Client raised an unhandled exception"). Beside them,
+# IncompleteReadError: a body that ends short of its Content-Length is a
+# transfer cut short like the others, but botocore files it directly under
+# BotoCoreError - and only raises it itself under urllib3 1.x; urllib3 2
+# enforces the length first and the same cut arrives as ResponseStreamingError,
+# an HTTPClientError. Listed so one event has one category on both.
 _TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
     EndpointConnectionError,
     BotoConnectionError,
     HTTPClientError,
+    IncompleteReadError,
 )
+
+# The CRT engine's network and server failures by awscrt's error name: a
+# connection, DNS, TLS or socket failure and S3's own 5xx / throttle answers
+# the CRT client retried and gave up on - transport, as the classic engine's
+# botocore files the same events. Every other name stays at the base here; a
+# local file the engine could not open or write is the transfer engine's to
+# classify (`transfer.Transferrer`), where the local path is known.
+_CRT_TRANSPORT_NAMES = frozenset(
+    {
+        "AWS_ERROR_HTTP_CONNECTION_CLOSED",
+        "AWS_ERROR_HTTP_SERVER_CLOSED",
+        "AWS_ERROR_HTTP_RESPONSE_FIRST_BYTE_TIMEOUT",
+        "AWS_ERROR_S3_SLOW_DOWN",
+        "AWS_ERROR_S3_INTERNAL_ERROR",
+    }
+)
+_CRT_TRANSPORT_PREFIXES = ("AWS_IO_SOCKET_", "AWS_IO_DNS_", "AWS_IO_TLS_")
+_CRT_RUNTIME_ERROR = re.compile(r"\d+ \((AWS_[A-Z0-9_]+)\)")
+
+
+def crt_error_name(exc: BaseException) -> str | None:
+    """awscrt's error name for a CRT failure, else None.
+
+    An ``AwsCrtError`` carries it (``name``, beside ``code``); a request awscrt
+    refuses synchronously - a local file it cannot open - raises a plain
+    ``RuntimeError("<code> (<name>): <text>")`` instead.
+    """
+    name: object = getattr(exc, "name", None) if hasattr(exc, "code") else None
+    if not isinstance(name, str) and type(exc) is RuntimeError:
+        match = _CRT_RUNTIME_ERROR.match(str(exc))
+        name = match.group(1) if match else None
+    return name if isinstance(name, str) and name.startswith("AWS_") else None
+
 
 # S3 error Code -> exception category, shared by every translation path: the
 # request-level ClientError below and the per-key DeleteObjects ``Errors[]``
@@ -165,6 +220,67 @@ _S3_OUTPOST_BUCKET_ARN_RE = re.compile(
     r"[a-zA-Z0-9\-]{1,63}[/:]bucket[/:]"
     r"[a-zA-Z0-9\-]{1,63})[/:]?(?P<key>.*)$"
 )
+
+
+def botocore_older_than(minimum: str) -> bool:
+    """Whether the installed botocore's release is below ``minimum`` (``"X.Y.Z"``).
+
+    The SDK-floor gates that probe a botocore internal (a class, a private
+    table) also require this, so a later botocore that merely renames the
+    internal is never refused. A release that does not parse reads as not
+    older.
+    """
+    try:
+        installed = tuple(int(part) for part in version("botocore").split(".")[:3])
+        wanted = tuple(int(part) for part in minimum.split("."))
+    except ValueError:
+        return False
+    return installed < wanted
+
+
+# Back-compat (supported floor botocore 1.31, docs/compatibility.md): botocore
+# learned S3 Express directory buckets - the --x-s3 suffix, their zonal
+# endpoint and CreateSession credentials - in 1.33.2 (its
+# S3ExpressIdentityResolver), and the access points of one (the --xa-s3
+# suffix) in 1.37.24 (its endpoint rules), each read from the published
+# releases. An older botocore addresses such a location as an ordinary bucket:
+# its requests go to a host that does not serve it, and a presigned URL comes
+# back that cannot work, without a word. The `S3` operations refuse it up front
+# instead (`s3._validate_storage`), after the location checks, so the command's
+# own usage errors for a directory bucket keep their exit code. Drop each gate
+# once the floor reaches it.
+_S3EXPRESS_MIN_BOTOCORE = "1.33.2"
+_S3EXPRESS_ACCESS_POINT_MIN_BOTOCORE = "1.37.24"
+
+
+def s3express_unsupported_reason(bucket: str) -> str | None:
+    """Why the installed botocore cannot address S3 Express location ``bucket``, or ``None``.
+
+    ``None`` for any other bucket. A directory bucket is probed by the
+    resolver, backed by the release (`botocore_older_than`, so a later botocore
+    that renamed it is never refused); its access point, which botocore knows
+    only through its endpoint rules, by the release alone. The message names
+    the version.
+    """
+    if bucket.endswith("--xa-s3"):
+        if not botocore_older_than(_S3EXPRESS_ACCESS_POINT_MIN_BOTOCORE):
+            return None
+        return (
+            "S3 Express access points (a name ending in --xa-s3) require botocore >= "
+            f"{_S3EXPRESS_ACCESS_POINT_MIN_BOTOCORE}; the installed botocore is "
+            f"{version('botocore')}."
+        )
+    if (
+        not bucket.endswith("--x-s3")
+        or hasattr(botocore.utils, "S3ExpressIdentityResolver")
+        or not botocore_older_than(_S3EXPRESS_MIN_BOTOCORE)
+    ):
+        return None
+    return (
+        "S3 Express directory buckets (a name ending in --x-s3) require botocore >= "
+        f"{_S3EXPRESS_MIN_BOTOCORE}; the installed botocore is {version('botocore')}."
+    )
+
 
 _S3_SCHEME = "s3://"
 
@@ -246,13 +362,17 @@ def translate_boto_error(
     credentials/region and a missing optional dependency
     (``MissingDependencyException`` - awscrt absent where SigV4a signing needs
     it) to ``ConfigurationError``, a present-but-unusable
-    profile or partial credentials to its ``InvalidConfigError`` refinement,
+    profile, partial credentials or botocore's own ``InvalidConfigError``
+    family to the ``InvalidConfigError`` refinement,
     and ``ParamValidationError`` (client-side validation - no HTTP happened)
-    to ``ValidationError``, which aws-cli files under its usage rc. An
-    existing ``Boto3S3Error`` passes through unchanged, and anything else -
-    an ``OSError`` raised by local file I/O inside s3transfer, say - becomes
-    the base category carrying its message (the ``[Errno 21] Is a directory``
-    text aws prints for a directory source survives verbatim).
+    to ``ValidationError``, which aws-cli files under its usage rc. A CRT
+    network or server failure is a ``TransportError`` by its awscrt name
+    (`crt_error_name`). An existing ``Boto3S3Error`` passes through
+    unchanged, and anything else becomes the base category carrying its
+    message - an ``OSError`` included: raised inside a request it can be a
+    credential provider's (a missing ``credential_process`` executable), not
+    the filesystem the request is about, so a local file's failure is
+    classified where the file is known (the transfer engine's records).
     """
     if isinstance(exc, Boto3S3Error):
         return exc
@@ -275,7 +395,105 @@ def translate_boto_error(
         return TransportError(str(exc), operation=operation, bucket=bucket, key=key)
     if isinstance(exc, ParamValidationError):
         return ValidationError(str(exc), operation=operation, bucket=bucket, key=key)
+    name = crt_error_name(exc)
+    if name is not None and (
+        name in _CRT_TRANSPORT_NAMES or name.startswith(_CRT_TRANSPORT_PREFIXES)
+    ):
+        return TransportError(str(exc), operation=operation, bucket=bucket, key=key)
     return Boto3S3Error(str(exc), operation=operation, bucket=bucket, key=key)
+
+
+# The OSErrors a client build raises when a configured path cannot be used:
+# a credential_process executable that is missing, not executable, a
+# directory, or not a program at all.
+_CONFIG_PATH_ERRORS = (FileNotFoundError, PermissionError, IsADirectoryError, NotADirectoryError)
+
+
+def client_build_error(exc: ValueError | AttributeError | OSError) -> Boto3S3Error:
+    """The family error for what the SDK raises outside its own family while it builds a client.
+
+    It reads the configuration then: a malformed endpoint is a plain
+    ``ValueError``, a config value of the wrong shape (``s3 = foo``, a scalar
+    where it reads a section) an ``AttributeError``, and a configured path
+    that cannot be used (a ``credential_process`` executable, run at build)
+    an ``OSError`` - set-but-unusable configuration, `InvalidConfigError`.
+    Any other ``OSError`` (out of file descriptors reading the SDK's own
+    data) is local I/O failing, `TransportError`.
+    """
+    if isinstance(exc, OSError) and not (
+        isinstance(exc, _CONFIG_PATH_ERRORS) or exc.errno == errno.ENOEXEC
+    ):
+        return TransportError(str(exc))
+    return InvalidConfigError(str(exc))
+
+
+# The attribute that tells `reject_empty_ca_bundle` a client's CA bundle
+# environment is already accounted for. `S3.client()` sets it on what it
+# builds (the client's own value answers for the credential clients behind
+# it), and boto3-s3-cli on every client its sessions build: those sessions
+# hold each client the SDK builds behind them - the credential chain's STS
+# and SSO clients, the CRT request serializer - to the CA bundle check at the
+# point aws runs it, so checking the environment again would refuse runs aws
+# completes (static credentials beside a valid --ca-bundle).
+CA_BUNDLE_ENVIRONMENT_VETTED = "_boto3_s3_ca_bundle_environment_vetted"
+
+
+def reject_empty_ca_bundle(client: Any, *, check_environment: bool = False) -> None:
+    """Refuse a client whose CA bundle setting is an empty or whitespace-only string.
+
+    botocore reads an empty value as falsy and turns TLS certificate
+    verification off without a word, so a misconfiguration - an unset
+    variable expanded into ``AWS_CA_BUNDLE``, a blank ``ca_bundle =`` line -
+    silently drops verification; a whitespace-only value fails later as an
+    unreadable path. botocore 1.43.54 and aws-cli 2.36.6 refuse both when a
+    client is built. The supported botocore floor is older, so this supplies
+    the same refusal - botocore's own ``InvalidConfigError`` with its exact
+    wording, which `s3_errors` refines to `InvalidConfigError` - for a client
+    an older botocore built, on either transfer engine.
+
+    The client's own setting is read where botocore keeps it, the endpoint's
+    HTTP session; a client without that shape (a test double) passes, and so
+    do ``False`` (verification off on purpose), ``True`` and a real path.
+    A client the library builds resolves that setting through the same chain
+    as the clients botocore builds behind it for its credentials (an assumed
+    role's STS, SSO): ``AWS_CA_BUNDLE``, the profile's ``ca_bundle``, then
+    ``REQUESTS_CA_BUNDLE``, so its own value answers for them too.
+
+    *check_environment* is for a client the caller built and handed over,
+    which may carry an explicit ``verify`` while those credential clients
+    still resolve the chain: an empty or whitespace-only ``AWS_CA_BUNDLE``,
+    first in the chain, is refused as well. This is stricter than aws, which
+    refuses it only when it builds a client that reads the value - those
+    credential clients, the CRT engine's request serializer - so a static
+    credential on the classic engine passes there. ``REQUESTS_CA_BUNDLE`` and a profile's
+    ``ca_bundle`` stay out of reach in that position: whether they are read
+    depends on the session the client came from, which it does not name. A
+    client marked `CA_BUNDLE_ENVIRONMENT_VETTED` skips the environment: one
+    `S3.client()` built, whose own value already answers for it, and one
+    boto3-s3-cli built, whose sessions check every client at aws's point.
+    """
+    verify = getattr(
+        getattr(getattr(client, "_endpoint", None), "http_session", None), "_verify", None
+    )
+    refused = isinstance(verify, str) and not verify.strip()
+    if check_environment and not refused:
+        env = os.environ.get("AWS_CA_BUNDLE")
+        # The mark is read last: on a botocore client a missing attribute
+        # goes through its event-emitting __getattr__.
+        refused = (
+            env is not None
+            and not env.strip()
+            and not getattr(client, CA_BUNDLE_ENVIRONMENT_VETTED, False)
+        )
+    if refused:
+        raise BotocoreInvalidConfigError(
+            error_msg=(
+                "Invalid CA bundle: the configured value (ca_bundle, "
+                "AWS_CA_BUNDLE, REQUESTS_CA_BUNDLE, or verify) resolved to an "
+                "empty or whitespace-only string. Provide a valid path to a "
+                "CA bundle file."
+            )
+        )
 
 
 @contextmanager
@@ -289,30 +507,153 @@ def s3_errors(
         raise translate_boto_error(exc, operation=operation, bucket=bucket, key=key) from exc
 
 
+def attribute_failure(
+    error: Boto3S3Error, *, operation: str | None, bucket: str | None, key: str | None
+) -> None:
+    """Fill the attribution a raiser could not know; never overwrite what it set.
+
+    The one rule every operation-layer capture applies to a family error
+    raised in-pipeline (design/exceptions.md): a storage's ``open`` /
+    ``delete`` / ``validate`` leaves ``operation`` unset because the storage
+    cannot know which operation is using it, so the operation fills it here.
+    ``bucket`` and ``key`` fill only as a pair, never one alone: a raiser that
+    named only ``key`` placed it in its own address space
+    (`localstorage.translate_os_error`'s local path, which leaves ``bucket``
+    unset by contract), and pairing this run's bucket with it would invent a
+    mixed address. A ``BatchError`` is skipped outright - it stands for a
+    whole run, and its coordinates are pinned as always-None
+    (docs/reference/exceptions.md).
+    """
+    if error.operation is None:
+        error.operation = operation
+    if error.bucket is None and error.key is None and not isinstance(error, BatchError):
+        error.bucket = bucket
+        error.key = key
+
+
+def lost_like_aws(exc: BaseException) -> bool:
+    """Whether aws-cli loses this per-item failure without a trace.
+
+    aws-cli's per-item completion handler (its ``DoneResultSubscriber``) asks
+    whether a failure is S3's conditional-write rejection by evaluating
+    ``exception.response.get("Error", {}).get("Code")``. botocore's
+    ``HTTPClientError`` family - a connection closed before the response, a
+    read timeout - carries ``response = None``, so that expression raises
+    ``AttributeError``, which s3transfer's callback runner logs at debug level
+    and swallows: the item gets no result line, counts as neither done nor
+    failed, and the run exits 0 when nothing else failed (measured on cp, mv,
+    recursive cp and rm). A refused connection or a connect timeout is
+    botocore's ``ConnectionError`` family instead, with no ``response``
+    attribute at all, and a download's read timeout reaches the handler as
+    s3transfer's ``RetriesExceededError`` after its own retries - both
+    ordinary failures on aws-cli. The operations mirror the loss on the routes
+    aws-cli sends through that handler with a botocore client - the transfer
+    engine's terminal, the S3 deleter's per-key requests, the blind
+    single-key rm - by dropping the item through `drop_like_aws`, which also
+    logs it. The deletes that ride the CRT client (when the run selects the
+    CRT engine, as aws-cli's do) fail with awscrt's error, which never
+    qualifies, so aws-cli's CRT client and this one both report them.
+
+    The expression is aws-cli's own, evaluated on the exception aws-cli would
+    hold: a family error this library raised from a botocore one (`s3_errors`,
+    `request_failure`) is judged by that botocore cause. Only the botocore
+    family qualifies, because nothing else reaches aws-cli's handler - an
+    s3transfer ``RetriesExceededError``, an awscrt error or an ``OSError``
+    carries no ``response`` there, and a custom backend's own exception that
+    happens to carry one is an ordinary failure here.
+    """
+    seen = exc.__cause__ if isinstance(exc, Boto3S3Error) else exc
+    if not isinstance(seen, BotoCoreError):
+        return False
+    response: Any = getattr(seen, "response", _NO_RESPONSE)
+    if response is _NO_RESPONSE:
+        return False
+    try:
+        response.get("Error", {}).get("Code")
+    except AttributeError:
+        return True
+    return False
+
+
+def drop_like_aws(exc: BaseException) -> bool:
+    """`lost_like_aws`, for a route that drops the item when it answers True.
+
+    The dropped failure is logged at debug level, the way s3transfer logs the
+    one aws-cli's completion handler swallows.
+    """
+    if not lost_like_aws(exc):
+        return False
+    logger.debug("dropping a per-item failure as aws-cli does", exc_info=exc)
+    return True
+
+
+_NO_RESPONSE = object()
+
+
 def request_failure(
     exc: Exception, *, operation: str | None, bucket: str | None = None, key: str | None = None
 ) -> Boto3S3Error:
-    """The per-item failure for an exception a single S3 request raised.
+    """The per-item failure for an exception a single request raised.
 
-    `s3_errors` has already translated the boto family. Anything else the
-    client call raised - botocore reading a response that lacks an element it
-    needs (an S3 Express ``CreateSession`` reply without ``Credentials``,
+    `s3_errors` (or a backend's own translation) has already turned the boto
+    family into a ``Boto3S3Error``, which passes through with its own cause
+    and gets the attribution it left unset (`attribute_failure`). Anything
+    else the call raised - botocore reading a response that lacks an element
+    it needs (an S3 Express ``CreateSession`` reply without ``Credentials``,
     ``KeyError``), a redirect loop ending in ``RecursionError`` - is the
     request failing all the same, and becomes `translate_boto_error`'s
     last-resort ``Boto3S3Error`` (the exception's ``str()`` as the message)
-    carrying the original as ``__cause__``; an existing ``Boto3S3Error``
-    passes through with its own cause. This is aws-cli's shape: its per-key
-    ``DeleteObject`` runs as an s3transfer task, which records whatever the
-    request raises as that key's failure, so the CLI's line reads
+    carrying the original as ``__cause__``. This is aws-cli's shape: its
+    per-key ``DeleteObject`` runs as an s3transfer task, which records
+    whatever the request raises as that key's failure, so the CLI's line reads
     ``delete failed: s3://b/k 'Credentials'`` on both tools (measured). The
-    transfer engine gets the same from s3transfer itself; the deleter and the
-    blind single-key delete apply it by hand.
+    transfer engine gets the same from s3transfer itself; the deleter, the
+    blind single-key delete, sync's synchronous deletes and the single-call
+    operations apply it by hand, and the storage's own requests - the listing,
+    the HEAD, ``open`` / ``delete`` / ``get_file`` / ``put_file`` - through
+    `s3_request`.
     """
     error = translate_boto_error(exc, operation=operation, bucket=bucket, key=key)
     if error is not exc:
         error.__cause__ = exc
+    else:
+        attribute_failure(error, operation=operation, bucket=bucket, key=key)
     return error
 
+
+@contextmanager
+def s3_request(
+    *, operation: str | None, bucket: str | None = None, key: str | None = None
+) -> Generator[None, None, None]:
+    """Report whatever one S3 request raised as a ``Boto3S3Error``.
+
+    `s3_errors` for the boto family, plus the `request_failure` capture for
+    everything else the call raised from inside botocore - a redirect loop
+    ending in ``RecursionError``, an S3 Express ``CreateSession`` reply without
+    ``Credentials`` (``KeyError``), a response value its parser cannot convert
+    (``ValueError``) - so ``except Boto3S3Error`` catches a failed request
+    whatever botocore died of. Those become the base error carrying the
+    original as ``__cause__`` and its ``str()`` as the message, which is the
+    text aws-cli prints for the same failure. A family error raised inside
+    passes through untouched, and ``AssertionError`` alone is left
+    untranslated (an invariant or a test double's guard, never a request
+    outcome).
+
+    Wrap the request only - the client call, or one step of a paginator -
+    never the code that consumes its result: what that code raises is not a
+    request failing.
+    """
+    try:
+        with s3_errors(operation=operation, bucket=bucket, key=key):
+            yield
+    except (Boto3S3Error, AssertionError):
+        raise
+    except Exception as exc:
+        raise request_failure(exc, operation=operation, bucket=bucket, key=key) from exc
+
+
+# The instant naive stamps are counted from (`aware_stamp`).
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 # Years a listing timestamp can carry without its local-zone rendering being
 # able to leave datetime's range: everything strictly inside the first and the
@@ -326,7 +667,88 @@ _LOCAL_CHECK_FREE_YEARS = range(datetime.min.year + 1, datetime.max.year)
 _ALWAYS_CHECK_LOCAL_ZONE = sys.platform == "win32"
 
 
-def reject_unrepresentable_stamp(mtime: datetime | None) -> None:
+def read_required(
+    entry: Mapping[str, Any],
+    element: str,
+    *,
+    operation: str | None = None,
+    bucket: str | None = None,
+    key: str | None = None,
+) -> Any:
+    """Read an element a response entry must carry: aws-cli's subscript, as a family error.
+
+    aws-cli reads these by subscript and dies on the ``KeyError`` naming the
+    element; here that becomes `MalformedResponseError` with the same message
+    (the ``KeyError``'s ``str()``, the element name in quotes) and the
+    ``KeyError`` on ``__cause__``, so a consumer catches it as a family error
+    while the CLI's line stays byte-identical. Each call site reads in
+    aws-cli's own order, so a doubly incomplete entry is blamed on the same
+    element there.
+    """
+    try:
+        return entry[element]
+    except KeyError as exc:
+        raise MalformedResponseError(str(exc), operation=operation, bucket=bucket, key=key) from exc
+
+
+def aware_stamp(
+    mtime: datetime,
+    *,
+    operation: str | None = None,
+    bucket: str | None = None,
+    key: str | None = None,
+) -> datetime:
+    """A response timestamp as the aware value ``FileInfo.mtime`` promises.
+
+    Every form S3 itself sends carries a zone, and botocore parses it into an
+    aware ``datetime``; that value is returned as it is. A text with no zone
+    at all (an S3-compatible endpoint's ``2025-01-01T00:00:00``) parses naive,
+    and a naive ``mtime`` cannot be set against the other side's aware one -
+    sync's size-and-time judgment would end the run on the subtraction.
+    aws-cli reads such a stamp as local time (its ``.astimezone(tzlocal())``
+    presumes the system zone for a naive value) and carries on, so that is the
+    reading here, converted to UTC: the instant aws-cli compares, stamps a
+    download with and prints.
+
+    The instant is taken through ``timestamp()`` rather than ``astimezone()``.
+    The two agree except for a wall-clock time the local zone skips (the gap
+    a daylight-saving change, or any other change of offset, jumps over),
+    which ``astimezone()`` places earlier by the gap's length before Python
+    3.12 than from it; ``timestamp()`` gives the 3.12 reading on every
+    version, and aws-cli runs on a later one (measured under
+    ``TZ=America/New_York``: ``2025-03-09T02:30:00`` is 07:30Z for aws-cli).
+    Only whole seconds go through the float, the microseconds are put back
+    exactly.
+
+    Where the conversion itself fails, aws-cli dies on it, and it is reported
+    the way `reject_unrepresentable_stamp` reports the aware case. That
+    includes a failure of a step whose answer is not otherwise needed:
+    aws-cli's Python places a naive value by solving for it on both sides of
+    a possible fold, and the second solution reads the local calendar a day
+    ahead. So a zone-less stamp in the last day of ``datetime``'s range
+    (``9999-12-31T00:00:00`` on) ends an aws-cli run in every zone, and on
+    Windows so does one within a day of where its ``localtime`` stops, as
+    well as any below the epoch (all measured). The same second call is made
+    here, for its exception alone.
+    """
+    if mtime.utcoffset() is not None:
+        return mtime
+    try:
+        whole = mtime.replace(microsecond=0)
+        seconds = int(whole.timestamp())
+        whole.replace(fold=1).timestamp()  # the far side of a fold: a day ahead
+        return _EPOCH + timedelta(seconds=seconds, microseconds=mtime.microsecond)
+    except (OverflowError, ValueError, OSError) as exc:
+        raise MalformedResponseError(str(exc), operation=operation, bucket=bucket, key=key) from exc
+
+
+def reject_unrepresentable_stamp(
+    mtime: datetime | None,
+    *,
+    operation: str | None = None,
+    bucket: str | None = None,
+    key: str | None = None,
+) -> None:
     """Run aws-cli's local-zone conversion of an S3 timestamp for its failure alone.
 
     aws-cli turns every timestamp an S3 response carries into
@@ -336,7 +758,11 @@ def reject_unrepresentable_stamp(mtime: datetime | None) -> None:
     away from the end of ``datetime``'s range) aborts the whole run with
     ``date value out of range`` instead of being listed or transferred. The value
     kept here stays UTC per the ``FileInfo.mtime`` contract, so this runs the
-    conversion only for the exception it may raise. dateutil's ``tzlocal`` is
+    conversion only for the exception it may raise, which surfaces as
+    `MalformedResponseError` (aws-cli's ``date value out of range`` as the
+    message, the ``OverflowError`` on ``__cause__``; on Windows, where the
+    conversion fails as an ``OSError`` instead - for every stamp below the
+    epoch too - that error and its message). dateutil's ``tzlocal`` is
     rebuilt per call the way aws-cli does, so a process that changes ``TZ`` (and
     calls ``time.tzset``) follows; the import is deferred because the whole
     dateutil package costs about as much to import as boto3-s3 itself.
@@ -350,7 +776,13 @@ def reject_unrepresentable_stamp(mtime: datetime | None) -> None:
         return
     from dateutil.tz import tzlocal
 
-    mtime.astimezone(tzlocal())
+    try:
+        mtime.astimezone(tzlocal())
+    except (OverflowError, ValueError, OSError) as exc:
+        # OSError is Windows': the conversion goes through time.localtime,
+        # which fails outright there - below the epoch and past its own upper
+        # limit alike ([Errno 22]) - where POSIX raises OverflowError.
+        raise MalformedResponseError(str(exc), operation=operation, bucket=bucket, key=key) from exc
 
 
 def _page_to_infos(
@@ -378,18 +810,19 @@ def _page_to_infos(
     ``compare_key``, before ``scan_pages`` sieves, so a ``ScanOptions.filter`` sees
     ``info.storage``.
 
-    The elements a listing entry must carry are read by subscript, not by
-    ``get``: aws-cli reads them the same way (``BucketLister`` takes ``Key`` then
+    The elements a listing entry must carry are read as required, not by
+    ``get``: aws-cli reads them by subscript (``BucketLister`` takes ``Key`` then
     ``LastModified``, its consumer ``Size``; a common prefix is read as
-    ``Prefix``), so an entry missing one raises ``KeyError`` naming the element
-    and stops the listing right there rather than being dropped from it. That is
-    what the ignores below mark: the subscripts may raise at runtime on purpose.
-    This is a generator, entry by entry, for the same reason - the entries ahead
-    of the bad one are already emitted when it is reached, as in aws-cli.
+    ``Prefix``), so an entry missing one stops the listing right there with
+    `MalformedResponseError` naming the element (`read_required`) rather than
+    being dropped from it. This is a generator, entry by entry, for the same
+    reason - the entries ahead of the bad one are already emitted when it is
+    reached, as in aws-cli.
     """
+    bucket = storage.bucket
     if include_common_prefixes:
         for common in page.get("CommonPrefixes", []):
-            dir_prefix = common["Prefix"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
+            dir_prefix: str = read_required(common, "Prefix", bucket=bucket)
             yield S3FileInfo(
                 key=dir_prefix,
                 kind=FileKind.DIRECTORY,
@@ -397,22 +830,55 @@ def _page_to_infos(
                 storage=storage,
             )
     for obj in page.get("Contents", []):
-        key = obj["Key"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
-        mtime = obj["LastModified"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
-        reject_unrepresentable_stamp(mtime)
-        size = obj["Size"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
+        key: str = read_required(obj, "Key", bucket=bucket)
+        mtime = aware_stamp(
+            read_required(obj, "LastModified", bucket=bucket, key=key), bucket=bucket, key=key
+        )
+        reject_unrepresentable_stamp(mtime, bucket=bucket, key=key)
+        size: int = read_required(obj, "Size", bucket=bucket, key=key)
         etag = obj.get("ETag")
         owner = obj.get("Owner")
         yield S3FileInfo(
             key=key,
             size=size,
             mtime=mtime,
-            etag=etag.strip('"') if etag else None,
+            etag=etag,
             storage_class=obj.get("StorageClass"),
             owner=owner.get("ID") if owner else None,
             compare_key=key[len(prefix) :],
             storage=storage,
         )
+
+
+# The entry elements botocore itself subscripts on a listing page, ahead of
+# `_page_to_infos`: a response that echoes ``EncodingType`` (S3 and MinIO do,
+# botocore having asked for ``url``) has every ``Contents`` ``Key`` and every
+# ``CommonPrefixes`` ``Prefix`` URL-decoded in place as the page is parsed.
+_LISTING_DECODED_ELEMENTS = frozenset({"Key", "Prefix"})
+
+
+def _next_listing_page(
+    pages: Iterator[ListObjectsV2OutputTypeDef], *, bucket: str
+) -> ListObjectsV2OutputTypeDef | None:
+    """Fetch the next ``ListObjectsV2`` page, or ``None`` once the listing ends.
+
+    A page whose entry lacks ``Key`` (or whose common prefix lacks ``Prefix``)
+    never reaches `_page_to_infos` when the response echoes ``EncodingType``:
+    botocore's own URL-decoding of the page subscripts the same element first
+    and dies on the ``KeyError``, as aws-cli does on the same response. That is
+    the incomplete entry `read_required` reports, met one step earlier, so it
+    is reported the same way - `MalformedResponseError` naming the element,
+    the ``KeyError`` on ``__cause__``. Here the whole page is lost with it, the
+    decoding running before any of its entries is handed out (aws-cli's
+    listing stops at the same point). Any other ``KeyError`` is left to the
+    caller's request capture.
+    """
+    try:
+        return next(pages, None)
+    except KeyError as exc:
+        if exc.args and exc.args[0] in _LISTING_DECODED_ELEMENTS:
+            raise MalformedResponseError(str(exc), bucket=bucket) from exc
+        raise
 
 
 def _collect_page(entries: Iterator[S3FileInfo]) -> Iterator[list[S3FileInfo]]:
@@ -450,17 +916,21 @@ def _page_to_bucket_infos(page: ListBucketsOutputTypeDef, storage: Storage) -> I
     ``storage`` (the service-level ``S3Storage``) is stamped as the producing
     backend, like every other producer's entries.
 
-    Both elements are read by subscript, in the order aws-cli's bucket listing
-    reads them (it renders the creation date, then appends the name), so a bucket
-    entry missing one raises ``KeyError`` naming the element and stops the
-    listing at that bucket - the buckets ahead of it are already delivered,
-    this being a generator its caller yields straight through. The date needs no
-    local-zone check here: nothing but the ``ls`` rendering consumes it, and that
-    conversion is aws-cli's own (``output.format_entry``).
+    Both elements are read as required, in the order aws-cli's bucket listing
+    subscripts them (it renders the creation date, then appends the name), so a
+    bucket entry missing one stops the listing at that bucket with
+    `MalformedResponseError` naming the element - the buckets ahead of it are
+    already delivered, this being a generator its caller yields straight
+    through. The date is made aware like any other stamp (`aware_stamp`) but
+    needs no local-zone check here: nothing but the ``ls`` rendering consumes
+    it, and that conversion is aws-cli's own (``output.format_entry``).
     """
-    for bucket in page.get("Buckets", []):
-        creation = bucket["CreationDate"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
-        name = bucket["Name"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
+    for entry in page.get("Buckets", []):
+        name_hint = entry.get("Name")
+        creation = aware_stamp(
+            read_required(entry, "CreationDate", bucket=name_hint), bucket=name_hint
+        )
+        name: str = read_required(entry, "Name", bucket=name_hint)
         yield S3FileInfo(
             key=name,
             kind=FileKind.BUCKET,
@@ -506,9 +976,11 @@ def _bucket_filters_unsupported_reason(
     return None
 
 
-# The ``operation`` the single-request lane stamps on the errors it raises
-# (design/exceptions.md: a storage-level method the caller invokes itself names
-# its own errors, since no subcommand is in scope).
+# The ``operation`` the single-request lane stamps on the errors it raises.
+# ``get_file`` / ``put_file`` are not a storage half of some operation the way
+# ``open`` / ``delete`` / ``get_fileinfo`` are (those leave it unset for the
+# operation to fill): nothing above them will ever name the failure, so they
+# name it themselves (design/exceptions.md section 2).
 _GET_FILE_OPERATION = "get_file"
 _PUT_FILE_OPERATION = "put_file"
 
@@ -520,7 +992,8 @@ _DOWNLOAD_CHUNK_SIZE = 256 * 1024
 # (``OSUtils.get_temp_filename``): the destination's name plus a random
 # extension, in the destination's directory - so the ``os.replace`` that commits
 # the download stays inside one filesystem and is therefore atomic. The length
-# cap is the 255-character limit common filesystems impose, and it eats the
+# cap is the 255 that common filesystems impose on one name - counted in the
+# name's encoded bytes, which is how the POSIX ones count it - and it eats the
 # destination's name rather than the random part.
 _TEMP_NAME_MAX = 255
 _TEMP_SUFFIX_BYTES = 4
@@ -536,6 +1009,28 @@ _TEMP_OPEN_FLAGS: int = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BI
 _TEMP_OPEN_MODE = 0o666
 
 
+def _download_temp_name(base: str, suffix: str) -> str:
+    """``base + suffix``, with ``base`` cut so the name fits ``_TEMP_NAME_MAX``.
+
+    The limit is measured on the filesystem encoding (``os.fsencode``), not on
+    ``len``: a destination named in multi-byte characters can be a valid name
+    of 255 bytes and well under 255 characters, and a cut by characters would
+    leave it whole and push the suffixed name past the limit - failing every
+    download onto such a name with ``ENAMETOOLONG`` (s3transfer's own temp
+    naming cuts by characters and does fail there). Whole characters are
+    dropped from the end, never part of one. Where the filesystem counts
+    UTF-16 units instead (NTFS), the byte count only overestimates, so the cut
+    is at worst a little deeper than it had to be.
+    """
+    room = _TEMP_NAME_MAX - len(os.fsencode(suffix))
+    size = 0
+    for index, char in enumerate(base):
+        size += len(os.fsencode(char))
+        if size > room:
+            return base[:index] + suffix
+    return base + suffix
+
+
 def _create_download_temp(path: str) -> tuple[int, str]:
     """Create the sibling temp file a download finishes into; return ``(fd, temp_path)``.
 
@@ -549,7 +1044,7 @@ def _create_download_temp(path: str) -> tuple[int, str]:
     base = os.path.basename(path)
     for _ in range(_TEMP_NAME_ATTEMPTS):
         suffix = f".{secrets.token_hex(_TEMP_SUFFIX_BYTES)}"
-        candidate = os.path.join(directory, base[: _TEMP_NAME_MAX - len(suffix)] + suffix)
+        candidate = os.path.join(directory, _download_temp_name(base, suffix))
         try:
             return os.open(candidate, _TEMP_OPEN_FLAGS, _TEMP_OPEN_MODE), candidate
         except FileExistsError:
@@ -733,29 +1228,65 @@ class S3Storage(Storage):
         """The keyless-normalized ``s3://`` URI, from the held state.
 
         The instance form of ``normalize_s3_uri`` (aws-cli's
-        ``_normalize_s3_trailing_slash``), derived from ``bucket`` / ``key``
-        with no string round-trip: a keyless bucket reads as the bucket root
-        ``s3://bucket/`` (the join supplies the slash), a bare service root
-        stays ``s3://``. The form aws validates and prints - ``mv``'s
-        same-path error shows it.
+        ``_normalize_s3_trailing_slash``), derived from the held state with no
+        string round-trip: a keyless bucket reads as the bucket root
+        ``s3://bucket/``, and the service root keeps the spelling it was given
+        (``s3://`` or ``s3:///``), which aws-cli leaves alone. The form aws
+        validates and prints - ``mv``'s same-path error shows it.
+        """
+        return _S3_SCHEME + self._normalized_path()
+
+    def _normalized_path(self) -> str:
+        """The scheme-less, keyless-normalized ``bucket/key`` string.
+
+        What aws-cli's ``_normalize_s3_trailing_slash`` leaves after the scheme
+        is stripped, rebuilt from ``bucket`` / ``key`` and the separator that
+        stood between them (``_key_sep``): a keyless location gains the
+        trailing ``/`` that makes it the bucket root, anything with a key is
+        the plain join. The bare service root has no join to fall out of, and
+        its two spellings stay apart the way aws-cli's scheme strip leaves
+        them - ``s3://`` is ``""``, ``s3:///`` is ``"/"`` - so the raw URI
+        decides there (tested on the scheme-less rest, because ``"s3://"``
+        itself ends in a slash). An access point name the pattern cuts short
+        (``accesspoint/my_ap`` - the name stops at ``my``) has no separator,
+        so it comes back as typed, the way aws-cli prints it.
         """
         if not self._bucket and not self._key:
-            return _S3_SCHEME
-        return f"{_S3_SCHEME}{self._bucket}/{self._key}"
+            return "/" if self._uri[len(_S3_SCHEME) :].endswith("/") else ""
+        path = f"{self._bucket}{self._key_sep}{self._key}"
+        if not self._key and not path.endswith("/"):
+            path += "/"
+        return path
 
     def same_path_as(self, dest: S3Storage) -> bool:
         """Whether ``mv self dest`` would move an object onto itself (held state).
 
-        Equivalent to aws-cli's ``CommandParameters._same_path`` over the two
-        keyless-normalized URIs, computed from the held ``bucket`` / ``key``
-        instead of rebuilt strings: the buckets must match (with equal
-        buckets the URI prefix is inert), and the keys are compared with the
-        ``same_path`` rule anchored at ``/`` - the ``same_key``
+        aws-cli's ``CommandParameters._same_path`` over the two
+        keyless-normalized URIs (``normalized_uri``), plus the one case that
+        string rule misses. For two locations in a bucket the comparison is
+        made on the held ``bucket`` / ``key``: the buckets must match (with
+        equal buckets the URI prefix is inert), and the keys are compared
+        with the ``same_path`` rule anchored at ``/`` - the ``same_key``
         anchoring, which preserves ``os.path.join`` / ``basename``'s host
         semantics exactly (a keyless side reads as the ``/``-terminated
         bucket root, and any prefix ending in ``/`` reproduces the full
-        URI's behavior, ntpath's drive-relative reset included).
+        URI's behavior, ntpath's drive-relative reset included). That agrees
+        with aws-cli's strings except where one object is spelled two ways -
+        an Outposts access-point key set off with ``:`` on one side and ``/``
+        on the other, or typed straight after a name the pattern cuts short
+        (``accesspoint/my_ap`` against ``accesspoint/my/_ap``) - which aws-cli
+        takes for two objects and lets the move
+        proceed onto itself; here it is refused like any other self-move.
+
+        A location without a bucket has no object to protect, only a message
+        to get right, so there aws-cli's string rule alone decides: ``s3://``
+        and ``s3:///`` are different strings, and the run goes on to fail on
+        the empty bucket name as aws-cli's does.
         """
+        if S3Storage.same_path(self.normalized_uri(), dest.normalized_uri()):
+            return True
+        if not self._bucket or not dest._bucket:
+            return False
         return self._bucket == dest._bucket and S3Storage.same_path(
             f"/{self._key}", f"/{dest._key}"
         )
@@ -780,6 +1311,20 @@ class S3Storage(Storage):
             text = f"{_S3_SCHEME}{text}"
         self._uri = text
         self._bucket, self._key = _parse_s3_uri(text)
+        # What stood between the bucket part and the key as written. It is "/"
+        # everywhere but on an Outposts access point, whose pattern also
+        # accepts ":" there (``...:accesspoint/name:key``) and accepts nothing
+        # at all where it cuts a name short at a character the name may not
+        # hold (``.../accesspoint/my_ap`` is the access point ``my`` and the
+        # key ``_ap``) - aws-cli keeps printing and comparing the location as
+        # it was typed. The string forms below rebuild the location with this
+        # separator, so they spell it aws-cli's way, and the producers slice
+        # the key back off a formatted path the same way
+        # (`producers.key_after_bucket`); the requests take ``bucket`` and
+        # ``key``. A keyless location typed with no separator takes "/", the
+        # one its bucket root gains.
+        boundary = text[len(_S3_SCHEME) + len(self._bucket) : len(text) - len(self._key)]
+        self._key_sep = boundary if boundary or self._key else "/"
         self._client = client
         self._owns_client = client is None
         # How this source is listed (the scan's source-config): the ListObjectsV2
@@ -813,32 +1358,24 @@ class S3Storage(Storage):
         (``boto3_s3.transferplan``).
         """
         if self._key:
-            return f"{_S3_SCHEME}{self._bucket}/{self._key}"
+            return f"{_S3_SCHEME}{self._bucket}{self._key_sep}{self._key}"
         return f"{_S3_SCHEME}{self._bucket}"
 
     @override
     def format(self, *, dir_op: bool) -> tuple[str, bool]:
         """Format this S3 side; return ``(root, use_src_name)`` (``Storage.format``).
 
-        aws-cli's ``FileFormat.s3_format``, computed from the held
-        ``bucket`` / ``key`` instead of a re-parsed URI string: the
-        scheme-less ``bucket/key`` root falls straight out of the join, and so
-        does the keyless-bucket normalization (aws-cli's
+        aws-cli's ``FileFormat.s3_format``, computed from the held state
+        instead of a re-parsed URI string: the scheme-less ``bucket/key`` root
+        with the keyless-bucket normalization applied (aws-cli's
         ``_normalize_s3_trailing_slash``: ``s3://bucket`` reads as the bucket
-        root ``bucket/``).
-        Only the bare service root has no join to fall out of, and there the
-        two spellings differ the way aws's scheme strip leaves them: ``s3://``
-        formats to ``""`` (no source name), ``s3:///`` to ``"/"`` (the source
-        name is taken). The raw URI decides, since ``bucket`` and ``key`` are
-        both empty either way - and the test is on the scheme-less rest,
-        because ``"s3://"`` itself ends in a slash.
+        root ``bucket/``) - ``_normalized_path``, which also keeps the two
+        spellings of the bare service root apart (``s3://`` formats to ``""``,
+        no source name; ``s3:///`` to ``"/"``, the source name is taken).
         A ``dir_op`` root is ``/``-terminated and takes the source's name;
         otherwise only an explicit trailing ``/`` does.
         """
-        if not self._bucket and not self._key:
-            path = "/" if self._uri[len(_S3_SCHEME) :].endswith("/") else ""
-        else:
-            path = f"{self._bucket}/{self._key}"
+        path = self._normalized_path()
         if dir_op:
             if not path.endswith("/"):
                 path += "/"
@@ -892,23 +1429,32 @@ class S3Storage(Storage):
         every later call returns the same instance. Deliberately not guarded by
         a lock; build the client on the caller side for concurrent use. A failed
         default build raises the translated ``Boto3S3Error`` -
-        ``ConfigurationError`` for unresolvable credentials / region, its
-        ``InvalidConfigError`` refinement for a set-but-unusable
-        ``AWS_PROFILE`` or a malformed environment endpoint - never the raw
-        botocore error (design/exceptions.md
-        section 1).
+        ``InvalidConfigError`` for a set-but-unusable ``AWS_PROFILE``, partial
+        credentials, a malformed environment endpoint, a config value of the
+        wrong shape or a ``credential_process`` executable that cannot run -
+        never the raw
+        botocore error (design/exceptions.md section 1). A client, built or
+        supplied, whose CA bundle setting is empty or whitespace-only is
+        refused with ``InvalidConfigError`` on every call, and a supplied one
+        also while ``AWS_CA_BUNDLE`` is set but empty or whitespace-only
+        (`reject_empty_ca_bundle`). Missing credentials
+        and an unset region do not fail the build: the client's first request
+        fails on the missing credentials instead, and an unset region falls
+        back to botocore's default for S3.
         """
         if self._client is None:
             # operation=None: no subcommand is in scope at build time.
             with s3_errors(operation=None):
                 try:
                     self._client = boto3.client("s3")
-                except ValueError as exc:
+                except (ValueError, AttributeError, OSError) as exc:
                     # A malformed endpoint from the environment
-                    # (AWS_ENDPOINT_URL[_S3]) raises a plain ValueError, not a
-                    # BotoCoreError - the same hole S3.client() plugs
-                    # (design/exceptions.md).
-                    raise InvalidConfigError(str(exc)) from exc
+                    # (AWS_ENDPOINT_URL[_S3]), a config value of the wrong
+                    # shape, a credential_process that cannot run - the same
+                    # holes S3.client() plugs (`client_build_error`).
+                    raise client_build_error(exc) from exc
+        with s3_errors(operation=None):
+            reject_empty_ca_bundle(self._client, check_environment=not self._owns_client)
         return self._client
 
     def close(self) -> None:
@@ -1008,19 +1554,25 @@ class S3Storage(Storage):
         # a lazy-build failure also surfaces as a Boto3S3Error on the first pull.
         # operation=None: this object listing backs every recursive scan - not
         # only ls, but also rm / cp / mv / sync source enumeration - so the calling
-        # subcommand is not known here, and stamping a fixed "ls" would mislabel
-        # the others (the service-root list_buckets below is ls-only, so it can).
-        with s3_errors(operation=None, bucket=self._bucket):
-            paginator = self.get_client().get_paginator("list_objects_v2")
-            for page in paginator.paginate(**paging):
-                yield from _collect_page(
-                    _page_to_infos(
-                        page,
-                        include_common_prefixes=include_common_prefixes,
-                        prefix=prefix,
-                        storage=self,
-                    )
+        # subcommand is not known here; the operation reading the listing fills
+        # its own name in (attribute_failure).
+        with s3_request(operation=None, bucket=self._bucket):
+            pages = iter(self.get_client().get_paginator("list_objects_v2").paginate(**paging))
+        while True:
+            # Each page is its own request, and only the request sits inside
+            # the capture: what the conversion below raises is this module's.
+            with s3_request(operation=None, bucket=self._bucket):
+                page = _next_listing_page(pages, bucket=self._bucket)
+            if page is None:
+                return
+            yield from _collect_page(
+                _page_to_infos(
+                    page,
+                    include_common_prefixes=include_common_prefixes,
+                    prefix=prefix,
+                    storage=self,
                 )
+            )
 
     def list_buckets(
         self,
@@ -1046,30 +1598,38 @@ class S3Storage(Storage):
         1.34.162) it falls back to one unpaginated ``list_buckets()``. Errors
         surface on the consumer's pull.
         """
-        with s3_errors(operation="ls"):
+        # operation=None throughout, like the object listing: ``S3.ls`` stamps
+        # its own name on what this raises, a direct call has none in scope.
+        with s3_errors(operation=None):
             client = self.get_client()
-            reason = _bucket_filters_unsupported_reason(
-                client, name_prefix=name_prefix, region=region
-            )
-            if reason is not None:
-                # The environment (SDK floor) lacks the capability, not the
-                # caller's arguments: a ConfigurationError. s3_errors translates
-                # botocore exceptions only, so this reaches the caller as raised.
-                raise ConfigurationError(reason, operation="ls")
-            if not client.can_paginate("list_buckets"):
-                # Back-compat (floor botocore 1.31): the ListBuckets paginator is a
-                # late-2024 addition (botocore 1.34.162), so an older botocore has
-                # only the single unpaginated call to list with. Drop this branch
-                # once the floor reaches the paginator.
-                yield from _page_to_bucket_infos(client.list_buckets(), self)
+        reason = _bucket_filters_unsupported_reason(client, name_prefix=name_prefix, region=region)
+        if reason is not None:
+            # The environment (SDK floor) lacks the capability, not the
+            # caller's arguments: a ConfigurationError.
+            raise ConfigurationError(reason)
+        if not client.can_paginate("list_buckets"):
+            # Back-compat (floor botocore 1.31): the ListBuckets paginator is a
+            # late-2024 addition (botocore 1.34.162), so an older botocore has
+            # only the single unpaginated call to list with. Drop this branch
+            # once the floor reaches the paginator.
+            with s3_request(operation=None):
+                listing = client.list_buckets()
+            yield from _page_to_bucket_infos(listing, self)
+            return
+        paging: dict[str, Any] = {"PaginationConfig": {"PageSize": self._page_size}}
+        if name_prefix:
+            paging["Prefix"] = name_prefix
+        if region:
+            paging["BucketRegion"] = region
+        with s3_request(operation=None):
+            pages = iter(client.get_paginator("list_buckets").paginate(**paging))
+        while True:
+            # Only the request sits inside the capture, as in the object listing.
+            with s3_request(operation=None):
+                page = next(pages, None)
+            if page is None:
                 return
-            paging: dict[str, Any] = {"PaginationConfig": {"PageSize": self._page_size}}
-            if name_prefix:
-                paging["Prefix"] = name_prefix
-            if region:
-                paging["BucketRegion"] = region
-            for page in client.get_paginator("list_buckets").paginate(**paging):
-                yield from _page_to_bucket_infos(page, self)
+            yield from _page_to_bucket_infos(page, self)
 
     @override
     def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
@@ -1107,7 +1667,9 @@ class S3Storage(Storage):
         """
         if mode != "rb":
             raise NotImplementedError(_OPEN_WRITE_NOT_IMPLEMENTED)
-        with s3_errors(operation="open", bucket=self._bucket, key=key):
+        # operation=None: the storage cannot know which operation opened it;
+        # the operation layer fills the name in (attribute_failure).
+        with s3_request(operation=None, bucket=self._bucket, key=key):
             response = self.get_client().get_object(Bucket=self._bucket, Key=key)
         return cast("BinaryIO", response["Body"])
 
@@ -1127,7 +1689,10 @@ class S3Storage(Storage):
         kwargs: dict[str, Any] = {"Bucket": self._bucket, "Key": info.key}
         if request_payer is not None:
             kwargs["RequestPayer"] = request_payer
-        with s3_errors(operation="delete", bucket=self._bucket, key=info.key):
+        # operation=None, like open: rm's single-key path, a sync's orphan
+        # removal and an mv's source delete all reach this, and each stamps
+        # its own name on the way out (attribute_failure).
+        with s3_request(operation=None, bucket=self._bucket, key=info.key):
             return self.get_client().delete_object(**kwargs)
 
     def _resolve_key(self, key: str) -> str:
@@ -1168,27 +1733,34 @@ class S3Storage(Storage):
         """
         target_key = self._resolve_key(key)
         try:
-            with s3_errors(operation="head", bucket=self._bucket, key=target_key):
+            # operation=None, like open and delete: a direct call has no
+            # operation in scope, and one that reaches this through a run has
+            # its name filled in by that run (attribute_failure).
+            with s3_request(operation=None, bucket=self._bucket, key=target_key):
                 head = self.get_client().head_object(Bucket=self._bucket, Key=target_key)
         except NotFoundError:
             return None
-        # Read by subscript in aws-cli's own order (`ContentLength`, then
-        # `LastModified`; `ETag` takes a default), like the listing converter
-        # above and the transfer engine's `producers.head_single`: a response
-        # missing one raises `KeyError` naming it instead of yielding an entry
-        # with the value unset.
-        size = head["ContentLength"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
-        mtime = head["LastModified"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
+        # Read as required in aws-cli's own subscript order (`ContentLength`,
+        # then `LastModified`; `ETag` takes a default), like the listing
+        # converter above and the transfer engine's `producers.head_single`: a
+        # response missing one is a MalformedResponseError naming it instead
+        # of an entry with the value unset.
+        size: int = read_required(head, "ContentLength", bucket=self._bucket, key=target_key)
+        mtime = aware_stamp(
+            read_required(head, "LastModified", bucket=self._bucket, key=target_key),
+            bucket=self._bucket,
+            key=target_key,
+        )
         etag = head.get("ETag")
         # aws-cli converts the HeadObject stamp to the local zone as it reads the
         # response (filegenerator's single-object branch), so an unrepresentable
         # one kills the run there rather than downstream.
-        reject_unrepresentable_stamp(mtime)
+        reject_unrepresentable_stamp(mtime, bucket=self._bucket, key=target_key)
         return S3FileInfo(
             key=target_key,
             size=size,
             mtime=mtime,
-            etag=etag.strip('"') if etag else None,
+            etag=etag,
             storage_class=head.get("StorageClass"),
             head=head,
             compare_key=target_key.rsplit("/", 1)[-1],
@@ -1226,14 +1798,16 @@ class S3Storage(Storage):
         replaced rather than followed into its target. On top of that pair, and
         unlike s3transfer, an existing regular destination's permission bits are
         carried onto the replacement (the swap lands a new inode, so without
-        that the mode would silently become the temp file's). Missing parent
+        that the mode would silently become the temp file's). Windows cannot
+        replace a read-only destination: the call fails with
+        ``AccessDeniedError`` and leaves it as it was. Missing parent
         directories are created.
 
         Nothing stamps the local file's mtime - that is the transfer lanes' aws
         parity behavior; here the caller holds the returned ``S3FileInfo`` and
         decides. That info describes the object as ``get_fileinfo``'s does: the
         full key, ``ContentLength`` as ``size``, ``LastModified`` as ``mtime``,
-        the dequoted ETag, the storage class, the key's basename as
+        the ETag as the response carried it, the storage class, the key's basename as
         ``compare_key``. Its ``head`` differs from ``get_fileinfo``'s raw one:
         the response minus its transport metadata and its body.
 
@@ -1241,9 +1815,8 @@ class S3Storage(Storage):
         attributed to its own side: the ``GetObject`` and the reads of its
         streamed body through the botocore translation (a missing key is
         ``NotFoundError``, denied access ``AccessDeniedError``, a stream
-        breaking mid-body ``TransportError``, and one ending short of its
-        ``Content-Length`` the base ``Boto3S3Error`` - botocore files that as an
-        incomplete read, which is none of its transport errors - all carrying
+        breaking mid-body or ending short of its ``Content-Length``
+        ``TransportError`` - all carrying
         ``bucket`` / ``key``), and the local filesystem failures - the temp
         file, the writes, the replace - through the local one, which names the
         local path in ``key`` and leaves ``bucket`` unset
@@ -1251,18 +1824,25 @@ class S3Storage(Storage):
         """
         target_key = self._resolve_key(key)
         dest = os.fspath(path)
-        with s3_errors(operation=_GET_FILE_OPERATION, bucket=self._bucket, key=target_key):
+        with s3_request(operation=_GET_FILE_OPERATION, bucket=self._bucket, key=target_key):
             response = self.get_client().get_object(Bucket=self._bucket, Key=target_key)
         # closing(): the body holds its HTTP connection until it is released,
         # whether the download finished or a local failure abandoned it.
         with closing(cast("BinaryIO", response["Body"])) as body:
+            # The stamp is read before a byte is written: a response whose
+            # stamp cannot be read fails the call with the destination still
+            # as it was, not after the file has been replaced.
+            stamp: datetime | None = response.get("LastModified")
+            mtime = stamp and aware_stamp(
+                stamp, operation=_GET_FILE_OPERATION, bucket=self._bucket, key=target_key
+            )
             self._write_body_atomically(body, dest, key=target_key)
         etag = response.get("ETag")
         return S3FileInfo(
             key=target_key,
             size=response.get("ContentLength"),
-            mtime=response.get("LastModified"),
-            etag=etag.strip('"') if etag else None,
+            mtime=mtime,
+            etag=etag,
             storage_class=response.get("StorageClass"),
             head=strip_response_metadata(response, drop_body=True),
             compare_key=target_key.rsplit("/", 1)[-1],
@@ -1291,7 +1871,7 @@ class S3Storage(Storage):
 
         ``key`` addresses the object exactly as ``get_fileinfo``'s does
         (``_resolve_key``). The returned ``S3FileInfo`` carries the full key, the
-        local file's size as ``size``, the response's dequoted ETag, the key's
+        local file's size as ``size``, the response's ETag as it came, the key's
         basename as ``compare_key``, and the whole ``PutObject`` response under
         ``head``; ``mtime`` stays unset, the response carrying none.
 
@@ -1301,12 +1881,33 @@ class S3Storage(Storage):
         naming the local path in ``key``), while the ``PutObject`` - including a
         failure botocore hits reading the body mid-request, which it reports as
         one of its own - translates through the botocore one.
+
+        A FIFO, a socket or a device is refused up front with
+        ``ValidationError`` (naming the local path in ``key``), in the words
+        the transfer lanes warn such a source away with. None is a regular
+        file whose size says how long its content is, and a FIFO or a socket
+        cannot be rewound for a retry - a FIFO would block the open until a
+        writer appears and then fail botocore's ``tell()`` mid-request with a
+        bare ``OSError``. A device that happens to size and seek
+        (``/dev/null``) is refused with the rest, as aws-cli's transfer skips
+        it.
         """
         target_key = self._resolve_key(key)
         source = os.fspath(path)
         try:
+            special = is_special_file(source)
+        except (OSError, ValueError):
+            special = False  # missing, unreachable or unnameable: the open below reports it
+        if special:
+            raise ValidationError(
+                f"{source}: File is character special device, block special device, "
+                "FIFO, or socket.",
+                operation=_PUT_FILE_OPERATION,
+                key=source,
+            )
+        try:
             stream = open(source, "rb")
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             raise translate_os_error(exc, operation=_PUT_FILE_OPERATION, key=source) from exc
         with stream:
             try:
@@ -1316,7 +1917,7 @@ class S3Storage(Storage):
                 size = os.fstat(stream.fileno()).st_size
             except OSError as exc:
                 raise translate_os_error(exc, operation=_PUT_FILE_OPERATION, key=source) from exc
-            with s3_errors(operation=_PUT_FILE_OPERATION, bucket=self._bucket, key=target_key):
+            with s3_request(operation=_PUT_FILE_OPERATION, bucket=self._bucket, key=target_key):
                 response = self.get_client().put_object(
                     Bucket=self._bucket, Key=target_key, Body=stream
                 )
@@ -1324,7 +1925,7 @@ class S3Storage(Storage):
         return S3FileInfo(
             key=target_key,
             size=size,
-            etag=etag.strip('"') if etag else None,
+            etag=etag,
             head=strip_response_metadata(response),
             compare_key=target_key.rsplit("/", 1)[-1],
             storage=self,
@@ -1353,7 +1954,7 @@ class S3Storage(Storage):
             if parent:
                 os.makedirs(parent, exist_ok=True)
             fd, temp_path = _create_download_temp(dest)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             raise translate_os_error(exc, operation=_GET_FILE_OPERATION, key=dest) from exc
         # The stream takes the descriptor over on a successful fdopen and closes
         # it from then on (the `with` below, on every path out); until then the
@@ -1365,8 +1966,15 @@ class S3Storage(Storage):
             if not stream_owns_fd:
                 with suppress(OSError):
                     os.close(fd)
-            with suppress(OSError):
+            try:
                 os.unlink(temp_path)
+            except OSError:
+                # Windows refuses to delete a read-only file, and the temp file
+                # took a read-only destination's mode - the very replace that
+                # Windows also refuses. Lift the flag and delete again.
+                with suppress(OSError):
+                    os.chmod(temp_path, stat_module.S_IREAD | stat_module.S_IWRITE)
+                    os.unlink(temp_path)
 
         try:
             _preserve_destination_mode(dest, temp_path)
@@ -1386,16 +1994,17 @@ class S3Storage(Storage):
         """Copy the streamed response body into the open temp file, chunk by chunk.
 
         The two error families are kept apart without splitting the loop: the
-        whole of it runs under the botocore translation, and a write's
+        whole of it runs under the request capture (`s3_request`), and a write's
         ``OSError`` is translated locally on the spot instead of reaching that
-        translation as a raw one. ``s3_errors`` catches only ``ClientError`` /
-        ``BotoCoreError``, so the already-translated local error passes straight
-        out through it. Pre-translating there is what the split rests on -
-        botocore's ``ReadTimeoutError`` is itself an ``OSError``, so a single
+        capture as a raw one - a family error passes straight out through it,
+        so the already-translated local error keeps its own attribution.
+        Pre-translating there is what the split rests on: botocore's
+        ``ReadTimeoutError`` is itself an ``OSError``, so a single
         ``except OSError`` reaching around the reads would file a broken stream
-        as a local failure (see ``_write_body_atomically``).
+        as a local failure (see ``_write_body_atomically``), and whatever else
+        a read raises is the request failing, not the filesystem.
         """
-        with s3_errors(operation=_GET_FILE_OPERATION, bucket=self._bucket, key=key):
+        with s3_request(operation=_GET_FILE_OPERATION, bucket=self._bucket, key=key):
             while True:
                 chunk = body.read(_DOWNLOAD_CHUNK_SIZE)
                 if not chunk:
@@ -1406,4 +2015,10 @@ class S3Storage(Storage):
                     raise translate_os_error(exc, operation=_GET_FILE_OPERATION, key=dest) from exc
 
 
-__all__ = ["S3Storage", "s3_errors", "translate_boto_error"]
+__all__ = [
+    "CA_BUNDLE_ENVIRONMENT_VETTED",
+    "S3Storage",
+    "s3_errors",
+    "s3express_unsupported_reason",
+    "translate_boto_error",
+]

@@ -53,3 +53,36 @@ def listing(*entries: tuple[str, int]) -> dict[str, Any]:
             for key, size in entries
         ]
     }
+
+
+class RecordingCrtSender:
+    """Stands in for `crtrequest.CrtRequestSender`: each request goes to the
+    test client's method of the same name - so a fake client's scripts, or a
+    recording client's canned responses, answer it - and is recorded."""
+
+    def __init__(self, client: Any) -> None:
+        self.client = client
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def call(self, operation: str, params: dict[str, Any]) -> dict[str, Any]:
+        from botocore import xform_name
+
+        self.calls.append((operation, dict(params)))
+        return getattr(self.client, xform_name(operation))(**params)
+
+
+def crt_sender_factory(
+    built: list[tuple[RecordingCrtSender, Any, dict[str, Any]]],
+) -> Any:
+    """A stand-in for `deleter.crt_delete_sender`: a `RecordingCrtSender` over
+    the client when the config names ``'crt'``, else ``None`` (botocore), with
+    each build recorded as (sender, config, keyword arguments)."""
+
+    def build(client: Any, transfer_config: Any, **kwargs: Any) -> RecordingCrtSender | None:
+        if getattr(transfer_config, "preferred_transfer_client", None) != "crt":
+            return None
+        sender = RecordingCrtSender(client)
+        built.append((sender, transfer_config, kwargs))
+        return sender
+
+    return build

@@ -9,11 +9,12 @@ classic engine's - aws-cli ``s3handler`` has no CRT branch - and the value is
 the live ours-vs-aws comparison under CRT mode).
 
 The delete cases port the missing intent of aws-cli's CRT rm/sync tests at the
-CLI-observable boundary. For S3 deletion, boto3-s3 deliberately keeps its
-established ``DeleteObject`` / batched ``S3Deleter`` routes rather than
-aws-cli's per-key CRT DELETE requests; download sync-delete removes local files
-on both sides (design/deleter.md). The contract here is rc, output, and end-state
-parity rather than S3 transport identity.
+CLI-observable boundary. For S3 deletion, boto3-s3 sends batched
+``DeleteObjects`` on the CRT client (``DeleteObject`` for a single key) where
+aws-cli sends one CRT ``DeleteObject`` per key; download sync-delete removes
+local files on both sides (design/deleter.md, design/crt.md section 6). The
+contract here is rc, output, and end-state parity rather than S3 transport
+identity.
 """
 
 from __future__ import annotations

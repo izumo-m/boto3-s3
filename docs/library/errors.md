@@ -13,17 +13,22 @@ except Boto3S3Error as exc:
     ...
 ```
 
-Catching the root catches everything the library raises.
+Catching the root catches every failure the library reports as its own. The
+deliberate exceptions — programming errors, `KeyboardInterrupt` / `SystemExit`,
+and botocore's `MissingDependencyException` when the CRT engine is requested
+explicitly without a usable awscrt — are listed under
+[`Boto3S3Error`](../reference/exceptions.md#boto3s3error).
 
 ## 1. The hierarchy
 
 ```
-Boto3S3Error                 the root; catch this to catch everything
+Boto3S3Error                 the root; catch this to catch every reported failure
 ├── AccessDeniedError        S3 403, or a local PermissionError
 ├── NotFoundError            S3 404, or a local FileNotFoundError
 ├── ValidationError          an invalid argument, precondition or state
 │   └── InvalidValueError
 ├── TransportError           network or local I/O failure
+├── MalformedResponseError   a response missing what the AWS CLI reads, or a timestamp the host cannot hold
 ├── ConfigurationError       credentials or region missing or unusable
 │   └── InvalidConfigError
 ├── CancelledError           cancelled through a CancelToken
@@ -39,8 +44,11 @@ Catch the parent — `ValidationError` also catches `InvalidValueError`, and
 `CancelledError` here is the library's own, unrelated to the identically named
 exceptions in `asyncio` and `concurrent.futures`.
 
-Programming mistakes are not wrapped. A `TypeError` from your own callback, a
-`KeyboardInterrupt`, a `SystemExit` — all pass straight through.
+Programming mistakes are not wrapped on the synchronous paths. A `TypeError`
+raised by a `filter` predicate, a `KeyboardInterrupt`, a `SystemExit` — all
+pass straight through. `on_result` and `on_progress` must not raise at all:
+beyond what an operation's reference page states, the library makes no promise
+about a callback that does.
 
 Every class in the tree has its own entry in the API reference,
 [`exceptions.md`](../reference/exceptions.md) — the exact conditions that raise
@@ -60,9 +68,9 @@ and never parse `str(exc)`.
 
 The context attributes are best-effort. `operation=None` is a legitimate value
 rather than a gap: it means no single operation was in scope — while a client is
-being built, while a recursive run is listing entries, or when you call a
-storage-level method such as `Storage.validate` yourself; the same validation
-run by an operation carries that operation's name. And `key` names the
+being built, or when you call a storage-level method such as
+`Storage.validate` or `Storage.scan` yourself; the same call made by an
+operation carries that operation's name. And `key` names the
 failing entry in whichever address space it came from, so a locally-originating
 error puts a filesystem path there, with no `bucket`.
 
@@ -85,6 +93,7 @@ synthesized from the response body and has no exception behind it, so its
 | S3 403 / `AccessDenied`; a local `PermissionError` | `AccessDeniedError` |
 | S3 404 / `NoSuchKey` / `NoSuchBucket`; a local `FileNotFoundError` or missing source | `NotFoundError` |
 | S3 5xx or throttling (`InternalError`, `SlowDown`, `ServiceUnavailable`); a connection failure, a timeout, a local I/O `OSError` | `TransportError` |
+| a listing, bucket or HeadObject response missing an element the AWS CLI reads; a `LastModified` the host's local zone cannot represent | `MalformedResponseError` |
 | `NoCredentialsError` / `NoRegionError`; an SDK too old for a requested feature | `ConfigurationError` |
 | an unusable profile, partial credentials, a config value that will not convert | `InvalidConfigError` |
 | an invalid argument or a violated precondition | `ValidationError` |
@@ -122,13 +131,18 @@ Some details worth knowing:
 - The batch shape applies **regardless of item count** — a single failing item
   still ends in `BatchError`, reported as 1 of 1.
 - Cancelled items are never counted as failures, and a cancelled run raises
-  something else entirely (see [`results.md`](./results.md)).
+  something else entirely (see [`results.md`](./results.md)). The CRT engine
+  is narrower: there only a `CancelToken` cancel yields cancelled items, so a
+  fatal error or a Ctrl-C that cuts a CRT run short reports its in-flight items
+  as `FAILED`, and a Ctrl-C the CRT manager swallows mid-drain ends the run in
+  `BatchError`.
 - `skipped` is informational. It counts skips the operation made — a `cp` or
   `mv` that `no_overwrite` stopped from replacing an existing object, an
   archived object passed over under `ignore_glacier_warnings` — but not items
   dropped during enumeration by a filter, which never reach that layer. `sync`
-  never adds to it: a pair it finds up to date produces no record at all, and
-  `no_overwrite` there simply turns the update lane off.
+  adds to it only through that archived-object skip: a pair it finds up to date
+  produces no record at all, and `no_overwrite` there simply turns the update
+  lane off.
 
 Not every operation aggregates. `mb` / `rb` / `website` / `presign` act on one
 thing and raise the category exception directly. So does a failure that happens

@@ -11,6 +11,7 @@ gate warns/skips/forces, and item failures aggregate into ``BatchError``.
 
 from __future__ import annotations
 
+import concurrent.futures
 import gzip
 import io
 import os
@@ -25,8 +26,10 @@ from botocore.exceptions import ClientError, ParamValidationError
 from boto3_s3 import GlobFilter, producers, transferplan
 from boto3_s3.exceptions import (
     BatchError,
+    Boto3S3Error,
     CancelledError,
     NotFoundError,
+    TransportError,
     ValidationError,
 )
 from boto3_s3.iostorage import IOStorage, StdioStorage
@@ -61,6 +64,29 @@ _SYNC = TransferConfig(use_threads=False)
 # 1) here. A fully synchronous NonThreadedExecutor (_SYNC) completes each twin
 # before the next is judged, emptying the set, so the conflict is never seen.
 _CASE_CONFLICT_CONFIG = TransferConfig(max_concurrency=1)
+
+
+def _release_once_queued(
+    monkeypatch: pytest.MonkeyPatch, release: threading.Event, count: int
+) -> None:
+    """Set *release* once *count* items have been queued on a Transferrer.
+
+    For a test whose first request is held until a cancel its record
+    triggers: the run checks the cancel before it pulls each next item, so
+    a file the walk had not reached by then is never queued. Releasing on a
+    fixed delay instead let a slow runner (a Windows CI job) reach the last
+    file only after the cancel, one record short.
+    """
+    queued: list[TransferItem] = []
+    real_submit = Transferrer.submit
+
+    def submit(self: Transferrer, item: TransferItem) -> None:
+        real_submit(self, item)
+        queued.append(item)
+        if len(queued) == count:
+            release.set()
+
+    monkeypatch.setattr(Transferrer, "submit", submit)
 
 
 class TestUploadRoute:
@@ -101,6 +127,87 @@ class TestUploadRoute:
         S3().cp(src, S3Storage("s3://bucket/up/", client=client), transfer_config=_SYNC)
         assert ops(calls) == ["PutObject"]
         assert calls[0].params["Key"] == "up/a.txt"
+
+    @pytest.mark.skipif(
+        os.name == "nt", reason="Windows folds `..` before the filesystem sees the path"
+    )
+    def test_a_source_typed_through_a_symlink_and_dot_dot_is_admitted_like_aws(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `lsub/../x` is sub/x to the kernel (lsub -> sub/other) and <cwd>/x
+        # to os.path.abspath, which folds `..` lexically. aws's pre-check asks
+        # the kernel and admits the source; its generator then looks for the
+        # lexical form and warns "File does not exist." - rc 2 (measured).
+        # Ours tested abspath up front and refused it: fatal error, rc 1.
+        (tmp_path / "sub" / "other").mkdir(parents=True)
+        (tmp_path / "sub" / "x").write_bytes(b"sub-x")
+        (tmp_path / "lsub").symlink_to(tmp_path / "sub" / "other")
+        monkeypatch.chdir(tmp_path)
+        client, calls = make_recording_client([])
+        results: list[OpResult] = []
+        S3().cp(
+            LocalStorage("lsub/../x"),
+            S3Storage("s3://bucket/k", client=client),
+            on_result=results.append,
+        )
+        assert calls == []
+        assert [r.outcome for r in results] == [OpOutcome.WARNED]
+        assert str(results[0].error) == f"Skipping file {tmp_path / 'x'}. File does not exist."
+
+    @pytest.mark.skipif(os.name != "nt", reason="the Windows path rule")
+    def test_on_windows_that_source_is_refused_as_missing_like_aws(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Windows folds `..` out of a path before the filesystem sees it, so
+        # the typed path and the lexical form name the same missing <cwd>/x:
+        # aws.exe's pre-check refuses the source (rc 255, measured) and so
+        # does this one.
+        (tmp_path / "sub" / "other").mkdir(parents=True)
+        (tmp_path / "sub" / "x").write_bytes(b"sub-x")
+        (tmp_path / "lsub").symlink_to(tmp_path / "sub" / "other", target_is_directory=True)
+        monkeypatch.chdir(tmp_path)
+        client, calls = make_recording_client([])
+        with pytest.raises(NotFoundError) as excinfo:
+            S3().cp(LocalStorage("lsub/../x"), S3Storage("s3://bucket/k", client=client))
+        assert str(excinfo.value) == "The user-provided path lsub/../x does not exist."
+        assert calls == []
+
+    def test_an_empty_local_path_is_rejected_before_anything_runs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws refuses "" on either side (rc 255); the library used to resolve
+        # it to the working directory and run there.
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "a.txt").write_bytes(b"x")
+        client, calls = make_recording_client([])
+        for src, dest in (
+            ("", S3Storage("s3://bucket/up/", client=client)),
+            (S3Storage("s3://bucket/k", client=client), ""),
+        ):
+            with pytest.raises(ValidationError, match="must not be empty") as excinfo:
+                S3().cp(src, dest, recursive=True)
+            assert excinfo.value.operation == "cp"
+        assert calls == []
+
+    def test_a_single_source_resolution_failure_is_attributed_to_the_operation(
+        self, tmp_path: Path
+    ) -> None:
+        # The storage's get_fileinfo raises with operation unset (it cannot know
+        # who resolves the path); the single-source producer fills the name in,
+        # as the run does for open / delete failures. Before, the local backend
+        # stamped its own method name and the operation could not replace it.
+        src = tmp_path / "a.txt"
+        src.write_bytes(b"x")
+
+        class _Unresolvable(LocalStorage):
+            def get_fileinfo(self, key: str = "", *, on_warning: Any = None) -> Any:
+                raise TransportError("stat failed", operation=None, key=str(src))
+
+        client, _calls = make_recording_client([])
+        with pytest.raises(TransportError) as excinfo:
+            S3().cp(_Unresolvable(str(src)), S3Storage("s3://bucket/k", client=client))
+        assert excinfo.value.operation == "cp"
+        assert excinfo.value.key == str(src)
 
     def test_oversize_upload_warns_but_still_attempts(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -344,7 +451,9 @@ class TestUploadRoute:
         assert calls == []
         assert not dest.exists()
 
-    def test_graceful_cancel_from_result_drains_submitted_transfers(self, tmp_path: Path) -> None:
+    def test_graceful_cancel_from_result_drains_submitted_transfers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         for name in ("a.txt", "b.txt", "c.txt"):
             (tmp_path / name).write_bytes(name.encode())
         client, _ = make_recording_client([])
@@ -366,7 +475,7 @@ class TestUploadRoute:
             if len(results) == 1:
                 token.cancel()
 
-        threading.Timer(0.2, release_first.set).start()
+        _release_once_queued(monkeypatch, release_first, 3)
         with pytest.raises(CancelledError):
             S3().cp(
                 str(tmp_path),
@@ -448,7 +557,7 @@ class TestUploadRoute:
                 token.cancel()
                 threading.Thread(target=escalate, daemon=True).start()
 
-        threading.Timer(0.2, release_first.set).start()
+        _release_once_queued(monkeypatch, release_first, 3)
         with pytest.raises(CancelledError):
             S3().cp(
                 str(tmp_path),
@@ -529,6 +638,46 @@ class TestFilters:
         assert ops(calls) == ["HeadObject"]
         assert results == []
         assert not (tmp_path / "k.txt").exists()
+
+    @pytest.mark.parametrize("operation", ["cp", "mv"])
+    @pytest.mark.parametrize(
+        ("key", "patterns", "kept"),
+        [
+            # aws-cli matches a single object relative to its parent, and the
+            # parent of `a//b` is `a/`: the entry is `/b`, not `b` (measured
+            # on the pinned aws for cp and mv alike).
+            ("a//b", ("-b",), True),
+            ("a//b", ("-*", "+b"), False),
+            ("a//b", ("-?b",), False),
+            ("/b", ("-b",), True),
+            ("/b", ("-*", "+b"), False),
+            ("a/b", ("-b",), False),
+            ("a/b", ("-*", "+b"), True),
+        ],
+    )
+    def test_a_single_s3_source_is_matched_under_aws_clis_filter_root(
+        self, tmp_path: Path, operation: str, key: str, patterns: tuple[str, ...], kept: bool
+    ) -> None:
+        # The record's compare_key is the key's last component (it names the
+        # destination), and the filter was matched against that - so a key
+        # doubling a slash got the opposite verdict from aws-cli's, and from
+        # the blind rm's. A mv then moved, and deleted, a source aws-cli
+        # leaves alone.
+        glob = GlobFilter()
+        for pattern in patterns:
+            glob = glob.exclude(pattern[1:]) if pattern[0] == "-" else glob.include(pattern[1:])
+        client, calls = make_recording_client([head_response()])
+        results: list[OpResult] = []
+        getattr(S3(), operation)(
+            S3Storage(f"s3://bucket/{key}", client=client),
+            str(tmp_path) + os.sep,
+            filter=glob,
+            dryrun=True,
+            on_result=results.append,
+        )
+        assert ops(calls) == ["HeadObject"]
+        # The record still names the item by its last component.
+        assert [result.compare_key for result in results] == (["b"] if kept else [])
 
     def test_single_upload_is_filtered_too(self, tmp_path: Path) -> None:
         src = tmp_path / "k.txt"
@@ -664,6 +813,109 @@ class TestDownloadRoute:
         assert ops(calls) == ["HeadObject"]
         assert [result.outcome for result in results] == [OpOutcome.DRYRUN]
 
+    def test_a_colon_separated_outposts_key_is_reported_as_written(self, tmp_path: Path) -> None:
+        # aws-cli's Outposts access-point pattern takes ":" between the ARN and
+        # the key and keeps printing the location as typed: `cp f.txt
+        # s3://<arn>:dir/ --dryrun` previews `upload: ./f.txt to
+        # s3://<arn>:dir/f.txt` (measured against the pinned aws 2.36.40,
+        # offline). The request still takes the ARN as Bucket and `dir/f.txt`
+        # as Key; a single source reports its own spelling the same way.
+        arn = "arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-1/accesspoint/ap"
+        source = tmp_path / "f.txt"
+        source.write_bytes(b"x")
+        client, calls = make_recording_client([])
+        results: list[OpResult] = []
+        S3().cp(
+            str(source),
+            S3Storage(f"s3://{arn}:dir/", client=client),
+            dryrun=True,
+            on_result=results.append,
+        )
+        assert calls == []
+        assert [r.dest for r in results] == [f"s3://{arn}:dir/f.txt"]
+
+        client, calls = make_recording_client([head_response()])
+        results = []
+        S3().cp(
+            S3Storage(f"s3://{arn}:dir/a.txt", client=client),
+            str(tmp_path / "x"),
+            dryrun=True,
+            on_result=results.append,
+        )
+        assert calls[0].params["Bucket"] == arn
+        assert calls[0].params["Key"] == "dir/a.txt"
+        assert [r.src for r in results] == [f"s3://{arn}:dir/a.txt"]
+
+    def test_a_cut_short_outposts_name_is_reported_as_written(self, tmp_path: Path) -> None:
+        # `my_ap` is no access point name: aws-cli's pattern stops at `my` and
+        # reads `_ap` as the key, sends that split, and prints the location as
+        # typed: `cp f s3://<arn>/my_ap --dryrun` previews `upload: ./f to
+        # s3://<arn>/my_ap` (measured against the pinned aws 2.36.40, offline).
+        base = "arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-1/accesspoint/"
+        source = tmp_path / "f.txt"
+        source.write_bytes(b"x")
+        client, calls = make_recording_client([{}])
+        results: list[OpResult] = []
+        S3().cp(
+            str(source),
+            S3Storage(f"s3://{base}my_ap", client=client),
+            transfer_config=_SYNC,
+            on_result=results.append,
+        )
+        assert ops(calls) == ["PutObject"]
+        assert (calls[0].params["Bucket"], calls[0].params["Key"]) == (f"{base}my", "_ap")
+        assert [r.dest for r in results] == [f"s3://{base}my_ap"]
+
+        tree = tmp_path / "d"
+        (tree / "sub").mkdir(parents=True)
+        (tree / "sub" / "g.txt").write_bytes(b"y")
+        client, calls = make_recording_client([])
+        results = []
+        S3().cp(
+            str(tree),
+            S3Storage(f"s3://{base}my.ap/", client=client),
+            recursive=True,
+            dryrun=True,
+            on_result=results.append,
+        )
+        assert [r.dest for r in results] == [f"s3://{base}my.ap/sub/g.txt"]
+
+    def test_a_cut_short_outposts_name_addresses_the_split_on_every_route(
+        self, tmp_path: Path
+    ) -> None:
+        # The key slices off a formatted path after the separator as typed -
+        # none at the cut (producers.key_after_bucket): the recursive
+        # download's listing, an S3-to-S3 copy's destination key and sync's
+        # listing all address the access point `my` and the key `_ap`.
+        base = "arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-1/accesspoint/"
+        client, calls = make_recording_client([{}])
+        S3().cp(
+            S3Storage(f"s3://{base}my_ap/", client=client),
+            str(tmp_path / "out"),
+            recursive=True,
+            transfer_config=_SYNC,
+        )
+        assert [(c.operation, c.params["Bucket"], c.params["Prefix"]) for c in calls] == [
+            ("ListObjectsV2", f"{base}my", "_ap/")
+        ]
+
+        client, calls = make_recording_client([head_response(), {}])
+        S3().cp(
+            S3Storage("s3://b/k", client=client),
+            S3Storage(f"s3://{base}my_ap", client=client),
+            transfer_config=_SYNC,
+        )
+        assert ops(calls) == ["HeadObject", "CopyObject"]
+        assert (calls[1].params["Bucket"], calls[1].params["Key"]) == (f"{base}my", "_ap")
+
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        client, calls = make_recording_client([{}])
+        S3().sync(str(empty), S3Storage(f"s3://{base}my_ap/", client=client), delete_filter=True)
+        assert [(c.operation, c.params["Bucket"], c.params["Prefix"]) for c in calls] == [
+            ("ListObjectsV2", f"{base}my", "_ap/")
+        ]
+
     def test_keyless_non_recursive_source_transfers_nothing(self, tmp_path: Path) -> None:
         # `cp s3://bucket .`: aws lists the bucket and exact-matches nothing
         # (rc 0, silent). The listing itself is observable when ListBucket is
@@ -748,6 +1000,54 @@ class TestDownloadRoute:
         assert ops(calls) == ["ListObjectsV2"]
         assert dest.read_bytes() == b"keep"
         assert results == []
+
+    @pytest.mark.skipif(
+        os.name == "nt", reason="Windows folds `..` before the filesystem sees the path"
+    )
+    def test_a_recursive_destination_the_kernel_finds_is_not_created_lexically(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # As for sync: aws-cli's pre-check asks the kernel about `lsub/../out`
+        # (sub/out, which exists) and creates nothing, so an empty prefix
+        # leaves no <cwd>/out behind (measured). Ours tested the lexical form
+        # and created it.
+        (tmp_path / "sub" / "other").mkdir(parents=True)
+        (tmp_path / "sub" / "out").mkdir()
+        (tmp_path / "lsub").symlink_to(tmp_path / "sub" / "other")
+        monkeypatch.chdir(tmp_path)
+        client, calls = make_recording_client([{}])  # empty ListObjectsV2 page
+        S3().cp(
+            S3Storage("s3://b/pre", client=client),
+            LocalStorage("lsub/../out"),
+            recursive=True,
+            transfer_config=_SYNC,
+        )
+        assert ops(calls) == ["ListObjectsV2"]
+        assert not (tmp_path / "out").exists()
+
+    @pytest.mark.skipif(
+        os.name == "nt", reason="Windows folds `..` before the filesystem sees the path"
+    )
+    def test_a_recursive_destination_is_created_bare_like_aws(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `missing/../out` does not exist as typed (missing/ is not there), so
+        # aws-cli's bare makedirs creates missing/ on the way and then fails
+        # on the existing out: rc 255, `[Errno 17] File exists`, measured. The
+        # recursive cp created it with exist_ok, swallowed that and went on.
+        (tmp_path / "out").mkdir()
+        monkeypatch.chdir(tmp_path)
+        client, calls = make_recording_client([])
+        with pytest.raises(TransportError) as excinfo:
+            S3().cp(
+                S3Storage("s3://b/pre", client=client),
+                LocalStorage("missing/../out"),
+                recursive=True,
+                transfer_config=_SYNC,
+            )
+        assert isinstance(excinfo.value.__cause__, FileExistsError)
+        assert calls == []
+        assert (tmp_path / "missing").is_dir()
 
 
 class TestGlacierGate:
@@ -941,6 +1241,52 @@ class TestStreamRoutes:
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
         assert (results[0].src, results[0].dest) == ("-", "s3://bucket/streaming.txt")
 
+    def test_a_cancellederror_the_stream_raises_is_a_failure_not_a_revocation(self) -> None:
+        # Nobody ordered a cancel: a reader raising concurrent.futures'
+        # CancelledError from read() wears s3transfer's cancellation type, but
+        # the coordinator settled the task's own exception as a failure. FAILED
+        # and BatchError - not a CANCELLED record and a normal return with no
+        # object stored (measured on MinIO).
+        class _StrayReader:
+            def read(self, size: int = -1) -> bytes:
+                raise concurrent.futures.CancelledError("nobody ordered this")
+
+        client, calls = make_recording_client([{}])
+        results: list[OpResult] = []
+        with pytest.raises(BatchError):
+            S3().cp(
+                IOStorage(_StrayReader()),
+                S3Storage("s3://bucket/k", client=client),
+                transfer_config=_SYNC,
+                on_result=results.append,
+            )
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert calls == []
+
+    def test_the_librarys_own_cancellederror_from_the_stream_is_a_failure_too(self) -> None:
+        # The same throw with boto3_s3's type: it classified as revoked on the
+        # type alone, so the run returned normally with a CANCELLED record and
+        # nothing stored. A FAILED record must not carry the type that means
+        # "revoked" either - the base error, the throw on __cause__.
+        class _StrayReader:
+            def read(self, size: int = -1) -> bytes:
+                raise CancelledError("nobody ordered this")
+
+        client, calls = make_recording_client([{}])
+        results: list[OpResult] = []
+        with pytest.raises(BatchError):
+            S3().cp(
+                IOStorage(_StrayReader()),
+                S3Storage("s3://bucket/k", client=client),
+                transfer_config=_SYNC,
+                on_result=results.append,
+            )
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        error = results[0].error
+        assert type(error) is Boto3S3Error
+        assert isinstance(error.__cause__, CancelledError)
+        assert calls == []
+
     def test_stream_download_probes_then_streams(self) -> None:
         sink = io.BytesIO()
         client, calls = make_recording_client(
@@ -1025,6 +1371,30 @@ class TestStreamRoutes:
         client, calls = make_recording_client([])
         S3().cp(S3Storage("s3://bucket/k", client=client), down, dryrun=True)
         assert calls == [] and down.opens == []
+
+    @pytest.mark.parametrize(
+        ("uri", "shown"),
+        [
+            ("s3://bucket", "s3://bucket/"),
+            ("s3://bucket/", "s3://bucket/"),
+            ("s3:///", "s3:///"),
+            ("s3://bucket/k", "s3://bucket/k"),
+        ],
+    )
+    def test_a_stream_download_names_a_keyless_source_as_the_bucket_root(
+        self, uri: str, shown: str
+    ) -> None:
+        # aws prints the source as its argument normalization left it
+        # (measured: `cp s3://b - --dryrun` is `download: s3://b/ to -`).
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        S3().cp(
+            S3Storage(uri, client=client),
+            IOStorage(io.BytesIO()),
+            dryrun=True,
+            on_result=results.append,
+        )
+        assert [result.src for result in results] == [shown]
 
     def test_stream_with_recursive_is_rejected(self) -> None:
         client, _ = make_recording_client([])
@@ -1189,6 +1559,14 @@ def _cc_listing() -> dict[str, Any]:
     }
 
 
+def _pairs(gate: CaseConflictGate | None, key: str) -> bool:
+    """Whether the gate's merge pairs ``key`` with a destination entry (advances it)."""
+    assert gate is not None
+    merge = gate._merge  # pyright: ignore[reportPrivateUsage]
+    assert merge is not None
+    return merge.pairs(key)
+
+
 class TestCaseConflictGate:
     def _run(
         self,
@@ -1231,6 +1609,42 @@ class TestCaseConflictGate:
         assert len(notices) == 1
         assert str(notices[0].error).startswith("warning: Downloading b/cc/a.txt -> ")
         assert (out / "A.txt").exists() and (out / "a.txt").exists()
+
+    def test_an_unsorted_listing_pairs_as_aws_cli_merges_it(self, tmp_path: Path) -> None:
+        # aws-cli runs the gate through sync's comparator, which compares only
+        # the two keys in hand: a listing that sends `b.txt` before `a.txt`
+        # (an S3-compatible endpoint that does not sort) moves the destination
+        # past `a.txt` while pairing `b.txt`, so `a.txt` finds no partner and
+        # meets the conflict check against the file it would overwrite -
+        # skipped, where a lookup by name would have copied it (measured
+        # against the pinned aws 2.36.40 on a fake endpoint).
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "a.txt").write_bytes(b"old")
+        (out / "b.txt").write_bytes(b"old")
+        listing = {
+            "Contents": [
+                {"Key": "cc/b.txt", "Size": 5, "LastModified": MTIME, "ETag": '"b"'},
+                {"Key": "cc/a.txt", "Size": 5, "LastModified": MTIME, "ETag": '"a"'},
+            ]
+        }
+        client, calls = make_recording_client([listing, get_response()])
+        results: list[OpResult] = []
+        S3().cp(
+            S3Storage("s3://b/cc/", client=client),
+            str(out),
+            recursive=True,
+            transfer_config=_CASE_CONFLICT_CONFIG,
+            on_result=results.append,
+            **TransferOptions(case_conflict=CaseConflictMode.SKIP),
+        )
+        assert [(c.operation, c.params.get("Key")) for c in calls] == [
+            ("ListObjectsV2", None),
+            ("GetObject", "cc/b.txt"),
+        ]
+        notices = [r for r in results if r.outcome is OpOutcome.NOTICE]
+        assert [str(n.error).split(" -> ")[0] for n in notices] == ["warning: Skipping b/cc/a.txt"]
+        assert (out / "a.txt").read_bytes() == b"old"
 
     def test_error_raises_the_awscli_failure(self, tmp_path: Path) -> None:
         out = tmp_path / "out"
@@ -1388,11 +1802,9 @@ class TestCaseConflictGate:
         (out / "real.txt").write_bytes(b"x")
         (out / "A.txt").symlink_to(out / "real.txt")
         gate, _ = self._build_gate(LocalStorage(str(out)))
-        assert gate is not None
-        assert "A.txt" in gate._dest_keys  # pyright: ignore[reportPrivateUsage]
+        assert _pairs(gate, "A.txt")
         gate, _ = self._build_gate(LocalStorage(str(out), follow_symlinks=False))
-        assert gate is not None
-        assert "A.txt" not in gate._dest_keys  # pyright: ignore[reportPrivateUsage]
+        assert not _pairs(gate, "A.txt")
 
     @skip_if_chmod_is_inert
     def test_case_gate_scan_warns_into_the_rollup_and_filters(self, tmp_path: Path) -> None:
@@ -1411,8 +1823,8 @@ class TestCaseConflictGate:
             )
         finally:
             (out / "secret.txt").chmod(0o644)
-        assert gate is not None
-        assert gate._dest_keys == set()  # pyright: ignore[reportPrivateUsage]
+        assert not _pairs(gate, "A.txt")
+        assert not _pairs(gate, "secret.txt")
         assert transferrer.warned == 1  # the unreadable-file walk warning
 
     def test_exact_case_match_at_dest_always_copies(self, tmp_path: Path) -> None:

@@ -50,8 +50,9 @@ class RbCommand(Command):
         catch spans the success line too, so an unwritable stdout is an rb
         failure rather than the dispatcher's 255. aws builds the client
         before validating the path (``S3Command._run_main``), so a
-        client-construction failure (bad ``--profile`` / unresolved credentials /
-        region) takes precedence over a path usage error - we build it first.
+        client-construction failure (a bad ``--profile``, partial credentials,
+        an empty region) takes precedence over a path usage error - we build it
+        first.
         """
         # Parse-time head (measured, design/cli.md section 6): the --query compile
         # (252), the --endpoint-url scheme check (252), and the positional

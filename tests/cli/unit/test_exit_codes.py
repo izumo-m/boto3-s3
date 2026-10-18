@@ -13,6 +13,7 @@ the three global resolutions that run before any command layer.
 from __future__ import annotations
 
 import argparse
+import io
 import sys
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ from boto3_s3 import (
     ConfigurationError,
     InvalidConfigError,
     InvalidValueError,
+    MalformedResponseError,
     NotFoundError,
     TransportError,
     ValidationError,
@@ -108,6 +110,10 @@ class TestExitCodeFor:
     def test_other_errors_map_to_255(self) -> None:
         assert cli.exit_code_for(TransportError("connection reset")) == 255
         assert cli.exit_code_for(Boto3S3Error("unexpected")) == 255
+        # An incomplete listing entry reaches aws's general handler as a bare
+        # KeyError (ls: `[ERROR]: 'LastModified'` at 255); the translated
+        # class keeps that rc through this mapping.
+        assert cli.exit_code_for(MalformedResponseError("'LastModified'")) == 255
 
     def test_refining_subclasses_map_to_255_not_their_parents_rc(self) -> None:
         # aws routes post-parse value failures and bad config through its
@@ -2094,3 +2100,223 @@ class TestTopLevelGlobalsStripping:
         # token is a protected positional, not the help-token rule).
         assert cli.main(["--region", "us-east-2", "--", "help"]) == 252
         assert "Found invalid choice 'help'" in capsys.readouterr().err
+
+
+class TestClosedStandardStreams:
+    """``--version`` and the help token when a standard stream is closed.
+
+    A descriptor closed before the interpreter starts leaves ``sys.stdout`` /
+    ``sys.stderr`` ``None``. Measured on the pinned aws-cli: ``--version >&-``
+    exits 0 with the version line on stderr (its argparse, Python 3.14's,
+    falls back to stderr and drops a write that fails), with both closed it
+    still exits 0, and a help page requested with stdout closed is written
+    nowhere, rc 0. This CLI replayed the version line onto the missing stream
+    and left as a traceback at rc 1.
+    """
+
+    @pytest.mark.parametrize("argv", [["--version"], ["ls", "--version"], ["--version", "bogus"]])
+    def test_the_version_line_falls_back_to_stderr(
+        self, argv: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(sys, "stdout", None)
+        assert cli.main(argv) == 0
+        assert capsys.readouterr().err.startswith("boto3-s3-cli/")
+
+    def test_the_version_line_is_dropped_when_both_are_closed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sys, "stdout", None)
+        monkeypatch.setattr(sys, "stderr", None)
+        assert cli.main(["--version"]) == 0
+
+    def test_a_version_line_that_cannot_be_written_is_dropped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class _Refusing:
+            def write(self, text: str) -> int:
+                raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(sys, "stdout", _Refusing())
+        assert cli.main(["--version"]) == 0
+
+    @pytest.mark.parametrize("argv", [["help"], ["ls", "help"]])
+    def test_a_help_page_is_written_nowhere_when_stdout_is_closed(
+        self, argv: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(sys, "stdout", None)
+        assert cli.main(argv) == 0
+        assert capsys.readouterr().err == ""
+
+    @pytest.mark.parametrize("argv", [["help"], ["ls", "help"]])
+    def test_a_help_page_with_both_closed_still_exits_zero(
+        self, argv: list[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sys, "stdout", None)
+        monkeypatch.setattr(sys, "stderr", None)
+        assert cli.main(argv) == 0
+
+    def test_every_parser_prints_the_way_python_3_14_does(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The pin itself, off the host Python: a missing stream falls back to
+        # stderr, and a failing one is dropped rather than raised.
+        class _Refusing:
+            def write(self, text: str) -> int:
+                raise OSError(28, "No space left on device")
+
+        for parser in _every_built_parser():
+            parser._print_message("page\n", None)  # pyright: ignore[reportPrivateUsage]
+            assert capsys.readouterr().err == "page\n"
+            parser._print_message("page\n", _Refusing())  # pyright: ignore[reportPrivateUsage]
+        monkeypatch.setattr(sys, "stderr", None)
+        for parser in _every_built_parser():
+            parser._print_message("page\n", None)  # pyright: ignore[reportPrivateUsage]
+
+
+class TestUnknownOptionsWaitForTheValues:
+    """Leftover tokens are reported after the option values are expanded.
+
+    aws's command layer parses, then expands every argument's value - the
+    paramfile load, the integer coercion, the shorthand parse - and only then
+    raises ``Unknown options`` for what the parse left over, right before the
+    command body runs (its ``BasicCommand.__call__``). So a value that fails
+    to expand wins over a leftover token, in exit code as well as text, while
+    everything the command body checks still loses to it. All measured on the
+    pinned aws-cli; this CLI used to report the leftovers first.
+    """
+
+    _INT = "boto3-s3: [ERROR]: invalid literal for int() with base 10: 'abc'\n"
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["presign", "s3://b/k", "--expires-in", "abc", "--bogus"],
+            ["presign", "s3://b/k", "--expires-in", "abc", "extra-positional"],
+            ["ls", "s3://b/", "EXTRA", "--page-size", "abc"],
+            ["rm", "s3://b/k", "--page-size", "abc", "--bogus"],
+            ["cp", "f", "s3://b/k", "--page-size", "abc", "--bogus"],
+            ["sync", "d", "s3://b/p", "--progress-frequency", "abc", "--bogus"],
+        ],
+    )
+    def test_a_failed_integer_coercion_wins_at_255(
+        self, argv: list[str], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert cli.main(argv, ctx=unused_ctx()) == 255
+        assert capsys.readouterr().err == self._INT
+
+    @pytest.mark.parametrize(
+        ("argv", "report"),
+        [
+            (
+                ["presign", "file:///nonexistent/p", "--bogus"],
+                "Error parsing parameter 'path': Unable to load paramfile file:///nonexistent/p",
+            ),
+            (
+                ["mb", "file:///nonexistent/p", "--bogus"],
+                "Error parsing parameter 'path': Unable to load paramfile file:///nonexistent/p",
+            ),
+            (
+                ["ls", "s3://b/", "--page-size", "file:///nonexistent/p", "--bogus"],
+                "Error parsing parameter '--page-size': Unable to load paramfile",
+            ),
+            (
+                ["cp", "f", "s3://b/k", "--metadata", "a", "--bogus"],
+                "Error parsing parameter '--metadata': Expected: '=', received: 'EOF'",
+            ),
+        ],
+    )
+    def test_a_failed_paramfile_or_shorthand_wins_at_252(
+        self, argv: list[str], report: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert cli.main(argv, ctx=unused_ctx()) == 252
+        err = capsys.readouterr().err
+        assert err.startswith(f"boto3-s3: [ERROR]: An error occurred (ParamValidation): {report}")
+        assert "Unknown options" not in err
+
+    @pytest.mark.parametrize(
+        ("argv", "leftovers"),
+        [
+            (["ls", "s3://b/", "--bogus"], "--bogus"),
+            (["ls", "s3://b/", "extra", "--bogus"], "extra,--bogus"),
+            (["mb", "not-an-s3-uri", "--bogus"], "--bogus"),
+            (["cp", "local-a", "local-b", "--bogus"], "--bogus"),
+            (["presign", "s3://b/k", "--bogus", "--expires-in", "60"], "--bogus"),
+        ],
+    )
+    def test_the_leftovers_still_beat_the_command_body(
+        self, argv: list[str], leftovers: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The report sits ahead of the client build and of every path check
+        # the command body makes (aws: before `_run_main`), so the client
+        # factory is never reached.
+        assert cli.main(argv, ctx=unused_ctx()) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            f"Unknown options: {leftovers}\n"
+        )
+
+    def test_a_command_that_never_builds_its_s3_still_rejects_them(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The report is made where every command builds its `S3`; the
+        # dispatcher repeats the check after the command returns, so a
+        # command that returned early cannot accept the tokens silently.
+        from boto3_s3_cli.commands.ls import LsCommand
+
+        class _EarlyReturn(LsCommand):
+            def run(self, args: argparse.Namespace, ctx: Context) -> int:
+                return 0
+
+        monkeypatch.setattr(cli, "_load_command", lambda name: _EarlyReturn)
+        assert cli.main(["ls", "s3://b/", "--bogus"], ctx=unused_ctx()) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): Unknown options: --bogus\n"
+        )
+
+
+class TestTheEntryPointBackstop:
+    """Nothing the dispatcher itself raises leaves as a traceback.
+
+    aws's entry point hands whatever escapes its driver to its handler chain;
+    a command's failures are settled in `_run_command`, and `main` applies
+    the same mapping to the dispatcher's own steps.
+    """
+
+    def test_an_unclaimed_exception_is_the_general_report(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        def explode(*args: object, **kwargs: object) -> int:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(cli, "_dispatch", explode)
+        assert cli.main(["ls", "s3://b/"]) == 255
+        assert capsys.readouterr().err == "boto3-s3: [ERROR]: boom\n"
+
+    def test_a_report_the_codec_cannot_write_is_the_codec_s_report(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The report raises inside the clause that was making it, where the
+        # `UnicodeError` clause beside it cannot reach; aws's entry point
+        # reports the codec error at rc 255, and so must this one (it left as
+        # a traceback at rc 1).
+        def explode(*args: object, **kwargs: object) -> int:
+            raise ValueError("caf\u00e9")
+
+        raw = io.BytesIO()
+        stream = io.TextIOWrapper(raw, encoding="utf-8", newline="", write_through=True)
+        monkeypatch.setattr(sys, "stderr", stream)
+        monkeypatch.setattr(cli, "_dispatch", explode)
+        monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "ascii")
+        assert cli.main(["ls", "s3://b/"]) == 255
+        assert raw.getvalue() == (
+            b"boto3-s3: [ERROR]: 'ascii' codec can't encode character '\\xe9' "
+            b"in position 22: ordinal not in range(128)\n"
+        )
+
+    def test_an_assertion_stays_loud(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def explode(*args: object, **kwargs: object) -> int:
+            raise AssertionError("an invariant")
+
+        monkeypatch.setattr(cli, "_dispatch", explode)
+        with pytest.raises(AssertionError, match="an invariant"):
+            cli.main(["ls", "s3://b/"])

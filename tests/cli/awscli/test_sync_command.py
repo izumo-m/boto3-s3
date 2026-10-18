@@ -252,19 +252,18 @@ class TestSyncCommand:
         result, calls = _run_cmd(
             [
                 {
-                    # Byte-ordered, as a real ListObjectsV2 page is (bar < foo).
                     "Contents": [
-                        {
-                            "Key": "bar",
-                            "Size": 100,
-                            "LastModified": _TIME_UTC,
-                            "StorageClass": "DEEP_ARCHIVE",
-                        },
                         {
                             "Key": "foo",
                             "Size": 100,
                             "LastModified": _TIME_UTC,
                             "StorageClass": "GLACIER",
+                        },
+                        {
+                            "Key": "bar",
+                            "Size": 100,
+                            "LastModified": _TIME_UTC,
+                            "StorageClass": "DEEP_ARCHIVE",
                         },
                     ]
                 }
@@ -284,19 +283,18 @@ class TestSyncCommand:
         result, calls = _run_cmd(
             [
                 {
-                    # Byte-ordered, as a real ListObjectsV2 page is (bar < foo).
                     "Contents": [
-                        {
-                            "Key": "bar",
-                            "Size": 100,
-                            "LastModified": _TIME_UTC,
-                            "StorageClass": "DEEP_ARCHIVE",
-                        },
                         {
                             "Key": "foo",
                             "Size": 100,
                             "LastModified": _TIME_UTC,
                             "StorageClass": "GLACIER",
+                        },
+                        {
+                            "Key": "bar",
+                            "Size": 100,
+                            "LastModified": _TIME_UTC,
+                            "StorageClass": "DEEP_ARCHIVE",
                         },
                     ]
                 }
@@ -311,15 +309,15 @@ class TestSyncCommand:
     ) -> None:
         (tmp_path / "foo.txt").write_text("mycontent")
 
-        # Patch the walk's single stat accessor to report an out-of-range mtime
-        # (impossible to set on all OSes; aws-cli patches get_file_stat the same
-        # way). st_mtime overflows datetime -> the epoch-fallback path.
-        def invalid_stat(_self: object, _entry: os.DirEntry[str]) -> os.stat_result:
-            return os.stat_result((0o100644, 0, 0, 1, 0, 0, 9, 0, 10**30, 0))
+        # Patch the shared mtime derivation to report every stat as
+        # unrepresentable (impossible to set on all OSes; aws-cli patches
+        # get_file_stat the same way). The walk takes a leaf's stat twice - at
+        # its parent's scan and at its turn - and warns from the latter, where
+        # aws-cli takes its only one, so the derivation both read is patched.
+        def unrepresentable(st: os.stat_result) -> tuple[int, None]:
+            return st.st_size, None
 
-        monkeypatch.setattr(
-            "boto3_s3.localstorage.LocalFileGenerator.entry_stat_result", invalid_stat
-        )
+        monkeypatch.setattr("boto3_s3.localstorage._size_mtime", unrepresentable)
         _, calls = _run_cmd(
             [
                 {"CommonPrefixes": [], "Contents": []},
@@ -710,7 +708,7 @@ class TestSyncCommand:
         _, calls = _run_cmd(
             [
                 list_objects_response(["new_file.txt"]),
-                list_objects_response(["file1.txt", "new_file.txt"]),  # byte-ordered, as real S3
+                list_objects_response(["new_file.txt", "file1.txt"]),
             ],
             ["sync", "s3://bucket/", "s3://bucket2/", "--no-overwrite"],
         )

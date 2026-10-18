@@ -6,7 +6,7 @@
 #   source scripts/bench-env.sh
 #   uv sync --all-packages --locked    # provisions .venv-bench on first use
 #   scripts/install-awscli.sh          # pinned aws -> .venv-bench/bin
-#   source scripts/minio-env.sh
+#   source scripts/dev-env.sh
 #   uv run python -m benchmarks run
 #
 # The lane runs on Python 3.14, the interpreter the pinned aws-cli bundles, so

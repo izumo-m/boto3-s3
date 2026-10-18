@@ -63,24 +63,27 @@ class _DeletePrinter:
             logger.debug("Error printing result %s: %s", result, exc, exc_info=True)
 
     def _write_line(self, result: OpResult) -> None:
-        # The printed line needs the full object key; a delete record's
-        # compare_key is the operation-relative form (design/opresult.md), and
-        # the listed entry always rides on src_info.
-        info = result.src_info
-        key = info.key if info is not None else result.compare_key
+        # The line names the object the way the record's `src` does: the
+        # listed entry as s3://bucket/key, the single-key target as it was
+        # written - an Outposts access point's `<arn>:key` keeps its colon,
+        # like aws-cli's line. A record without one (not produced by rm
+        # itself) is spelled from its full key: a delete record's compare_key
+        # is the operation-relative form (design/opresult.md), and the listed
+        # entry rides on src_info.
+        location = result.src
+        if location is None:
+            info = result.src_info
+            key = info.key if info is not None else result.compare_key
+            location = f"s3://{self._bucket}/{key}"
         if result.outcome is OpOutcome.FAILED:
-            sys.stderr.write(output.format_delete_failed(self._bucket, key, result.error) + "\n")
+            sys.stderr.write(output.format_delete_failed(location, result.error) + "\n")
         elif result.outcome is OpOutcome.DRYRUN:
             # uni_write (aws's uni_print): an unencodable key on a narrow
             # console/pipe encoding must not raise out of the deleter worker
             # and kill the run - aws prints it with replacements and finishes.
-            output.uni_write(
-                sys.stdout, output.format_delete(self._bucket, key, dryrun=True) + "\n"
-            )
+            output.uni_write(sys.stdout, output.format_delete(location, dryrun=True) + "\n")
         elif not self._only_show_errors:
-            output.uni_write(
-                sys.stdout, output.format_delete(self._bucket, key, dryrun=False) + "\n"
-            )
+            output.uni_write(sys.stdout, output.format_delete(location, dryrun=False) + "\n")
 
 
 class RmCommand(Command):
@@ -166,13 +169,19 @@ class RmCommand(Command):
         if not target.startswith("s3://"):
             # aws check_path_type: rm takes S3 paths only -> rc 252.
             raise ValidationError(usage.single_uri_usage("rm"), operation="rm")
+        # Next in aws's add_paths: the refused ARN forms (252, ahead of the
+        # [s3] config and the engine below) and the keyless trailing "/" whose
+        # re-read gives an Outposts "...:accesspoint/ap:" the key "/".
+        target = transferargs.normalize_s3_path(target)
 
         # rm is an S3TransferCommand in aws, so it reads and validates [s3] and
         # builds a transfer manager exactly like cp - after the path check above
         # (which a bad [s3] value loses to) and before everything below (which it
-        # beats, the bucket-less synthesis included). The deletes never ride the
-        # engine here (design/crt.md section 6), but its construction failures
-        # are aws's, so they must land at aws's point.
+        # beats, the bucket-less synthesis included). The deletes ride the
+        # engine but the library builds it later - with the deleter, or just
+        # before a single key's request (design/crt.md sections 4 and 6) - and
+        # its construction failures are aws's, so they must land at aws's
+        # point.
         transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type="s3")
         transferargs.materialize_transfer_engine(s3, client, transfer_config, operation="rm")
 
@@ -190,10 +199,9 @@ class RmCommand(Command):
                 sys.stderr.write(f"fatal error: {usage.invalid_bucket_name_message()}\n")
             return 1
 
-        # Outside the fatal-catch below: rejected ARN forms (S3 Object Lambda /
-        # Outposts bucket) raise ValidationError through main -> rc 252,
-        # matching aws; the bucket-less blind single delete flows through
-        # build_s3_storage's carve-out instead of failing validation.
+        # The refused ARN forms already failed at aws's slot above; the
+        # bucket-less blind single delete flows through build_s3_storage's
+        # carve-out instead of failing validation.
         storage = transferargs.build_s3_storage(target, client=client, page_size=page_size)
 
         # The target is both filter sides (aws sets dest = src for rm).
@@ -211,6 +219,9 @@ class RmCommand(Command):
                 dryrun=args.dryrun,
                 request_payer=args.request_payer,
                 on_result=printer,
+                # The engine aws would carry these deletes on, which decides
+                # how one that dies without a response is reported.
+                transfer_config=transfer_config,
             )
         except BatchError:
             # Per-key failure lines were already streamed by the printer.
@@ -235,12 +246,13 @@ class RmCommand(Command):
             # rc 1, by position rather than by type: aws's rm runs inside the
             # same `CommandResultRecorder` cp/mv/sync do, which turns whatever
             # escapes the pipeline into an ErrorResult. So a listing entry the
-            # response left incomplete (KeyError) and a timestamp the local
-            # calendar cannot hold (OverflowError) report as `fatal error:
+            # response left incomplete and a timestamp the local calendar
+            # cannot hold - `MalformedResponseError` here, a bare KeyError /
+            # OverflowError on aws-cli - report as `fatal error:
             # 'LastModified'` / `fatal error: date value out of range` at rc 1,
             # measured, rather than reaching the dispatcher's 255.
             # `SystemExit` is a BaseException and still passes, like there.
             if not args.quiet:
-                sys.stderr.write(f"fatal error: {exc}\n")
+                sys.stderr.write(f"fatal error: {output.error_text(exc)}\n")
             return 1
         return 0

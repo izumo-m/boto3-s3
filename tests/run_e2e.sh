@@ -45,9 +45,19 @@ suffix="$(openssl rand -hex 5 2>/dev/null \
 export BOTO3_S3_E2E_BUCKET="boto3s3-e2e-${suffix}"
 bucket="$BOTO3_S3_E2E_BUCKET"
 
+# endpoint-fidelity T4: the mb/rb tests give every scenario and side a
+# sibling of its own, "<bucket>-<kind><nnn>-<side>", and remove it after the
+# test; this sweeps up any a crashed test left behind.
 cleanup() {
     echo "--- cleanup: force-remove test buckets ---"
-    for name in "$bucket" "${bucket}-mb" "${bucket}-rb"; do
+    local siblings
+    if ! siblings="$(aws s3api list-buckets --output text \
+        --query "Buckets[?starts_with(Name, '${bucket}-')].Name" 2>/dev/null)"; then
+        echo "warning: could not list buckets; check for leftovers named ${bucket}-*" >&2
+        siblings=""
+    fi
+    for name in "$bucket" $siblings; do
+        [ "$name" = "None" ] && continue
         if aws s3 rb "s3://${name}" --force >/dev/null 2>&1; then
             echo "removed  s3://${name}"
         else

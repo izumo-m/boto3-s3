@@ -7,7 +7,7 @@ leak into moto-backed or recorder-backed tests and trigger
 per-test via ``monkeypatch``.
 
 The e2e suite at ``tests/cli/e2e/`` talks to a **real** S3-compatible
-endpoint (MinIO via ``scripts/minio-env.sh``, or real S3) and needs the host
+endpoint (the dev stack via ``scripts/dev-env.sh``, or real S3) and needs the host
 env intact, so ``tests/cli/e2e/conftest.py`` overrides the ``_moto_isolation``
 fixture defined here with a no-op of the same name (pytest's
 closer-conftest-wins resolution).
@@ -112,7 +112,16 @@ def _moto_isolation(monkeypatch: pytest.MonkeyPatch, _classic_aws_config: Path) 
     # fixture config does not declare - which silently strips the
     # ParamValidation envelope off every CLI error report (design/cli.md
     # section 6) as well as steering the session.
-    for leak in ("AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3"):
+    # The CA bundle variables steer every client too, and an empty one is
+    # refused outright (`s3storage.reject_empty_ca_bundle`).
+    for leak in (
+        "AWS_PROFILE",
+        "AWS_DEFAULT_PROFILE",
+        "AWS_ENDPOINT_URL",
+        "AWS_ENDPOINT_URL_S3",
+        "AWS_CA_BUNDLE",
+        "REQUESTS_CA_BUNDLE",
+    ):
         monkeypatch.delenv(leak, raising=False)
     # A prior test's boto3.client() / session-less S3() installs a
     # process-global default session built under THAT test's env, and

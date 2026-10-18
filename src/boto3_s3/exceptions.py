@@ -1,5 +1,10 @@
 """Public exception hierarchy for the boto3-s3 library."""
 
+from __future__ import annotations
+
+import functools
+from typing import Any
+
 
 class Boto3S3Error(Exception):
     """Root of every *classified* failure raised from boto3-s3 public APIs.
@@ -58,6 +63,23 @@ class InvalidValueError(ValidationError):
 
 class TransportError(Boto3S3Error):
     """Network or local I/O failure (connection, timeout, OSError)."""
+
+
+class MalformedResponseError(Boto3S3Error):
+    """The service answered, but with a response this library cannot consume.
+
+    A listing entry, a bucket entry or a single-object ``HeadObject`` missing
+    an element aws-cli reads by subscript (``Key`` / ``LastModified`` /
+    ``Size``, a common prefix's ``Prefix``, a bucket's ``CreationDate`` /
+    ``Name``, a HEAD's ``ContentLength`` / ``LastModified``) - a truncating
+    proxy, a partial S3 implementation - or a ``LastModified`` the host's
+    local zone cannot represent (aws-cli converts every S3 timestamp it reads
+    to local time, so such an object ends its run). aws-cli dies with the
+    bare ``KeyError`` / ``OverflowError``; this class carries that exception
+    on ``__cause__`` and its ``str()`` as the message, so the CLI's line reads
+    the same. The run stops where aws-cli's stops: the entries ahead of the
+    bad one are already delivered (design/exceptions.md section 3).
+    """
 
 
 class ConfigurationError(Boto3S3Error):
@@ -120,6 +142,28 @@ class BatchError(Boto3S3Error):
         self.warned: int = warned
         self.skipped: int = skipped
 
+    def __reduce__(self) -> str | tuple[Any, ...]:
+        """Pickle with the counts, which ``BaseException``'s default cannot rebuild.
+
+        An exception pickles as ``cls(*args)`` plus its ``__dict__``, and the
+        required keyword-only counts make that call a ``TypeError`` - on the
+        receiving side, where it reads as a broken process pool rather than
+        as this failure. The module-level functions are meant to be handed to
+        a ``ProcessPoolExecutor``, whose worker sends a failure back pickled.
+        """
+        if type(self).__init__ is not BatchError.__init__:
+            # A subclass with a constructor of its own knows how its arguments
+            # map; leave it the default it had.
+            return super().__reduce__()
+        rebuild = functools.partial(
+            type(self),
+            succeeded=self.succeeded,
+            failed=self.failed,
+            warned=self.warned,
+            skipped=self.skipped,
+        )
+        return (rebuild, self.args, self.__dict__)
+
     @property
     def total(self) -> int:
         """The rollup sum (succeeded + failed + warned + skipped).
@@ -140,6 +184,7 @@ __all__ = [
     "ConfigurationError",
     "InvalidConfigError",
     "InvalidValueError",
+    "MalformedResponseError",
     "NotFoundError",
     "TransportError",
     "ValidationError",

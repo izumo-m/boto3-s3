@@ -1,11 +1,12 @@
 #!/bin/bash
-# scripts/compose-up.sh - bring up the project's MinIO compose stack if it is
-# not already running, then wait for the bucket-init helper to finish so
+# scripts/compose-up.sh - bring up the project's dev S3 compose stack if it
+# is not already running, then wait for the bucket-init helper to finish so
 # callers can rely on AWS_ENDPOINT_URL_S3=http://127.0.0.1:9000 being fully
 # provisioned (test-bucket + boto3-s3-e2e created). No-op when the stack is
 # already up.
 #
 # For raw compose subcommands (down, ps, logs, ...) use scripts/compose.sh.
+# endpoint-fidelity T15: the container name and the readiness wait.
 
 set -euo pipefail
 
@@ -13,17 +14,17 @@ scriptdir=$(cd "$(dirname "$0")" && pwd)
 compose="$scriptdir/compose.sh"
 
 # Exact-name match: the compose project name is pinned in compose.dev.yaml,
-# so this never mistakes another stack's minio (one sharing ports 9000/9001
-# but lacking the boto3-s3-e2e bucket) for ours.
-if [ -z "$(docker container ls --filter "name=^boto3-s3-dev-minio-1$" --quiet)" ]; then
-    echo 'Starting docker minio'
+# so this never mistakes another stack's S3 server (one sharing ports
+# 9000/9001 but lacking the boto3-s3-e2e bucket) for ours.
+if [ -z "$(docker container ls --filter "name=^boto3-s3-dev-s3-1$" --quiet)" ]; then
+    echo 'Starting the dev S3 stack'
     if ! "$compose" up -d; then
         echo "$0: docker start failed" >&2
         exit 1
     fi
 fi
 
-# Wait for mc-init even when minio was already running: an earlier compose up
+# Wait for mc-init even when the server was already running: an earlier compose up
 # may have died before the bucket provisioning finished (a completed mc-init
 # makes docker wait return 0 immediately, so the re-check is free).
 

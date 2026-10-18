@@ -38,9 +38,12 @@ whichever Python this command runs.
 
 A CA bundle that resolves to an empty or whitespace-only value — `--ca-bundle
 ''`, `AWS_CA_BUNDLE=`, `REQUESTS_CA_BUNDLE=`, or a profile `ca_bundle` key left
-blank — is a configuration error, exit code 255, and not a quiet request to
-skip verification. `aws` refuses it the same way, on whichever `boto3` you have
-installed. Pass `--no-verify-ssl` when turning verification off is what you
+blank — is a configuration error, not a quiet request to skip verification,
+wherever a client would use it: exit code 255 when the command's own client
+would, a failed item when a client built later for the credentials (an
+assumed role, SSO) would. A valid `--ca-bundle` beside an empty
+`AWS_CA_BUNDLE` with static credentials runs as usual. `aws` refuses it the
+same way, on whichever `boto3` you have installed. Pass `--no-verify-ssl` when turning verification off is what you
 mean.
 
 On top of those, the command reads `AWS_REGION`, `AWS_DEFAULT_REGION`,
@@ -59,7 +62,10 @@ for that same report — aws's own compatibility fallback, matched here.
 Two of those parse loosely rather than strictly.
 `AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS` is honored only when it is literally
 `true` (case-insensitively), and `AWS_CLI_AUTO_PROMPT` accepts `on` and
-`on-partial` — anything else counts as off.
+`on-partial` — anything else counts as off. The profile key behind that
+variable, `cli_auto_prompt`, is read the way `aws` reads it: from the profile
+the environment selects (`AWS_PROFILE`, then `AWS_DEFAULT_PROFILE`, else
+`default`), not from the one `--profile` names.
 
 Three variables the installed SDK would otherwise act on are ignored here,
 because `aws` cannot see them either: `SSLKEYLOGFILE` (its frozen interpreter
@@ -76,11 +82,14 @@ same reason it is inert there, which is why `--no-cli-pager` is among the
 options accepted and ignored
 (see [`aws-differences.md`](./aws-differences.md)).
 
-One section of `~/.aws/config` is not read at all: `[plugins]`, from which
-`aws` imports and initializes aws-cli plugins on every invocation. This command
-has no plugin mechanism, so the section is inert — including the case where an
-entry cannot be imported, which stops `aws` before it does anything and does not
-stop this command (see [`aws-differences.md`](./aws-differences.md)).
+The `[plugins]` section is read the way `aws` reads it: when it sets
+`cli_legacy_plugin_path`, every other entry is imported from there and its
+`awscli_initialize` called, on every invocation, and a plugin that cannot be
+imported or initialized stops the command before it does anything (exit code
+255, or 252 for a parameter-validation error). A plugin's handlers on the
+SDK's own events run as they do under `aws`; what it hooks into `aws`'s own
+command machinery does not, and the installed SDK is not quite `aws`'s
+bundled one (see [`aws-differences.md`](./aws-differences.md)).
 
 ## 3. Transfer tuning: the `[s3]` section
 
@@ -89,10 +98,11 @@ stop this command (see [`aws-differences.md`](./aws-differences.md)).
 
 `rm` reads and validates the same section, and builds the transfer engine
 `preferred_transfer_client` names, because `aws s3 rm` does — so an unusable
-value fails identically. But only that one key reaches anything here: this
-command's deletes never ride the transfer engine (see
-[`aws-differences.md`](./aws-differences.md)), so the numeric keys below tune
-nothing about `rm`, where under `aws` they do.
+value fails identically. Under the CRT engine its deletes ride that engine's
+client, as `aws`'s do, so the keys below that tune the CRT client reach them
+on both tools; this command batches them (see
+[`aws-differences.md`](./aws-differences.md)), so there are fewer requests to
+tune.
 
 | Key | Effect |
 | --- | --- |
@@ -171,8 +181,21 @@ recent = !sh -c 'boto3-s3 ls "$1" | sort | tail' sh
 `boto3-s3 lsr s3://bucket` then runs `ls --recursive s3://bucket`, and
 `boto3-s3 recent s3://bucket` runs the shell command with `s3://bucket`
 appended. Because this CLI *is* `aws s3`, `[command s3]` is the section that
-applies; `[toplevel]`, whose entries name services, has no counterpart here and
-is ignored.
+applies. The `[toplevel]` section declares commands beside `aws s3`, so only
+its `s3` entry reaches this CLI — and it replaces `aws s3` itself, so every
+invocation runs through it:
+
+```ini
+[toplevel]
+s3 = s3 --endpoint-url http://localhost:9000
+```
+
+sends every `boto3-s3` command to that endpoint, as it does every `aws s3` one.
+Its value is read like `aws`'s top level: global options, then the command name
+(`s3`, or another `[toplevel]` entry - an external one, say - to chain to),
+then anything to place ahead of what was typed; a `!` value runs a shell command with everything typed after
+the global options. A chain that ends at another `aws` command has nothing to
+run here (see [`aws-differences.md`](./aws-differences.md)).
 
 The section header must be spelled `command` followed by a single ASCII space,
 as `aws` requires. Extra spaces are fine (`[command  s3]` is the same section),
@@ -185,8 +208,11 @@ declare nothing at all, on either tool.
 - Any other value is **CLI arguments**. They are split with shell quoting rules
   and placed ahead of what was typed, then parsed again — so an alias may
   expand to another alias, and a global option in the value (say `--region`)
-  applies to the run, overriding one typed on the command line. `--debug` and
-  `--profile` are refused there, as they are under `aws`.
+  applies to the run, overriding one typed on the command line - though, as
+  under `aws`, credentials fetched for a role still use the region typed or
+  configured, not the alias's. `--debug` and
+  `--profile` are refused there, as they are under `aws`, and `--ca-bundle`
+  there changes nothing, as under `aws` (`--no-verify-ssl` does apply).
 - An alias named after a built-in subcommand **replaces** it and proxies to it,
   dropping the first word of the expansion: `ls = ls --recursive` makes every
   `ls` recursive.
@@ -200,7 +226,9 @@ Credentials fetched for an `assume_role` / web-identity / SSO profile are cached
 in `~/.aws/cli/cache`, aws's own directory and file format, so consecutive
 commands do not repeat the `AssumeRole` call and an `mfa_serial` profile asks
 for a code once rather than on every invocation. The cache is shared with
-`aws`: either command reuses what the other fetched.
+`aws`: either command reuses what the other fetched. An `sso-session` token
+refreshed during a command is written back to `~/.aws/sso/cache` the way `aws`
+writes it.
 
 ## 7. Reading a value from a file
 

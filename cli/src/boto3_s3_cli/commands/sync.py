@@ -49,8 +49,9 @@ class SyncCommand(Command):
         aws-cli order: the local-local pair 252, any
         ``-`` path 252 ("Streaming currently is only compatible with
         non-recursive cp commands" - cp-worded even here), the checksum /
-        SSE-C pairings 252, and an S3 Express directory bucket on either
-        side 252 ("Cannot use sync command with a directory bucket.") - all
+        SSE-C pairings 252, and an S3 Express directory bucket or one of
+        its access points on either side 252 ("Cannot use sync command with
+        a directory bucket."; aws refuses the bucket only) - all
         after the S3 client is built, the way aws orders them. A missing local source exits 255; the
         ``--exclude`` / ``--include`` patterns compile once and apply to both
         sides (rootless anchoring; design/sync.md section 1).
@@ -82,9 +83,17 @@ class SyncCommand(Command):
             # run): a creation failure is the pre-pipeline rc 255.
             transferargs.create_local_dest_dir(dest, operation="sync")
         transferargs.validate_sse_c_pairing(args, paths_type, operation="sync")
-        if transferargs.is_s3express_path(src) or transferargs.is_s3express_path(dest):
+        if any(
+            transferargs.is_s3express_path(path) or transferargs.is_s3express_accesspoint_path(path)
+            for path in (src, dest)
+        ):
             # aws-cli's _validate_not_s3_express_bucket_for_sync: directory-bucket
             # listings are not lexicographic, so sync rejects them outright.
+            # aws tests only the --x-s3 suffix and so runs a sync through an
+            # access point of a directory bucket (--xa-s3), whose listing is
+            # just as unordered: --delete then removes destination keys the
+            # source has too. That is refused here as well (a deliberate
+            # difference, docs/cli/aws-differences.md).
             raise ValidationError(
                 "Cannot use sync command with a directory bucket.", operation="sync"
             )

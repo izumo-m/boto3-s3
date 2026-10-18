@@ -12,6 +12,7 @@ the engine.
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -107,6 +108,7 @@ class TestExplicitCrtDegradation:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(crtsupport, "has_minimum_crt_version", lambda: False)
+        monkeypatch.setitem(sys.modules, "awscrt", None)  # the import raises ImportError
         runtime_config = _runtime_config(preferred_transfer_client="crt")
         with pytest.raises(ConfigurationError) as exc_info:
             runtimeconfig.resolve_transfer_client(runtime_config, paths_type="locals3")
@@ -115,6 +117,21 @@ class TestExplicitCrtDegradation:
         # this lane is the documented rc 253 (crt.md section 4), and the
         # subclass would silently remap it to 255.
         assert type(exc_info.value) is ConfigurationError
+        assert exit_code_for(exc_info.value) == 253
+
+    def test_too_old_awscrt_names_the_boto3_upgrade(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The crt extra of boto3 1.28 - 1.33 installs an awscrt below boto3's
+        # CRT minimum: the extra is already there, so the remedy named is a
+        # newer boto3, not the extra (same rc 253).
+        import awscrt
+
+        monkeypatch.setattr(awscrt, "__version__", "0.16.9")
+        runtime_config = _runtime_config(preferred_transfer_client="crt")
+        with pytest.raises(ConfigurationError) as exc_info:
+            runtimeconfig.resolve_transfer_client(runtime_config, paths_type="locals3")
+        message = str(exc_info.value)
+        assert "awscrt 0.16.9 is too old" in message and "boto3 >= 1.34.6" in message
+        assert "boto3-s3-cli[crt]" not in message
         assert exit_code_for(exc_info.value) == 253
 
     def test_s3s3_with_missing_awscrt_is_classic_not_an_error(
@@ -494,7 +511,8 @@ class TestCrtEngineConstructionSlot:
     aws's ``_get_transfer_manager`` runs right after the ``[s3]`` read and
     before anything about the run is decided, so a CRT selection pays the whole
     construction even for a ``--dryrun``, and even for ``rm``, whose deletes
-    never ride the engine here (design/crt.md section 6). When no region
+    ride it but build it later (design/crt.md sections 4 and 6).
+    When no region
     resolves, that construction is awscrt's ``assert isinstance(region, str)``:
     a bare ``AssertionError`` that aws's general handler renders as an empty
     rc-255 report.

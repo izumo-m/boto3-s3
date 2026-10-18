@@ -29,13 +29,14 @@ from boto3_s3 import (
     crtsupport,
 )
 from boto3_s3.localstorage import translate_os_error
-from boto3_s3.pathresolver import is_s3express_path
+from boto3_s3.pathresolver import is_s3express_accesspoint_path, is_s3express_path
 from boto3_s3.transfer import conditional_write_unsupported_reason
 from boto3_s3_cli import (
     checksumdefault,
     clientfactory,
     filters,
     globalargs,
+    output,
     paramfile,
     runtimeconfig,
     shorthand,
@@ -454,18 +455,21 @@ def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) ->
     paramfile + shorthand, which the coercions beat) -> cp's ``--expected-size``
     paramfile (252) -> the session profile resolution (255: aws binds the
     profile at startup, so a bad ``--profile`` beats every post-parse usage
-    error) -> **the S3 client build** -> the local-local pair gate (252). Only
-    this shared, order-stable prefix lives here - the stream / checksum / SSE-C
-    checks that follow differ in relative order per command and stay with each
-    command.
+    error) -> **the S3 client build** -> the local-local pair gate (252) ->
+    aws's ``_normalize_s3_trailing_slash`` over both paths (``normalize_s3_path``:
+    the refused ARN forms, 252, then the keyless trailing ``/``; the returned
+    paths are the normalized ones). Only this shared, order-stable prefix lives
+    here - the stream / checksum / SSE-C checks that follow differ in relative
+    order per command and stay with each command.
 
     The client build sits at aws's own slot: everything above is aws's parse
     layer, which runs before ``S3Command._run_main`` creates the client, and
     everything below is the ``add_paths`` validation, which runs after. So an
     empty region - the one shape whose client cannot be built (``Invalid
-    endpoint: https://s3..amazonaws.com``, rc 255) - preempts every usage error
-    the family reports, while a merely absent region builds fine (S3's global
-    endpoint fallback) and leaves those 252s exactly where they were.
+    endpoint: https://s3..amazonaws.com``, rc 255; an explicit endpoint URL
+    sidesteps that derivation, and the build then succeeds) - preempts every
+    usage error the family reports, while a merely absent region builds fine
+    (S3's global endpoint fallback) and leaves those 252s exactly where they were.
     """
     globalargs.validate_query(args)
     clientfactory.validate_endpoint_url(args)
@@ -484,6 +488,12 @@ def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) ->
     dest_type = identify_type(dest)
     if src_type == "local" and dest_type == "local":
         raise ValidationError(usage.two_path_usage(operation), operation=operation)
+    # aws's add_paths runs _normalize_s3_trailing_slash right after the
+    # path-type check and ahead of every other path validation: the refused
+    # ARN forms beat the stream, checksum, missing-source, directory-creation,
+    # same-path and SSE-C checks below, src before dest.
+    src = normalize_s3_path(src)
+    dest = normalize_s3_path(dest)
     return TransferPaths(
         page_size,
         progress_frequency,
@@ -495,6 +505,31 @@ def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) ->
         s3,
         client,
     )
+
+
+def normalize_s3_path(path: str) -> str:
+    """One path argument as aws's ``_normalize_s3_trailing_slash`` leaves it.
+
+    aws runs this over cp / mv / sync / rm's paths right after the path-type
+    check. Its ``find_bucket_key`` refuses the S3 Object Lambda and Outposts
+    *bucket* ARNs first (rc 252, whatever else is wrong with the run), then a
+    keyless ``s3://`` path gains the trailing ``/`` that makes it the bucket
+    root, and every later step re-reads the result. The re-read changes one
+    spelling: an Outposts access point ARN set off with ``:`` and no key
+    (``.../accesspoint/ap:``) becomes ``.../accesspoint/ap:/``, whose key is
+    ``/`` - so ``rm --recursive`` lists under ``/`` and a single download
+    heads the key ``/``, not the whole access point. A local path, and the
+    bucket-less forms the commands handle on their own (``s3://``,
+    ``s3:///k``), pass unchanged.
+    """
+    if not path.startswith("s3://"):
+        return path
+    bucket, _key = S3Storage.split_bucket_key(S3Storage.strip_scheme(path))
+    if bucket:
+        # The ARN rejections are all S3Storage.validate checks here; its other
+        # one (a key without a bucket) needs no bucket to apply to.
+        S3Storage(path).validate()
+    return S3Storage.normalize_s3_uri(path)
 
 
 def create_local_dest_dir(dest: str, *, operation: str) -> None:
@@ -598,15 +633,20 @@ def resolve_case_conflict(
     (listings are not lexicographic), so aws rejects ``skip`` / ``error``
     there (252), prints a standing warning for ``warn``, and runs the
     transfer without the comparator - modeled here by downgrading the
-    mode to ``ignore`` after the message. ``recursive`` overrides the
-    parsed flag for commands without one (sync is always recursive).
+    mode to ``ignore`` after the message. aws takes that branch for the
+    ``--x-s3`` suffix only; a source named through an access point of a
+    directory bucket (``--xa-s3``) lists just as unordered, and under aws
+    its keys pair wrongly with the destination's - ``skip`` drops objects
+    that conflict with nothing (measured on real S3) - so it takes the
+    branch here too (docs/cli/aws-differences.md). ``recursive`` overrides
+    the parsed flag for commands without one (sync is always recursive).
     """
     if recursive is None:
         recursive = bool(args.recursive)
     mode = CaseConflictMode(args.case_conflict)
     if mode is CaseConflictMode.IGNORE or paths_type != "s3local" or not recursive:
         return mode
-    if not is_s3express_path(src):
+    if not (is_s3express_path(src) or is_s3express_accesspoint_path(src)):
         return mode
     if mode is not CaseConflictMode.WARN:
         raise ValidationError(
@@ -794,7 +834,13 @@ def resolve_locations(
     if src_type == "local":
         return _local(src), _s3(dest, client)
     if dest_type == "local":
-        return _s3(src, client), _local(dest)
+        # aws-cli reads an empty destination of a single download as the
+        # working directory (its local_format absolutizes "" to the cwd, which
+        # is a directory); the library refuses "" as no location at all, so
+        # the CLI spells out what aws-cli means. A dir_op never gets here with
+        # "": pre-creating the destination already failed it (rc 255, like
+        # aws-cli), and an empty source is refused as missing before that.
+        return _s3(src, client), _local(dest or os.curdir)
     source_client = client
     if args.source_region:
         source_args = argparse.Namespace(**vars(args))
@@ -891,8 +937,9 @@ def materialize_transfer_engine(
     right after reading ``[s3]`` and before it decides anything about the run,
     so a CRT selection pays its whole construction there - the cross-process
     lock and ``create_s3_crt_client`` - even for a ``--dryrun`` that transfers
-    nothing, and even for ``rm``, whose deletes never ride the engine here. Call
-    it at that slot so the same failures land at the same point.
+    nothing, and even for ``rm``, whose deletes ride it but build it later
+    (with the deleter, or just before a single key's request). Call it at that
+    slot so the same failures land at the same point.
 
     The one failure it converts is awscrt's own ``assert isinstance(region,
     str)``, which fires when the region chain resolved nothing (`clientfactory`
@@ -948,39 +995,65 @@ def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], 
     pathologically deep tree is aws's ``fatal error`` rc 1, never the
     dispatcher's 255, and a mid-run Ctrl-C is never its 130). A clean run exits 2
     when only warnings accumulated, else 0. The printer's rendering thread
-    runs for exactly the ``run()`` span - the ``with`` drains it on every
-    path, so all queued lines are written (and precede a ``fatal error:``
-    line) before the exit code is derived.
+    outlives ``run()`` only by its drain: every queued line is written (and
+    precedes a ``fatal error:`` line) before the exit code is derived.
+
+    That drain is past aws's recorder span too - its recorder's shutdown,
+    waiting for its printer thread - so a Ctrl-C landing there is not
+    converted: it reaches the dispatcher's 130 (and its newline) once the
+    printer has written what was queued (``TransferPrinter.finish``),
+    whatever the run itself ended with (measured: all lines, rc 130).
     """
+    error: BaseException | None = None
     try:
         with printer:
-            run()
-    except BatchError:
-        # Per-item failure lines were already streamed by the printer.
-        return 1
+            try:
+                run()
+            except BaseException as exc:  # classified below, once every line is out
+                error = exc
     except KeyboardInterrupt:
-        # Ctrl-C inside the pipeline span is a cancelled run, not the
-        # dispatcher's 130: aws's result machinery swallows the interrupt
-        # (`CommandResultRecorder.__exit__`), the shutdown cancels the
-        # accepted transfers, and the printer emits one
-        # `cancelled: ctrl-c received` line at rc 1 (measured mid-sync and
-        # mid-rm, 2.36.40). The per-item CANCELLED records stay silent like
-        # aws's (progress.py `_prints`); the pre-pipeline spans keep the
-        # 130 backstop.
-        if not quiet:
-            sys.stderr.write("cancelled: ctrl-c received\n")
-        return 1
-    except AssertionError:
+        # From the drain: aws's printer thread still writes the run's own
+        # closing line - it is a queued result there - before the 130
+        # (measured: a mid-run Ctrl-C, then one in the drain, prints
+        # `cancelled: ctrl-c received` and exits 130).
+        line = None if error is None else _closing_line(error)
+        if line is not None and not quiet:
+            sys.stderr.write(line)
+        raise
+    if error is None:
+        return 2 if printer.warned else 0
+    if isinstance(error, AssertionError) or not isinstance(error, Exception | KeyboardInterrupt):
         # An internal-invariant violation (a bug) surfaces loudly, like the
         # dispatcher's AssertionError re-raise (cli.py) - masking it as a
         # fatal error would also blunt the test doubles' unexpected-call
-        # guards.
-        raise
-    except Exception as exc:
-        if not quiet:
-            sys.stderr.write(f"fatal error: {exc}\n")
-        return 1
-    return 2 if printer.warned else 0
+        # guards; SystemExit and the rest of the BaseException family pass.
+        raise error
+    line = _closing_line(error)
+    if line is not None and not quiet:
+        sys.stderr.write(line)
+    return 1
+
+
+def _closing_line(error: BaseException) -> str | None:
+    """The line a run that raised *error* ends with, or None (finish_transfer).
+
+    ``BatchError`` has none - its per-item failure lines were already
+    streamed by the printer. A ``KeyboardInterrupt`` inside the pipeline span
+    is a cancelled run, not the dispatcher's 130: aws's result machinery
+    swallows the interrupt (``CommandResultRecorder.__exit__``), the shutdown
+    cancels the accepted transfers, and the printer emits one ``cancelled:
+    ctrl-c received`` line at rc 1 (measured mid-sync and mid-rm, 2.36.40);
+    the per-item CANCELLED records stay silent like aws's (progress.py
+    ``_prints``), and the pre-pipeline spans keep the 130 backstop. Anything
+    else that killed the run is one ``fatal error:`` line.
+    """
+    if isinstance(error, BatchError):
+        return None
+    if isinstance(error, KeyboardInterrupt):
+        return "cancelled: ctrl-c received\n"
+    if isinstance(error, Exception) and not isinstance(error, AssertionError):
+        return f"fatal error: {output.error_text(error)}\n"
+    return None
 
 
 __all__ = [
@@ -993,8 +1066,10 @@ __all__ = [
     "create_local_dest_dir",
     "finish_transfer",
     "identify_type",
+    "is_s3express_accesspoint_path",
     "is_s3express_path",
     "materialize_transfer_engine",
+    "normalize_s3_path",
     "path_storage",
     "resolve_case_conflict",
     "resolve_locations",

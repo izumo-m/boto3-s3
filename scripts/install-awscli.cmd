@@ -3,7 +3,7 @@ rem scripts/install-awscli.cmd - scripts/install-awscli.sh's Windows twin.
 rem
 rem Extracts the aws-cli v2 MSI matching the pinned aws-cli source revision into a
 rem per-user directory (no admin rights, no registry entries, no PATH edits),
-rem for the Windows e2e parity lane. scripts\minio-env.cmd prepends the stable
+rem for the Windows e2e parity lane. scripts\dev-env.cmd prepends the stable
 rem `current` junction to PATH, so the pinned aws.exe shadows any system
 rem install for the suite - mirroring how .venv/bin/aws wins on Linux.
 rem
@@ -58,7 +58,7 @@ move "%tmpdir%\extract\Amazon\AWSCLIV2" "%dest%" >nul || goto fail
 rmdir /s /q "%tmpdir%"
 
 :link
-rem Stable pointer for PATH (minio-env.cmd): current -> <version>. A junction
+rem Stable pointer for PATH (dev-env.cmd): current -> <version>. A junction
 rem needs neither admin rights nor Developer Mode (unlike a symlink).
 if exist "%root%\current" rmdir "%root%\current"
 mklink /j "%root%\current" "%dest%" >nul || exit /b 1

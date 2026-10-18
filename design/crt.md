@@ -56,7 +56,8 @@ naturally.
 | module | role |
 |---|---|
 | `transferconfig.py` | `TransferConfig` = a subclass of boto3's `TransferConfig`. Adds the CRT tuning fields that boto3 lacks (`target_bandwidth` / `should_stream` / `disk_throughput` / `direct_io`) plus the classic multipart-copy's `annotation_temp_dir` (transfer.md section 4). A plain boto3 config is also accepted (`crtsupport.py` reads the CRT fields via `getattr` with a default of None, so a plain boto3 config works too). |
-| `crtsupport.py` | A faithful port of boto3's `boto3/crt.py` plus improvements. `should_use_crt` (whether to attempt CRT given `preferred`), `create_crt_transfer_manager` (the process-singleton CRT client + serializer, lock, compatibility check), `is_optimized_for_system` / `acquire_process_lock` (the building blocks for the CLI decision tree). It does not pull in awscrt / s3transfer.crt at import time. |
+| `crtsupport.py` | A faithful port of boto3's `boto3/crt.py` plus improvements. `should_use_crt` (whether to attempt CRT given `preferred`), `create_crt_transfer_manager` (the process-singleton CRT client + serializer, lock, compatibility check), `create_crt_request_sender` (the same engine as a sender of single requests, for the deletes - section 6), `is_optimized_for_system` / `acquire_process_lock` (the building blocks for the CLI decision tree). It does not pull in awscrt / s3transfer.crt at import time. |
+| `crtrequest.py` | `CrtRequestSender`: one botocore-serialized S3 request through the engine's CRT client, for the operation `CRTTransferManager` has no route for (the deleter's `DeleteObjects`) and, so one route reads every delete's answer, for the single-key `DeleteObject`s too (section 6). Also free of awscrt at import time. |
 | `Transferrer._get_manager` in `transfer.py` | The engine seam. COPY is unconditionally classic, and `capture_response=True` forces classic before any config is read (transfer.md section 2). Otherwise it reads `preferred_transfer_client`, attempts CRT (classic fallback if None), and the rest takes the conventional classic path. |
 | `runtimeconfig.py` (CLI) | A port of `RuntimeConfig` from aws-cli `transferconfig.py` + reading `[s3]` + the decision tree (`resolve_transfer_client`) + building the `TransferConfig` (`build_transfer_config`). |
 
@@ -83,16 +84,36 @@ also read as `'auto'`) with the same rules as boto3.
   the lock is held by another process, it returns `None` = classic fallback. A
   later client that falls outside the compatibility check (same region + same
   frozen credentials, **+ our extensions: same endpoint, same signing mode**
-  [signed/unsigned]**, same TLS `verify`, same `Config.s3` shape** - the CRT
-  client bakes in the first client's `verify` and the shared serializer its
+  [signed/unsigned]**, same TLS `verify`, same URL-shaping `Config` (the `s3`
+  dict plus the top-level fips / dualstack flags)** - the CRT client bakes in
+  the first client's `verify` and the shared serializer its
   `Config`, so a differing later client must not silently ride those) also
   drops to classic (the same shape as boto3's region/credentials-mismatch
-  fallback). The credentials half of that check carries one caller opt-in,
-  `allow_absent_credentials` (section 4, "Entering the CRT engine without
-  credentials"); it is off by default, so every library caller keeps boto3's
-  rule. On an explicit `'crt'` it also ports
-  boto3's `_validate_crt_transfer_config` (which rejects an explicit setting of a
-  CRT-unsupported option).
+  fallback). The endpoint and `Config` pins compare what botocore resolves,
+  not the spelling: a missing `s3` dict, an empty one and one naming only
+  defaults (`addressing_style='auto'`) are one shape, a flag left `None`
+  reads as `False`, and an endpoint's scheme and host case and trailing
+  slash are ignored as botocore ignores them when it joins the URL - taken
+  verbatim, `Config()` against `Config(s3={})` or a trailing `/` sent the
+  second client to classic for nothing (measured 2026-10-06), with the CRT
+  engine's throughput silently lost. The credentials half of that check matches by object before it
+  compares by value: a client whose credentials object is the one the
+  singleton's delegate wraps - every client of one session shares it - has
+  the same identity by construction and is admitted without resolving it,
+  which keeps a refreshable credential unresolved until the delegate needs
+  it (section 4, "Entering the CRT engine without credentials"); boto3's
+  frozen comparison is kept for a client holding another object. The half
+  also carries one caller opt-in,
+  `allow_absent_credentials` (section 4, same heading); it is off by default,
+  so every library caller keeps boto3's rule. On an explicit `'crt'` it also
+  ports boto3's `_validate_crt_transfer_config` (which rejects an explicit
+  setting of a CRT-unsupported option). Whatever the construction raises is
+  classified at the seams that call it (`transfer.crt_engine_errors`, used
+  by the transfer engine and by `S3.materialize_crt_engine`): that validation
+  error is a `ValidationError`, a CA bundle awscrt cannot read or parse is an
+  `InvalidConfigError`, a credential resolution's failure keeps its botocore
+  category, and awscrt's bare `AssertionError` on an unresolved region passes
+  through (section 6).
 - **Deriving the connection parameters (a documented improvement over boto3)**:
   because the library uses a connection model in which the caller holds the
   client (the S3 connection model in [`overview.md`](./overview.md)), it derives
@@ -129,7 +150,12 @@ also read as `'auto'`) with the same rules as boto3.
     `--endpoint-url` through. aws-cli itself has a known bug where, with only the
     env `AWS_ENDPOINT_URL_S3` set, it makes a TLS connection over http and dies
     with `AWS_IO_SOCKET_CLOSED`; we do not hit it because we derive from the
-    resolved `client.meta.endpoint_url`.
+    resolved `client.meta.endpoint_url`. A `None` is resolved again by the
+    serializer under its own session (below), so a client whose AWS endpoint
+    came from another session than the `S3`'s would be addressed by whatever
+    `endpoint_url` / `[services]` the `S3`'s session configures - a library
+    corner only (the CLI has one session), not measured, since probes cannot
+    lift the endpoint variables.
   - use_ssl = the endpoint's scheme is other than `http`
   - verify = the client's TLS verification setting. Via the private botocore
     attribute `client._endpoint.http_session._verify` (a private dependency at
@@ -167,7 +193,24 @@ also read as `'auto'`) with the same rules as boto3.
     endpoint through the session instead - the serializer builds its own client
     from the session it is handed, so the CLI's session-level
     `us_east_1_regional_endpoint` pin (cli.md section 4 item 3) reaches it as it
-    reaches every other client (one Host across engines)
+    reaches every other client (one Host across engines). Three parts of the
+    Config are rewritten on the way (`_serializer_config`): the preliminary
+    User-Agent botocore stores in it goes back to what the caller supplied
+    (handed on, it read as a caller-supplied `user_agent` and froze the
+    header in botocore's legacy form, dropping `app/<id>`); the app id is
+    pinned to the client's resolved one, empty for none; and every `s3`
+    key and fips / dualstack flag the client left out is pinned to
+    botocore's default - otherwise the serializer's session, which is not the
+    client's when the client came from another session, filled them from its
+    own profile (its `addressing_style = virtual` put the CRT's requests on a
+    virtual host where classic's went path-style, its `sdk_ua_app_id` named
+    a client that has none; measured). What botocore takes from the session
+    instead of the Config - the header's leading product name, a
+    session-level `user_agent_extra` - stays the serializer session's, and a
+    later client sharing the engine sends its CRT requests under the name of
+    the client the engine was built for. The compatibility check below does
+    not pin the User-Agent: a name is no reason to lose the engine (boto3's
+    own check pins only region and credentials)
 
   - part_size = that value **only when `multipart_chunksize` is explicitly set**;
     `None` if unset (CRT dynamic). Determined via boto3's `UNSET_DEFAULT`
@@ -293,19 +336,23 @@ aws builds the transfer manager immediately after that read
 (`_get_transfer_manager`), before it decides anything about the run, so a CRT
 selection pays the whole construction - the cross-process lock and
 `create_s3_crt_client` - even for a `--dryrun` that transfers nothing. The
-library builds its manager lazily, at the first submit, which would put those
-failures inside the transfer span (rc 1) instead of ahead of it (rc 255). So
-all four commands call `transferargs.materialize_transfer_engine` at aws's
-slot; it delegates to `S3.materialize_crt_engine`, which builds the engine the
+library builds its manager only once a live run starts - `prepare()` just ahead
+of enumeration, or the first submit on a stream route - and never for a
+dryrun, which would put those failures inside the operation (rc 1), or skip
+them, instead of ahead of it (rc 255). So all four commands call
+`transferargs.materialize_transfer_engine` at aws's slot; it delegates to
+`S3.materialize_crt_engine`, which builds the engine the
 effective `TransferConfig` selects and drops it (a no-op when that engine is
 classic; the CRT client is a process-wide singleton, so the transfer that
 follows reuses whatever was built).
 
-For rm this is construction without use: the deletes still never ride the
-engine (section 6). aws's rm builds the same client and does use it, so paying
-the construction is what makes the failure surfaces identical - the alternative,
-synthesizing awscrt's assertion ourselves, would rest the parity on a
-hand-written mirror of a third-party `assert`.
+For rm this construction comes ahead of everything the run does: the deletes
+ride the engine (section 6), but the library builds it later - the listing
+routes (recursive, and the keyless folder-marker sweep) with their deleter,
+just before the listing; the single-key route just before its request; a
+dryrun never. Paying it at aws's slot is what makes the failure surfaces
+identical - the alternative, synthesizing awscrt's assertion ourselves, would
+rest the parity on a hand-written mirror of a third-party `assert`.
 
 ### Entering the CRT engine without credentials
 
@@ -351,10 +398,30 @@ plumbing, but that class is transfer *tuning*, and a compatibility-posture
 boolean does not belong in it. `S3` already declares one such posture
 (`reusable_after_interrupt`), so it is where the second one goes.
 
-Only uploads reach this surface - a local source or a stdin stream alike, both
-measured byte-for-byte. A download or a sync fails earlier, at the botocore
-listing / HeadObject call, with `fatal error: Unable to locate credentials` on
-both tools.
+Only uploads and a single-key `rm` reach this surface - a local source or a
+stdin stream alike, and the rm's one `DeleteObject`, all measured
+byte-for-byte. A download, a sync or a recursive rm fails earlier, at the
+botocore listing / HeadObject call, with `fatal error: Unable to locate
+credentials` on both tools.
+
+A credential that resolves *lazily* - an assumed role, an SSO token, a web
+identity - is the same surface one step later: aws-cli's factory wraps the
+session's credentials object unresolved, so a refresh that fails (the token
+expired, STS unreachable or refusing) lands inside the delegate, per item
+(`upload failed: ...` / `delete failed: ...
+AWS_AUTH_CREDENTIALS_PROVIDER_DELEGATE_FAILURE`, rc 1),
+a download or sync fails at its botocore call (`fatal error:`, rc 1), and a
+`--dryrun` never resolves it at all (rc 0). boto3's compatibility check would
+resolve it ahead of the transfer - `get_frozen_credentials()` on every
+request - and the refresh failure would then fail the whole run before any
+item, the dryrun included (measured 2026-10-06 on the pinned aws: rc 1 / 0
+there against rc 254 / 255 here before the identity rule). The library
+therefore matches the credentials half by object first: the singleton
+records the credentials object its delegate wraps, and a client holding that
+same object is admitted without resolving anything, which is every client of
+one session, the CLI's included. A client holding another object still gets
+boto3's value comparison, and a resolution that fails there surfaces through
+the seam's classification (section 6) rather than as the bare botocore error.
 
 ### Where the CRT region comes from
 
@@ -363,8 +430,10 @@ boto3 takes the CRT client's region from the built client
 (`TransferManagerFactory._resolve_region`: `--region`, else the session's
 config variable), which answers `None` when nothing is configured. The two
 agree everywhere except that last case, where botocore has already handed the
-*botocore* client S3's `aws-global` pseudo-region - so boto3's source can never
-be `None`, and `awscrt.s3.S3Client`'s `assert isinstance(region, str)` is
+*botocore* client a concrete region - `us-east-1` in stock botocore's default
+(legacy) us-east-1 endpoint mode, S3's `aws-global` pseudo-region in the
+regional mode the CLI pins (cli.md section 4 item 3) - so boto3's source can
+never be `None`, and `awscrt.s3.S3Client`'s `assert isinstance(region, str)` is
 unreachable.
 
 Same split as the credentials posture above: the library keeps boto3's source
@@ -408,34 +477,41 @@ than inheriting the opt-in through the process singleton.
 
 ## 5. Charter treatment
 
-The CRT mode is promoted, in the charter of [`overview.md`](./overview.md) section 3,
-from "excluded because hard to realize" to a target that "**takes parity against
-aws's CRT mode**" (the CRT transfer engine is removed from charter exception 2).
+The charter of [`overview.md`](./overview.md) section 3 holds the CRT mode to
+**parity against aws's CRT mode**; the CRT transfer engine is not a "hard to
+realize" feature under charter exception 2.
 When the CRT stack is usable (awscrt present and s3transfer's CRT surface new
 enough - section 6), the exit code and output of CRT mode must match those of
 aws's CRT mode (enforced by the e2e CRT lane - testing.md).
 
 ## 6. Degradation and known differences (record)
 
-- **Deletes never ride the CRT engine, but rm builds it**: under CRT
-  configuration rm constructs the CRT client exactly as aws does - the same
-  cross-process lock, the same `create_s3_crt_client` call, so its
-  construction-time failures match - and then deletes through its established
-  non-CRT routes regardless: single rm keeps its blind `DeleteObject`,
-  recursive rm and S3-side
-  `sync --delete` keep `S3Deleter`'s batched `DeleteObjects`, and local-side
-  sync-delete keeps `os.remove`; none route through `CRTTransferManager.delete`.
-  These are the accepted deletion paths documented in deleter.md section 4;
-  the CRT e2e lane pins the charter-observable rc, output, and end states for
-  single/recursive rm and both sync-delete directions. One consequence shows in
-  the credentials-absent corner of section 4: with CRT configured, aws's `rm`
-  fails inside the CRT credentials delegate (`delete failed: ...
-  AWS_AUTH_CREDENTIALS_PROVIDER_DELEGATE_FAILURE`, unraisable block included)
-  while ours fails on its `DeleteObject` (`delete failed: ... Unable to locate
-  credentials`). Same rc 1; the wording follows from the routing decision, not
-  from how credentials are handled. A user can observe it, so it is recorded
-  in [`aws-differences.md`](../docs/cli/aws-differences.md) section 2 too
-  (testing.md section 9's recording rule); the mechanism stays here.
+- **Deletes ride the CRT engine, batched**: under CRT configuration aws sends
+  each `rm` / local-side `sync --delete` deletion through its CRT transfer
+  manager, one `DeleteObject` per key (an S3-to-S3 sync is classic on both
+  tools). `S3Deleter` keeps its batches and sends them on the same CRT client:
+  `CRTTransferManager` has no `DeleteObjects` route, so `crtrequest`'s
+  `CrtRequestSender` provides one the way s3transfer builds its own - an
+  unsigned, non-sending botocore client serializes the request (keeping the
+  checksum `DeleteObjects` requires, which s3transfer strips from its own
+  bodiless requests), the CRT client signs and sends it as a `DEFAULT` meta
+  request under the operation's name, and botocore's parser reads the answer
+  (an HTTP error answer as the botocore error for its code, as s3transfer's
+  `translate_crt_exception` does). The single-key rm and the deleter's per-key
+  requests (keys XML cannot carry, re-sends) ride it as `DeleteObject`. The
+  engine is resolved by `create_crt_request_sender`, which goes through
+  `create_crt_transfer_manager` - same singleton, lock, pins, postures and
+  construction failures - and serves a sender built once per engine from the
+  serializer's own session and client arguments. What this buys is the CRT's
+  retry policy (a request that dies without an answer is sent six times
+  whatever `max_attempts` says, measured), its failure text (the credentials
+  delegate's `AWS_AUTH_CREDENTIALS_PROVIDER_DELEGATE_FAILURE` with its
+  unraisable block, measured identical to aws's), and the `[s3]` tuning keys'
+  reach. What batching leaves is one set of attempts per batch where aws has
+  one per key, so a batch request that fails as a whole is re-sent key by key
+  on the same client (deleter.md section 3) - which can give a key more attempts
+  than aws does, never fewer - plus the batch differences deleter.md section 4
+  records for both engines.
 - **A plain-HTTP endpoint named only by the environment**: aws decides its CRT
   client's `use_ssl` from `--endpoint-url` alone, so an `http://` endpoint
   supplied through `AWS_ENDPOINT_URL_S3` is dialed over TLS and the transfer
@@ -445,7 +521,7 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   recorded in [`aws-differences.md`](../docs/cli/aws-differences.md) section 2
   too (testing.md section 9's recording rule); the measurement and the
   mechanism stay in section 3.
-- **CRT configured x no resolvable region**: aligned, no longer a divergence.
+- **CRT configured x no resolvable region**: aligned.
   aws's factory hands `create_s3_crt_client` whatever its region chain
   answered, unvalidated, so an unresolved region reaches
   `awscrt.s3.S3Client`'s `assert isinstance(region, str)`; the bare
@@ -453,7 +529,7 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   (`aws: [ERROR]:`) at rc 255. It fires for every command whose architecture
   builds a transfer manager - `cp` / `mv` / `sync` **and** `rm` - independently
   of whether credentials exist, and `--dryrun` / `--quiet` do not save it. This
-  CLI now reaches the same assertion: it declares aws's chain-resolved region
+  CLI reaches the same assertion: it declares aws's chain-resolved region
   (section 4, "Where the CRT region comes from") instead of the built client's
   `aws-global`, builds the engine at aws's slot (section 4, "Materializing the
   engine") so `rm` and the dryrun routes get there too, converts the bare
@@ -470,6 +546,31 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
     boto3 does (faithful). This is a deliberate exception to the backend-exception
     translation at the library boundary (exceptions.md section 1) - to reproduce boto3's
     behavior.
+- **Construction failures are classified, one excepted**: the engine is
+  built by third-party code, and what it raises reaches the library's caller
+  through `transfer.crt_engine_errors` - at the transfer engine's seam and at
+  `S3.materialize_crt_engine` alike. A CA bundle awscrt cannot read
+  (`FileNotFoundError` / `IsADirectoryError` / `PermissionError`, from its
+  own `open` of the path) or cannot parse (its `RuntimeError`,
+  `AWS_ERROR_INVALID_ARGUMENT`) is an `InvalidConfigError`; boto3's
+  `InvalidCrtTransferConfigError` a `ValidationError`; the botocore family a
+  credential resolution raises keeps its category (an `AccessDeniedError`
+  for a refused `AssumeRole`, a `TransportError` for an unreachable STS).
+  The CLI's rc 255 for an unusable bundle is unchanged: `InvalidConfigError`
+  maps to aws's general-handler code, and the text is the exception's own
+  (measured 16 ways, 2026-10-06: `aws: [ERROR]: 34 (AWS_ERROR_INVALID_ARGUMENT)
+  ...` on both). The one exception is awscrt's bare `AssertionError` on an
+  unresolved region, which passes through untouched for the CLI's single
+  conversion site (section 4, "Where the CRT region comes from").
+  `InvalidCrtTransferConfigError` itself exists from boto3 1.42.0 only, so the
+  seam looks it up rather than importing it: boto3 1.34 to 1.41 run the CRT
+  engine without it (an unconditional import failed every CRT transfer there
+  with `ImportError`, 2026-10-06). The engine's floor is boto3 1.34.6, the
+  first release whose `crt` extra brings an awscrt at boto3's own minimum
+  (the extra's awscrt follows botocore's patch release: 1.34.0 to 1.34.5
+  pin 0.19.17, one below it), and the awscrt the extra brings before boto3
+  1.40.12 dials the standard port only, so a custom-port endpoint is refused
+  there (docs/compatibility.md records both).
 - **Explicit crt x lock contention**: aws forces the CRT construction; boto3 -
   and the library default - silently falls back to classic. When the
   construction succeeds the two are indistinguishable in output and rc
@@ -507,35 +608,51 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   in docs/cli/aws-differences.md section 2).
 - **fio_options**: unavailable on any pip s3transfer
   ([`compatibility.md`](../docs/compatibility.md)). `_add_fio_options` probes
-  `create_s3_crt_client`'s signature rather than a version, so the keys start
-  flowing the moment the parameter ships upstream.
+  `create_s3_crt_client`'s signature rather than a version, so the keys are
+  passed whenever the installed s3transfer's `create_s3_crt_client` accepts
+  the parameter.
 - **TransferConfig on old s3transfer**: below s3transfer 0.16.0 the config
   cannot reach `CRTTransferManager` and is dropped with boto3's own warning
   (`configured values will be ignored`), boto3-faithfully; the CRT client itself
-  still gets `part_size` / `target_throughput`, passed to
-  `create_s3_crt_client` directly ([`compatibility.md`](../docs/compatibility.md) for
-  what the caller sees). The gate is boto3's `TRANSFER_CONFIG_SUPPORTS_CRT` =
-  `hasattr(TransferConfig, "UNSET_DEFAULT")`; drop the shim once the floor is
-  past 0.16.
+  still gets `target_throughput`, passed to `create_s3_crt_client` directly,
+  while `part_size` stays `None` (the CRT's dynamic part size): an explicit
+  `multipart_chunksize` is only detectable through the `UNSET_DEFAULT`
+  machinery s3transfer 0.16.0 introduced
+  ([`compatibility.md`](../docs/compatibility.md) for what the caller sees).
+  The gate is boto3's `TRANSFER_CONFIG_SUPPORTS_CRT` =
+  `hasattr(TransferConfig, "UNSET_DEFAULT")`.
 - **Empty / whitespace-only `verify`**: aws refuses such a value outright from
-  2.36.2 on (`Invalid CA bundle: ...` at rc 255, its bundled botocore and
+  2.36.6 on (`Invalid CA bundle: ...` at rc 255, its bundled botocore and
   s3transfer fork both carrying the check), and so does the CLI - but at the
   botocore client build, which every command performs before any transfer
   engine exists ([`cli.md`](./cli.md) section 4, `_reject_empty_ca_bundle`).
   So the CRT lane is never handed one from the CLI, whichever engine the run
   selects, and both tools report the same line at the same point (measured
   2026-09-06 under `preferred_transfer_client = crt`: an empty `--ca-bundle`,
-  a whitespace-only one, and an empty `AWS_CA_BUNDLE`). What remains below is a **library**
-  concern only, for a caller that builds its own client and bypasses that
-  resolution: pip s3transfer >= 0.19.2 and botocore >= 1.43.54 raise
-  `InvalidConfigError` on the value, while older ones read the empty string as
-  falsy and turn TLS verification off. `_derive_verify` normalizes the empty
-  string to `False` so that lane behaves uniformly across installed versions
-  rather than swinging with the patch level; a whitespace-only value is left
-  through and fails either as a missing CA path or as that same rejection,
-  depending on the version. Whether the library should adopt aws's refusal
-  instead is open (`overview.md` section 3's third exception covers the
-  engine-rooted half).
+  a whitespace-only one, and an empty `AWS_CA_BUNDLE`). For a **library**
+  caller that builds its own client, pip botocore >= 1.43.54 (and pip
+  s3transfer >= 0.19.2 on the CRT lane) raise `InvalidConfigError` on the
+  value, while older ones read the empty string as falsy and turn TLS
+  verification off. The library refuses the value itself on every version,
+  with botocore's own error and wording (`s3storage.reject_empty_ca_bundle`):
+  `S3Storage.get_client` for every operation, `S3.client()` and
+  `S3PathResolver` for the clients they hand out or take, and
+  `create_crt_transfer_manager` as its first step - before the cross-process
+  lock and whatever state the singleton is in - for a client passed straight
+  to `materialize_crt_engine` (the client-only check: the environment is
+  `S3.materialize_crt_engine`'s, below). For a client the caller hands over
+  (`S3Storage(client=...)`, `S3PathResolver`, `S3.materialize_crt_engine`) an
+  empty `AWS_CA_BUNDLE` is refused too, because botocore's credential clients
+  resolve it first whatever `verify` the client was given - stricter than
+  aws, which refuses it only when it builds a client that reads the value (a
+  credential client, the CRT request serializer). `REQUESTS_CA_BUNDLE`
+  and a profile's empty `ca_bundle` in that position stay out of reach: the
+  client does not name the session that decides whether they are read.
+  `S3.client()`'s clients carry `CA_BUNDLE_ENVIRONMENT_VETTED` (their own
+  value answers for the environment), and so do the CLI's, which skip that guess
+  since `clientfactory._check_every_client` already checks every client
+  their sessions build at aws's own point (static credentials beside a valid
+  `--ca-bundle` complete, as on aws).
 - **Process-pinned singleton**: the region / credentials / endpoint of the first
   client to reach the CRT path monopolize the in-process CRT, and an incompatible
   second connection falls back to classic (identical behavior to boto3).
@@ -549,13 +666,12 @@ aws's CRT mode (enforced by the e2e CRT lane - testing.md).
   an upload that names no checksum; aws-cli's bundled one stamps `CRC64NVME`
   (its bundled botocore's default). The library keeps boto3's (section 1):
   a library caller names `checksum_algorithm` itself. The CLI names aws's
-  value for both engines (`checksumdefault`, cli.md section 4), which is
+  value for both engines (`checksumdefault`, cli.md section 5.7), which is
   where the two agree. The difference is not cosmetic on this lane:
   aws-checksums computes CRC32 in software on x86-64 (about 3 GiB/s against
   about 20 for CRC64NVME), which on a 4-vCPU instance pushing 800 MiB/s was
-  10% of a 1 GB upload's wall time against real S3 - the one benchmark row
-  where the CLI trailed aws until the default was aligned
-  (benchmarks/RESULTS.md, 2026-09-06). A library caller on the CRT lane who
-  wants that speed passes `checksum_algorithm="CRC64NVME"`.
+  10% of a 1 GB upload's wall time against real S3 (benchmarks/RESULTS.md,
+  2026-09-06). A library caller on the CRT lane who wants that speed passes
+  `checksum_algorithm="CRC64NVME"`.
 - **Cannot be verified under moto**: because CRT bypasses botocore's HTTP layer,
-  actual verification is only on the e2e (MinIO) lane.
+  actual verification is only on the e2e (dev stack) lane.

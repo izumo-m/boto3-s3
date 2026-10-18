@@ -11,6 +11,7 @@ instead, where what botocore itself does with the arguments is the point
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import io
 import os
@@ -19,14 +20,24 @@ import sys
 import threading
 import time
 from collections.abc import Collection, Generator, Iterator
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
 import boto3
 import pytest
-from botocore.exceptions import ClientError, ProfileNotFound, ResponseStreamingError
+from botocore.exceptions import (
+    ClientError,
+    ConnectionClosedError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    HTTPClientError,
+    IncompleteReadError,
+    ProfileNotFound,
+    ReadTimeoutError,
+    ResponseStreamingError,
+)
 from moto import mock_aws
 
 from boto3_s3 import (
@@ -38,7 +49,9 @@ from boto3_s3 import (
     FileKind,
     InvalidConfigError,
     LocalStorage,
+    MalformedResponseError,
     NotFoundError,
+    OpResult,
     S3FileInfo,
     S3ScanOptions,
     S3Storage,
@@ -46,10 +59,11 @@ from boto3_s3 import (
     StorageCapability,
     TransportError,
     ValidationError,
+    s3storage,
 )
 from boto3_s3.storage import sieve_pages
 from tests.utils.fakemodel import model_meta
-from tests.utils.fakes3 import MTIME, client_error
+from tests.utils.fakes3 import MTIME, client_error, listing
 from tests.utils.recorder import ApiCall, make_recording_client, ops
 
 
@@ -174,10 +188,47 @@ class TestScanNonRecursive:
         assert info.compare_key == "a.txt"
         assert info.size == 10
         assert info.mtime == MTIME
-        assert info.etag == "abc"  # surrounding quotes stripped
+        assert info.etag == '"abc"'  # as the response carried it, quotes included
         assert info.storage_class == "STANDARD"
         assert info.owner == "me"
         assert info.storage is storage
+
+
+class TestEtagIsKeptAsReceived:
+    """``S3FileInfo.etag`` is the response's own text; nothing is stripped.
+
+    The transfer engine hands it to s3transfer as the ``If-Match`` of a ranged
+    download (and a multipart copy's ``CopySourceIfMatch``), and aws-cli sends
+    the response's text there untouched. Stripping the quotes and putting them
+    back is only an identity for the usual quoted form: measured against the
+    pinned aws (2.36.40) through a 127.0.0.1 fake, an ETag served as ``abc``
+    goes back as ``abc`` and one served as ``W/"abc"`` as ``W/"abc"``, where a
+    strip-and-requote sent ``"abc"`` and ``"W/"abc"``.
+    """
+
+    @pytest.mark.parametrize("etag", ['"abc"', '"abc-2"', "abc", 'W/"abc"'])
+    def test_a_listing_entry_keeps_the_etag_text(self, etag: str) -> None:
+        storage, _ = _storage([{"Contents": [_obj("prefix/a.txt", 10, etag=etag)]}])
+        (info,) = storage.scan(S3ScanOptions(recursive=True))
+        assert isinstance(info, S3FileInfo)
+        assert info.etag == etag
+
+    @pytest.mark.parametrize("etag", ['"abc"', "abc", 'W/"abc"'])
+    def test_a_head_keeps_the_etag_text(self, etag: str) -> None:
+        head = {"ContentLength": 7, "LastModified": MTIME, "ETag": etag}
+        storage, _ = _storage(url="s3://bucket/prefix/obj.txt", head_response=head)
+        info = storage.get_fileinfo()
+        assert info is not None and info.etag == etag
+
+    def test_only_a_missing_etag_is_none(self) -> None:
+        # An empty ETag is still what the response carried: aws-cli provides
+        # it to s3transfer like any other (so no HeadObject probe goes out
+        # for that object - measured through a fake serving `<ETag></ETag>`),
+        # and only an entry with no ETag element at all has none.
+        pages = [{"Contents": [_obj("prefix/a.txt"), _obj("prefix/b.txt", etag="")]}]
+        storage, _ = _storage(pages)
+        infos = list(storage.scan(S3ScanOptions(recursive=True)))
+        assert [info.etag for info in infos if isinstance(info, S3FileInfo)] == [None, ""]
 
 
 class TestScanRecursive:
@@ -511,7 +562,7 @@ class TestGetFileinfo:
         assert info.key == "prefix/obj.txt"
         assert info.compare_key == "obj.txt"  # basename
         assert info.size == 7
-        assert info.etag == "abc"  # surrounding quotes stripped
+        assert info.etag == '"abc"'  # as the response carried it, quotes included
         assert info.head is head  # the HeadObject payload is cached
         assert client.head_calls == [{"Bucket": "bucket", "Key": "prefix/obj.txt"}]
 
@@ -660,7 +711,8 @@ class TestListBuckets:
         message = str(exc_info.value)
         assert "1.35.42" in message
         assert version("botocore") in message
-        assert exc_info.value.operation == "ls"
+        # A storage-level call names no operation; `S3.ls` stamps its own.
+        assert exc_info.value.operation is None
         assert client.calls == []
 
     def test_prefix_only_model_carries_name_prefix_and_refuses_region(self) -> None:
@@ -702,8 +754,10 @@ class TestMalformedListingEntries:
 
     aws-cli reads a ``Contents`` entry's ``Key`` / ``LastModified`` / ``Size``
     (and a common prefix's ``Prefix``, a bucket's ``CreationDate`` / ``Name``) by
-    subscript, so a response that omits one raises ``KeyError`` naming the
-    element, right at that entry. Measured against the pinned aws through a
+    subscript, so a response that omits one dies with ``KeyError`` naming the
+    element, right at that entry; here that is ``MalformedResponseError`` with
+    the KeyError's text as its message and the KeyError on ``__cause__``.
+    Measured against the pinned aws through a
     127.0.0.1 fake: ``ls`` prints the entries ahead of it and exits 255 with
     ``[ERROR]: 'LastModified'``, a transfer prints its own and exits 1 with
     ``fatal error: 'LastModified'``. Dropping the entry instead - what this used
@@ -719,22 +773,28 @@ class TestMalformedListingEntries:
             ({"ETag": '"x"'}, "Key"),
         ],
     )
-    def test_a_missing_element_raises_keyerror_naming_it(
+    def test_a_missing_element_is_a_malformed_response_naming_it(
         self, entry: dict[str, Any], missing: str
     ) -> None:
         # The last row pins the read order too: aws-cli's BucketLister takes Key
         # first, then LastModified, and its consumer Size afterwards, so an entry
         # missing several is reported by the first of them.
         storage, _ = _storage([{"Contents": [entry]}])
-        with pytest.raises(KeyError) as excinfo:
+        with pytest.raises(MalformedResponseError) as excinfo:
             list(storage.scan(S3ScanOptions(recursive=True)))
-        assert excinfo.value.args[0] == missing
+        assert str(excinfo.value) == f"'{missing}'"  # str(KeyError): the CLI's line
+        cause = excinfo.value.__cause__
+        assert isinstance(cause, KeyError) and cause.args[0] == missing
+        assert excinfo.value.bucket == storage.bucket
+        assert excinfo.value.key == (None if missing == "Key" else entry["Key"])
 
     def test_entries_ahead_of_the_bad_one_are_still_yielded(self) -> None:
         bad = {"Key": "prefix/bad.txt", "Size": 1}
         pages = [{"Contents": [_obj("prefix/a.txt"), bad, _obj("prefix/z.txt")]}]
         storage, _ = _storage(pages)
-        keys = _keys_until_raise(storage.scan(S3ScanOptions(recursive=True)), KeyError)
+        keys = _keys_until_raise(
+            storage.scan(S3ScanOptions(recursive=True)), MalformedResponseError
+        )
         assert keys == ["prefix/a.txt"]
 
     def test_an_earlier_page_survives_a_later_bad_entry(self) -> None:
@@ -743,7 +803,9 @@ class TestMalformedListingEntries:
             {"Contents": [_obj("prefix/b.txt"), {"Key": "prefix/bad.txt", "Size": 1}]},
         ]
         storage, _ = _storage(pages)
-        keys = _keys_until_raise(storage.scan(S3ScanOptions(recursive=True)), KeyError)
+        keys = _keys_until_raise(
+            storage.scan(S3ScanOptions(recursive=True)), MalformedResponseError
+        )
         assert keys == ["prefix/a.txt", "prefix/b.txt"]
 
     def test_a_common_prefix_without_prefix_raises_before_the_objects(self) -> None:
@@ -756,7 +818,9 @@ class TestMalformedListingEntries:
             }
         ]
         storage, _ = _storage(pages)
-        keys = _keys_until_raise(storage.scan(S3ScanOptions(recursive=False)), KeyError)
+        keys = _keys_until_raise(
+            storage.scan(S3ScanOptions(recursive=False)), MalformedResponseError
+        )
         assert keys == ["prefix/good/"]
 
     @pytest.mark.parametrize(
@@ -767,7 +831,7 @@ class TestMalformedListingEntries:
             ({"ETag": '"abc"'}, "ContentLength"),
         ],
     )
-    def test_a_head_missing_an_element_raises_keyerror_naming_it(
+    def test_a_head_missing_an_element_is_a_malformed_response_naming_it(
         self, head: dict[str, Any], missing: str
     ) -> None:
         # The single-object HEAD follows the same rule in aws-cli's
@@ -776,9 +840,16 @@ class TestMalformedListingEntries:
         # is blamed on ContentLength (the transfer engine's `head_single` reads
         # it the same way; the CLI measurement is in that route's suite).
         storage, _ = _storage(url="s3://bucket/prefix/obj.txt", head_response=head)
-        with pytest.raises(KeyError) as excinfo:
+        with pytest.raises(MalformedResponseError) as excinfo:
             storage.get_fileinfo()
-        assert excinfo.value.args[0] == missing
+        assert str(excinfo.value) == f"'{missing}'"
+        assert isinstance(excinfo.value.__cause__, KeyError)
+        # A storage-level call: the operation stays unset, the entry is named.
+        assert (excinfo.value.operation, excinfo.value.bucket, excinfo.value.key) == (
+            None,
+            "bucket",
+            "prefix/obj.txt",
+        )
 
     @pytest.mark.parametrize(
         ("entry", "missing"),
@@ -791,11 +862,11 @@ class TestMalformedListingEntries:
         # name, so the date is the one reported when both are gone.
         storage, _ = _storage([{"Buckets": [_bucket_entry("aaa"), entry]}], url="s3://")
         keys: list[str] = []
-        with pytest.raises(KeyError) as excinfo:
+        with pytest.raises(MalformedResponseError) as excinfo:
             for info in storage.list_buckets():
                 keys.append(info.key)
         assert keys == ["aaa"]
-        assert excinfo.value.args[0] == missing
+        assert str(excinfo.value) == f"'{missing}'"
 
 
 _FAR_FUTURE = datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
@@ -845,6 +916,8 @@ class TestListingTimestampRepresentability:
     ``date value out of range`` there rather than being listed or transferred -
     measured against the pinned aws through a 127.0.0.1 fake: ``fatal error: date
     value out of range`` at rc 1 for cp / sync, ``[ERROR]`` at rc 255 for ``ls``.
+    Here it is ``MalformedResponseError`` carrying that text and the
+    ``OverflowError`` on ``__cause__``.
     Which stamps qualify depends on the zone, so each case pins one; the value
     kept on the entry stays UTC per the ``FileInfo.mtime`` contract.
     """
@@ -853,7 +926,9 @@ class TestListingTimestampRepresentability:
         pages = [{"Contents": [_obj("prefix/a.txt"), _stamped("prefix/far.txt", _FAR_FUTURE)]}]
         with _local_zone("Asia/Tokyo"):
             storage, _ = _storage(pages)
-            keys = _keys_until_raise(storage.scan(S3ScanOptions(recursive=True)), OverflowError)
+            keys = _keys_until_raise(
+                storage.scan(S3ScanOptions(recursive=True)), MalformedResponseError
+            )
         assert keys == ["prefix/a.txt"]
 
     def test_the_same_stamp_is_kept_where_the_zone_can_hold_it(self) -> None:
@@ -867,8 +942,10 @@ class TestListingTimestampRepresentability:
         pages = [{"Contents": [_stamped("prefix/old.txt", _FAR_PAST)]}]
         with _local_zone("America/New_York"):
             storage, _ = _storage(pages)
-            with pytest.raises(OverflowError, match="date value out of range"):
+            with pytest.raises(MalformedResponseError, match="date value out of range") as excinfo:
                 list(storage.scan(S3ScanOptions(recursive=True)))
+        assert isinstance(excinfo.value.__cause__, OverflowError)
+        assert (excinfo.value.bucket, excinfo.value.key) == (storage.bucket, "prefix/old.txt")
 
     def test_the_far_past_stamp_is_kept_east_of_utc(self) -> None:
         pages = [{"Contents": [_stamped("prefix/old.txt", _FAR_PAST)]}]
@@ -883,7 +960,7 @@ class TestListingTimestampRepresentability:
         head = {"ContentLength": 5, "LastModified": _FAR_FUTURE}
         with _local_zone("Asia/Tokyo"):
             storage, _ = _storage([], head_response=head)
-            with pytest.raises(OverflowError, match="date value out of range"):
+            with pytest.raises(MalformedResponseError, match="date value out of range"):
                 storage.get_fileinfo("a.txt")
 
     @pytest.mark.skipif(sys.platform == "win32", reason="Windows has no check-free range")
@@ -899,6 +976,159 @@ class TestListingTimestampRepresentability:
         with _local_zone("Asia/Tokyo"):
             storage, _ = _storage([{"Contents": [_obj("prefix/a.txt")]}])
             assert [r.key for r in storage.scan(S3ScanOptions(recursive=True))] == ["prefix/a.txt"]
+
+    def test_the_windows_shape_of_the_failure_is_translated_too(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # On Windows the conversion goes through time.localtime, which fails
+        # with OSError [Errno 22] - not OverflowError - for a stamp below the
+        # epoch or past its own limit. Only the POSIX pair was caught, so the
+        # OSError left the library bare (measured on a Windows host; aws.exe
+        # dies on the same error with the same line).
+        class _WindowsLocalZone(tzinfo):
+            def utcoffset(self, dt: datetime | None) -> timedelta:
+                raise OSError(errno.EINVAL, "Invalid argument")
+
+        monkeypatch.setattr("dateutil.tz.tzlocal", _WindowsLocalZone)
+        monkeypatch.setattr(s3storage, "_ALWAYS_CHECK_LOCAL_ZONE", True)
+        with pytest.raises(MalformedResponseError) as exc_info:
+            s3storage.reject_unrepresentable_stamp(
+                datetime(1960, 1, 1, tzinfo=timezone.utc), bucket="b", key="k"
+            )
+        error = exc_info.value
+        assert str(error) == "[Errno 22] Invalid argument"
+        assert isinstance(error.__cause__, OSError)
+        assert (error.bucket, error.key) == ("b", "k")
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="the Windows localtime limits")
+    def test_a_stamp_below_the_epoch_is_malformed_on_windows(self) -> None:
+        with pytest.raises(MalformedResponseError):
+            s3storage.reject_unrepresentable_stamp(datetime(1960, 1, 1, tzinfo=timezone.utc))
+
+
+class TestZonelessStamp:
+    """A timestamp with no zone is read as local time, the way aws-cli reads it.
+
+    Every form S3 sends carries a zone. An endpoint that leaves it off
+    (``2025-01-01T00:00:00``) makes botocore hand back a naive ``datetime``,
+    which aws-cli's ``parse(...).astimezone(tzlocal())`` takes as local time
+    and compares, stamps and prints from there (measured against the pinned
+    aws through a 127.0.0.1 fake, ``TZ=UTC`` and ``TZ=Asia/Tokyo``). Kept
+    naive, the value could not be set against the local side's aware one: a
+    sync with one key on both sides ended on ``TypeError``.
+    """
+
+    _NAIVE = datetime(2025, 1, 1, 0, 0, 0)
+
+    def test_a_listing_entry_gets_the_local_reading_as_aware_utc(self) -> None:
+        storage, _ = _storage([{"Contents": [_stamped("prefix/a.txt", self._NAIVE)]}])
+        [entry] = storage.scan(S3ScanOptions(recursive=True))
+        assert entry.mtime is not None
+        assert entry.mtime.utcoffset() == timedelta(0)
+        # `timestamp()` of a naive value is the stdlib's own local-time reading.
+        assert entry.mtime.timestamp() == self._NAIVE.timestamp()
+
+    @_needs_tzset
+    def test_the_reading_follows_the_local_zone(self) -> None:
+        with _local_zone("Asia/Tokyo"):
+            storage, _ = _storage([{"Contents": [_stamped("prefix/a.txt", self._NAIVE)]}])
+            [entry] = storage.scan(S3ScanOptions(recursive=True))
+        assert entry.mtime == datetime(2024, 12, 31, 15, tzinfo=timezone.utc)
+
+    def test_a_stamp_that_carries_a_zone_is_kept_as_it_is(self) -> None:
+        east = datetime(2025, 1, 1, 9, tzinfo=timezone(timedelta(hours=9)))
+        storage, _ = _storage([{"Contents": [_stamped("prefix/a.txt", east)]}])
+        [entry] = storage.scan(S3ScanOptions(recursive=True))
+        assert entry.mtime is east
+
+    def test_a_head_gets_the_same_reading(self) -> None:
+        head = {"ContentLength": 7, "LastModified": self._NAIVE}
+        storage, _ = _storage(url="s3://bucket/prefix/obj.txt", head_response=head)
+        info = storage.get_fileinfo()
+        assert info is not None and info.mtime is not None
+        assert info.mtime.utcoffset() == timedelta(0)
+        assert info.mtime.timestamp() == self._NAIVE.timestamp()
+
+    @_needs_tzset
+    def test_a_wall_clock_time_the_zone_skips_is_read_as_aws_cli_reads_it(self) -> None:
+        # 02:30 on the day New York's clocks jump from 02:00 to 03:00 does not
+        # exist. aws-cli, on Python 3.14, places it at 07:30Z (measured: a
+        # download is stamped 1741505400); `astimezone()` on a naive value
+        # says 06:30Z before Python 3.12, which is why the instant is taken
+        # through `timestamp()`.
+        gap = datetime(2025, 3, 9, 2, 30)
+        with _local_zone("America/New_York"):
+            storage, _ = _storage([{"Contents": [_stamped("prefix/a.txt", gap)]}])
+            [entry] = storage.scan(S3ScanOptions(recursive=True))
+        assert entry.mtime == datetime(2025, 3, 9, 7, 30, tzinfo=timezone.utc)
+
+    def test_the_microseconds_survive_the_reading(self) -> None:
+        precise = datetime(2025, 1, 1, 12, 0, 0, 123457)
+        storage, _ = _storage([{"Contents": [_stamped("prefix/a.txt", precise)]}])
+        [entry] = storage.scan(S3ScanOptions(recursive=True))
+        assert entry.mtime is not None
+        assert entry.mtime.microsecond == 123457
+        assert entry.mtime.replace(microsecond=0).timestamp() == (
+            precise.replace(microsecond=0).timestamp()
+        )
+
+    def test_the_last_day_of_the_range_is_malformed(self) -> None:
+        # aws-cli's Python places a naive value by solving for it on both
+        # sides of a possible fold, and the second solution reads the local
+        # calendar a day ahead - so a zone-less stamp from 9999-12-31T00:00:00
+        # on ends its run (measured under UTC, Asia/Tokyo and
+        # America/New_York: `ls` at rc 255 from that second on, rc 0 one
+        # microsecond before).
+        pages = [{"Contents": [_stamped("prefix/far.txt", datetime(9999, 12, 31, 0, 0, 0))]}]
+        storage, _ = _storage(pages)
+        with pytest.raises(MalformedResponseError):
+            list(storage.scan(S3ScanOptions(recursive=True)))
+
+    @_needs_tzset
+    @pytest.mark.parametrize("zone", ["UTC", "Asia/Tokyo", "America/New_York"])
+    def test_the_last_day_is_malformed_whatever_the_zone(self, zone: str) -> None:
+        # East of UTC and at UTC the stamp's own instant is in range; only the
+        # day-ahead step leaves it. The error is the one that step raises, the
+        # year running out, as it is for aws-cli.
+        pages = [{"Contents": [_stamped("prefix/far.txt", datetime(9999, 12, 31, 0, 0, 0))]}]
+        with _local_zone(zone):
+            storage, _ = _storage(pages)
+            with pytest.raises(MalformedResponseError) as exc_info:
+                list(storage.scan(S3ScanOptions(recursive=True)))
+        if sys.platform == "linux":
+            # The step's own error (glibc reads the calendar a day ahead and
+            # CPython then refuses the year); another libc may fail the read
+            # itself, so only the kind of outcome is held elsewhere.
+            assert isinstance(exc_info.value.__cause__, ValueError)
+            assert "10000" in str(exc_info.value)
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Windows' localtime ends at the year 3000")
+    def test_the_microsecond_before_the_last_day_is_kept(self) -> None:
+        stamp = datetime(9999, 12, 30, 23, 59, 59, 999999)
+        storage, _ = _storage([{"Contents": [_stamped("prefix/far.txt", stamp)]}])
+        with _local_zone("UTC"):
+            [entry] = storage.scan(S3ScanOptions(recursive=True))
+        assert entry.mtime == stamp.replace(tzinfo=timezone.utc)
+
+    def test_a_bucket_creation_date_gets_the_same_reading(self) -> None:
+        pages = [{"Buckets": [{"Name": "alpha", "CreationDate": self._NAIVE}]}]
+        storage, _ = _storage(pages, url="s3://")
+        [bucket] = storage.list_buckets()
+        assert bucket.mtime is not None
+        assert bucket.mtime.utcoffset() == timedelta(0)
+        assert bucket.mtime.timestamp() == self._NAIVE.timestamp()
+
+    @_needs_tzset
+    def test_a_zoneless_stamp_the_conversion_cannot_hold_is_malformed(self) -> None:
+        # The reading itself can fail at the edge of datetime's range; aws-cli
+        # dies on the same conversion.
+        pages = [{"Contents": [_stamped("prefix/far.txt", datetime(1, 1, 1))]}]
+        with _local_zone("Asia/Tokyo"):
+            storage, _ = _storage(pages)
+            with pytest.raises(MalformedResponseError) as exc_info:
+                list(storage.scan(S3ScanOptions(recursive=True)))
+        assert (exc_info.value.bucket, exc_info.value.key) == ("bucket", "prefix/far.txt")
+        assert isinstance(exc_info.value.__cause__, (OverflowError, ValueError, OSError))
 
 
 class TestScanErrorMapping:
@@ -1028,6 +1258,116 @@ class TestScanErrorMapping:
             list(storage.scan())
         assert exc_info.value.operation is None
 
+    @pytest.mark.parametrize(
+        ("run", "operation"),
+        [
+            ("ls", "ls"),
+            ("rm", "rm"),
+            ("rm --dryrun", "rm"),
+            ("cp", "cp"),
+            ("mv", "mv"),
+            ("sync", "sync"),
+        ],
+    )
+    def test_the_operation_reading_the_listing_names_its_failure(
+        self, tmp_path: Path, run: str, operation: str
+    ) -> None:
+        # The listing cannot know who reads it, so it raises unnamed and the
+        # operation fills its own name in - the rule open / delete / validate
+        # failures follow. One listing failure, five names.
+        denied = client_error("AccessDenied", 403, "ListObjectsV2")
+        client, _calls = make_recording_client([denied, denied])
+        source = S3Storage("s3://bucket/prefix/", client=client)
+        s3 = S3()
+        runs = {
+            "ls": lambda: s3.ls(source, on_entry=lambda info: None, recursive=True),
+            "rm": lambda: s3.rm(source, recursive=True),
+            "rm --dryrun": lambda: s3.rm(source, recursive=True, dryrun=True),
+            "cp": lambda: s3.cp(source, str(tmp_path), recursive=True),
+            "mv": lambda: s3.mv(source, str(tmp_path), recursive=True),
+            "sync": lambda: s3.sync(source, str(tmp_path)),
+        }
+        with pytest.raises(AccessDeniedError) as exc_info:
+            runs[run]()
+        error = exc_info.value
+        assert (error.operation, error.bucket, error.key) == (operation, "bucket", None)
+        assert error.__cause__ is denied
+
+    @pytest.mark.parametrize("run", ["ls", "rm --dryrun"])
+    def test_what_the_callers_callback_raises_is_not_the_listings(self, run: str) -> None:
+        # Only fetching an entry is the listing's. A storage call the callback
+        # makes itself - the documented way to read an entry's object - raises
+        # unnamed, and stays unnamed: the operation's name was being written
+        # over the whole delivery loop.
+        denied = client_error("AccessDenied", 403, "HeadObject")
+        client, _calls = make_recording_client([listing(("prefix/a", 1)), denied])
+        source = S3Storage("s3://bucket/prefix/", client=client)
+
+        def read_it(_record: object) -> None:
+            source.get_fileinfo("prefix/a")
+
+        s3 = S3()
+        runs = {
+            "ls": lambda: s3.ls(source, on_entry=read_it, recursive=True),
+            "rm --dryrun": lambda: s3.rm(source, recursive=True, dryrun=True, on_result=read_it),
+        }
+        with pytest.raises(AccessDeniedError) as exc_info:
+            runs[run]()
+        assert exc_info.value.operation is None
+
+    @pytest.mark.parametrize(
+        "run", ["ls", "rb", "website", "rm", "rm --recursive", "rm --recursive --dryrun"]
+    )
+    def test_failing_to_build_the_client_names_no_operation(self, run: str) -> None:
+        # A storage built without a client builds one on first use. That
+        # failing is no operation's failure (exceptions.md), and the transfer
+        # routes, mb and presign reported it so; these routes built the client
+        # inside their request's or listing's attribution and named
+        # themselves - the single-key rm as a FAILED record and a BatchError.
+        class _Unbuildable(S3Storage):
+            def get_client(self) -> Any:
+                raise InvalidConfigError("The config profile (nope) could not be found")
+
+        results: list[OpResult] = []
+        s3 = S3()
+        key = _Unbuildable("s3://bucket/k")
+        prefix = _Unbuildable("s3://bucket/prefix/")
+        runs = {
+            "ls": lambda: s3.ls(prefix, on_entry=lambda info: None),
+            "rb": lambda: s3.rb(_Unbuildable("s3://bucket")),
+            "website": lambda: s3.website(_Unbuildable("s3://bucket"), index_document="i.html"),
+            "rm": lambda: s3.rm(key, on_result=results.append),
+            "rm --recursive": lambda: s3.rm(prefix, recursive=True, on_result=results.append),
+            "rm --recursive --dryrun": lambda: s3.rm(
+                prefix, recursive=True, dryrun=True, on_result=results.append
+            ),
+        }
+        with pytest.raises(InvalidConfigError) as exc_info:
+            runs[run]()
+        error = exc_info.value
+        assert (error.operation, error.bucket, error.key) == (None, None, None)
+        assert results == []
+
+    def test_a_bucket_listing_failure_is_named_by_ls_alone(self) -> None:
+        denied = client_error("AccessDenied", 403, "ListBuckets")
+        client, _calls = make_recording_client([denied, denied])
+        storage = S3Storage("s3://", client=client)
+        with pytest.raises(AccessDeniedError) as direct:
+            list(storage.list_buckets())
+        assert direct.value.operation is None
+        with pytest.raises(AccessDeniedError) as through_ls:
+            S3().ls(storage, on_entry=lambda info: None)
+        assert through_ls.value.operation == "ls"
+
+    def test_a_direct_head_failure_names_no_operation(self) -> None:
+        # get_fileinfo is a storage-level call like open and delete: only an
+        # operation that reaches it could name the failure.
+        storage, _ = _storage(head_error=client_error("AccessDenied", 403, "HeadObject"))
+        with pytest.raises(AccessDeniedError) as exc_info:
+            storage.get_fileinfo()
+        error = exc_info.value
+        assert (error.operation, error.bucket, error.key) == (None, "bucket", "prefix/")
+
 
 class _DeleteRecordingClient:
     def __init__(self, error: Exception | None = None) -> None:
@@ -1039,6 +1379,315 @@ class _DeleteRecordingClient:
         if self._error is not None:
             raise self._error
         return {}
+
+
+def _request_scan(storage: S3Storage, tmp_path: Path) -> object:
+    return list(storage.scan(S3ScanOptions(recursive=True)))
+
+
+def _request_list_buckets(storage: S3Storage, tmp_path: Path) -> object:
+    return list(storage.list_buckets())
+
+
+def _request_get_fileinfo(storage: S3Storage, tmp_path: Path) -> object:
+    return storage.get_fileinfo("k")
+
+
+def _request_open(storage: S3Storage, tmp_path: Path) -> object:
+    return storage.open("prefix/k", "rb")
+
+
+def _request_delete(storage: S3Storage, tmp_path: Path) -> object:
+    return storage.delete(FileInfo(key="prefix/k"))
+
+
+def _request_get_file(storage: S3Storage, tmp_path: Path) -> object:
+    return storage.get_file(tmp_path / "out.bin", key="k")
+
+
+def _request_put_file(storage: S3Storage, tmp_path: Path) -> object:
+    source = tmp_path / "in.bin"
+    source.write_bytes(b"x")
+    return storage.put_file(source, key="k")
+
+
+# Each request the backend issues itself, with the attribution its failure
+# carries: (operation, bucket, key).
+_REQUEST_POINTS: list[tuple[Any, tuple[str | None, str | None, str | None]]] = [
+    (_request_scan, (None, "bucket", None)),
+    (_request_list_buckets, (None, None, None)),
+    (_request_get_fileinfo, (None, "bucket", "prefix/k")),
+    (_request_open, (None, "bucket", "prefix/k")),
+    (_request_delete, (None, "bucket", "prefix/k")),
+    (_request_get_file, ("get_file", "bucket", "prefix/k")),
+    (_request_put_file, ("put_file", "bucket", "prefix/k")),
+]
+
+
+class _FakeCrtError(Exception):
+    """awscrt's ``AwsCrtError`` shape: ``code`` / ``name`` / message."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f"{name}: text")
+        self.code = 1
+        self.name = name
+
+
+class TestTranslateEngineFailures:
+    """The shared translator classifies the CRT engine's network and server
+    failures by awscrt's name; a local file's failure is the transfer
+    engine's to classify, where the file is known."""
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            _FakeCrtError("AWS_IO_SOCKET_CONNECTION_REFUSED"),
+            _FakeCrtError("AWS_IO_DNS_QUERY_FAILED"),
+            _FakeCrtError("AWS_IO_TLS_ERROR_NEGOTIATION_FAILURE"),
+            _FakeCrtError("AWS_ERROR_HTTP_CONNECTION_CLOSED"),
+            _FakeCrtError("AWS_ERROR_S3_SLOW_DOWN"),
+            _FakeCrtError("AWS_ERROR_S3_INTERNAL_ERROR"),
+        ],
+    )
+    def test_a_crt_network_or_server_failure_is_transport(self, exc: BaseException) -> None:
+        error = s3storage.translate_boto_error(exc, operation="cp", bucket="b", key="k")
+        assert type(error) is TransportError
+        assert str(error) == str(exc)
+        assert (error.bucket, error.key) == ("b", "k")
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            _FakeCrtError("AWS_ERROR_NO_PERMISSION"),
+            _FakeCrtError("AWS_ERROR_FILE_INVALID_PATH"),
+            _FakeCrtError("AWS_ERROR_S3_CANCELED"),
+            RuntimeError("43 (AWS_ERROR_NO_PERMISSION): User does not have permission"),
+            RuntimeError("no awscrt here"),
+            # Raised inside a request it can be a credential provider's - a
+            # missing credential_process executable - not the object's.
+            FileNotFoundError(errno.ENOENT, "No such file or directory", "/bin/helper"),
+            PermissionError(errno.EACCES, "Permission denied", "/d/f"),
+        ],
+    )
+    def test_everything_else_stays_at_the_base(self, exc: BaseException) -> None:
+        error = s3storage.translate_boto_error(exc, operation="cp", bucket="b", key="k")
+        assert type(error) is Boto3S3Error
+        assert str(error) == str(exc)
+
+    def test_crt_error_name_reads_both_shapes(self) -> None:
+        assert s3storage.crt_error_name(_FakeCrtError("AWS_ERROR_NO_SPACE")) == "AWS_ERROR_NO_SPACE"
+        assert (
+            s3storage.crt_error_name(RuntimeError("43 (AWS_ERROR_NO_PERMISSION): text"))
+            == "AWS_ERROR_NO_PERMISSION"
+        )
+        assert s3storage.crt_error_name(RuntimeError("plain")) is None
+        assert s3storage.crt_error_name(ImportError("x", name="mod")) is None
+
+    def test_a_request_s_os_error_is_not_an_absence(self) -> None:
+        # A HeadObject that dies on a credential provider's FileNotFoundError
+        # (a web identity token file that is gone) must not read as the
+        # object being absent: get_fileinfo returns None only for a 404.
+        client, _ = make_recording_client(
+            [FileNotFoundError(errno.ENOENT, "No such file or directory", "/tok")]
+        )
+        with pytest.raises(Boto3S3Error) as raised:
+            S3Storage("s3://b/k", client=client).get_fileinfo()
+        assert type(raised.value) is Boto3S3Error
+        assert isinstance(raised.value.__cause__, FileNotFoundError)
+
+
+class TestLostLikeAws:
+    """`lost_like_aws` evaluates aws-cli's own precondition check.
+
+    aws-cli's completion handler reads ``exception.response.get("Error",
+    {}).get("Code")``; where that raises ``AttributeError`` the failure is
+    swallowed there, and only there does this answer True.
+    """
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            ConnectionClosedError(endpoint_url="http://h/"),
+            ReadTimeoutError(endpoint_url="http://h/"),
+            ResponseStreamingError(error="cut"),
+            HTTPClientError(error="boom"),
+        ],
+        ids=["connection-closed", "read-timeout", "response-streaming", "http-client"],
+    )
+    def test_a_response_less_transport_error_is_lost(self, exc: Exception) -> None:
+        assert s3storage.lost_like_aws(exc)
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            EndpointConnectionError(endpoint_url="http://h/"),
+            ConnectTimeoutError(endpoint_url="http://h/"),
+            client_error("AccessDenied", 403, "PutObject"),
+            IncompleteReadError(actual_bytes=1, expected_bytes=2),
+            OSError(13, "Permission denied"),
+            KeyError("Credentials"),
+        ],
+        ids=["endpoint", "connect-timeout", "client-error", "incomplete-read", "os", "key"],
+    )
+    def test_everything_else_is_an_ordinary_failure(self, exc: Exception) -> None:
+        assert not s3storage.lost_like_aws(exc)
+
+    def test_a_translated_error_is_judged_by_its_botocore_cause(self) -> None:
+        cause = ConnectionClosedError(endpoint_url="http://h/")
+        translated = TransportError("closed", operation="mv", bucket="b", key="k")
+        translated.__cause__ = cause
+        assert s3storage.lost_like_aws(translated)
+        assert not s3storage.lost_like_aws(TransportError("closed", operation="mv"))
+
+    def test_a_foreign_exception_with_a_none_response_is_not_lost(self) -> None:
+        # Only botocore's family reaches aws-cli's handler; a custom backend's
+        # own exception that happens to carry ``response = None`` fails as usual.
+        class _ForeignError(Exception):
+            response = None
+
+        assert not s3storage.lost_like_aws(_ForeignError())
+
+
+class TestRequestRaisingOutsideTheBotoFamily:
+    """Whatever a request raises from inside botocore is that request failing.
+
+    botocore can die reading a response with an exception that is none of its
+    own: an S3 Express ``CreateSession`` reply without ``Credentials``
+    (``KeyError``), a region-less 301 looping its redirector into
+    ``RecursionError``, a value its parser cannot convert (``ValueError``).
+    aws-cli ends the run with that exception's text - ``fatal error:
+    'Credentials'`` at rc 1 for a transfer, ``[ERROR]: 'Credentials'`` at rc 255
+    for ``ls``, measured against the pinned aws (2.36.40) through a 127.0.0.1
+    fake - and every request the backend issues reports it as the base
+    ``Boto3S3Error`` carrying the original, so ``except Boto3S3Error`` catches
+    a failed request whatever botocore died of (the deleter and the
+    single-call operations already did).
+    """
+
+    @pytest.mark.parametrize(("request_point", "attribution"), _REQUEST_POINTS)
+    @pytest.mark.parametrize(
+        "boom",
+        [
+            KeyError("Credentials"),
+            RecursionError("maximum recursion depth exceeded"),
+            ValueError('Invalid timestamp "garbage": Unknown string format: garbage'),
+        ],
+        ids=["KeyError", "RecursionError", "ValueError"],
+    )
+    def test_it_becomes_the_base_error_carrying_the_original(
+        self,
+        tmp_path: Path,
+        request_point: Any,
+        attribution: tuple[str | None, str | None, str | None],
+        boom: Exception,
+    ) -> None:
+        client, _calls = make_recording_client([boom])
+        storage = S3Storage("s3://bucket/prefix/", client=client)
+        with pytest.raises(Boto3S3Error) as excinfo:
+            request_point(storage, tmp_path)
+        error = excinfo.value
+        assert type(error) is Boto3S3Error
+        assert error.__cause__ is boom
+        assert str(error) == str(boom)  # the text aws-cli's line carries
+        assert (error.operation, error.bucket, error.key) == attribution
+
+    @pytest.mark.parametrize(("request_point", "attribution"), _REQUEST_POINTS)
+    def test_an_assertion_passes_through(
+        self,
+        tmp_path: Path,
+        request_point: Any,
+        attribution: tuple[str | None, str | None, str | None],
+    ) -> None:
+        # An invariant or a test double's unexpected-call guard is never a
+        # request outcome: the carve-out the deleter's capture makes too.
+        client, _calls = make_recording_client([AssertionError("unexpected call")])
+        storage = S3Storage("s3://bucket/prefix/", client=client)
+        with pytest.raises(AssertionError, match="unexpected call"):
+            request_point(storage, tmp_path)
+
+    def test_a_later_page_failing_keeps_the_pages_already_listed(self) -> None:
+        boom = RecursionError("maximum recursion depth exceeded")
+        first = {
+            "Contents": [_obj("prefix/a")],
+            "IsTruncated": True,
+            "NextContinuationToken": "t",
+        }
+        client, _calls = make_recording_client([first, boom])
+        storage = S3Storage("s3://bucket/prefix/", client=client)
+        keys = _keys_until_raise(storage.scan(S3ScanOptions(recursive=True)), Boto3S3Error)
+        assert keys == ["prefix/a"]
+
+    def test_a_body_read_raising_it_leaves_no_file_behind(self, tmp_path: Path) -> None:
+        # The streamed body is part of the GetObject: what reading it raises
+        # is the request failing, not the local filesystem.
+        boom = RecursionError("maximum recursion depth exceeded")
+
+        class _Body:
+            def read(self, amt: int | None = None) -> bytes:
+                raise boom
+
+            def close(self) -> None:
+                pass
+
+        client, _calls = make_recording_client([{"Body": _Body(), "ContentLength": 9}])
+        storage = S3Storage("s3://bucket/prefix/", client=client)
+        dest = tmp_path / "out.bin"
+        dest.write_bytes(b"old")
+        with pytest.raises(Boto3S3Error) as excinfo:
+            storage.get_file(dest, key="k")
+        assert type(excinfo.value) is Boto3S3Error
+        assert excinfo.value.__cause__ is boom
+        assert (excinfo.value.bucket, excinfo.value.key) == ("bucket", "prefix/k")
+        assert dest.read_bytes() == b"old"
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["out.bin"]
+
+    def test_the_conversion_of_a_fetched_page_is_not_a_request(self) -> None:
+        # Only the request sits inside the capture: what this module's own
+        # reading of the page raises keeps its type (a programming error
+        # stays loud instead of being reported as the service failing).
+        entry = {**_obj("prefix/a"), "Key": 7}  # no parser ever yields a non-str Key
+        client, _calls = make_recording_client([{"Contents": [entry]}])
+        storage = S3Storage("s3://bucket/prefix/", client=client)
+        with pytest.raises(TypeError):
+            list(storage.scan(S3ScanOptions(recursive=True)))
+
+
+class TestListingEntryBotocoreCannotDecode:
+    """An entry missing ``Key`` is a malformed response even when botocore
+    meets it first.
+
+    botocore asks every ``ListObjectsV2`` for ``EncodingType=url`` and, when
+    the response echoes it (S3 and MinIO do), URL-decodes each entry's ``Key``
+    and each common prefix's ``Prefix`` by subscript as it parses the page -
+    ahead of the backend's own required-element read. aws-cli dies in that
+    same handler (``fatal error: 'Key'`` at rc 1 for ``rm --recursive``,
+    ``[ERROR]: 'Key'`` at rc 255 for ``ls --recursive``, measured against the
+    pinned aws (2.36.40) through a 127.0.0.1 fake echoing ``EncodingType``),
+    so the report is the one `TestMalformedListingEntries` pins for a response
+    that does not echo it. The recording client bypasses botocore's parser, so
+    the handler's ``KeyError`` is raised in its place.
+    """
+
+    @pytest.mark.parametrize("element", ["Key", "Prefix"])
+    def test_the_decoding_key_error_is_a_malformed_response(self, element: str) -> None:
+        boom = KeyError(element)
+        client, _calls = make_recording_client([boom])
+        storage = S3Storage("s3://bucket/prefix/", client=client)
+        with pytest.raises(MalformedResponseError) as excinfo:
+            list(storage.scan(S3ScanOptions(recursive=True)))
+        error = excinfo.value
+        assert str(error) == f"'{element}'"  # str(KeyError): the CLI's line
+        assert error.__cause__ is boom
+        assert (error.operation, error.bucket, error.key) == (None, "bucket", None)
+
+    def test_another_missing_element_stays_the_base_error(self) -> None:
+        # Not an entry of this listing: an element botocore reads elsewhere in
+        # the request (an S3 Express session reply) is the request failing.
+        client, _calls = make_recording_client([KeyError("Credentials")])
+        storage = S3Storage("s3://bucket/prefix/", client=client)
+        with pytest.raises(Boto3S3Error) as excinfo:
+            list(storage.scan(S3ScanOptions(recursive=True)))
+        assert type(excinfo.value) is Boto3S3Error
 
 
 class TestDelete:
@@ -1099,6 +1748,18 @@ class TestConstructor:
             S3Storage("s3:///key").validate()
         assert exc_info.value.key == "key"
         assert exc_info.value.bucket is None
+
+    def test_validate_leaves_s3express_to_the_operation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The floor gate runs in the S3 operation (s3._validate_storage), after
+        # the location checks: the CLI calls validate() ahead of its own usage
+        # errors for a directory bucket, which keep exit code 252.
+        import botocore.utils
+
+        monkeypatch.delattr(botocore.utils, "S3ExpressIdentityResolver")
+        monkeypatch.setattr(s3storage, "version", lambda _name: "1.31.0")
+        S3Storage("s3://demo--usw2-az1--x-s3/key").validate()
 
     def test_direct_validate_leaves_the_operation_unset(self) -> None:
         # The storage does not know which operation is about to use it; the
@@ -1197,6 +1858,17 @@ class TestResolveRouting:
         storage = LocalStorage("some/path")
         assert S3().resolve(storage) is storage
 
+    def test_resolve_reads_a_string_the_way_the_transfer_commands_do(self) -> None:
+        # aws's _normalize_s3_trailing_slash: a keyless URI is the bucket root,
+        # and an Outposts access point closed with ":" re-reads as the key "/".
+        arn = "arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-1/accesspoint/ap"
+        resolved = S3().resolve(f"s3://{arn}:")
+        assert isinstance(resolved, S3Storage)
+        assert (resolved.bucket, resolved.key) == (arn, "/")
+        root = S3().resolve("s3://b")
+        assert isinstance(root, S3Storage)
+        assert (root.bucket, root.key, root.uri) == ("b", "", "s3://b/")
+
 
 class TestOpen:
     """``S3Storage.open`` - a ``GetObject`` read convenience (``"rb"`` only);
@@ -1277,6 +1949,49 @@ class _FailingBody:
         self.closes += 1
 
 
+class TestS3ExpressFloorGate:
+    """`s3express_unsupported_reason`: a directory bucket below botocore
+    1.33.2, or its access point below 1.37.24, cannot be addressed."""
+
+    @staticmethod
+    def _release(monkeypatch: pytest.MonkeyPatch, release: str) -> None:
+        monkeypatch.setattr(s3storage, "version", lambda _name: release)
+
+    def test_directory_bucket_refused_without_the_resolver_below_its_release(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import botocore.utils
+
+        monkeypatch.delattr(botocore.utils, "S3ExpressIdentityResolver")
+        self._release(monkeypatch, "1.33.1")
+        reason = s3storage.s3express_unsupported_reason("demo--usw2-az1--x-s3")
+        assert reason is not None and "1.33.2" in reason and "1.33.1" in reason
+        assert s3storage.s3express_unsupported_reason("general-purpose") is None
+
+    def test_a_newer_botocore_without_the_resolver_name_is_not_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The resolver is a botocore internal: a release past 1.33.2 that
+        # renamed it must not lose directory buckets.
+        import botocore.utils
+
+        monkeypatch.delattr(botocore.utils, "S3ExpressIdentityResolver")
+        assert s3storage.s3express_unsupported_reason("demo--usw2-az1--x-s3") is None
+
+    def test_access_point_refused_below_1_37_24(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # botocore knows the --xa-s3 form only through its endpoint rules (from
+        # 1.37.24); the resolver alone (1.33.2) does not address it.
+        self._release(monkeypatch, "1.37.23")
+        reason = s3storage.s3express_unsupported_reason("demo--usw2-az1--xa-s3")
+        assert reason is not None and "1.37.24" in reason
+        self._release(monkeypatch, "1.37.24")
+        assert s3storage.s3express_unsupported_reason("demo--usw2-az1--xa-s3") is None
+
+    def test_current_botocore_addresses_both(self) -> None:
+        for bucket in ("demo--usw2-az1--x-s3", "demo--usw2-az1--xa-s3"):
+            assert s3storage.s3express_unsupported_reason(bucket) is None
+
+
 class TestGetFile:
     """``S3Storage.get_file`` - one ``GetObject`` streamed onto a local path.
 
@@ -1304,7 +2019,7 @@ class TestGetFile:
         assert info.compare_key == "manifest.json"  # basename, as get_fileinfo stamps
         assert info.size == 13
         assert info.mtime == MTIME
-        assert info.etag == "abc"  # surrounding quotes stripped
+        assert info.etag == '"abc"'  # as the response carried it, quotes included
         assert info.storage_class == "STANDARD_IA"
         assert info.storage is storage
         # head is the parsed response minus the transport metadata and the body.
@@ -1314,6 +2029,33 @@ class TestGetFile:
             "ETag": '"abc"',
             "StorageClass": "STANDARD_IA",
         }
+
+    def test_a_zoneless_stamp_comes_back_aware(self, tmp_path: Path) -> None:
+        # The listing's reading of a stamp with no zone (TestZonelessStamp):
+        # local time, kept as aware UTC.
+        naive = datetime(2025, 1, 1, 12, 0, 0)
+        client, _ = make_recording_client([dict(_get_response(b"x", LastModified=naive))])
+        info = S3Storage("s3://bucket/prefix/", client=client).get_file(tmp_path / "f", key="f")
+        assert info.mtime is not None
+        assert info.mtime.utcoffset() == timedelta(0)
+        assert info.mtime.timestamp() == naive.timestamp()
+
+    def test_a_stamp_that_cannot_be_read_fails_before_the_file_is_touched(
+        self, tmp_path: Path
+    ) -> None:
+        # The stamp is judged before a byte is written: the call fails with the
+        # destination as it was, and names its operation like every other
+        # get_file failure.
+        dest = tmp_path / "f"
+        dest.write_bytes(b"what was there")
+        unreadable = datetime(9999, 12, 31, 12, 0, 0)  # zone-less, in the range's last day
+        client, _ = make_recording_client([dict(_get_response(b"new", LastModified=unreadable))])
+        with pytest.raises(MalformedResponseError) as exc_info:
+            S3Storage("s3://bucket/prefix/", client=client).get_file(dest, key="f")
+        error = exc_info.value
+        assert (error.operation, error.bucket, error.key) == ("get_file", "bucket", "prefix/f")
+        assert dest.read_bytes() == b"what was there"
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["f"]  # no temp file left
 
     @pytest.mark.parametrize(
         ("url", "key", "expected"),
@@ -1389,6 +2131,32 @@ class TestGetFile:
         assert sorted(p.name for p in tmp_path.iterdir()) == ["state.json"]  # no temp-file litter
         assert body.closes == 1  # the connection is released either way
 
+    def test_a_body_ending_short_is_a_transport_error_on_either_urllib3(
+        self, tmp_path: Path
+    ) -> None:
+        # urllib3 2 enforces Content-Length itself and the cut arrives as a
+        # broken stream (the case above); under urllib3 1.x botocore's own
+        # length check raises IncompleteReadError, which botocore files
+        # outside its transport tree. One event, one category.
+        short = IncompleteReadError(actual_bytes=5, expected_bytes=16)
+
+        class _ShortBody:
+            def read(self, amt: int | None = None) -> bytes:
+                raise short
+
+            def close(self) -> None:
+                pass
+
+        dest = tmp_path / "state.json"
+        dest.write_bytes(b"previous-contents")
+        client, _calls = make_recording_client([{"Body": _ShortBody(), "ContentLength": 16}])
+        with pytest.raises(TransportError) as exc_info:
+            S3Storage("s3://bucket/state.json", client=client).get_file(dest)
+        assert exc_info.value.__cause__ is short
+        assert (exc_info.value.bucket, exc_info.value.key) == ("bucket", "state.json")
+        assert dest.read_bytes() == b"previous-contents"
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["state.json"]
+
     def test_a_local_write_failure_is_attributed_locally_and_cleans_up(
         self, tmp_path: Path
     ) -> None:
@@ -1404,6 +2172,37 @@ class TestGetFile:
         assert exc_info.value.bucket is None
         assert isinstance(exc_info.value.__cause__, OSError)
         assert sorted(p.name for p in tmp_path.iterdir()) == ["occupied"]  # temp file removed
+
+    def test_a_read_only_destination_that_cannot_be_replaced_leaves_no_temp_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Windows: the temp file takes the destination's read-only mode, the
+        # replace onto a read-only file is refused, and so is deleting a
+        # read-only temp file - the cleanup must lift the flag first. Both
+        # refusals are simulated so the path runs on every platform.
+        dest = tmp_path / "state.json"
+        dest.write_bytes(b"old")
+        dest.chmod(0o444)
+        real_unlink = os.unlink
+
+        def refuse_replace(_src: str, _dst: str) -> None:
+            raise PermissionError(13, "Access is denied", str(dest))
+
+        def windows_unlink(path: str) -> None:
+            if not os.stat(path).st_mode & stat.S_IWRITE:
+                raise PermissionError(13, "Access is denied", path)
+            real_unlink(path)
+
+        monkeypatch.setattr(os, "replace", refuse_replace)
+        monkeypatch.setattr(os, "unlink", windows_unlink)
+        client, _calls = make_recording_client([_get_response(b"new")])
+        try:
+            with pytest.raises(AccessDeniedError):
+                S3Storage("s3://bucket/state.json", client=client).get_file(dest)
+            assert dest.read_bytes() == b"old"
+            assert sorted(p.name for p in tmp_path.iterdir()) == ["state.json"]
+        finally:
+            dest.chmod(0o644)
 
     @pytest.mark.skipif(sys.platform == "win32", reason="symlink creation needs privileges")
     def test_a_symlink_destination_is_replaced_not_followed(self, tmp_path: Path) -> None:
@@ -1466,6 +2265,52 @@ class _PutRecordingClient:
         return self._response
 
 
+class TestGetFileTempName:
+    """The sibling temp file's name fits the filesystem's per-name limit in bytes."""
+
+    # "a" is 1 byte and the hiragana 3 in UTF-8, the filesystem encoding the
+    # POSIX hosts use; the suffix is the 9-byte ".xxxxxxxx".
+    _SUFFIX = ".0a1b2c3d"
+    _WIDE = chr(0x3042)
+
+    def test_a_short_name_is_kept_whole(self) -> None:
+        from boto3_s3.s3storage import _download_temp_name
+
+        assert _download_temp_name("state.json", self._SUFFIX) == "state.json.0a1b2c3d"
+
+    def test_a_long_ascii_name_is_cut_to_the_limit(self) -> None:
+        from boto3_s3.s3storage import _download_temp_name
+
+        name = _download_temp_name("a" * 255, self._SUFFIX)
+        assert name == "a" * 246 + self._SUFFIX
+        assert len(os.fsencode(name)) == 255
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="the byte width assumed is UTF-8's")
+    def test_a_multibyte_name_is_cut_by_bytes_at_a_character_boundary(self) -> None:
+        from boto3_s3.s3storage import _download_temp_name
+
+        # 85 characters, 255 bytes: a valid name that a cut by characters
+        # leaves whole, making the suffixed name 264 bytes.
+        name = _download_temp_name(self._WIDE * 85, self._SUFFIX)
+        assert name == self._WIDE * 82 + self._SUFFIX  # 246 bytes of name
+        assert len(os.fsencode(name)) == 255
+        # One byte over a boundary drops the whole character, not a part of it.
+        mixed = _download_temp_name("a" + self._WIDE * 85, self._SUFFIX)
+        assert mixed == "a" + self._WIDE * 81 + self._SUFFIX
+        assert len(os.fsencode(mixed)) == 253
+
+    def test_downloads_onto_a_valid_name_of_255_multibyte_bytes(self, tmp_path: Path) -> None:
+        dest = tmp_path / (self._WIDE * 85)
+        try:
+            dest.write_bytes(b"old")
+        except OSError:
+            pytest.skip("this filesystem cannot hold the name at all")
+        client, _calls = make_recording_client([_get_response(b"new")])
+        S3Storage("s3://bucket/obj", client=client).get_file(dest)
+        assert dest.read_bytes() == b"new"
+        assert [p.name for p in tmp_path.iterdir()] == [dest.name]
+
+
 class TestPutFile:
     """``S3Storage.put_file`` - one ``PutObject`` carrying a local file."""
 
@@ -1485,7 +2330,7 @@ class TestPutFile:
         assert info.key == "prefix/manifest.json"
         assert info.compare_key == "manifest.json"
         assert info.size == 13  # the local file's size
-        assert info.etag == "abc"  # surrounding quotes stripped
+        assert info.etag == '"abc"'  # as the response carried it, quotes included
         assert info.storage is storage
         assert info.head == {"ETag": '"abc"'}
 
@@ -1528,6 +2373,21 @@ class TestPutFile:
         assert isinstance(exc_info.value.__cause__, FileNotFoundError)
         assert client.calls == []
 
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs a FIFO")
+    def test_a_fifo_source_is_refused_without_opening_it(self, tmp_path: Path) -> None:
+        # Opening a FIFO blocks until a writer appears, and with one botocore
+        # dies sizing the body (`tell()` -> [Errno 29] Illegal seek). Refused
+        # before the open, so the call returns at once and sends nothing.
+        source = tmp_path / "pipe"
+        os.mkfifo(source)
+        client = _PutRecordingClient()
+        storage = S3Storage("s3://bucket/prefix/", client=client)  # type: ignore[arg-type]
+        with pytest.raises(ValidationError, match="FIFO, or socket") as exc_info:
+            storage.put_file(source, key="k")
+        assert client.calls == []
+        error = exc_info.value
+        assert (error.operation, error.bucket, error.key) == ("put_file", None, str(source))
+
     def test_a_put_failure_translates_to_the_taxonomy(self, tmp_path: Path) -> None:
         source = tmp_path / "a.bin"
         source.write_bytes(b"x")
@@ -1562,8 +2422,9 @@ class TestSingleRequestTransferRoundTrip:
             uploaded = storage.put_file(source, key="state.json")
             assert uploaded.key == "app/state.json"
             assert uploaded.size == len(payload)
-            # A single-part object's ETag is the MD5 of its bytes, undecorated.
-            assert uploaded.etag == hashlib.md5(payload, usedforsecurity=False).hexdigest()
+            # A single-part object's ETag is the MD5 of its bytes, in S3's quotes.
+            digest = hashlib.md5(payload, usedforsecurity=False).hexdigest()
+            assert uploaded.etag == f'"{digest}"'
 
             back = tmp_path / "downloaded.json"
             downloaded = storage.get_file(back, key="state.json")

@@ -7,8 +7,10 @@ tokens and SSE-C keys. `boto3_s3.set_stream_logger` mirrors
 ```python
 from boto3_s3 import set_stream_logger
 
-set_stream_logger("botocore")           # masked
-set_stream_logger("botocore", mask_secrets=False)   # not masked
+set_stream_logger("botocore")  # masked
+
+# Or, unmasked — instead of the call above, as each call adds a handler:
+# set_stream_logger("botocore", mask_secrets=False)
 ```
 
 The first three arguments are boto3's — `name`, `level`, `format_string` — with
@@ -86,5 +88,7 @@ warnings all arrive through the callbacks described in
 exactly what the `boto3-s3` command does with them.
 
 Components that have something to say beyond their results log it under their
-own module name, such as `boto3_s3.deleter`. No handler is attached at import
-time, so nothing is emitted until you ask for it.
+own module name, such as `boto3_s3.deleter`. On its own the library attaches
+only a `NullHandler` to the `boto3_s3` package logger, as boto3 and botocore do
+to theirs, so nothing is emitted, not even a warning, until you configure a
+handler.

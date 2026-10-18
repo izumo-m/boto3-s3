@@ -26,13 +26,13 @@ from tests.utils.fakemodel import model_only_client
 
 def test_rejects_upload_on_old_botocore() -> None:
     client = model_only_client(set())
-    with pytest.raises(ValidationError, match=r"1\.35\.16"):
+    with pytest.raises(ValidationError, match=r"1\.35\.2"):
         transferargs.validate_no_overwrite_supported(True, "locals3", client, operation="cp")
 
 
 def test_rejects_copy_on_old_botocore() -> None:
-    client = model_only_client({"PutObject"})  # upload ok, copy needs 1.41.0
-    with pytest.raises(ValidationError, match=r"1\.41\.0"):
+    client = model_only_client({"PutObject"})  # upload ok, copy needs 1.40.61
+    with pytest.raises(ValidationError, match=r"1\.40\.61"):
         transferargs.validate_no_overwrite_supported(True, "s3s3", client, operation="cp")
 
 
@@ -116,6 +116,133 @@ class TestBuildS3Storage:
         arn = "arn:aws:s3:us-west-2:123456789012:accesspoint/endpoint"
         storage = transferargs.build_s3_storage(f"s3://{arn}", client=object())
         assert (storage.bucket, storage.key) == (arn, "")
+
+
+_OBJECT_LAMBDA = "s3://arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/olap"
+_OUTPOSTS_BUCKET = (
+    "s3://arn:aws:s3-outposts:us-west-2:123456789012:outpost/op-01234567890123456/bucket/b"
+)
+_OUTPOSTS_AP = (
+    "arn:aws:s3-outposts:us-west-2:123456789012:outpost/op-01234567890123456/accesspoint/ap"
+)
+
+
+class TestNormalizeS3Path:
+    """aws's ``_normalize_s3_trailing_slash`` on one argument."""
+
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            ("s3://b", "s3://b/"),
+            ("s3://b/", "s3://b/"),
+            ("s3://b/k", "s3://b/k"),
+            ("s3://", "s3://"),
+            ("s3:///k", "s3:///k"),
+            ("local/dir", "local/dir"),
+            ("-", "-"),
+            (f"s3://{_OUTPOSTS_AP}", f"s3://{_OUTPOSTS_AP}/"),
+            # The ":" closing the access point is eaten by the re-read, so the
+            # appended "/" becomes the key.
+            (f"s3://{_OUTPOSTS_AP}:", f"s3://{_OUTPOSTS_AP}:/"),
+        ],
+    )
+    def test_keyless_paths_gain_the_bucket_root_slash(self, path: str, expected: str) -> None:
+        assert transferargs.normalize_s3_path(path) == expected
+
+    @pytest.mark.parametrize(
+        ("path", "match"),
+        [
+            (f"{_OBJECT_LAMBDA}/k", "S3 Object Lambda"),
+            (_OBJECT_LAMBDA, "S3 Object Lambda"),
+            (f"{_OUTPOSTS_BUCKET}/k", "Outpost Bucket ARNs"),
+        ],
+    )
+    def test_refused_arns_fail_here(self, path: str, match: str) -> None:
+        with pytest.raises(ValidationError, match=match):
+            transferargs.normalize_s3_path(path)
+
+
+class TestNormalizedPathsAreUsed:
+    """The commands build their locations from the normalized path, so an
+    Outposts access point closed with ":" reads as the key "/" (measured:
+    aws lists under "/" and heads "/")."""
+
+    def test_rm_recursive_lists_under_the_key_slash(self) -> None:
+        from tests.utils.harness import run_recorded
+
+        result, calls = run_recorded(
+            [{}], ["rm", f"s3://{_OUTPOSTS_AP}:", "--recursive", "--dryrun"]
+        )
+        assert result.rc == 0, result.stderr
+        assert [(c.operation, c.params.get("Prefix")) for c in calls] == [("ListObjectsV2", "/")]
+
+    def test_a_single_download_heads_the_key_slash(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tests.utils.fakes3 import client_error
+        from tests.utils.harness import run_recorded
+
+        monkeypatch.chdir(tmp_path)
+        result, calls = run_recorded(
+            [client_error("404", 404, "HeadObject")],
+            ["cp", f"s3://{_OUTPOSTS_AP}:", "out", "--dryrun"],
+        )
+        assert result.rc == 1
+        assert [(c.operation, c.params.get("Key")) for c in calls] == [("HeadObject", "/")]
+
+
+class TestRefusedArnsComeFirst:
+    """aws refuses the unsupported ARNs right after the path-type check.
+
+    Measured against the pinned aws: every other path check of cp / mv / sync
+    / rm loses to it - the missing local source, the pre-created download
+    directory, the stream rules, mv's same-path guard, the checksum and SSE-C
+    pairings, sync's directory-bucket refusal - and so does rm's ``[s3]``
+    config.
+    """
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["cp", "nosuch", f"{_OBJECT_LAMBDA}/k"],
+            ["mv", "nosuch", f"{_OUTPOSTS_BUCKET}/k"],
+            ["sync", "nosuch", f"{_OBJECT_LAMBDA}/p"],
+            ["cp", f"{_OBJECT_LAMBDA}/p", "out", "--recursive"],
+            ["sync", f"{_OUTPOSTS_BUCKET}/p", "out"],
+            ["mv", f"{_OBJECT_LAMBDA}/p", "out", "--recursive"],
+            ["cp", "-", f"{_OBJECT_LAMBDA}/k", "--recursive"],
+            ["cp", f"{_OBJECT_LAMBDA}/k", "-", "--no-overwrite"],
+            ["mv", f"{_OBJECT_LAMBDA}/k", f"{_OBJECT_LAMBDA}/k"],
+            ["cp", "f", f"{_OBJECT_LAMBDA}/k", "--checksum-mode", "ENABLED"],
+            ["cp", "f", f"{_OBJECT_LAMBDA}/k", "--sse-c", "AES256"],
+            ["sync", f"{_OBJECT_LAMBDA}/k", "s3://bkt--usw2-az1--x-s3/"],
+            ["cp", f"{_OBJECT_LAMBDA}/k", f"{_OUTPOSTS_BUCKET}/k"],
+        ],
+    )
+    def test_the_arn_refusal_wins(
+        self, argv: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tests.utils.harness import client_ctx, run_cli_in_process
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "f").write_bytes(b"x")
+        result = run_cli_in_process(argv, ctx=client_ctx(object()))
+        assert result.rc == 252, result.stderr
+        assert "S3 Object Lambda" in result.stderr or "Outpost Bucket ARNs" in result.stderr
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["f"]
+
+    @pytest.mark.parametrize("path", [f"{_OBJECT_LAMBDA}/k", f"{_OUTPOSTS_BUCKET}/k"])
+    def test_rm_refuses_the_arn_before_reading_the_s3_config(
+        self, path: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tests.utils.harness import client_ctx, run_cli_in_process
+
+        config = tmp_path / "config"
+        config.write_text("[default]\ns3 =\n  multipart_threshold = nope\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        result = run_cli_in_process(["rm", path, "--recursive"], ctx=client_ctx(object()))
+        assert result.rc == 252, result.stderr
+        assert "Invalid size value" not in result.stderr
 
 
 class TestParamfile:
@@ -326,6 +453,31 @@ class TestExpressCaseConflictWarning:
         assert stream is sys.stderr
         assert text.startswith("warning: Recursive copies/moves")
         assert not text.endswith("\n")
+
+    @pytest.mark.parametrize("src", ["s3://b--use1-az4--x-s3/p/", "s3://ap--use1-az4--xa-s3/p/"])
+    def test_directory_bucket_and_its_access_point_take_the_branch(
+        self, src: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws takes this branch for --x-s3 only. An access point of a directory
+        # bucket lists the same keys just as unordered, and under aws its keys
+        # then pair wrongly - skip dropped objects that conflicted with nothing
+        # (measured on real S3) - so the access point takes it here too.
+        writes: list[str] = []
+        monkeypatch.setattr(transferargs, "uni_write", lambda _stream, text: writes.append(text))
+        for value in ("skip", "error"):
+            args = argparse.Namespace(case_conflict=value, recursive=True)
+            with pytest.raises(ValidationError, match="when operating on S3 Express"):
+                transferargs.resolve_case_conflict(args, src, "s3local", operation="cp")
+        args = argparse.Namespace(case_conflict="warn", recursive=True)
+        mode = transferargs.resolve_case_conflict(args, src, "s3local", operation="cp")
+        assert mode is CaseConflictMode.IGNORE
+        assert len(writes) == 1
+
+    @pytest.mark.parametrize("src", ["s3://plain/p/", "s3://ap-abc123-s3alias/p/"])
+    def test_other_buckets_keep_the_mode(self, src: str) -> None:
+        args = argparse.Namespace(case_conflict="skip", recursive=True)
+        mode = transferargs.resolve_case_conflict(args, src, "s3local", operation="cp")
+        assert mode is CaseConflictMode.SKIP
 
 
 class TestBuildPrinter:

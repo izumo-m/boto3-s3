@@ -11,7 +11,17 @@ The s3transfer boundary is always **bytes** (like botocore's ``StreamingBody``):
 ``IOStorage(binary_stream)`` presents the stream through a close-suppressing
 view, while ``IOStorage(text_stream)`` wraps it with an incremental codec
 (``encoding``, default utf-8) - encode on read (upload), decode on write
-(download). The transfer ``close``s every fileobj ``open`` returns (the open
+(download). A binary stream in append mode (``open(p, "ab")``, a ``>>``
+redirected stdout's ``.buffer``) is written through a write-only view instead:
+it reports ``seekable()`` and takes ``seek``, but every write lands at its end,
+so s3transfer's positioned, parallel download would append the ranged parts in
+completion order - the view hides ``seek`` and the download runs in order.
+(The descriptor's flag can be read on POSIX only; on Windows the ``mode``
+string is the whole cue - `_is_append_mode`.) A stream that cannot be
+positioned whatever it reports - a pipe, a socket, a console, judged by its
+descriptor (`_cannot_seek`; a Windows pipe answers ``seekable()`` True) - gets
+the same write-only view as a destination, and a read-only one as a source.
+The transfer ``close``s every fileobj ``open`` returns (the open
 route flushes a real backend's writer that way), so each ``IOStorage`` *writer*
 view absorbs that ``close`` into a flush and each reader view's ``close`` is a
 no-op (nothing to release): the caller's stream is **never closed** by
@@ -34,16 +44,25 @@ from __future__ import annotations
 
 import codecs
 import io
+import os
+import stat
 import sys
 from typing import IO, TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 from typing_extensions import override
 
-from boto3_s3.exceptions import ValidationError
+from boto3_s3.exceptions import InvalidValueError, ValidationError
 from boto3_s3.storage import Storage, StorageCapability
 
 if TYPE_CHECKING:
     from typing import BinaryIO
+
+    from _typeshed import SupportsRead, SupportsWrite
+
+try:
+    import fcntl
+except ImportError:  # Windows: no descriptor flags; the open mode is the only cue
+    fcntl = None
 
 
 _READ_CHUNK = 64 * 1024
@@ -104,12 +123,136 @@ class _WriteOnly:
         pass
 
 
+class _SequentialWriter:
+    """Write-only binary view of a destination that must be written in order.
+
+    Two kinds of stream get it: one in append mode (`_is_append_mode`), and one
+    that cannot be positioned whatever its ``seekable()`` says
+    (`_cannot_seek` - a Windows pipe answers True and lets ``seek`` succeed
+    without moving). Exposing only ``write`` takes s3transfer's non-seekable
+    download path, which orders the ranged parts before writing them out, so
+    the bytes land in object order - at the stream's end, where an append-mode
+    stream puts every write anyway, or down the pipe as they come. ``close``
+    flushes and leaves the caller's stream open, like `_Uncloseable`.
+    """
+
+    def __init__(self, raw: Any) -> None:
+        self._raw = raw
+
+    def write(self, data: Any) -> int:
+        return self._raw.write(data)
+
+    def close(self) -> None:
+        flush = getattr(self._raw, "flush", None)
+        if flush is not None:
+            flush()
+
+
+def _is_append_mode(stream: Any) -> bool:
+    """Whether every write to ``stream`` lands at its end (``O_APPEND``).
+
+    Such a stream still reports ``seekable()`` and honours ``seek`` / ``tell``,
+    so through the plain pass-through view s3transfer would take its positioned,
+    parallel download path and every ranged part would be appended in
+    completion order - a corrupted object reported as a success. The cue is the
+    open mode where the object carries one (``"a"`` in ``mode``:
+    ``open(p, "ab")``), and otherwise the descriptor's flags where the platform
+    can read them (``fcntl``'s ``F_GETFL``): a ``>>`` redirected stdout's
+    ``.buffer`` has mode ``"wb"`` and only the flag reveals it. A stream with no
+    descriptor (``BytesIO``) is not append-only. Windows has no ``fcntl``, so
+    there the mode string is the whole cue: a descriptor opened ``O_APPEND``
+    under another mode goes unrecognized (measured: its multipart download
+    scrambles), and a ``cmd`` ``>>`` redirect is not append-only in the first
+    place - the shell seeks to the end and the stream writes at offsets.
+    """
+    mode = getattr(stream, "mode", None)
+    if isinstance(mode, str) and "a" in mode:
+        return True
+    if fcntl is None:
+        return False
+    fileno = getattr(stream, "fileno", None)
+    if fileno is None:
+        return False
+    try:
+        fd = fileno()
+    except Exception:
+        # io.UnsupportedOperation (a BytesIO), or a `fileno` forwarded to a
+        # wrapped object that has none - a GzipFile over a write-only sink
+        # raises AttributeError: no descriptor to read the flags from, so
+        # not append-only, as every such stream was before this cue existed.
+        return False
+    try:
+        return bool(fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_APPEND)
+    except OSError:
+        return False
+
+
+def _cannot_seek(stream: Any) -> bool:
+    """Whether a binary stream cannot be positioned (`_NonSeekable` / `_SequentialWriter`).
+
+    As a destination, a stream that claims ``seekable()`` without being able
+    to seek would take s3transfer's positioned, parallel download: on Windows
+    a pipe does exactly that, and the classic engine wrote the ranged parts
+    down it in completion order - a scrambled object reported SUCCEEDED
+    (measured: 26 MiB from MinIO), where the CRT engine wrote it in order. As
+    a source, the rest of this note applies.
+
+    A stream that answers ``seekable()`` False - a POSIX pipe, a socket file
+    - still carries ``seek`` and ``tell``, and the CRT lane hands the stream
+    to botocore, whose content-length probe calls them when both exist and
+    expects ``io.UnsupportedOperation`` where a pipe raises
+    ``OSError(ESPIPE)``: the upload fails with ``[Errno 29] Illegal seek``
+    (classic asks ``seekable()`` first and takes its buffered path). A
+    Windows pipe is worse: it answers ``seekable()`` True and lets ``tell``
+    and ``seek`` succeed with meaningless positions, so the probe computes a
+    wrong length and the CRT lane stores a truncated object as a success
+    (measured: 4176 bytes of a 9 MiB `subprocess` pipe) while classic fails.
+    The descriptor's type settles both: a FIFO, a character device (a
+    console) or a socket cannot be positioned whatever ``seekable()`` says,
+    and ``os.fstat`` reports a Windows pipe as a FIFO too (measured).
+
+    What cannot answer is handled by what the engines would do with it. A
+    closed stream raises ``ValueError`` from ``seekable()`` and is left as
+    it is: the transfer reports the closed stream as it already does, where
+    the view would leave the CRT lane's failure wordless (measured). A
+    stream whose ``seekable`` raises anything else cannot be asked twice -
+    a stream-mode tarfile member's ``BufferedReader`` forwards ``seekable``
+    to a wrapped object that has none (``AttributeError``), and s3transfer's
+    own ``seekable()`` probe would fail the item the same way - so it is
+    read through the view, which both engines then upload. A stream without
+    ``fileno``, or whose ``fileno`` cannot answer (a ``BytesIO``'s
+    ``io.UnsupportedOperation``; a regular tarfile member, whose wrapped
+    object has ``seekable`` but no ``fileno``, ``AttributeError``), is left
+    as it is: ``seekable()`` already answered True, and there is no
+    descriptor to say otherwise.
+    """
+    seekable = getattr(stream, "seekable", None)
+    if seekable is not None:
+        try:
+            if not seekable():
+                return True
+        except ValueError:
+            return False
+        except Exception:
+            return True
+    fileno = getattr(stream, "fileno", None)
+    if fileno is None:
+        return False
+    try:
+        mode = os.fstat(fileno()).st_mode
+    except Exception:
+        return False
+    return stat.S_ISFIFO(mode) or stat.S_ISCHR(mode) or stat.S_ISSOCK(mode)
+
+
 class _NonSeekable:
     """Read-only binary view that hides ``seek`` (aws-cli's ``NonSeekableStream``).
 
     Some streams that are not truly seekable still report ``seekable() == True``
-    (Windows stdin); exposing only ``read`` forces s3transfer's buffered
-    non-seekable upload path.
+    (Windows stdin, a Windows pipe); exposing only ``read`` forces the buffered
+    non-seekable upload path on both engines - s3transfer's, and botocore's
+    chunked body on the CRT lane. `StdioStorage` applies it to stdin
+    unconditionally, `IOStorage` to any source `_cannot_seek` recognizes.
     """
 
     def __init__(self, fileobj: Any) -> None:
@@ -212,15 +355,31 @@ class IOStorage(Storage):
     ``mv("s3://b/k", IOStorage(buf))`` additionally deletes the S3 source after
     the bytes land (a stream is never a move *source* - it cannot be deleted).
     A binary stream is used as-is behind a close-suppressing view
-    (`_Uncloseable`); a text stream - recognized as an
+    (`_Uncloseable`) - except one in append mode, written through a write-only
+    view (`_SequentialWriter`) so a multipart download lands in order rather
+    than in completion order, and one that cannot be positioned (a pipe, a
+    socket, a console - `_cannot_seek`), written through that same view and
+    read through a read-only one (`_NonSeekable`) so both engines take their
+    buffered upload path instead of probing it with ``seek`` / ``tell``; a text
+    stream - recognized as an
     ``io.TextIOBase`` or by its ``encoding`` attribute (``codecs.open``'s
     ``StreamReaderWriter``, a text-mode ``SpooledTemporaryFile``) - is wrapped
-    with ``encoding`` (default utf-8). The caller's stream is never closed by
-    this class. As a single endpoint it has no listing: ``scan_pages`` /
+    with ``encoding`` (default utf-8), so it carries the object as text. A text
+    stream is never swapped for its ``.buffer``: text it has already read ahead
+    would be skipped, and the encoding it was opened with ignored; a caller
+    wanting the bytes as they are passes a binary stream, or `StdioStorage` for
+    the process's standard input and output. The caller's stream is never
+    closed by this class. As a single endpoint it has no listing: ``scan_pages`` /
     ``delete`` / ``get_fileinfo`` raise.
 
     ``capabilities`` is just the ``OPEN_*`` pair: a single stream supports only byte
     I/O (both directions, chosen per ``open`` call), with no listing or deletion.
+
+    ``encoding`` is checked at construction (``codecs.lookup``): an unknown name
+    is an ``InvalidValueError`` here rather than a bare ``LookupError`` from the
+    first ``open`` - which the eager stream route of ``cp`` would let escape
+    the library's taxonomy while the lazy open route of ``mv`` reported it as
+    the item's failure.
     """
 
     scheme: ClassVar[str] = "stream"
@@ -228,8 +387,20 @@ class IOStorage(Storage):
         StorageCapability.OPEN_READ | StorageCapability.OPEN_WRITE
     )
 
-    def __init__(self, stream: IO[bytes] | IO[str], *, encoding: str = "utf-8") -> None:
-        self._stream: IO[Any] | None = stream
+    def __init__(
+        self,
+        stream: SupportsRead[bytes] | SupportsRead[str] | SupportsWrite[bytes] | SupportsWrite[str],
+        *,
+        encoding: str = "utf-8",
+    ) -> None:
+        # Typed by what a transfer needs - a read for an upload, a write for a
+        # download - so a wrapper exposing only one of them (the gzip example
+        # in docs/library/streams.md) type-checks; the views probe the rest.
+        self._stream: IO[Any] | None = cast("IO[Any]", stream)
+        try:
+            codecs.lookup(encoding)
+        except LookupError as exc:
+            raise InvalidValueError(str(exc)) from exc
         self._encoding = encoding
 
     @override
@@ -237,7 +408,11 @@ class IOStorage(Storage):
         """Return the wrapped stream as a binary stream (``key`` / ``size`` ignored).
 
         A single endpoint takes no key. A text stream is adapted to bytes via the
-        configured ``encoding`` (encode on ``"rb"``, decode on ``"wb"``).
+        configured ``encoding`` (encode on ``"rb"``, decode on ``"wb"``). A
+        binary stream in append mode (`_is_append_mode`), or one that cannot be
+        positioned (`_cannot_seek`), is written through a write-only view, so
+        the download runs in order; one that cannot be positioned is read
+        through a read-only view.
         """
         stream = self._stream
         assert stream is not None  # plain IOStorage always holds a stream
@@ -248,6 +423,10 @@ class IOStorage(Storage):
                 else _DecodingWriter(stream, self._encoding)
             )
             return cast("BinaryIO", adapter)
+        if mode == "wb" and (_is_append_mode(stream) or _cannot_seek(stream)):
+            return cast("BinaryIO", _SequentialWriter(stream))
+        if mode == "rb" and _cannot_seek(stream):
+            return cast("BinaryIO", _NonSeekable(stream))
         return cast("BinaryIO", _Uncloseable(stream))
 
     @override
@@ -297,8 +476,9 @@ class StdioStorage(IOStorage):
                 # A runtime-state precondition (no stdin in this process), so
                 # ValidationError; raised in-pipeline, rc 1 either way. The
                 # operation name is left unset: this storage does not know which
-                # operation opened it (cp and mv both can), so the operation
-                # layer stamps its own name.
+                # operation opened it, so the operation layer stamps its own
+                # name (a streaming cp; mv rejects a stream source before any
+                # open).
                 raise ValidationError("stdin is required for this operation, but is not available.")
             return cast("BinaryIO", _NonSeekable(getattr(stdin, "buffer", stdin)))
         # No stdout counterpart to the guard above: aws checks stdin only, and

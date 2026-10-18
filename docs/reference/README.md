@@ -40,8 +40,8 @@ their area but are not indexed here.
   gate it, the local / S3 / stream backends, and the local walk's override
   seams.
 - [`misc.md`](./misc.md) — the tuned session, the AWS config-file reader,
-  masked debug logging, access-point path resolution, batch deletion, and
-  `__version__`.
+  masked debug logging, the CRT engine resolution (`boto3_s3.crtsupport`),
+  access-point path resolution, batch deletion, and `__version__`.
 
 ## Symbol index
 
@@ -68,8 +68,8 @@ that wraps it is documented on the same page.
 - [`ConfigSection`](./misc.md#configsection)
 - [`ConfigurationError`](./exceptions.md#configurationerror)
 - [`CopyPropsMode`](./options.md#copypropsmode)
-- [`CrtRegion`](./s3.md#crtregion)
 - [`cp`](./operations/cp.md#s3cp)
+- [`CrtRegion`](./s3.md#crtregion)
 - [`DestOnlyPair`](./comparator.md#destonlypair)
 - [`EtagComparison`](./comparator.md#etagcomparison)
 - [`fast_parse_timestamp`](./misc.md#fast_parse_timestamp)
@@ -90,6 +90,7 @@ that wraps it is documented on the same page.
 - [`Location`](./storage.md#location)
 - [`LoopDetector`](./storage.md#loopdetector)
 - [`ls`](./operations/ls.md#s3ls)
+- [`MalformedResponseError`](./exceptions.md#malformedresponseerror)
 - [`mb`](./operations/mb.md#s3mb)
 - [`MergedPair`](./comparator.md#mergedpair)
 - [`MergedPairFilter`](./comparator.md#mergedpairfilter)

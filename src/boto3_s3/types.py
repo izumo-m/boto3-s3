@@ -8,7 +8,7 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from typing_extensions import TypedDict
 
@@ -128,7 +128,13 @@ class LocalFileInfo(FileInfo):
 class S3FileInfo(FileInfo):
     """``FileInfo`` enriched with fields derived from an S3 object listing.
 
-    ``etag`` is the dequoted ETag (surrounding ``"`` stripped) when populated.
+    ``etag`` is the ETag exactly as the response carried it - S3's surrounding
+    ``"`` included, the form a boto3 response's ``ETag`` has - and ``None`` only
+    when the response carried none (an empty one stays the empty string).
+    Nothing is stripped, so the value can go back to S3 as an ``If-Match``
+    unchanged (the transfer engine does just that, as aws-cli does) whatever
+    an endpoint's ETags look like; a comparison against a computed ETag
+    removes the quotes at the comparison (``EtagComparison``).
     ``storage_class`` is the object's storage class from the listing
     (``ListObjectsV2``'s ``StorageClass``), consulted by the aws-cli glacier gate
     to skip ``GLACIER`` / ``DEEP_ARCHIVE`` sources on ``cp`` / ``mv`` / ``sync``
@@ -392,8 +398,8 @@ class CopyPropsMode(enum.Enum):
     """Which source object properties to propagate on an S3-to-S3 copy.
 
     `ALL` additionally carries S3 object annotations and needs an SDK with the
-    annotations model - botocore >= 1.43.31 and s3transfer >= 0.19; on an older
-    SDK the transfer engine refuses it up front with a `ConfigurationError`
+    annotations model - botocore >= 1.43.31; on an older SDK the transfer
+    engine refuses it up front with a `ConfigurationError`
     (every other mode degrades silently there, design/transfer.md section 4).
     Multipart annotation staging is selected separately by
     `AnnotationCopyMode`.
@@ -529,7 +535,12 @@ class TransferOptions(TypedDict, total=False):
 
     Names are the snake_case form of the corresponding ``aws s3`` options; the
     library translates them to S3 API PascalCase internally. Options that do not
-    apply to a given transfer direction are ignored (aws-cli parity). An
+    apply to a given transfer direction are ignored by the library. ``aws s3``
+    ignores most of them the same way, but rejects ``checksum_algorithm`` on a
+    download, ``checksum_mode`` off a download (an upload and an S3-to-S3 copy
+    alike) and the ``sse_c_copy_source`` pair off the copy route as usage
+    errors - a check the CLI layer owns
+    (docs/cli/aws-differences.md section 4). An
     *unknown* key, by contrast, is rejected eagerly by ``cp`` / ``mv`` /
     ``sync`` (``ValidationError``): a typo'd option never passes silently.
 
@@ -543,7 +554,11 @@ class TransferOptions(TypedDict, total=False):
     backend owns its key space; ``sync`` still skips destination-present pairs
     from its listing - design/transfer.md section 12). `annotation_copy_mode`
     affects only multipart S3-to-S3 copies under `copy_props=ALL`; it defaults
-    to `PRELOAD_MEMORY` for aws-cli parity.
+    to `PRELOAD_MEMORY` for aws-cli parity. The three mode options -
+    ``copy_props`` / ``annotation_copy_mode`` / ``case_conflict`` - take the
+    enum member, its string value, or ``None`` for the default, and their
+    annotations say so; any other value is a ``ValidationError`` when the run
+    reads it.
     """
 
     acl: str
@@ -557,8 +572,10 @@ class TransferOptions(TypedDict, total=False):
     sse_c_copy_source_key: str | bytes
     metadata: Mapping[str, str]
     metadata_directive: str
-    copy_props: CopyPropsMode
-    annotation_copy_mode: AnnotationCopyMode
+    copy_props: CopyPropsMode | Literal["none", "metadata-directive", "default", "all"] | None
+    annotation_copy_mode: (
+        AnnotationCopyMode | Literal["preload-memory", "preload-tempfile", "deferred"] | None
+    )
     cache_control: str
     content_type: str
     content_disposition: str
@@ -572,7 +589,7 @@ class TransferOptions(TypedDict, total=False):
     guess_mime_type: bool
     force_glacier_transfer: bool
     ignore_glacier_warnings: bool
-    case_conflict: CaseConflictMode
+    case_conflict: CaseConflictMode | Literal["ignore", "skip", "warn", "error"] | None
     no_overwrite: bool
 
 

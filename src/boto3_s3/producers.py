@@ -27,15 +27,19 @@ from typing import TYPE_CHECKING, Any, cast
 
 from boto3_s3 import requestparams, transferplan
 from boto3_s3.comparator import SrcOnlyPair, SyncPair
-from boto3_s3.exceptions import NotFoundError, ValidationError
+from boto3_s3.exceptions import Boto3S3Error, NotFoundError, ValidationError
 from boto3_s3.localstorage import LocalStorage, to_native_path
 from boto3_s3.s3storage import (
     S3Storage,
-    # The one out-of-module caller: the local-zone band this encodes belongs
-    # with the backend that reads S3 timestamps, while aws-cli runs the same
-    # conversion on the single-object HEAD this module owns.
+    attribute_failure,
+    # The one out-of-module caller of these three: the required-element read,
+    # the aware reading of a stamp and the local-zone band belong with the
+    # backend that reads S3 responses, while aws-cli runs the same reads on
+    # the single-object HEAD this module owns.
+    aware_stamp,
+    read_required,
     reject_unrepresentable_stamp,
-    s3_errors,
+    s3_request,
 )
 from boto3_s3.storage import Storage, StorageCapability
 from boto3_s3.transfer import TransferItem, Transferrer
@@ -50,7 +54,7 @@ from boto3_s3.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Iterator, Mapping
+    from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
     from typing import BinaryIO
 
 
@@ -130,7 +134,7 @@ def _compare_key(info: FileInfo) -> str:
 
 
 def _single_source_info(
-    plan: transferplan.TransferPlan, transferrer: Transferrer
+    plan: transferplan.TransferPlan, transferrer: Transferrer, *, operation: str
 ) -> FileInfo | None:
     """Resolve the single (non-dir_op) source through ``get_fileinfo``.
 
@@ -138,11 +142,74 @@ def _single_source_info(
     the built-ins stamp their own ``get_fileinfo`` results, so this only fills a
     ``None`` left by a bespoke backend - keeping ``src_info.storage`` in
     agreement with ``OpResult.src_storage`` on the single-object routes too.
+
+    A family error the storage raises (a stat the local backend could not
+    take - ``ELOOP``, a permission error on the way - or a HEAD that failed)
+    leaves ``operation`` unset, since the storage cannot know which operation
+    resolves the path; this is the operation layer that fills it in, as the
+    run does for ``open`` / ``delete`` failures (`attribute_failure`).
     """
-    single = plan.src.get_fileinfo(on_warning=transferrer.warner.warn)
+    try:
+        single = plan.src.get_fileinfo(on_warning=transferrer.warner.warn)
+    except Boto3S3Error as exc:
+        attribute_failure(exc, operation=operation, bucket=None, key=None)
+        raise
     if single is not None and single.storage is None:
         single.storage = plan.src
     return single
+
+
+def _warn_absent_local_source(src: Storage, transferrer: Transferrer) -> None:
+    """aws-cli's verdict for a single local source its pre-check admitted but
+    its generator cannot find: "File does not exist.", a warning and rc 2.
+
+    The pre-check (``_check_local_source_exists`` -> `LocalStorage.exists`)
+    asks the kernel about the path as typed, the generator looks for the
+    lexical ``abspath`` form, and ``..`` after a symlinked directory makes
+    those two different files (``lsub/../x``); a source that vanished between
+    the two is the same case. `get_fileinfo` returns a silent ``None`` for
+    absence by contract, so the warning aws-cli's ``should_ignore_file``
+    sends there is the operation layer's. A symlink not followed is aws-cli's
+    silent skip, and an entry the stat warned away (special, unreadable) has
+    already warned - both leave the path in place, so only true absence
+    warns.
+    """
+    if not isinstance(src, LocalStorage):
+        return
+    path = src.abspath
+    if not src.default_scan_options().follow_symlinks and os.path.islink(path):
+        return
+    if not os.path.exists(path):
+        transferrer.warner.warn(f"Skipping file {path}. File does not exist.")
+
+
+def _s3_source_display(plan: transferplan.TransferPlan, src_bucket: str, info: FileInfo) -> str:
+    """The ``s3://`` string a download / copy item reports as its source.
+
+    aws-cli's two shapes: a listed entry is ``bucket/key`` joined with ``/``
+    (its ``BucketLister``), while a single source is the path as it was
+    written (``_list_single_object`` hands the argument through) - the plan's
+    source root. The two differ only for a location whose key is set off from
+    the bucket by something other than ``/`` (``S3Storage.format``).
+    """
+    if plan.dir_op:
+        return f"s3://{src_bucket}/{info.key}"
+    return f"s3://{plan.src_root}"
+
+
+def key_after_bucket(path: str, bucket: str) -> str:
+    """The key part of a formatted ``bucket<sep>key`` path (``S3Storage.format``).
+
+    The separator is the one the location was typed with: ``/``, or ``:`` after
+    an Outposts access point - and nothing where the access-point pattern cut
+    the name short (``accesspoint/my_ap`` is bucket ``.../accesspoint/my``, key
+    ``_ap``). The key then starts with the character that stopped the name,
+    which is never ``/`` or ``:``: the pattern would have taken either as the
+    separator. So one leading ``/`` or ``:`` is the separator, and anything
+    else already belongs to the key.
+    """
+    rest = path[len(bucket) :]
+    return rest[1:] if rest[:1] in ("/", ":") else rest
 
 
 def open_side_display(storage: Storage, key: str) -> str:
@@ -222,13 +289,46 @@ def _glacier_gate(
     return True
 
 
+class _DestinationMerge:
+    """aws-cli's comparator over a destination listing, fed one source key at a time.
+
+    A recursive cp / mv download under ``--case-conflict`` runs, in aws-cli,
+    through sync's machinery: a comparator merges the source listing with the
+    destination walk, and a source entry it pairs with a destination entry (an
+    equal compare key) always transfers while the rest run the conflict check.
+    The gate sees each listed source entry once, in listing order and after
+    the filters - what that comparator sees - so this keeps the comparator's
+    destination side and takes the source keys as they come. Each step
+    compares only the two keys in hand, as `comparator.Comparator.compare`
+    does: a destination key below the source key is passed over (a key only
+    the destination has), an equal one pairs, a greater one waits for the next
+    source key. A listing out of key order therefore mis-pairs here exactly as
+    there - a source key that arrives after the destination has moved past
+    its match finds no partner.
+    """
+
+    def __init__(self, dest_keys: Iterable[str]) -> None:
+        self._dest = iter(dest_keys)
+        self._head = next(self._dest, None)
+
+    def pairs(self, key: str) -> bool:
+        head = self._head
+        while head is not None and head < key:
+            head = next(self._dest, None)
+        if head is not None and head == key:
+            self._head = next(self._dest, None)
+            return True
+        self._head = head
+        return False
+
+
 class CaseConflictGate:
     """The ``--case-conflict`` decision for recursive downloads.
 
     aws builds this from sync machinery (a destination listing paired by a
-    comparator): a source file whose compare key exists at the destination
-    with the **exact same case** always transfers (``AlwaysSync`` - cp
-    overwrites); everything else runs the conflict check
+    comparator): a source file the comparator pairs with a destination entry
+    - the same compare key, **exact same case** - always transfers
+    (``AlwaysSync`` - cp overwrites); everything else runs the conflict check
     (``CaseConflictSync``): a conflict exists when another file with the
     same lowercased name was already admitted in this run, or the
     destination path exists (on a case-insensitive filesystem a
@@ -241,10 +341,18 @@ class CaseConflictGate:
     _DOC_URI = "https://docs.aws.amazon.com/cli/latest/topic/s3-case-insensitivity.html"
 
     def __init__(
-        self, mode: CaseConflictMode, dest_keys: set[str], *, operation: str = "cp"
+        self,
+        mode: CaseConflictMode,
+        dest_keys: Iterable[str] | None,
+        *,
+        operation: str = "cp",
     ) -> None:
+        # ``dest_keys`` is the destination listing in its walk order, merged
+        # against the source keys as they arrive (`_DestinationMerge`); None
+        # where the caller has paired the two already (sync consults the gate
+        # only for a key the destination lacks).
         self._mode = mode
-        self._dest_keys = dest_keys
+        self._merge = None if dest_keys is None else _DestinationMerge(dest_keys)
         self._operation = operation
         self._submitted: set[str] = set()
 
@@ -262,8 +370,8 @@ class CaseConflictGate:
         return False
 
     def blocks(self, item: TransferItem, transferrer: Transferrer) -> bool:
-        if item.compare_key in self._dest_keys:
-            return False  # exact-case match at the destination: always copy
+        if self._merge is not None and self._merge.pairs(item.compare_key):
+            return False  # paired with an exact-case destination entry: always copy
         lowered = item.compare_key.lower()
         src = f"{item.src_bucket}/{item.src_key}"
         dest = os.path.abspath(item.dest_path or "")
@@ -302,6 +410,7 @@ def upload_items(
     dest_bucket: str,
     transferrer: Transferrer,
     item_filter: FileFilter | None,
+    operation: str,
     reusable_after_interrupt: bool,
 ) -> Generator[TransferItem, None, None]:
     """Materialize upload items from the local source (warnings -> rollup).
@@ -333,7 +442,9 @@ def upload_items(
         # Single source object: the get_fileinfo point op (the scan
         # counterpart). None = warned-away (special/unreadable) or absent.
         # get_fileinfo has no filter, so an excluded single source is dropped here.
-        single = _single_source_info(plan, transferrer)
+        single = _single_source_info(plan, transferrer, operation=operation)
+        if single is None:
+            _warn_absent_local_source(plan.src, transferrer)
         infos = iter([single] if single is not None else [])
         if item_filter is not None:
             infos = (info for info in infos if item_filter(info))
@@ -367,7 +478,7 @@ def upload_item_from_info(
         src_path=native,
         src_info=info,
         dest_bucket=dest_bucket,
-        dest_key=dest[len(dest_bucket) + 1 :],
+        dest_key=key_after_bucket(dest, dest_bucket),
         src_display=native,
         dest_display=f"s3://{dest}",
     )
@@ -391,7 +502,7 @@ def s3_source_items(
     if plan.dir_op:
         infos: Iterator[FileInfo] = scan_s3_source(
             src_storage,
-            key_prefix=plan.src_root[len(src_bucket) + 1 :],
+            key_prefix=key_after_bucket(plan.src_root, src_bucket),
             item_filter=item_filter,
             options=options,
             reusable_after_interrupt=reusable_after_interrupt,
@@ -427,7 +538,7 @@ def s3_source_items(
             # (its filter pipeline stage runs regardless of dir_op); the
             # recursive branch filters inside the scan above. An excluded mv
             # source must not transfer - and must not be deleted.
-            infos = (info for info in infos if item_filter(info))
+            infos = _filter_single_s3_source(infos, item_filter)
 
     for info in infos:
         if transfer_type is TransferType.DOWNLOAD:
@@ -452,6 +563,45 @@ def s3_source_items(
             yield item
 
 
+def single_object_filter_root(key: str) -> str:
+    """The parent a single S3 object's filter patterns resolve under (aws-cli parity).
+
+    aws-cli's ``filters._get_s3_root`` for a non-``dir_op`` source: the key's
+    parent directory, empty for a bucket-root key, and a folder-marker key
+    its own root. aws joins the pattern onto that parent with
+    ``os.path.join``, which adds no second ``/`` after a parent that already
+    ends in one, so the parent of ``a//b`` is ``a/`` (the entry is matched as
+    ``/b``, not ``b``) and the parent of ``/b`` is ``""``. Always empty or
+    ``/``-terminated. ``rm_filter_root`` is this for its non-recursive form.
+    """
+    if not key or key.endswith("/"):
+        return key
+    head, sep, _tail = key.rpartition("/")
+    if not sep or not head:
+        return ""
+    return head if head.endswith("/") else f"{head}/"
+
+
+def _filter_single_s3_source(
+    infos: Iterator[FileInfo], item_filter: FileFilter
+) -> Iterator[FileInfo]:
+    """Apply ``item_filter`` to a single S3 source the way aws-cli matches it.
+
+    The record's ``compare_key`` is the key's last component, which also names
+    the destination (``transferplan.dest_for``). aws-cli matches the object
+    against its key relative to `single_object_filter_root` instead, and the
+    two differ for a key that doubles a slash or starts with one: ``a//b`` is
+    ``/b`` there. The filter is shown a copy carrying that relative key - what
+    ``rm``'s blind single-key path stamps on its own record - and the record
+    handed on is the original.
+    """
+    for info in infos:
+        relative = info.key[len(single_object_filter_root(info.key)) :]
+        view = info if relative == info.compare_key else replace(info, compare_key=relative)
+        if item_filter(view):
+            yield info
+
+
 def download_item_from_info(
     plan: transferplan.TransferPlan,
     info: FileInfo,
@@ -463,10 +613,9 @@ def download_item_from_info(
 ) -> TransferItem | None:
     """One download item from a listing entry, or ``None`` once a gate
     consumed it (the gate emits its own warn/skip/notice record)."""
-    src_path = f"{src_bucket}/{info.key}"
     compare_key = _compare_key(info)
     dest = transferplan.dest_for(plan, compare_key)
-    src_display = f"s3://{src_path}"
+    src_display = _s3_source_display(plan, src_bucket, info)
     is_s3_info = isinstance(info, S3FileInfo)
     item = TransferItem(
         compare_key=compare_key,
@@ -523,10 +672,9 @@ def copy_item_from_info(
 ) -> TransferItem | None:
     """One S3-to-S3 copy item from a listing entry, or ``None`` when the
     glacier gate consumed it."""
-    src_path = f"{src_bucket}/{info.key}"
     compare_key = _compare_key(info)
     dest = transferplan.dest_for(plan, compare_key)
-    src_display = f"s3://{src_path}"
+    src_display = _s3_source_display(plan, src_bucket, info)
     is_s3_info = isinstance(info, S3FileInfo)
     if _glacier_gate(
         info,
@@ -547,7 +695,7 @@ def copy_item_from_info(
         src_key=info.key,
         src_info=info,
         dest_bucket=dest_bucket,
-        dest_key=dest[len(dest_bucket) + 1 :],
+        dest_key=key_after_bucket(dest, dest_bucket),
         src_display=src_display,
         dest_display=f"s3://{dest}",
     )
@@ -638,7 +786,7 @@ def head_single(
     if getattr(client.meta.config, "response_checksum_validation", None) == "when_supported":
         params.setdefault("ChecksumMode", "ENABLED")
     try:
-        with s3_errors(operation=operation, bucket=src_storage.bucket, key=key):
+        with s3_request(operation=operation, bucket=src_storage.bucket, key=key):
             head = client.head_object(Bucket=src_storage.bucket, Key=key, **params)
     except NotFoundError as exc:
         # aws-cli's filegenerator rewrites only the bare HTTP-404 HeadObject
@@ -669,14 +817,21 @@ def head_single(
     # aws-cli's `_list_single_object` reads the two elements the HEAD must
     # carry by subscript - `ContentLength` first, then `LastModified` - and
     # `ETag` with a default, so a response missing one of the two ends the run
-    # with a KeyError naming it (`fatal error: 'ContentLength'` /
-    # `'LastModified'` at rc 1 on the CLI, measured) rather than riding on as
-    # None: the single-object counterpart of the listing rule the S3 backend
-    # applies (design/storage.md). The order decides which element a doubly
+    # with a MalformedResponseError naming it - the KeyError's text, so the
+    # CLI's line still reads `fatal error: 'ContentLength'` / `'LastModified'`
+    # at rc 1 (measured against aws) - rather than riding on as None: the
+    # single-object counterpart of the listing rule the S3 backend applies
+    # (design/storage.md). The order decides which element a doubly
     # incomplete response is blamed on. The stream route never comes here, and
     # aws is lenient there too.
-    size = head["ContentLength"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
-    mtime = head["LastModified"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
+    bucket = src_storage.bucket
+    size: int = read_required(head, "ContentLength", operation=operation, bucket=bucket, key=key)
+    mtime = aware_stamp(
+        read_required(head, "LastModified", operation=operation, bucket=bucket, key=key),
+        operation=operation,
+        bucket=bucket,
+        key=key,
+    )
     etag = head.get("ETag")
     # aws-cli converts the HeadObject stamp to the local zone as the last thing
     # `_list_single_object` does, so a stamp the local calendar cannot hold
@@ -685,7 +840,7 @@ def head_single(
     # check inside the S3 backend; this route never passes through it, so it
     # gets the check at aws's own slot. The value handed on stays UTC per the
     # `FileInfo.mtime` contract - only the conversion's failure is wanted.
-    reject_unrepresentable_stamp(mtime)
+    reject_unrepresentable_stamp(mtime, operation=operation, bucket=bucket, key=key)
     # A single (non-dir_op) source: the compare key is the key's basename,
     # matching transferplan.item_paths' single-item branch. storage stamps the
     # producing backend like every listing path, so src_info.storage agrees
@@ -694,7 +849,7 @@ def head_single(
         key=key,
         size=size,
         mtime=mtime,
-        etag=etag.strip('"') if etag else None,
+        etag=etag,
         storage_class=head.get("StorageClass"),
         head=head,
         compare_key=key.rsplit("/", 1)[-1],
@@ -738,7 +893,8 @@ def require_open_sync_capabilities(
 
     ``sync`` merge-joins two byte-ordered listings, so a custom side must
     declare ``SORTABLE_SCAN`` (an unsorted side would manufacture phantom
-    new/delete pairs - with ``--delete``, destination corruption). On top of
+    new/delete pairs - with ``--delete``, destination corruption, as on
+    aws-cli's merge, which this one follows step for step). On top of
     that: an ``opens3`` source needs ``OPEN_READ``; an ``s3open`` destination
     needs ``OPEN_WRITE`` plus ``DELETE`` when ``delete`` removes orphans (the
     ``opens3`` orphans are S3, deleted without the custom side).
@@ -812,7 +968,7 @@ def open_upload_items(
             )
         )
     else:
-        single = _single_source_info(plan, transferrer)
+        single = _single_source_info(plan, transferrer, operation=operation)
         if single is None:
             raise NotFoundError(
                 f"The user-provided path {plan.src.as_text()} does not exist.",
@@ -954,7 +1110,7 @@ def open_upload_item(
         src_info=info,
         src_fileobj=None if dryrun else _DeferredReader(plan.src, open_key, info.size),
         dest_bucket=dest_bucket,
-        dest_key=dest[len(dest_bucket) + 1 :],
+        dest_key=key_after_bucket(dest, dest_bucket),
         src_display=open_side_display(plan.src, open_key),
         dest_display=f"s3://{dest}",
     )
@@ -987,7 +1143,7 @@ def open_download_items(
     if plan.dir_op:
         infos: Iterator[FileInfo] = scan_s3_source(
             src_storage,
-            key_prefix=plan.src_root[len(src_bucket) + 1 :],
+            key_prefix=key_after_bucket(plan.src_root, src_bucket),
             item_filter=item_filter,
             options=options,
             reusable_after_interrupt=reusable_after_interrupt,
@@ -1025,7 +1181,7 @@ def open_download_items(
             # Mirror the built-in download route: aws filters the
             # single-object case too (the recursive branch filters inside
             # the scan above).
-            infos = (info for info in infos if item_filter(info))
+            infos = _filter_single_s3_source(infos, item_filter)
     for info in infos:
         item = open_download_item(
             plan,
@@ -1058,7 +1214,7 @@ def open_download_item(
     """
     compare_key = _compare_key(info)
     open_key = transferplan.dest_for(plan, compare_key)
-    src_display = f"s3://{src_bucket}/{info.key}"
+    src_display = _s3_source_display(plan, src_bucket, info)
     is_s3_info = isinstance(info, S3FileInfo)
     if _glacier_gate(
         info,
@@ -1117,10 +1273,12 @@ def cp_case_gate(
     """Build the ``--case-conflict`` gate when it applies (aws-cli scope:
     recursive S3->local with a mode other than ``ignore``).
 
-    The destination tree is enumerated up front (through ``plan.dest.scan``)
-    into the exact-case membership set the gate's AlwaysSync arm consults -
-    the observable equivalent of aws's reverse file generator + comparator.
-    That reverse enumeration is a full walk of the destination side: aws
+    The destination tree is enumerated up front (through ``plan.dest.scan``),
+    in the byte order sync's merge walks it, and the gate merges each source
+    key against that listing as it arrives - aws's reverse file generator +
+    comparator, step for step (`_DestinationMerge`), so a source listing out
+    of key order pairs, and mis-pairs, as aws's does. That reverse enumeration
+    is a full walk of the destination side: aws
     builds it with the run's ``follow_symlinks`` parameter, routes its
     warnings into the shared result queue (they count toward rc 2), and runs
     the ``--exclude`` / ``--include`` filters over it - so the membership scan
@@ -1138,18 +1296,19 @@ def cp_case_gate(
     if plan.paths_type != "s3local" or not recursive or mode is CaseConflictMode.IGNORE:
         return None
     # paths_type == "s3local" guarantees a LocalStorage destination here.
-    dest_keys = {
+    dest_keys = [
         _compare_key(info)
         for info in plan.dest.scan(
             walk_source_scan_options(
                 plan.dest,
                 recursive=True,
+                sort=True,  # the merge pairs against the destination in byte order
                 on_warning=transferrer.warner.warn,
                 item_filter=item_filter,
                 reusable_after_interrupt=reusable_after_interrupt,
             )
         )
-    }
+    ]
     return CaseConflictGate(mode, dest_keys, operation=operation)
 
 
@@ -1158,10 +1317,10 @@ def sync_case_gate(
 ) -> CaseConflictGate | None:
     """The ``--case-conflict`` gate for sync downloads to a local destination.
 
-    Unlike cp's (which pre-lists the destination for its exact-case
-    AlwaysSync arm), sync already pairs against the destination listing:
+    Unlike cp's (which merges the source keys against a pre-listed
+    destination itself), sync already pairs against the destination listing:
     the gate is consulted only for ``SrcOnlyPair``s (keys missing there), so
-    the membership set is vacuously empty and only the submitted-set /
+    it does no pairing of its own and only the submitted-set /
     ``os.path.exists`` conflict check remains - aws-cli's
     ``CaseConflictSync`` in the ``file_not_at_dest`` slot. Scoped to a
     ``LocalStorage`` destination (a case-insensitive *filesystem*); a custom
@@ -1174,7 +1333,7 @@ def sync_case_gate(
         or not isinstance(dest_storage, LocalStorage)
     ):
         return None
-    return CaseConflictGate(mode, set(), operation="sync")
+    return CaseConflictGate(mode, None, operation="sync")
 
 
 def sync_entries(
@@ -1217,7 +1376,7 @@ def sync_entries(
     seeds ``read_ahead=False`` in its ``default_scan_options``).
     """
     if isinstance(storage, S3Storage):
-        key_prefix = root[len(storage.bucket) + 1 :]
+        key_prefix = key_after_bucket(root, storage.bucket)
         for info in scan_s3_source(
             storage,
             key_prefix=key_prefix,

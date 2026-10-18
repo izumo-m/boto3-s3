@@ -20,7 +20,15 @@ from typing import Any
 import pytest
 from botocore.exceptions import ParamValidationError
 
-from boto3_s3 import S3, BatchError, S3Storage, ValidationError
+from boto3_s3 import (
+    S3,
+    BatchError,
+    Boto3S3Error,
+    ConfigurationError,
+    S3Storage,
+    ValidationError,
+    s3storage,
+)
 
 
 class _FakePresignClient:
@@ -69,6 +77,40 @@ class TestPresign:
     def test_url_returned_unchanged(self) -> None:
         client = _FakePresignClient(url="https://x.example/y?sig=1")
         assert S3().presign(_storage("s3://b/k", client)) == "https://x.example/y?sig=1"
+
+    def test_directory_bucket_refused_on_a_botocore_without_s3express(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Below botocore 1.33.2 a --x-s3 bucket would be signed as an ordinary
+        # one, a URL that cannot work; the operation refuses it instead, before
+        # any client call (s3._validate_storage).
+        import botocore.utils
+
+        monkeypatch.delattr(botocore.utils, "S3ExpressIdentityResolver")
+        monkeypatch.setattr(s3storage, "version", lambda _name: "1.31.0")
+        client = _FakePresignClient()
+        with pytest.raises(ConfigurationError, match=r"1\.33\.2") as exc_info:
+            S3().presign(_storage("s3://demo--usw2-az1--x-s3/key", client))
+        assert (exc_info.value.operation, exc_info.value.bucket) == (
+            "presign",
+            "demo--usw2-az1--x-s3",
+        )
+        assert client.calls == []
+
+    def test_a_keyless_directory_bucket_target_skips_the_floor_gate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # botocore refuses a presign with no key at every version (aws exits
+        # 252), so the floor gate's upgrade hint must not pre-empt it.
+        import botocore.utils
+
+        monkeypatch.delattr(botocore.utils, "S3ExpressIdentityResolver")
+        monkeypatch.setattr(s3storage, "version", lambda _name: "1.31.0")
+        client = _FakePresignClient()
+        S3().presign(_storage("s3://demo--usw2-az1--x-s3/", client))
+        assert [params for _method, params, _expires in client.calls] == [
+            {"Bucket": "demo--usw2-az1--x-s3", "Key": ""}
+        ]
 
     def test_invalid_target_type_raises_validation_error(self) -> None:
         with pytest.raises(ValidationError):
@@ -129,10 +171,34 @@ class TestPresign:
         )
         assert "AWSAccessKeyId=" in after and "X-Amz-Signature=" not in after
 
+    def test_a_generic_v4_client_meets_its_own_handlers(self) -> None:
+        # The CLI pins the generic `v4`: botocore registers no downgrade for
+        # it and answers `v4-query` with the S3 signer itself, so the library
+        # stays out of the way - a `choose-signer.s3` handler the caller
+        # registered (a CLI plugin's) still sees the presign, as on aws.
+        import boto3
+        from botocore.config import Config
+
+        session = boto3.session.Session(
+            aws_access_key_id="AKIAIOSFODNN7EXAMPLE",
+            aws_secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        )
+        client = session.client(
+            "s3", region_name="us-east-1", config=Config(signature_version="v4")
+        )
+        seen: list[str] = []
+
+        def watch(signature_version: str, **_kwargs: Any) -> None:
+            seen.append(signature_version)
+
+        client.meta.events.register("choose-signer.s3", watch)
+        url = S3().presign(S3Storage("s3://b/k", client=client))
+        assert "X-Amz-Algorithm=AWS4-HMAC-SHA256" in url
+        assert seen == ["v4-query"]
+
     def test_explicit_sigv4_client_is_unchanged(self) -> None:
-        # A client already pinned to s3v4 (the CLI's own build) resolves the
-        # s3v4 signer, which the override returns unchanged - the CLI's presign
-        # goldens are unaffected. Compare the signature *scheme* (the query
+        # A client already pinned to s3v4 resolves the s3v4 signer, which the
+        # override returns unchanged. Compare the signature *scheme* (the query
         # parameter keys), not the whole URL, whose Date/Signature move with
         # wall-clock time.
         import urllib.parse
@@ -257,6 +323,26 @@ class TestPresignErrors:
         assert not isinstance(excinfo.value, BatchError)
         assert "Invalid bucket name" in str(excinfo.value)
         assert excinfo.value.operation == "presign"
+
+    def test_a_non_botocore_exception_is_wrapped_with_its_cause(self) -> None:
+        cause = ValueError("a signer's own rejection")
+        client = _FakePresignClient(error=cause)
+        with pytest.raises(Boto3S3Error) as excinfo:
+            S3().presign(_storage("s3://b/k", client))
+        assert type(excinfo.value) is Boto3S3Error
+        assert excinfo.value.__cause__ is cause
+        assert (excinfo.value.operation, excinfo.value.bucket, excinfo.value.key) == (
+            "presign",
+            "b",
+            "k",
+        )
+
+    def test_the_crt_signers_assertion_passes_through(self) -> None:
+        # docs/reference/operations/presign.md: the CRT signer's refusal of a
+        # non-positive expiry is awscrt's bare AssertionError, not translated.
+        client = _FakePresignClient(error=AssertionError())
+        with pytest.raises(AssertionError):
+            S3().presign(_storage("s3://b/k", client), expires_in=0)
 
     def test_empty_key_fails_real_botocore_validation(self) -> None:
         # Real botocore (no fake): presign validates the request shape

@@ -23,6 +23,7 @@ from boto3_s3_cli.commands.base import Context
 from boto3_s3_cli.commands.rm import _DeletePrinter
 from tests.utils.fakes3 import client_error
 from tests.utils.harness import (
+    bucket_name_report,
     built_client_ctx,
     client_ctx,
     run_cli_in_process,
@@ -103,6 +104,27 @@ class TestOutputMatrix:
         result, calls = run_recorded([], ["rm", "s3://b/k", "--dryrun", "--only-show-errors"])
         assert (result.rc, result.stdout) == (0, "(dryrun) delete: s3://b/k\n")
         assert calls == []
+
+    @pytest.mark.parametrize("failed", [False, True])
+    def test_a_colon_separated_outposts_key_keeps_its_colon(self, failed: bool) -> None:
+        # aws-cli names the single key as it was written - `<arn>:k`, the
+        # Outposts access-point form (measured, --dryrun). The library's
+        # record already said so; the printer rebuilt the line from bucket
+        # and key and put a `/` there.
+        target = (
+            "s3://arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-01234567890123456"
+            "/accesspoint/myap:dir/k.txt"
+        )
+        if failed:
+            result, _ = run_recorded(
+                [client_error("AccessDenied", 403, "DeleteObject")], ["rm", target]
+            )
+            assert result.rc == 1
+            assert result.stderr.startswith(f"delete failed: {target} An error occurred")
+        else:
+            result, calls = run_recorded([], ["rm", target, "--dryrun"])
+            assert (result.rc, result.stdout) == (0, f"(dryrun) delete: {target}\n")
+            assert calls == []
 
     def test_quiet_silences_dryrun(self) -> None:
         result, _ = run_recorded([], ["rm", "s3://b/k", "--dryrun", "--quiet"])
@@ -401,11 +423,9 @@ class TestExitCodeShape:
         ):
             result = run_cli_in_process(argv, ctx=built_client_ctx())
             assert result.rc == 1, argv
-            # Synthesized, so it stops before botocore's regex tail - the one
-            # truncation this surface has (docs/cli/aws-differences.md).
-            assert result.stderr == (
-                'fatal error: Parameter validation failed:\nInvalid bucket name ""\n'
-            )
+            # Written before any request, in botocore's own words (regex tail
+            # included), as aws's listing reports it.
+            assert result.stderr == f"fatal error: {bucket_name_report('')}\n"
 
 
 class TestFilterWiring:

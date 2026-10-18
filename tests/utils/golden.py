@@ -83,12 +83,6 @@ class Golden:
     # scenarios opting in via ``compare_progress`` - what --no-progress/--quiet
     # change on a piped stdout; None = not compared).
     progress: bool | None = None
-    # The bucket's tag set after the run (``harness.capture_bucket_tags``,
-    # sorted ``Key=Value``; mb scenarios opting in; None = not compared).
-    # Empty on moto/MinIO for a --tags create (neither honors
-    # CreateBucketConfiguration.Tags): an aws-vs-ours no-divergence pin, not
-    # a tag-application check.
-    bucket_tags: list[str] | None = None
 
 
 def golden_path(kind: str, name: str) -> Path:
@@ -197,9 +191,10 @@ def load_golden(kind: str, name: str) -> Golden:
             path = variant
     if not path.exists():
         pytest.fail(
-            f"golden {path} is missing. Generate it against MinIO:\n"
+            # endpoint-fidelity T15: the regeneration hint names the dev stack.
+            f"golden {path} is missing. Generate it against the dev stack:\n"
             f"  scripts/compose-up.sh\n"
-            f"  source scripts/minio-env.sh\n"
+            f"  source scripts/dev-env.sh\n"
             f"  UPDATE_GOLDENS=1 uv run pytest tests/cli/e2e"
         )
     data = json.loads(path.read_text())
@@ -219,7 +214,6 @@ def assert_matches_golden(
     head_fields: dict[str, Any] | None = None,
     src_tree: list[str] | None = None,
     progress: bool | None = None,
-    bucket_tags: list[str] | None = None,
 ) -> None:
     """Compare one run against *golden*; *side* labels who diverged.
 
@@ -260,10 +254,6 @@ def assert_matches_golden(
     if golden.progress is not None and progress != golden.progress:
         problems.append(
             f"progress lines: {side} printed={progress!r}, golden has {golden.progress!r}"
-        )
-    if golden.bucket_tags is not None and bucket_tags != golden.bucket_tags:
-        problems.append(
-            f"bucket tags: {side} shows {bucket_tags!r}, golden has {golden.bucket_tags!r}"
         )
     if problems:
         pytest.fail(f"[{golden.scenario}] {side} diverged from golden:\n" + "\n".join(problems))

@@ -6,7 +6,9 @@ reads is that interpreter's, while a host interpreter brings its own release's
 (3.10 knows no `.php` / `.weba` / `.g3` / `.t38`; 3.15 adds `.cjs` and re-types
 `.texinfo`). Guessing from these dicts instead pins one answer across every
 supported interpreter, the same way the CLI pins argparse behaviour that moved
-between releases.
+between releases; `transfer._guess_content_type` pins the algorithm beside
+them (3.14's `guess_type`, whose file branch splits with the host's `os.path`
+where older interpreters used `posixpath` for every name).
 
 `TYPES_MAP` / `COMMON_TYPES` are the strict (IANA) and non-standard halves,
 `SUFFIX_MAP` the multi-suffix aliases (`.tgz` -> `.tar.gz`), `ENCODINGS_MAP` the
@@ -14,7 +16,8 @@ compression suffixes, and `KNOWNFILES` the system files `mimetypes.init()`
 overlays on top - a local /etc/mime.types still reaches both tools.
 
 Regenerate by dumping the four table globals plus `knownfiles` from a stock
-CPython 3.14, before any `mimetypes.init()` so no host data leaks in.
+CPython 3.14, before any `mimetypes.init()` so no host data leaks in, and keep
+the empty `__all__` at the end.
 """
 
 from __future__ import annotations
@@ -260,3 +263,7 @@ KNOWNFILES: list[str] = [
     "/usr/local/etc/httpd/conf/mime.types",
     "/usr/local/etc/mime.types",
 ]
+
+# Package-internal: the tables are consumed by transfer.py only and carry no
+# documented surface (design/imports.md).
+__all__: list[str] = []

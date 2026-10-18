@@ -43,8 +43,8 @@ preserve here - and a completion that is *more* helpful than `aws s3`'s is itsel
 a reason to reach for `boto3-s3`. The guiding rule is therefore one-directional:
 **where aws completes, we aim to complete too; where aws does not, we still
 may** when it helps the user finish the command. The first half is a goal, not
-an absolute: an aws-only nicety can lag (e.g. aws offers a `{}` autoclose
-candidate for the map-shaped `--metadata`, which we currently do not). This is
+an absolute: aws offers a `{}` autoclose candidate for the map-shaped
+`--metadata`, which this implementation does not. This is
 the opposite of the exit-code charter (which demands exact parity) precisely
 because the UI is charter-exempt.
 
@@ -188,7 +188,10 @@ session).
 
 Display uses prompt_toolkit's standard completion menu. aws's multi-pane
 doc-panel application is not reproduced (the candidates are the ported
-substance, the UI chrome is not - neither is a contract, section 1).
+substance, the UI chrome is not - neither is a contract, section 1). The
+prompt opens the way aws's does, though: seeded with what was typed (the two
+flags taken out), a space after a seed nothing completes so the next word
+starts fresh, and the completion menu already open (aws's `pre_run`).
 
 ## 5. Activation conditions (mode resolution)
 
@@ -228,8 +231,14 @@ Behavior per mode:
   with the auto-prompt flags removed (to prevent an infinite re-prompt loop).
 - **on-partial** -> first **run as-is**, and fall back to the prompt and
   re-dispatch **only when rc is 252 (usage error)** (the on-partial branch in
-  aws-cli's `clidriver.py`). 252 is emitted before the S3 call, so it can be re-run
-  without side effects. The usage messages from the attempt (argparse's usage
+  aws-cli's `clidriver.py`). A 252 does not prove the run had no effect - an
+  external alias's command can end with it, and a plugin's handler can raise a
+  parameter-validation failure after a request - so the run after the prompt is
+  the user's choice, as on aws, and never automatic: without `prompt_toolkit`
+  (section 6) there is no trial at all. That run is preceded by what aws's new
+  driver does (`create_clidriver`): the config is read and the plugins are
+  loaded and initialized again (`_build_driver`); `on` keeps its driver. The
+  usage messages from the attempt (argparse's usage
   block / `Unknown options` / 252 `ValidationError`) are **silenced**
   (`_dispatch(suppress_usage_errors=True)` = aws's
   `SilenceParamValidationMsgErrorHandler`) - so the prompt is not buried under a
@@ -248,16 +257,21 @@ the profile config comes from the dispatcher's own config scan, which
 merged in key by key, and an indented block parsed into the map botocore makes
 of it, [`cli.md`](./cli.md) section 1). So this setting is read under
 botocore's own rules while the pre-parse path stays SDK-free - which is an
-implementation detail, not an import guarantee for usage-error paths. The
-active profile is `--profile` > `AWS_PROFILE` > `AWS_DEFAULT_PROFILE` >
-`default`.
+implementation detail, not an import guarantee for usage-error paths.
 
-Consulting `--profile` here is a deliberate deviation from aws-cli: at
-auto-prompt resolution aws has not yet applied `--profile` to the session, so it
-reads `cli_auto_prompt` from the env-derived profile only. Preferring `--profile`
-means a `cli_auto_prompt` set only under a `[profile X]` section fires the prompt
-on `--profile X` for us but not for aws - an intentional usability preference,
-admissible because the auto-prompt UI is charter-exempt.
+The profile whose section is read is the one the **environment** names
+(`configfiles.env_profile`: `AWS_PROFILE` > `AWS_DEFAULT_PROFILE`, present-wins,
+else `default`) - never `--profile`. aws resolves the mode before it binds
+`--profile` to its session, so a `cli_auto_prompt` set under `[profile X]` is
+not read on `--profile X`, and the one under the environment's profile is. A
+profile the environment names and no file declares reads as nothing set (aws
+catches that read's `ProfileNotFound` into `off`), an empty `AWS_PROFILE=`
+included. The rule is aws's rather than a friendlier one because the mode is
+not a UI matter alone: it decides what a non-interactive run does (measured:
+with `cli_auto_prompt = on` under `[profile X]`, `--profile X` without a
+terminal runs the command on aws, and stopped at rc 255 when this read
+followed the flag), and the block-valued `AttributeError` above has to fire
+for the same profile aws fires it for.
 
 **Difference when prompt_toolkit is absent** (section 6): an explicit flag gets the
 install guidance + 252. The env/config-driven case **silently falls back to
@@ -274,7 +288,9 @@ importing):
   'boto3-s3-cli[autoprompt]'`) + rc 252.
 - **Absent + config/env-driven** -> **silently fall back to normal dispatch**. So
   that the combination of an ambient setting (`cli_auto_prompt=on`, etc.) and a
-  missing optional dependency does not break every command.
+  missing optional dependency does not break every command. Under `on-partial`
+  the command then runs once, as under `off`, rather than as a silenced trial
+  that a prompt could not follow.
 - **Present** -> import `prompt.py` and run the prompt.
 
 All rc values are non-contractual (the charter's interactive-UI exemption,
@@ -287,7 +303,7 @@ normal dispatch, so the subsequent rc follows each subcommand's convention.
 
 ## 7. Context injection and tests
 
-`Context` in `commands/base.py` gains `auto_prompter` (`AutoPrompter | None`,
+`Context` in `commands/base.py` carries `auto_prompter` (`AutoPrompter | None`,
 default None -> lazily created by `main`). Tests inject a fake `AutoPrompter`
 (returns canned argv) to verify "seed -> prompt -> re-dispatch" without a tty
 (the same DI style by which other subcommands inject `client_factory`; no
@@ -305,7 +321,7 @@ Test structure (`tests/cli/unit/test_autoprompt.py`):
 - **Wiring**: mutual exclusion 252, missing-dep (stub `find_spec`) guidance +
   252, re-dispatch via an injected prompter, `help`-token precedence,
   `--no-cli-auto-prompt` triggering no prompt.
-- **Mode resolution (Phase 2)**: env on/off/invalid, config file (`[default]` /
+- **Mode resolution**: env on/off/invalid, config file (`[default]` /
   `[profile X]`, `AWS_CONFIG_FILE`), env > config precedence, explicit flag >
   env, on-partial (valid = no prompt / usage error = prompt), config-driven AND
   prompt_toolkit absent -> fall-through. Tests pin `AWS_CLI_AUTO_PROMPT=off` via

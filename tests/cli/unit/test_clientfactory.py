@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from botocore.exceptions import InvalidConfigError as BotocoreInvalidConfigError
 from botocore.exceptions import NoRegionError
 from botocore.utils import JSONFileCache
 
@@ -387,12 +388,39 @@ class TestBuildClient:
     def test_presigned_urls_are_sigv4_even_in_us_east_1(self) -> None:
         # Stock botocore downgrades presigned URLs to SigV2 where the region
         # still accepts it; aws v2's botocore has no SigV2 at all. The pinned
-        # s3v4 keeps presign output aws-shaped.
+        # SigV4 keeps presign output aws-shaped.
         client = clientfactory.build_client(_parse(["--region", "us-east-1"]))
         url = client.generate_presigned_url(
             "get_object", Params={"Bucket": "bucket", "Key": "key"}, ExpiresIn=60
         )
         assert "X-Amz-Algorithm=AWS4-HMAC-SHA256" in url
+
+    def test_the_pin_leaves_botocores_signer_choice_to_answer(self) -> None:
+        # The pin is the generic `v4` aws's endpoint resolution hands its
+        # requests, so botocore's own bare `choose-signer` handler turns it
+        # into the S3 signer and answers: a later bare registration (a
+        # plugin's `disable_signing`) is never reached, and a handler on
+        # `choose-signer.s3` sees the `v4` / `v4-query` aws hands it
+        # (measured against the pinned aws-cli). An `s3v4` pin passed
+        # botocore's handler by and let the bare registration unsign it.
+        from botocore import UNSIGNED
+
+        client = clientfactory.build_client(_parse(["--region", "us-east-1"]))
+        seen: list[str] = []
+
+        def unsign(**_kwargs: Any) -> object:
+            return UNSIGNED
+
+        def watch(signature_version: str, **_kwargs: Any) -> None:
+            seen.append(signature_version)
+
+        client.meta.events.register("choose-signer", unsign)
+        client.meta.events.register("choose-signer.s3", watch)
+        url = client.generate_presigned_url(
+            "get_object", Params={"Bucket": "bucket", "Key": "key"}, ExpiresIn=60
+        )
+        assert "X-Amz-Signature=" in url
+        assert seen == ["v4-query"]
 
     def test_symmetric_sigv4_signers_stay_pure_python(self) -> None:
         # With awscrt importable (the dev group installs botocore[crt]; the
@@ -418,7 +446,7 @@ class TestBuildClient:
         # (region set `*`) - measured against aws 2.36.40, whose MRAP presign
         # signs AWS4-ECDSA-P256-SHA256 for each of these aliases (the empty
         # ARN region is the whole test; the `.mrap` suffix is a convention).
-        # The s3v4 pin stands down when a positional names an MRAP ARN; the
+        # The SigV4 pin stands down when a positional names an MRAP ARN; the
         # dev environment's awscrt (always present, design/testing.md
         # section 4) then signs SigV4a offline.
         arn = f"arn:aws:s3::123456789012:accesspoint/{alias}"
@@ -547,7 +575,7 @@ class TestBuildClient:
         ]
         client = clientfactory.build_client(args)
         resolver = client._ruleset_resolver  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
-        assert resolver._requested_auth_scheme == "s3v4"  # pyright: ignore[reportPrivateUsage]
+        assert resolver._requested_auth_scheme == "v4"  # pyright: ignore[reportPrivateUsage]
 
     def test_transfer_positional_list_lifts_the_pin_too(self) -> None:
         # The transfer family carries a two-item `paths` list; an MRAP ARN on
@@ -588,15 +616,16 @@ class TestBuildClient:
     def test_s3express_target_lifts_the_pin(self) -> None:
         # A directory bucket must resolve to sigv4-s3express with CreateSession
         # credentials; an explicit signature_version suppresses that resolution
-        # (s3v4 matches the scheme name up to the first dash) and signs a plain
+        # (the pin matches the scheme name up to the first dash) and signs a plain
         # SigV4 request instead - measured: a pinned express presign scopes
         # `.../s3/aws4_request` where the unpinned flow dials CreateSession,
         # like aws v2's bundled botocore. Signing needs that live CreateSession
         # call, so assert on the exact input botocore's per-request scheme
         # selection keys on: the requested auth scheme is unset, leaving the
         # endpoint's `sigv4-s3express` alive. (`meta.config.signature_version`
-        # cannot serve here - botocore backfills it with the *resolved*
-        # version, `s3v4` for S3 with or without the pin.)
+        # does tell the pin apart - `v4` with it, the resolved `s3v4` botocore
+        # backfills without - but the requested scheme is what the selection
+        # reads.)
         args = _parse(["--region", "us-east-1"])
         args.path = "s3://mybkt--use1-az4--x-s3/key"
         client = clientfactory.build_client(args)
@@ -622,6 +651,17 @@ class TestBuildClient:
         resolver = client._ruleset_resolver  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
         assert resolver._requested_auth_scheme is None  # pyright: ignore[reportPrivateUsage]
 
+    def test_s3express_access_point_lifts_the_pin_too(self) -> None:
+        # An access point of a directory bucket (--xa-s3) resolves to the same
+        # sigv4-s3express scheme as the bucket - measured against a recording
+        # endpoint: aws dials CreateSession first, while the pin left on sent
+        # a plain SigV4 ListObjectsV2 with no session.
+        args = _parse(["--region", "us-east-1"])
+        args.paths = "s3://myap--use1-az4--xa-s3/"
+        client = clientfactory.build_client(args)
+        resolver = client._ruleset_resolver  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+        assert resolver._requested_auth_scheme is None  # pyright: ignore[reportPrivateUsage]
+
     def test_local_x_s3_suffix_lookalike_keeps_the_pin(self) -> None:
         # A local path can plausibly end in --x-s3; only the s3:// form names
         # a directory bucket, so the pin stays.
@@ -629,11 +669,11 @@ class TestBuildClient:
         args.paths = ["./backup--x-s3", "s3://plain-bucket/key"]
         client = clientfactory.build_client(args)
         resolver = client._ruleset_resolver  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
-        assert resolver._requested_auth_scheme == "s3v4"  # pyright: ignore[reportPrivateUsage]
+        assert resolver._requested_auth_scheme == "v4"  # pyright: ignore[reportPrivateUsage]
 
     def test_no_sign_request_still_wins_for_s3express(self) -> None:
         # --no-sign-request overrides to UNSIGNED even for a directory bucket,
-        # exactly as it overrides the s3v4 pin: the bare zonal-endpoint URL.
+        # exactly as it overrides the SigV4 pin: the bare zonal-endpoint URL.
         args = _parse(["--no-sign-request", "--region", "us-east-1"])
         args.path = "s3://mybkt--use1-az4--x-s3/key"
         client = clientfactory.build_client(args)
@@ -646,7 +686,7 @@ class TestBuildClient:
 
     def test_no_sign_request_still_wins_for_mrap(self) -> None:
         # --no-sign-request overrides to UNSIGNED even for an MRAP target,
-        # exactly as it overrides the s3v4 pin: aws emits the bare URL.
+        # exactly as it overrides the SigV4 pin: aws emits the bare URL.
         args = _parse(["--no-sign-request", "--region", "us-east-1"])
         args.path = "s3://arn:aws:s3::123456789012:accesspoint/test.mrap/key"
         client = clientfactory.build_client(args)
@@ -1077,6 +1117,58 @@ class TestCredentialCache:
             cache_dir.chmod(0o700)
         assert excinfo.value.filename == str(cache_dir / "denied-key.json")
 
+    def test_the_sso_token_cache_is_written_the_same_way(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The `sso-session` provider writes a refreshed token back to
+        # ~/.aws/sso/cache through a cache it builds itself, from this class
+        # attribute. Through the installed botocore's temp file + rename, a
+        # read-only entry in a writable directory was replaced (rc 0 where
+        # aws is 255), a writable entry in a read-only directory could not be
+        # (rc 255 where aws is 0), and a 0644 entry became 0600 (measured).
+        import tempfile
+
+        from botocore.tokens import SSOTokenProvider
+
+        def refuse(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("the token cache must not write through a temp file")
+
+        # Restored after the test: the pin is process-wide by design.
+        monkeypatch.setattr(
+            SSOTokenProvider, "DEFAULT_CACHE_CLS", SSOTokenProvider.DEFAULT_CACHE_CLS
+        )
+        clientfactory.build_session(_parse([]))
+        monkeypatch.setattr(tempfile, "mkstemp", refuse)
+        token_dir = tmp_path / "sso-cache"
+        token_dir.mkdir()
+        entry = token_dir / "token-key.json"
+        entry.write_text("{}")
+        entry.chmod(0o644)
+        cache = SSOTokenProvider.DEFAULT_CACHE_CLS(
+            str(token_dir), dumps_func=lambda _value: "dumped"
+        )
+        cache["token-key"] = {"accessToken": "t"}
+        assert entry.read_text() == "dumped"
+        if sys.platform != "win32":
+            assert stat.S_IMODE(entry.stat().st_mode) == 0o644
+
+    def test_the_sso_provider_is_built_with_that_token_cache(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The provider builds its token cache once, when the chain is built,
+        # so the class has to be pinned before that: pinned after, the chain's
+        # provider kept the installed botocore's write (measured: the
+        # unwritable-cache rc flips back, the entry's mode becomes 0600).
+        from botocore.tokens import SSOTokenProvider
+
+        # Back to botocore's own class first: an earlier test's session left
+        # the pin in place, which would hide a pin made too late here.
+        monkeypatch.setattr(SSOTokenProvider, "DEFAULT_CACHE_CLS", JSONFileCache)
+        session = clientfactory.build_session(_parse([]))._session  # pyright: ignore[reportPrivateUsage]
+        sso = session.get_component("credential_provider").get_provider("sso")
+        token_cache = sso._token_provider._cache  # pyright: ignore[reportAttributeAccessIssue]
+        assert type(token_cache) is clientfactory._credential_cache_class()  # pyright: ignore[reportPrivateUsage]
+
     def test_a_fetched_credential_lands_in_that_directory(self, tmp_path: Path) -> None:
         # The write half: whatever a provider caches becomes a file under the
         # shared directory, so the next invocation (and aws) can read it.
@@ -1163,6 +1255,29 @@ def _provider_client(session: Any, service: str = "sts") -> Any:
     return session.create_client(service)
 
 
+class _RequestStoppedError(Exception):
+    """Raised from ``before-send`` once the signed request has been seen."""
+
+
+def _authorization_sent(client: Any, bucket: str) -> str:
+    """The ``Authorization`` header a PutObject is signed with, sent nowhere.
+
+    ``before-send`` fires on the finished, signed request; raising there ends
+    the call before any connection is made.
+    """
+    seen: list[str] = []
+
+    def capture(request: Any, **_kwargs: Any) -> None:
+        value = request.headers.get("Authorization", b"")
+        seen.append(value.decode() if isinstance(value, bytes) else value)
+        raise _RequestStoppedError
+
+    client.meta.events.register("before-send.s3.PutObject", capture)
+    with pytest.raises(_RequestStoppedError):
+        client.put_object(Bucket=bucket, Key="k", Body=b"x", ServerSideEncryption="aws:kms")
+    return seen[0]
+
+
 class TestNoSignRequestPosture:
     """``--no-sign-request`` is the session's posture, and ``--sse aws:kms`` beats it.
 
@@ -1230,6 +1345,40 @@ class TestNoSignRequestPosture:
         assert clientfactory.build_client(args).meta.config.signature_version == "s3v4"
 
     @pytest.mark.parametrize(
+        ("target", "bucket"),
+        [
+            (
+                "s3://arn:aws:s3::123456789012:accesspoint/mfzwi23gnjvgw.mrap/k",
+                "arn:aws:s3::123456789012:accesspoint/mfzwi23gnjvgw.mrap",
+            ),
+            (
+                "s3://arn:aws:s3-outposts:us-west-2:123456789012:outpost/op-01234567890123456/"
+                "accesspoint/myap/k",
+                "arn:aws:s3-outposts:us-west-2:123456789012:outpost/op-01234567890123456/"
+                "accesspoint/myap",
+            ),
+            ("s3://mybkt--usw2-az1--x-s3/k", "mybkt--usw2-az1--x-s3"),
+        ],
+        ids=["mrap", "outposts", "express"],
+    )
+    @pytest.mark.parametrize("unsigned", [False, True], ids=["signed", "no-sign-request"])
+    def test_sse_aws_kms_signs_plain_sigv4_whatever_the_target(
+        self, monkeypatch: pytest.MonkeyPatch, target: str, bucket: str, unsigned: bool
+    ) -> None:
+        # aws's per-client config does not look at the target: an MRAP,
+        # Outposts or S3 Express target signs plain SigV4 under --sse aws:kms,
+        # with the client's region in the scope (measured offline on the
+        # pinned aws), where the endpoint's own resolution - SigV4a,
+        # sigv4-s3express - signs every other signed run.
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+        argv = ["./local.txt", target, "--region", "us-west-2", "--sse", "aws:kms"]
+        args = _parse_transfer([*argv, "--no-sign-request"] if unsigned else argv)
+        authorization = _authorization_sent(clientfactory.build_client(args), bucket)
+        assert authorization.startswith("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/")
+        assert "/us-west-2/" in authorization
+
+    @pytest.mark.parametrize(
         "extra",
         [[], ["--sse", "AES256"], ["--sse-c", "AES256"], ["--sse-kms-key-id", "somekey"]],
         ids=["bare", "sse-aes256", "sse-c", "sse-kms-key-id"],
@@ -1278,7 +1427,7 @@ class TestNoSignRequestPosture:
         assert s3._crt_sign_requests is expected  # pyright: ignore[reportPrivateUsage]
 
     def test_a_signed_run_is_untouched_by_the_kms_case(self, _broken_role_profile: None) -> None:
-        # Without --no-sign-request the s3v4 pin was always there; --sse
+        # Without --no-sign-request the SigV4 pin was always there; --sse
         # aws:kms changes nothing, credentials included.
         for extra in ([], ["--sse", "aws:kms"]):
             args = _parse_transfer(["./local.txt", "s3://bkt/key", "--region", "us-east-1", *extra])
@@ -1377,7 +1526,7 @@ class TestRegionSessionBinding:
         session = clientfactory.build_session(args)._session  # pyright: ignore[reportPrivateUsage]
         clientfactory._bind_region(  # pyright: ignore[reportPrivateUsage]
             session,
-            args.region,
+            args,
             clientfactory._resolve_region(args.region, session),  # pyright: ignore[reportPrivateUsage]
         )
         assert session.get_config_variable("region") is None
@@ -1441,6 +1590,51 @@ class TestRegionSessionBinding:
             monkeypatch.setenv(var, value)
         session = self._session_of(clientfactory.build_s3(_parse([])))
         assert session.get_config_variable("region") == ""
+
+    def test_a_client_built_for_another_region_does_not_rebind_the_session(self) -> None:
+        # `--source-region`'s client is built from the run's session with its
+        # own region; aws's source client takes that region as `region_name`
+        # alone, so its credential chain still signs `AssumeRole` in the
+        # run's region. Rebinding the shared session put STS in the source
+        # region - and with no other region source, made a run aws fails
+        # (`You must specify a region.`, rc 1) succeed (measured).
+        args = _parse(["--region", "eu-west-1"])
+        s3 = clientfactory.build_s3(args)
+        source_args = argparse.Namespace(**vars(args))
+        source_args.region = "us-west-2"
+        source_client = clientfactory.build_client(source_args, session=s3.session)
+        session = self._session_of(s3)
+        assert source_client.meta.region_name == "us-west-2"
+        assert session.get_config_variable("region") == "eu-west-1"
+        assert _provider_client(session).meta.region_name == "eu-west-1"
+
+    def test_a_source_region_alone_binds_nothing(self) -> None:
+        args = _parse([])
+        s3 = clientfactory.build_s3(args)
+        source_args = argparse.Namespace(**vars(args))
+        source_args.region = "us-west-2"
+        clientfactory.build_client(source_args, session=s3.session)
+        assert self._session_of(s3).get_config_variable("region") is None
+
+    @pytest.mark.parametrize(
+        ("typed", "expected"),
+        [(None, None), ("us-west-2", "us-west-2"), ("", None)],
+        ids=["none-typed", "typed", "empty-typed"],
+    )
+    def test_an_alias_region_reaches_the_client_but_not_the_session(
+        self, typed: str | None, expected: str | None
+    ) -> None:
+        # aws binds the session from the arguments it parsed itself, before
+        # any alias runs; an alias's `--region` rewrites only the globals the
+        # clients are built from (measured: `myls = ls --region eu-west-1`
+        # lists in eu-west-1 while `AssumeRole` goes to the typed region, or
+        # fails NoRegion, rc 253, with none).
+        args = _parse([] if typed is None else ["--region", typed])
+        setattr(args, clientfactory.TYPED_REGION, args.region)
+        args.region = "eu-west-1"
+        s3 = clientfactory.build_s3(args)
+        assert s3.client().meta.region_name == "eu-west-1"
+        assert self._session_of(s3).get_config_variable("region") == expected
 
     def test_the_region_chain_is_still_walked_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Binding must not cost a second walk: the chain's last link is the
@@ -1605,6 +1799,38 @@ class TestConfigErrorOrder:
         self._config(tmp_path, monkeypatch, "[default]\nmax_attempts = 0\nretry_mode = legacy\n")
         with pytest.raises(InvalidConfigError, match='Value provided to "max_attempts"'):
             clientfactory.build_client(_parse([]))
+
+    @pytest.mark.parametrize("source", ["config", "env"])
+    @pytest.mark.parametrize("endpoint", ["http://a b/", "http://[::1]:x/"])
+    def test_a_legacy_retry_mode_outranks_an_invalid_endpoint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str, endpoint: str
+    ) -> None:
+        # The installed botocore takes `legacy`, so a mode judged only after
+        # the client exists loses to everything botocore checks behind its own
+        # mode validation - the endpoint first of all (measured: aws reports
+        # the mode, this CLI reported `Invalid endpoint`).
+        self._config(
+            tmp_path, monkeypatch, "[default]\nretry_mode = legacy\n" if source == "config" else ""
+        )
+        if source == "env":
+            monkeypatch.setenv("AWS_RETRY_MODE", "legacy")
+        with pytest.raises(InvalidConfigError) as excinfo:
+            clientfactory.build_client(_parse(["--endpoint-url", endpoint]))
+        assert str(excinfo.value) == (
+            'Invalid value provided to "mode": "legacy" must be one of: "standard" or "adaptive"'
+        )
+
+    def test_a_refused_legacy_build_leaves_the_session_s_mode_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The mode is swapped only for the length of the build; what the
+        # session answers afterwards is what the configuration says.
+        self._config(tmp_path, monkeypatch, "[default]\nretry_mode = legacy\n")
+        args = _parse([])
+        session = clientfactory.build_session(args)
+        with pytest.raises(InvalidConfigError, match='"legacy"'):
+            clientfactory.build_client(args, session=session)
+        assert session._session.get_config_variable("retry_mode") == "legacy"  # pyright: ignore[reportPrivateUsage]
 
     @pytest.mark.parametrize(
         ("body", "expected"),
@@ -1782,7 +2008,43 @@ class TestDefaultsMode:
 
         section = clientfactory._RegionalS3Section(_ProvideOnly())  # pyright: ignore[reportPrivateUsage]
         with pytest.raises(AttributeError, match="_ProvideOnly"):
-            section.set_default_provider("us_east_1_regional_endpoint", ConstantProvider("legacy"))
+            section.set_default_provider("addressing_style", ConstantProvider("path"))
+
+    def test_the_pinned_key_is_not_written_back_into_the_section(self) -> None:
+        # The key smart defaults actually write is the pinned one. Passing
+        # that write on would restore the override entry the pin removed -
+        # the entry that makes botocore assign into a degenerate `s3 =`.
+        from botocore.configprovider import ConstantProvider
+
+        session = clientfactory.build_session(_parse([]))._session  # pyright: ignore[reportPrivateUsage]
+        provider = session.get_component("config_store").get_config_provider("s3")
+        provider.set_default_provider("us_east_1_regional_endpoint", ConstantProvider("legacy"))
+        wrapped = provider._section_provider  # pyright: ignore[reportPrivateUsage]
+        assert "us_east_1_regional_endpoint" not in wrapped._override_providers
+        assert provider.provide()["us_east_1_regional_endpoint"] == "regional"
+
+    @pytest.mark.parametrize("mode", _MODES)
+    @pytest.mark.parametrize("source", ["config", "env"])
+    def test_a_degenerate_s3_line_fails_as_it_does_without_a_mode(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, source: str
+    ) -> None:
+        """A valid mode must not change the report of a string-valued `s3 =`.
+
+        aws - no defaults modes, no such key - reports botocore's
+        `'str' object has no attribute 'get'` with or without a mode
+        (measured, rc 255). With the smart-defaults write passed through, the
+        report here became `'str' object does not support item assignment`.
+        """
+        config = tmp_path / "config"
+        if source == "config":
+            config.write_text(f"[default]\nregion = us-east-1\ndefaults_mode = {mode}\ns3 =\n")
+        else:
+            config.write_text("[default]\nregion = us-east-1\ns3 =\n")
+            monkeypatch.setenv("AWS_DEFAULTS_MODE", mode)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        with pytest.raises(AttributeError) as excinfo:
+            clientfactory.build_client(_parse(["--region", "us-east-1"]))
+        assert str(excinfo.value) == "'str' object has no attribute 'get'"
 
 
 class TestS3ErrorMsgRegistration:
@@ -1926,14 +2188,27 @@ class TestBuildServiceClient:
     ) -> None:
         # aws binds --region into the session at startup, so from_session's
         # region-less sts client (and the source s3control without
-        # --source-region) still lands in --region; the caller's None must fall
-        # back to args.region ahead of the env/config chain.
+        # --source-region) still lands in --region.
         monkeypatch.delenv("AWS_REGION", raising=False)
         monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
         client = clientfactory.build_service_client(
             "sts", _parse(["--region", "eu-central-1"]), region=None
         )
         assert client.meta.region_name == "eu-central-1"
+
+    def test_none_region_under_an_empty_flag_is_the_sessions_answer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `--region ""` never binds the session, so aws's region-less clients
+        # resolve the rest of its chain: measured, `mv` from an access-point
+        # alias with `--validate-same-s3-paths --region ""` and AWS_REGION set
+        # resolved and moved (rc 0), where taking the flag itself built them
+        # with an empty region (rc 255).
+        monkeypatch.setenv("AWS_REGION", "eu-west-1")
+        monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+        args = _parse(["--region", ""])
+        client = clientfactory.build_service_client("sts", args, region=None)
+        assert client.meta.region_name == "eu-west-1"
 
 
 def _client_verify(client: Any) -> Any:
@@ -2074,6 +2349,68 @@ class TestVerifyResolution:
         monkeypatch.setenv("REQUESTS_CA_BUNDLE", "")
         with pytest.raises(InvalidConfigError, match="Invalid CA bundle"):
             clientfactory.build_client(_parse([]))
+
+    @pytest.mark.parametrize("var", ["AWS_CA_BUNDLE", "REQUESTS_CA_BUNDLE"])
+    @pytest.mark.parametrize("flag", [["--no-verify-ssl"], ["--ca-bundle", "ca.pem"]])
+    def test_a_client_the_sdk_builds_is_held_to_the_check_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, var: str, flag: list[str]
+    ) -> None:
+        # The flag sets the S3 client's own trust, but the clients the SDK
+        # builds from the session - the credential chain's STS / SSO, the CRT
+        # serializer - read the session's empty value and took it as
+        # "verification off". aws checks every client it builds: measured, an
+        # assume-role profile with `AWS_CA_BUNDLE=` beside either flag is rc
+        # 255 there, where this fetched credentials over unverified TLS.
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "ca.pem").write_text("")
+        monkeypatch.setenv(var, "")
+        s3 = clientfactory.build_s3(_parse(flag))
+        s3.client()
+        with pytest.raises(BotocoreInvalidConfigError) as excinfo:
+            _provider_client(s3.session._session)  # pyright: ignore[reportOptionalMemberAccess, reportPrivateUsage]
+        assert str(excinfo.value) == _EMPTY_CA_BUNDLE_REPORT
+
+    def test_an_assumed_role_is_fetched_through_the_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The fetch builds its STS client when the credentials are first
+        # used, through the session. An endpoint nothing listens on keeps an
+        # unchecked client from reaching anything.
+        config = tmp_path / "config"
+        config.write_text(
+            "[profile ar]\nrole_arn = arn:aws:iam::123456789012:role/r\n"
+            "source_profile = src\nregion = us-east-1\n"
+            "[profile src]\naws_access_key_id = AKID\naws_secret_access_key = s\n"
+        )
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        monkeypatch.setenv("AWS_ENDPOINT_URL_STS", "http://127.0.0.1:9")
+        monkeypatch.setenv("AWS_MAX_ATTEMPTS", "1")
+        monkeypatch.setenv("AWS_CA_BUNDLE", "")
+        s3 = clientfactory.build_s3(_parse(["--profile", "ar", "--no-verify-ssl"]))
+        credentials = s3.session.get_credentials()  # pyright: ignore[reportOptionalMemberAccess]
+        assert credentials is not None
+        with pytest.raises(BotocoreInvalidConfigError) as excinfo:
+            credentials.get_frozen_credentials()
+        assert str(excinfo.value) == _EMPTY_CA_BUNDLE_REPORT
+
+    def test_the_sso_provider_builds_its_clients_through_the_check(self) -> None:
+        # The SSO provider keeps the `create_client` it was handed when the
+        # chain was built, so the check has to be on the session first: put
+        # on after, legacy SSO and an unexpired `sso-session` fetched their
+        # credentials unchecked (measured: rc 0 where aws is 255).
+        session = clientfactory.build_session(_parse([]))._session  # pyright: ignore[reportPrivateUsage]
+        sso = session.get_component("credential_provider").get_provider("sso")
+        assert sso._client_creator is session.create_client  # pyright: ignore[reportAttributeAccessIssue]
+
+    def test_a_client_the_sdk_builds_with_a_usable_bundle_is_left_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bundle = tmp_path / "ca.pem"
+        bundle.write_text("")
+        monkeypatch.setenv("AWS_CA_BUNDLE", str(bundle))
+        s3 = clientfactory.build_s3(_parse([]))
+        client = _provider_client(s3.session._session)  # pyright: ignore[reportOptionalMemberAccess, reportPrivateUsage]
+        assert _client_verify(client) == str(bundle)
 
     def test_no_verify_ssl_beats_an_empty_ca_bundle(self) -> None:
         # The rejection reads the *resolved* value, and `--no-verify-ssl`

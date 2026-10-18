@@ -52,8 +52,18 @@ def rm(
     on_result: ResultCallback | None = None,
     cancel_token: CancelToken | None = None,
     capture_response: bool = False,
+    transfer_config: TransferConfig | None = None,
 ) -> None: ...
 ```
+
+`transfer_config` (this instance's when `None`) moves no bytes; its engine
+choice is the client the deletes ride, as `aws s3 rm` carries them on its
+transfer manager: the storage's botocore client, or — when it selects the CRT
+engine — the CRT client, with this instance's CRT postures (see
+[`S3Deleter`](../misc.md#s3deleter)). That client's retry policy and error
+text are the deletes', and a delete that dies without a response is dropped
+without a record on botocore, as `aws s3` drops it, and a `FAILED` record on
+the CRT client ([`../results.md`](../results.md)). A dryrun builds no engine.
 
 `target` names what to delete: an `"s3://bucket/key"` string (the `s3://`
 scheme is optional, so `"bucket/key"` works too), an `os.PathLike[str]`
@@ -133,14 +143,25 @@ page pulls and stops the deleter from dispatching further batches; what each
 mode leaves buffered, dispatched or in flight is specified with the token
 itself. Either mode ends by raising
 [`CancelledError`](../exceptions.md#cancellederror) once the worker has been
-reclaimed.
+reclaimed. On the blind single-key path the token is polled after the record
+is emitted, the `FAILED` record included, so a cancel from that callback
+raises `CancelledError` in place of the `BatchError` the failure would
+otherwise become. A Ctrl-C while that single request is out does not abandon
+it: `rm` waits for the answer and then raises the `KeyboardInterrupt`,
+emitting the `SUCCEEDED` record first if the delete went through - as
+`aws s3 rm` still reports a delete it had sent - but no `FAILED` record if it
+failed (there the interrupt wins, as on `aws s3 rm`). A second Ctrl-C still
+lets the request finish but emits no record (`aws s3 rm` still completes it
+and prints nothing more); a third stops the wait.
 
-`capture_response=True` attaches the delete response to each successful
+`capture_response=True` attaches the delete response to a successful
 record's `extra_info` under the key `"delete"`, with `ResponseMetadata`
 removed. Both routes produce the single-object `DeleteObject` shape — the
 batched route reconstructs it from the batch response — so the wire form does
 not show through. Failed and dry-run records keep `extra_info` at `None`,
-which is also what every record carries when `capture_response` is `False`.
+which is also what every record carries when `capture_response` is `False`,
+and what a batched success carries when the response did not list its key
+under `Deleted[]` ([Captured responses](../misc.md#captured-responses)).
 
 Raises:
 
@@ -148,11 +169,22 @@ Raises:
   a string, an `os.PathLike`, nor an `S3Storage`; the location is an
   unsupported ARN form or has a key but no bucket; or its bucket part is empty
   (`"s3://"`), which this operation requires. No request is sent in these
-  cases.
+  cases. Also a `TransferConfig` carrying classic-only settings with
+  `preferred_transfer_client="crt"`, raised as the CRT engine the deletes ride
+  is built — with the deleter, before the listing, or just before the single
+  key's request — and never under `dryrun`.
 - [`ConfigurationError`](../exceptions.md#configurationerror), or its
   [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement —
-  the client had to be built and credentials, region, profile or endpoint were
-  unresolvable. Only when the target did not bring its own client.
+  the client had to be built from a profile, region, endpoint or partial
+  credentials that will not resolve, only when the target did not bring its
+  own client; and credentials missing when the listing sends its first
+  request. The blind single-key delete, which lists nothing, reports missing
+  credentials as its item's failure instead (`BatchError` below). A selected
+  CRT engine that cannot be built — a CA bundle it cannot read or use — is an
+  `InvalidConfigError`, raised where the engine is built (above).
+- botocore's `MissingDependencyException` — `preferred_transfer_client="crt"`
+  requested explicitly without a usable awscrt, raised where the engine would
+  be built, as a transfer raises it ([`../options.md`](../options.md)).
 - The listing's own rejection, translated to its category and propagated
   untouched: `NoSuchBucket` becomes
   [`NotFoundError`](../exceptions.md#notfounderror), a denied `ListBucket`
@@ -208,7 +240,11 @@ cases are:
   empty key gives `""`.
 - `recursive=False` with a key not ending in `/` — everything through its last
   `/`, so `"data/a.txt"` gives `"data/"`, and `""` when the key contains no
-  `/` at all, so `"a.txt"` gives `""`.
+  `/` at all, so `"a.txt"` gives `""`. A `/` that directly follows another, or
+  opens the key, is not counted twice: `"a//b"` gives `"a/"` and `"/b"` gives
+  `""`, so both entries are matched as `"/b"` — the relative key aws is left
+  with after joining a pattern onto its root with `os.path.join`, which adds
+  no second `/`.
 - `recursive=False` with a key that already ends in `/`, or an empty key — the
   key unchanged: `"data/"` gives `"data/"` and `""` gives `""`.
 

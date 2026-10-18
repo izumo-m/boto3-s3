@@ -5,6 +5,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-18
+
+- Added `is_s3express_accesspoint_path`, `LocalStorage.exists()` / `ensure_directory()` and a `transfer_config` for `rm` and `S3Deleter`; `S3PathResolver` and `has_underlying_s3_path` now cover an S3 Express access point, which `sync` refuses, and an empty local path is rejected instead of meaning the working directory.
+- `S3FileInfo.etag` now holds the ETag exactly as S3 returned it, quotes included, so a multipart download from an endpoint serving another form no longer fails its `If-Match`; `EtagComparison.content_differs` takes either form.
+- Failures now take the library's exception classes on every path and engine: an incomplete response or a timestamp the host cannot represent is `MalformedResponseError`, and a request's, a local file's or a configuration's error no longer arrives as a bare built-in or botocore exception.
+- A CA bundle setting (`AWS_CA_BUNDLE`, `ca_bundle`, `REQUESTS_CA_BUNDLE`, `verify`) that is empty or whitespace-only is now refused with `InvalidConfigError` on every botocore version, instead of turning TLS certificate verification off under an older botocore.
+- On an SDK too old for them, `mb`'s tags and `-an` bucket names, the newer checksum algorithms and S3 Express directory buckets and access points are now refused up front with a `ConfigurationError` naming the version they need.
+- More `aws s3` parity in transfers and deletes: a request that dies without any response leaves no record where `aws s3` loses it, a batched delete sends again on its own a key that failed transiently or whose batch failed as a whole, deletes go on the CRT client when the CRT engine is selected, and `copy_props=ALL` writes a multipart copy's annotations after its tags.
+- More `aws s3` parity in listings and paths: `sync` merges an out-of-order listing instead of stopping, a timestamp sent without a zone is read as local time, a string path is read as `aws s3` reads it (`rm` on an Outposts access point ARN closed with `:` no longer deletes the whole access point), an unreadable `mime.types` fails each upload it would have typed, and the `Content-Type` guess follows `aws`'s interpreter on every host.
+- The CRT engine now resolves a lazily refreshed credential per transfer, runs on boto3 1.34 to 1.41 with the `crt` extra, is shared by a second client that resolves the same, and fails a download whose file could not be put in place instead of succeeding (a `mv` then deleted the object).
+- A download into an `IOStorage` over an append-mode stream or a pipe that claims to seek is now written in order, a retried one into a stream that cannot seek no longer writes its first bytes twice, a CRT upload from a pipe or socket works, a seekable stream's upload is no longer cut to `expected_size`, and `IOStorage`'s type admits a wrapper offering only `read` or `write`.
+- A transfer cut short by Ctrl-C, or by an interrupt the caller's own code raises on a worker thread, is now recorded as cancelled and re-raised, so a `mv` no longer deletes its source; an exception from `on_result` reaches the caller on every engine, a Ctrl-C during a single-key `rm` waits for its request, and an immediate cancellation also interrupts a CRT submission waiting on backpressure.
+- Log masking now also hides a legacy SigV2 `Authorization` id and a credentials response's id that are not AWS-shaped, and no longer swallows the rest of a logged XML body when a key is spelled like a secret's name.
+- Smaller fixes in `get_file` / `put_file` (long multi-byte names, read-only Windows destinations, special files), `ChecksumComparison` (a multipart checksum sent without its part count), `S3.aws_config()` (a later `boto3.setup_default_session(...)`), a listing failure's `operation`, and `EtagComparison`'s `part_size` check.
+
 ## [0.11.1] - 2026-09-07
 
 - The package logger now carries a `NullHandler` like boto3's, so a library warning no longer prints on its own where no logging is configured.
@@ -95,7 +110,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release.
 
-[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.11.1...HEAD
+[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.12.0...HEAD
+[0.12.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.11.1...boto3-s3-v0.12.0
 [0.11.1]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.11.0...boto3-s3-v0.11.1
 [0.11.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.10.0...boto3-s3-v0.11.0
 [0.10.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.9.0...boto3-s3-v0.10.0

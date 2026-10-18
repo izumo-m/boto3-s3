@@ -9,19 +9,21 @@ is the operational definition every output comparison applies.
 
 | location | what | mechanism | runs |
 |---|---|---|---|
-| `tests/lib/` | `boto3-s3` library unit tests | hand-rolled fakes (one moto-backed file, `test_capture_response.py` - the capture rides botocore's real event stream) | always |
+| `tests/lib/` | `boto3-s3` library unit tests | hand-rolled fakes (two moto-backed spots: `test_capture_response.py` - the capture rides botocore's real event stream - and `test_s3storage.py`'s `TestSingleRequestTransferRoundTrip`) | always |
 | `tests/cli/awscli/` | ports of aws-cli's own functional tests (one file per subcommand plus `test_s3_object_lambda.py`, diffable against aws-cli's `tests/functional/s3/`) | canned-response recording client (`tests/utils/recorder.py`) | always |
 | `tests/cli/unit/` | `boto3-s3-cli`'s own unit tests (everything the ports don't cover) | fake clients via `Context` injection, plus the few properties no in-runner fake can show: a subprocess where the property is per-process (the import contract, the environment botocore freezes at import) and a loopback socket where it is on the wire (the CONNECT request a proxy receives) | always |
 | `tests/cli/functional/` | golden replay: the CLI on moto must reproduce what aws-cli did on a real endpoint | in-process `moto.mock_aws` | always |
-| `tests/cli/e2e/` | differential parity: `boto3-s3` vs the real `aws` binary against the same live endpoint, plus golden capture | subprocesses against MinIO / real S3 | opt-in (`BOTO3_S3_E2E_BUCKET`) |
+| `tests/cli/e2e/` | differential parity: `boto3-s3` vs the real `aws` binary against the same live endpoint, plus golden capture | subprocesses against the dev stack (RustFS) / real S3 | opt-in (`BOTO3_S3_E2E_BUCKET`) |
 
 Directory = provenance (awscli port vs own), subdirectory = mechanism
 (stub / moto / live server). `uv run pytest` with no setup runs everything
-except e2e (skipped with a reason). The `ci` GitHub Actions workflow runs the
-quality gates and package builds on Linux, then runs this default suite on
-Linux, macOS and Windows at both ends of the supported Python range (the 3.10
-floor and 3.14). A test silent for five minutes dumps every thread's stack
-(pytest's `faulthandler_timeout`), so a hang pins its location in the job log
+except e2e (skipped with a reason) - `tests/benchmarks/` included, the
+benchmark harness's own unit tests (synthetic records, no S3;
+[`benchmark.md`](./benchmark.md)). The `ci` GitHub Actions workflow runs, as
+parallel jobs, the quality gates and package builds on Linux and this default
+suite on Linux, macOS and Windows at both ends of the supported Python range
+(the 3.10 floor and 3.14). A test silent for five minutes dumps every thread's
+stack (pytest's `faulthandler_timeout`), so a hang pins its location in the job log
 instead of ending as a silent timeout kill.
 It also downgrades to the declared boto3 / botocore / s3transfer floors and
 runs the library and CLI compatibility-seam tests whose expected request
@@ -57,10 +59,10 @@ The e2e parity tests (`tests/cli/e2e/test_*_parity.py`) assert
 `ours.rc == aws.rc` for **every** scenario - scenario flags can relax stdout
 comparison and golden handling, but by design the sole rc carve-out is
 `undefined_on_case_insensitive_dest` (on a case-insensitive destination aws's
-own rc is racy - the warn-mode note in section 1 - so only `ours.rc == 0` is
-asserted there); no other flag can relax the rc comparison. The scenario sets
-(`tests/utils/<cmd>_scenarios.py`) are the charter's detection surface:
-extend them whenever a subcommand or option is added, including error paths
+own rc is racy - the warn-mode note in section 3's "Platform variants" - so
+only `ours.rc == 0` is asserted there); no other flag can relax the rc
+comparison. The scenario sets (`tests/utils/<cmd>_scenarios.py`) are the
+charter's detection surface: extend them whenever a subcommand or option is added, including error paths
 (nonexistent bucket, out-of-range values). Which code a given failure is
 expected to produce differs by command family, so consult
 [`cli.md`](./cli.md) section 6 when adding an error scenario rather than
@@ -85,9 +87,9 @@ aws_version}` - plus `remaining_keys` (the bucket end state) for destructive
 commands. Committed to git.
 
 - **Capture** - under `UPDATE_GOLDENS=1` the e2e run writes goldens from what
-  the real aws did. It is only valid against a clean MinIO (tmpfs state), since
-  a golden records an end state as well as an output; `aws_version` gives the
-  provenance. The command and the review step are in
+  the real aws did. It is only valid against a clean dev stack (tmpfs
+  state), since a golden records an end state as well as an output;
+  `aws_version` gives the provenance. The command and the review step are in
   [`CONTRIBUTING.md`](../CONTRIBUTING.md).
 - **Drift check** - without `UPDATE_GOLDENS`, the e2e suite asserts the live
   aws output still matches the committed golden, so an aws-cli upgrade that
@@ -109,25 +111,29 @@ stops differing is pruned); base files are POSIX captures and are never
 written from Windows - the platform-independent kinds (ls/rm/mb/rb/presign/
 website, verified against `aws.exe` unchanged) skip Windows capture
 entirely. One scenario has no Windows golden by design:
-`cp_case_conflict_warn` (`undefined_on_case_insensitive_dest`) - aws's own
-twin-download rename race makes its outcome undefined on a case-insensitive
-destination (its warn text says as much), so the golden tiers stand down
-there and e2e pins only ours' deterministic rc 0. Where aws itself is
-nondeterministic no defined rc exists to match, so this does not breach the
-exit-code charter.
+`cp_case_conflict_warn` (`undefined_on_case_insensitive_dest`) - the
+twin-download rename race makes the outcome undefined on a case-insensitive
+destination (aws's warn text says as much), so the golden tiers stand down
+there. The race is s3transfer's Windows rename (a remove, then a rename), a
+path both tools share, and both lose it: over 150 runs each on a Windows host
+aws ended at rc 1 67 times and at rc 2 three times, boto3-s3 twice and once.
+So e2e holds ours only to the outcomes the race allows (rc 0, 1 or 2) and to
+its warning. Where aws itself is nondeterministic no defined rc exists to
+match, so this does not breach the exit-code charter.
 
-### Endpoint policy (MinIO goldens, occasional real-AWS verification)
+### Endpoint policy (dev stack goldens, occasional real-AWS verification)
 
 A golden is a **drift detector, not ground truth**: the truth the exit-code
 charter binds to is the pinned aws binary's behavior on the *same endpoint*
 as ours, which the parity tests compare directly and unconditionally. So
-goldens are captured against MinIO (fast, free, resettable state), and the
-suite is re-run occasionally against real AWS (`tests/run_e2e.sh`) using the
-**same pinned aws-cli** (`scripts/install-awscli.sh`) - a golden mismatch
-there then isolates the endpoint variable, never the aws-cli version.
+goldens are captured against the dev stack (section 4: fast, free,
+resettable state), and the suite is re-run occasionally against real AWS
+(`tests/run_e2e.sh`) using the **same pinned aws-cli**
+(`scripts/install-awscli.sh`) - a golden mismatch there then isolates the
+endpoint variable, never the aws-cli version.
 
-When a real-AWS run diverges from a MinIO-captured golden, absorb the
-difference in this order:
+When the dev stack, real S3, and moto answer a scenario differently, absorb
+the difference in this order:
 
 1. **Normalize** (preferred): a mechanical difference (request IDs, ETag
    values, region strings) is folded into the normalizers so both endpoints
@@ -139,12 +145,21 @@ difference in this order:
    both sides against one golden is what transitively guaranteed their
    parity, and an allow-list breaks that transitivity (aws matching
    alternate X while ours matches alternate Y must still fail).
-3. **`diff_only`** (last resort): a genuinely endpoint-relative outcome
-   (MinIO accepts what S3 rejects, or vice versa) is not frozen into a
-   golden at all - rc equality between the two CLIs remains asserted, per
-   the charter.
+3. **`frozen_golden`**: when the committed golden matches real S3 and moto
+   but the dev stack answers otherwise, the scenario names the gap in
+   `frozen_golden`; the e2e tier then neither rewrites nor drift-checks that
+   golden, while the moto replay and the live aws-vs-ours comparison still
+   run.
+4. **`diff_only`** (last resort): a genuinely endpoint-relative outcome (the
+   dev stack accepts what S3 rejects, or vice versa, or moto cannot replay
+   what the capture recorded) is not recorded in a golden at all - rc
+   equality between the two CLIs remains asserted, per the charter.
 
 None of these relax the rc comparison between the two CLIs (section 2).
+Every use of 2-4 for an endpoint gap, and every other test-side change made
+because the endpoint is not real S3, is tabulated in
+[`endpoint-fidelity.md`](./endpoint-fidelity.md) section 2 and marked
+`endpoint-fidelity T<n>` where it lives.
 
 Normalization (`tests/utils/harness.py`): for **ls**
 (`normalize_ls_stdout`), leading timestamps are masked (`<TIMESTAMP>` -
@@ -170,22 +185,29 @@ Bucket-lifecycle commands (**mb** / **rb**) extend the same model: their
 goldens additionally record `bucket_exists` (the scenario bucket's existence
 after the run; `remaining_keys` is `null` when it is gone), their stdout
 shares rm's sorted normalization (no timestamps; `rb --force` interleaves
-nondeterministically ordered delete lines), and they run against a
-**sibling** bucket derived from the suite's main bucket (`-mb` / `-rb`
-suffix) - the e2e main bucket must stay existing and empty, so the
-`mb_bucket` / `rb_bucket` fixtures force-delete the sibling around each test
-and `harness.force_delete_bucket` resets it between the aws and boto3-s3
-runs. Sibling names must not end in `-an` (account-regional BucketNamespace
-semantics are unverified against MinIO; covered by ports and unit tests
-instead).
+nondeterministically ordered delete lines), and they run against
+**sibling** buckets derived from the suite's main bucket - the e2e main
+bucket must stay existing and empty. The `mb_buckets` / `rb_buckets`
+fixtures hand each scenario two fresh names, one per side
+(`<main>-mb007-aws` / `<main>-mb007-ours`), and force-delete both around the
+test: real S3 lags behind a delete and re-create under one name, so no name
+is used twice in a run. Whether a bucket exists is read from ListBuckets,
+not HeadBucket: on real S3, HeadBucket answers from a cache that can trail
+a create by half a minute and a delete by minutes. Each side's stdout masks its own bucket name, so the
+two compare equal. Sibling names must not end in `-an` (account-regional
+BucketNamespace semantics are unverified against the dev stack; covered by
+ports and unit tests instead). mb's tag set (`--tags`) is compared between
+the two sides only, never recorded in a golden: real S3 applies the tags,
+moto and the dev stack do not.
 
-For **website** only the client-side-error scenarios (rc 252, no server
-contact) carry goldens - every server-reaching scenario is `diff_only`
-because MinIO rejects the operation outright (section 7) while a moto replay
-would succeed; the success path is verified directly on moto instead
+For **website** the goldens cover the client-side errors (rc 252, no
+server contact) and the server-reaching scenarios alike, the latter
+replayed on moto. The two configurations without an IndexDocument are
+`diff_only`: real S3 and the dev stack reject them, moto stores them. The
+success path is also checked directly on moto
 (`test_website_golden.py::TestWebsiteOnMoto`, asserting the
-`get_bucket_website` round trip). Website stdout is empty in every
-outcome and shares rm's normalization.
+`get_bucket_website` round trip). Website stdout is empty in every outcome
+and shares rm's normalization.
 
 For **cp** the scenario fixes the *local* tree too: each side of the e2e
 diff gets its own workdir (materialized from `local_src`), the CLI runs
@@ -202,14 +224,14 @@ HeadObject fields of one probe key - how ContentType/Metadata/StorageClass
 passthrough and the copy-props chain are verified end-to-end). The download
 mtime stamp is asserted live per side (file mtime == object LastModified),
 never via goldens. Scenarios whose outcome is endpoint-relative are
-`diff_only` (`--sse` and `--storage-class GLACIER` fail on MinIO and
-succeed on real S3; both CLIs always agree); the glacier *gate* shapes run
-on moto instead (`TestCpGlacierOnMoto` - including the restored-object
-pass and force-glacier letting S3's InvalidObjectState through). The `-`
-streaming scenarios carry a `stdin` payload: the e2e driver feeds it to
-both CLIs through the stdin-capable subprocess runners, and the moto
-replay routes any scenario with a payload or a `-` in its argv through
-`run_cli_in_process_streaming`, whose buffer-backed `sys.stdin` /
+`diff_only` (`--storage-class GLACIER` fails on the dev stack and succeeds
+on real S3; both CLIs always agree); the glacier *gate* shapes run on moto
+instead (`TestCpGlacierOnMoto` - including
+the restored-object pass and force-glacier letting S3's InvalidObjectState
+through). The `-` streaming scenarios carry a `stdin` payload: the e2e
+driver feeds it to both CLIs through the stdin-capable subprocess runners,
+and the moto replay routes any scenario with a payload or a `-` in its argv
+through `run_cli_in_process_streaming`, whose buffer-backed `sys.stdin` /
 `sys.stdout` shims let the in-process CLI read stdin uploads and write
 raw download bytes (a plain `StringIO` has no `.buffer`). A streaming
 download's golden `stdout_lines` are the object body itself - the
@@ -225,7 +247,7 @@ already pinned by `remaining_keys`). cp goldens carry the field as `null`
 the object *before* the run - a successful move deletes the key the cp
 harness re-reads afterwards. Scenarios reuse `CpScenario` verbatim
 (`tests/utils/mv_scenarios.py`); the `--validate-same-s3-paths` surface has
-no e2e lane (MinIO hosts no access points) and lives in the awscli port
+no e2e lane (the dev stack hosts no access points) and lives in the awscli port
 (per-service recording clients) and the unit tier, and the glacier-gated
 move shapes run on moto (`TestMvGlacierOnMoto` - a gated or failed move
 must never delete the source).
@@ -237,8 +259,8 @@ must never delete the source).
 captured nor compared). The new scenario knob is
 `CpScenario.local_mtimes`: workdir-relative offsets (+/-1 day) applied with
 `os.utime` after materialization, so the size+time judgments are
-deterministic against objects seeded at ~now - identically on MinIO (e2e)
-and moto (replay). The at-both matrices pin the aws-cli rules from both
+deterministic against objects seeded at ~now - identically on the dev stack
+(e2e) and moto (replay). The at-both matrices pin the aws-cli rules from both
 directions (upload skips when the destination is newer; a same-size
 download runs only when the *local* side is newer; `--size-only` /
 `--exact-timestamps` variants, the latter winning when combined). The
@@ -253,8 +275,8 @@ restored-object *skip*: sync judges from the listing, which carries no
 For **presign** the golden is one normalized URL line
 (`normalize_presign_stdout`): virtual-host URLs are canonicalized to
 path-style and the endpoint is masked (`<ENDPOINT>` - the functional replay
-runs with no endpoint override while the capture used MinIO's IP endpoint),
-and the time/credential-dependent query values are masked (`X-Amz-Date`,
+runs with no endpoint override while the capture used the dev stack's IP
+endpoint), and the time/credential-dependent query values are masked (`X-Amz-Date`,
 `X-Amz-Signature`, and the access key + date inside `X-Amz-Credential`). The
 credential scope's region/service segment is compared, not blanket-masked -
 the **endpoint policy**, in two steps:
@@ -275,22 +297,30 @@ the **endpoint policy**, in two steps:
   1's golden comparison would hide a divergence.
 
 Parameter order, `X-Amz-Expires`, `X-Amz-SignedHeaders`, and the
-key path are compared verbatim. The functional replay needs no moto backend
-(presign never contacts a server) and deletes `AWS_SESSION_TOKEN` for the
-run - the root conftest exports one, which would add an
-`X-Amz-Security-Token` parameter the token-less MinIO capture lacks. The
-e2e suite adds a **fetch layer** for time-stable scenarios: both sides'
+key path are compared verbatim. `X-Amz-Security-Token` is dropped from both
+sides of a golden comparison only: it appears when the credentials are
+temporary, which can differ between capture and replay (the root conftest
+exports a session token for the replay), while the live aws-vs-ours
+comparison runs on one set of credentials and keeps it. The functional
+replay needs no moto backend (presign never contacts a server). The e2e
+suite adds a **fetch layer** for time-stable scenarios: both sides'
 URLs are actually GET and compared on status (and body when 200) - the
 endpoint accepting our signature like it accepts aws's is parity the URL
 string alone cannot prove.
 
-## 4. MinIO dev stack and the e2e gate
+## 4. The dev stack and the e2e gate
 
 The commands to bring the stack up and run the suite against it are in
 [`CONTRIBUTING.md`](../CONTRIBUTING.md); this section covers why the stack is
 shaped the way it is. One variation worth knowing: with the environment sourced,
 a bare `uv run pytest` runs the whole suite including e2e, rather than only
 `tests/cli/e2e`.
+
+The stack's server is RustFS, pinned to one release in
+`scripts/compose.dev.yaml`. How it differs from real S3, and how it was
+chosen, is in [`endpoint-fidelity.md`](./endpoint-fidelity.md). Older notes
+in this file that say MinIO describe the server the stack ran before
+2026-10-17.
 
 `scripts/compose.dev.yaml` pins the compose project name (`boto3-s3-dev`) so
 `compose-up.sh` matches the exact container name, and its `mc-init` sidecar
@@ -335,20 +365,24 @@ design discussion first.
 
 The suites isolate in both directions: the root `tests/conftest.py` forces
 fake credentials (and strips `AWS_PROFILE` / `AWS_ENDPOINT_URL*`) for
-everything except e2e, which overrides that fixture with a no-op; test
+everything except e2e, which overrides that fixture with a no-op and takes
+credentials, region and endpoint from the env alone while pointing `~` at a
+throwaway directory and dropping `AWS_CONFIG_FILE` / `AWS_SHARED_CREDENTIALS_FILE`
+(both tools read `~/.aws`, and the pinned aws writes its session database
+under it on every command that builds a client); test
 fixtures build clients from fresh `boto3.session.Session()` objects because
 the process-global default session caches the first credentials it resolves.
 Two mechanisms pin classic, because the CLI tiers and the library-default
 path resolve the engine differently. The same root fixture points
 `AWS_CONFIG_FILE` at a session-scoped file pinning
-`[s3] preferred_transfer_client = classic`: now that cp/mv/sync read the
+`[s3] preferred_transfer_client = classic`: as cp / mv / sync / rm read the
 profile's `[s3]` section (cli.md section 8), this stops the host config from
 leaking tuning into the moto/recorder tiers and - on a CRT-optimized host -
 keeps `auto` from silently resolving to an engine moto cannot intercept. That
 config file only covers the CLI transfer tiers (`resolve_transfer_client`),
 not the library's own default `auto` path, which consults
-`awscrt.s3.is_optimized_for_system()` directly (transfer.py); a second
-autouse fixture (`_pin_classic_engine`) monkeypatches that probe to `False`
+`awscrt.s3.is_optimized_for_system()` directly (`crtsupport.should_use_crt`);
+a second autouse fixture (`_pin_classic_engine`) monkeypatches that probe to `False`
 so the in-process/library transfer tests stay deterministic on a
 CRT-optimized host (`test_transferrer.py` depends on it).
 
@@ -369,18 +403,19 @@ Both CLIs run with a temp `AWS_CONFIG_FILE` selecting
 `preferred_transfer_client = crt` (the harness subprocess runners gained an
 `env` overlay for this), and both sides get an explicit `--endpoint-url`
 (aws's CRT client reads `use_ssl` from the argument only, so an env-only
-endpoint dials TLS to http MinIO and dies; ours does not need the flag but
-receives the same one for symmetry). The lane is differential, no
+endpoint dials TLS to the http dev stack and dies; ours does not need the
+flag but receives the same one for symmetry). The lane is differential, no
 goldens: the CRT manager's stdout is byte-identical to classic (aws-cli
 `s3handler` has no CRT branch), so the signal is that our CRT mode agrees
 with aws's CRT mode on rc / stdout / bucket state / local tree / download
 mtime across upload and download (each single-part and 9 MiB multipart) plus
 mv and sync (small corpora). The same lane covers the missing CRT-configured deletion shapes:
 single/recursive `rm` and upload/download `sync --delete`. Those cases assert
-CLI-observable parity rather than transport identity: boto3-s3 deliberately
-keeps `DeleteObject` / batched `S3Deleter` for the S3-side deletions instead of
-aws-cli's per-key CRT DELETE requests, while download sync-delete removes local
-files on both sides (deleter.md section 4). A separate `--debug` check
+CLI-observable parity rather than transport identity: boto3-s3 sends the
+S3-side deletions batched on the CRT client (`DeleteObjects`, with
+`DeleteObject` for single keys and per-key re-sends) where aws-cli sends one
+CRT `DeleteObject` per key, while download sync-delete removes local files on
+both sides (deleter.md section 4, crt.md section 6). A separate `--debug` check
 pins that our side actually engaged the CRT engine by asserting the
 transfer-time breadcrumb
 `Transferrer._get_manager` emits (`transfer engine: CRTTransferManager`),
@@ -440,13 +475,14 @@ is, section 4) `botocore.crt.auth` - and keeps aws-cli's expected URLs -
 frozen-time signatures included - bit-for-bit.
 The cp port injects `Context.transfer_config` with `use_threads=False`
 (boto3's NonThreadedExecutor path) so multipart call order is deterministic
-against the positional canned list, and rewrites aws-cli's expected
-default `ChecksumAlgorithm: 'CRC64NVME'` to the `'CRC32'` that pip s3transfer
-injects on upload paths (both engines add a default integrity checksum;
-they just pick different algorithms - an explicit `--checksum-algorithm`
-makes them agree, and design/transfer.md section 10 has the full wire-deviation
-list). Its case-conflict classes guard the existing-local-file variants
-with a live case-insensitivity probe of the test directory (aws-cli's
+against the positional canned list, and spells aws-cli's expected default
+`ChecksumAlgorithm: 'CRC64NVME'` as `DEFAULT_CHECKSUM`: the CLI names aws's
+CRC64NVME itself (`checksumdefault`, cli.md section 5.7) wherever the
+installed botocore can compute it, and elsewhere (no awscrt) pip botocore's
+`'CRC32'` stands (an explicit `--checksum-algorithm` makes the two agree, and
+design/transfer.md section 10 has the full wire-deviation list). Its
+case-conflict classes guard the existing-local-file variants with a live
+case-insensitivity probe of the test directory (aws-cli's
 `skip_if_case_sensitive`), so they run on macOS/Windows-like filesystems
 and skip on default Linux ones.
 
@@ -465,70 +501,69 @@ resolve-every-symbol case guards the three-way `__all__` / `TYPE_CHECKING` /
 
 ## 7. Known limitations
 
-- **xdist** (not currently configured): if parallel runs are added, the e2e
-  tier shares one bucket with an empty-before/after invariant and would not be
-  xdist-safe (the other tiers would be). Move to per-worker key prefixes if
-  parallel e2e becomes necessary.
+- **xdist** (not configured): the e2e tier shares one bucket with an
+  empty-before/after invariant, so it runs serially (the other tiers would be
+  xdist-safe).
 - **moto fidelity**: moto raises an internal `IndexError` for `MaxKeys=-1`
   instead of S3's `InvalidArgument`, so `ls_page_size_negative` and
-  `rm_page_size_negative` are `diff_only` (e2e only). Likewise `mb_existing`:
-  moto mirrors real S3's us-east-1 quirk (re-creating a bucket you own
-  succeeds) while MinIO answers `BucketAlreadyOwnedByYou` -> rc 1 on both live
-  sides, so a golden would freeze the MinIO-specific rc. Scenarios that hit
+  `rm_page_size_negative` are `diff_only` (e2e only). Scenarios that hit
   moto gaps should be flagged the same way, not papered over.
-- **MinIO fidelity (the inverse gap)**: MinIO rejects **every**
-  PutBucketWebsite with `MalformedXML` (index-only, both
-  documents, empty config, and nonexistent bucket alike - its
-  GetBucketWebsite answers `NoSuchWebsiteConfiguration` and its
-  DeleteBucketWebsite is a no-op success). Both CLIs exit 254 identically,
-  so the e2e rc comparison still holds, but the website success path cannot
-  run there: those scenarios are `diff_only` and the success path is
-  verified on moto (which supports the operation fully). Against real S3
-  the same scenarios exit 0 on both sides - rc parity is endpoint-relative
-  by design.
-- **MinIO: no S3 object annotations** (probed 2026-07 on both minio/minio
-  and pgsty/minio): the `x-amz-object-annotation-directive` header is
+- **No S3 object annotations on the dev stack** (probed 2026-07 on MinIO,
+  2026-10 on RustFS): the `x-amz-object-annotation-directive` header is
   ignored (harmless - the EXCLUDE both CLIs now send on every copy rides
   through the copy lanes unchanged, goldens unaffected) and
-  ListObjectAnnotations answers 500, so `--copy-props all` cannot be
-  exercised end-to-end. Measured against the pinned aws-cli: single-part `all`
-  exits 0 on both sides (nothing annotation-related on the wire); the
+  ListObjectAnnotations fails (500 on MinIO, `NotImplemented` on RustFS), so
+  `--copy-props all` cannot be exercised end-to-end. Measured against the
+  pinned aws-cli: single-part `all` exits 0 on both sides (nothing
+  annotation-related on the wire); the
   multipart carryover fails with rc 1 and **identical stderr** on both. The
   live-only `cp_copy_props_all_multipart` scenario pins the defining end state:
   both read annotations before CreateMultipartUpload and leave no destination.
   Successful annotation writes, pagination, the three library staging modes,
   and temporary-file cleanup are covered by `TestCopyPropsAllCpCommand` and
-  the library transfer tests because MinIO cannot serve those operations.
+  the library transfer tests because the dev stack cannot serve those
+  operations.
+
+- **Endpoint fidelity, in full**: every known way the dev stack answers
+  differently from real S3 - including the gap above - and the test-side
+  change made for each is tabulated in
+  [`endpoint-fidelity.md`](./endpoint-fidelity.md).
 
 ## 8. Running the suite on Windows (WSL2 host)
 
 Windows is a supported OS (overview.md section 2); the suite runs there on a
-real Windows CPython using a host-installed `uv`. The whole run - every tier,
-the e2e differential against `aws.exe` included - is driven from a WSL2 shell
-through the interop layer (`cmd.exe`, resolved from the Windows `PATH` that
-WSL2 appends by default), against an NTFS copy of the working tree. A native
+real Windows CPython that uv provisions - the uv `mise.toml` pins, run
+through a host-installed mise. The whole run - every tier, the e2e
+differential against `aws.exe` included - is driven from a WSL2 shell through
+the interop layer (`cmd.exe`, resolved from the Windows `PATH` that WSL2
+appends by default), against an NTFS copy of the working tree. A native
 Windows shell can run the same `cmd.exe` command lines. None of it needs an
 elevated shell.
 
-Prerequisites on the Windows side: `uv` on the Windows `PATH` (from WSL2,
-`cmd.exe /c "uv --version"` answers), and **Developer Mode** (or an elevated
+Prerequisites on the Windows side: mise on the Windows `PATH` (from WSL2,
+`cmd.exe /c "mise --version"` answers), and **Developer Mode** (or an elevated
 shell), because several `tests/lib` scenarios create symlinks. On the WSL2
 side: the repository checkout with its aws-cli submodule, `rsync`, and Docker
-for the MinIO stack (section 4).
+for the dev stack (section 4).
 
 ### The procedure
 
 1. **Copy the working tree to NTFS** (why: below). From `<repo>`:
 
        rsync -a --delete --exclude .git --exclude .venv --exclude __pycache__ \
-         --exclude out --exclude .pytest_cache --exclude .ruff_cache \
+         --exclude .pytest_cache \
+         --exclude-from=<(git ls-files -oi --exclude-standard --directory | sed 's|^|/|') \
          --exclude "$(git config -f .gitmodules --get-regexp path | awk '{print $2}')" \
          ./ /mnt/c/tmp/boto3-s3-wintest/
 
-   The last exclusion is the aws-cli source checkout - reference-only for the
-   tests, nothing imports from it - which keeps the copy to a few MiB. Re-run
-   the command whenever the tree changes: `--delete` keeps the copy exact, and
-   the excluded `.venv` on the copy survives it.
+   The `--exclude-from` list is everything git ignores in the tree - caches,
+   build output, and above all the other virtualenvs (the benchmark one alone
+   is tens of thousands of files, minutes across the drive boundary on every
+   sync). The last exclusion is the aws-cli source checkout - reference-only
+   for the tests, nothing imports from it. Together they keep the copy to a
+   few MiB and a sync to seconds. Re-run the command whenever the tree
+   changes: `--delete` keeps the copy exact, and what the named exclusions
+   cover on the copy - its own `.venv` and caches - survives it.
 
 2. **Work from inside the copy.** Every `cmd.exe` call below is issued from a
    WSL2 shell whose current directory is inside the copy: the interop layer
@@ -538,14 +573,18 @@ for the MinIO stack (section 4).
 
        cd /mnt/c/tmp/boto3-s3-wintest
 
-3. **Create the Windows virtualenv** with the Windows `uv` - the `cmd.exe`
-   wrapper is what keeps WSL2's own `uv` out of it:
+3. **Create the Windows virtualenv** with the Windows mise and uv - the
+   `cmd.exe` wrapper is what keeps WSL2's own mise and uv out of it:
 
-       cmd.exe /c "uv sync --all-packages --locked"
+       cmd.exe /c "mise exec -- uv sync --all-packages --locked"
 
-   `uv` provisions its managed CPython for the pinned `.python-version` (3.10,
-   the support floor) - the host Python installation is not used - and
-   `--locked` refuses to rewrite `uv.lock`. `--all-packages` matters for the
+   `mise exec --` runs the uv the copied `mise.toml` pins - installing it on
+   first use - so Windows builds with the same uv as Linux and CI; it needs
+   no shell activation, which a one-shot `cmd.exe` never has. Every `uv`
+   call below goes through it for the same reason. `uv` provisions its
+   managed CPython for the pinned `.python-version` (3.10, the support
+   floor) - the host Python installation is not used - and `--locked`
+   refuses to rewrite `uv.lock`. `--all-packages` matters for the
    reason [`CONTRIBUTING.md`](../CONTRIBUTING.md) gives.
 
 4. **Pin `aws.exe`** at the reference version. The copy carries no aws-cli
@@ -563,23 +602,24 @@ for the MinIO stack (section 4).
    junction. A matching extraction is reused. (On a full checkout the argument
    is optional; the copy is not one.)
 
-5. **Start MinIO inside WSL2**: `scripts/compose-up.sh` from `<repo>`
+5. **Start the dev stack inside WSL2**: `scripts/compose-up.sh` from `<repo>`
    (section 4). Windows reaches it on `127.0.0.1:9000` through WSL2's
    localhost forwarding.
 
-6. **Run the suite.** `scripts\minio-env.cmd` is `minio-env.sh`'s twin - a
-   runner, because `cmd.exe` cannot `source`: it sets the MinIO variables in
+6. **Run the suite.** `scripts\dev-env.cmd` is `dev-env.sh`'s twin - a
+   runner, because `cmd.exe` cannot `source`: it sets the dev stack variables in
    the **Windows** process (WSLENV propagation is not relied on), puts the
    pinned `aws.exe` first on `PATH` so it shadows any system install - as
    `.venv/bin/aws` does on Linux - and executes the rest of its command line:
 
-       cmd.exe /c "scripts\minio-env.cmd uv run pytest -q"
+       cmd.exe /c "scripts\dev-env.cmd mise exec -- uv run pytest -q"
 
-   That is the complete suite, e2e included; `cmd.exe /c "uv run pytest -q"`
-   runs everything but e2e, which deselects itself without the variables, as
-   on Linux. `cmd.exe`'s own messages arrive in the console's OEM code page;
-   pytest's summary is ASCII. Never run the Windows and Linux e2e suites at
-   the same time - the bucket-empty invariant (section 4) is shared.
+   That is the complete suite, e2e included;
+   `cmd.exe /c "mise exec -- uv run pytest -q"` runs everything but e2e,
+   which skips itself without the variables, as on Linux. `cmd.exe`'s own
+   messages arrive in the console's OEM code page; pytest's summary is ASCII.
+   Never run the Windows and Linux e2e suites at the same time - the
+   bucket-empty invariant (section 4) is shared.
 
 7. **Regenerate the Windows goldens** when the reference `aws.exe` moves or a
    cp/mv/sync scenario changes. The copy must hold the current POSIX base
@@ -587,7 +627,7 @@ for the MinIO stack (section 4).
    by comparing the Windows capture against that base, and a Windows run
    never writes a base golden (section 3's capture rule).
 
-       cmd.exe /c "set UPDATE_GOLDENS=1&& scripts\minio-env.cmd uv run pytest -q tests\cli\e2e"
+       cmd.exe /c "set UPDATE_GOLDENS=1&& scripts\dev-env.cmd mise exec -- uv run pytest -q tests\cli\e2e"
 
    The variants land in the copy, not the repo, so sync them back before
    committing - only the variants, and with `--delete`, since a scenario
@@ -607,7 +647,9 @@ for the MinIO stack (section 4).
 The skips a Windows run reports are the platform's, not gaps in the setup:
 anything that sets `TZ` mid-process (`time.tzset` is POSIX-only),
 chmod-revoked access and POSIX permission bits (`skip_if_chmod_is_inert` in
-`tests/utils/host.py`), `sh`-based external aliases, `mkfifo`, the POSIX
+`tests/utils/host.py`), `sh`-based external aliases, `mkfifo`, a path whose
+`..` follows a symlinked directory (Windows folds `..` before the filesystem
+sees the path; a Windows-only twin pins what `aws.exe` does instead), the POSIX
 `dir_fd` walk fast path (Windows length limits follow the `LongPathsEnabled`
 policy instead, and the MAX_PATH tests probe that policy for themselves, so
 either setting is fine), a `DirEntry`-cache race Windows cannot reproduce, a
@@ -636,12 +678,16 @@ than lean on the host. Left to the host, such a test passes on one Windows and
 fails on another: cp1252 decodes every byte, cp932 and UTF-8 reject some. The
 same knob is how a test picks a codec deliberately. Subprocess runs are already
 pinned - the harness passes `PYTHONUTF8=1`, which fixes the child's stdio and
-its default codec at UTF-8. It does not pin the `aws` side: the official
-distribution is a frozen interpreter in isolated mode and ignores the `PYTHON*`
-family entirely (measured on the pinned Linux binary - `PYTHONIOENCODING` set
-to `latin-1` leaves its output UTF-8). Both sides of a parity pair still land
-on the same codec, because that build writes UTF-8 of its own accord; the
-variable buys the child's determinism, not aws's.
+its default codec at UTF-8. On the `aws` side it reaches the error reports
+alone: the official distribution is a frozen interpreter in isolated mode, so
+the interpreter ignores the `PYTHON*` family (measured on the pinned Linux
+binary - `PYTHONIOENCODING` set to `latin-1` leaves its output UTF-8 - and on
+the pinned `aws.exe`, whose result lines keep the host code page under
+`PYTHONUTF8=1`), but aws's own code reads `PYTHONUTF8=1` back for the streams
+it writes error reports on, so `aws.exe`'s error reports move to UTF-8 with
+the child's (measured; `PYTHONIOENCODING` does not move them). On Linux both
+sides of a parity pair land on the same codec regardless, because that build
+writes UTF-8 of its own accord.
 
 ## 9. The output-parity criterion
 

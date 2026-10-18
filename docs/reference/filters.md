@@ -44,7 +44,12 @@ their own form — on the single-object `cp` / `mv` routes the last
 `/`-separated component of the key, so a pattern for
 `cp s3://bucket/a/b/c.txt .` is matched against `c.txt` and not `a/b/c.txt`;
 on `rm`'s blind single-key path the key relative to what
-[`rm_filter_root`](./operations/rm.md#rm_filter_root) returns. Each operation
+[`rm_filter_root`](./operations/rm.md#rm_filter_root) returns. The two are the
+same string except for a key that doubles a slash or starts with one, where
+the AWS CLI matches `a//b` as `/b`: there a single S3 source's predicate on
+`cp` / `mv` is shown a copy of the entry carrying that `rm_filter_root`-relative
+key, while the record keeps the last component, which names the destination.
+Each operation
 page states which key its filter matches
 ([`operations/README.md`](./operations/README.md)). `storage` is stamped before
 the filter runs too, so a predicate can reach the backend the entry came from
@@ -59,16 +64,26 @@ local destination pre-walk a recursive S3-to-local `cp` / `mv` performs when
 `case_conflict` is anything but `ignore`, `rm`'s recursive delete and its
 bucket-root folder-marker sweep, and each side of `sync` — the predicate is
 evaluated page by page on the enumeration's prefetch worker thread, overlapped
-with the listing I/O. It must therefore be thread-safe, and a slow predicate
-throttles enumeration. `sync` enumerates its two sides through separate
-workers, so the two side-walks can invoke it concurrently. The `case_conflict`
+with the listing I/O — except where the scan runs without read-ahead
+([`ScanOptions.read_ahead`](./options.md#scanoptions) `False`: a local `sync`
+destination while the delete lane is on, or a backend that seeds it), where it
+runs on the thread that called the operation. It must therefore be
+thread-safe, and a slow predicate throttles enumeration. `sync` enumerates its
+two sides through separate workers, so the two side-walks can invoke it
+concurrently. The `case_conflict`
 pre-walk hands the predicate destination-side entries during a `cp` or `mv`,
 and an entry it excludes is not counted as an existing destination key by that
 gate ([`options.md`](./options.md)). On the single-object paths — a
 non-recursive `cp` / `mv`, `rm`'s blind single-key delete — it is applied
 inline on the calling thread. An exception raised by the predicate is re-raised
 on the consumer side of the enumeration (after entries already queued) and
-propagates out of the operation call.
+propagates out of the operation call. One detail on the enumerating paths: the
+predicate runs inside the listing, and the operation puts its name on a
+listing failure that carries none — so a `Boto3S3Error` the predicate lets out
+with `operation` unset (from a storage call of its own, say) arrives with
+`operation` set to the operation's name, the same exception object otherwise.
+On the single-object paths, and from `on_result` / `on_entry`, it arrives as
+raised.
 
 **Where it does not apply.** `cp`'s stream route — an `IOStorage` on either
 side — has no listing to prune, and `filter` is not consulted on it. `mv` has

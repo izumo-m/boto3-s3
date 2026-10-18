@@ -48,8 +48,7 @@ maintaining high functional compatibility (parity).
 - **AWS SDK floor**: the oldest SDKs supported are roughly three years old. The
   numbers themselves live in each package's `pyproject.toml`, which is what
   enforces them and is where they are read from; this states only the policy
-  behind them. A future release may raise the floor (when it does, the
-  back-compat shims that carry a comment to that effect can be removed).
+  behind them.
 - **The installed SDK decides the feature set**: rather than emulate newer AWS
   behavior on an older SDK, features that depend on a newer S3 model are simply
   unavailable below the version that introduced them - on a par with the awscrt
@@ -85,7 +84,7 @@ maintaining high functional compatibility (parity).
   **must match** that of `aws s3 <subcommand>` under the same arguments and the
   same conditions, **whether on success or error**. This holds for any arguments
   and values. A mismatch is a bug, and it must be detectable by e2e tests. There
-  are only three exceptions.
+  are only four exceptions.
   1. Extension options that do not exist in `aws s3`. The CLI declares none:
      its option surface is exactly `aws s3`'s, so this exception is currently
      unused. `--version` is *not* one of them - aws accepts it under any
@@ -103,6 +102,17 @@ maintaining high functional compatibility (parity).
      subscriber - it aims to behave like the bundled fork anyway; deciding
      not to compensate is legitimate and is recorded together with its
      reason.
+  4. Behavior differences rooted in batched deletion: S3 objects are deleted
+     in batched `DeleteObjects` requests ([`deleter.md`](./deleter.md)) where
+     aws-cli sends one `DeleteObject` per key, and an observable difference
+     (exit code, output, requests sent, the objects left after an interrupted
+     or failing run) that originates in batching is **accepted**. Batching is
+     settled and is not to be traded back for per-key deletes. Such a
+     difference is not a question to reopen: it is recorded as a known
+     divergence (deleter.md section 4, and
+     [`aws-differences.md`](../docs/cli/aws-differences.md) where a user can
+     observe it), and where the deleter can cheaply narrow it toward aws-cli's
+     per-key outcome - re-sending a key on its own - it does so.
 
   awscrt-dependent features (the CRT transfer engine, CRT-family checksums,
   SigV4a signing) are subject to this charter whenever the CRT stack is usable,
@@ -124,12 +134,12 @@ maintaining high functional compatibility (parity).
   not cover is comparable surface, where a difference **is** a divergence: a
   bug, or a deliberate deviation that has been written down. The three classes,
   each with the test that decides membership, are defined in
-  [`testing.md`](./testing.md) section 9. This charter has two exceptions,
-  matching the exit code charter's second and third: an **interactive UI**
-  (`--cli-auto-prompt`) is outside it, its console output and its completion
-  candidates alike, and so is an observable difference rooted in the
-  bundled-vs-pip `s3transfer` engine difference, recorded as a known
-  divergence the same way.
+  [`testing.md`](./testing.md) section 9. This charter has three exceptions,
+  matching the exit code charter's second, third and fourth: an **interactive
+  UI** (`--cli-auto-prompt`) is outside it, its console output and its
+  completion candidates alike, and so are an observable difference rooted in
+  the bundled-vs-pip `s3transfer` engine difference and one rooted in batched
+  deletion, each recorded as a known divergence the same way.
 - **OS-dependent behavior**: host-OS-dependent behavior such as path separators
   and case sensitivity is matched to aws-cli on each supported OS.
 - **Unsatisfiable option combinations**: prefer making a mutually-exclusive or
@@ -168,8 +178,9 @@ Markdown links inside each half resolve relatively and need no prefix.
 ### Design documents
 
 - [`glossary.md`](./glossary.md) - glossary.
-- [`compatibility.md`](../docs/compatibility.md) - which feature needs which
-  `botocore` / `s3transfer` / `awscrt`, and how an unavailable one behaves.
+- [`compatibility.md`](../docs/compatibility.md) - which `boto3` version (and
+  whether the `crt` extra) each feature needs, and how an unavailable one
+  behaves.
 - [`exceptions.md`](./exceptions.md) - the exception model.
 - [`opresult.md`](./opresult.md) - the `OpResult` record (the `on_result`
   callback): the fields, the `src` / `dest` convention, and which operation
@@ -211,6 +222,9 @@ Neither design nor promises to users - how to work on the project. Read with
 - [`testing.md`](./testing.md) - the test structure (5 tiers, golden
   contracts, e2e gate, enforcement of the exit code charter) and the
   operational definition of the output parity criterion.
+- [`endpoint-fidelity.md`](./endpoint-fidelity.md) - how the local test
+  endpoint (the dev stack, RustFS) answers differently from real S3, the
+  test-side change made for each gap, and how that server was chosen.
 - [`benchmark.md`](./benchmark.md) - the local performance benchmarks
   (E2E differential against the pinned aws-cli, in-process stubbed-S3
   timings, startup-adjusted comparison, regression flags).

@@ -84,8 +84,11 @@ root-anchored, which matches the entry's full key rather than its compare key.
 Folder markers — zero-byte `/`-terminated objects — are dropped from an S3
 side's listing before `filter` sees them, and the local walk does not produce
 them, so `sync` neither transfers nor deletes markers. `filter` is evaluated
-during enumeration, off the calling thread, and both sides are enumerated at
-once, so keep it thread-safe and fast, as with `on_result`.
+during enumeration, on each side's background scan worker — except for a side
+walked without read-ahead, such as a local destination while the delete lane is
+on (`pair_filter` included), where it runs on the calling thread — and both
+sides are enumerated at once, so keep it thread-safe and fast, as with
+`on_result`.
 
 `create_filter` decides the keys held only by the source. `True` (the default)
 creates every one, `False` none. A `FileFilter` creates only the entries it
@@ -134,7 +137,13 @@ non-deterministic. A stateful predicate can observe the concurrency and can
 therefore decide differently. Wrapping `delete_filter` also lets the pair loop
 advance while decisions are still outstanding, which re-introduces the overlap
 the no-read-ahead walk above removes — the self-aliasing local tree behaves as
-`aws s3` does on the default, inline lane. The wrapper's contract, including
+`aws s3` does on the default, inline lane — and lets a new entry be
+transferred before an orphan file whose name it needs as a directory is
+deleted, so that transfer fails; on a case-insensitive filesystem, where an
+orphan and a new entry differing only in case are one file whose survival is
+already a matter of timing when the new entry sorts first, wrapping extends
+that to the order in which the orphan sorts first. The wrapper's contract,
+including
 pool ownership, is in [`../comparator.md`](../comparator.md).
 
 `pair_filter` replaces all three lanes with a single
@@ -201,7 +210,8 @@ still gated.
 ### When the decisions are made
 
 A lane filter that is **not** wrapped in `ParallelFilter` is called on `sync`'s
-calling thread, one entry at a time, in ascending compare-key order. With none
+calling thread, one entry at a time, in ascending compare-key order (given
+listings in key order - [`../comparator.md`](../comparator.md)). With none
 of them wrapped, the lanes that are on interleave their calls into a single
 ascending stream over the pairs they judge — a lane switched off, as
 `delete_filter` is by default, is offered nothing at all. `pair_filter`, which
@@ -213,8 +223,8 @@ first-key-wins resolution deterministic.
 Wrapping a lane filter in `ParallelFilter` gives that guarantee up for that lane
 alone — its decisions run on the pool and are consumed in completion order, as
 described above. The visibility `filter` is outside this contract in the other
-direction: it runs during enumeration, on the scan's own thread, before any
-pairing.
+direction: it runs during enumeration, on the scan's own thread (the calling
+thread for a side walked without read-ahead), before any pairing.
 
 The action a surviving decision selects is always submitted from the calling
 thread, in the order the decisions were consumed; what happens after that submit
@@ -228,23 +238,37 @@ rejected; a `pair_filter` that conflicts with another argument is rejected;
 `src` and `dest` are resolved and validated; an already-cancelled
 `cancel_token` raises; the route is classified, which for an upload checks
 that the local source path exists; a missing local destination directory is
-created; an S3 Express directory bucket on either side is rejected; a client
+created; an S3 Express directory bucket or one of its access points on either
+side is rejected; a client
 is built for an S3 side that still has none; an open-route side is checked for
 the capabilities the route needs; an unrecognized `case_conflict` value is
 rejected. The destination directory is therefore created even by a run that
 transfers nothing, by one the directory-bucket check goes on to reject, and by
 one the `case_conflict` check rejects. The check is a bare existence test,
-so a destination that already exists as a file passes it and every item fails
-afterwards. The source check is a bare existence test too: a local source that
+so a destination that already exists as a file — written without a trailing
+separator — passes it and every item fails afterwards. The source check is a
+bare existence test too: a local source that
 is a file passes it, the directory-style walk then enumerates nothing and emits
 one `WARNED` record, and the run completes with warnings rather than raising.
+
+Both local checks ask about the path as typed (`exists` and
+`ensure_directory` of [`LocalStorage`](../storage.md#localstorage)), as the AWS
+CLI's do, while the walk works on the absolutized form. The two can name
+different places when the path carries a `..` or a trailing separator
+([`storage.md`](../storage.md#localstorage) lists the cases), and there the
+outcome is the AWS CLI's, hazard included: with `..` after a symlinked
+directory, a source the kernel finds but the absolutized form does not is
+admitted, walked as missing (a warning, exit code 2 on the command) and so
+contributes nothing — which under a delete filter means everything at the
+destination is deleted.
 
 Only a caller-constructed `S3Storage` carrying no client reaches that late
 client build. The client for a bare `s3://…` string argument is built during
 resolution instead — before the cancel-token poll, the destination-directory
-creation and the directory-bucket check — so credentials, region, profile or
-endpoint that will not resolve raise there rather than at the position listed
-above.
+creation and the directory-bucket check — so a profile, region, endpoint or
+partial credentials that will not resolve raise there rather than at the
+position listed above. Missing credentials fail no client build; they surface
+with the run's first request.
 
 `sync` has no guard against syncing a path onto itself: every key simply pairs
 with itself, so under the default decisions nothing is transferred and the run
@@ -296,12 +320,17 @@ order rather than in compare-key order.
 ### Raises
 
 - [`ValidationError`](../exceptions.md#validationerror) — an unrecognized key
-  in `**options`; a `pair_filter` passed together with a non-default
+  in `**options`; a `create_filter` / `update_filter` / `delete_filter` that is
+  none of the shapes its parameter takes (`None` on `create_filter` or
+  `delete_filter`, an integer), refused before anything is resolved rather
+  than failing as a `TypeError` once the lane first calls it; a `pair_filter`
+  passed together with a non-default
   `create_filter` / `update_filter` / `delete_filter`, with `no_overwrite=True`,
   or wrapped in a `ParallelFilter`, each rejected before anything is resolved;
   a local-to-local pair, a custom backend paired with anything but S3, or a
-  stream endpoint; an S3 Express directory bucket on either side, whose
-  listings are not ordered the way the merge-join requires; a custom
+  stream endpoint; an S3 Express directory bucket or one of its access points
+  on either side, whose listings are not ordered the way the merge-join
+  requires; a custom
   (open-route) side that does not declare the capabilities the route needs
   (sorted scanning, the route's read or write, and deletion when the delete
   lane is on for a custom destination — which `pair_filter` switches on too);
@@ -314,10 +343,12 @@ order rather than in compare-key order.
   an upload does not exist.
 - [`ConfigurationError`](../exceptions.md#configurationerror), or its
   [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement —
-  credentials, region, profile or endpoint that will not resolve while a client
-  is built for a bare `s3://…` argument, and `copy_props=ALL` on an SDK without
-  the annotations model (S3-to-S3 route), the latter raised as the engine is
-  built and before any item.
+  a profile, region, endpoint or partial credentials that will not resolve
+  while a client is built for a bare `s3://…` argument, credentials missing
+  when the run's first request needs them, `copy_props=ALL` on an SDK
+  without the annotations model (S3-to-S3 route) or a `checksum_algorithm`
+  newer than its S3 model, raised as the run is set up — before any item, and
+  under `dryrun` too.
 - [`AccessDeniedError`](../exceptions.md#accessdeniederror) or
   [`TransportError`](../exceptions.md#transporterror) — creating the local
   destination directory failed, mapped by the same rules as any other local

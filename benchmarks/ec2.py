@@ -1,6 +1,6 @@
 """Provision a throwaway EC2 instance, run the benchmarks on it, tear it down.
 
-Why a lane at all: the local MinIO lane measures a differential on a noisy
+Why a lane at all: the local dev stack lane measures a differential on a noisy
 host against a zero-latency, no-TLS, unbounded-bandwidth endpoint. It is the
 right regression signal but the wrong absolute picture. A quiet, fixed-size
 EC2 instance against real S3 in one region is the environment `aws s3` is
@@ -457,7 +457,7 @@ class Outcome:
 def cmd_run(args: argparse.Namespace) -> int:
     from tests.utils.harness import force_delete_bucket
 
-    awsenv.refuse_minio_env()
+    awsenv.refuse_dev_stack_env()
     region = awsenv.resolve_region(args.region)
     if region is None:
         raise BenchmarkError("no region; pass --region or set AWS_REGION / a profile with one")
@@ -890,7 +890,7 @@ def cmd_setup_iam(args: argparse.Namespace) -> int:
     """
     import json
 
-    awsenv.refuse_minio_env()
+    awsenv.refuse_dev_stack_env()
     region = awsenv.resolve_region(args.region)
     if region is None:
         raise BenchmarkError("no region; pass --region or set AWS_REGION")
@@ -986,7 +986,7 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
 
     from tests.utils.harness import force_delete_bucket
 
-    awsenv.refuse_minio_env()
+    awsenv.refuse_dev_stack_env()
     region = awsenv.resolve_region(args.region)
     if region is None:
         raise BenchmarkError("no region; pass --region or set AWS_REGION")

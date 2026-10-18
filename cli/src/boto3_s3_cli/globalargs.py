@@ -16,6 +16,7 @@ dispatcher before parsing (section 3).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 from collections.abc import Sequence
 from typing import Any
@@ -143,7 +144,14 @@ class _VersionAction(argparse.Action):
         values: Any,
         option_string: str | None = None,
     ) -> None:
-        sys.stdout.write(_version_string() + "\n")
+        # Written the way argparse's own version action writes on the Python
+        # aws's build runs (3.14): a missing stdout - a closed descriptor
+        # leaves `sys.stdout` None - falls back to stderr, and a write that
+        # fails is dropped, so the run still exits 0 (measured on aws:
+        # `--version >&-` puts the line on stderr).
+        stream = sys.stdout or sys.stderr
+        with contextlib.suppress(AttributeError, OSError):
+            stream.write(_version_string() + "\n")
         parser.exit()
 
 

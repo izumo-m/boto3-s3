@@ -255,8 +255,8 @@ The base implementation raises `NotImplementedError` naming
 
 Returns the `FileInfo` for a single entry, or `None` when there is no
 transferable entry there. This is the single-entry counterpart to `scan`: a
-non-recursive `cp` / `mv` resolves its source with it, and an existence check
-reads it for `None`.
+non-recursive `cp` / `mv` resolves its source with it. The engine runs no
+destination existence check through it.
 
 `key` is relative to this storage's location. The default `""` is the location
 itself — the single source or destination the storage points at — and a
@@ -312,7 +312,7 @@ their own held state.
 Runs deferred strict validation on this location. Construction is permissive,
 so an operation — or the CLI at its parity point — calls this to reject a
 malformed location loudly before use. The base implementation is a concrete
-no-op; `S3Storage` overrides it. Idempotent.
+no-op; `S3Storage` and `LocalStorage` override it. Idempotent.
 
 When an operation runs the check, a `Boto3S3Error` raised here that names no
 operation is stamped with that operation's name; a direct call leaves
@@ -351,9 +351,10 @@ gates raise is built from this.
 
 `ScanOptions.sort` requests entries in UTF-8 byte order of their `compare_key`
 ([`./options.md`](./options.md)). **A backend declaring `SORTABLE_SCAN` must
-honor `sort=True`; nothing else promises any order.** The promise is checked as
-`sync` consumes it: a stream that descends raises `ValidationError` from the
-merge rather than mis-pairing ([`./comparator.md`](./comparator.md)).
+honor `sort=True`; nothing else promises any order.** The promise is not
+checked: a stream that breaks it is merged the way the AWS CLI merges an
+unsorted listing, mis-pairing — and with deletes on, removing destination
+entries the source has too ([`./comparator.md`](./comparator.md)).
 
 `sync` is the only operation that sets `sort=True` — its merge-join walks both
 listings in ascending key order ([`./comparator.md`](./comparator.md)) — and it
@@ -371,7 +372,8 @@ prunes decides it instead. `S3Storage` relies on `ListObjectsV2`
 returning keys in byte order, preserved across pages — but its non-recursive
 listing emits each page's common prefixes ahead of that page's objects, which
 is `aws s3 ls`'s shape rather than a merged byte order, and S3 Express
-directory buckets guarantee no order at all, which is why `sync` rejects them.
+directory buckets guarantee no order at all, listed directly or through one of
+their access points, which is why `sync` rejects both.
 
 ## Location
 
@@ -467,7 +469,14 @@ separator, the one backend whose `format` roots are not `/`-separated.
 `scan_pages_filters` is `True` because the walk applies `options.filter`
 itself.
 
-`path` is the location, taken as given; `os.PathLike` is accepted. It is
+`path` is the location, taken as given; `os.PathLike` is accepted. An empty
+string is not a location — `validate` rejects it with `ValidationError`:
+Python's own path functions treat `""` as a path that does not exist, while
+`os.path.abspath` alone would silently make it the working directory
+(`pathlib.Path("")` is `"."` and passes). The AWS CLI reports an empty source
+as missing and fails on an empty directory destination, but reads an empty
+destination of a single download as the working directory; the `boto3-s3`
+command passes `"."` for that one case, and a library caller says `"."`. It is
 absolutized once, at construction, against the then-current working directory.
 Every scan, `get_fileinfo`, `open` and transfer plan anchors on that absolute
 form, so a relative `path` keeps meaning the same directory if the process
@@ -495,6 +504,50 @@ on the `mv` download route.
 `path`, `abspath`, `fsync` and `walker` are read-only properties exposing the
 constructor input, the construction-time absolute form, the durability knob and
 the walk strategy respectively.
+
+### exists()
+
+Whether the location exists, asked the way the AWS CLI's pre-check asks:
+`os.path.exists` on the path as typed, anchored at the construction-time
+working directory like `abspath` but without `abspath`'s lexical
+normalization. The two differ once `..` follows a symlinked directory —
+`lsub/../x` is `sub/x` to the kernel and `<cwd>/x` to `abspath` — and the AWS
+CLI admits such a source up front and lets its generator warn "File does not
+exist." (exit code 2) for the lexical form; the operations' source existence
+check asks this method so they admit the same, and the walk or `get_fileinfo`
+then answers for the lexical form. Windows has no such gap — it folds `..` out
+of a path before the filesystem sees it, so the typed path is already the
+lexical one — and there the AWS CLI refuses that source as missing up front,
+as this does. An empty path does not exist.
+
+### ensure_directory()
+
+Creates the location as a directory unless `exists()` already finds it, the
+way the AWS CLI prepares a directory destination: a bare `os.makedirs` on the
+same typed, construction-anchored path `exists()` tests, not on `abspath`. The
+recursive `cp` / `mv` and `sync` call it for a local destination before
+anything is enumerated. The typed path keeps what `abspath` folds away — a
+trailing separator, a `..` — and each of these comes out as it does on the
+AWS CLI:
+
+- an existing file written without a trailing separator exists, so nothing is
+  created and the transfer fails per item; written `out/` it does not exist as
+  typed, and the creation fails (`[Errno 17] File exists`; on macOS
+  `[Errno 20] Not a directory`);
+- `..` after a component that does not exist creates that component on the
+  way (`missing/../out` leaves `missing/` behind) and then fails if the result
+  already exists; after a component that is a file it fails (`[Errno 20]`);
+- `..` after a symlinked directory names the link target's parent: a
+  destination the kernel finds there is not created lexically, so a `sync`
+  warns "File does not exist." for the lexical directory (exit code 2), and
+  one the kernel does not find is created where the kernel resolves it.
+
+The two `..` cases are POSIX's. Windows folds `..` out of a path before the
+filesystem sees it, so there the typed path differs from `abspath` by the
+trailing separator alone (measured: `missing\..\out` over an existing `out`
+exists, and nothing is created).
+
+An `OSError` propagates; the operations translate it.
 
 ### relative_path(filename, start=os.path.curdir)
 
@@ -586,9 +639,13 @@ cannot disagree.
 Returns `None` for a definitively absent path (`ENOENT` / `ENOTDIR`, which
 includes a broken symlink when following), for a symlink when
 `follow_symlinks=False`, and — after warning through `on_warning` — for a
-special or unreadable file. A directory is returned with `FileKind.DIRECTORY`
+special or unreadable file (an unreadable directory is named with the trailing
+separator the AWS CLI's `local_format` gives a directory source, except when
+symlinks are not followed, where the AWS CLI strips it again before its
+battery). A directory is returned with `FileKind.DIRECTORY`
 and no type check, and fails later at open the way `aws s3` fails. A stat error
-that is not absence is raised, translated.
+that is not absence is raised, translated, with `operation` unset for the
+operation layer to fill and the path as `key`.
 
 ### as_text() / format(\*, dir_op)
 
@@ -647,10 +704,14 @@ therefore optional here — `S3Storage("bucket/key")` reads exactly as
 `S3Storage("s3://bucket/key")` — a deliberate library leniency that `S3.resolve`
 does not share, since `resolve` must still route a bare `bucket/key` to local.
 The stored text is split once into `bucket` and `key`, which are the properties
-every operation reads and from which `as_text`, `format`, `normalized_uri` and
-`same_path_as` are all derived. So `uri` is the input as accepted, scheme
-filled in, while `as_text()` is the canonical rebuilt token; they differ when
-the input carried a trailing slash on a keyless bucket.
+every operation reads and from which `as_text`, `normalized_uri`,
+`same_path_as` and `format` are derived — together with the one character the
+split found between them, and, for the bare service root, its spelling
+(below). So `uri` is the input as accepted, scheme filled in, while `as_text()`
+is the canonical rebuilt token; they differ when the input carried a trailing
+slash on a keyless bucket or on the service root. An Outposts access point ARN
+whose key follows a `:` rather than a `/` — a spelling the AWS CLI's pattern
+accepts — keeps its colon in all of these, as the AWS CLI's own output does.
 
 An empty bucket part — a bare `"s3://"` — is the service root: `list_buckets`
 lists the account's buckets there, while object listing or a transfer needs a
@@ -705,12 +766,18 @@ work and its access point warning.
 
 ### same_path_as(dest)
 
-The instance form of `same_path`, computed from held state rather than rebuilt
-strings: `True` when the two storages' buckets are equal **and** their keys
-satisfy the `same_path` rule anchored at `/`. With equal buckets the URI prefix
-is inert, so this is equivalent to running `same_path` over the two
-keyless-normalized URIs, with the `/`-anchoring preserving `os.path`'s
-semantics exactly.
+The instance form of `same_path`: `True` when `same_path` holds over the two
+`normalized_uri()` strings, or when the two storages name a bucket, the buckets
+are equal **and** their keys satisfy the `same_path` rule anchored at `/` (with
+equal buckets the URI prefix is inert, and the `/`-anchoring preserves
+`os.path`'s semantics exactly). The two agree except for one object spelled two
+ways — an Outposts access point key set off with `:` on one side and `/` on the
+other, or typed straight after an access point name the pattern cuts short
+(`accesspoint/my_ap` on one side, `accesspoint/my/_ap` on the other) — which the
+AWS CLI's string comparison takes for two objects, letting the move run onto
+itself; here it is a self-move like any other. Two locations
+without a bucket are compared as strings only, so `s3://` and `s3:///` are
+different, as they are to the AWS CLI.
 
 ### split_bucket_key(path) / strip_scheme(path) / normalize_s3_uri(path)
 
@@ -733,10 +800,14 @@ hand, `normalized_uri` derives the same form from held state.
 
 ### normalized_uri()
 
-The keyless-normalized `s3://` URI derived from `bucket` and `key` with no
-string round-trip: a keyless bucket reads as `s3://bucket/`, and the bare
-service root stays `s3://`. This is the form `mv`'s same-path error message
-shows.
+The keyless-normalized `s3://` URI derived from the held state with no string
+round-trip: a keyless bucket reads as `s3://bucket/`, and the bare service root
+keeps the spelling it was given, `s3://` or `s3:///`. It equals
+`normalize_s3_uri(uri)`: the separator between the bucket and the key is the
+one the location was typed with — `/`, `:` after an Outposts access point, or
+none where the AWS CLI's pattern cuts an access point name short
+(`accesspoint/my_ap` — not a valid name; the pattern stops at `my` and `_ap` is
+the key). This is the form `mv`'s same-path error message shows.
 
 ### as_text() / format(\*, dir_op)
 
@@ -744,9 +815,11 @@ shows.
 echoing the constructor input, so a keyless location normalizes to a slashless
 `s3://bucket` and the service root to `s3://`.
 
-`format` returns the scheme-less `bucket/key` as the root, with the same
-keyless-bucket normalization (`s3://bucket` formats as `bucket/`); only the
-bare service root formats empty. A `dir_op` root is `/`-terminated and
+`format` returns the scheme-less `bucket/key` as the root — `normalized_uri()`
+without its scheme — with the same keyless-bucket normalization (`s3://bucket`
+formats as `bucket/`); only the bare service root formats empty — or as `/`,
+taking the source's name, when spelled `s3:///`, the one case where the stored
+text rather than the held bucket and key decides. A `dir_op` root is `/`-terminated and
 `use_src_name` is `True`; otherwise `use_src_name` is whether the root already
 ends in `/`, and a `dir_op` on the service root formats it as `/`.
 
@@ -772,9 +845,17 @@ Returns the boto3 S3 client, building a default one lazily when none was
 supplied. Memoized: the first call builds or returns the client and every later
 call returns the same instance. Deliberately not guarded by a lock.
 
-Raises: `ConfigurationError` when credentials or region cannot be resolved,
-`InvalidConfigError` for a set-but-unusable profile or a malformed environment
-endpoint. A raw botocore error never escapes.
+Raises: `InvalidConfigError` for a set-but-unusable profile, partial
+credentials or a malformed environment endpoint, and on every call for a
+client, built or supplied, whose CA bundle setting is empty or
+whitespace-only, and for a supplied client also while `AWS_CA_BUNDLE` is set
+but empty or whitespace-only (rather than letting requests run with TLS
+verification off - see [`InvalidConfigError`](./exceptions.md#invalidconfigerror)); any
+other failure of the default build is translated into the library taxonomy
+([`./exceptions.md`](./exceptions.md)); a raw botocore error never escapes.
+Missing credentials and an unset region do not fail the build: missing
+credentials fail the client's first request instead, and an unset region falls
+back to botocore's default for S3.
 
 ### close()
 
@@ -793,14 +874,21 @@ Yields one `list[S3FileInfo]` per `ListObjectsV2` page. Requires an
 
 An entry the service returned incomplete stops the listing rather than being
 dropped from it: a `Contents` entry missing `Key`, `LastModified` or `Size`, or
-a `CommonPrefixes` entry missing `Prefix`, raises `KeyError` naming the element,
-read in that order. The entries converted before it are still delivered — that
+a `CommonPrefixes` entry missing `Prefix`, raises
+[`MalformedResponseError`](./exceptions.md#malformedresponseerror) naming the
+element (the AWS CLI's `KeyError` text, that `KeyError` on `__cause__`), read
+in that order. The entries converted before it are still delivered — that
 page is emitted short and the error follows it — so a consumer sees them ahead
-of the failure exactly as the AWS CLI's entry-by-entry listing does. A
-`LastModified` the host's local zone cannot represent raises `OverflowError`
-(`date value out of range`) at the same point, for the same reason — the AWS
-CLI converts every timestamp it reads to local time, so such an object ends the
-run there. Note the asymmetry with
+of the failure exactly as the AWS CLI's entry-by-entry listing does. One shape
+loses the whole page instead: when the response echoes `EncodingType` (S3 and
+MinIO do), botocore URL-decodes every `Key` and `Prefix` of the page before
+handing it over, so an entry missing one fails there — the same class, element
+and cause, with none of that page's entries delivered, which is also where the
+AWS CLI's listing stops. A
+`LastModified` the host's local zone cannot represent raises the same class
+(`date value out of range`, the `OverflowError` on `__cause__`) at the same
+point, for the same reason — the AWS CLI converts every timestamp it reads to
+local time, so such an object ends the run there. Note the asymmetry with
 `LocalStorage`, which applies the same local-zone test to a file's mtime and
 *keeps* the file with a warning and `EPOCH_TIME`: that is the AWS CLI's own
 split between a local file it cannot represent and an S3 object it cannot
@@ -857,9 +945,9 @@ container rather than an openable entity, so no transfer scan ever yields one.
 omitted when falsy. The page size is the storage's own `page_size`.
 
 As in `scan_pages`, a bucket entry missing `CreationDate` or `Name` raises
-`KeyError` naming the element, read in that order — the order the AWS CLI
-renders them in — at that bucket, with the buckets ahead of it already
-delivered.
+[`MalformedResponseError`](./exceptions.md#malformedresponseerror) naming the
+element, read in that order — the order the AWS CLI renders them in — at that
+bucket, with the buckets ahead of it already delivered.
 
 Requesting either filter on a botocore whose `ListBuckets` model lacks the
 matching input member raises `ConfigurationError` naming the version they need
@@ -923,9 +1011,14 @@ its `compare_key` is the key's basename.
 
 Raises: a `404` returns `None` rather than raising. Any other error — `403`,
 transport, 5xx — is raised translated, because existence could not be
-determined. A `LastModified` the host's local zone cannot represent raises
-`OverflowError` (`date value out of range`) instead of being returned, the same
-test `scan_pages` applies and at the point the AWS CLI applies it to its own
+determined, with `operation` unset like every storage-level call's. A response
+missing `ContentLength` or `LastModified` raises
+[`MalformedResponseError`](./exceptions.md#malformedresponseerror) naming the
+element, read in that order — the AWS CLI's own reading of its single-object
+HEAD, and the single-entry counterpart of the `scan_pages` rule. A
+`LastModified` the host's local zone cannot represent raises the same class
+(`date value out of range`) instead of being returned, the same test
+`scan_pages` applies and at the point the AWS CLI applies it to its own
 single-object HEAD. This is the generic HEAD; the SSE-C-aware single-source
 HEAD lives in the transfer engine, which applies the test at the same point.
 
@@ -959,14 +1052,15 @@ s3transfer's own download lane has — so:
 - an existing **regular** destination's permission bits are carried onto the
   replacement, since the swap lands a new inode — this lane's own addition, not
   something s3transfer does; a destination that did not exist gets the bits a
-  plain `open(…, "wb")` would give it (the umask decides, and the temp file's
-  own restrictive mode never leaks through);
+  plain `open(…, "wb")` would give it (the temp file is created with mode
+  `0o666`, so the umask decides). Windows cannot replace a read-only
+  destination: the call fails with `AccessDeniedError` and leaves it as it was;
 - missing parent directories are created.
 
 Nothing stamps the local file's mtime: that is the transfer lanes' AWS CLI
 parity behavior, and here the caller holds the returned info and decides. The
 returned `S3FileInfo` is shaped like `get_fileinfo`'s — the full key,
-`ContentLength` as `size`, `LastModified` as `mtime`, the dequoted ETag, the
+`ContentLength` as `size`, `LastModified` as `mtime`, the ETag as returned, the
 storage class, the key's basename as `compare_key` — and carries the whole
 `GetObject` response minus its transport metadata and its body under `head`.
 
@@ -976,10 +1070,8 @@ side. The `GetObject` and the reads of its streamed body translate as botocore
 errors and carry `bucket` / `key`: a missing object is `NotFoundError` (unlike
 `get_fileinfo`, a download of an absent object is a failure, not a `None`),
 denied access `AccessDeniedError`, and a stream that breaks mid-body — a reset
-connection, a read timeout — `TransportError`. A body that merely ends short of
-its `Content-Length` is the exception: botocore reports that as an incomplete
-read, which is none of its transport errors, so it arrives as the base
-`Boto3S3Error`. The local filesystem failures — the temp file, the writes, the
+connection, a read timeout, a body that ends short of its `Content-Length` —
+`TransportError`. The local filesystem failures — the temp file, the writes, the
 replace — translate as local errors, naming the local path in `key` with
 `bucket` unset.
 
@@ -1003,14 +1095,18 @@ not this lane's. Shape the object through `S3.cp`'s transfer options, or call
 
 `key` addresses the object exactly as `get_fileinfo`'s does. The returned
 `S3FileInfo` carries the full key, the local file's size (taken from the open
-handle, so it describes what was actually sent), the response's dequoted ETag,
+handle, so it describes what was actually sent), the response's ETag as returned,
 the key's basename as `compare_key`, and the whole `PutObject` response minus
 its transport metadata under `head`; `mtime` stays unset, the response carrying
 none.
 
 Raises: opening or stat'ing the local file translates as a local error — a
 missing file is `NotFoundError`, an unreadable one `AccessDeniedError`, naming
-the local path in `key` with `bucket` unset — and no request is made. The
+the local path in `key` with `bucket` unset — and no request is made. A FIFO,
+a socket or a device is refused the same way, before it is opened, with
+`ValidationError`, as the transfer routes skip such a source: it is not a
+regular file whose size says how long its content is, and a FIFO or a socket
+cannot be rewound for a retry either. The
 `PutObject` itself translates as a botocore error carrying `bucket` / `key`,
 including a failure botocore hits while reading the body mid-request, which it
 reports as one of its own.
@@ -1028,29 +1124,69 @@ class IOStorage(Storage):
     )
 
     def __init__(
-        self, stream: IO[bytes] | IO[str], *, encoding: str = "utf-8"
+        self,
+        stream: SupportsRead[bytes] | SupportsRead[str] | SupportsWrite[bytes] | SupportsWrite[str],
+        *,
+        encoding: str = "utf-8",
     ) -> None: ...
 ```
 
 `capabilities` is just the `OPEN_*` pair: a single stream supports byte I/O in
 both directions, chosen per `open` call, with no listing and no deletion.
 
-`stream` is the caller's file-like object. A binary stream is used as it is,
-behind a close-suppressing view. A text stream — recognized either as an
+`stream` is the caller's file-like object: anything with a `read` for an
+upload or a `write` for a download (typeshed's `SupportsRead` /
+`SupportsWrite`), so a wrapper exposing only one of them is accepted. A binary
+stream is used as it is,
+behind a close-suppressing view — except one that cannot be positioned (a
+pipe, a socket, a console: `seekable()` answers False, or `os.fstat` reports
+its descriptor as a FIFO, character device or socket, which a Windows pipe is
+even though it claims to seek), which an upload reads through a view that
+offers nothing but `read`, so both transfer engines take their buffered path
+instead of probing it with `seek` / `tell`. A text stream — recognized either as an
 `io.TextIOBase` or by carrying an `encoding` attribute, which covers
 `codecs.open`'s reader/writer and a text-mode `SpooledTemporaryFile` — is
 wrapped with an incremental codec instead, encoding on read for an upload and
 decoding on write for a download.
 
-`encoding` is that codec's encoding and applies only to a text stream. A single
-incremental encoder or decoder spans the whole transfer, so a stateful codec
-behaves as one stream — utf-16 emits its BOM once, not per chunk.
+`encoding` is that codec's encoding and applies only to a text stream; a name
+`codecs.lookup` does not know raises `InvalidValueError` from the constructor.
+A single incremental encoder or decoder spans the whole transfer, so a stateful
+codec behaves as one stream — utf-16 emits its BOM once, not per chunk.
 
-**The caller's stream is never closed by this class, and never repositioned.**
-The transfer closes every file object `open` returns, since that close is how a
-real backend flushes a write; each view here absorbs that close into a flush of
-the wrapped stream at most. Lifecycle and final position stay the caller's:
-after a download the stream sits at the end of the written bytes.
+A text stream carries the object as text: the encoding it was opened with and
+its newline translation apply to what is read and written. Text that will not
+convert fails the transfer — on a download, an object that is not valid text
+in `encoding` or a character the stream cannot write; on an upload, bytes the
+stream cannot read or a character `encoding` cannot encode. A failed download
+leaves in the stream whatever was decoded before the failure, and the item's
+`OpResult.error` is a `Boto3S3Error` with the `UnicodeDecodeError` or
+`UnicodeEncodeError` on `__cause__`. A text stream is never swapped for its
+`.buffer` — text it has read ahead would be skipped and the encoding it was
+opened with ignored — so pass a binary stream (a file opened `"rb"` or `"wb"`)
+or [`StdioStorage`](#stdiostorage) for the bytes as they are; `StdioStorage`
+writes standard output in order, where `IOStorage(sys.stdout.buffer)` on the
+classic engine writes a redirected file from offset 0.
+
+**The caller's stream is never closed by this class.** The transfer closes
+every file object `open` returns, since that close is how a real backend
+flushes a write; each view here absorbs that close into a flush of the wrapped
+stream at most. Lifecycle stays the caller's, and so does rewinding after a
+download, whose landing place depends on the stream and the engine: the binary
+view passes `seek` through, so on the classic engine `s3transfer` writes a
+seekable binary stream at absolute offsets from 0 — its prior position is
+ignored, and a multipart download can leave it anywhere — while a text stream,
+a stream that cannot seek (a pipe, a socket or a console, judged by its
+descriptor: a Windows pipe answers `seekable()` with `True`, and gets the
+write-only view all the same), a binary stream in append mode (`open(p, "ab")`, a
+`>>` redirected stdout's `.buffer`: it reports `seekable()` but every write
+lands at its end, so it gets a write-only view and the parts arrive in order),
+and any stream under the CRT engine are written in order from their current
+position. Append mode is read from the stream's `mode` string and, on POSIX
+only, from the descriptor's `O_APPEND` flag; Windows cannot be asked for the
+flag, so a stream that appends under another `mode` string is not recognized
+there, and a `>>` redirect from `cmd` — which appends nothing, it only starts
+at the end — is an ordinary seekable stream.
 
 Of the four contract operations only `open` is implemented. `get_fileinfo` and
 `delete` keep `Storage`'s base implementations and raise `NotImplementedError`
@@ -1061,8 +1197,9 @@ Where a stream may appear is enforced by the operations, not by capabilities:
 it is a side of a non-recursive `cp`, or the destination of a non-recursive
 `mv`; it is never a `mv` source, never a recursive `mv` destination, never both
 sides at once, and never an `ls` or `rm` target. `S3.cp` and `S3.mv` raise
-`ValidationError` for those cases ([`./operations/cp.md`](./operations/cp.md),
-[`./operations/mv.md`](./operations/mv.md)).
+`ValidationError` for their cases ([`./operations/cp.md`](./operations/cp.md),
+[`./operations/mv.md`](./operations/mv.md)), and `S3.ls` and `S3.rm`, which
+take only an S3 location, for theirs.
 
 ### open(key, mode, \*, size=None)
 
@@ -1119,8 +1256,9 @@ Raises: `ValidationError` ([`./exceptions.md`](./exceptions.md)) when `mode` is
 `"rb"` and this process has no `sys.stdin`, in the AWS CLI's own wording,
 rather than letting a transfer worker receive an unusable file object. The
 error names no operation of its own: the run that invoked the storage stamps
-the one it is performing — a streaming `cp` reports `"cp"`, a `mv` onto a
-stream reports `"mv"` — while a direct call leaves `operation` as `None`.
+the one it is performing — the streaming `cp` that reads stdin reports `"cp"`
+(`mv` rejects a stream source before opening it) — while a direct call leaves
+`operation` as `None`.
 Stdout has no such precondition, again like the AWS CLI: a process without one
 fails on the writer's first `write`, from inside the transfer, so it is that
 item's failure (`'NoneType' object has no attribute 'write'`) and not a reason
@@ -1363,15 +1501,21 @@ A single `os.stat` on `path` decides three outcomes. It fails: the
 `triggers_warning` battery runs on the path — normally "File does not exist.",
 a warning and exit code 2 — and the leaf is dropped whether or not the battery
 found anything, so a stale record is never submitted for a transfer that would
-then fail to open it. It reports a directory: the returned record is the
+then fail to open it (the complete view first tries the link's own lstat: a
+leaf that became a dangling link or a loop is kept as that lstat leaf, warned
+only when links are followed — `classify_child`'s failed-follow rule, applied
+at the leaf's turn). It reports a directory: the returned record is the
 promoted directory (`promoted_directory`), which `walk_dir` descends, so the
 children of a name swapped for a directory are transferred rather than the name
 being submitted as a file. Otherwise: `info` itself with `size`, `mtime` and
 `stat_result` refreshed from this stat, which is where the AWS CLI takes every
 leaf's size and timestamp, so what is transferred and what `sync` compares is
-the file as of its turn. An mtime that has become unrepresentable stamps
-`EPOCH_TIME` as `stat_info` does, and warns unless the scan's stat was already
-unrepresentable, so one file draws one warning rather than two.
+the file as of its turn. An mtime this stat cannot represent stamps
+`EPOCH_TIME` as `stat_info` does and sends the file's one invalid-timestamp
+warning from here, where the AWS CLI sends it: it sorts among the walk's other
+warnings as the AWS CLI's does (an earlier-sorting sibling directory's warnings
+come first), and a timestamp that became representable since the scan draws
+none — `stat_info` stamps the scan-time record silently.
 
 `is_symlink` is left as classified — re-testing it would cost a second syscall
 per leaf. A record whose classification stat is a symlink's own (the complete
@@ -1421,7 +1565,11 @@ A directory that cannot be opened or scanned — replaced, removed or locked awa
 in the race between its parent's scan and this descent — is put through the
 `triggers_warning` battery and yields an empty list, so the walk goes on. The
 battery runs on `dir_path` as passed, which for a descended child carries the
-trailing separator the AWS CLI's own re-test names it by. If that battery finds
+trailing separator the AWS CLI's own re-test names it by. With symlinks not
+followed, that re-test first strips the separator and tests the name itself,
+as the AWS CLI's `should_ignore_file` does at the top of each descent: a
+directory that became a symlink is skipped silently rather than followed, and
+the battery names the stripped path. If that battery finds
 nothing wrong, the `OSError` propagates instead of pruning silently. That
 handling is scoped to establishing the scan; a per-entry `OSError` raised
 mid-scan propagates. The deterministic full-path limits — a symlink cycle
@@ -1480,7 +1628,10 @@ the natural per-entry override point, and the owner of the single stat.
 
 Symlinks are decided first, on a free type test: with symlinks not followed,
 the complete view returns the link's own lstat leaf and the normal view skips
-it silently. Then `entry_stat_result` is taken once. A `None` stat warns; the
+it — silently when `os.path.islink` agrees, and otherwise through the full-path
+warning battery, which is where the AWS CLI's lstat-based test lands in a
+directory that grants no search permission ("File does not exist."). Then
+`entry_stat_result` is taken once. A `None` stat warns; the
 complete view falls back to the link's lstat and the normal view skips. A stat
 that itself reports a symlink — which only an lstat-style override produces —
 is its own vetting-free leaf. Otherwise the normal view vets the entry through
@@ -1559,7 +1710,8 @@ The warn-and-skip battery on a path, in the AWS CLI's order and wording: the
 path does not exist, then it is a character or block special device, FIFO or
 socket, then it is not readable. Returns whether any check fired, having sent
 that check's message to `notify`. Used for the root, for a directory whose scan
-could not be established, and for the near-boundary re-vetting.
+could not be established, for a leaf whose re-stat fails at its turn
+(`restat_leaf`), and for the near-boundary re-vetting.
 
 ### should_ignore_entry(entry, full, dir\_fd, st, \*, notify)
 
@@ -1580,7 +1732,10 @@ still warns "not readable".
 Builds one file entry's `LocalFileInfo` from the stat `classify_child` already
 took, at scan time. It never fails: the race case was handled upstream, and an
 mtime the host's local zone cannot represent — the AWS CLI's own test, as
-above — keeps the file, warns, and stamps `EPOCH_TIME`. The info carries `st` as
+above — keeps the file and stamps `EPOCH_TIME`. The warning for it is sent from
+here only for a link's own stat, which no re-stat follows; a regular file's
+record is stamped silently and warns at its turn (`restat_leaf`), or from the
+scan when a one-level scan keeps this record. The info carries `st` as
 `stat_result` and the entry's symlink flag.
 
 Of what this stamps, `size`, `mtime` and `stat_result` are refreshed by

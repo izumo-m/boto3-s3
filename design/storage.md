@@ -44,7 +44,7 @@ implements exactly what it declares. Every declared flag — including one
 declarations, not implementations, so they refuse an unsupported operation up
 front only when the declaration is honest:
 
-- **`scheme: ClassVar[str]`** — the backend's path-shape token, anything but
+- **`scheme: ClassVar[str]`** — the backend's family label, anything but
   `"s3"` / `"local"` (a declared classification label for embedders; the
   engine itself never reads it - results render through `as_text()`).
   Transfer *routing* does not read it either: the planner
@@ -59,7 +59,8 @@ front only when the declaration is honest:
   / progress (its canonical path token).
 - **`open(key, mode, *, size=None) -> BinaryIO`** — per-object byte I/O. `"rb"`
   returns a readable stream; `"wb"` a writable one whose `close()` flushes buffered
-  writes (standard file semantics). `size` is an optional total-length hint for writes.
+  writes (standard file semantics). `size` is an optional total-length hint, for
+  reads as well as writes.
   `S3Storage` implements `"rb"` only (a `GetObject` read convenience, addressed by
   the object's full key — chiefly for a content-based `sync` filter); its `"wb"`
   stays unimplemented, since every S3 write on the *transfer lanes* rides
@@ -92,10 +93,14 @@ front only when the declaration is honest:
   built-in S3 backend is what needs it: it reads the elements a listing entry
   must carry by subscript, in aws-cli's own order (`Key` -> `LastModified` ->
   `Size` for an object, `Prefix` for a common prefix, `CreationDate` -> `Name`
-  for a bucket), so an entry missing one raises `KeyError` naming the element
-  instead of being silently dropped - the object listing emitting the part of
+  for a bucket), so an entry missing one raises `MalformedResponseError`
+  naming the element (aws-cli's `KeyError` text and cause) instead of being
+  silently dropped - the object listing emitting the part of
   the page it had converted, the bucket listing being streamed entry by entry
-  to begin with. Its single-object `HeadObject` (`get_fileinfo`, and the
+  to begin with. (A response that echoes `EncodingType` has botocore
+  URL-decode each `Key` / `Prefix` by subscript while it parses the page, so
+  there the same error is raised from the page fetch, the whole page lost with
+  it - aws-cli's listing dies in that same handler.) Its single-object `HeadObject` (`get_fileinfo`, and the
   transfer engine's `producers.head_single`) reads `ContentLength` ->
   `LastModified` the same way, `ETag` with a default - aws-cli's
   `_list_single_object` order.
@@ -231,9 +236,12 @@ A few more members come with working defaults a custom backend normally keeps:
   the location, a no-op by default. Construction is permissive (a building
   block); an operation — or the CLI at its parity point — calls this to reject
   a malformed location loudly before use. `S3Storage` overrides it with the
-  aws-cli-parity checks (unsupported ARN forms, a key with no bucket); a
-  custom backend that can detect a malformed location overrides it likewise.
-  Idempotent.
+  aws-cli-parity checks (unsupported ARN forms, a key with no bucket),
+  `LocalStorage` rejects an empty path (`""` is no location to Python, only
+  `abspath` would make it the working directory; aws-cli agrees except for
+  the destination of a single download, which the CLI layer turns into `"."`
+  before the library sees it); a custom backend that can detect a malformed
+  location overrides it likewise. Idempotent.
 
 Errors raised from these should map to the library taxonomy
 ([`exceptions.md`](./exceptions.md)); the engine renders their message verbatim.
@@ -281,7 +289,7 @@ of deep inside the run:
 |---|---|---|
 | `OPEN_READ` | `open(key, "rb")` | an `opens3` source |
 | `OPEN_WRITE` | `open(key, "wb")` | an `s3open` destination |
-| `GET_FILEINFO` | `get_fileinfo` | a single-entry source / existence check |
+| `GET_FILEINFO` | `get_fileinfo` | a single-entry source |
 | `SCAN` | `scan` / `scan_pages` | a recursive (multi-entry) **source** |
 | `SORTABLE_SCAN` | byte-ordered recursive `scan` (`ScanOptions(sort=True)`) | **any `sync`** side |
 | `DELETE` | `delete(info)` | an `mv` source / a `sync --delete` destination |
@@ -290,11 +298,10 @@ The reading members form a lattice: `SORTABLE_SCAN` implies `SCAN` implies
 `GET_FILEINFO`. `sync`'s merge-join walks both listings in UTF-8 byte order, so a
 custom `sync` side **must** declare `SORTABLE_SCAN` — an unsorted listing would
 manufacture phantom pairs and, with `--delete`, corrupt the destination. The
-promise is checked as the merge consumes it rather than taken on trust: the
-first strict descent on either side raises `ValidationError` and ends the run
-(`comparator._byte_ordered`; the check is unconditional, so `python -O` keeps
-it), which is also what an S3-compatible endpoint returning an unsorted
-`ListObjectsV2` runs into.
+promise is taken on trust: the merge follows aws-cli's step for step and does
+not check the order, so a backend that breaks it - like an S3-compatible
+endpoint returning an unsorted `ListObjectsV2`, on which aws-cli mis-pairs the
+same way - gets aws-cli's mis-pairing ([`sync.md`](./sync.md) section 3).
 **`sync` is the only order-sensitive consumer**: recursive `cp` / `mv` take the
 backend's entries in whatever order `scan` yields them (they never pass
 `ScanOptions(sort=True)`), so a plain `SCAN` side needs no ordering guarantee
@@ -390,16 +397,22 @@ with open("hello.txt", "rb") as f:
 # upload from a text buffer (encoded with `encoding`, default utf-8)
 s3.cp(IOStorage(io.StringIO("hello")), "s3://bucket/hello.txt")
 
-# download into a buffer, then read it back: IOStorage does NOT reposition the
-# stream, so rewind it yourself (or use getvalue())
+# download into a buffer, then read it back: rewind it yourself (or use
+# getvalue())
 buf = io.StringIO()
 s3.cp("s3://bucket/hello.txt", IOStorage(buf))
 buf.seek(0)
 print(buf.read())            # or: print(buf.getvalue())
 
-# download straight into a gzip writer - a non-seekable binary write stream
+# download straight into a gzip writer - a GzipFile reports seekable() but
+# seeks only forward, so hand over just its write(): a non-seekable binary
+# write stream is written strictly in order
+class WriteOnly:
+    def __init__(self, stream):
+        self.write = stream.write
+
 with gzip.open("hello.txt.gz", "wb") as f:
-    s3.cp("s3://bucket/hello.txt", IOStorage(f))
+    s3.cp("s3://bucket/hello.txt", IOStorage(WriteOnly(f)))
 ```
 
 The contract:
@@ -409,12 +422,27 @@ The contract:
   stream (`io.StringIO`, a file opened `"r"` / `"w"`) is wrapped with a codec
   (`IOStorage(stream, encoding="utf-8")`) — encode on upload, decode on download.
 - **The caller owns the stream.** `IOStorage` **never closes** it and never
-  rewinds it for you: lifecycle and final position are yours. After a download
-  the stream sits at the end of the written bytes, so to read them back rewind it
-  (`seek(0)`) or use `getvalue()`. A non-seekable sink works just as well — a
-  `gzip` writer, `sys.stdout`, a pipe — there is nothing to rewind; the bytes
-  land wherever the stream sends them (the `.gz` file, the console), and the
-  caller's own `with` / `close` finalizes it.
+  rewinds it for you: lifecycle and final position are yours. Where a download
+  lands depends on the stream and the engine: the binary view passes `seek`
+  through, so on the classic engine s3transfer's seekable download path writes
+  a seekable binary stream at absolute offsets from 0 — its prior position is
+  ignored, and a multipart download can leave it anywhere — while a text
+  stream, a non-seekable one, an append-mode binary stream (`open(p, "ab")`, a
+  `>>` redirected stdout's `.buffer`: it reports `seekable()` but every write
+  lands at its end, so the view hides `seek` and the parts arrive in order
+  instead of scrambling) and any stream under the CRT engine are written in
+  order from their current position. The append cue is the `mode` string, plus
+  the descriptor's `O_APPEND` flag where `fcntl` can read it - POSIX only:
+  measured on Windows, `os.fdopen(os.open(p, O_APPEND), "wb")` goes
+  unrecognized and scrambles, and a `cmd` `>>` redirect is no append stream at
+  all (seekable, positioned at the end, written from offset 0). To read a
+  download back, rewind it
+  (`seek(0)`) or use `getvalue()`. A non-seekable sink works just as well —
+  `sys.stdout`, a pipe, a write-only wrapper like the `gzip` one above — there
+  is nothing to rewind; the bytes land wherever the stream sends them (the
+  `.gz` file, the console), and the caller's own `with` / `close` finalizes it.
+  A `GzipFile` handed over directly is not such a sink: it reports `seekable()`
+  but seeks only forward, so a multipart download into it can fail.
 - **A single endpoint, not a container.** Only `open` is meaningful; the
   inherited `get_fileinfo` / `delete` raise `NotImplementedError` on the call,
   and `scan` raises the same on its first iteration rather than on the call
@@ -471,7 +499,11 @@ its temp file was created with. In full:
 - the body streams into a **sibling temp file** in the destination's own
   directory (so the commit stays inside one filesystem), created `O_EXCL` with
   a random name and mode `0o666` — the umask decides a *new* destination's bits,
-  exactly as a plain `open(…, "wb")` would;
+  exactly as a plain `open(…, "wb")` would. The name is the destination's own
+  plus a random extension, cut to the filesystem's 255 per name in **encoded
+  bytes**, so a valid destination named in multi-byte characters still gets a
+  temp name that fits (s3transfer's own cut counts characters and fails there
+  with `ENAMETOOLONG`, as `cp` therefore does on both tools);
 - an existing **regular** destination's permission bits are copied onto the temp
   file first: the atomic swap lands a new inode, so without that the file's mode
   would silently become the temp file's;
@@ -505,14 +537,14 @@ spanning both would file a broken stream as a local failure.
   the returned `S3FileInfo` and decides.
 - **`cp` / `mv` / `sync` do not use them**, so aws-cli parity is untouched: the
   transfer engine, its gates (glacier, `--no-overwrite`, case-conflict) and the
-  CLI behave exactly as before.
+  CLI do not depend on them.
 - not part of the `Storage` SPI. These are `S3Storage`-specific building blocks
-  like the S3-only operations, so `StorageCapability` and the `Storage` ABC gain
-  nothing and a custom backend implements nothing new.
+  like the S3-only operations, so neither `StorageCapability` nor the `Storage`
+  ABC describes them, and a custom backend implements none of it.
 
 Both address the object through the same `""`-is-this-location /
 join-under-the-prefix rule as `get_fileinfo`, and both return an `S3FileInfo`
-filled as `get_fileinfo`'s is: full `key`, dequoted `etag`, basename
+filled as `get_fileinfo`'s is: full `key`, the response's `etag`, basename
 `compare_key`, `storage`. The `head` slot is where they differ — these two store
 the response with its transport metadata stripped (`strip_response_metadata`,
 the convention for every response slot the API surfaces; `get_file` drops the

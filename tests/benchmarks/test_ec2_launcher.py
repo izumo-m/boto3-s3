@@ -3,7 +3,7 @@
 The launcher itself can only be exercised end to end against real AWS, so
 these tests pin the parts that are easy to break silently and do not need the
 cloud: architecture selection, the AMI parameter mapping, the instance role's
-policy shape, region precedence, the MinIO-shell guard, and the fact that the
+policy shape, region precedence, the dev-stack-shell guard, and the fact that the
 user-data template renders with no leftover placeholder.
 """
 
@@ -208,8 +208,10 @@ class TestUserData:
     @pytest.mark.skipif(not _has_real_bash(), reason="needs a working bash for a syntax check")
     def test_rendered_user_data_is_valid_bash(self) -> None:
         script = ec2._inline_urls(_render(), _URLS)
-        proc = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
-        assert proc.returncode == 0, proc.stderr
+        # Bytes, not text: Windows text-mode stdin would turn every LF into
+        # CRLF, which bash rejects, while the instance receives the LF script.
+        proc = subprocess.run(["bash", "-n"], input=script.encode(), capture_output=True)
+        assert proc.returncode == 0, proc.stderr.decode(errors="replace")
 
     def test_a_signed_url_with_braces_survives_substitution(self) -> None:
         # URLs are inlined after str.format, so query strings cannot collide
@@ -241,23 +243,23 @@ class TestRegionAndGuards:
         monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
         assert awsenv.resolve_region() == "eu-west-1"
 
-    def test_minio_endpoint_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_dev_stack_endpoint_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "http://127.0.0.1:9000")
-        with pytest.raises(BenchmarkError, match="MinIO"):
-            awsenv.refuse_minio_env()
+        with pytest.raises(BenchmarkError, match="dev stack"):
+            awsenv.refuse_dev_stack_env()
 
-    def test_minio_static_key_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_dev_stack_static_key_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("AWS_ENDPOINT_URL_S3", raising=False)
         monkeypatch.delenv("AWS_ENDPOINT_URL", raising=False)
-        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "minioadmin")
-        with pytest.raises(BenchmarkError, match="MinIO"):
-            awsenv.refuse_minio_env()
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "devadmin")
+        with pytest.raises(BenchmarkError, match="dev stack"):
+            awsenv.refuse_dev_stack_env()
 
     def test_a_clean_shell_passes_the_guard(self, monkeypatch: pytest.MonkeyPatch) -> None:
         for key in ("AWS_ENDPOINT_URL_S3", "AWS_ENDPOINT_URL"):
             monkeypatch.delenv(key, raising=False)
         monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE")
-        awsenv.refuse_minio_env()  # no raise
+        awsenv.refuse_dev_stack_env()  # no raise
 
 
 def _as_list(value: object) -> list[str]:

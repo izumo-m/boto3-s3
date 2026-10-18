@@ -4,8 +4,11 @@ aws registers an alias injector on the suffix-less ``building-command-table``
 event, which its emitter matches for ``building-command-table.s3`` as well, so
 the ``[command s3]`` section of that file adds subcommands to ``aws s3`` (and
 shadows built-in ones). This CLI's whole surface *is* that table, so
-``[command s3]`` is the section that maps onto it; ``[toplevel]``, whose
-entries name services, has no counterpart here and is ignored.
+``[command s3]`` is the section that maps onto it. The ``[toplevel]`` section
+adds commands beside ``aws s3`` instead, and only its ``s3`` entry reaches this
+surface: it replaces ``aws s3`` itself, so every invocation of this CLI runs
+through it (`cli` resolves it; entries under other names are kept only as the
+commands an ``s3`` entry can chain to).
 
 The file path is hardcoded in aws (``AliasLoader``'s default argument), so
 ``AWS_CONFIG_FILE`` does not move it, and it is read on **every** invocation,
@@ -63,6 +66,12 @@ _SECTION_PREFIX = _LINEAGE_KEY + " "
 COMMAND_LINEAGE = ("s3",)
 SHADOW_LINEAGE: tuple[str, ...] = ()
 
+# The section aws's loader answers ``get_aliases()`` from - aliases beside the
+# services rather than under one - and the one entry of it this CLI is: the
+# service name a ``[toplevel]`` alias must carry to replace ``aws s3``.
+TOPLEVEL_SECTION = "toplevel"
+SERVICE_NAME = "s3"
+
 
 class AliasTable(NamedTuple):
     """The alias file's sections, re-keyed onto the command lineages aws uses.
@@ -71,11 +80,14 @@ class AliasTable(NamedTuple):
     longer relatives - to that section's entries: an alias name to its raw
     value. ``configparser`` lowers the names, so ``LSR`` is invoked as ``lsr``;
     the values keep their case and are stripped of surrounding whitespace, as
-    aws strips them. Sections whose raw name aws does not re-key are dropped
-    here, since no lineage can reach them.
+    aws strips them. ``toplevel`` is the ``[toplevel]`` section's entries the
+    same way (aws looks that section up by its exact name). Other sections
+    whose raw name aws does not re-key are dropped here, since no lineage can
+    reach them.
     """
 
     sections: dict[tuple[str, ...], dict[str, str]]
+    toplevel: dict[str, str]
 
     @property
     def entries(self) -> dict[str, str]:
@@ -110,18 +122,22 @@ def load() -> AliasTable:
     """
     path = alias_file_path()
     if not os.path.exists(path):
-        return AliasTable({})
+        return AliasTable({}, {})
     if not os.path.isfile(path):
         raise InvalidConfigError(_NOT_FOUND.format(path))
     sections: dict[tuple[str, ...], dict[str, str]] = {}
+    toplevel: dict[str, str] = {}
     for section, options in _parse(path).items():
+        if section == TOPLEVEL_SECTION:
+            toplevel = options
+            continue
         if not section.startswith(_SECTION_PREFIX):
             continue
         # Assigned, not merged: aws re-keys each section in turn, so where two
         # spellings (`[command s3]`, `[command  s3]`) normalize to the same key
         # the last one read replaces the first.
         sections[tuple(section.split())] = options
-    return AliasTable(sections)
+    return AliasTable(sections, toplevel)
 
 
 def _parse(path: str) -> dict[str, dict[str, str]]:

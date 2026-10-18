@@ -166,7 +166,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     handicap = args.self_test_handicap_ms / 1000.0
     aws_ver: str | None = None
     if "e2e" in modes:
-        # Fail fast on a missing MinIO stack before spending in-process time.
+        # Fail fast on a missing dev stack before spending in-process time.
         _ours_exe, aws_exe = e2e.check_environment()
         aws_ver = e2e.aws_version(aws_exe)
 

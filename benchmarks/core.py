@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
-# Single-object transfer size (MB) for the default, local-MinIO lane. Both
+# Single-object transfer size (MB) for the default, local dev stack lane. Both
 # modes size their large-file scenarios from it; `--large-transfer-mb`
 # overrides it, and the EC2 lane raises it because a 64 MB object finishes
 # inside the startup constant on a wide NIC against real S3.

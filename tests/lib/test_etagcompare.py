@@ -40,7 +40,12 @@ from boto3_s3.etagcompare import (
     _file_md5_hex,  # pyright: ignore[reportPrivateUsage]
     _multipart_etag_at,  # pyright: ignore[reportPrivateUsage]
 )
-from boto3_s3.exceptions import Boto3S3Error, NotFoundError
+from boto3_s3.exceptions import (
+    Boto3S3Error,
+    InvalidConfigError,
+    NotFoundError,
+    ValidationError,
+)
 from boto3_s3.types import FileInfo, S3FileInfo, TransferType
 from tests.utils.pairbuilders import local_info, make_pair, native_key, write_file
 
@@ -59,7 +64,9 @@ _CONTENT_6MIB_MP5 = "6976d829a1a06b80396a19f0a92087e6-2"
 
 
 def _s3(*, etag: str | None = None, size: int | None = None, key: str = "k") -> S3FileInfo:
-    return S3FileInfo(key=key, etag=etag, size=size)
+    """An S3 listing entry whose ETag is *etag* the way a listing carries it:
+    wrapped in S3's double quotes (``S3FileInfo.etag`` keeps the response's text)."""
+    return S3FileInfo(key=key, etag=None if etag is None else f'"{etag}"', size=size)
 
 
 def _pair(transfer_type: TransferType, *, src: FileInfo, dest: FileInfo) -> SyncPair:
@@ -152,6 +159,25 @@ class TestConstruction:
     def test_check_size_flag(self) -> None:
         assert _etag(check_size=False).check_size is False
 
+    @pytest.mark.parametrize("part_size", [0, -1, 8.0, "8MB"])
+    def test_a_part_size_that_is_no_positive_integer_is_refused(self, part_size: Any) -> None:
+        # 0 used to be held and divide by zero at the first multipart ETag, a
+        # float to fail in the read; both are the caller's argument, refused
+        # where it is passed.
+        with pytest.raises(ValidationError, match="part_size must be a positive integer"):
+            EtagComparison(part_size=part_size)
+
+    @pytest.mark.parametrize("configured", [0, -1])
+    def test_a_profile_part_size_that_is_not_positive_is_refused(self, configured: int) -> None:
+        with pytest.raises(InvalidConfigError) as caught:
+            _etag(_FakeS3(configured))
+        assert str(caught.value) == (
+            f"Value for multipart_chunksize must be a positive integer: {configured}"
+        )
+
+    def test_the_smallest_part_size_is_accepted(self) -> None:
+        assert _etag(part_size=1).part_size == 1
+
 
 class TestS3Integration:
     """``EtagComparison(s3)`` against a real boto3 session over a temp config file."""
@@ -164,6 +190,16 @@ class TestS3Integration:
         monkeypatch.setenv("AWS_CONFIG_FILE", str(cfg))
         s3 = S3(session=boto3.Session())
         assert _etag(s3).part_size == 16 * _MIB
+
+    def test_a_zero_part_size_in_the_config_file_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = tmp_path / "config"
+        cfg.write_text("[default]\ns3 =\n    multipart_chunksize = 0\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(cfg))
+        s3 = S3(session=boto3.Session())
+        with pytest.raises(InvalidConfigError, match="must be a positive integer: 0"):
+            _etag(s3)
 
     def test_absent_key_falls_back_to_default(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -195,6 +231,24 @@ class TestCopyDirectEtag:
             EtagComparison()(_pair(TransferType.COPY, src=_s3(etag="abc"), dest=_s3(etag=None)))
             is True
         )
+
+    def test_a_hand_built_bare_etag_compares_like_a_quoted_one(self) -> None:
+        # An entry built by hand may carry the bare hex; the quotes are not
+        # part of what is compared.
+        bare = S3FileInfo(key="k", etag="abc")
+        assert EtagComparison()(_pair(TransferType.COPY, src=bare, dest=_s3(etag="abc"))) is False
+        assert EtagComparison()(_pair(TransferType.COPY, src=bare, dest=_s3(etag="xyz"))) is True
+
+    def test_two_empty_etags_are_not_the_same_object(self) -> None:
+        # An endpoint serving an empty ETag leaves nothing to compare: the
+        # pair differs (copy), whichever empty spelling each side carries.
+        for left, right in [("", ""), ('""', '""'), ("", '""')]:
+            pair = _pair(
+                TransferType.COPY,
+                src=S3FileInfo(key="k", etag=left),
+                dest=S3FileInfo(key="k", etag=right),
+            )
+            assert EtagComparison()(pair) is True
 
     def test_non_s3_side_counts_as_differ(self) -> None:
         # A side that is not an S3FileInfo has no comparable etag -> differ.
@@ -435,6 +489,30 @@ class TestContentDiffers:
 
     def test_path_mismatch_differs(self, tmp_path: Path) -> None:
         assert EtagComparison().content_differs(write_file(tmp_path, _TEN), etag="0" * 32) is True
+
+    def test_the_etag_is_taken_quoted_or_bare(self, tmp_path: Path) -> None:
+        # `S3FileInfo.etag` and a boto3 response carry S3's quotes; a caller
+        # holding the bare hex passes that. Both name the same object.
+        p = write_file(tmp_path, _TEN)
+        comparison = EtagComparison()
+        assert comparison.content_differs(p, etag=f'"{_TEN_SINGLE}"') is False
+        assert comparison.content_differs(p, etag=_TEN_SINGLE) is False
+        assert comparison.content_differs(p, etag='"' + "0" * 32 + '"') is True
+
+    def test_an_etag_that_is_not_a_plain_one_reads_as_differing(self, tmp_path: Path) -> None:
+        # A weak validator is not the content's MD5; only a matched pair of
+        # quotes is removed, so it never equals a computed ETag.
+        p = write_file(tmp_path, _TEN)
+        assert EtagComparison().content_differs(p, etag=f'W/"{_TEN_SINGLE}"') is True
+        # A quote on one side only is not a pair: it stays, and the value
+        # differs (stripping every quote would make these two read as same).
+        assert EtagComparison().content_differs(p, etag=f'"{_TEN_SINGLE}') is True
+        assert EtagComparison().content_differs(p, etag=f'{_TEN_SINGLE}"') is True
+
+    def test_an_etag_empty_inside_its_quotes_is_indeterminate(self, tmp_path: Path) -> None:
+        # Nothing is opened: a path that does not exist would raise otherwise.
+        missing = tmp_path / "no-such-file"
+        assert EtagComparison().content_differs(missing, etag='""') is True
 
     def test_str_path_accepted(self, tmp_path: Path) -> None:
         # str and PathLike sources are the same source.

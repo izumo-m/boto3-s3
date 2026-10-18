@@ -36,7 +36,7 @@ Each accepts `True`, `False`, or a callable. For `create_filter` and
 to act on it:
 
 ```python
-s3.sync(src, dest, delete_filter=lambda info: info.mtime < cutoff)
+s3.sync(src, dest, delete_filter=lambda info: info.mtime is not None and info.mtime < cutoff)
 ```
 
 `update_filter` is different because its entry exists on both sides, so its
@@ -134,20 +134,23 @@ s3.sync("./site", "s3://my-bucket/site/", pair_filter=decide)
 ```
 
 Two things make this work as a journal. The calls are **serial, on your thread,
-in ascending key order** across all three kinds of entry, so the log is written
-in one deterministic sequence and the callback needs no locking. And every entry
+in ascending key order** across all three kinds of entry — given listings in key
+order, which real S3, MinIO and the local walk all provide (an S3-compatible
+endpoint that does not sort breaks the order, as it breaks the pairing) — so the
+log is written in one deterministic sequence and the callback needs no locking. And every entry
 reaches it, including the ones nothing will be done to — so returning `False`
-everywhere is a real "report what a sync would decide" mode that touches
-nothing:
+everywhere is a real "report what a sync would decide" mode that transfers and
+deletes nothing (a download still creates its destination directory, section
+6):
 
 ```python
 s3.sync("./site", "s3://my-bucket/site/", pair_filter=lambda pair: False)
 ```
 
 `pair_filter` replaces the three lanes rather than layering onto them, so
-passing it together with `create_filter`, `update_filter`, `delete_filter` or
-`no_overwrite=True` is an error rather than a silent winner. The default
-overwrite rule is not applied underneath it either — call
+passing it together with a non-default `create_filter`, `update_filter` or
+`delete_filter`, or with `no_overwrite=True`, is an error rather than a silent
+winner. The default overwrite rule is not applied underneath it either — call
 `AwsCliComparison()(pair)` yourself if you want it for the both-sides entries.
 `filter=` still applies first, as always: an entry it hides never reaches the
 callback.
@@ -166,15 +169,18 @@ refused. See [`compatibility.md`](../compatibility.md).
 
 - **Downloading** creates the destination directory before scanning, so it
   exists even if the sync transfers nothing. If a *file* already exists at that
-  path, the run proceeds and then every item fails.
+  path, the run proceeds and then every item fails — or, when the path is
+  written with a trailing separator, stops before anything is listed, the
+  directory creation failing on the file.
 - **Uploading** from a path that does not exist raises. If the source is a file
   rather than a directory, `sync` warns and completes with warnings rather than
   failing — `sync` is a directory operation.
-- **Syncing a path onto itself** does nothing and succeeds silently; there is no
-  self-reference guard like `mv`'s.
-- **S3 Express directory buckets** are rejected on either side, because their
-  listings are not ordered the way `sync` needs to pair them. Use a recursive
-  `cp` instead.
+- **Syncing an S3 location onto itself** does nothing and succeeds silently;
+  there is no self-reference guard like `mv`'s.
+- **S3 Express directory buckets** are rejected on either side, and so are
+  their access points (a name ending `--xa-s3`), because their listings are
+  not ordered the way `sync` needs to pair them. Use a recursive `cp`
+  instead.
 
 ## 7. Results and failure
 
@@ -190,8 +196,16 @@ ordering relative to transfers is not deterministic.
 
 - **Deletes are batched.** Orphans on an S3 destination are removed with S3's
   batch delete API rather than one call per key, so the deletions surface
-  together on flush. The final state, the set of reported lines, and the outcome
-  are the same.
+  together on flush. For a run that enumerates to the end, the final state and
+  the outcome are the same unless the endpoint fails requests — a batch has
+  one set of attempts where `aws s3` gives each key its own, so the keys of a
+  batch that fails as a whole are sent again one by one and can end up
+  deleted where `aws s3` gives up on them, even after a single failure — and a key the batch response
+  fails reports an error naming `DeleteObjects` rather than `DeleteObject`
+  (see [`deleter.md`](./deleter.md)). If a listing fails part
+  way, orphans still waiting in the unsent batch — up to 999 — are dropped,
+  undeleted and unreported, where `aws s3 sync` would already have removed
+  them.
 - **Archived objects are skipped even when restored.** `sync` decides from the
   listing, which does not carry restore status, so a restored Glacier object is
   still skipped with a warning. `force_glacier_transfer=True` is the only way

@@ -163,8 +163,30 @@ class PromptToolkitAutoPrompter(AutoPrompter):
             completer=ThreadedCompleter(PromptToolkitCompleter(self._source)),
             complete_while_typing=True,
         )
-        text = session.prompt(f"{ROOT} ", default=shlex.join(argv))
+        text = session.prompt(
+            f"{ROOT} ",
+            default=self._seed(argv),
+            pre_run=session.default_buffer.start_completion,
+        )
         return shlex.split(text)
+
+    def _seed(self, argv: list[str]) -> str:
+        """The buffer the prompt opens with, and its menu (aws's ``pre_run``).
+
+        A seed nothing completes is taken as finished words, so aws leaves a
+        space after it - what is typed next starts a new word instead of
+        running into the last one (``ls`` then ``--dryrun`` is
+        ``ls --dryrun``, measured). A seed that still completes is left open,
+        its candidates already showing. The menu opens either way: the prompt
+        starts with ``start_completion``.
+        """
+        seed = shlex.join(argv)
+        if not seed or seed.endswith(" "):
+            return seed
+        line = f"{ROOT} {seed}"
+        if self._source.autocomplete(line, len(line)):
+            return seed
+        return f"{seed} "
 
 
 def build_default_prompter() -> AutoPrompter:

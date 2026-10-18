@@ -94,7 +94,8 @@ def register(client: Any) -> None:
     ``requestAlgorithmMember`` unset and where botocore would then stamp its
     own default - botocore's own test, in its order: an operation that
     requires a checksum (``requestChecksumRequired``; of the ones the CLI
-    sends, DeleteObjects, PutBucketTagging and PutBucketWebsite) gets one
+    sends, DeleteObjects, PutBucketWebsite and the PutObjectTagging a copy
+    falls back to for a large tag set) gets one
     under either ``request_checksum_calculation`` setting, every other one
     only under ``when_supported`` - so the CLI's deletes, bucket puts and annotation
     writes carry what aws's do (a ``when_required`` ``website`` sends

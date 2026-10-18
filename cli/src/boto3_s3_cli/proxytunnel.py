@@ -94,12 +94,21 @@ def _tunnel(self: Any) -> None:
     host. The bytes reaching the wire are the same either way: the supplied
     headers first, in order, then the generated ``Host``.
 
+    An IPv6 literal is bracketed in the request line and bare in that header
+    (``CONNECT [::1]:8443`` / ``Host: ::1:8443``), which is what 3.12 and later
+    write: their ``set_tunnel`` strips the brackets urllib3 hands it and
+    generates ``Host`` from the result, and their opener puts them back for
+    the request target alone. Below 3.11.4 ``set_tunnel`` keeps the brackets
+    whenever the port comes separately - as it does from urllib3 - so the
+    host is stripped here first, or both lines would carry them.
+
     The request-target and header validations CPython's own copy carries are
     left out. They guard against input shapes botocore does not put on this
     path, and each one is a further private name the pin would have to find
     before it could install itself at all.
     """
-    host = _wrap_ipv6(self._tunnel_host.encode("idna"))
+    tunnel_host: bytes = _strip_brackets(self._tunnel_host).encode("idna")
+    host = _wrap_ipv6(tunnel_host)
     port: int = self._tunnel_port
     lines = [b"CONNECT %s:%d %s\r\n" % (host, port, self._http_vsn_str.encode("ascii"))]
     supplied_host = False
@@ -107,7 +116,7 @@ def _tunnel(self: Any) -> None:
         supplied_host = supplied_host or header.lower() == "host"
         lines.append(f"{header}: {value}\r\n".encode("latin-1"))
     if not supplied_host:
-        lines.append(b"Host: %s:%d\r\n" % (host, port))
+        lines.append(b"Host: %s:%d\r\n" % (tunnel_host, port))
     lines.append(b"\r\n")
     # One send() rather than one per line, as CPython does: it lets the host OS
     # pick a sensible packet size instead of emitting a series of small ones.
@@ -128,11 +137,24 @@ def _tunnel(self: Any) -> None:
         response.close()
 
 
+def _strip_brackets(host: str) -> str:
+    """The tunnel host without an IPv6 literal's brackets, as 3.12 holds it.
+
+    urllib3 passes the literal bracketed, with the port as its own argument.
+    From 3.11.4 on ``set_tunnel`` strips the brackets regardless; before that
+    it strips them only when it also has to split the port off, so the host
+    it stored still has them.
+    """
+    if host[:1] == "[" and host[-1:] == "]":
+        return host[1:-1]
+    return host
+
+
 def _wrap_ipv6(host: bytes) -> bytes:
     """Bracket a bare IPv6 literal, as CPython's tunnel opener does.
 
-    urllib3 reaches ``set_tunnel`` with the host already stripped of brackets,
-    and an authority-form request target needs them back.
+    An authority-form request target needs the brackets `_strip_brackets`
+    (or ``set_tunnel`` itself) took off.
     """
     if b":" in host and not host.startswith(b"["):
         return b"[" + host + b"]"

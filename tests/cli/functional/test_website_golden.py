@@ -1,12 +1,8 @@
 """``boto3-s3 website`` functional coverage: golden replay + the moto success path.
 
-Two halves, because MinIO cannot exercise the success path (testing.md section 7 -
-it rejects every PutBucketWebsite with MalformedXML, the inverse of the
-usual moto fidelity gap):
+Two halves:
 
-1. **Golden replay** for the client-side-error scenarios (rc 252, no server
-   contact, so no moto backend is needed) - the only website goldens that
-   exist.
+1. **Golden replay** on moto of every scenario that carries a golden.
 2. **TestWebsiteOnMoto** - the success path verified directly against moto
    (full PutBucketWebsite support): rc 0, empty stdout,
    and the configuration read back via ``get_bucket_website``; plus
@@ -33,7 +29,7 @@ _REPLAYABLE = [scenario for scenario in SCENARIOS if not scenario.diff_only]
 
 
 @pytest.mark.parametrize("scenario", _REPLAYABLE, ids=lambda s: s.name)
-def test_website_matches_golden(scenario: WebsiteScenario) -> None:
+def test_website_matches_golden(scenario: WebsiteScenario, moto_s3: Any) -> None:
     result = run_cli_in_process(resolve_argv(scenario, FUNCTIONAL_BUCKET))
     lines = normalize_rm_stdout(result.stdout, bucket=FUNCTIONAL_BUCKET)
     golden = load_golden("website", scenario.name)

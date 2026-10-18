@@ -13,23 +13,32 @@ from typing import Any, cast
 import boto3
 import pytest
 from botocore.config import Config
-from botocore.exceptions import ProfileNotFound
+from botocore.exceptions import ClientError, ProfileNotFound
 
 from boto3_s3 import (
     CLIENT_REGION,
     S3,
+    AccessDeniedError,
+    BatchError,
+    Boto3S3Error,
     CancelledError,
     CancelToken,
+    FileInfo,
     FileKind,
     InvalidConfigError,
     IOStorage,
     LocalStorage,
     NotFoundError,
+    OpOutcome,
+    OpResult,
     S3Storage,
+    SyncPair,
     TransferConfig,
     ValidationError,
 )
 from tests.utils.fakemodel import model_meta
+from tests.utils.fakes3 import client_error, listing
+from tests.utils.recorder import make_recording_client
 
 _MTIME = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
 
@@ -327,6 +336,118 @@ class TestValidationOperationAttribution:
         assert exc_info.value.__cause__ is cause
 
 
+class TestStrictChecksPrecedeTheGates:
+    """aws rejects the unsupported ARN families before every other check (its
+    ``add_paths`` runs ahead of the stream checks and ``_validate_path_args``),
+    so a bad location reports as such whatever else is wrong with the call."""
+
+    _OLAP = "s3://arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/olap/k"
+
+    def test_mvs_same_path_check_comes_after(self) -> None:
+        with pytest.raises(ValidationError, match="Object Lambda") as exc_info:
+            S3().mv(self._OLAP, self._OLAP)
+        assert exc_info.value.operation == "mv"
+
+    def test_the_stream_gates_come_after(self) -> None:
+        with pytest.raises(ValidationError, match="Object Lambda"):
+            S3().cp(IOStorage(io.BytesIO(b"x")), self._OLAP, recursive=True)
+        with pytest.raises(ValidationError, match="Object Lambda"):
+            S3().cp(self._OLAP, IOStorage(io.BytesIO()), no_overwrite=True)
+        with pytest.raises(ValidationError, match="Object Lambda") as exc_info:
+            S3().mv(self._OLAP, IOStorage(io.BytesIO()), recursive=True)
+        assert exc_info.value.operation == "mv"
+
+
+class TestStorageMethodAttribution:
+    """A storage's ``open`` / ``delete`` raise unnamed; the operation names them.
+
+    The storage cannot know which operation is using it (design/exceptions.md),
+    so the same delete failure reads the operation's name whichever path
+    reached it, and ``None`` on a direct call - the rule ``validate`` already
+    follows above.
+    """
+
+    def test_a_direct_delete_leaves_operation_unset(self, tmp_path: Any) -> None:
+        client, _calls = make_recording_client([client_error("AccessDenied", 403, "DeleteObject")])
+        with pytest.raises(Boto3S3Error) as exc_info:
+            S3Storage("s3://b/p/k", client=client).delete(FileInfo(key="p/k"))
+        assert (exc_info.value.operation, exc_info.value.bucket, exc_info.value.key) == (
+            None,
+            "b",
+            "p/k",
+        )
+        with pytest.raises(NotFoundError) as local_info:
+            LocalStorage(str(tmp_path)).delete(
+                FileInfo(key=f"{tmp_path}/missing".replace(os.sep, "/"))
+            )
+        assert local_info.value.operation is None
+
+    def test_rms_single_key_path_names_rm(self) -> None:
+        # The batched path (S3Deleter) already stamps "rm"; the blind
+        # single-key path goes through S3Storage.delete and must agree.
+        client, _calls = make_recording_client([client_error("AccessDenied", 403, "DeleteObject")])
+        results: list[OpResult] = []
+        with pytest.raises(BatchError) as exc_info:
+            S3().rm(S3Storage("s3://b/p/k", client=client), on_result=results.append)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        error = results[0].error
+        assert error is not None
+        assert (error.operation, error.bucket, error.key) == ("rm", "b", "p/k")
+        assert exc_info.value.__cause__ is error
+
+    def test_syncs_local_orphan_delete_names_sync(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        (dest / "orphan.txt").write_bytes(b"o")
+
+        def refuse(path: Any, *args: Any, **kwargs: Any) -> None:
+            raise PermissionError(13, "Permission denied", str(path))
+
+        monkeypatch.setattr(os, "remove", refuse)
+        client, _calls = make_recording_client([listing(("p/a.txt", 1))])
+        results: list[OpResult] = []
+        with pytest.raises(BatchError):
+            S3().sync(
+                S3Storage("s3://b/p/", client=client),
+                str(dest),
+                create_filter=False,
+                delete_filter=True,
+                on_result=results.append,
+            )
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        error = results[0].error
+        assert error is not None
+        assert (error.operation, error.bucket, error.key) == (
+            "sync",
+            None,
+            str(dest / "orphan.txt").replace(os.sep, "/"),
+        )
+
+    def test_a_decision_raising_unnamed_is_attributed_to_sync(self, tmp_path: Any) -> None:
+        # A content strategy opens one side through Storage.open, which raises
+        # unnamed; the failure aborts the run attributed to sync.
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        (dest / "a.txt").write_bytes(b"a")
+        error = Boto3S3Error("content compare failed", key="p/a.txt")
+
+        def compare(_pair: SyncPair) -> bool:
+            raise error
+
+        client, _calls = make_recording_client([listing(("p/a.txt", 1))])
+        with pytest.raises(Boto3S3Error) as exc_info:
+            S3().sync(S3Storage("s3://b/p/", client=client), str(dest), update_filter=compare)
+        assert exc_info.value is error
+        assert error.operation == "sync"
+
+
+def _verifying(verify: Any) -> SimpleNamespace:
+    """A client stand-in carrying *verify* where botocore keeps it."""
+    return SimpleNamespace(_endpoint=SimpleNamespace(http_session=SimpleNamespace(_verify=verify)))
+
+
 class TestClientSeam:
     """``S3.client`` builds a fresh client from session / endpoint_url / config."""
 
@@ -381,6 +502,86 @@ class TestClientSeam:
         assert type(exc_info.value) is InvalidConfigError
         assert isinstance(exc_info.value.__cause__, ProfileNotFound)
 
+    @pytest.mark.parametrize("bundle", ["", "   "], ids=["empty", "whitespace"])
+    def test_an_empty_ca_bundle_is_refused(
+        self, bundle: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An older botocore reads an empty CA bundle as "verification off" and
+        # builds the client; 1.43.54 refuses it while building. Either way
+        # the library answers botocore's own refusal, as the InvalidConfigError
+        # refinement, from both build paths.
+        from botocore.exceptions import InvalidConfigError as BotocoreInvalidConfigError
+
+        monkeypatch.setenv("AWS_CA_BUNDLE", bundle)
+        for build in (lambda: S3().client(), lambda: S3Storage("s3://b/").get_client()):
+            with pytest.raises(InvalidConfigError, match="Invalid CA bundle") as exc_info:
+                build()
+            assert type(exc_info.value) is InvalidConfigError
+            assert isinstance(exc_info.value.__cause__, BotocoreInvalidConfigError)
+
+    @pytest.mark.parametrize("bundle", ["", "   "], ids=["empty", "whitespace"])
+    def test_a_supplied_client_with_an_empty_ca_bundle_is_refused(self, bundle: str) -> None:
+        # A client an older botocore built with an empty CA bundle never
+        # carries a request: every operation takes its client from here.
+        client = SimpleNamespace(
+            _endpoint=SimpleNamespace(http_session=SimpleNamespace(_verify=bundle))
+        )
+        storage = S3Storage("s3://b/", client=cast("Any", client))
+        with pytest.raises(InvalidConfigError, match="Invalid CA bundle"):
+            storage.get_client()
+
+    @pytest.mark.parametrize("bundle", ["", "   "], ids=["empty", "whitespace"])
+    def test_an_empty_aws_ca_bundle_is_refused_beside_a_handed_over_client(
+        self, bundle: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The client carries a real path, but the clients botocore builds
+        # behind it for an assumed role or SSO resolve AWS_CA_BUNDLE first.
+        monkeypatch.setenv("AWS_CA_BUNDLE", bundle)
+        with pytest.raises(InvalidConfigError, match="Invalid CA bundle"):
+            S3Storage("s3://b/", client=cast("Any", _verifying("/etc/ca.pem"))).get_client()
+
+    def test_an_empty_requests_ca_bundle_is_not_guessed_at(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Whether the credential clients read REQUESTS_CA_BUNDLE depends on the
+        # session's profile, which a handed-over client does not name.
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", "")
+        client = _verifying("/etc/ca.pem")
+        assert S3Storage("s3://b/", client=cast("Any", client)).get_client() is client
+
+    def test_a_client_the_cli_vetted_skips_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # boto3-s3-cli checks every client its sessions build where aws does;
+        # a second look at the environment would refuse runs aws completes.
+        from boto3_s3.s3storage import CA_BUNDLE_ENVIRONMENT_VETTED
+
+        monkeypatch.setenv("AWS_CA_BUNDLE", "")
+        client = _verifying("/etc/ca.pem")
+        setattr(client, CA_BUNDLE_ENVIRONMENT_VETTED, True)
+        assert S3Storage("s3://b/", client=cast("Any", client)).get_client() is client
+
+    def test_a_client_s3_built_is_not_second_guessed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A session whose ca_bundle was set in code outranks AWS_CA_BUNDLE for
+        # the S3 client and its credential clients alike, so a string-URI
+        # operation handing S3.client()'s client to S3Storage must not refuse
+        # it over the (unread) empty variable.
+        import certifi
+
+        session = boto3.Session(region_name="us-east-1")
+        session._session.set_config_variable("ca_bundle", certifi.where())  # pyright: ignore[reportPrivateUsage]
+        monkeypatch.setenv("AWS_CA_BUNDLE", "")
+        storage = S3(session=session).resolve("s3://b/")
+        assert isinstance(storage, S3Storage)
+        storage.get_client()
+
+    @pytest.mark.parametrize("verify", [True, False, "/etc/ca.pem"], ids=["default", "off", "path"])
+    def test_a_usable_verify_setting_passes(self, verify: Any) -> None:
+        client = SimpleNamespace(
+            _endpoint=SimpleNamespace(http_session=SimpleNamespace(_verify=verify))
+        )
+        assert S3Storage("s3://b/", client=cast("Any", client)).get_client() is client
+
     def test_malformed_endpoint_maps_to_invalid_config_error(self) -> None:
         # botocore rejects a malformed endpoint_url with a plain ValueError,
         # which is not a BotoCoreError and used to leak raw through the
@@ -390,6 +591,62 @@ class TestClientSeam:
             S3(endpoint_url="not-a-url").client()
         assert type(exc_info.value) is InvalidConfigError
         assert isinstance(exc_info.value.__cause__, ValueError)
+
+    def test_a_config_value_of_the_wrong_shape_maps_to_invalid_config_error(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `s3 = foo` is a scalar where botocore reads a section: its
+        # `.get(...)` on the string raises AttributeError mid-build.
+        config = tmp_path / "config"
+        config.write_text("[default]\nregion = us-east-1\ns3 = foo\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        monkeypatch.delenv("AWS_PROFILE", raising=False)
+        for build in (lambda: S3().client(), lambda: S3Storage("s3://b/").get_client()):
+            with pytest.raises(InvalidConfigError) as exc_info:
+                build()
+            assert isinstance(exc_info.value.__cause__, AttributeError)
+
+    def test_a_credential_process_that_cannot_run_maps_to_invalid_config_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # botocore runs credential_process while it builds the client, and a
+        # missing executable surfaces as subprocess's own FileNotFoundError.
+        def boom(*args: Any, **kwargs: Any) -> Any:
+            raise FileNotFoundError(2, "No such file or directory", "/no/such-helper")
+
+        monkeypatch.setattr(boto3, "client", boom)
+        for build in (lambda: S3().client(), lambda: S3Storage("s3://b/").get_client()):
+            with pytest.raises(InvalidConfigError) as exc_info:
+                build()
+            assert isinstance(exc_info.value.__cause__, FileNotFoundError)
+
+    @pytest.mark.parametrize(
+        ("raised", "category"),
+        [
+            (OSError(8, "Exec format error"), "InvalidConfigError"),
+            (IsADirectoryError(21, "Is a directory", "/helper"), "InvalidConfigError"),
+            (OSError(24, "Too many open files", "/botocore/data/endpoints.json"), "TransportError"),
+        ],
+    )
+    def test_a_build_time_os_error_is_configuration_only_for_a_configured_path(
+        self, monkeypatch: pytest.MonkeyPatch, raised: OSError, category: str
+    ) -> None:
+        def boom(*args: Any, **kwargs: Any) -> Any:
+            raise raised
+
+        monkeypatch.setattr(boto3, "client", boom)
+        with pytest.raises(Boto3S3Error) as exc_info:
+            S3().client()
+        assert type(exc_info.value).__name__ == category
+        assert exc_info.value.__cause__ is raised
+
+    def test_a_caller_s_wrong_typed_argument_passes_through(self) -> None:
+        # A programming error in the arguments is not the configuration's
+        # (design/exceptions.md section 2): it propagates as is.
+        with pytest.raises(AttributeError):
+            S3(session=cast("Any", "x")).client()
+        with pytest.raises(AttributeError):
+            S3(config=cast("Any", "x")).client()
 
 
 class TestResolveSeam:
@@ -635,6 +892,37 @@ class TestMaterializeCrtEngine:
             }
         ]
 
+    @pytest.mark.parametrize("bundle", ["", "   "], ids=["empty", "whitespace"])
+    def test_an_empty_ca_bundle_is_refused_as_invalid_config(self, bundle: str) -> None:
+        # A client handed straight to the CRT seam, past get_client: the
+        # engine refuses it before the lock, and the seam refines botocore's
+        # error to the library's.
+        from botocore.exceptions import InvalidConfigError as BotocoreInvalidConfigError
+
+        pytest.importorskip("awscrt")
+        client = SimpleNamespace(
+            meta=SimpleNamespace(endpoint_url=None),
+            _endpoint=SimpleNamespace(http_session=SimpleNamespace(_verify=bundle)),
+        )
+        config = TransferConfig(preferred_transfer_client="crt")
+        with pytest.raises(InvalidConfigError, match="Invalid CA bundle") as exc_info:
+            S3().materialize_crt_engine(client, transfer_config=config)  # pyright: ignore[reportArgumentType]
+        assert type(exc_info.value) is InvalidConfigError
+        assert isinstance(exc_info.value.__cause__, BotocoreInvalidConfigError)
+
+    def test_an_empty_aws_ca_bundle_is_refused_beside_the_client(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("awscrt")
+        monkeypatch.setenv("AWS_CA_BUNDLE", "")
+        client = SimpleNamespace(
+            meta=SimpleNamespace(endpoint_url=None),
+            _endpoint=SimpleNamespace(http_session=SimpleNamespace(_verify="/etc/ca.pem")),
+        )
+        config = TransferConfig(preferred_transfer_client="crt")
+        with pytest.raises(InvalidConfigError, match="Invalid CA bundle"):
+            S3().materialize_crt_engine(client, transfer_config=config)  # pyright: ignore[reportArgumentType]
+
     def test_the_instance_transfer_config_is_the_fallback(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -667,6 +955,79 @@ class TestMaterializeCrtEngine:
         # The no-op it is on the classic lane: no raise, nothing constructed.
         S3(transfer_config=config).materialize_crt_engine(client)  # pyright: ignore[reportArgumentType]
 
+    def test_the_crt_lane_builds_without_the_crt_only_boto3_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # boto3 1.34.6 to 1.41 run the CRT engine (from 1.34.6 the crt extra's
+        # awscrt meets boto3's own minimum) but carry no InvalidCrtTransferConfigError
+        # - it arrived with 1.42's CRT-aware TransferConfig. Importing it on
+        # the CRT lane failed every CRT transfer there with ImportError.
+        import boto3.exceptions
+
+        from boto3_s3 import crtsupport
+
+        monkeypatch.delattr(boto3.exceptions, "InvalidCrtTransferConfigError", raising=False)
+        built: list[Any] = []
+        monkeypatch.setattr(
+            crtsupport, "materialize_crt_engine", lambda _c, config, **_k: built.append(config)
+        )
+        client = SimpleNamespace(meta=SimpleNamespace(endpoint_url=None))
+        config = TransferConfig(preferred_transfer_client="crt")
+        S3(transfer_config=config).materialize_crt_engine(client)  # pyright: ignore[reportArgumentType]
+        assert built == [config]
+
+    @pytest.mark.parametrize(
+        ("raised", "expected"),
+        [
+            (
+                FileNotFoundError(2, "No such file or directory", "/ca/missing.pem"),
+                InvalidConfigError,
+            ),
+            (
+                RuntimeError("34 (AWS_ERROR_INVALID_ARGUMENT): An invalid argument was passed."),
+                InvalidConfigError,
+            ),
+            (
+                ClientError({"Error": {"Code": "AccessDenied", "Message": "denied"}}, "AssumeRole"),
+                AccessDeniedError,
+            ),
+        ],
+        ids=["missing-ca-bundle", "unparsable-ca-bundle", "refused-assume-role"],
+    )
+    def test_a_construction_failure_is_classified(
+        self, monkeypatch: pytest.MonkeyPatch, raised: Exception, expected: type[Boto3S3Error]
+    ) -> None:
+        # awscrt reads the CA bundle path itself (OSError) and parses it in C
+        # (RuntimeError); resolving a credential the compatibility check has
+        # to compare by value raises the botocore family. None of them is the
+        # documented pass-through, so each keeps its category and its text.
+        from boto3_s3 import crtsupport
+
+        def fake(_client: Any, _config: Any, **_kwargs: Any) -> None:
+            raise raised
+
+        monkeypatch.setattr(crtsupport, "materialize_crt_engine", fake)
+        client = SimpleNamespace(meta=SimpleNamespace(endpoint_url=None))
+        config = TransferConfig(preferred_transfer_client="crt")
+        with pytest.raises(expected) as info:
+            S3(transfer_config=config).materialize_crt_engine(client)  # pyright: ignore[reportArgumentType]
+        assert str(info.value) == str(raised)
+        assert info.value.__cause__ is raised
+
+    def test_awscrts_region_assertion_passes_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The CLI converts awscrt's bare AssertionError at its one call site
+        # (aws's empty rc-255 report), so the library must hand it over as is.
+        from boto3_s3 import crtsupport
+
+        def fake(_client: Any, _config: Any, **_kwargs: Any) -> None:
+            raise AssertionError
+
+        monkeypatch.setattr(crtsupport, "materialize_crt_engine", fake)
+        client = SimpleNamespace(meta=SimpleNamespace(endpoint_url=None))
+        config = TransferConfig(preferred_transfer_client="crt")
+        with pytest.raises(AssertionError):
+            S3(transfer_config=config).materialize_crt_engine(client)  # pyright: ignore[reportArgumentType]
+
 
 class TestModuleLevelConvenienceSignatures:
     """The module-level wrappers introspect as their method minus ``self``
@@ -689,3 +1050,17 @@ class TestModuleLevelConvenienceSignatures:
 
         bound = inspect.signature(boto3_s3.cp).bind("local.txt", "s3://bucket/key")
         assert bound.args == ("local.txt", "s3://bucket/key")
+
+    def test_wrappers_pickle_by_reference(self) -> None:
+        # pickle stores a function as module + __qualname__, so the qualname
+        # functools.wraps copied (``S3.cp``) resolved to the method itself and
+        # the wrapper was refused as "not the same object" - unusable with a
+        # ProcessPoolExecutor. The wrapper is named by its own binding instead.
+        import pickle
+
+        import boto3_s3
+
+        for name in ("cp", "ls", "mv", "rm", "mb", "rb", "presign", "sync", "website"):
+            wrapper = getattr(boto3_s3, name)
+            assert wrapper.__qualname__ == name
+            assert pickle.loads(pickle.dumps(wrapper)) is wrapper, name

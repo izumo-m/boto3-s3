@@ -214,6 +214,23 @@ class TestOpenUploadRoute:
         assert results[0].src == "mem://data/a.txt"
         assert results[0].dest == "s3://bucket/up/a.txt"
 
+    def test_an_upload_into_a_cut_short_outposts_name_puts_the_split_key(self) -> None:
+        # `my_ap` is the access point `my` and the key `_ap`: the key slices
+        # off the formatted destination with no separator at the cut.
+        base = "arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-1/accesspoint/"
+        src = _MemStorage({"": b"x"}, location="mem://data/a.txt")
+        client, calls = make_recording_client([{}])
+        results: list[OpResult] = []
+        S3().cp(
+            src,
+            S3Storage(f"s3://{base}my_ap", client=client),
+            transfer_config=_SYNC,
+            on_result=results.append,
+        )
+        assert ops(calls) == ["PutObject"]
+        assert (calls[0].params["Bucket"], calls[0].params["Key"]) == (f"{base}my", "_ap")
+        assert results[0].dest == f"s3://{base}my_ap"
+
     def test_recursive_upload_opens_each_key_in_order(self) -> None:
         src = _MemStorage({"a.txt": b"x", "sub/b.txt": b"yy"}, location="mem://data/")
         client, calls = make_recording_client([{}, {}])
@@ -417,6 +434,22 @@ class TestOpenDownloadRoute:
         assert ops(calls) == ["HeadObject", "GetObject"]
         assert store == {"": b"payload"}
 
+    def test_a_recursive_download_from_a_cut_short_outposts_name_lists_the_split(
+        self,
+    ) -> None:
+        base = "arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-1/accesspoint/"
+        dest = _MemStorage({}, location="mem://data/")
+        client, calls = make_recording_client([{}])
+        S3().cp(
+            S3Storage(f"s3://{base}my_ap/", client=client),
+            dest,
+            recursive=True,
+            transfer_config=_SYNC,
+        )
+        assert [(c.operation, c.params["Bucket"], c.params["Prefix"]) for c in calls] == [
+            ("ListObjectsV2", f"{base}my", "_ap/")
+        ]
+
     def test_single_download_into_a_directory_uses_the_basename(self) -> None:
         # A "/"-terminated destination adopts the source's name (use_src_name).
         store: dict[str, bytes] = {}
@@ -437,6 +470,20 @@ class TestOpenDownloadRoute:
         S3().cp(
             S3Storage("s3://b/d/a.txt", client=client), dest, filter=drop, transfer_config=_SYNC
         )
+        assert ops(calls) == ["HeadObject"]
+        assert store == {}
+        assert dest.opens == []
+
+    def test_single_download_is_matched_under_aws_clis_filter_root(self) -> None:
+        # The open route applies the same single-source rule as the built-in
+        # one: `a//b` is matched as `/b` under aws-cli's root `a/`, so
+        # exclude("*").include("b") drops it. Reverting this route's call
+        # alone left every test green.
+        store: dict[str, bytes] = {}
+        dest = _MemStorage(store, location="mem://data/")
+        only_b = GlobFilter().exclude("*").include("b")
+        client, calls = make_recording_client([head_response()])
+        S3().cp(S3Storage("s3://b/a//b", client=client), dest, filter=only_b, transfer_config=_SYNC)
         assert ops(calls) == ["HeadObject"]
         assert store == {}
         assert dest.opens == []
@@ -606,6 +653,40 @@ class TestOpenRouteContracts:
             )
         assert ops(calls) == ["HeadObject", "GetObject"]  # and no DeleteObject
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert store == {}
+
+    def test_mv_commit_cut_short_by_an_interrupt_keeps_the_s3_source(self) -> None:
+        # use_threads=False runs the writer's close - the commit - on the
+        # calling thread, where a Ctrl-C can land. The interrupt escaped the
+        # close subscriber, upstream re-ran the callback list, the second
+        # close was a no-op, and the mv then deleted the S3 source and
+        # recorded SUCCEEDED for bytes no backend ever committed.
+        class _InterruptedCommitWriter(_MemWriter):
+            def close(self) -> None:
+                raise KeyboardInterrupt
+
+        class _InterruptedCommitMem(_MemStorage):
+            def open(
+                self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None
+            ) -> BinaryIO:
+                if mode == "wb":
+                    self.opens.append((key, mode))
+                    return _InterruptedCommitWriter(self._store, key)  # type: ignore[return-value]
+                return super().open(key, mode, size=size)
+
+        store: dict[str, bytes] = {}
+        dest = _InterruptedCommitMem(store, location="mem://data/out.bin")
+        client, calls = make_recording_client([head_response(), get_response(), {}])
+        results: list[OpResult] = []
+        with pytest.raises(KeyboardInterrupt):
+            S3().mv(
+                S3Storage("s3://b/d/a.txt", client=client),
+                dest,
+                transfer_config=_SYNC,
+                on_result=results.append,
+            )
+        assert ops(calls) == ["HeadObject", "GetObject"]  # and no DeleteObject
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
         assert store == {}
 
     def test_backend_failure_fails_the_item_and_the_run_continues(self) -> None:

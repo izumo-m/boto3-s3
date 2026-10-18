@@ -20,14 +20,21 @@ which are not objects; submitting them would try to delete prefixes.
 ```python
 S3Deleter(storage, *, request_payer=None, on_result=None, cancel_token=None,
           batch_size=1000, operation="delete", capture_response=False,
-          dryrun=False)
+          dryrun=False, transfer_config=None, session=None, crt_endpoint=None,
+          crt_allow_absent_credentials=False, crt_allow_lockless=False,
+          crt_region=CLIENT_REGION, crt_sign_requests=None)
 ```
 
 `storage` must be an `S3Storage`; anything else raises `ValidationError`. Only
 its client and bucket are used for addressing — the key part is ignored — but
 the object itself rides along on every result. Keep it open until the deleter is
-closed. The client is resolved during construction so that a credential problem
-surfaces on your thread rather than in the worker.
+closed. The client is built during construction, so a client that cannot be
+built — an unknown profile, say — fails on your thread rather than in the
+worker. The credential chain is walked then too, so a provider that fails
+outright — partial credentials, a failing `credential_process` — fails
+construction the same way; a chain that simply finds nothing raises nothing
+until the first request is signed, so missing credentials arrive as per-key
+failures (`ConfigurationError`).
 
 `batch_size` must be between 1 and 1000, S3's own limit for one batch request.
 
@@ -45,9 +52,22 @@ Used as a context manager, exiting normally flushes; exiting because of an
 exception discards the unsent buffer while still waiting for what is already in
 flight.
 
-**Close it.** The worker thread is not a daemon, so if you neither close it nor
-use the context manager, interpreter shutdown blocks until the in-flight batch
+**Close it.** Interpreter shutdown waits for the worker thread whichever
+thread started it (a daemon thread included), so if you neither close the
+deleter nor use the context manager, shutdown blocks until the in-flight batch
 finishes.
+
+`transfer_config` picks the client the requests ride, the way it picks a
+transfer's engine (`None` is boto3's `'auto'`): the storage's botocore client,
+or — when it selects the CRT engine — the CRT client, built in the constructor
+just as a transfer builds it. That is the client `aws s3` carries its deletes
+on under the same setting, so its retry policy and its error text are the
+deletes' here too; one difference it makes is spelled out under
+[Failures](#3-failures). `session` and the `crt_*` arguments are the CRT
+engine's postures, as on [`S3`](../reference/s3.md#s3); leave them alone
+unless you set them there. `rm` and `sync` pass their own `transfer_config`
+and postures (an S3-to-S3 `sync` always deletes on botocore, as `aws s3` runs
+it on its classic client).
 
 ### Rehearsing with `dryrun`
 
@@ -80,7 +100,9 @@ rehearsing; this flag is for code driving the deleter directly.
 
 `on_result` receives one `OpResult` per dispatched key, with `transfer_type`
 `delete` and `bytes_transferred` 0, in submission order within a batch. Keys
-discarded without being sent produce no record.
+discarded without being sent produce no record, and neither does a key whose
+own `DeleteObject` died without a response on the botocore client (see
+[Failures](#3-failures)).
 
 **It is called from the worker thread.** Keep it fast and do not let it raise.
 If it does raise, the records already delivered are counted, the rest of that
@@ -94,7 +116,11 @@ calls it on your own thread — see [Rehearsing with
 Cancelling through `cancel_token` never discards a batch whose request has
 already started — it completes and delivers its results. Buffered entries not
 yet sent are dropped without records, and immediate mode may also cancel a
-dispatched batch that has not begun.
+dispatched batch that has not begun. One kind of entry inside a started batch
+can still go unsent: a key the batch sends as a request of its own (one XML
+cannot carry, or a re-send) that had not gone out when the run was abandoned — by
+`close(flush=False)` for anything but a graceful cancel, or by an immediate
+one. It is dropped without a record, like a buffered entry.
 
 Nothing is printed. Beyond the result records, the deleter logs to the
 `boto3_s3.deleter` logger — batch dispatches and failures at debug level,
@@ -104,13 +130,34 @@ unattributable responses as warnings.
 
 A per-key failure carries the taxonomy exception matching S3's error code:
 `AccessDenied` becomes `AccessDeniedError`, the not-found family becomes
-`NotFoundError`, the throttling and 5xx family becomes `TransportError`, and
-anything else the base `Boto3S3Error`. The message reads like botocore's, so it
-can be printed as-is.
+`NotFoundError`, and anything else the base `Boto3S3Error`. The message reads
+like botocore's, so it can be printed as-is.
 
-If the batch request itself fails, **every key in that batch** is recorded as
-failed and the deleter continues with the following batches. So a wrong bucket
-name fails everything, and the counts show it.
+A key the batch response reports with a passing fault — `InternalError`,
+`SlowDown`, `ServiceUnavailable`, `RequestTimeout` — is not failed on the spot:
+it is sent again on its own, as a `DeleteObject`, so the client's retry policy
+gets to work on it the way it does for every key `aws` deletes. Only if that
+request still fails is the key recorded as failed, with that request's error.
+A batch's re-sends go out up to ten at a time. Two things switch them off: a
+botocore client configured not to retry at all (a single attempt per request;
+the CRT client retries on its own policy whatever that says), and abandoning
+the run — `close(flush=False)`, or an immediate-mode cancel — after which the
+keys not yet re-sent get no record, as `aws s3` prints nothing on its classic
+client for a key whose request never started.
+
+If the batch request itself fails — an error the service answered with, a
+dropped connection, anything the request raised — that decides nothing for its
+keys: each is sent again as a `DeleteObject` of its own on the same client,
+the request `aws s3` sends, whatever the retry policy, and takes that
+request's outcome. The deleter then continues with the following batches. A
+wrong bucket name still fails everything, each key on its own request, and the
+counts show it. One batch request has one set of attempts, where `aws s3`
+gives each key its own, so a key can get more attempts here than there —
+never fewer. On botocore a re-sent key that dies without a response is
+dropped without a record, as `aws s3` drops it; on the CRT client it is a
+failure carrying the CRT's own error, as `aws s3` reports it. A key the run is
+abandoned before re-sending gets no record, like an entry still in the
+buffer.
 
 Success on the batch route is normally read as "not in the response's error
 list". If the response carries an error the deleter cannot pin on any key it
@@ -125,19 +172,23 @@ there. S3 answers only for the keys you sent, so in practice this never fires;
 it is a guard, and it logs a warning as well.
 
 An exception the delete request itself raises that is not a botocore error —
-botocore choking on a malformed response, a redirect loop — fails the keys of
-that request all the same, as a plain `Boto3S3Error` carrying the original as
-`__cause__`. Anything outside that — a genuine programming error, or an
+botocore choking on a malformed response, a redirect loop — is that request
+failing all the same: a batch's keys are sent again one by one, and a single
+key's request fails the key, as a plain `Boto3S3Error` carrying the original
+as `__cause__`. Anything outside that — a genuine programming error, or an
 `on_result` callback that raises — is not turned into per-key results. It is
 re-raised to you on the next non-empty `flush()` or `close()`.
 
 `S3Deleter` never raises `BatchError`. If you want one, build it from
 `succeeded` / `failed` after `close()`.
 
-With `capture_response=True`, each successful key's `OpResult.extra_info` gains
+With `capture_response=True`, a successful key's `OpResult.extra_info` gains
 a `"delete"` slot holding a single-object-shaped response, regardless of which
-wire form was used. One limitation: if the same key was submitted twice in one
-batch, both records share a single slot.
+wire form was used. A success the batch response does not list under
+`Deleted[]` — an endpoint that leaves a key out, or answers quietly although
+asked not to — is still a success, with `extra_info` left at `None`, so read
+the slot defensively. One more limitation: if the same key was submitted twice
+in one batch, both records share a single slot.
 
 ## 4. Differences from `aws s3`
 
@@ -145,12 +196,21 @@ batch, both records share a single slot.
 you cannot tell the difference: deleting a key that does not exist succeeds
 either way, and per-key success and failure are preserved.
 
-Two consequences of batching:
+Three consequences of batching:
 
 - **A run that dies mid-way leaves different state.** `aws` has already issued
   a delete for everything it enumerated; here the unsent buffer — up to
   `batch_size - 1` entries — is abandoned.
-- **Keys XML cannot carry** (control characters, surrogates, `U+FFFE` /
-  `U+FFFF`) fall back to individual requests, which is what `aws` does for
-  every key. The rest of the buffer stays batched.
+- **Keys XML cannot carry verbatim** (C0 control characters other than TAB
+  and LF, surrogates, `U+FFFE` / `U+FFFF`) fall back to individual requests,
+  which is what `aws` does for every key. The rest of the buffer stays batched.
+  The individual requests of a batch go out up to ten at a time, and once the
+  run is abandoned no further one is started.
+- **A batch request has one set of attempts.** Each of `aws`'s per-key
+  requests has its own, so a batch request that fails as a whole is sent
+  again key by key (see [Failures](#3-failures)); a key can end up with more
+  attempts than `aws` gives it, never fewer. An endpoint that fails
+  requests often enough to defeat `aws`'s can therefore leave these deletes
+  succeeding where `aws` leaves the objects in place — dropping the keys
+  silently or failing them, depending on how the endpoint fails.
 

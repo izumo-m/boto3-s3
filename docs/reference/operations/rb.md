@@ -50,10 +50,12 @@ Raises:
   (`"s3://"`). No request is sent in these cases.
 - [`ConfigurationError`](../exceptions.md#configurationerror), or its
   [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement —
-  a client had to be built and credentials, region, profile or endpoint were
-  unresolvable. This covers a string or `os.PathLike` target, whose client is
-  this instance's `client()`, and an `S3Storage` constructed without a
-  `client`, which builds its default on first use.
+  a client had to be built from a profile, region, endpoint or partial
+  credentials that will not resolve. This covers a string or `os.PathLike`
+  target, whose client is this instance's `client()`, and an `S3Storage`
+  constructed without a `client`, which builds its default on first use.
+  Missing credentials fail no build: they raise `ConfigurationError` when the
+  `DeleteBucket` request is signed.
 - The `DeleteBucket` rejection itself, translated to its category:
   `NoSuchBucket` becomes [`NotFoundError`](../exceptions.md#notfounderror), a
   403 becomes [`AccessDeniedError`](../exceptions.md#accessdeniederror), a 5xx
@@ -63,6 +65,11 @@ Raises:
   status, so a 4xx other than 403/404 surfaces as `ValidationError`. The
   originating botocore `ClientError` is kept on `__cause__`. The full mapping
   is in [`../exceptions.md`](../exceptions.md).
+- [`Boto3S3Error`](../exceptions.md#boto3s3error) itself — any other exception
+  the `DeleteBucket` call raised from inside botocore, such as a redirect loop
+  ending in `RecursionError` or a response missing an element botocore reads;
+  the original is kept on `__cause__`, the same capture a per-item failure
+  gets. `AssertionError` alone is not translated.
 
 ## boto3_s3.rb
 

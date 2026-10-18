@@ -3,11 +3,11 @@
 This is the only mode where the pinned ``aws`` binary can be compared
 against ``boto3-s3`` - both are timed as whole processes (startup included;
 the report subtracts the ``startup_minimal`` probe, see design/benchmark.md)
-against the same MinIO endpoint, interleaved A/B so host drift cancels in
+against the same dev stack endpoint, interleaved A/B so host drift cancels in
 the ratio.
 
 The mode requires the standard dev stack (``scripts/compose-up.sh``,
-``scripts/install-awscli.sh``, ``source scripts/minio-env.sh``) and owns the
+``scripts/install-awscli.sh``, ``source scripts/dev-env.sh``) and owns the
 dedicated bucket `BUCKET`, created at run start and force-deleted at exit;
 the e2e test suite's bucket (``boto3-s3-e2e``, contractually empty) is never
 touched.
@@ -56,10 +56,10 @@ _SUBPROCESS_TIMEOUT = 300.0
 _MB = 1024 * 1024
 
 _SETUP_HINT = (
-    "the E2E mode needs the MinIO stack, the pinned aws binary, and its env:\n"
+    "the E2E mode needs the dev stack, the pinned aws binary, and its env:\n"
     "  scripts/compose-up.sh\n"
     "  scripts/install-awscli.sh\n"
-    "  source scripts/minio-env.sh\n"
+    "  source scripts/dev-env.sh\n"
     "then rerun via `uv run python -m benchmarks run`"
 )
 
@@ -99,7 +99,7 @@ class E2EScenario:
 
     `setup` runs once per engine; `reset` runs before *every* invocation
     (warmup included) and is where destructive scenarios re-seed and write
-    scenarios purge the previous invocation's output, keeping MinIO's
+    scenarios purge the previous invocation's output, keeping the dev stack's
     tmpfs-backed storage bounded. `verify` runs on both warmup results only -
     it guards against a run that silently did no work, which would otherwise
     record fake-fast timings. `top_level` marks argv for the program itself
@@ -124,8 +124,8 @@ class E2EScenario:
 def check_environment() -> tuple[str, str]:
     """Resolve both executables and validate the S3 target, or raise with guidance.
 
-    Three shapes are accepted: local MinIO (an `AWS_ENDPOINT_URL_S3` on a local
-    host plus the static dev keys), a deliberate non-local endpoint, and real
+    Three shapes are accepted: the local dev stack (an `AWS_ENDPOINT_URL_S3` on
+    a local host plus the static dev keys), a deliberate non-local endpoint, and real
     S3 (no endpoint override, credentials from the default chain - a profile or
     an instance role). The last two both require the explicit
     `BOTO3_S3_BENCH_ALLOW_REMOTE` opt-in so a bare run cannot touch real AWS by
@@ -137,7 +137,7 @@ def check_environment() -> tuple[str, str]:
         if not opted_in:
             raise BenchmarkError(f"no AWS_ENDPOINT_URL_S3 set; {_SETUP_HINT}")
         _check_remote_credentials()
-    elif awsenv.targeting_local_minio():
+    elif awsenv.targeting_local_stack():
         missing = [
             name
             for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
@@ -201,7 +201,7 @@ def aws_version(aws_exe: str) -> str:
 def _build_client() -> Any:
     import boto3
 
-    # No endpoint override means real S3; MinIO reports us-east-1, so that is
+    # No endpoint override means real S3; the dev stack reports us-east-1, so that is
     # the only place the default applies.
     return boto3.client(
         "s3",
@@ -211,16 +211,16 @@ def _build_client() -> Any:
 
 
 def _bench_bucket() -> str:
-    """The bucket the run owns: the fixed name on MinIO, a unique one on S3.
+    """The bucket the run owns: the fixed name on the dev stack, a unique one on S3.
 
-    On MinIO the name is private to the stack, so the documented
+    On the dev stack the name is private to it, so the documented
     ``boto3-s3-bench`` is fine and matches design/benchmark.md. Anywhere else -
     real S3 with or without an explicit endpoint - the namespace is global and
     the harness force-deletes whatever it creates, so a per-run suffix avoids
     colliding with anyone (including a previous run whose delete had not yet
     propagated).
     """
-    if awsenv.targeting_local_minio():
+    if awsenv.targeting_local_stack():
         return BUCKET
     override = os.environ.get(BUCKET_ENV)
     if override:
@@ -254,10 +254,11 @@ def _invoke(
     argv = scenario.make_argv(env, side)
     if env.engine == "crt" and not scenario.top_level:
         # aws's CRT client reads use_ssl from the CLI argument only, so an
-        # env-only AWS_ENDPOINT_URL_S3 makes it dial TLS to MinIO's http
+        # env-only AWS_ENDPOINT_URL_S3 makes it dial TLS to the dev stack's http
         # endpoint and fail (AWS_IO_SOCKET_CLOSED). Same workaround as the
-        # e2e CRT parity lane: pass --endpoint-url explicitly, to both sides
-        # for symmetry. The classic lane stays env-driven like the e2e suite.
+        # e2e CRT parity lane (endpoint-fidelity T2): pass --endpoint-url
+        # explicitly, to both sides for symmetry. The classic lane stays
+        # env-driven like the e2e suite.
         endpoint = os.environ.get("AWS_ENDPOINT_URL_S3")
         if endpoint:
             argv = [*argv, "--endpoint-url", endpoint]
@@ -410,7 +411,7 @@ def build_scenarios(quick: bool, *, large_mb: int = DEFAULT_LARGE_MB) -> list[E2
     """The E2E scenario set (sizes divided by ~100 under --quick).
 
     *large_mb* sizes the single-object transfer scenarios. The 64 MB default
-    suits the local MinIO lane; against real S3 on a wide NIC that finishes
+    suits the local dev stack lane; against real S3 on a wide NIC that finishes
     inside the startup constant, so the EC2 lane raises it
     (``--large-transfer-mb``).
     """
@@ -664,7 +665,7 @@ def build_scenarios(quick: bool, *, large_mb: int = DEFAULT_LARGE_MB) -> list[E2
         workload.generate_tree(env.dir_for("cp_up_small") / "tree", cp_small_count, 4096)
 
     def cp_up_small_reset(env: E2EEnv) -> None:
-        # Purge the previous invocation's output so MinIO's tmpfs stays bounded.
+        # Purge the previous invocation's output so the dev stack's tmpfs stays bounded.
         from tests.utils.harness import delete_under
 
         delete_under(env.client, env.bucket, env.s3_prefix("cp_up_small"))
@@ -899,7 +900,7 @@ def run_scenarios(
                 "AWS_CLI_AUTO_PROMPT": "off",
                 "AWS_PAGER": "",
                 # The engine config replaces ~/.aws/config, so hand both CLIs
-                # the region explicitly (real S3 needs it; harmless on MinIO).
+                # the region explicitly (real S3 needs it; harmless on the dev stack).
                 **({"AWS_REGION": region, "AWS_DEFAULT_REGION": region} if region else {}),
             }
             env = E2EEnv(

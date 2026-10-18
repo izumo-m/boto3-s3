@@ -1,4 +1,4 @@
-"""Unit coverage for the benchmark harness pieces that do not need MinIO.
+"""Unit coverage for the benchmark harness pieces that do not need the dev stack.
 
 The scenario sets are built and inspected (names, payloads, the shared
 large-transfer knob), the per-invocation runner is exercised on trivial
@@ -186,9 +186,14 @@ class TestLanes:
         monkeypatch.delenv(results.GIT_REV_ENV, raising=False)
         monkeypatch.delenv(results.LANE_ENV, raising=False)
         monkeypatch.delenv(results.IMAGE_ENV, raising=False)
+        # Stub git so the test holds outside a work tree too (a copy without
+        # `.git` legitimately yields "unknown").
+        answers = {("rev-parse", "--short=10", "HEAD"): "0123456789", ("status", "--porcelain"): ""}
+        monkeypatch.setattr(results, "_git", lambda *args: answers[args])
         meta = results.collect_meta("inprocess", {})
         assert meta.lane == "local"
-        assert meta.git_rev != "unknown"
+        assert meta.git_rev == "0123456789"
+        assert meta.git_dirty is False
         assert "image" not in meta.record()
 
     def test_filename_spells_a_non_local_lane_and_baselines_stay_in_lane(
@@ -243,7 +248,7 @@ class TestRemoteGuards:
         monkeypatch.setenv(awsenv.ALLOW_REMOTE_ENV, "1")
         assert awsenv.remote_opted_in() is True
 
-    def test_bucket_is_fixed_only_on_minio(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_bucket_is_fixed_only_on_dev_stack(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(e2e.BUCKET_ENV, raising=False)
         monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "http://127.0.0.1:9000")
         assert e2e._bench_bucket() == e2e.BUCKET
@@ -263,7 +268,7 @@ class TestRemoteGuards:
         monkeypatch.setenv(e2e.BUCKET_ENV, "someone-elses-bucket")
         with pytest.raises(BenchmarkError, match="must start with"):
             e2e._bench_bucket()
-        # MinIO ignores the override; its bucket is the documented fixed name.
+        # The dev stack ignores the override; its bucket is the documented fixed name.
         monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "http://127.0.0.1:9000")
         assert e2e._bench_bucket() == e2e.BUCKET
 

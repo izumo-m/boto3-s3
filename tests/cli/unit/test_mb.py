@@ -18,7 +18,13 @@ from boto3_s3 import Boto3S3Error
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
 from tests.utils.fakes3 import client_error
-from tests.utils.harness import client_ctx, run_cli_in_process, run_recorded, unused_ctx
+from tests.utils.harness import (
+    bucket_name_report,
+    client_ctx,
+    run_cli_in_process,
+    run_recorded,
+    unused_ctx,
+)
 from tests.utils.recorder import make_recording_client
 
 
@@ -168,18 +174,15 @@ class TestPostStartErrors:
         # before the client is used, so a benign factory suffices).
         result = run_cli_in_process(["mb", path], ctx=client_ctx(None))
         assert result.rc == 1
-        # botocore's ParamValidationError str uses a colon + newline (aws wording).
-        assert result.stderr == (
-            f'make_bucket failed: {path} Parameter validation failed:\nInvalid bucket name ""\n'
-        )
+        # botocore's own report for the name "", regex tail included (aws's bytes).
+        assert result.stderr == f"make_bucket failed: {path} {bucket_name_report('')}\n"
 
     def test_a_name_botocore_rejects_keeps_the_whole_report(self) -> None:
-        # The one-line report above is synthesized only for the empty-bucket
-        # form. A name that reaches botocore's own check carries botocore's
+        # The report above is written before any request for the empty-bucket
+        # form; a name that reaches botocore's own check carries the same
         # whole report, regex tail included, byte for byte as aws prints it
-        # (measured; docs/cli/aws-differences.md section 2). A real client is
-        # needed for the client-side validation, and none of it hits the
-        # network.
+        # (measured). A real client is needed for the client-side validation,
+        # and none of it hits the network.
         import boto3
 
         client = boto3.session.Session().client("s3", region_name="us-east-1")

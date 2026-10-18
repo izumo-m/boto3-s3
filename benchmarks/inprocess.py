@@ -71,7 +71,7 @@ def pinned_environment(workdir: Path) -> Generator[None]:
 
     Mirrors the test suite's ``_moto_isolation``: static fake credentials, a
     fixed region, an ``AWS_CONFIG_FILE`` pinning the classic engine, and no
-    profile/endpoint leakage from the host shell (the MinIO env may or may
+    profile/endpoint leakage from the host shell (the dev stack env may or may
     not be sourced). Restoring matters because an ``--mode all`` run executes
     the E2E mode in this same process and needs the host env back.
     """

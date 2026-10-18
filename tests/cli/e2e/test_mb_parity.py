@@ -1,11 +1,12 @@
 """Differential parity: ``boto3-s3 mb`` vs the real ``aws s3 mb``.
 
-The rm-suite contract applied to bucket lifecycle: each side starts from an
-identical sibling-bucket state (``force_delete_bucket`` + optional
-pre-create), runs, and is compared on rc (unconditionally - exit-code
-charter, design/overview.md section 3), sorted stdout, the end state
-``(bucket_exists, remaining_keys)``, and stable stderr tokens. Goldens
-record the aws side, end state included.
+The rm-suite contract applied to bucket lifecycle: each side gets a sibling
+bucket of its own in the same start state (absent, or pre-created), runs,
+and is compared on rc (unconditionally - exit-code charter,
+design/overview.md section 3), sorted stdout (each side's bucket name
+masked), the end state ``(bucket_exists, remaining_keys)``, the tag set
+where the scenario asks, and stable stderr tokens. Goldens record the aws
+side, end state included.
 """
 
 from __future__ import annotations
@@ -28,39 +29,46 @@ from tests.utils.harness import (
     capture_bucket_state,
     capture_bucket_tags,
     create_bucket_in_region,
-    force_delete_bucket,
     normalize_rm_stdout,
     run_aws_subprocess,
     run_cli_subprocess,
+    settle_bucket_existence,
 )
 from tests.utils.mb_scenarios import SCENARIOS, MbScenario, resolve_argv
 
 
-def _reset(s3_client: Any, bucket: str, scenario: MbScenario) -> None:
-    """Put the sibling bucket into the scenario's start state."""
-    force_delete_bucket(s3_client, bucket)
+def _prepare(s3_client: Any, bucket: str, scenario: MbScenario) -> None:
+    """Put a fresh sibling bucket (endpoint-fidelity T4) into the start state."""
     if scenario.pre_create:
         create_bucket_in_region(s3_client, bucket)
 
 
+def _settle(s3_client: Any, bucket: str, rc: int) -> None:
+    """After a successful mb, wait out real S3's create lag (endpoint-fidelity T4)."""
+    if rc == 0:
+        settle_bucket_existence(s3_client, bucket, exists=True)
+
+
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=lambda s: s.name)
-def test_mb_parity(scenario: MbScenario, mb_bucket: str, s3_client: Any) -> None:
-    argv = resolve_argv(scenario, mb_bucket)
+def test_mb_parity(scenario: MbScenario, mb_buckets: tuple[str, str], s3_client: Any) -> None:
+    aws_bucket, ours_bucket = mb_buckets
 
-    _reset(s3_client, mb_bucket, scenario)
-    aws_result = run_aws_subprocess(argv)
-    aws_exists, aws_remaining = capture_bucket_state(s3_client, mb_bucket)
-    aws_tags = capture_bucket_tags(s3_client, mb_bucket) if scenario.capture_tags else None
+    _prepare(s3_client, aws_bucket, scenario)
+    aws_result = run_aws_subprocess(resolve_argv(scenario, aws_bucket))
+    _settle(s3_client, aws_bucket, aws_result.rc)
+    aws_exists, aws_remaining = capture_bucket_state(s3_client, aws_bucket)
+    aws_tags = capture_bucket_tags(s3_client, aws_bucket) if scenario.capture_tags else None
 
-    _reset(s3_client, mb_bucket, scenario)
-    ours_result = run_cli_subprocess(argv)
-    ours_exists, ours_remaining = capture_bucket_state(s3_client, mb_bucket)
-    ours_tags = capture_bucket_tags(s3_client, mb_bucket) if scenario.capture_tags else None
+    _prepare(s3_client, ours_bucket, scenario)
+    ours_result = run_cli_subprocess(resolve_argv(scenario, ours_bucket))
+    _settle(s3_client, ours_bucket, ours_result.rc)
+    ours_exists, ours_remaining = capture_bucket_state(s3_client, ours_bucket)
+    ours_tags = capture_bucket_tags(s3_client, ours_bucket) if scenario.capture_tags else None
 
-    aws_lines = normalize_rm_stdout(aws_result.stdout, bucket=mb_bucket)
-    ours_lines = normalize_rm_stdout(ours_result.stdout, bucket=mb_bucket)
+    aws_lines = normalize_rm_stdout(aws_result.stdout, bucket=aws_bucket)
+    ours_lines = normalize_rm_stdout(ours_result.stdout, bucket=ours_bucket)
 
-    if not scenario.diff_only:
+    if not scenario.diff_only and not scenario.frozen_golden:
         if update_goldens_enabled():
             write_golden(
                 "mb",
@@ -72,7 +80,6 @@ def test_mb_parity(scenario: MbScenario, mb_bucket: str, s3_client: Any) -> None
                     aws_version=detect_aws_version(),
                     remaining_keys=aws_remaining,
                     bucket_exists=aws_exists,
-                    bucket_tags=aws_tags,
                 ),
             )
         else:
@@ -84,7 +91,6 @@ def test_mb_parity(scenario: MbScenario, mb_bucket: str, s3_client: Any) -> None
                 compare_stdout=scenario.compare_stdout,
                 remaining_keys=aws_remaining,
                 bucket_exists=aws_exists,
-                bucket_tags=aws_tags,
             )
 
     assert ours_result.rc == aws_result.rc, (

@@ -93,10 +93,13 @@ yourself and calling the method ([`../s3.md`](../s3.md)). Subclassing does not
 reach these functions either — they instantiate `S3` itself, not the subclass.
 
 Introspection reports the method's identity: `functools.wraps` copies
-`__name__`, `__qualname__`, `__doc__` and `__module__`, and `__signature__` is
-pinned to the method's signature with `self` removed, so `inspect.signature`
-and `Signature.bind` see the documented parameters rather than the bound-method
-signature `__wrapped__` would otherwise expose.
+`__name__`, `__doc__` and `__module__`, and `__signature__` is pinned to the
+method's signature with `self` removed, so `inspect.signature` and
+`Signature.bind` see the documented parameters rather than the signature of
+`__wrapped__` — the plain method function (`S3.cp` for `cp`), `self` included —
+that they would otherwise report. `__qualname__` is the wrapper's own
+module-level name (`cp`, not `S3.cp`), so each function pickles by reference
+and can be handed to a `ProcessPoolExecutor` or `multiprocessing`.
 
 All nine are exported from `boto3_s3` and from `boto3_s3.s3`. The root
 re-export is lazy: reading one of these names imports `boto3_s3.s3`, and with
@@ -117,17 +120,19 @@ acts on produces one terminal record — `SUCCEEDED`, `FAILED`, `SKIPPED`,
 `DRYRUN` or `CANCELLED` — while `WARNED` and `NOTICE` records are advisories
 outside that rule, so one key may produce more than one callback. An item that
 never reaches the operation, because a filter dropped it during enumeration or
-because the run ended first, produces nothing. Two carve-outs sit between the
-two — an item a pre-transfer gate consumes with an advisory instead of an
-outcome, and an entry discarded from a batched delete's unsent buffer — and
-both are stated with `OpResult` in [`../results.md`](../results.md).
+because the run ended first, produces nothing. Three carve-outs sit between
+the two — an item a pre-transfer gate consumes with an advisory instead of an
+outcome, an entry discarded from a batched delete's unsent buffer, and an item
+whose request died without a response, which `aws s3` loses as well — and all
+three are stated with `OpResult` in [`../results.md`](../results.md).
 
 The callback runs on a worker thread for engine transfers and for batched
 deletes, and on the scan's prefetch worker for the warnings a walk or listing
 raises, which can therefore arrive alongside transfer records. Records emitted
 inline — dry-run reports, a single-key `rm`, synchronous deletes — run on the
 calling thread. Keep it fast, keep it thread-safe, and do not let it raise —
-the library states no contract for a callback that raises. `OpResult`, the
+beyond what an operation's page states for its own paths (`rm`'s Raises), the
+library states no contract for a callback that raises. `OpResult`, the
 outcome set, and which fields each record carries are specified in
 [`../results.md`](../results.md).
 
@@ -179,7 +184,8 @@ documented where it is owned:
 - `filter: FileFilter | None` on `cp` / `mv` / `rm` / `sync`
   ([`../filters.md`](../filters.md)), and, on `cp` / `mv` / `sync`, the
   `transfer_config` argument plus the `**options` transfer options
-  ([`../options.md`](../options.md)). Each operation page states which key the
+  ([`../options.md`](../options.md)); `rm` takes `transfer_config` too, for its
+  engine choice alone ([`rm.md`](./rm.md)). Each operation page states which key the
   filter matches against for that operation.
 - `recursive: bool = False` on `cp` / `mv` / `rm` / `ls` — what it selects
   differs per operation, so each page states its own meaning. `sync` is always
@@ -203,7 +209,9 @@ A failure that happens before item processing begins raises its category
 exception directly instead: an unknown key in `**options`
 (`ValidationError`), a target that will not resolve or validate
 (`ValidationError`), a client that cannot be built (`ConfigurationError` or its
-`InvalidConfigError` refinement), a missing local source (`NotFoundError`,
+`InvalidConfigError` refinement), an S3 Express location or a requested feature
+the installed SDK predates (`ConfigurationError`, naming the version it needs —
+see [`../../compatibility.md`](../../compatibility.md)), a missing local source (`NotFoundError`,
 worded as the AWS CLI words it), a listing rejected outright.
 
 `mb`, `rb`, `presign` and `website` act on a single thing and raise their

@@ -18,13 +18,13 @@ helper is the S3 backend suite's (same conversion, same POSIX-only skip).
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import pytest
 from boto3.s3.transfer import TransferConfig
 
-from boto3_s3 import S3, OpOutcome, OpResult, S3Storage
+from boto3_s3 import S3, Boto3S3Error, MalformedResponseError, OpOutcome, OpResult, S3Storage
 from tests.lib.test_s3storage import _local_zone, _needs_tzset
 from tests.utils.fakes3 import MTIME, get_response, head_response
 from tests.utils.recorder import make_recording_client, ops
@@ -37,13 +37,69 @@ _SYNC = TransferConfig(use_threads=False)
 _FAR_FUTURE = datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
 
 
+class TestSingleObjectHeadRaisingOutsideTheBotoFamily:
+    """What the HEAD raises from inside botocore is the request failing.
+
+    An S3 Express ``CreateSession`` reply without ``Credentials`` kills the
+    single-source HEAD with botocore's own ``KeyError``; aws-cli ends the run
+    on its text (``fatal error: 'Credentials'`` at rc 1 for
+    ``cp s3://bkt--use1-az4--x-s3/k x``, measured against the pinned aws
+    2.36.40 through a 127.0.0.1 fake). Here it is the base ``Boto3S3Error``
+    carrying it, attributed like every other failed HEAD, so
+    ``except Boto3S3Error`` catches it.
+    """
+
+    def test_it_is_the_base_error_attributed_to_the_operation(self, tmp_path: Path) -> None:
+        boom = KeyError("Credentials")
+        client, calls = make_recording_client([boom])
+        with pytest.raises(Boto3S3Error) as excinfo:
+            S3().cp(
+                S3Storage("s3://b/d/a.txt", client=client),
+                str(tmp_path / "out.bin"),
+                transfer_config=_SYNC,
+            )
+        error = excinfo.value
+        assert type(error) is Boto3S3Error
+        assert str(error) == "'Credentials'"  # str(KeyError): the CLI's line
+        assert error.__cause__ is boom
+        assert (error.operation, error.bucket, error.key) == ("cp", "b", "d/a.txt")
+        assert ops(calls) == ["HeadObject"]
+
+
+class TestSingleObjectZonelessStamp:
+    """A HEAD stamp with no zone gets the listing's reading: local time, kept as aware UTC.
+
+    aws-cli's ``_list_single_object`` runs the same ``astimezone(tzlocal())``
+    over the HeadObject stamp as the listing does over its entries, so a naive
+    one is local time there too (``TestZonelessStamp`` in the S3 backend
+    suite has the listing side).
+    """
+
+    def test_the_source_entry_carries_an_aware_stamp(self, tmp_path: Path) -> None:
+        naive = datetime(2025, 1, 1, 12, 0, 0)
+        client, _ = make_recording_client([head_response(LastModified=naive), get_response()])
+        records: list[OpResult] = []
+        S3().cp(
+            S3Storage("s3://b/d/a.txt", client=client),
+            str(tmp_path / "out.bin"),
+            transfer_config=_SYNC,
+            on_result=records.append,
+        )
+        [record] = records
+        assert record.outcome is OpOutcome.SUCCEEDED
+        assert record.src_info is not None and record.src_info.mtime is not None
+        assert record.src_info.mtime.utcoffset() == timedelta(0)
+        assert record.src_info.mtime.timestamp() == naive.timestamp()
+
+
 class TestSingleObjectRequiredElements:
     """A HEAD missing `ContentLength` or `LastModified` stops the single-object
     routes where aws-cli stops them.
 
     aws-cli's `_list_single_object` reads those two elements by subscript
     (`ContentLength` first) and `ETag` with a default, so a response without
-    one of the two ends the run with `KeyError` naming it - the single-object
+    one of the two ends the run with `MalformedResponseError` naming it (the
+    KeyError's text, the KeyError on `__cause__`) - the single-object
     counterpart of the listing rule (`TestMalformedListingEntries` in the S3
     backend suite). Measured against the pinned aws (2.36.40) through a
     127.0.0.1 fake: `fatal error: 'LastModified'` at rc 1 for
@@ -62,28 +118,35 @@ class TestSingleObjectRequiredElements:
             ({"ETag": '"abc"'}, "ContentLength"),
         ],
     )
-    def test_a_missing_element_raises_keyerror_naming_it(
+    def test_a_missing_element_is_a_malformed_response_naming_it(
         self, tmp_path: Path, head: dict[str, Any], missing: str
     ) -> None:
         client, calls = make_recording_client([head, get_response()])
         dest = tmp_path / "out.bin"
-        with pytest.raises(KeyError) as excinfo:
+        with pytest.raises(MalformedResponseError) as excinfo:
             S3().cp(S3Storage("s3://b/d/a.txt", client=client), str(dest), transfer_config=_SYNC)
-        assert excinfo.value.args[0] == missing
+        assert str(excinfo.value) == f"'{missing}'"  # str(KeyError): the CLI's line
+        assert isinstance(excinfo.value.__cause__, KeyError)
+        assert (excinfo.value.operation, excinfo.value.bucket, excinfo.value.key) == (
+            "cp",
+            "b",
+            "d/a.txt",
+        )
         # The HEAD is where aws dies: no GET, nothing written.
         assert ops(calls) == ["HeadObject"]
         assert not dest.exists()
 
     def test_a_dryrun_copy_source_is_rejected_too(self) -> None:
         client, calls = make_recording_client([{"ContentLength": 7, "ETag": '"abc"'}])
-        with pytest.raises(KeyError) as excinfo:
+        with pytest.raises(MalformedResponseError) as excinfo:
             S3().mv(
                 S3Storage("s3://b/d/a.txt", client=client),
                 S3Storage("s3://b2/d/a.txt", client=client),
                 dryrun=True,
                 transfer_config=_SYNC,
             )
-        assert excinfo.value.args[0] == "LastModified"
+        assert str(excinfo.value) == "'LastModified'"
+        assert excinfo.value.operation == "mv"
         assert ops(calls) == ["HeadObject"]
 
     def test_a_missing_etag_transfers(self, tmp_path: Path) -> None:
@@ -119,7 +182,7 @@ class TestSingleObjectStampRepresentability:
         )
         dest = tmp_path / "out.bin"
         with _local_zone("Asia/Tokyo"):
-            with pytest.raises(OverflowError, match="date value out of range"):
+            with pytest.raises(MalformedResponseError, match="date value out of range"):
                 S3().cp(
                     S3Storage("s3://b/d/a.txt", client=client), str(dest), transfer_config=_SYNC
                 )
@@ -134,7 +197,7 @@ class TestSingleObjectStampRepresentability:
         client, _ = make_recording_client([head_response(LastModified=_FAR_FUTURE)])
         results: list[OpResult] = []
         with _local_zone("Asia/Tokyo"):
-            with pytest.raises(OverflowError, match="date value out of range"):
+            with pytest.raises(MalformedResponseError, match="date value out of range"):
                 S3().cp(
                     S3Storage("s3://b/d/a.txt", client=client),
                     str(tmp_path / "out.bin"),
@@ -149,7 +212,7 @@ class TestSingleObjectStampRepresentability:
         # as well - measured on aws.
         client, calls = make_recording_client([head_response(LastModified=_FAR_FUTURE)])
         with _local_zone("Asia/Tokyo"):
-            with pytest.raises(OverflowError, match="date value out of range"):
+            with pytest.raises(MalformedResponseError, match="date value out of range"):
                 S3().mv(
                     S3Storage("s3://b/d/a.txt", client=client),
                     S3Storage("s3://b2/d/a.txt", client=client),

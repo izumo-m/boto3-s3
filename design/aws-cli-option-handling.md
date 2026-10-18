@@ -49,7 +49,6 @@ changes nothing about the operation.
 | `--no-cli-pager` | Accept & ignore. |
 | `--color {on,off,auto}` | Accept & ignore. Validates `choices`. |
 | `--cli-error-format {legacy,json,yaml,text,table,enhanced}` | Accept & ignore. Validates `choices`. |
-| `--no-cli-auto-prompt` | Accept. A no-op in the default state, but it explicitly disables an env/config-driven prompt request, matching aws-cli (see section 3). |
 | `--cli-binary-format {base64,raw-in-base64-out}` | Accept & ignore. Validates `choices`. |
 
 ### 2.1 Why these are no-ops
@@ -242,13 +241,16 @@ hard-fails. `boto3-s3-cli` mirrors each rejection (same message, rc 252):
 | `--checksum-algorithm` | `<LocalPath> <S3Uri>` or `<S3Uri> <S3Uri>` | rc 252 usage error |
 | `--checksum-mode` | `<S3Uri> <LocalPath>` | rc 252 usage error |
 | `--sse-c-copy-source` / `--sse-c-copy-source-key` | `<S3Uri> <S3Uri>` (copy only) | rc 252 usage error |
+| `--no-overwrite` | any route but a download to stdout (`cp <S3Uri> -`) | rc 252 usage error |
 
-These mirror aws-cli `S3TransferCommand._validate_path_args` (checksum pairing,
-in aws-cli's `awscli/customizations/s3/subcommands.py`) and
-`_validate_sse_c_copy_source_for_paths` (copy-source scope, same file).
+These mirror aws-cli `CommandParameters._validate_path_args` (checksum
+pairing, in aws-cli's `awscli/customizations/s3/subcommands.py`),
+`_validate_sse_c_copy_source_for_paths` (copy-source scope, same file) and
+`_validate_no_overwrite_for_download_streaming` (same file).
 The CLI ports are `validate_checksum_paths_type`
-(in `cli/src/boto3_s3_cli/commands/transferargs.py`) and the **copy-source
-scope branch** of `validate_sse_c_pairing` (same file). The rest of
+(in `cli/src/boto3_s3_cli/commands/transferargs.py`), the **copy-source
+scope branch** of `validate_sse_c_pairing` (same file) and `cp`'s
+streaming-path check (`commands/cp.py`). The rest of
 `validate_sse_c_pairing` (mirroring aws-cli `_validate_sse_c_arg`)
 enforces that `--sse-c` / `--sse-c-key` (and the copy-source pair) are supplied
 together; that pairing check is route-independent and belongs to neither
@@ -287,7 +289,9 @@ For completeness, the options that **do** have an effect:
   translated internally to S3 API PascalCase (see the design record).
 - **`--debug`**: the library emits via the standard `logging` module
   under the `boto3_s3` logger hierarchy; `boto3-s3-cli` wires a stderr
-  handler. The library never attaches handlers itself.
+  handler. The library itself attaches only a `NullHandler` to the
+  `boto3_s3` package logger, and a stream handler when the caller asks for
+  one through `set_stream_logger`.
 - **`--version`**: prints a single aws v2-style version line
   (`boto3-s3-cli/<v> boto3-s3/<v> boto3/<v> botocore/<v> Python/<v>
   <System>/<release>`) and exits; handled entirely in `boto3-s3-cli`, with no
@@ -370,11 +374,14 @@ itself mirrors aws-cli's `ResultProcessor`):
   total: the byte meter reads done over expected for the real transfers
   alone, and the two meters disagree mid-run and at the end.
 
-Two more are in the result text itself rather than in its rendering:
+Three more are in the result text itself rather than in its rendering:
 
-- **A batched delete's per-key failure line** names the `DeleteObjects`
-  operation and carries no `(reached max retries: N)` suffix, where aws's line
-  names `DeleteObject` and lets botocore append the suffix. It follows from the
+- **A batched delete's per-key failure line**, composed from a batch
+  response's own `Errors[]` entry, names the `DeleteObjects` operation and
+  never carries the `(reached max retries: N)` suffix, where aws's line names
+  `DeleteObject` and, on its classic client, carries the suffix botocore
+  appends once the request's attempts are spent. (A batch request failing as
+  a whole sends its keys on their own, whose lines are aws's.) It follows from the
   accepted batching ([`deleter.md`](./deleter.md) section 4): the line is
   composed from the batch response's own `Errors[]` entry rather than by
   botocore. It reaches the batching routes alone - `rm --recursive`, an S3-side
@@ -389,6 +396,9 @@ Two more are in the result text itself rather than in its rendering:
   other name. Reproducing both orders would make a backend's read order depend
   on its consumer. The exit code, the entries printed before it and the stream
   they go to all agree, and the transfer commands agree entirely.
+- **An interrupted `mv`'s record.** aws can delete sources for which it
+  printed no `move:` line (measured); this command prints the line for every
+  source it deletes.
 
 The rest sit outside the pipeline:
 
@@ -418,14 +428,6 @@ The rest sit outside the pipeline:
   through its engines — under CRT an untranslated `Unknown Error Code` —
   because mirroring that rendering would cost the clear errno report
   (decided 2026-08-01).
-- **The invalid-bucket-name report is truncated** to botocore's leading
-  `Invalid bucket name "<name>"` line, dropping the regex tail aws prints
-  after it (`usage.py`; the tail is botocore-version-fragile). It reaches only
-  the reports this command synthesizes rather than lets botocore raise - the
-  bucket-less URIs mb / rb / rm refuse up front, and the key-carrying website
-  URIs - because a name that reaches botocore's own check carries botocore's
-  own text on both tools, tail included (measured 2026-08-12). The exit code
-  is unaffected - mb / rb / rm 1, website 252.
 - **A message botocore itself writes is the installed botocore's wording**,
   where aws prints its bundled fork's. This is not class 2: the same aws
   version installed from PyPI still carries the fork, so the difference is ours
@@ -434,9 +436,12 @@ The rest sit outside the pipeline:
   one.` and this ends `greater than or equal to 1.` (rc 255 on both, measured
   2026-08-08). Rewriting an SDK sentence to match would be a fragile string
   patch on a report neither tool authors, so the difference is taken. The
-  invalid-bucket-name entry above is the same family, and the rest of the
+  invalid-bucket-name report is the same family - the installed botocore words
+  it, the names refused before any request included - and the rest of the
   fork's wording differences sit on aws's SSO / login paths, which this command
   does not have.
+- **No `cli_history` warning.** This command has no history mechanism, so it
+  never writes aws's `Warning: Unable to record CLI history. ...` line.
 - **`--human-readable` past EiB.** aws's suffix loop falls through above EiB
   and renders `None`; `human_readable_size` keeps counting in EiB instead
   (`output.py`). Unreachable in practice - a total below 1 EiB never gets

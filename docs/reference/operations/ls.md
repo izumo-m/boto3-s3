@@ -152,7 +152,8 @@ order the listing produces them, so what a caller may rely on is that order:
   `key` in UTF-8 byte order, preserved across pages — and therefore ascending
   by `compare_key` too, since the same prefix is removed from every entry. An
   S3 Express directory bucket is the carve-out: its listings carry no order
-  guarantee at all.
+  guarantee at all, whether it is named directly or through one of its access
+  points.
 - A non-recursive object listing keeps the delimiter listing's native shape:
   each page's common prefixes are delivered ahead of that page's objects, which
   is `aws s3 ls`'s order. Across a multi-page listing the delivered stream is
@@ -168,9 +169,9 @@ order the listing produces them, so what a caller may rely on is that order:
 
 An error raised while the listing runs surfaces on the pull that hits it, from
 inside the delivery loop — so `ls` can raise after `on_entry` has already
-received entries. Botocore errors from the object listing carry
-`operation=None`, because that listing path is shared with the recursive forms
-of `cp` / `mv` / `rm` / `sync`; the bucket listing stamps `operation="ls"`.
+received entries. Either listing's errors carry `operation="ls"`: the storage
+raises them unnamed (the object listing is shared with the recursive forms of
+`cp` / `mv` / `rm` / `sync`) and `ls` fills its own name in.
 
 - [`ValidationError`](../exceptions.md#validationerror) — `target` is neither an
   `S3Storage` nor a `str` / `os.PathLike[str]`; it is an S3 Object Lambda or an
@@ -190,9 +191,10 @@ of `cp` / `mv` / `rm` / `sync`; the bucket listing stamps `operation="ls"`.
   [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement — a
   bucket filter (`bucket_name_prefix` / `bucket_region`) on an SDK whose
   `ListBuckets` model lacks the matching input member, raised as the bucket
-  listing starts and before any request; and a client that cannot be built:
-  unresolvable credentials or region, a set-but-unusable profile, a malformed
-  endpoint.
+  listing starts and before any request; a client that cannot be built: a
+  set-but-unusable profile, partial credentials, a malformed region or
+  endpoint; and missing credentials, which fail the listing's first request
+  rather than the build.
 - [`Boto3S3Error`](../exceptions.md#boto3s3error) itself — a failure the
   translator cannot classify.
 

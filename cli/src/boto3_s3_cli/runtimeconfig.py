@@ -32,6 +32,7 @@ from botocore.utils import ensure_boolean
 
 from boto3_s3 import ConfigurationError, InvalidConfigError, TransferConfig, crtsupport
 from boto3_s3.awsconfig import SIZE_SUFFIX, AwsConfig, split_size_suffix
+from boto3_s3_cli import usage
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +113,11 @@ def human_readable_to_int(value: str) -> int:
             return int(value)
         except ValueError:
             raise InvalidConfigError(f"Invalid size value: {value}") from None
-    return int(value[: -len(suffix)]) * SIZE_SUFFIX[suffix]
+    try:
+        return int(value[: -len(suffix)]) * SIZE_SUFFIX[suffix]
+    except ValueError as exc:
+        # aws lets this one through raw: its own interpreter's words.
+        raise ValueError(usage.int_error_message(exc)) from None
 
 
 class RuntimeConfig:
@@ -286,6 +291,31 @@ def load_scoped_s3_config(config: AwsConfig) -> dict[str, Any]:
     return scoped
 
 
+def _crt_unavailable_message() -> str:
+    """The refusal for an explicit ``crt`` when awscrt is absent or too old.
+
+    The two need different remedies: an absent awscrt is the missing extra,
+    while an installed one below boto3's CRT minimum is what the extra itself
+    pins on an old boto3 (the crt extra of boto3 1.28 - 1.33 brings awscrt
+    0.16 - 0.19.17, docs/compatibility.md), so installing the extra again
+    changes nothing - only a newer boto3 does.
+    """
+    try:
+        import awscrt
+    except ImportError:
+        return (
+            "preferred_transfer_client is set to crt but awscrt is "
+            "unavailable. Install the optional CRT dependency with the "
+            "'crt' extra (e.g. pip install 'boto3-s3-cli[crt]')."
+        )
+    return (
+        "preferred_transfer_client is set to crt but the installed awscrt "
+        f"{getattr(awscrt, '__version__', '')} is too old for it (the CRT transfer "
+        "engine needs boto3 >= 1.34.6 with its crt extra). Upgrade boto3 "
+        "(e.g. pip install -U 'boto3[crt]>=1.34.6')."
+    )
+
+
 def resolve_transfer_client(
     runtime_config: dict[str, Any], *, paths_type: str
 ) -> Literal["classic", "crt"]:
@@ -306,11 +336,7 @@ def resolve_transfer_client(
     preferred = runtime_config["preferred_transfer_client"]  # alias already resolved
     if preferred == "crt":
         if not crtsupport.has_minimum_crt_version():
-            raise ConfigurationError(
-                "preferred_transfer_client is set to crt but awscrt is "
-                "unavailable. Install the optional CRT dependency with the "
-                "'crt' extra (e.g. pip install 'boto3-s3-cli[crt]')."
-            )
+            raise ConfigurationError(_crt_unavailable_message())
         if not crtsupport.has_crt_s3transfer():
             # The floor s3transfer (< 0.8.0) lacks the CRT lock/credentials
             # surface; fail clean (like awscrt-missing) instead of an ImportError.

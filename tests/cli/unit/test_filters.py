@@ -13,6 +13,7 @@ derived through the host ``os.path`` so the suite passes on both OS families.
 from __future__ import annotations
 
 import os
+import sys
 from typing import TYPE_CHECKING
 
 import pytest
@@ -25,6 +26,27 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _PATTERNS = [GlobPattern.exclude("*"), GlobPattern.include("*.TXT")]
+
+
+class _HostOs:
+    """The real ``os`` module with ``name`` overridden."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __getattr__(self, attribute: str) -> object:
+        return getattr(os, attribute)
+
+
+def _host(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """Make the module under test see ``os.name == name``, and nothing else.
+
+    The override goes on the module's own ``os`` reference rather than on the
+    shared ``os`` module: pytest builds paths while it reports a failure, and
+    with the process-wide ``os.name`` saying ``nt`` on a POSIX host that fails
+    inside pytest instead of showing the assertion.
+    """
+    monkeypatch.setattr(filters, "os", _HostOs(name))
 
 
 def _compile(patterns: list[GlobPattern]) -> FileFilter:
@@ -45,18 +67,121 @@ def _keeps(file_filter: FileFilter, compare_key: str, full_key: str | None = Non
 
 class TestCaseFolding:
     def test_posix_filter_is_case_sensitive(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(filters.os, "name", "posix")
+        _host(monkeypatch, "posix")
         keep = _compile(_PATTERNS)
         assert _keeps(keep, "a.TXT") is True
         assert _keeps(keep, "a.txt") is False  # byte-exact on POSIX
 
     def test_windows_filter_is_case_insensitive(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # aws normcases both sides on Windows, so `*.TXT` matches `a.txt`.
-        monkeypatch.setattr(filters.os, "name", "nt")
+        _host(monkeypatch, "nt")
         keep = _compile(_PATTERNS)
         assert _keeps(keep, "a.txt") is True
         assert _keeps(keep, "a.TXT") is True
         assert _keeps(keep, "a.log") is False
+
+
+_BS = chr(92)  # a backslash, spelled so no escape rewriting can touch it
+
+
+class TestWindowsSeparatorFolding:
+    """On Windows a backslash and a slash are one separator, in keys as in patterns.
+
+    aws-cli's ``fnmatch.fnmatch`` normcases the path and the pattern, and
+    ``ntpath.normcase`` turns every ``/`` into a backslash. An S3 key can hold
+    a literal backslash, so ``--exclude a/b`` excludes the key ``a<bs>b`` there
+    - measured against aws.exe 2.36.40 by real deletion (``rm --recursive``
+    keeps it), on both engines. Lower-casing alone left such keys unmatched:
+    ``rm --exclude`` deleted what aws-cli keeps, and ``--exclude '*' --include
+    'dir/*.txt'`` skipped what aws-cli deletes.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _windows(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _host(monkeypatch, "nt")
+
+    def _rm(self, patterns: list[GlobPattern]) -> FileFilter:
+        target = S3Storage("s3://bucket")
+        keep = filters.compile_filter(patterns, src=target, dest=target, dir_op=True)
+        assert keep is not None
+        return keep
+
+    @pytest.mark.parametrize("pattern", ["a/b", "a/*", "A/B", f"a{_BS}b", f"a{_BS}*"])
+    @pytest.mark.parametrize("forced_joined", [False, True])
+    def test_a_backslash_in_a_key_matches_a_separator(
+        self, pattern: str, forced_joined: bool
+    ) -> None:
+        # An absolute pattern ahead of the rule sends the whole list to the
+        # joined engine; without it the same list is delegated.
+        lead = [GlobPattern.exclude("/zzz-nowhere/*")] if forced_joined else []
+        keep = self._rm([*lead, GlobPattern.exclude(pattern)])
+        target = S3Storage("s3://bucket")
+        for key in (f"a{_BS}b", "a/b", f"A{_BS}B"):
+            assert keep(FileInfo(key=key, compare_key=key, storage=target)) is False, key
+        assert keep(FileInfo(key="ab", compare_key="ab", storage=target)) is True
+
+    def test_include_reaches_a_backslash_key_too(self) -> None:
+        keep = self._rm([GlobPattern.exclude("*"), GlobPattern.include("dir/*.txt")])
+        target = S3Storage("s3://bucket")
+        key = f"dir{_BS}x.txt"
+        assert keep(FileInfo(key=key, compare_key=key, storage=target)) is True
+
+    def test_posix_keeps_the_backslash_a_literal(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _host(monkeypatch, "posix")
+        keep = self._rm([GlobPattern.exclude("a/b")])
+        target = S3Storage("s3://bucket")
+        key = f"a{_BS}b"
+        assert keep(FileInfo(key=key, compare_key=key, storage=target)) is True
+
+    def test_a_class_spanning_the_slash_does_not_match_the_separator(self) -> None:
+        # aws-cli matches in the backslash form, where the separator is 0x5C:
+        # the range `+-9` holds `/` (0x2F) and not that. The delegated engine
+        # works in `/` space and would match, so a `[` goes to the joined one.
+        keep = self._rm([GlobPattern.exclude("a[+-9]b")])
+        target = S3Storage("s3://bucket")
+        assert keep(FileInfo(key="a/b", compare_key="a/b", storage=target)) is True
+        assert keep(FileInfo(key="a5b", compare_key="a5b", storage=target)) is False
+
+    def test_a_bracket_needs_the_joined_engine_only_when_folding(self) -> None:
+        patterns = [GlobPattern.exclude("a[+-9]b")]
+        bases = {"src_base": "bucket/", "dest_base": "bucket/", "both_s3": True, "dir_op": True}
+        assert filters._needs_joined(patterns, **bases, fold=True) is True
+        assert filters._needs_joined(patterns, **bases, fold=False) is False
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows' own case mapping")
+class TestWindowsCaseMapping:
+    """The fold is Windows' locale-invariant lower-casing, not ``str.lower``.
+
+    aws.exe bundles a Python whose ``ntpath.normcase`` calls ``LCMapStringEx``;
+    that table is one-to-one, so it differs from Unicode's full case mapping
+    for a few hundred code points. Measured against aws.exe 2.36.40: ``--exclude 'k*'``
+    does not keep a key that starts with the Kelvin sign, ``--exclude 'i*'``
+    not one that starts with U+0130, and ``str.lower`` would have kept both.
+    """
+
+    @pytest.mark.parametrize(
+        ("text", "folded"),
+        [
+            ("ABC/Def", f"abc{_BS}def"),
+            (chr(0x130) + "x", chr(0x130) + "x"),  # LATIN CAPITAL LETTER I WITH DOT ABOVE
+            (chr(0x212A) + "x", chr(0x212A) + "x"),  # KELVIN SIGN
+            (chr(0x1E9E) + "x", chr(0x1E9E) + "x"),  # LATIN CAPITAL LETTER SHARP S
+            (chr(0x39F) + chr(0x3A3), chr(0x3BF) + chr(0x3C3)),  # no final sigma
+            ("", ""),
+        ],
+    )
+    def test_it_folds_like_the_operating_system(self, text: str, folded: str) -> None:
+        assert filters._windows_normcase(text) == folded
+
+    def test_the_direct_call_agrees_with_the_stdlib_where_the_stdlib_has_it(self) -> None:
+        if sys.version_info < (3, 12):
+            pytest.skip("ntpath.normcase lower-cases with str.lower before Python 3.12")
+        import ntpath
+
+        for code in (*range(0x20, 0x250), 0x130, 0x212A, 0x1E9E, 0x3A3, 0x10400, 0x1F600):
+            text = "x" + chr(code) + "/y"
+            assert filters._lcmap_lower(text.replace("/", _BS)) == ntpath.normcase(text), hex(code)
 
 
 class TestAbsolutePatterns:
@@ -68,7 +193,7 @@ class TestAbsolutePatterns:
     def test_absolute_pattern_matches_full_key_not_compare_key(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(filters.os, "name", "posix")
+        _host(monkeypatch, "posix")
         base = os.path.abspath("/data/src")
         dest = S3Storage("s3://dst")
         keep = filters.compile_filter(
@@ -89,7 +214,7 @@ class TestAbsolutePatterns:
     def test_windows_absolute_pattern_is_case_insensitive(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(filters.os, "name", "nt")
+        _host(monkeypatch, "nt")
         base = os.path.abspath("/Data/Src")
         keep = filters.compile_filter(
             [GlobPattern.exclude(os.path.join(base, "Keep", "*"))],
