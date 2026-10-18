@@ -46,11 +46,11 @@ exceptions in `asyncio` and `concurrent.futures`.
 
 Programming mistakes are not wrapped on the synchronous paths. A `TypeError`
 raised by a `filter` predicate, a `KeyboardInterrupt`, a `SystemExit` — all
-pass straight through. So does an exception `on_result` raises: it ends the
-run and reaches the caller as it is, whichever thread the callback ran on.
-Even so, keep `on_result` and `on_progress` from raising: beyond that and what
-an operation's reference page states, the library makes no promise about a
-callback that does.
+pass straight through. So does an exception `on_result` or `on_progress`
+raises: it ends the run and reaches the caller as it is, whichever thread the
+callback ran on, and it does not fail the item the callback was reporting on.
+Even so, keep both from raising: beyond that and what an operation's reference
+page states, the library makes no promise about a callback that does.
 
 Every class in the tree has its own entry in the API reference,
 [`exceptions.md`](../reference/exceptions.md) — the exact conditions that raise

@@ -328,9 +328,10 @@ upload, the parent reference) are emitted inline on the calling thread
   through `cancel_token`. It supersedes `BatchError`.
 - Anything `filter` itself raises. A predicate's exception surfaces on the
   consuming side of the enumeration and aborts the run; the engine then cancels
-  the transfers it had accepted. `on_result` and `on_progress` must not raise —
-  `cp` states no contract for a callback that does
-  ([`README.md`](./README.md#on_result)).
+  the transfers it had accepted.
+- Anything `on_result` or `on_progress` raises, as it is: it ends the run
+  without failing the item the callback was reporting on. Keep both from
+  raising all the same ([`README.md`](./README.md#on_result)).
 
 ## boto3_s3.cp
 

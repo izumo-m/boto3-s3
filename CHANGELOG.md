@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- An exception from `on_progress` now ends the run and reaches the caller as it is, like one from `on_result`, instead of failing the item it reported on.
+
 ## [0.12.0] - 2026-10-18
 
 - Added `is_s3express_accesspoint_path`, `LocalStorage.exists()` / `ensure_directory()` and a `transfer_config` for `rm` and `S3Deleter`; `S3PathResolver` and `has_underlying_s3_path` now cover an S3 Express access point, which `sync` refuses, and an empty local path is rejected instead of meaning the working directory.

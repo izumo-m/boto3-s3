@@ -1508,6 +1508,26 @@ class Transferrer:
             if threading.get_ident() == self._caller_thread:
                 raise
 
+    def _deliver_progress(self, progress: TransferProgress) -> None:
+        """Hand one progress record to the caller's ``on_progress``.
+
+        Progress fires inside the transfer it reports on - s3transfer's read
+        and write path (on the calling thread too under ``use_threads=False``)
+        or an awscrt thread - where an exception would fail that item, or
+        escape into awscrt. What the callback raises is the caller's failure,
+        not the item's, so an ``Exception`` is only noted here and reaches the
+        caller from the next `submit` or from ``__exit__``, as `_deliver` hands
+        back ``on_result``'s. An interrupt (``KeyboardInterrupt`` /
+        ``SystemExit``) is left to propagate, so it cancels the item as one
+        raised anywhere else in the transfer does.
+        """
+        callback = self._on_progress
+        assert callback is not None  # only wired when the caller passed one
+        try:
+            callback(progress)
+        except Exception as exc:
+            self._note_raise(exc)
+
     @staticmethod
     def _close_item_fileobjs(item: TransferItem) -> None:
         for fileobj in (item.src_fileobj, item.dest_fileobj):
@@ -1754,7 +1774,9 @@ class Transferrer:
             subscribers.append(_ProvideETag(item.etag))
         if self._on_progress is not None:
             subscribers.append(
-                _Progress(self._result_transfer_type, item.compare_key, total, self._on_progress)
+                _Progress(
+                    self._result_transfer_type, item.compare_key, total, self._deliver_progress
+                )
             )
         return subscribers, counted
 

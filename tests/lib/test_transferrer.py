@@ -2153,6 +2153,35 @@ class TestWorkerRaise:
         with pytest.raises(ValueError, match="from on_result"), transferrer:
             transferrer.submit(item)
 
+    @pytest.mark.parametrize("config", [TransferConfig(), _SYNC_CONFIG], ids=["threads", "serial"])
+    def test_an_on_progress_error_reaches_the_caller_and_leaves_the_item(
+        self, tmp_path: Path, config: TransferConfig
+    ) -> None:
+        # Progress fires inside the transfer, where raising would fail the
+        # item: the error is the caller's, so it ends the run without failing
+        # the item. The queued record fires at submit, so a threaded run
+        # raises there and cancels the item still waiting for its worker.
+        item = self._upload_item(tmp_path)
+        client, _calls = make_recording_client([{}])
+        results: list[OpResult] = []
+
+        def on_progress(progress: TransferProgress) -> None:
+            raise ValueError("from on_progress")
+
+        transferrer = Transferrer(
+            TransferType.UPLOAD,
+            client,
+            src_storage=LocalStorage("."),
+            transfer_config=config,
+            on_result=results.append,
+            on_progress=on_progress,
+        )
+        with pytest.raises(ValueError, match="from on_progress"), transferrer:
+            transferrer.submit(item)
+        assert len(results) == 1
+        assert results[0].outcome in (OpOutcome.SUCCEEDED, OpOutcome.CANCELLED)
+        assert transferrer.failed == 0
+
     def test_the_crt_body_hands_an_interrupt_back_instead_of_to_awscrt(self) -> None:
         class _Exiting:
             def read(self, amount: int = -1) -> bytes:
