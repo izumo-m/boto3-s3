@@ -142,13 +142,13 @@ maintaining high functional compatibility.
   options, prefer the one closer to aws-cli's function. When aws-cli's behavior
   is ambiguous, measure it against the pinned `aws` and read the aws-cli source
   rather than third-party documentation.
-- **Symbol-name traceability against aws-cli**: parity work depends on reading
-  this codebase side by side with the aws-cli source. When a symbol here (a
-  class, function, or option/config key) corresponds to an aws-cli counterpart,
-  keep the same name with the same meaning, or an extended form whose
-  correspondence remains easy to trace (e.g., a function ported from aws-cli
-  keeps aws-cli's name even where it re-raises its failure as the library's
-  exception). Renaming such a symbol to something unrelated - or reusing an
+- **Symbol-name traceability against aws-cli**: compatibility work depends on
+  reading this codebase side by side with the aws-cli source. When a symbol
+  here (a class, function, or option/config key) corresponds to an aws-cli
+  counterpart, keep the same name with the same meaning, or an extended form
+  whose correspondence remains easy to trace (e.g., a function ported from
+  aws-cli keeps aws-cli's name even where it re-raises its failure as the
+  library's exception). Renaming such a symbol to something unrelated - or reusing an
   aws-cli name for a different meaning - obscures the port; a change (including
   a refactoring) that would significantly break this correspondence is
   rejected.
@@ -240,8 +240,8 @@ Neither design nor promises to users - how to work on the project. Read with
 [`CONTRIBUTING.md`](../CONTRIBUTING.md), which is the entry point.
 
 - [`testing.md`](./testing.md) - the test structure (5 tiers, golden
-  contracts, e2e gate, enforcement of the exit code charter) and the
-  operational definition of the output parity criterion.
+  contracts, e2e gate, the exit code comparison) and the output comparison
+  criterion.
 - [`endpoint-fidelity.md`](./endpoint-fidelity.md) - how the local test
   endpoint (the dev stack, RustFS) answers differently from real S3, the
   test-side change made for each gap, and how that server was chosen.
