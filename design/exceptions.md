@@ -50,8 +50,8 @@ Boto3S3Error                # root. The supertype of all library errors. Inherit
 `-- BatchError              # aggregate: a batch operation's failure rollup (counts only; the sample failure rides on __cause__; section 4)
 ```
 
-The two **refining subclasses** exist for the CLI's exit-code parity: aws
-reports those failures through its *general* exception handler (rc 255), while
+The two **refining subclasses** exist for the CLI's exit codes: aws reports
+those failures through its *general* exception handler (rc 255), while
 plain `ValidationError` / `ConfigurationError` map to the dedicated 252 / 253.
 `exit_code_for` keys on the subclass before the parent (section 5). Library
 consumers can ignore the distinction and catch the parent category.
@@ -99,9 +99,9 @@ What a consumer may rely on across releases is **class identity** (the
 hierarchy above) and the **structured attributes**: `operation` / `bucket` /
 `key` on every `Boto3S3Error`, plus `BatchError`'s counters (`succeeded` /
 `failed` / `warned` / `skipped` and the derived `total`, section 4).
-**Message strings are display only**: they carry aws-cli wording and change
-whenever parity tracking requires, so never parse `str(exc)` - branch on the
-class and read the attributes.
+**Message strings are display only**: they follow aws-cli's wording and may
+change in any release, so never parse `str(exc)` - branch on the class and
+read the attributes.
 
 `__cause__` reachability: an error raised for a failed S3 request carries the
 originating botocore `ClientError` on `__cause__` (the `raise ... from`

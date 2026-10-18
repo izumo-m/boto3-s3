@@ -104,10 +104,10 @@ The CRT engine is E2E-only: it bypasses botocore's HTTP layer, so the
 `preferred_transfer_client` through `AWS_CONFIG_FILE` (the test suite's
 mechanism); `--engine both` adds a CRT pass over the transfer scenarios for
 aws and boto3-s3 alike. On the CRT lane the harness passes `--endpoint-url`
-explicitly to both sides - the same workaround as the e2e CRT parity tests,
-because aws's CRT client reads `use_ssl` from the CLI argument only and an
-env-only `AWS_ENDPOINT_URL_S3` makes it dial TLS to the dev stack's http
-endpoint (`AWS_IO_SOCKET_CLOSED`).
+explicitly to both sides - the same workaround as the e2e CRT tests
+(`test_crt_parity.py`), because aws's CRT client reads `use_ssl` from the CLI
+argument only and an env-only `AWS_ENDPOINT_URL_S3` makes it dial TLS to the
+dev stack's http endpoint (`AWS_IO_SOCKET_CLOSED`).
 
 A scenario that fails (unexpected rc, verification mismatch) is skipped and
 recorded - in the run summary, and under `failures` in the results file's

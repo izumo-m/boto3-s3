@@ -1,12 +1,13 @@
 # Endpoint fidelity
 
-Parity means boto3-s3 behaves like aws against real S3. Running the suite
-against real S3 every time costs too much, so the e2e tier runs both CLIs
-against a local S3 server, the dev stack (RustFS, `scripts/compose.dev.yaml`),
-with occasional real-AWS runs ([`testing.md`](./testing.md) section 3,
-endpoint policy). Wherever the dev stack answers differently from real S3, a
-pass on it is no evidence of parity on real S3. This file records those
-places (section 1), every test-side change made because the endpoint is not
+Compatibility means boto3-s3 behaves like aws against real S3 (the policy is
+[`overview.md`](./overview.md) section 3). Running the suite against real S3
+every time costs too much, so the e2e tier runs both CLIs against a local S3
+server, the dev stack (RustFS, `scripts/compose.dev.yaml`), with occasional
+real-AWS runs ([`testing.md`](./testing.md) section 3, endpoint policy).
+Wherever the dev stack answers differently from real S3, a pass on it is no
+evidence that the two agree on real S3. This file records those places
+(section 1), every test-side change made because the endpoint is not
 real S3 (section 2 - each must be revisited when the endpoint changes), and
 how the dev stack's server was chosen (section 3).
 

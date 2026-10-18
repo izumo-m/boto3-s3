@@ -278,8 +278,8 @@ So an `mv` of one S3 object to another carries both `"write"` (the copy) and
 
 The **`"write"`** and **`"read"`** slots ride the botocore client's event stream,
 which the CRT data plane bypasses, so `capture_response=True` **forces the classic
-transfer engine** (a library-only flag with no `aws s3` equivalent, so no parity
-impact).
+transfer engine** (a library-only flag with no `aws s3` equivalent, so no
+compatibility impact).
 It registers handlers on the transfer's client for the operation's span and
 removes them after; run a capture operation with a client not used concurrently
 elsewhere (design/s3.md thread-safety note). The **`"delete"`** slot rides no

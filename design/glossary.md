@@ -59,8 +59,8 @@ group (`aws s3`).
 
 - **aws-cli** - Amazon's official AWS command-line tool (the project /
   distribution). Unless otherwise noted it refers to **AWS CLI v2**. It is the
-  upstream that boto3-s3 takes as its baseline for functional compatibility
-  (parity). It is the counterpart of boto3-s3-cli.
+  upstream that boto3-s3 takes as its baseline for functional compatibility.
+  It is the counterpart of boto3-s3-cli.
 - **the `aws` command** - the shell command exposed by aws-cli. The counterpart
   of the `boto3-s3` command (`aws` <-> `boto3-s3`).
 - **`aws s3`** - the S3 subcommand group of the `aws` command (`cp` / `ls` /
@@ -69,12 +69,17 @@ group (`aws s3`).
 
 ## General terms
 
-- **parity** - under identical settings, each boto3-s3 operation produces the
-  same functional result (final state of S3 objects, return values, error
-  conditions) as the corresponding `aws s3` subcommand. Parity does not extend
-  to internal processing order, or to features that cannot be embedded in a
-  library. (The CLI layer is held to two stricter charters, one on exit codes
-  and one on console output; see [`overview.md`](./overview.md).)
+- **functional compatibility** - in the normal path, each boto3-s3 operation
+  does what the corresponding `aws s3` subcommand does under the same
+  arguments and conditions (the same objects and files with the same content,
+  properties and request headers, the same `sync` decisions, the same option
+  meanings); in the semi-abnormal and abnormal paths only what decides the
+  functional outcome is matched, not the details of an error. It does not
+  extend to internal processing order, or to features that cannot be embedded
+  in a library. The CLI also prints what `aws s3` prints on success and
+  follows the meaning aws-cli gives each exit code; see
+  [`overview.md`](./overview.md) section 3. (The older word "parity" remains
+  in file and symbol names, such as the e2e tests' `test_*_parity.py`.)
 - **key** - the full, `/`-separated identifier of a listing entry (an S3 object
   key / prefix / bucket name, or a local path with the host `os.sep` translated
   to `/`). It is `/`-form on **every OS**, never the host separator, so the two
