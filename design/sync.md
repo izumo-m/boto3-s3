@@ -208,8 +208,8 @@ mtime rule (full float precision; `delta = dest.mtime - src.mtime`):
   (aws-cli's strategy override order; a same-size, different-mtime
   download runs).
 - a pair missing either mtime or size is treated as "different" (falls to the
-  copy side). aws's listing always carries both, so this never happens on the
-  parity path (the permissive reading of a library building block).
+  copy side). aws's listing always carries both, so this never happens on an
+  input `aws s3` handles (the permissive reading of a library building block).
 
 ## 5. The execution side of transfer and delete
 
@@ -517,7 +517,7 @@ botocore client is safe to share for concurrent calls).
   case-variant survives a case-insensitive local destination, and which
   warns), because the gate's in-flight set is
   order-sensitive (aws-cli's `CaseConflictSync` in the not-at-dest slot). The
-  **update** lane never touches the gate. Exit parity is otherwise unaffected
+  **update** lane never touches the gate. The exit code is otherwise unaffected
   (the wrapped delete lane above is the one exception).
 - **Back-pressure.** `sync` submits each pooled decision as a `Future` and keeps a
   bounded number outstanding (the distinct executors' worker counts, summed), so a
@@ -536,7 +536,7 @@ botocore client is safe to share for concurrent calls).
   down the caller-owned executor.
 
 `ParallelFilter` is a library-only building block: there is no `aws s3` flag for a
-parallel filter, so the CLI never sets it and parity is not at stake.
+parallel filter, so the CLI never sets it and compatibility is not at stake.
 
 ## 11. One hook over every pair (`pair_filter`, opt-in)
 
@@ -602,5 +602,5 @@ either not a `SyncPair` or `AwsCliComparison()(pair)`.
   is stated as a user-facing contract in `docs/reference/operations/sync.md`.
 
 Library-only, like `ParallelFilter`: `aws s3` has no counterpart, so the CLI
-never sets it and no parity is at stake (the library may be a permissive
+never sets it and no compatibility is at stake (the library may be a permissive
 superset, [`overview.md`](./overview.md) section 3).

@@ -259,10 +259,10 @@ versioned bucket) cannot be mapped back to submission order.
   to the caller on the next non-empty `flush()` or on `close()` (fails
   loudly).
 
-## 4. aws-cli parity notes
+## 4. aws-cli compatibility notes
 
-Batching is an accepted deviation ([`overview.md`](./overview.md), exit code
-charter exception 4): a difference from aws-cli that originates in sending
+Batching is a settled deliberate deviation ([`overview.md`](./overview.md)
+section 3): a difference from aws-cli that originates in sending
 `DeleteObjects` batches instead of one `DeleteObject` per key is recorded here
 and in aws-differences.md, not reopened. The deleter still narrows such a
 difference where that is cheap - every per-key re-send in section 3 exists for
@@ -292,9 +292,9 @@ that - so a key never gets fewer attempts than aws-cli gives it.
   which `sync`'s `ExitStack` does before the transferrer has drained, the
   deleter being entered later - so the final flush races the in-flight copies
   and the copy usually wins. Either way the outcome is execution order under
-  concurrency, which the parity charter leaves out
-  ([`overview.md`](./overview.md) section 3): no ordering is added to settle
-  it, and aws-differences.md tells the reader not to run the command. A key containing XML 1.0-forbidden controls, surrogate code points,
+  concurrency - run nondeterminism, which no output comparison holds to one
+  order ([`testing.md`](./testing.md) section 9, class 3): no ordering is
+  added to settle it, and aws-differences.md tells the reader not to run the command. A key containing XML 1.0-forbidden controls, surrogate code points,
   or `U+FFFE` / `U+FFFF` cannot be carried in a `DeleteObjects` body; it falls
   back to `DeleteObject`, preserving aws-cli behavior without sacrificing
   batching for the other keys. A key containing a carriage return takes the
@@ -324,8 +324,8 @@ that - so a key never gets fewer attempts than aws-cli gives it.
   (its CRT client's error carries none). A batch request failing as a whole
   is not one of these: its keys go out again on their own, so their lines are
   aws's. The
-  non-batched single-key delete keeps `DeleteObject` and matches aws byte for
-  byte, so the difference is confined to the batched routes
+  non-batched single-key delete keeps `DeleteObject` and reads as aws's does,
+  so the difference is confined to the batched routes
   (`rm --recursive`, an S3-side `sync --delete`, `rb --force`). Recorded for
   the reader in [`aws-differences.md`](../docs/cli/aws-differences.md).
 - User-facing output such as `delete: s3://...` / `delete failed: s3://... <error>` /
@@ -333,7 +333,7 @@ that - so a key never gets fewer attempts than aws-cli gives it.
   responsibility to assemble from `on_result`. The library does not print; it
   only emits the `boto3_s3.deleter` logger (debug: batch dispatch, request-level
   failures, per-key failures / warning: unattributable entries) - an intentional
-  break from parity. The CLI's `--debug` picks up this logger, and nothing
+  difference from aws-cli. The CLI's `--debug` picks up this logger, and nothing
   else does: the `boto3_s3` package logger carries a `NullHandler` (registered
   by `s3storage` and, for its own warning, by `crtsupport` - every logging path
   imports one of the two - as boto3's own loggers do), so where no handler is
@@ -357,8 +357,8 @@ Each of the following lives outside this component:
   single-key path builds its `FileInfo` without any deleter at all, and a
   local or custom (`s3open`) sync destination has no deleter either, so
   routing only the S3-destination case through this flag would leave two
-  emission points instead of one. The CLI parity tests pin those records'
-  ordering against real aws, so the flag is offered to direct consumers (who
+  emission points instead of one. The CLI's e2e comparison tests pin those
+  records' ordering against aws, so the flag is offered to direct consumers (who
   otherwise hand-roll the same record shape) and the orchestrators are left
   alone.
 - **The `CancelToken` machinery** - shared infrastructure

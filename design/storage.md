@@ -153,7 +153,7 @@ front only when the declaration is honest:
   merge-join asserts on (section 3).
 
   `LocalStorage` also takes one **destination-side** constructor knob that is
-  *not* a scan source-config: `fsync` (default off = aws parity), a library
+  *not* a scan source-config: `fsync` (default off, as aws-cli), a library
   extension the transfer engine reads off the destination to make an `mv`
   download durable before deleting the S3 source (transfer.md section 11).
 - **`get_fileinfo(key="", *, on_warning=None) -> FileInfo | None`**
@@ -234,9 +234,9 @@ A few more members come with working defaults a custom backend normally keeps:
   (`dir_op` or a trailing `/` on `as_text()`).
 - **`validate() -> None`** — a public hook for deferred strict validation of
   the location, a no-op by default. Construction is permissive (a building
-  block); an operation — or the CLI at its parity point — calls this to reject
-  a malformed location loudly before use. `S3Storage` overrides it with the
-  aws-cli-parity checks (unsupported ARN forms, a key with no bucket),
+  block); an operation — or the CLI where aws-cli validates — calls this to
+  reject a malformed location loudly before use. `S3Storage` overrides it with
+  the checks aws-cli makes (unsupported ARN forms, a key with no bucket),
   `LocalStorage` rejects an empty path (`""` is no location to Python, only
   `abspath` would make it the working directory; aws-cli agrees except for
   the destination of a single download, which the CLI layer turns into `"."`
@@ -530,14 +530,14 @@ spanning both would file a broken stream as a local failure.
   fails with S3's own error; `get_file` streams the whole object in one
   `GetObject`. Multipart, parallelism and resumption remain `S3.cp`'s.
 - no `HeadObject`, and no `ContentType` / MIME guessing on upload — guessing an
-  upload's type from its name is the transfer lanes' aws-cli parity behavior
+  upload's type from its name is the transfer lanes' aws-cli behavior
   (`guess_mime_type`), not this lane's.
 - no local mtime stamping after a download, and no `reject_unrepresentable_stamp`
-  guard: both exist for the transfer lanes' aws parity, and here the caller holds
+  guard: both exist so the transfer lanes match aws, and here the caller holds
   the returned `S3FileInfo` and decides.
-- **`cp` / `mv` / `sync` do not use them**, so aws-cli parity is untouched: the
-  transfer engine, its gates (glacier, `--no-overwrite`, case-conflict) and the
-  CLI do not depend on them.
+- **`cp` / `mv` / `sync` do not use them**, so compatibility with aws-cli is
+  untouched: the transfer engine, its gates (glacier, `--no-overwrite`,
+  case-conflict) and the CLI do not depend on them.
 - not part of the `Storage` SPI. These are `S3Storage`-specific building blocks
   like the S3-only operations, so neither `StorageCapability` nor the `Storage`
   ABC describes them, and a custom backend implements none of it.
