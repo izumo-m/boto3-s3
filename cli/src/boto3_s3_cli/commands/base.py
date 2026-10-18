@@ -30,7 +30,6 @@ if TYPE_CHECKING:
     from mypy_boto3_s3 import S3Client
 
     from boto3_s3 import S3
-    from boto3_s3_cli.autoprompt.prompter import AutoPrompter
 
     ClientFactory = Callable[[argparse.Namespace], S3Client]
     S3Factory = Callable[[argparse.Namespace], S3]
@@ -51,9 +50,6 @@ class Context:
     overrides the transfer engine's defaults (aws-equivalent 8 MiB
     threshold/chunk); tests inject ``TransferConfig(use_threads=False, ...)``
     to make multipart call order deterministic against canned clients.
-    ``auto_prompter`` overrides the ``--cli-auto-prompt`` backend (default: the
-    real ``prompt_toolkit`` prompter, built lazily by ``main``); tests inject a
-    fake returning a canned argv to exercise the re-dispatch without a terminal.
     """
 
     def __init__(
@@ -63,7 +59,6 @@ class Context:
         s3_factory: S3Factory | None = None,
         service_client_factory: ServiceClientFactory | None = None,
         transfer_config: TransferConfig | None = None,
-        auto_prompter: AutoPrompter | None = None,
     ) -> None:
         self.client_factory: ClientFactory = (
             build_client if client_factory is None else client_factory
@@ -75,7 +70,6 @@ class Context:
         )
         self._service_client_factory_injected = service_client_factory is not None
         self.transfer_config: TransferConfig | None = transfer_config
-        self.auto_prompter: AutoPrompter | None = auto_prompter
 
     def s3(self, args: argparse.Namespace) -> S3:
         """Build the command's `S3`, adapting an injected client factory if present.
@@ -124,7 +118,6 @@ class Context:
                 self.service_client_factory if self._service_client_factory_injected else None
             ),
             transfer_config=self.transfer_config,
-            auto_prompter=self.auto_prompter,
         )
         return clone
 

@@ -5,14 +5,9 @@ functional (moto) and e2e (dev stack / real S3) suites exercise **identical
 inputs** - that identity is what makes "golden captured from aws-cli" a valid
 expectation for the moto replay.
 
-Charter note (design/overview.md section 3): the exit code is compared for *every*
-scenario, unconditionally - there is deliberately no flag to relax it.
+The exit code is compared for *every* scenario, unconditionally
+(design/testing.md section 2) - there is deliberately no flag to relax it.
 ``compare_stdout`` / ``diff_only`` only relax stdout and golden handling.
-
-Not represented here:
-
-- the interactive prompt (``--cli-auto-prompt``): it needs a terminal on both
-  sides and is the charter's exception 2, so it is unit-tested instead.
 """
 
 from __future__ import annotations

@@ -28,8 +28,8 @@ classifiers = [
 dependencies = [
     # Versioned independently; the range pins the library API this CLI is built against.
     "boto3-s3>=0.12.0,<0.13.0",
-    # Imported directly (the Session in build_client and the [s3] config read,
-    # the autoprompt completers); floor matches boto3-s3's pin.
+    # Imported directly (the Session in build_client and the [s3] config read);
+    # floor matches boto3-s3's pin.
     "boto3>=1.28",
     # Imported directly by build_client (Config / UNSIGNED / signer pin); floor matches boto3-s3's botocore pin.
     "botocore>=1.31",
@@ -41,8 +41,6 @@ dependencies = [
 [project.optional-dependencies]
 # Opt-in CRT support, forwarding down the stack to boto3-s3[crt] (see design/crt.md).
 crt = ["boto3-s3[crt]"]
-# Opt-in --cli-auto-prompt interactive UI via prompt_toolkit (see design/autoprompt.md).
-autoprompt = ["prompt_toolkit>=3.0"]
 
 [project.scripts]
 boto3-s3 = "boto3_s3_cli.cli:main"

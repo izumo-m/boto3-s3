@@ -12,7 +12,6 @@ already made by the test runner can't mask a regression.
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 import textwrap
@@ -62,11 +61,8 @@ _PRELUDE = """
 def _run_fresh(code: str) -> str:
     """Run *code* (after the prelude) in a fresh interpreter; return its stdout."""
     source = textwrap.dedent(_PRELUDE) + textwrap.dedent(code)
-    # Pin the auto-prompt mode off so ambient configuration cannot divert an
-    # informational exit into the interactive prompt.
-    env = {**os.environ, "AWS_CLI_AUTO_PROMPT": "off"}
     result = subprocess.run(
-        [sys.executable, "-c", source], capture_output=True, text=True, check=False, env=env
+        [sys.executable, "-c", source], capture_output=True, text=True, check=False
     )
     assert result.returncode == 0, (
         f"\n--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"

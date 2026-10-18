@@ -56,7 +56,7 @@ its wording or which of two mistakes is reported, may differ. Deliberate
 differences, such as batched deletes and credentials masked in debug output,
 are listed in
 [`docs/cli/aws-differences.md`](https://github.com/izumo-m/boto3-s3/blob/main/docs/cli/aws-differences.md);
-the interactive auto-prompt UI is not compared.
+there is no interactive auto-prompt.
 
 ## Packaging & startup
 
@@ -108,15 +108,11 @@ the measured package set was about 31.5 MiB.
 pip install boto3-s3-cli
 ```
 
-Optional extras:
+Optional extra:
 
 ```bash
-pip install "boto3-s3-cli[crt]"          # AWS Common Runtime transfer engine + CRT checksums
-pip install "boto3-s3-cli[autoprompt]"   # --cli-auto-prompt interactive completion
+pip install "boto3-s3-cli[crt]"   # AWS Common Runtime transfer engine + CRT checksums
 ```
-
-With the autoprompt extra, run `boto3-s3 --cli-auto-prompt` to complete
-arguments interactively as you type.
 
 Installing the package also makes a `boto3_s3_cli` Python package importable,
 but that is an implementation detail with no API guarantee: the supported

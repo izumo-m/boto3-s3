@@ -80,9 +80,6 @@ overview.md section 3 can call for one). A mismatch in an error's details
 or Python version difference, is not a bug: the scenario is changed, not the
 code.
 
-The interactive auto-prompt UI is not compared (overview.md section 3); it
-cannot run on the aws side anyway, so it is unit-tested instead of diffed.
-
 `test_positional_fileb_bug_parity.py` is a dedicated drift tripwire rather
 than a golden scenario. It feeds a readable binary positional to all six
 single-path commands and asserts the explicit aws-cli bug-shaped exit codes

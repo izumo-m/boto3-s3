@@ -312,16 +312,6 @@ class TestWhatABadProfileCannotReach:
             "\nusage: boto3-s3 [--profile PROFILE] [--debug]\n"
         )
 
-    def test_the_auto_prompt_conflict_keeps_the_envelope(
-        self, config: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        monkeypatch.setenv("AWS_PROFILE", "nosuch")
-        assert cli.main(["--cli-auto-prompt", "--no-cli-auto-prompt", "ls"]) == 252
-        assert capsys.readouterr().err == (
-            f"boto3-s3: [ERROR]: {_ENVELOPE}Both --cli-auto-prompt and "
-            "--no-cli-auto-prompt cannot be specified at the same time.\n"
-        )
-
     @pytest.mark.parametrize(
         ("argv", "message"), _RESOLUTION_ERRORS, ids=["globals-parse", "query", "endpoint"]
     )
@@ -378,13 +368,6 @@ class TestUnparseableConfigFile:
         config.write_text("[[[broken\n")
         assert cli.main(["--profile"]) == 252
         assert "Unable to parse config file" not in capsys.readouterr().err
-
-    def test_it_beats_the_auto_prompt_conflict(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        config.write_text("[[[broken\n")
-        assert cli.main(["--cli-auto-prompt", "--no-cli-auto-prompt", "ls"]) == 255
-        assert "Unable to parse config file" in capsys.readouterr().err
 
     def test_it_beats_an_undeclared_profile(
         self, config: Path, capsys: pytest.CaptureFixture[str]
@@ -504,13 +487,6 @@ class TestInvalidTimestampFormat:
     ) -> None:
         config.write_text("[default]\ncli_timestamp_format = bogus\n")
         assert cli.main(["--profile"]) == 252
-        assert "cli_timestamp_format" not in capsys.readouterr().err
-
-    def test_the_auto_prompt_conflict_outranks_it(
-        self, config: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        config.write_text("[default]\ncli_timestamp_format = bogus\n")
-        assert cli.main(["--cli-auto-prompt", "--no-cli-auto-prompt", "ls"]) == 252
         assert "cli_timestamp_format" not in capsys.readouterr().err
 
     def test_an_unparseable_config_outranks_it(
@@ -796,13 +772,6 @@ class TestUnknownOutputEncoding:
     ) -> None:
         monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "nosuch")
         assert cli.main(["--profile"]) == 252
-        assert "Unknown codec" not in capsys.readouterr().err
-
-    def test_the_auto_prompt_conflict_outranks_it(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "nosuch")
-        assert cli.main(["--cli-auto-prompt", "--no-cli-auto-prompt", "ls"]) == 252
         assert "Unknown codec" not in capsys.readouterr().err
 
     @pytest.mark.parametrize(

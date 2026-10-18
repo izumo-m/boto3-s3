@@ -6,8 +6,7 @@ import argparse
 import os
 import sys
 
-# Loaded at dispatch once mv is determined (stage 2 of the lazy dispatch) -
-# or up front when auto-prompt builds the full command model.
+# Loaded at dispatch once mv is determined (stage 2 of the lazy dispatch).
 from boto3_s3 import (
     S3,
     NotFoundError,

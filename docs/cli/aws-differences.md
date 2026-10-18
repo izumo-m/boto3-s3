@@ -49,9 +49,7 @@ cover the text that differs on purpose — the progress display, help pages and
 `--debug` traces, the failure lines of a batched delete, the `--dryrun` line
 of a directory copied without `--recursive`, the `--version` line, and the
 history warning `aws` writes and this command has not. Other error reports
-worded differently from aws's are not listed. The interactive
-prompt (`--cli-auto-prompt`) is not compared with `aws` at all, its output
-included. And the ordering of concurrent output is not reproducible on either
+worded differently from aws's are not listed. And the ordering of concurrent output is not reproducible on either
 tool (below).
 
 Because the text is aws's, so are its envelopes: parameter-validation errors
@@ -78,8 +76,8 @@ profile key would have to come from the profile that does not exist),
 the report itself — into a JSON object, a YAML mapping, a tab-separated line,
 an ASCII table — where here the report keeps its usual one-line form
 throughout. `aws` applies the setting from the point where it has read it:
-the reports it makes before that — `--profile` without a value, `--debug=1`,
-the two auto-prompt flags together — never change, and the option, unlike the
+the reports it makes before that — `--profile` without a value, `--debug=1`
+— never change, and the option, unlike the
 variable and the profile key, does not reach a failure of the very parse that
 reads it (`ls --output bad --cli-error-format legacy` keeps its envelope). A
 value outside that list, in the variable or the profile, is an error on
@@ -400,11 +398,10 @@ that say outright that the run comes out differently, listed in section 1.
   `boto3-s3-cli/<v> boto3-s3/<v> boto3/<v> botocore/<v> Python/<v>
   <System>/<release>` — and has no `exe/<machine>` install-source token to
   report. Anything keying on the `aws-cli/<version>` token will not match.
-- **Interactive prompt.** `--cli-auto-prompt` needs the `autoprompt` extra, and
-  its completions are not the same as aws's: values of every option that has a
-  fixed choice list are completed (`aws` omits some), bucket and key names are
-  not completed from the server, and shell completion is not provided. Nothing
-  about the prompt is compared with `aws`.
+- **No interactive prompt.** `--cli-auto-prompt` and `--no-cli-auto-prompt`
+  are accepted and ignored, and `AWS_CLI_AUTO_PROMPT` and the profile's
+  `cli_auto_prompt` are not read: the command runs as typed, where `aws`
+  would prompt for the rest.
 - **`cli_history` is not read.** With `cli_history = enabled` in the selected
   profile, `aws` records the run in a history database, and when it cannot
   open that database it writes one line to stderr ahead of everything else —

@@ -25,9 +25,8 @@ pip install boto3-s3-cli
 Two optional extras:
 
 ```bash
-pip install "boto3-s3-cli[crt]"          # the AWS Common Runtime transfer engine
-                                         # and the CRT-family checksums
-pip install "boto3-s3-cli[autoprompt]"   # --cli-auto-prompt interactive completion
+pip install "boto3-s3-cli[crt]"   # the AWS Common Runtime transfer engine
+                                  # and the CRT-family checksums
 ```
 
 Not sure whether you need them? Start without either — the command is complete

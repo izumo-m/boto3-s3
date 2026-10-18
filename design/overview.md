@@ -85,7 +85,7 @@ maintaining high functional compatibility.
   batches ([`deleter.md`](./deleter.md)) where aws-cli deletes one key per
   request; batching is not to be traded back for per-key deletes. The CRT
   transfer engine is held to aws's CRT mode on the same terms
-  ([`crt.md`](./crt.md)), and the interactive auto-prompt UI is not compared.
+  ([`crt.md`](./crt.md)). The CLI has no interactive auto-prompt.
 - **Compatibility target**: the pinned aws-cli release the code is ported
   against, together with the boto3 / botocore / s3transfer / awscrt releases
   of the same period. Older aws-cli releases are not a target. Two version
@@ -231,10 +231,6 @@ Markdown links inside each half resolve relatively and need no prefix.
   (`set_stream_logger`, `SecretMaskingFilter`, the replacement notation).
 - [`aws-cli-option-handling.md`](./aws-cli-option-handling.md) - handling of
   `aws s3` options that are no-ops / unsupported.
-- [`autoprompt.md`](./autoprompt.md) - the design of `--cli-auto-prompt`
-  (prompt_toolkit opt-in extra; the completion engine is a port of aws-cli's
-  `autocomplete/`; the exact-match baseline and the storage-class gap
-  correction).
 - [`cli.md`](./cli.md) - the design of the CLI layer (`boto3-s3-cli`).
   Implemented subcommands (currently `cp` / `ls` / `mv` / `rm` / `mb` / `rb` /
   `presign` / `sync` / `website` - all `aws s3` subcommands).

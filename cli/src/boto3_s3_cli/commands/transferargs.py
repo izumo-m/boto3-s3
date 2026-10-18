@@ -4,7 +4,7 @@
 (aws-cli's ``subcommands.py``); this module is that shared list and the
 validation/translation steps the three commands run in the same order.
 This module loads at dispatch once its command is determined (stage 2 of the
-lazy dispatch) - or up front when auto-prompt builds the full command model.
+lazy dispatch).
 Top-level imports may therefore reach the AWS SDK.
 """
 

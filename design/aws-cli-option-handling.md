@@ -193,36 +193,13 @@ parse-time load 252 on every subcommand.
 
 ## 3. Auto-prompt / completion UI
 
-`boto3-s3-cli` supports aws-cli's interactive **auto-prompt**
-(`--cli-auto-prompt`) as an **opt-in extra**: it is active when
-`prompt_toolkit` is installed (`boto3-s3-cli[autoprompt]`) and degrades to a
-rejection-with-install-hint otherwise. The full design - the completion-candidate
-spec, the port architecture, and the degradation - is in
-[`autoprompt.md`](./autoprompt.md). This section records only the option-level
-handling.
-
-| Option / feature | Handling |
-|---|---|
-| `--cli-auto-prompt` (with `prompt_toolkit`) | Launches an interactive prompt with `aws s3`-style completion (usability-tuned, see below), then re-dispatches the completed command. |
-| `--cli-auto-prompt` (without `prompt_toolkit`) | Rejected with an install hint and a non-zero exit code. |
-| `--no-cli-auto-prompt` | Forces the mode **off**, and pairing it with `--cli-auto-prompt` is a usage error, both matching aws-cli. |
-| `AWS_CLI_AUTO_PROMPT`, profile `cli_auto_prompt` | **Consulted**, matching aws-cli's chain, and read SDK-free. |
-| `on-partial` mode | **Supported.** |
-| Shell completion (the `aws_completer` equivalent) | **Not provided.** |
-
-This table records *which* aws-cli auto-prompt surface is covered. The
-precedence among these inputs, the meaning of each mode, and the behavior when
-`prompt_toolkit` is absent are specified in
-[`autoprompt.md`](./autoprompt.md) section 5.
-
-The exit codes above are **not contractual**: the auto-prompt UI is an
-interactive front-end that is not compared with aws (`overview.md` section 3),
-and aws-cli itself fails when it cannot acquire terminal control. The
-completion *candidates* are **not contractual either** - the whole auto-prompt
-surface is left out of the comparison, so it favors **usability over matching
-aws** (it completes command-level choices like `--storage-class` that aws
-misses, and widens reachability where aws's parser drops completions - see
-[`autoprompt.md`](./autoprompt.md) section 2).
+There is no interactive auto-prompt: the CLI is a by-product of the library,
+and an interactive front-end has no place in either. `--cli-auto-prompt` and
+`--no-cli-auto-prompt` are **accepted and ignored**, so a command line that
+carries one still runs as typed, and `AWS_CLI_AUTO_PROMPT` and the profile's
+`cli_auto_prompt` are not read. Shell completion (the `aws_completer`
+equivalent) is not provided either. Recorded for users in
+[`aws-differences.md`](../docs/cli/aws-differences.md).
 
 ## 4. Direction-specific options
 
@@ -317,8 +294,8 @@ onto our single one - are rewritten on aws's side before the comparison, and
 the surrounding message is then compared in full.
 
 The default enhanced-style parameter-validation envelope is reproduced as
-well: parser failures, unknown options, path/option validation failures,
-and auto-prompt flag conflicts use
+well: parser failures, unknown options and path/option validation failures
+use
 `An error occurred (ParamValidation): <message>`. This target is the default
 output of aws-cli; selecting another `--cli-error-format` does not alter
 `boto3-s3-cli` output, as described in section 2.1.
@@ -465,8 +442,3 @@ Two further differences reach stderr from the **parser** rather than the
 display layer: the candidate order of an ambiguous-abbreviation report, and an
 ambiguous abbreviation used as an option value on Python 3.10 / 3.11. Both are
 recorded with their rationale in [`cli.md`](./cli.md) section 2.
-
-The interactive auto-prompt is on no list at all, because it is not compared
-with aws: neither the prompt's console output nor its completion set
-([`overview.md`](./overview.md) section 3, section 3 of this document,
-[`autoprompt.md`](./autoprompt.md) section 1).

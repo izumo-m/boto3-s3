@@ -64,8 +64,6 @@ dev = [
     "moto[s3]>=5.0",
     # Keep awscrt present in tests, as aws v2 bundles it (see design/testing.md).
     "botocore[crt]>=1.34",
-    # Keep prompt_toolkit present in tests, as aws v2 bundles it (see design/testing.md).
-    "prompt_toolkit>=3.0",
 ]
 
 [tool.uv.workspace]

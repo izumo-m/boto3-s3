@@ -31,12 +31,11 @@ solidified design is added here.
   `parse_known_args` over the raw argv, ahead of everything else. Either
   option can fail it - `--profile` by having no value, `--debug` by being
   handed one (`--debug=1`) - and because the scan comes first that failure
-  beats `--version`, the help token, the auto-prompt rejection and every parse
+  beats `--version`, the help token and every parse
   below, wherever the option sits (`ls --profile`, `--debug --profile`, the
   abbreviations `--p` / `--d=1`; behind `--` the token is data, so the scan
   cannot see it - all measured). It reports that parser's own two-option usage
-  rather than the top-level block, and the on-partial silencing does not cover
-  it (aws installs its silencer on the driver, which this precedes). Only the
+  rather than the top-level block. Only the
   failure is reproduced: the values themselves come from the globals pass
   below, which parses them again.
 - Next comes the **config-file scan** (`configfiles.scan`, stdlib only -
@@ -46,8 +45,8 @@ solidified design is added here.
   after the preliminary scan and reads the whole merged config, so a file
   that is not valid INI settles the run right
   there: `Unable to parse config file: <path>` at rc 255 (botocore's
-  `ConfigParseError` through aws's general handler), ahead of the auto-prompt
-  rejection, `--version`, the help token and every parse below. Both of
+  `ConfigParseError` through aws's general handler), ahead of
+  `--version`, the help token and every parse below. Both of
   botocore's files are read in its order - the config file, then the shared
   credentials file - and its rules apply: the path must name a file (a
   directory or a missing path is simply "no config file"), `configparser`
@@ -103,8 +102,8 @@ solidified design is added here.
   event, which it emits after binding `--profile` and before handing the argv
   to any command layer, so an unknown value is the run's outcome ahead of the
   help token, an invalid subcommand, unknown options and missing arguments,
-  while `--version`, the preliminary scan, the auto-prompt rejection, the
-  unparseable-config abort, the alias-file abort, the three global
+  while `--version`, the preliminary scan, the
+  unparseable-config abort, the three global
   resolutions and the unknown-codec `AWS_CLI_OUTPUT_ENCODING` gate (section 6)
   all still outrank it (all measured). The value comes from the scan's profile
   map scoped to the profile aws would have bound - `--profile` under its truthy guard, then
@@ -168,7 +167,7 @@ solidified design is added here.
   subcommand is the same parse (both `boto3-s3 --profile foo ls s3://b` and
   `boto3-s3 ls s3://b --profile foo` work, matching `aws s3 --profile foo ls
   ...`). The **rendering** parsers - each subcommand's help page and the
-  auto-prompt model's `build_parser()` tree - still take the
+  `build_parser()` tree - still take the
   `suppress_defaults=True` globals parent so their help keeps listing the
   globals; the parser stage 2 actually parses with
   (`_build_command_parse_parser`) knows only the command's own arguments,
@@ -232,8 +231,8 @@ solidified design is added here.
     ambiguity (`ls --output bad --no-c` blames `--no-c`); and so does a
     `--version` ahead of one (`ls --version --c` is rc 252 where aws prints
     its version). What an earlier step settles is untouched - the
-    preliminary `--profile` / `--debug` scan and the auto-prompt pair still
-    report first, on every Python.
+    preliminary `--profile` / `--debug` scan still reports first, on every
+    Python.
     Closing it would mean overriding the classification too
     (`_parse_optional` / `_get_option_tuples`), far more private argparse
     surface than a corner input is worth.
@@ -384,9 +383,9 @@ solidified design is added here.
 
 | module | role |
 |---|---|
-| `cli.py` | Two-stage dispatch (the aws-clidriver lazy-command-table shape): the globals pass consumes the globals off the full argv, the command scan matches its remainder against `_COMMAND_TABLE` (the registry: name -> module, class, help - no command module imported), stage 2 imports the matched module, builds its real parser and runs it. Wires `--debug`, maps exceptions to exit codes; the full `build_parser()` remains as the auto-prompt model's source |
+| `cli.py` | Two-stage dispatch (the aws-clidriver lazy-command-table shape): the globals pass consumes the globals off the full argv, the command scan matches its remainder against `_COMMAND_TABLE` (the registry: name -> module, class, help - no command module imported), stage 2 imports the matched module, builds its real parser and runs it. Wires `--debug`, maps exceptions to exit codes; the full `build_parser()` builds the whole surface for tests |
 | `globalargs.py` | Common option definitions (the parent; the aws-cli `globalargs.py` counterpart) |
-| `configfiles.py` | The SDK-free (stdlib `configparser` / `shlex`) pre-dispatch read of aws's config and credentials files: the parse failure that aborts the run at rc 255, the profile map the error rendering consults, and the scoped read of `cli_timestamp_format` behind the rc-253 gate (sections 1 and 6). Also the single home of "which file / which env profile", shared with `clientfactory.resolve_profile` and the auto-prompt resolution |
+| `configfiles.py` | The SDK-free (stdlib `configparser` / `shlex`) pre-dispatch read of aws's config and credentials files: the parse failure that aborts the run at rc 255, the profile map the error rendering consults, and the scoped read of `cli_timestamp_format` behind the rc-253 gate (sections 1 and 6). Also the single home of "which file / which env profile", shared with `clientfactory.resolve_profile` |
 | `clientfactory.py` | `build_client(args) -> S3Client` (the connection/authentication layer, section 4) + `build_service_client(service, args, *, region=None)` (the s3control / sts client used by mv's path validation, section 5.8). Both open their botocore session through `_open_botocore_session` (the profile / `api_versions` / retry / timeout / credential-cache alignment of section 4) and create their client through `_create_client`, the single seam that carries aws's retry-mode vocabulary and installs the CONNECT pin - a seam rather than `_open_botocore_session` because `build_client` may be handed a session built elsewhere. Every S3 client the first one builds carries aws's message rewriter (`s3errormsg`) |
 | `proxytunnel.py` | The CONNECT request the official aws distribution sends (section 2): a copy of CPython 3.12+'s tunnel opener, installed onto urllib3's `HTTPConnection` by `clientfactory._create_client` on the host interpreters whose own opener still writes `CONNECT ... HTTP/1.0` with no `Host`. Every precondition - no urllib3, no opener to read, an opener that already writes aws's shape - declines quietly, so it is a no-op on 3.12+ and idempotent |
 | `s3errormsg.py` | aws's `after-call.s3` handler (its `s3errormsg` customization), ported verbatim: it rewrites two "requires Signature Version 4" messages and the cross-region `PermanentRedirect` in place, so every report carrying a service message - the top-level `[ERROR]` line and the per-item `upload failed:` / `download failed:` lines alike - reads as aws's. aws registers it on its session; here `build_client` registers it on each S3 client it builds, the CLI's only S3 client builder. The library stays boto3-faithful and never rewrites a service message |
@@ -400,7 +399,6 @@ solidified design is added here.
 | `paramfile.py` | aws's local paramfile loaders (`file://` text, `fileb://` binary; the `get_paramfile` counterpart) shared by the option resolution and the shorthand `@=` operator. A load failure is a `ParamfileLoadError`, whose exit code the caller decides: `named_argument` (aws's `load-cli-arg` handler) turns it into the named argument's rc-252 parse error, and the shorthand's `@=` stays outside it for aws's bare rc 255 |
 | `output.py` | `aws s3`-compatible output formatting (`ls` listing lines, `rm` delete lines. Kept as pure functions; not turned into a class) |
 | `usage.py` | The single home of the aws-matching usage / error strings shared across subcommands (`single_uri_usage` / `bare_single_uri_usage` / `two_path_usage` / `invalid_bucket_name_message`); commands interpolate only their own name or value |
-| `autoprompt/` | The completion engine for `--cli-auto-prompt` (a port of aws-cli's `autocomplete/` onto the `boto3-s3` surface = `model.py` / `parser.py` / `completers.py`, pure Python) + the prompt_toolkit implementation (`prompt.py`) + the injection ABC (`prompter.py`) + the SDK- and prompt_toolkit-free mode resolution the dispatcher runs before parsing (`resolve.py`). An opt-in extra. Design in [`autoprompt.md`](./autoprompt.md) |
 
 **Library consumption contract**: the CLI reaches `boto3_s3` only through its
 public surfaces (the two-layer export contract of
@@ -450,11 +448,6 @@ their dependencies through a `Context`.
     call order deterministic. **Only when it is `None`** do cp / mv / sync
     build the config from `[s3]` (section 8), so an injected value always
     takes precedence.
-  - `auto_prompter` (`AutoPrompter | None`) - the backend for
-    `--cli-auto-prompt`. Default `None` -> `main` lazily creates the
-    prompt_toolkit implementation. Tests inject a fake that returns canned
-    argv to verify re-dispatch without a tty
-    ([`autoprompt.md`](./autoprompt.md) section 7).
 
   Tests inject a fake client via
   `cli.main(argv, ctx=Context(client_factory=<fake>))` (no monkeypatching of
@@ -801,15 +794,8 @@ numbers in the bold item labels below are that document's.
 - **Recognized and ignored (no-op, section 2)**: `--output` / `--query` / `--no-paginate`
   / `--no-cli-pager` / `--color` / `--cli-error-format`.
   They are accepted (the `choices` are validated) and have no effect on behavior.
-- **auto-prompt (section 3, design in [`autoprompt.md`](./autoprompt.md))**:
-  `--cli-auto-prompt` is an **opt-in extra**. If `prompt_toolkit` is present, it
-  launches an interactive prompt with `aws s3`-faithful completion and
-  re-dispatches the edited command. What matters at this layer is the timing:
-  the mode is resolved from the raw argv **before** argparse runs, so the prompt
-  can launch with no subcommand present, and the read stays SDK-free. The
-  resolution chain itself - the flags, `AWS_CLI_AUTO_PROMPT`, the profile's
-  `cli_auto_prompt`, and what happens when `prompt_toolkit` is absent - is
-  specified in [`autoprompt.md`](./autoprompt.md) section 5.
+- **auto-prompt (section 3)**: `--cli-auto-prompt` / `--no-cli-auto-prompt`
+  are accepted and ignored; there is no interactive prompt.
 - **`--debug`**: attaches a stderr handler to the `boto3_s3` / `boto3_s3_cli` /
   `botocore` / `boto3` / `s3transfer` loggers (via the library's
   `boto3_s3.set_stream_logger`, `mask_secrets=True`). `boto3_s3_cli` is the
@@ -1567,10 +1553,10 @@ reviewed with it.
 | code | condition | the name on the aws-cli side |
 |---|---|---|
 | 0 | Success. The `help` token / `--version` are also 0 | - |
-| 130 | Ctrl-C **outside the transfer pipeline** (`KeyboardInterrupt` reaching `main`'s backstop: a bare newline on stdout, no traceback; the auto-prompt's own Ctrl-C/EOF returns the same code), the printer's final drain after the run included (section 5.7). Inside the rm / cp / mv / sync pipeline span a Ctrl-C is instead a cancelled run - `cancelled: ctrl-c received`, rc 1, like aws (section 5.7) | aws's `InterruptExceptionHandler`, 128+SIGINT |
+| 130 | Ctrl-C **outside the transfer pipeline** (`KeyboardInterrupt` reaching `main`'s backstop: a bare newline on stdout, no traceback), the printer's final drain after the run included (section 5.7). Inside the rm / cp / mv / sync pipeline span a Ctrl-C is instead a cancelled run - `cancelled: ctrl-c received`, rc 1, like aws (section 5.7) | aws's `InterruptExceptionHandler`, 128+SIGINT |
 | 1 | A subcommand-specific "no result" etc. (`ls` is a specified key / prefix with 0 entries), **all errors after the start of rm / cp / mv / sync / mb / rb** (below; the rm stage of `rb --force` is the 255 below) | the convention of the S3-family commands / a task failure of the transfer family |
 | 2 | **A transfer that completed with warnings only** (cp / mv / sync's glacier skip, an mtime stamp failure, an unreadable local file, etc. section 5.7) | a task warning of the transfer family |
-| 252 | A usage error (an unknown option = `Unknown options: ...`, an invalid choice / value), a client-side `ValidationError`, a `--cli-auto-prompt` rejection | `PARAM_VALIDATION_ERROR_RC` |
+| 252 | A usage error (an unknown option = `Unknown options: ...`, an invalid choice / value), a client-side `ValidationError` | `PARAM_VALIDATION_ERROR_RC` |
 | 253 | `ConfigurationError` (credentials / region unresolved, so their reports are enveloped and carry aws's hint (below); an absent awscrt x the `[s3] preferred_transfer_client=crt` degradation section 8 or an MRAP target's SigV4a section 4 item 4, which aws cannot reach and which stay bare), plus the pre-dispatch `cli_timestamp_format` gate (section 1), enveloped `Configuration` and raising nothing | `CONFIGURATION_ERROR_RC`, from its `NoCredentialsErrorHandler` / `NoRegionErrorHandler` / `ConfigurationErrorHandler` - three of its four rc-253 handlers, the `PagerErrorHandler` being the one with no counterpart here (below) |
 | 254 | A server-side error (a `Boto3S3Error` whose `__cause__` is a botocore `ClientError`) | `CLIENT_ERROR_RC` |
 | 255 | Any other general error (including `TransportError`, a `NotFoundError` with no `ClientError` cause such as a missing local source, the refining `InvalidValueError` / `InvalidConfigError` (below), an unparseable config / credentials file caught by the pre-dispatch scan (section 1), and any otherwise-uncaught exception via `_dispatch`'s backstop - a `BrokenPipeError` from the `ls \| head` pipeline included, since aws has no special case for it either: both tools report `[Errno 32] Broken pipe` here and the *process* then exits **120**, the interpreter's shutdown flush having failed on the closed pipe as well (measured)), **a failure of the rm stage of `rb --force`** (section 5.4) | `GENERAL_ERROR_RC` |
@@ -1587,8 +1573,7 @@ post-parse value failure (`InvalidValueError`) or a bad / unusable config
 ([`exceptions.md`](./exceptions.md) section 2). Parameter validation
 failures mapped to 252 use aws-cli's default enhanced-style
 envelope, `An error occurred (ParamValidation): <message>`. This includes
-argparse failures, unknown options, plain `ValidationError`, and the
-auto-prompt flag conflict. The **code the envelope names is the handler's,
+argparse failures, unknown options and plain `ValidationError`. The **code the envelope names is the handler's,
 not the exception class's**, and each handler also builds its own message, so
 the two rc-253 failures reachable here carry a hint botocore never wrote:
 `An error occurred (NoCredentials): Unable to locate credentials. You can
@@ -1658,7 +1643,7 @@ top-level globals parse and the three resolutions included - whereas
 `--profile` is bound by aws's `_handle_top_level_args`, after that parse and
 after the event those resolutions hang off, so it degrades only the command
 layers below (measured both ways). Errors raised before `_dispatch` - the
-preliminary scan, the auto-prompt flag conflict - never degrade, matching aws's
+preliminary scan - never degrade, matching aws's
 entry-point handler chain, which is constructed without a session. A profile is
 "declared" if the merged map has it; `--profile ""` is ignored under aws's
 truthy guard, while an empty env value names the empty profile and is
@@ -1801,13 +1786,6 @@ The key implementation points are:
   config scan applies botocore's own tests to the IMDS settings, in
   botocore's order, without importing it, and a randomized comparison
   against really building the chain holds the two together.
-- `prompt_toolkit` and the prompt-side modules of the `autoprompt` package
-  are imported only when `--cli-auto-prompt` fires; the package's pure
-  mode-resolution module, `autoprompt.resolve`, is imported with `cli` itself
-  and reads only the raw argv, the environment and the config scan. The
-  completion engine proper (`model` / `parser` / `completers`) is pure Python,
-  and only `prompt.py` bundles `prompt_toolkit`
-  ([`autoprompt.md`](./autoprompt.md) section 4).
 
 ## 8. Transfer-engine selection and the `[s3]` runtime config
 

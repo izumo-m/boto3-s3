@@ -5,12 +5,9 @@ from __future__ import annotations
 import argparse
 import contextlib
 import importlib
-import io
 import os
 import re
 import sys
-from collections.abc import Generator
-from contextlib import AbstractContextManager, contextmanager
 from difflib import get_close_matches
 from typing import TYPE_CHECKING, NoReturn, TextIO, cast
 
@@ -22,7 +19,6 @@ from boto3_s3 import (
     ValidationError,
 )
 from boto3_s3_cli import configfiles, globalargs, usage
-from boto3_s3_cli.autoprompt import resolve
 from boto3_s3_cli.commands.base import Command, Context, reject_unknown_options
 
 if TYPE_CHECKING:
@@ -512,7 +508,7 @@ def _load_command(name: str) -> type[Command]:
 def _shared_globals_parent() -> _ParamValidationArgumentParser:
     """The suppressed-defaults globals parent of the *rendering* parsers.
 
-    Only help pages and the auto-prompt completion model are built on it (the
+    Only help pages and `build_parser` are built on it (the
     dispatch parses globals in the top-level pass and the leaf with
     ``_build_command_parse_parser``); it keeps every subcommand's help listing
     the globals, including the recognized-but-ignored group. Suppressing the
@@ -564,13 +560,6 @@ def _build_subcommand_error_parser() -> _ParamValidationArgumentParser:
     return parser
 
 
-def _silencer(suppress_usage_errors: bool) -> AbstractContextManager[object]:
-    """Discard a parser's own usage message when the on-partial trial asks for it."""
-    if suppress_usage_errors:
-        return contextlib.redirect_stderr(io.StringIO())
-    return contextlib.nullcontext()
-
-
 def _build_first_pass_parser() -> _ParamValidationArgumentParser:
     """aws's preliminary ``--profile`` / ``--debug`` scan, run before everything.
 
@@ -581,11 +570,10 @@ def _build_first_pass_parser() -> _ParamValidationArgumentParser:
     reproduced here: both values are parsed again by the top-level globals
     pass, which is where ours takes them from, so this parse's namespace is
     discarded. Because the scan happens first its failure beats every other
-    outcome - ``--version``, the help token, the auto-prompt flag rejection
-    (all measured) - and it reports argparse's own two-option usage rather
-    than the top-level block. Both options can fail: ``--profile`` by having
-    no value, ``--debug`` by being handed one (``--debug=1``, abbreviations
-    included).
+    outcome - ``--version`` and the help token (all measured) - and it reports
+    argparse's own two-option usage rather than the top-level block. Both
+    options can fail: ``--profile`` by having no value, ``--debug`` by being
+    handed one (``--debug=1``, abbreviations included).
     """
     parser = _ParamValidationArgumentParser(prog="boto3-s3", add_help=False)
     parser.add_argument("--profile", type=str)
@@ -625,8 +613,7 @@ def _build_command_parser(name: str, command: Command) -> argparse.ArgumentParse
     ``prog`` / ``description`` match what ``add_parser`` produces under the
     full tree, so ``boto3-s3 <cmd> help`` pages exactly as the whole tree
     pages it. The dispatch parses with ``_build_command_parse_parser`` and
-    only renders help pages through this one; the auto-prompt model keeps
-    deriving from the full tree.
+    only renders help pages through this one.
     """
     parser = _ParamValidationArgumentParser(
         prog=f"boto3-s3 {name}",
@@ -664,11 +651,9 @@ def _build_command_parse_parser(name: str, command: Command) -> argparse.Argumen
 def build_parser() -> argparse.ArgumentParser:
     """Build the complete parser: every subcommand's full argument surface.
 
-    The normal dispatch no longer calls this (stage 1 + stage 2 above); it
-    remains the single source of truth the auto-prompt completion model
-    derives from (autoprompt/model.py), which needs every command's options at
-    once - so it imports all the command modules, a cost only the interactive
-    prompt pays.
+    The normal dispatch does not call this (stage 1 + stage 2 above); it
+    builds the whole surface at once - importing every command module - for
+    the tests that parse a full command line.
     """
     parser = _ParamValidationArgumentParser(
         prog="boto3-s3",
@@ -703,46 +688,14 @@ def _enable_debug_logging() -> None:
 
     for name in _DEBUG_LOGGERS:
         # Idempotent, like aws's set_stream_logger (it removes its named
-        # handler before re-adding): the on-partial trial dispatch can reach
-        # here before the prompt re-dispatches, and the library's
-        # boto3-faithful set_stream_logger appends unconditionally - drop the
-        # previously attached masking handlers first or every line doubles.
+        # handler before re-adding): the library's boto3-faithful
+        # set_stream_logger appends unconditionally, so drop the previously
+        # attached masking handlers first or a second call doubles every line.
         logger = logging.getLogger(name)
         for handler in list(logger.handlers):
             if any(isinstance(f, SecretMaskingFilter) for f in handler.filters):
                 logger.removeHandler(handler)
         set_stream_logger(name, logging.DEBUG, stream=sys.stderr, mask_secrets=True)
-
-
-@contextmanager
-def _debug_handlers_detached() -> Generator[None, None, None]:
-    """Detach the ``--debug`` stream handlers while the prompt owns the terminal.
-
-    The on-partial trial dispatch can enable debug logging before its usage
-    error falls back to the prompt; live stderr DEBUG handlers would then paint
-    over the prompt_toolkit screen (the first ``--region`` / ``--profile``
-    completion triggers a boto3 session load, dozens of botocore DEBUG lines).
-    aws swaps every logger's handlers into its debug-panel buffer for the
-    duration of the app run; there is no panel here, so records emitted during
-    the prompt are dropped instead, and the handlers come back for the
-    re-dispatch.
-    """
-    # Deferred like _enable_debug_logging: `logging` (and the traceback module
-    # it pulls in on 3.14) stays off the --version and help path;
-    # tests/cli/unit/test_import_contract.py pins this.
-    import logging
-
-    saved: list[tuple[logging.Logger, list[logging.Handler]]] = []
-    for name in _DEBUG_LOGGERS:
-        logger = logging.getLogger(name)
-        if logger.handlers:
-            saved.append((logger, logger.handlers[:]))
-            logger.handlers.clear()
-    try:
-        yield
-    finally:
-        for logger, handlers in saved:
-            logger.handlers[:] = handlers
 
 
 def exit_code_for(exc: Boto3S3Error) -> int:
@@ -815,20 +768,13 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
     """Parse ``argv``, dispatch to the requested subcommand, and return its exit code.
 
     *ctx* carries the runtime dependencies the command resolves (the S3 client
-    factory, the auto-prompt backend); tests inject a ``Context`` built
+    factory); tests inject a ``Context`` built
     around fakes. Returns the exit code (the deliberate escapes: an
     ``AssertionError`` - an internal bug - and a command-raised
     ``SystemExit``, whose orderly exit is honored) - argparse's ``SystemExit`` is
     absorbed downstream so usage errors map to aws-cli's 252, not argparse's 2,
     and a Ctrl-C mirrors aws's ``InterruptExceptionHandler``: a bare
-    newline on stdout and rc 130 (128+SIGINT), never a traceback (the
-    auto-prompt UI catches its own interrupt and returns 130 directly).
-
-    ``--cli-auto-prompt`` is resolved here from the raw argv, before argparse, so
-    it works without a subcommand, its mutual exclusion with
-    ``--no-cli-auto-prompt`` matches aws-cli, and the ``AWS_CLI_AUTO_PROMPT`` env /
-    ``cli_auto_prompt`` config / ``on-partial`` chain is honored (option-handling
-    section 3, autoprompt.md).
+    newline on stdout and rc 130 (128+SIGINT), never a traceback.
     """
     try:
         return _main(argv, ctx)
@@ -882,7 +828,7 @@ def _build_driver() -> int | None:
 
     aws reads the whole merged config while it is still constructing the
     driver, so a file that is not valid INI settles the run here - ahead of
-    the auto-prompt rejection, --version, the help token and every parse
+    --version, the help token and every parse
     below (all measured), and with botocore's own wording through aws's
     general handler (255). Only the preliminary scan outranks it. The
     `[plugins]` section aws then loads is not read here
@@ -892,8 +838,7 @@ def _build_driver() -> int | None:
     """
     global _config_scan, _enhanced_envelope
     # aws's entry point reports these through a chain built without a
-    # session, so the enhanced envelope applies - also after an on-partial
-    # trial run has bound a profile no file declares.
+    # session, so the enhanced envelope applies.
     _enhanced_envelope = True
     _config_scan = configfiles.scan()
     if _config_scan.unparseable is not None:
@@ -902,13 +847,6 @@ def _build_driver() -> int | None:
         )
         return _GENERAL_ERROR_RC
     return None
-
-
-def _prompt_toolkit_installed() -> bool:
-    """Is the `autoprompt` extra's ``prompt_toolkit`` there (without importing it)?"""
-    import importlib.util
-
-    return importlib.util.find_spec("prompt_toolkit") is not None
 
 
 def _main(argv: list[str] | None, ctx: Context | None) -> int:
@@ -924,11 +862,8 @@ def _main(argv: list[str] | None, ctx: Context | None) -> int:
     # aws's preliminary --profile / --debug scan of the raw argv, run before
     # the driver even exists, so either of them failing to parse - --profile
     # without a value, --debug handed one - settles the run here, ahead of
-    # --version, the help token, the auto-prompt rejection and every parse
-    # below (all measured). The parsed values are dropped: the top-level
-    # globals pass reads them again. It is outside the on-partial silencing
-    # too (aws's silencer is installed on the driver, which this precedes),
-    # so the message always reaches stderr.
+    # --version, the help token and every parse below (all measured). The
+    # parsed values are dropped: the top-level globals pass reads them again.
     try:
         _build_first_pass_parser().parse_known_args(raw)
     except SystemExit:
@@ -936,102 +871,10 @@ def _main(argv: list[str] | None, ctx: Context | None) -> int:
     rc = _build_driver()
     if rc is not None:
         return rc
-    if resolve.AUTO_PROMPT_FLAG in raw and resolve.NO_AUTO_PROMPT_FLAG in raw:
-        _write_error(
-            "Both --cli-auto-prompt and --no-cli-auto-prompt cannot be specified at the same time.",
-            rc=_PARAM_VALIDATION_ERROR_RC,
-        )
-        return _PARAM_VALIDATION_ERROR_RC
-    try:
-        mode = resolve.resolve_auto_prompt_mode(raw, _config_scan)
-    except AttributeError as exc:
-        # The resolution runs aws's own `config.lower()` over whatever the
-        # setting holds, so an indented block - a map after botocore's parse -
-        # raises there and aws's entry-point chain reports it at rc 255,
-        # ahead of the command it was about to run (measured). Reported here
-        # rather than left to `main`'s backstop, which only claims the codec
-        # failures of the report streams.
-        _write_error(exc, rc=_GENERAL_ERROR_RC)
-        return _GENERAL_ERROR_RC
-    if mode == "on":
-        return _run_auto_prompt(raw, ctx, explicit=resolve.AUTO_PROMPT_FLAG in raw)
-    if mode == "on-partial":
-        if ctx.auto_prompter is None and not _prompt_toolkit_installed():
-            # With no prompt to fall back to, the trial run would be the only
-            # one worth having: run it as the ordinary run, reports and all.
-            # Running it silenced and then again would repeat whatever it did
-            # before its 252.
-            return _dispatch(raw, ctx)
-        # Run the command as-is; only a usage error (rc 252) falls back to
-        # prompting (aws-cli's on-partial branch in clidriver's _do_main). The
-        # usage message is silenced on this trial so the prompt isn't buried
-        # under it (aws's SilenceParamValidationMsgErrorHandler).
-        rc = _dispatch(raw, ctx, suppress_usage_errors=True)
-        if rc != _PARAM_VALIDATION_ERROR_RC:
-            return rc
-        return _run_auto_prompt(raw, ctx, explicit=False, rebuild=True)
     return _dispatch(raw, ctx)
 
 
-def _run_auto_prompt(
-    raw_argv: list[str], ctx: Context, *, explicit: bool, rebuild: bool = False
-) -> int:
-    """Run the interactive prompt, then re-dispatch the completed argv once.
-
-    The ``prompt_toolkit`` dependency is opt-in (the ``autoprompt`` extra). When
-    it is absent and the prompt was *explicitly* requested (``--cli-auto-prompt``)
-    we reject with an install hint and rc 252 (non-contractual; the interactive
-    UI is not compared with aws - overview.md section 3). When it is
-    absent but the prompt was only *config/env-driven*, we fall through to normal
-    dispatch instead - a missing optional dep must not break every command. An
-    injected ``ctx.auto_prompter`` (tests) bypasses the dependency probe.
-
-    ``rebuild`` is the on-partial fall-back's: aws builds a new driver for the
-    run after its prompt (`create_clidriver`), so the config is read again
-    before the completed command runs.
-    """
-    prompter = ctx.auto_prompter
-    if prompter is None:
-        if not _prompt_toolkit_installed():
-            if not explicit:
-                return _dispatch(raw_argv, ctx)
-            _write_error(
-                "--cli-auto-prompt requires the optional 'prompt_toolkit' dependency. "
-                "Install it with: pip install 'boto3-s3-cli[autoprompt]'"
-            )
-            return _PARAM_VALIDATION_ERROR_RC
-        # Construct inside the try below: a broken/partial prompt_toolkit install
-        # (find_spec succeeds but the import or model build fails) must degrade
-        # with a message, not escape as a traceback.
-
-    # Seed the prompt with what was typed, minus the auto-prompt flags (they take
-    # no value, so a plain filter is exact).
-    seed = [a for a in raw_argv if a not in (resolve.AUTO_PROMPT_FLAG, resolve.NO_AUTO_PROMPT_FLAG)]
-    try:
-        if prompter is None:
-            from boto3_s3_cli.autoprompt.prompt import build_default_prompter
-
-            prompter = build_default_prompter()
-        with _debug_handlers_detached():
-            completed = prompter.prompt_for_args(seed)
-    except (KeyboardInterrupt, EOFError):
-        return 130
-    except Exception as exc:
-        _write_error(exc)
-        return _GENERAL_ERROR_RC
-    # Re-dispatch without prompting again - strip the flags so a re-typed
-    # --cli-auto-prompt can't loop.
-    completed = [
-        a for a in completed if a not in (resolve.AUTO_PROMPT_FLAG, resolve.NO_AUTO_PROMPT_FLAG)
-    ]
-    if rebuild:
-        rc = _build_driver()
-        if rc is not None:
-            return rc
-    return _dispatch(completed, ctx)
-
-
-def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = False) -> int:
+def _dispatch(argv: list[str], ctx: Context) -> int:
     """Parse ``argv`` in two stages and run the matched subcommand.
 
     Stage 1 is aws's own shape: the globals parser consumes the globals off
@@ -1046,15 +889,6 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
     minus the subcommand token into the pre-pass namespace. Once the
     subcommand is determined the SDK may load - the aws-clidriver-shaped lazy
     command table.
-
-    ``suppress_usage_errors`` silences the usage-error output (argparse's usage
-    block, ``Unknown options``, and a 252 ``ValidationError``) - used by the
-    ``on-partial`` trial run so the fall-back prompt isn't preceded by the error
-    the user is about to fix (aws-cli's ``SilenceParamValidationMsgErrorHandler``,
-    errorhandler.py:250, injected on the on-partial path in clidriver's ``_do_main``).
-    argparse writes its own message inside ``parse_*``, so the
-    parses (and only the parses - they are instant, no live output to lose) are
-    wrapped to discard it; the command itself still runs with stderr live.
     """
     global _enhanced_envelope
     # aws's CLIDriver.main: from here down its session-backed handler chain does
@@ -1098,8 +932,7 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
     # by its action. A zero exit can only be --version - the globals parser
     # declares no help option.
     try:
-        with _silencer(suppress_usage_errors):
-            head, remainder = _build_globals_parser().parse_known_args(argv)
+        head, remainder = _build_globals_parser().parse_known_args(argv)
     except SystemExit as exc:
         return 0 if not exc.code else _PARAM_VALIDATION_ERROR_RC
     tokens = remainder[1:] if argv[:1] == ["--"] else remainder
@@ -1114,8 +947,7 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
         clientfactory.resolve_cli_timeouts(head)
     except Boto3S3Error as exc:
         rc = exit_code_for(exc)
-        if not (suppress_usage_errors and rc == _PARAM_VALIDATION_ERROR_RC):
-            _write_error(exc, rc=rc)
+        _write_error(exc, rc=rc)
         return rc
     except Exception as exc:
         # The same backstop the command below gets: aws resolves these three
@@ -1161,8 +993,7 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
     # 252, a bad --cli-read-timeout still its 255) and ahead of everything the
     # command layers decide - the help token, an invalid subcommand, unknown
     # options, missing arguments (all measured). `--version` and the
-    # preliminary scan escape it by exiting further up. The on-partial silencer
-    # does not cover it: aws silences the 252 family alone.
+    # preliminary scan escape it by exiting further up.
     invalid_format = _config_scan.invalid_timestamp_format(clientfactory.resolve_profile(head))
     if invalid_format is not None:
         _write_error(
@@ -1217,16 +1048,10 @@ def _dispatch(argv: list[str], ctx: Context, *, suppress_usage_errors: bool = Fa
             rc = _exit_code_for_unexpected(exc)
             _write_error(exc, rc=rc)
             return rc
-    return _resolve_command(tokens, head, ctx, suppress_usage_errors=suppress_usage_errors)
+    return _resolve_command(tokens, head, ctx)
 
 
-def _resolve_command(
-    tokens: list[str],
-    head: argparse.Namespace,
-    ctx: Context,
-    *,
-    suppress_usage_errors: bool,
-) -> int:
+def _resolve_command(tokens: list[str], head: argparse.Namespace, ctx: Context) -> int:
     """Pick the subcommand out of the globals-free token stream and run it.
 
     aws's ``s3`` command does this: the help token first, then the first
@@ -1249,9 +1074,8 @@ def _resolve_command(
         # to report it is aws's bare missing-subcommand usage error, which
         # carries no help blurb (measured: `s3` and `s3 --`).
         leftovers = [token for token in tokens if token != "--"]
-        if not suppress_usage_errors:
-            message = f"Unknown options: {','.join(leftovers)}" if leftovers else _TOO_FEW_ARGUMENTS
-            _write_error(message, rc=_PARAM_VALIDATION_ERROR_RC)
+        message = f"Unknown options: {','.join(leftovers)}" if leftovers else _TOO_FEW_ARGUMENTS
+        _write_error(message, rc=_PARAM_VALIDATION_ERROR_RC)
         return _PARAM_VALIDATION_ERROR_RC
     name = tokens[index]
     # aws's subcommand extraction (SubCommandArgParser._remove_subcommand):
@@ -1269,19 +1093,14 @@ def _resolve_command(
         # `--` of their own, they are data), and without the marker argparse
         # would read one back as an option and report a missing subcommand
         # instead of the name aws blames (`--region us-east-1 -- --bogus`).
-        with contextlib.suppress(SystemExit), _silencer(suppress_usage_errors):
+        with contextlib.suppress(SystemExit):
             _build_subcommand_error_parser().parse_args(["--", name])
         return _PARAM_VALIDATION_ERROR_RC
-    return _run_command(name, stage2_tokens, head, ctx, suppress_usage_errors=suppress_usage_errors)
+    return _run_command(name, stage2_tokens, head, ctx)
 
 
 def _run_command(
-    name: str,
-    stage2_tokens: list[str],
-    head: argparse.Namespace,
-    ctx: Context,
-    *,
-    suppress_usage_errors: bool,
+    name: str, stage2_tokens: list[str], head: argparse.Namespace, ctx: Context
 ) -> int:
     """Stage 2: build the matched subcommand's parser, parse, and run it."""
     command = _load_command(name)()
@@ -1298,10 +1117,9 @@ def _run_command(
     # parse fills in the command's own arguments.
     head.command = name
     try:
-        with _silencer(suppress_usage_errors):
-            args, extras = _build_command_parse_parser(name, command).parse_known_args(
-                stage2_tokens, namespace=head
-            )
+        args, extras = _build_command_parse_parser(name, command).parse_known_args(
+            stage2_tokens, namespace=head
+        )
     except SystemExit as exc:
         return 0 if not exc.code else _PARAM_VALIDATION_ERROR_RC
     # What the leaf parse could not place is parked, not reported: aws expands
@@ -1323,8 +1141,7 @@ def _run_command(
         return rc
     except Boto3S3Error as exc:
         rc = exit_code_for(exc)
-        if not (suppress_usage_errors and rc == _PARAM_VALIDATION_ERROR_RC):
-            _write_error(exc, rc=rc)
+        _write_error(exc, rc=rc)
         return rc
     except AssertionError:
         # An AssertionError is an internal-invariant violation (a bug), not a

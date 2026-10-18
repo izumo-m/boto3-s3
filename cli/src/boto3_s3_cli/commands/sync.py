@@ -5,8 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 
-# Loaded at dispatch once sync is determined (stage 2 of the lazy dispatch) -
-# or up front when auto-prompt builds the full command model.
+# Loaded at dispatch once sync is determined (stage 2 of the lazy dispatch).
 from boto3_s3 import NotFoundError, ValidationError
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3_cli import filters

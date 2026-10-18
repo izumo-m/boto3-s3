@@ -103,7 +103,6 @@ dev = [
     { name = "boto3-stubs-lite", extra = ["s3"] },
     { name = "botocore", extra = ["crt"] },
     { name = "moto", extra = ["s3"] },
-    { name = "prompt-toolkit" },
     { name = "pytest" },
     { name = "ruff" },
     { name = "vermin" },
@@ -126,7 +125,6 @@ dev = [
     { name = "boto3-stubs-lite", extras = ["s3"], specifier = ">=1.34" },
     { name = "botocore", extras = ["crt"], specifier = ">=1.34" },
     { name = "moto", extras = ["s3"], specifier = ">=5.0" },
-    { name = "prompt-toolkit", specifier = ">=3.0" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "ruff", specifier = ">=0.6" },
     { name = "vermin", specifier = ">=1.6" },
@@ -144,9 +142,6 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-autoprompt = [
-    { name = "prompt-toolkit" },
-]
 crt = [
     { name = "boto3-s3", extra = ["crt"] },
 ]
@@ -157,10 +152,9 @@ requires-dist = [
     { name = "boto3-s3", editable = "." },
     { name = "boto3-s3", extras = ["crt"], marker = "extra == 'crt'", editable = "." },
     { name = "botocore", specifier = ">=1.31" },
-    { name = "prompt-toolkit", marker = "extra == 'autoprompt'", specifier = ">=3.0" },
     { name = "python-dateutil", specifier = ">=2.1" },
 ]
-provides-extras = ["crt", "autoprompt"]
+provides-extras = ["crt"]
 
 [[package]]
 name = "boto3-stubs-lite"
@@ -669,18 +663,6 @@ wheels = [
 ]
 
 [[package]]
-name = "prompt-toolkit"
-version = "3.0.52"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "wcwidth" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/a1/96/06e01a7b38dce6fe1db213e061a4602dd6032a8a97ef6c1a862537732421/prompt_toolkit-3.0.52.tar.gz", hash = "sha256:28cde192929c8e7321de85de1ddbe736f1375148b02f2e17edd840042b1be855", size = 434198, upload-time = "2025-08-27T15:24:02.057Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/84/03/0d3ce49e2505ae70cf43bc5bb3033955d2fc9f932163e84dc0779cc47f48/prompt_toolkit-3.0.52-py3-none-any.whl", hash = "sha256:9aac639a3bbd33284347de5ad8d68ecc044b91a762dc39b7c21095fcd6a19955", size = 391431, upload-time = "2025-08-27T15:23:59.498Z" },
-]
-
-[[package]]
 name = "py-partiql-parser"
 version = "0.6.3"
 source = { registry = "https://pypi.org/simple" }
@@ -973,15 +955,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/24/7b/2c1b403f2a844e1acb36694fc336e323df742f7f752edb4188311ad43f9e/vermin-1.8.0.tar.gz", hash = "sha256:3621955ac2a2950175c5b4a9b2fc3bd24bd416da0388893c9eb6971264e4ca1f", size = 99913, upload-time = "2025-11-20T17:29:31.509Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e6/fd/6d2167767488e162efd01300a679c7f7d913dbb65baa0b15760ebb369854/vermin-1.8.0-py3-none-any.whl", hash = "sha256:6f2b98ad697a16ed3442e81a0f0baabfc38c185b78aaab1b1fecd87bdd6640b8", size = 98030, upload-time = "2025-11-20T17:29:29.931Z" },
-]
-
-[[package]]
-name = "wcwidth"
-version = "0.8.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/49/b4/51fe890511f0f242d07cb1ebe6a5b6db417262b9d2568b460347c57d95cc/wcwidth-0.8.1.tar.gz", hash = "sha256:faf5b4a5366a72dc49cad48cdf21f52bdf63bdda995178e483ba247ff79089b9", size = 1466072, upload-time = "2026-06-08T05:57:23.146Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/bd/6e/95b0e537de1f4d4301f76f944642c6da50d1511cc7b3d64dc418a66c7509/wcwidth-0.8.1-py3-none-any.whl", hash = "sha256:f453740b1e4a4f3291faa37944c555d71056c4da08d59809b307ef4feba695c8", size = 323092, upload-time = "2026-06-08T05:57:21.413Z" },
 ]
 
 [[package]]

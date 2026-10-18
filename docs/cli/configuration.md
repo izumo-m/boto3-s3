@@ -48,7 +48,7 @@ mean.
 
 On top of those, the command reads `AWS_REGION`, `AWS_DEFAULT_REGION`,
 `AWS_PROFILE`, `AWS_DEFAULT_PROFILE`, `AWS_CONFIG_FILE`, `AWS_RETRY_MODE`,
-`AWS_MAX_ATTEMPTS`, `AWS_CLI_AUTO_PROMPT`, `AWS_CLI_FILE_ENCODING`,
+`AWS_MAX_ATTEMPTS`, `AWS_CLI_FILE_ENCODING`,
 `AWS_CLI_OUTPUT_ENCODING` and `AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS` itself.
 
 The two encoding variables name codecs. `AWS_CLI_FILE_ENCODING` is the codec a
@@ -59,13 +59,9 @@ Python does not know is a configuration error, exit code 255, on either
 variable. With `AWS_CLI_OUTPUT_ENCODING` unset, `PYTHONUTF8=1` selects UTF-8
 for that same report — aws's own compatibility fallback, matched here.
 
-Two of those parse loosely rather than strictly.
 `AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS` is honored only when it is literally
-`true` (case-insensitively), and `AWS_CLI_AUTO_PROMPT` accepts `on` and
-`on-partial` — anything else counts as off. The profile key behind that
-variable, `cli_auto_prompt`, is read the way `aws` reads it: from the profile
-the environment selects (`AWS_PROFILE`, then `AWS_DEFAULT_PROFILE`, else
-`default`), not from the one `--profile` names.
+`true` (case-insensitively). `AWS_CLI_AUTO_PROMPT` and the profile key
+`cli_auto_prompt` are not read: there is no interactive prompt.
 
 Three variables the installed SDK would otherwise act on are ignored here,
 because `aws` cannot see them either: `SSLKEYLOGFILE` (its frozen interpreter

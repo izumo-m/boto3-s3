@@ -10,8 +10,17 @@ tree's.
 
 from __future__ import annotations
 
+import argparse
+
 from boto3_s3_cli import cli
-from boto3_s3_cli.autoprompt.model import subparser_map
+
+
+def subparser_map(tree: argparse.ArgumentParser) -> dict[str, argparse.ArgumentParser]:
+    """The subcommand parsers a full tree holds, by name."""
+    for action in tree._actions:  # pyright: ignore[reportPrivateUsage]
+        if isinstance(action, argparse._SubParsersAction):  # pyright: ignore[reportPrivateUsage]
+            return dict(action.choices)
+    return {}
 
 
 class TestCommandTable:

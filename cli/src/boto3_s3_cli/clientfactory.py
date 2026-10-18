@@ -89,7 +89,7 @@ def resolve_profile(args: argparse.Namespace) -> str | None:
     fallback) stays boto3/botocore-faithful and keeps stock order on purpose.
 
     This answers "which profile's keys do I read" for the callers that parse
-    the config files themselves (the startup gates, the auto-prompt resolver).
+    the config files themselves (the startup gates).
     The session `_open_botocore_session` opens is *not* built from it - see
     there for why only the flag may be bound.
     """

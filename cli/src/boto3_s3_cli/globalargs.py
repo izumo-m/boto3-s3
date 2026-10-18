@@ -6,11 +6,8 @@ registers them on the top-level parser and on each subparser, so a global may
 sit before or after the subcommand (``boto3-s3 --profile foo ls s3://b`` and
 ``boto3-s3 ls s3://b --profile foo``, matching ``aws s3``). Turning the parsed
 connection / auth values into a boto3 client is ``clientfactory``'s
-job. The presentation globals are accepted and
-ignored (``design/aws-cli-option-handling.md`` section 2), except the
-auto-prompt pair: ``--cli-auto-prompt`` launches the interactive prompt and
-``--no-cli-auto-prompt`` forces it off, both resolved from raw argv by the
-dispatcher before parsing (section 3).
+job. The presentation globals and the auto-prompt pair are accepted and
+ignored (``design/aws-cli-option-handling.md`` sections 2 and 3).
 """
 
 from __future__ import annotations
@@ -158,8 +155,7 @@ class _VersionAction(argparse.Action):
 def add_common_arguments(
     parser: argparse.ArgumentParser, *, suppress_defaults: bool = False
 ) -> None:
-    """Register the effective globals (connection/auth and the auto-prompt pair
-    the dispatcher reads off raw argv) and the ignored presentation globals.
+    """Register the effective globals (connection/auth) and the ignored ones.
 
     Added to BOTH the top-level parser (with real defaults) and each subparser
     (``suppress_defaults=True``). Suppressing the subparser-side defaults stops an
@@ -283,19 +279,17 @@ def add_common_arguments(
         help="show the boto3-s3-cli, boto3-s3, Python and SDK versions, then exit",
     )
 
-    # Opt-in interactive UI (section 3, the "autoprompt" extra). Both are
-    # resolved from raw argv before parsing, so they are effective options, not
-    # members of the ignored group; argparse still has to declare them so they
-    # parse and appear on the help page (aws lists both).
+    # aws's interactive auto-prompt pair (section 3): accepted, so a command
+    # line carrying either still runs, and ignored - there is no prompt.
     parser.add_argument(
         "--cli-auto-prompt",
         action="store_true",
         default=flag,
-        help="prompt interactively for arguments (needs the autoprompt extra)",
+        help="accepted and ignored: there is no interactive prompt",
     )
     parser.add_argument(
         "--no-cli-auto-prompt",
         action="store_true",
         default=flag,
-        help="do not prompt interactively, whatever the environment or profile asks for",
+        help="accepted and ignored: there is no interactive prompt",
     )

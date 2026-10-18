@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The `[plugins]` section of the config file is no longer read: no `aws` plugin is loaded, and a section naming one is no error.
 - `~/.aws/cli/alias` is no longer read: no alias applies, and a file there is no error; a shell alias does the same job.
+- The interactive auto-prompt and the `autoprompt` extra are gone: `--cli-auto-prompt` and `--no-cli-auto-prompt` are accepted and ignored, and `AWS_CLI_AUTO_PROMPT` and `cli_auto_prompt` are not read.
 
 ## [0.9.0] - 2026-10-18
 
