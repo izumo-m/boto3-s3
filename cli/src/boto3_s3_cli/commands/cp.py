@@ -71,10 +71,8 @@ class CpCommand(Command):
         transferargs.validate_checksum_paths_type(args, paths_type, operation="cp")
         if src_type == "local" and src != "-" and not os.path.exists(src):
             # aws-cli's _validate_path_args checks the missing local source (its bare
-            # RuntimeError -> rc 255) right after the checksum/path pairing and
-            # before SSE-C (rc 252), so when both fail that order decides the exit
-            # code; '-' is a stream, not a path. NotFoundError without a
-            # ClientError cause maps to the same rc 255.
+            # RuntimeError -> rc 255); '-' is a stream, not a path. NotFoundError
+            # without a ClientError cause maps to the same rc 255.
             raise NotFoundError(f"The user-provided path {src} does not exist.", operation="cp")
         if args.recursive and paths_type == "s3local":
             # The dir_op half of aws's _validate_path_args: the s3local

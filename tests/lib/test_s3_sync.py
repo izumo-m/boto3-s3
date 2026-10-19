@@ -449,13 +449,13 @@ class TestSyncUpload:
         # aws's bare RuntimeError -> rc 255; NotFoundError with no ClientError
         # cause maps to the same general rc.
         assert excinfo.value.__cause__ is None
-        assert str(excinfo.value) == f"The user-provided path {missing} does not exist."
+        assert missing in str(excinfo.value)
         assert calls == []
 
     def test_source_file_degrades_to_the_walk_warning(self, tmp_path: Path) -> None:
         # `aws s3 sync ./file s3://...` treats the file as a
-        # directory root, warns "File does not exist." (trailing separator
-        # included) and exits 2 - no hard failure.
+        # directory root, warns that it does not exist and exits 2 - no hard
+        # failure.
         src = _write(tmp_path, "afile.txt", b"xx")
         client, calls = make_recording_client([listing()])
         results: list[OpResult] = []
@@ -467,14 +467,14 @@ class TestSyncUpload:
         )
         assert ops(calls) == ["ListObjectsV2"]
         assert [r.outcome for r in results] == [OpOutcome.WARNED]
-        assert f"Skipping file {src}{os.sep}. File does not exist." in str(results[0].error)
+        assert str(src) in str(results[0].error)
 
     @pytest.mark.parametrize("bucket", ["b--use1-az4--x-s3", "ap--use1-az4--xa-s3"])
     def test_directory_bucket_destination_is_rejected(self, tmp_path: Path, bucket: str) -> None:
         # An S3 Express directory bucket lists in unspecified order, so the
         # sorted merge-join (and --delete) cannot run on it; the library
-        # rejects with aws-cli's exact wording
-        # (_validate_not_s3_express_bucket_for_sync) before any client call.
+        # rejects it like aws-cli (_validate_not_s3_express_bucket_for_sync)
+        # before any client call.
         # An access point of one (--xa-s3) lists the same way - aws-cli's test
         # misses it, and on real S3 one delete_filter run removed 18 of 20
         # objects the source also had - so it is rejected too.
@@ -483,7 +483,7 @@ class TestSyncUpload:
         client, calls = make_recording_client([])
         with pytest.raises(ValidationError) as excinfo:
             S3().sync(str(src), S3Storage(f"s3://{bucket}/p", client=client))
-        assert str(excinfo.value) == "Cannot use sync command with a directory bucket."
+        assert excinfo.value.operation == "sync"
         assert calls == []
 
     def test_directory_bucket_refusal_comes_before_the_sdk_floor_gate(
@@ -744,9 +744,8 @@ class TestSyncDownload:
             on_result=results.append,
         )
         assert not (tmp_path / "out").exists()
-        assert [(r.outcome, str(r.error)) for r in results] == [
-            (OpOutcome.WARNED, f"Skipping file {tmp_path / 'out'}{os.sep}. File does not exist.")
-        ]
+        assert [r.outcome for r in results] == [OpOutcome.WARNED]
+        assert str(tmp_path / "out") in str(results[0].error)
 
     @pytest.mark.skipif(
         os.name == "nt", reason="Windows folds `..` before the filesystem sees the path"
@@ -803,7 +802,7 @@ class TestSyncDownload:
         client, calls = make_recording_client([])
         with pytest.raises(ValidationError) as excinfo:
             S3().sync(S3Storage(f"s3://{bucket}/p", client=client), str(out))
-        assert str(excinfo.value) == "Cannot use sync command with a directory bucket."
+        assert excinfo.value.operation == "sync"
         assert out.is_dir()
         assert calls == []
 
@@ -881,7 +880,8 @@ class TestSyncDownload:
             stale.parent.chmod(0o755)
         assert str(excinfo.value) == "1 of 1 operations failed"
         assert [r.outcome for r in results] == [OpOutcome.FAILED]
-        assert "[Errno 13]" in str(results[0].error)
+        assert results[0].error is not None
+        assert isinstance(results[0].error.__cause__, PermissionError)
 
     def test_glacier_source_warns_and_skips(self, tmp_path: Path) -> None:
         page: dict[str, Any] = {
@@ -905,7 +905,7 @@ class TestSyncDownload:
         )
         assert ops(calls) == ["ListObjectsV2"]
         assert [r.outcome for r in results] == [OpOutcome.WARNED]
-        assert "Unable to perform download operations on GLACIER objects" in str(results[0].error)
+        assert "d/cold.bin" in str(results[0].error)
 
     def test_case_conflict_gate_guards_only_missing_pairs(self, tmp_path: Path) -> None:
         # Two case twins, both missing at the destination: the first is
@@ -926,7 +926,7 @@ class TestSyncDownload:
         assert calls[1].params["Key"] == "d/A.txt"
         notices = [r for r in results if r.outcome is OpOutcome.NOTICE]
         assert len(notices) == 1
-        assert str(notices[0].error).startswith("warning: Skipping bucket/d/a.txt -> ")
+        assert "bucket/d/a.txt" in str(notices[0].error)
 
     def test_unrecognized_case_conflict_mode_raises_validation_error(self, tmp_path: Path) -> None:
         # An unrecognized value is a caller error in the Boto3S3Error family,
@@ -1518,4 +1518,5 @@ class TestDeletesOnTheCrtEngine:
         assert kwargs["crt_allow_lockless"] is True
         assert ops(calls) == ["ListObjectsV2", "DeleteObjects", "DeleteObject"]
         assert [r.outcome for r in results] == [OpOutcome.FAILED]
-        assert str(results[0].error) == "AWS_IO_SOCKET_CLOSED: socket is closed."
+        assert results[0].error is not None
+        assert isinstance(results[0].error.__cause__, awscrt_exceptions.AwsCrtError)

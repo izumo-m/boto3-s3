@@ -80,9 +80,9 @@ class TestDebugWiring:
     def test_enabling_twice_does_not_duplicate_handlers(
         self, restore_debug_loggers: None, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # The on-partial trial dispatch can enable debug logging before the
-        # prompt re-dispatches the completed argv; the second enable must not
-        # stack a second handler (every --debug line would print twice).
+        # main() can run more than once in one process (an embedding caller,
+        # the test suite); a second enable must not stack a second handler
+        # (every --debug line would print twice).
         cli._enable_debug_logging()
         cli._enable_debug_logging()
         for name in _DEBUG_LOGGERS:

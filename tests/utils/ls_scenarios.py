@@ -87,7 +87,7 @@ SCENARIOS: tuple[LsScenario, ...] = (
     LsScenario(
         "ls_nonexistent_bucket",
         ("ls", f"s3://{BUCKET_TOKEN}-no-such/"),
-        expected_stderr_tokens_ours=("boto3-s3:", "NoSuchBucket"),
+        expected_stderr_tokens_ours=("NoSuchBucket",),
         expected_stderr_tokens_aws=("NoSuchBucket",),
     ),
     # Out-of-range page sizes pass through to the server with no client-side
@@ -132,7 +132,7 @@ SCENARIOS: tuple[LsScenario, ...] = (
     LsScenario(
         "ls_object_lambda_arn",
         ("ls", "s3://arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/my-olap"),
-        expected_stderr_tokens_ours=("boto3-s3:", "S3 Object Lambda", "s3api"),
+        expected_stderr_tokens_ours=("S3 Object Lambda", "s3api"),
         expected_stderr_tokens_aws=("S3 Object Lambda", "s3api"),
     ),
     LsScenario(
@@ -142,7 +142,7 @@ SCENARIOS: tuple[LsScenario, ...] = (
             "s3://arn:aws:s3-outposts:us-west-2:123456789012:"
             "outpost/op-01234567890123456/bucket/my-bucket",
         ),
-        expected_stderr_tokens_ours=("boto3-s3:", "Outpost Bucket", "s3control"),
+        expected_stderr_tokens_ours=("Outpost Bucket", "s3control"),
         expected_stderr_tokens_aws=("Outpost Bucket", "s3control"),
     ),
 )

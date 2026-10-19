@@ -158,19 +158,11 @@ def _reject_unknown_cli_formats(session: BotocoreSession, args: argparse.Namespa
     value and is refused. An explicit ``--cli-binary-format`` replaces the
     config value, and argparse has already held it to the two choices.
 
-    The values are read from botocore's scoped config. A profile no file
-    declares makes that read raise ``ProfileNotFound``, which aws's handlers
-    catch, falling back to their defaults; the check stands down the same way
-    and leaves the profile to the session's other reads, which report it. A
-    config file botocore cannot parse fails here with botocore's own error,
-    which the callers report at rc 255.
+    The values are read from botocore's scoped config, so a profile no file
+    declares (``ProfileNotFound``) and a config file botocore cannot parse fail
+    here with botocore's own error, which the callers report at rc 255.
     """
-    from botocore.exceptions import ProfileNotFound
-
-    try:
-        scoped = session.get_scoped_config()
-    except ProfileNotFound:
-        return
+    scoped = session.get_scoped_config()
     timestamp_format = scoped.get("cli_timestamp_format")
     if timestamp_format is not None and timestamp_format not in _TIMESTAMP_FORMATS:
         raise ConfigurationError(
@@ -247,9 +239,8 @@ class _RegionalS3Section:
 
     A value botocore's own section provider hands over as something other than
     a mapping (a degenerate ``s3 =`` line arrives as ``""``) is passed through
-    untouched: that shape is botocore's to report, in the place and with the
-    wording it reports it (``'str' object has no attribute 'get'``, which aws
-    produces from the same read).
+    untouched: that shape is botocore's to report, and aws fails on the same
+    read.
     """
 
     def __init__(self, section_provider: Any) -> None:
@@ -277,7 +268,7 @@ class _RegionalS3Section:
         simply ran (measured for every valid mode, config key and env var
         alike). Delegating leaves botocore's own bookkeeping intact, and a
         wrapped provider that has no such method fails exactly as the
-        unwrapped one would, with the wording botocore itself would produce.
+        unwrapped one would.
 
         The one key not passed on is the pinned one. Smart defaults write
         exactly that key, and letting the write through puts back the override
@@ -418,13 +409,11 @@ def _inject_credential_cache(session: BotocoreSession) -> None:
     cannot (a read-only entry) succeeded here, and the entry's mode changed
     (measured) - by building that cache from the same class.
 
-    A ``ProfileNotFound`` from building the chain is swallowed exactly as aws
-    swallows it: the profile is reported by the caller's own config read
-    instead, keeping that error's wording and position. The ``sso`` provider is
-    fetched separately, under aws's wider ``UnknownCredentialError`` guard for
-    a botocore whose chain has no such provider.
+    The ``sso`` provider is fetched separately, under aws's
+    ``UnknownCredentialError`` guard for a botocore whose chain has no such
+    provider.
     """
-    from botocore.exceptions import ProfileNotFound, UnknownCredentialError
+    from botocore.exceptions import UnknownCredentialError
     from botocore.tokens import SSOTokenProvider
 
     cache = _credential_cache_class()
@@ -434,15 +423,12 @@ def _inject_credential_cache(session: BotocoreSession) -> None:
     # refresh of an `sso-session` token. A CLI process opens no session that
     # should write it any other way.
     SSOTokenProvider.DEFAULT_CACHE_CLS = cache
-    try:
-        chain = session.get_component("credential_provider")
-        chain.get_provider("assume-role").cache = cache(cache_dir)
-        chain.get_provider("assume-role-with-web-identity").cache = cache(cache_dir)
-    except ProfileNotFound:
-        return
+    chain = session.get_component("credential_provider")
+    chain.get_provider("assume-role").cache = cache(cache_dir)
+    chain.get_provider("assume-role-with-web-identity").cache = cache(cache_dir)
     try:
         chain.get_provider("sso").cache = cache(cache_dir)
-    except (ProfileNotFound, UnknownCredentialError):
+    except UnknownCredentialError:
         return
 
 
@@ -1151,8 +1137,8 @@ def _reject_empty_ca_bundle(verify: Any) -> None:
     rather than silently turning TLS verification off. The installed botocore
     adopted the same check in 1.43.54, but the supported floor is older
     (docs/compatibility.md), so a host botocore below it would still disable
-    verification. Re-raising botocore's own ``InvalidConfigError`` here, with
-    its exact wording, holds the rejection across the whole support range: on a
+    verification. Re-raising botocore's own ``InvalidConfigError`` here holds
+    the rejection across the whole support range: on a
     botocore that already rejects, ``session.client`` raised the identical
     exception first and this is unreached; on an older one, this supplies it.
 
@@ -1178,12 +1164,11 @@ def _reject_empty_ca_bundle(verify: Any) -> None:
 
 
 def _reject_unsupported_retry_mode(mode: Any) -> None:
-    """Reject a retry mode aws v2 does not have, with aws's own wording.
+    """Reject a retry mode aws v2 does not have.
 
     ``legacy`` is stock botocore's default and one of its three valid modes;
     aws v2's bundled botocore dropped it, so a profile carrying the aws-cli v1
-    value (or any other typo) is rc 255 there - and the report names the two
-    modes that remain, where the installed botocore names all three.
+    value (or any other typo) is rc 255 there.
     """
     if mode is None or mode in ("standard", "adaptive"):
         return

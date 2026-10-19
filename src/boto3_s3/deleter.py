@@ -575,8 +575,8 @@ class S3Deleter:
             # It decides nothing for the keys: aws-cli sends each of them as a
             # DeleteObject of its own, with attempts of its own, so each goes
             # out on that route of the same client and takes that request's
-            # outcome - a delete, a failure (a wrong bucket fails every key,
-            # each in aws-cli's own words), or on botocore a loss. Measured: a
+            # outcome - a delete, a failure (a wrong bucket fails every key), or
+            # on botocore a loss. Measured: a
             # server failing the first three deletes with InternalError, or
             # with Throttling, leaves aws deleting both keys of a two-key run
             # at rc 0, and a single 429 fails one key and deletes the other.
@@ -785,8 +785,7 @@ class S3Deleter:
         unattributable: list[str] = []
         for err in entries:
             key = err.get("Key")
-            # "Unknown" fallbacks mirror botocore's ClientError rendering, so a
-            # synthesized per-key message reads like a real DeleteObject failure.
+            # An entry missing its code or message still fails its key.
             code = err.get("Code", "Unknown")
             message = err.get("Message", "Unknown")
             if key is None or key not in submitted:
@@ -839,10 +838,8 @@ class S3Deleter:
         """Translate one per-key ``Errors[]`` entry into the exception taxonomy.
 
         Categories come from the table shared with the request-level path
-        (``S3_CODE_CATEGORIES``), and the message mirrors botocore's
-        ``ClientError`` str, so per-key and request-level failures read the
-        same to callers (modulo botocore's retry-info suffix on a
-        retries-exhausted request-level failure).
+        (``S3_CODE_CATEGORIES``); the message carries the entry's code and
+        S3's message.
         """
         category = S3_CODE_CATEGORIES.get(code, Boto3S3Error)
         text = f"An error occurred ({code}) when calling the DeleteObjects operation: {message}"

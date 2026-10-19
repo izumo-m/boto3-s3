@@ -64,8 +64,7 @@ with or without it, since the S3 Express signature has no CRT implementation.
 signs a download URL, and `"put_object"` signs an upload URL. Those two values
 are the supported set. `aws s3 presign` signs only `get_object`; `put_object`
 is this library's permissive superset. Any other value raises `ValidationError`
-(`Invalid method value: ...`) before the target is resolved or anything is
-signed.
+(`Invalid method value: ...`) before anything is signed.
 
 `presign` has no callback parameter and reports nothing to `on_result` (see
 [`../results.md`](../results.md) for the callback model the batch operations
@@ -137,12 +136,11 @@ The category contracts are specified in
 [`../exceptions.md`](../exceptions.md).
 
 - [`ValidationError`](../exceptions.md#validationerror) — a `method` outside the
-  supported set (checked first, before the target is resolved); `target` is not
-  a supported type or is a non-S3 `Storage`; the resolved location is one of the
-  forms the strict checks reject (an S3 Object Lambda ARN, an Outposts bucket
-  ARN, a key with no bucket); or botocore's client-side parameter validation
-  rejects the request, which is what an absent key or an empty bucket name
-  produces.
+  supported set; `target` is not a supported type or is a non-S3 `Storage`; the
+  resolved location is one of the forms the strict checks reject (an S3 Object
+  Lambda ARN, an Outposts bucket ARN, a key with no bucket); or botocore's
+  client-side parameter validation rejects the request, which is what an absent
+  key or an empty bucket name produces.
 - [`ConfigurationError`](../exceptions.md#configurationerror) — credentials
   cannot be resolved while the request is signed; or an optional dependency
   the resolved signer needs is absent, which is what a multi-region access

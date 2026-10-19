@@ -196,8 +196,7 @@ SCENARIOS: tuple[RmScenario, ...] = (
         expected_stderr_tokens_aws=("delete failed", "Invalid bucket name"),
     ),
     # A non-integer page size dies in the CLI's own int() conversion -> rc
-    # 255 on both sides (aws's bare int() escapes to its *general* handler,
-    # converting at parse time - it even precedes the 252 path-type check).
+    # 255 on both sides (aws's bare int() escapes to its *general* handler).
     # No server contact, nothing seeded, nothing deleted.
     RmScenario(
         "rm_page_size_nonint",

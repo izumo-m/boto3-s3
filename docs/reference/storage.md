@@ -640,10 +640,7 @@ cannot disagree.
 Returns `None` for a definitively absent path (`ENOENT` / `ENOTDIR`, which
 includes a broken symlink when following), for a symlink when
 `follow_symlinks=False`, and — after warning through `on_warning` — for a
-special or unreadable file (an unreadable directory is named with the trailing
-separator the AWS CLI's `local_format` gives a directory source, except when
-symlinks are not followed, where the AWS CLI strips it again before its
-battery). A directory is returned with `FileKind.DIRECTORY`
+special or unreadable file or directory. A directory is returned with `FileKind.DIRECTORY`
 and no type check, and fails later at open the way `aws s3` fails. A stat error
 that is not absence is raised, translated, with `operation` unset for the
 operation layer to fill and the path as `key`.
@@ -1254,9 +1251,9 @@ interpreter flushes it at exit. A caller that needs them out earlier flushes
 `sys.stdout` itself.
 
 Raises: `ValidationError` ([`./exceptions.md`](./exceptions.md)) when `mode` is
-`"rb"` and this process has no `sys.stdin`, in the AWS CLI's own wording,
-rather than letting a transfer worker receive an unusable file object. The
-error names no operation of its own: the run that invoked the storage stamps
+`"rb"` and this process has no `sys.stdin`, rather than letting a transfer
+worker receive an unusable file object. The error names no operation of its
+own: the run that invoked the storage stamps
 the one it is performing — the streaming `cp` that reads stdin reports `"cp"`
 (`mv` rejects a stream source before opening it) — while a direct call leaves
 `operation` as `None`.
@@ -1513,10 +1510,9 @@ being submitted as a file. Otherwise: `info` itself with `size`, `mtime` and
 leaf's size and timestamp, so what is transferred and what `sync` compares is
 the file as of its turn. An mtime this stat cannot represent stamps
 `EPOCH_TIME` as `stat_info` does and sends the file's one invalid-timestamp
-warning from here, where the AWS CLI sends it: it sorts among the walk's other
-warnings as the AWS CLI's does (an earlier-sorting sibling directory's warnings
-come first), and a timestamp that became representable since the scan draws
-none — `stat_info` stamps the scan-time record silently.
+warning from here, where the AWS CLI takes the timestamp, so a timestamp that
+became representable since the scan draws none — `stat_info` stamps the
+scan-time record silently.
 
 `is_symlink` is left as classified — re-testing it would cost a second syscall
 per leaf. A record whose classification stat is a symlink's own (the complete
@@ -1564,19 +1560,17 @@ itself.
 
 A directory that cannot be opened or scanned — replaced, removed or locked away
 in the race between its parent's scan and this descent — is put through the
-`triggers_warning` battery and yields an empty list, so the walk goes on. The
-battery runs on `dir_path` as passed, which for a descended child carries the
-trailing separator the AWS CLI's own re-test names it by. With symlinks not
-followed, that re-test first strips the separator and tests the name itself,
-as the AWS CLI's `should_ignore_file` does at the top of each descent: a
-directory that became a symlink is skipped silently rather than followed, and
-the battery names the stripped path. If that battery finds
+`triggers_warning` battery and yields an empty list, so the walk goes on. With
+symlinks not followed, that re-test first strips the trailing separator a
+descended directory is addressed with and tests the
+name itself, as the AWS CLI's `should_ignore_file` does at the top of each
+descent: a directory that became a symlink is skipped silently rather than
+followed. If that battery finds
 nothing wrong, the `OSError` propagates instead of pruning silently. That
 handling is scoped to establishing the scan; a per-entry `OSError` raised
 mid-scan propagates. The deterministic full-path limits — a symlink cycle
 stopped by the kernel, an over-long path — are caught one level up instead, by
-`crosses_full_path_boundary`, which addresses the child by its bare full path,
-the way the AWS CLI words those two.
+`crosses_full_path_boundary`.
 
 `sym_depth` lets any child near the symlink-loop or path-length limit be
 re-vetted by full path, so it warn-skips the way the AWS CLI's full-path stat
@@ -1593,10 +1587,7 @@ rejected it. The fast walk vets each entry through the owning directory's
 descriptor, which re-anchors resolution and so hides both the ancestor symlink
 chain and the full path's length; near either OS limit this re-runs the
 full-path warning battery so the two agree. A directory takes the same probe as
-a file, and by the same bare full path: that is where the AWS CLI names a child
-it vets, while a descent addresses it with a trailing separator, so leaving a
-boundary-crossing directory to fail its own descent would warn with a separator
-the AWS CLI's message does not carry. `scan_children` consults this only in the
+a file. `scan_children` consults this only in the
 normal view — under `enumerate_all_entries` the vetting is bypassed and this
 probe with it.
 
@@ -1708,9 +1699,9 @@ per-entry hot path uses `should_ignore_entry` instead.
 
 ### triggers_warning(path, notify)
 
-The warn-and-skip battery on a path, in the AWS CLI's order and wording: the
-path does not exist, then it is a character or block special device, FIFO or
-socket, then it is not readable. Returns whether any check fired, having sent
+The warn-and-skip battery on a path, the AWS CLI's: the path does not exist,
+then it is a character or block special device, FIFO or socket, then it is not
+readable. Returns whether any check fired, having sent
 that check's message to `notify`. Used for the root, for a directory whose scan
 could not be established, for a leaf whose re-stat fails at its turn
 (`restat_leaf`), and for the near-boundary re-vetting.

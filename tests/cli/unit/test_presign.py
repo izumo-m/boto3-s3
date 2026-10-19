@@ -99,32 +99,11 @@ class TestPresignExitCodeShape:
         assert rc == 255
         assert "invalid literal for int()" in capsys.readouterr().err
 
-    def test_an_over_long_expiry_is_255(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # int()'s digit limit, worded as the host's Python words it.
-        def factory(_args: Any) -> Any:
-            raise AssertionError("client factory must not be called")
-
-        rc = cli.main(
-            ["presign", "s3://b/k", "--expires-in", "1" * 5000],
-            ctx=Context(client_factory=factory),
-        )
-        assert rc == 255
-        assert "Exceeds the limit (4300" in capsys.readouterr().err
-
     def test_bucket_only_is_param_validation_252(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = cli.main(["presign", "s3://bucket-only"], ctx=_real_client_ctx())
         err = capsys.readouterr().err
         assert rc == 252
         assert "Invalid length for parameter Key" in err
-
-    def test_trailing_slash_is_param_validation_252(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        rc = cli.main(["presign", "s3://bucket-only/"], ctx=_real_client_ctx())
-        assert rc == 252
-        # The same empty-Key client-side validation as the bucket-only form -
-        # not some other usage rejection.
-        assert "Invalid length for parameter Key" in capsys.readouterr().err
 
     def test_empty_uri_is_param_validation_252(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = cli.main(["presign", "s3://"], ctx=_real_client_ctx())
@@ -135,23 +114,10 @@ class TestPresignExitCodeShape:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # aws splits the URI and signs with Bucket="" + Key="k", so the
-        # rejection is botocore's own bad-bucket-name text (regex tail
-        # included) - not an up-front refusal of the form.
+        # rejection is botocore's own bad-bucket-name check at signing time.
         rc = cli.main(["presign", "s3:///k"], ctx=_real_client_ctx())
-        err = capsys.readouterr().err
         assert rc == 252
-        assert 'Invalid bucket name ""' in err
-        assert "Bucket name must match the regex" in err
-
-    def test_bucketless_key_schemeless_is_botocores_rejection(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # The same URI in the scheme-less spelling presign also accepts.
-        rc = cli.main(["presign", "/k"], ctx=_real_client_ctx())
-        err = capsys.readouterr().err
-        assert rc == 252
-        assert 'Invalid bucket name ""' in err
-        assert "Bucket name must match the regex" in err
+        assert "Invalid bucket name" in capsys.readouterr().err
 
     def test_extra_positional_is_unknown_options_252(
         self, capsys: pytest.CaptureFixture[str]

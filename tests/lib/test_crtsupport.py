@@ -177,18 +177,14 @@ class TestShouldUseCrt:
 
     def test_explicit_crt_without_awscrt_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         hide_awscrt(monkeypatch)
-        with pytest.raises(MissingDependencyException) as exc_info:
+        with pytest.raises(MissingDependencyException):
             crtsupport.should_use_crt("crt")
-        assert "CRT installed: False" in str(exc_info.value)
 
-    def test_explicit_crt_with_old_awscrt_raises_with_version(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_explicit_crt_with_old_awscrt_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         old = SimpleNamespace(__version__="0.19.17")
         monkeypatch.setitem(sys.modules, "awscrt", old)
-        with pytest.raises(MissingDependencyException) as exc_info:
+        with pytest.raises(MissingDependencyException):
             crtsupport.should_use_crt("crt")
-        assert "CRT installed: True, with version: 0.19.17" in str(exc_info.value)
 
     def test_auto_without_crt_s3transfer_is_classic(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # awscrt present + host optimized, but the floor s3transfer (< 0.8.0)

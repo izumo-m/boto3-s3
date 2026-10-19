@@ -171,7 +171,7 @@ class EtagComparison(ContentComparison):
         elif s3 is not None:
             part_size = s3.aws_config().get_size("s3.multipart_chunksize", DEFAULT_PART_SIZE)
             if part_size < 1:
-                # aws-cli's own check of this setting, in its words.
+                # aws-cli refuses this setting too.
                 raise InvalidConfigError(
                     f"Value for multipart_chunksize must be a positive integer: {part_size}"
                 )

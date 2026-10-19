@@ -437,8 +437,7 @@ Raises:
 
 - [`ValidationError`](./exceptions.md#validationerror) for a `--op-s3` Outposts
   access point alias, which no API can resolve, and for a Multi-Region Access
-  Point alias not found in the account after the listing is exhausted. Both
-  carry the AWS CLI's wording.
+  Point alias not found in the account after the listing is exhausted.
 - [`ConfigurationError`](./exceptions.md#configurationerror) for an S3 Express
   access point on a botocore older than 1.37.24, which would send the lookup
   to an endpoint that does not know the access point; no request is sent.

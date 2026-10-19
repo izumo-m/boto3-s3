@@ -1151,8 +1151,8 @@ class S3:
     transfer runs classic and reports botocore's "Unable to locate
     credentials". ``True`` is aws-cli's: the CRT client is built around a
     credentials delegate that has nothing to resolve, and the failure surfaces
-    from inside it instead. Only the CLI distribution, which owes ``aws s3``
-    output parity, sets it (design/crt.md section 4).
+    from inside it instead. Only the CLI distribution, which follows aws-cli
+    here, sets it (design/crt.md section 4).
 
     ``crt_allow_lockless`` is the third, for cross-process lock contention
     under an **explicit** ``'crt'`` preference. ``False`` (the default) is
@@ -1630,17 +1630,14 @@ class S3:
         CLI derives exit code 2 from its warned count). Failures *before*
         any item work - an unreadable destination, the missing-source check
         - raise directly: a missing local source raises ``NotFoundError``
-        with aws's wording (their pre-pipeline rc 255 shape - no
-        ``ClientError`` cause, so the CLI maps it to the general rc).
+        (aws's pre-pipeline rc 255 shape - no ``ClientError`` cause, so the
+        CLI maps it to the general rc).
         """
         _validate_transfer_options(options, operation="cp")
         src_storage = self.resolve(src)
         dest_storage = self.resolve(dest)
-        # aws rejects the unsupported ARN families before any other check (its
-        # add_paths runs ahead of the stream gates and _validate_path_args), so
-        # the strict checks come first here too: a bad location reports as
-        # such whatever else is wrong with the call. Construction was
-        # permissive; a stream side validates as a no-op.
+        # The strict location checks (construction was permissive; a stream
+        # side validates as a no-op).
         _validate_storage(src_storage, operation="cp")
         _validate_storage(dest_storage, operation="cp")
         transfer_config = self._run_transfer_config(
@@ -2074,13 +2071,13 @@ class S3:
         not a recursive one (a stream is a single endpoint) and never the
         source (a move deletes its source, which a stream cannot be); both
         raise ``ValidationError``. The CLI rejects ``-`` for mv on either
-        side outright (aws parity; it owns that exact error text). Emptied
+        side outright (aws parity). Emptied
         local source directories are left behind like aws.
 
         Moving an object onto itself (same URI, or a ``/``-terminated
         destination plus the source's basename - checked for ``--recursive``
         too, aws-cli's faithful false positive) raises
-        ``ValidationError`` with aws's message before anything runs. That
+        ``ValidationError`` before anything runs. That
         guard is textual only: paths through access point ARNs or aliases
         can still land on the same underlying bucket. Resolve them first
         with `boto3_s3.pathresolver.S3PathResolver` (the
@@ -2090,8 +2087,7 @@ class S3:
         _validate_transfer_options(options, operation="mv")
         src_storage = self.resolve(src)
         dest_storage = self.resolve(dest)
-        # The strict location checks first, ahead of the stream gates and the
-        # same-path check below - aws's order (see cp).
+        # The strict location checks (see cp).
         _validate_storage(src_storage, operation="mv")
         _validate_storage(dest_storage, operation="mv")
         transfer_config = self._run_transfer_config(
@@ -2955,9 +2951,9 @@ class S3:
         -> `ValidationError`. ``method`` selects the signed operation -
         aws-cli only ever signs ``get_object``; ``put_object`` is this
         library's permissive superset, and any other value is refused with
-        `ValidationError` before ``target`` is resolved or anything is
-        signed (otherwise a client method taking Bucket and Key would sign
-        an undocumented operation, and miss the SigV4 forcing below).
+        `ValidationError` before anything is signed (otherwise a client
+        method taking Bucket and Key would sign an undocumented operation,
+        and miss the SigV4 forcing below).
 
         The URL is signed with SigV4, matching ``aws s3 presign``. This
         matters because botocore, left to itself, still downgrades a default

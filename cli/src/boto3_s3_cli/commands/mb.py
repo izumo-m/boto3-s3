@@ -81,7 +81,7 @@ class MbCommand(Command):
         target: str = args.path
         if not target.startswith("s3://"):
             # aws mb: S3 paths only -> rc 252.
-            raise ValidationError(usage.bare_single_uri_usage(), operation="mb")
+            raise ValidationError(usage.single_uri_usage("mb"), operation="mb")
 
         s3 = ctx.s3(args)
         client = s3.client()

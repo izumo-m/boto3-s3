@@ -76,10 +76,10 @@ config=None read as `'auto'` - with the same rules as boto3.
   `inject.py` ("copy is not supported in the CRT").
 - **`should_use_crt`** (a port of boto3's `_should_use_crt`): an explicit
   `'crt'` combined with a missing or too-old awscrt (below 0.19.18) raises a
-  `MissingDependencyException` (boto3's wording); an explicit `'crt'` on an
+  `MissingDependencyException`, as boto3 does; an explicit `'crt'` on an
   s3transfer below 0.8.0 (the supported floor predates it) also
-  raises `MissingDependencyException` - a branch boto3 does not have, with its
-  own wording (`'auto'` degrades to classic there instead); CRT is attempted
+  raises `MissingDependencyException` - a branch boto3 does not have
+  (`'auto'` degrades to classic there instead); CRT is attempted
   when `(is_optimized and 'auto') or 'crt'`.
 - **`create_crt_transfer_manager`** (a port of boto3's `get_crt_s3_client` +
   singleton): lazily creates the process-singleton CRT client + serializer. If
@@ -250,9 +250,9 @@ module name. It reads the profile's `[s3]` through `S3.aws_config()`
 (`load_scoped_s3_config` pulls the known keys; `AWS_CONFIG_FILE` / `--profile`
 / the nested `s3 =` INI are honored through that reader), converts sizes (`8MB`), rates (`100MB/s` /
 `800Kb/s`), and bools, resolves the `default` -> `classic` alias, and validates
-invalid values. The wording for invalid values is aws-cli's, raised as the
-library's `InvalidConfigError` - aws-cli's class of the same name reaches the
-general handler with rc 255; ours maps to 255 too (exceptions.md section 2).
+invalid values. An invalid value raises the library's `InvalidConfigError` -
+aws-cli's class of the same name reaches the general handler with rc 255; ours
+maps to 255 too (exceptions.md section 2).
 
 ### The decision tree (`resolve_transfer_client`)
 
@@ -340,10 +340,9 @@ each run - all four are `S3TransferCommand`s in aws, so all four read `[s3]`
 calls the same method first (`transferargs.resolve_transfer_config`), so its
 materialization below gets the same config; a test-injected
 `ctx.transfer_config` supplies the settings it sets (the determinization
-lever). In the CLI the reading of `[s3]` is placed **after** the usage (252)
-and source-absent (255) validations (an invalid `[s3]` value loses to either) and **before** everything
-the run itself does - for rm that includes the bucket-less enumerating
-synthesis, which an invalid `[s3]` value therefore preempts (measured).
+lever). In the CLI the reading of `[s3]` is placed **before** everything the
+run itself does - for rm that includes the bucket-less enumerating synthesis,
+so an invalid `[s3]` value stops every rm form (measured).
 
 ### Materializing the engine (`materialize_transfer_engine`)
 
@@ -612,9 +611,8 @@ error's details need not (checked by the e2e CRT lane - testing.md).
   `FAILED` unless this run's `CancelToken` ordered it
   (`Transferrer._cancel_initiated` - the one revocation aws has no
   counterpart for, kept `CANCELLED`; "ordered" means the token's own
-  `CancelledError` forced the fold or its escalation issued the cancel, so a
-  fatal or interrupt folding the manager stays `FAILED` even with the token
-  already cancelled - design/opresult.md), so the CLI streams aws's per-item
+  `CancelledError` forced the fold or its escalation issued the cancel -
+  design/opresult.md), so the CLI streams aws's per-item
   lines and the classic lane is untouched. Two residuals: a library caller on the
   swallowed-interrupt window gets `BatchError`, not the `KeyboardInterrupt`
   ([`opresult.md`](./opresult.md)); and a submission-window Ctrl-C ends with
@@ -644,14 +642,14 @@ error's details need not (checked by the e2e CRT lane - testing.md).
   botocore client build, which every command performs before any transfer
   engine exists ([`cli.md`](./cli.md) section 4, `_reject_empty_ca_bundle`).
   So the CRT lane is never handed one from the CLI, whichever engine the run
-  selects, and both tools report the same line at the same point (measured
+  selects, and both tools refuse it before any transfer (measured
   2026-09-06 under `preferred_transfer_client = crt`: an empty `--ca-bundle`,
   a whitespace-only one, and an empty `AWS_CA_BUNDLE`). For a **library**
   caller that builds its own client, pip botocore >= 1.43.54 (and pip
   s3transfer >= 0.19.2 on the CRT lane) raise `InvalidConfigError` on the
   value, while older ones read the empty string as falsy and turn TLS
   verification off. The library refuses the value itself on every version,
-  with botocore's own error and wording (`s3storage.reject_empty_ca_bundle`):
+  with botocore's own error (`s3storage.reject_empty_ca_bundle`):
   `S3Storage.get_client` for every operation, `S3.client()` and
   `S3PathResolver` for the clients they hand out or take, and
   `create_crt_transfer_manager` as its first step - before the cross-process

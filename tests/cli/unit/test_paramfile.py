@@ -59,8 +59,7 @@ class TestTextEncoding:
 class TestBadCodec:
     """An unusable `AWS_CLI_FILE_ENCODING` is the interpreter's own `LookupError`.
 
-    It reaches the user through the general handler (rc 255), worded as the
-    host's Python words it.
+    It reaches the user through the general handler (rc 255).
     """
 
     def _load(self, tmp_path: Path) -> str:
@@ -74,9 +73,8 @@ class TestBadCodec:
     ) -> None:
         # Including the empty present-wins value.
         monkeypatch.setenv("AWS_CLI_FILE_ENCODING", codec)
-        with pytest.raises(LookupError) as excinfo:
+        with pytest.raises(LookupError):
             self._load(tmp_path)
-        assert str(excinfo.value) == f"unknown encoding: {codec}"
 
     def test_it_is_not_a_paramfile_load_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

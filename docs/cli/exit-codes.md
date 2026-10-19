@@ -24,8 +24,7 @@ the command produces them is recorded in
 (`ls | head`) is not one of them: the broken pipe is reported like any other
 write failure — `boto3-s3: [ERROR]: [Errno 32] Broken pipe`, exit code 255 —
 and the process then usually ends at 120 anyway, once Python fails to flush to
-the closed pipe at shutdown. `aws` does exactly the same, report included, so
-do not branch on it.
+the closed pipe at shutdown. `aws` does the same, so do not branch on it.
 
 ### 1 — the operation failed after it started
 
@@ -37,8 +36,7 @@ failures were already printed as `... failed:` lines while the run proceeded;
 a failure that stops the whole run prints one `fatal error:` line.
 
 Ctrl-C during a running transfer or delete is also 1, with a
-`cancelled: ctrl-c received` line (`aws` words that line differently when no
-transfer is left to cancel). `rb --force` is the
+`cancelled: ctrl-c received` line. `rb --force` is the
 exception: Ctrl-C during its listing or its deletions is 255, the code of a
 deletion that fails there (section 2), and during the bucket removal itself
 130 (below).
@@ -68,9 +66,7 @@ remaining lines.
 
 An unknown option, an invalid choice or value, a path that is not a usable S3
 URI, or an option that does not apply to the direction being run (for example
-`--checksum-algorithm` on a download). No transfer request was sent. The
-message uses the same envelope as `aws`:
-`An error occurred (ParamValidation): <message>`.
+`--checksum-algorithm` on a download). No transfer request was sent.
 
 ### 253 — the environment cannot supply what is needed
 
@@ -98,10 +94,6 @@ subcommand stops on it. `help` and `--version` do not read the config files,
 so they still work, where `aws` fails them as well
 ([`configuration.md`](./configuration.md)).
 
-Unresolved credentials and an unresolved region are reported in botocore's
-own words (`Unable to locate credentials`, `You must specify a region.`),
-without the `An error occurred (NoCredentials):` envelope and the
-`aws login` / `aws configure` hints `aws` adds; the exit code is the same.
 Once a `cp` / `mv` / `sync` / `rm` run has started, a credential
 failure is exit code 1 instead: a per-item
 `upload failed:` / `move failed:` / `delete failed:` line when it lands on an

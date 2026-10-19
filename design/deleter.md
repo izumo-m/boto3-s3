@@ -199,8 +199,7 @@ versioned bucket) cannot be mapped back to submission order.
   per-key entry of a 200 `DeleteObjects` response never reaches the client's
   retry policy. The per-key request puts the key back under that policy, and
   when the attempts are spent the recorded error is the `DeleteObject`
-  failure - aws-cli's own line for the key, singular operation name and (on
-  botocore) retry suffix included. A batch request that failed as a whole
+  failure, kept as the cause. A batch request that failed as a whole
   sends its keys the same way, whatever the policy (below).
 - **an unattributable `Errors[]` entry** (a missing `Key`, or a spelling that
   does not match the submitted key): logs a WARNING (the trace stays) and
@@ -316,19 +315,7 @@ that - so a key never gets fewer attempts than aws-cli gives it.
 - Failure messages are unified to the full `str(ClientError)`
   (`An error occurred (...) ...`), the same shape as the string aws-cli emits on
   a failure line (so the CLI layer can use it as-is when composing
-  `delete failed: ...`). The shape is aws's; the bytes are not, and that is the
-  visible edge of the batching above. A per-key line composed from a
-  `DeleteObjects` `Errors[]` entry names the **plural** operation and never
-  carries the `(reached max retries: N)` suffix, where aws - issuing one
-  `DeleteObject` per key - names the singular one and, on its classic client,
-  carries the suffix botocore appends once the request's attempts are spent
-  (its CRT client's error carries none). A batch request failing as a whole
-  is not one of these: its keys go out again on their own, so their lines are
-  aws's. The
-  non-batched single-key delete keeps `DeleteObject` and reads as aws's does,
-  so the difference is confined to the batched routes
-  (`rm --recursive`, an S3-side `sync --delete`, `rb --force`). Recorded for
-  the reader in [`aws-differences.md`](../docs/cli/aws-differences.md).
+  `delete failed: ...`).
 - User-facing output such as `delete: s3://...` / `delete failed: s3://... <error>` /
   `(dryrun) delete: ...` (the format of aws-cli's `results.py`) is the CLI layer's
   responsibility to assemble from `on_result`. The library does not print; it

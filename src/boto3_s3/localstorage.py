@@ -705,11 +705,9 @@ class LocalFileGenerator:
           compares are the file as of its turn - aws-cli takes every leaf's size
           and timestamp here, never at scan time. The unrepresentable-timestamp
           fallback stamps ``EPOCH_TIME`` as ``stat_info`` does and sends the one
-          warning aws-cli sends for the file, here rather than at scan time:
-          so it sorts among the walk's other warnings as aws-cli's does (a
-          sibling directory's warnings come first), and a timestamp that
-          became representable since the scan draws none (``stat_info`` stamps
-          the scan-time record silently).
+          warning aws-cli sends for the file, here rather than at scan time, so
+          a timestamp that became representable since the scan draws none
+          (``stat_info`` stamps the scan-time record silently).
 
         ``is_symlink`` is left as classified: re-testing it would cost a second
         syscall per leaf, and aws-cli carries no such flag.
@@ -761,11 +759,10 @@ class LocalFileGenerator:
             return self.promoted_directory(info, st, is_symlink=is_link)
         size, mtime = _size_mtime(st)
         if mtime is None:
-            # aws-cli's one warning for the file, sent where aws-cli sends it -
-            # at the leaf's turn, from this stat (the scan-time record was
-            # stamped silently), so it sorts among the other warnings as
-            # aws-cli's does and a timestamp that healed since the scan draws
-            # none.
+            # aws-cli's one warning for the file, sent where aws-cli takes the
+            # timestamp - at the leaf's turn, from this stat (the scan-time
+            # record was stamped silently), so a timestamp that healed since
+            # the scan draws none.
             notify(_INVALID_TIMESTAMP)
             mtime = self.EPOCH_TIME
         info.size = size
@@ -971,23 +968,21 @@ class LocalFileGenerator:
             # The directory stopped being an openable directory between its
             # parent's scan and this descent - replaced by a file, deleted, or
             # chmod'd away. aws-cli re-tests the child immediately before
-            # recursing into it, on the *separator-terminated* path its sort key
-            # carries: no longer a directory falls to ``_safely_get_file_stats``,
+            # recursing into it: no longer a directory falls to
+            # ``_safely_get_file_stats``,
             # whose ``os.stat`` raises ``ENOTDIR`` / ``ENOENT`` and warns through
             # the battery, and still-a-directory-but-unreadable warns through the
             # ``should_ignore_file`` at the top of the recursion. Establishing
-            # this scan *is* that re-test, so run the same battery on ``probe``:
-            # ``dir_path`` as given - it keeps the separator every descended
-            # child was addressed with, and aws-cli's warning keeps it too - or,
-            # when symlinks are not followed, the separator-stripped form
-            # aws-cli's should_ignore_file rebinds - then keep
-            # walking (a warning, rc 2) instead of failing the run. If the probes
+            # this scan *is* that re-test, so run the same battery on ``probe``
+            # (``dir_path`` as given, or the separator-stripped form when
+            # symlinks are not followed), then keep walking (a warning, rc 2)
+            # instead of failing the run. If the probes
             # see nothing wrong (e.g. fd exhaustion resolved by the probe's
             # close), re-raise like aws-cli's ``listdir`` would - never prune
             # silently. The deterministic full-path limits this fd-relative walk
             # hides (``ELOOP`` / an over-long path) are caught one level up
-            # instead, at vetting time, by ``crosses_full_path_boundary``, so
-            # they carry aws-cli's vetting-time wording. Scoped to the
+            # instead, at vetting time, by ``crosses_full_path_boundary``. Scoped
+            # to the
             # open/scandir establishment only - a per-entry OSError (from a race
             # mid-scan or an override's classify_child) propagates rather than
             # dropping the directory.
@@ -1039,14 +1034,7 @@ class LocalFileGenerator:
         limits, so a normal walk never reaches this probe) re-run the full-path
         warning battery
         (``triggers_warning``); a child it warns away is dropped here so the two
-        agree.
-
-        Directories take the same probe as file leaves, and by the same path:
-        aws-cli's vetting names a child by its bare full path, while the descent
-        addresses it with the trailing separator - so a boundary-crossing
-        directory left to fail its own ``os.open`` in ``scan_children`` would be
-        warned there, where the battery reproduces aws-cli's *descent* wording
-        (separator included) rather than its vetting wording.
+        agree. Directories take the same probe as file leaves.
         """
         # PATH_MAX is a byte limit, so the length floor is measured in bytes
         # (a multibyte path crosses a 1024-byte PATH_MAX at a few hundred
@@ -1251,15 +1239,13 @@ class LocalFileGenerator:
         if not follow_symlinks:
             if os.path.isdir(path) and path.endswith(os.sep):
                 # A trailing separator must be removed to test the link itself.
-                # aws-cli rebinds the stripped path, so the warning wording
-                # below drops the separator too; mirror that.
                 path = path[:-1]
             if os.path.islink(path):
                 return True
         return self.triggers_warning(path, notify)
 
     def triggers_warning(self, path: str, notify: Callable[[str], None]) -> bool:
-        """Warn-and-skip checks on a *path*, aws-cli order and wording (``triggers_warning``).
+        """Warn-and-skip checks on a *path* (aws-cli's ``triggers_warning``).
 
         Path-based: the root vetting (``should_ignore_file``), a directory
         whose scandir establishment failed, and the near-symlink-boundary
@@ -1300,15 +1286,15 @@ class LocalFileGenerator:
         ignorable: a character/block/FIFO/socket special file, or one the process
         cannot read. The readability probe is dir-relative (``openat`` through
         ``dir_fd`` where the platform allows, ``None`` off POSIX). ``full`` is the
-        entry's absolute path (warning wording). Same order / wording as
-        ``triggers_warning``, with one refinement on the probe's failure path:
+        entry's absolute path, which the warnings name. The checks are
+        ``triggers_warning``'s, with one refinement on the probe's failure path:
         aws-cli vets by full path and probes existence *first*, so an entry
         whose full-path resolution fails - over ``MAX_PATH`` on a Windows host
         without long-path support (the length is invisible to the scandir-cached
-        stat above), or raced away since - warns ``File does not exist.`` there,
-        never ``not readable``. A full-path existence re-check on this rare
-        branch picks the same wording; a genuinely unreadable present entry
-        still warns ``not readable``.
+        stat above), or raced away since - is reported there as missing, never
+        as unreadable. A full-path existence re-check on this rare branch does
+        the same; a genuinely unreadable present entry is still reported as
+        unreadable.
         """
         if _is_special_mode(st.st_mode):
             notify(
@@ -1384,7 +1370,7 @@ def translate_os_error(
     handling is separate: it warns-and-skips through the vetting battery, and
     an ``OSError`` its probes cannot attribute re-raises untranslated rather
     than dropping a directory silently. ``message`` overrides
-    ``str(exc)`` when the caller carries aws-cli wording of its own.
+    ``str(exc)`` when the caller carries a message of its own.
     """
     text = str(exc) if message is None else message
     if isinstance(exc, ValueError):
@@ -1808,11 +1794,8 @@ class LocalStorage(Storage):
         The local side of ``Storage.get_fileinfo``'s contract: a
         ``follow_symlinks=False`` symlink, or a definitively absent path (``ENOENT`` /
         ``ENOTDIR`` - including a broken symlink when following), is a silent ``None``; a special /
-        unreadable file warns via ``notify`` and returns ``None`` (aws-cli's
-        warn-and-skip; an unreadable directory is named with the trailing
-        separator aws-cli's ``local_format`` gives a directory source, except
-        when symlinks are not followed, where aws-cli strips it again before
-        its battery); a regular file or directory returns a ``LocalFileInfo`` (no
+        unreadable file or directory warns via ``notify`` and returns ``None``
+        (aws-cli's warn-and-skip); a regular file or directory returns a ``LocalFileInfo`` (no
         type check, so a directory is returned and fails later at open). A stat error
         other than absence (e.g. a permission error reaching the path) is raised -
         existence could not be determined. ``compare_key`` is the caller's to stamp.
@@ -1847,15 +1830,8 @@ class LocalStorage(Storage):
                 "block special device, FIFO, or socket."
             )
             return None
-        is_dir = stat_module.S_ISDIR(st.st_mode)
-        if not is_readable(path, is_dir):
-            # aws-cli's local_format names a directory source with a trailing
-            # separator, and its no-follow check strips it again before the
-            # battery - so the warning keeps the separator only when following
-            # (measured: `.../d/. File/Directory is not readable.` by default,
-            # `.../d.` under --no-follow-symlinks).
-            shown = path + os.sep if is_dir and follow_symlinks else path
-            notify(f"Skipping file {shown}. File/Directory is not readable.")
+        if not is_readable(path, stat_module.S_ISDIR(st.st_mode)):
+            notify(f"Skipping file {path}. File/Directory is not readable.")
             return None
         size, mtime = get_file_stat(path, st)
         if mtime is None:

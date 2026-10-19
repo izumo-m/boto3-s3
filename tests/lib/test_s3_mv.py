@@ -1,8 +1,8 @@
 """``S3.mv``: the cp pipeline plus the onto-itself guard and source deletion.
 
 Everything route-shaped is cp's (test_s3_cp.py pins it); these tests pin
-what mv adds - the always-on same-path guard with aws's exact message
-(rc 252 even with ``recursive``),
+what mv adds - the always-on same-path guard (rc 252 even with
+``recursive``),
 MOVE-kind reporting, and the per-item source deletion with its gates (no
 delete on dryrun / filter / skip / warn / failure).
 """
@@ -99,7 +99,7 @@ class TestStreams:
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
         error = results[0].error
         assert error is not None
-        assert str(error) == "'NoneType' object has no attribute 'write'"
+        assert isinstance(error.__cause__, AttributeError)
         assert (error.operation, error.bucket, error.key) == ("mv", "b", "d/a.txt")
         assert excinfo.value.__cause__ is error
 
@@ -128,46 +128,29 @@ class TestStreams:
 
 
 class TestSamePathGuard:
-    """aws-cli's ``Cannot mv a file onto itself`` - before any client work."""
+    """aws-cli's onto-itself guard - before any client work."""
 
-    def _assert_guard(self, src: str, dest: str, message: str, **kwargs: Any) -> None:
+    def _assert_guard(self, src: str, dest: str, **kwargs: Any) -> None:
 
         client, calls = make_recording_client([])
         with pytest.raises(ValidationError) as excinfo:
             S3().mv(S3Storage(src, client=client), S3Storage(dest, client=client), **kwargs)
-        assert str(excinfo.value) == message
+        assert excinfo.value.operation == "mv"
         assert calls == []
 
     def test_exact_same_uri(self) -> None:
-        self._assert_guard(
-            "s3://b/k.txt",
-            "s3://b/k.txt",
-            "Cannot mv a file onto itself: s3://b/k.txt - s3://b/k.txt",
-        )
+        self._assert_guard("s3://b/k.txt", "s3://b/k.txt")
 
     def test_implied_basename(self) -> None:
-        self._assert_guard(
-            "s3://b/d/a.txt",
-            "s3://b/d/",
-            "Cannot mv a file onto itself: s3://b/d/a.txt - s3://b/d/",
-        )
+        self._assert_guard("s3://b/d/a.txt", "s3://b/d/")
 
-    def test_keyless_destination_is_normalized_in_the_message(self) -> None:
-        self._assert_guard(
-            "s3://b/k.txt",
-            "s3://b",
-            "Cannot mv a file onto itself: s3://b/k.txt - s3://b/",
-        )
+    def test_keyless_destination_reads_as_the_bucket_root(self) -> None:
+        self._assert_guard("s3://b/k.txt", "s3://b")
 
     def test_recursive_is_not_exempt(self) -> None:
         # The aws-cli's faithful false positive: no key would map onto
         # itself, but aws rejects it anyway (rc 252).
-        self._assert_guard(
-            "s3://b/d",
-            "s3://b/",
-            "Cannot mv a file onto itself: s3://b/d - s3://b/",
-            recursive=True,
-        )
+        self._assert_guard("s3://b/d", "s3://b/", recursive=True)
 
     def test_different_buckets_pass(self) -> None:
 
@@ -361,7 +344,7 @@ class TestDownloadMove:
         assert ops(calls) == ["ListObjectsV2", "GetObject", "DeleteObject"]
         assert calls[2].params == {"Bucket": "b", "Key": "pre/a.txt"}
 
-    def test_glacier_warning_keeps_the_route_wording_and_the_object(self, tmp_path: Path) -> None:
+    def test_glacier_warning_keeps_the_object(self, tmp_path: Path) -> None:
 
         client, calls = make_recording_client([head_response(StorageClass="GLACIER")])
         results: list[OpResult] = []
@@ -371,12 +354,10 @@ class TestDownloadMove:
             transfer_config=_SYNC,
             on_result=results.append,
         )
-        # No GetObject, no DeleteObject; the message says "download" (the
-        # aws-cli uses operation_name, not "move") but reports kind MOVE.
+        # No GetObject, no DeleteObject; the record reports kind MOVE.
         assert ops(calls) == ["HeadObject"]
         assert [result.outcome for result in results] == [OpOutcome.WARNED]
         assert results[0].transfer_type is TransferType.MOVE
-        assert "Unable to perform download operations on GLACIER objects." in str(results[0].error)
 
     def test_no_overwrite_existing_destination_skips_without_deleting(self, tmp_path: Path) -> None:
 

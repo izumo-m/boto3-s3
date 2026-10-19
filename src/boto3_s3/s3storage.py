@@ -447,8 +447,8 @@ def reject_empty_ca_bundle(client: Any, *, check_environment: bool = False) -> N
     silently drops verification; a whitespace-only value fails later as an
     unreadable path. botocore 1.43.54 and aws-cli 2.36.6 refuse both when a
     client is built. The supported botocore floor is older, so this supplies
-    the same refusal - botocore's own ``InvalidConfigError`` with its exact
-    wording, which `s3_errors` refines to `InvalidConfigError` - for a client
+    the same refusal - botocore's own ``InvalidConfigError``, which
+    `s3_errors` refines to `InvalidConfigError` - for a client
     an older botocore built, on either transfer engine.
 
     The client's own setting is read where botocore keeps it, the endpoint's
@@ -605,8 +605,7 @@ def request_failure(
     last-resort ``Boto3S3Error`` (the exception's ``str()`` as the message)
     carrying the original as ``__cause__``. This is aws-cli's shape: its
     per-key ``DeleteObject`` runs as an s3transfer task, which records
-    whatever the request raises as that key's failure, so the CLI's line reads
-    ``delete failed: s3://b/k 'Credentials'`` on both tools (measured). The
+    whatever the request raises as that key's failure. The
     transfer engine gets the same from s3transfer itself; the deleter, the
     blind single-key delete, sync's synchronous deletes and the single-call
     operations apply it by hand, and the storage's own requests - the listing,
@@ -633,8 +632,7 @@ def s3_request(
     ``Credentials`` (``KeyError``), a response value its parser cannot convert
     (``ValueError``) - so ``except Boto3S3Error`` catches a failed request
     whatever botocore died of. Those become the base error carrying the
-    original as ``__cause__`` and its ``str()`` as the message, which is the
-    text aws-cli prints for the same failure. A family error raised inside
+    original as ``__cause__`` and its ``str()`` as the message. A family error raised inside
     passes through untouched, and ``AssertionError`` alone is left
     untranslated (an invariant or a test double's guard, never a request
     outcome).
@@ -680,10 +678,7 @@ def read_required(
     aws-cli reads these by subscript and dies on the ``KeyError`` naming the
     element; here that becomes `MalformedResponseError` with the same message
     (the ``KeyError``'s ``str()``, the element name in quotes) and the
-    ``KeyError`` on ``__cause__``, so a consumer catches it as a family error
-    while the CLI's line stays byte-identical. Each call site reads in
-    aws-cli's own order, so a doubly incomplete entry is blamed on the same
-    element there.
+    ``KeyError`` on ``__cause__``, so a consumer catches it as a family error.
     """
     try:
         return entry[element]

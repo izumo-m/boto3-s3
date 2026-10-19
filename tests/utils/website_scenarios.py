@@ -77,8 +77,8 @@ SCENARIOS: tuple[WebsiteScenario, ...] = (
     WebsiteScenario(
         "website_with_key",
         ("website", f"s3://{BUCKET_TOKEN}/some/key", "--index-document", "index.html"),
-        expected_stderr_tokens_ours=("Parameter validation failed",),
-        expected_stderr_tokens_aws=("Parameter validation failed",),
+        expected_stderr_tokens_ours=("Invalid bucket name",),
+        expected_stderr_tokens_aws=("Invalid bucket name",),
     ),
     WebsiteScenario(
         "website_empty_uri",

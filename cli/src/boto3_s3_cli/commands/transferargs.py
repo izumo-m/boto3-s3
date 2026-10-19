@@ -473,7 +473,7 @@ def normalize_s3_path(path: str) -> str:
 
     aws runs this over cp / mv / sync / rm's paths right after the path-type
     check. Its ``find_bucket_key`` refuses the S3 Object Lambda and Outposts
-    *bucket* ARNs first (rc 252, whatever else is wrong with the run), then a
+    *bucket* ARNs first (rc 252, before a download directory is created), then a
     keyless ``s3://`` path gains the trailing ``/`` that makes it the bucket
     root, and every later step re-reads the result. The re-read changes one
     spelling: an Outposts access point ARN set off with ``:`` and no key
@@ -519,7 +519,7 @@ def validate_checksum_paths_type(
 
     ``--checksum-algorithm`` shapes what gets *written* (uploads, copies);
     ``--checksum-mode`` validates what gets *read* (downloads). aws rejects
-    the wrong pairing for cp and mv alike with the exact wording below.
+    the wrong pairing for cp and mv alike.
     """
     if getattr(args, "checksum_algorithm", None) and paths_type not in ("locals3", "s3s3"):
         raise ValidationError(
@@ -726,7 +726,7 @@ def resolve_text_paramfile(value: str, name: str, *, operation: str) -> str:
     ``--content-type file://ct.txt`` (etc.) sends the *file contents*. A value
     without a paramfile prefix passes through verbatim. A ``fileb://`` reference
     loads bytes, which botocore then rejects for a string-typed parameter at
-    parse time (measured: rc 252, this exact wording) - a missing file is still
+    parse time (measured: rc 252) - a missing file is still
     the load 252.
     """
     if value.startswith("file://"):
@@ -875,9 +875,8 @@ def resolve_transfer_config(ctx: Context, s3: S3, *, paths_type: str) -> Any:
     ``ctx.transfer_config`` (a test's determinism lever) supplies the settings
     it sets; the rest come from the profile's ``[s3]`` section of the exact
     session bound to *s3*, and the engine is picked as aws picks it
-    (`S3.resolve_transfer_config`). Called past the usage (252) and
-    missing-source (255) validations, so an invalid ``[s3]`` value loses to
-    both, as on aws.
+    (`S3.resolve_transfer_config`). Called at aws's ``_get_transfer_manager``
+    slot: after the path validations, before anything the run itself does.
     """
     return s3.resolve_transfer_config(ctx.transfer_config, copy=paths_type == "s3s3")
 

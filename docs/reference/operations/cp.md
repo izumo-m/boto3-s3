@@ -91,7 +91,7 @@ local source is resolved by a single stat and is not checked for being a
 directory, so a directory named as a non-recursive source becomes an item the
 transfer fails with `[Errno 21] Is a directory` rather than an up-front
 rejection. An S3 source with a non-empty key is resolved by one `HeadObject`,
-and a 404 raises `NotFoundError` worded as the AWS CLI words it. An S3 source
+and a 404 raises `NotFoundError` naming the missing key. An S3 source
 with no key (`"s3://bucket"`) matches nothing and transfers nothing, but the
 bucket listing is still issued, so a `NoSuchBucket` or a denied `ListBucket`
 surfaces instead of a silent success. A custom source is resolved through its
@@ -284,14 +284,13 @@ upload, the parent reference) are emitted inline on the calling thread
   enumeration. A `StdioStorage` *destination* has no such precondition,
   matching the AWS CLI — see `BatchError` below.
 - [`NotFoundError`](../exceptions.md#notfounderror) — a local source path that
-  does not exist, checked before any item work and worded as the AWS CLI words
-  it (the check asks the kernel about the path as typed, like the AWS CLI's:
-  a source typed through a symlinked directory and `..` is admitted, and the
-  walk or stat then warns "File does not exist." for the lexical form, exit
-  code 2, as the AWS CLI does — on Windows, which folds `..` before the
-  filesystem sees the path, both refuse it as missing); a single S3 source
-  whose `HeadObject` answers 404; a single custom-backend source
-  `get_fileinfo` cannot resolve.
+  does not exist, checked before any item work (the check asks the kernel
+  about the path as typed, like the AWS CLI's: a source typed through a
+  symlinked directory and `..` is admitted, and the walk or stat then warns
+  "File does not exist." for the lexical form, exit code 2, as the AWS CLI
+  does — on Windows, which folds `..` before the filesystem sees the path,
+  both refuse it as missing); a single S3 source whose `HeadObject` answers
+  404; a single custom-backend source `get_fileinfo` cannot resolve.
 - [`ConfigurationError`](../exceptions.md#configurationerror), or its
   [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement —
   `no_overwrite` on an SDK without conditional writes, `copy_props=ALL` on

@@ -270,7 +270,7 @@ def acquire_process_lock() -> bool:
 def should_use_crt(preferred: str) -> bool:
     """boto3's ``_should_use_crt`` over an already-extracted preference.
 
-    Raises botocore's ``MissingDependencyException`` (boto3's wording) when
+    Raises botocore's ``MissingDependencyException``, as boto3 does, when
     ``'crt'`` is explicit but awscrt is missing or too old; otherwise answers
     whether the CRT manager should be attempted (``'auto'`` requires
     ``awscrt.s3.is_optimized_for_system()``).

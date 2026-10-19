@@ -5,9 +5,8 @@ Two halves:
 1. **Golden replay** on moto of every scenario that carries a golden.
 2. **TestWebsiteOnMoto** - the success path verified directly against moto
    (full PutBucketWebsite support): rc 0, empty stdout,
-   and the configuration read back via ``get_bucket_website``; plus
-   NoSuchBucket -> rc **254**, pinning website's no-local-catch shape (the
-   contrast with mb/rb's rc 1).
+   and the configuration read back via ``get_bucket_website``. NoSuchBucket
+   -> rc 254 is the ``website_nonexistent_bucket`` golden's replay.
 """
 
 from __future__ import annotations
@@ -97,9 +96,3 @@ class TestWebsiteOnMoto:
         assert _website_config(moto_s3, FUNCTIONAL_BUCKET) == {
             "IndexDocument": {"Suffix": "b.html"}
         }
-
-    def test_nonexistent_bucket_is_254(self, moto_s3: Any) -> None:
-        # No local catch (unlike mb/rb): the ClientError cause maps to 254.
-        result = _run(["website", "s3://no-such-bucket", "--index-document", "index.html"])
-        assert result.rc == 254
-        assert "NoSuchBucket" in result.stderr

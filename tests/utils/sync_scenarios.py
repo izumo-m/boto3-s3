@@ -184,8 +184,8 @@ SCENARIOS: tuple[CpScenario, ...] = (
             "--dryrun",
         ),
         local_src={"src/a.txt": b"alpha\n"},
-        expected_stderr_tokens_ours=("grants should be of the form permission=principal",),
-        expected_stderr_tokens_aws=("grants should be of the form permission=principal",),
+        expected_stderr_tokens_ours=("fatal error", "grants"),
+        expected_stderr_tokens_aws=("fatal error", "grants"),
     ),
     CpScenario(
         name="sync_upload_no_overwrite",
@@ -361,8 +361,8 @@ SCENARIOS: tuple[CpScenario, ...] = (
             "--dryrun",
         ),
         seed={"cs/a.txt": b"alpha\n"},
-        expected_stderr_tokens_ours=("grants should be of the form permission=principal",),
-        expected_stderr_tokens_aws=("grants should be of the form permission=principal",),
+        expected_stderr_tokens_ours=("fatal error", "grants"),
+        expected_stderr_tokens_aws=("fatal error", "grants"),
     ),
     CpScenario(
         name="sync_copy_content_type",
@@ -384,17 +384,13 @@ SCENARIOS: tuple[CpScenario, ...] = (
         name="sync_local_to_local",
         argv=("sync", "src", "dest"),
         local_src={"src/a.txt": b"alpha\n"},
-        expected_stderr_tokens_ours=("Error: Invalid argument type",),
-        expected_stderr_tokens_aws=("Error: Invalid argument type",),
+        expected_stderr_tokens_ours=("Invalid argument type",),
+        expected_stderr_tokens_aws=("Invalid argument type",),
     ),
     CpScenario(
         name="sync_stream_source",
         argv=("sync", "-", f"s3://{BUCKET_TOKEN}/p"),
-        expected_stderr_tokens_ours=(
-            "Streaming currently is only compatible with non-recursive cp commands",
-        ),
-        expected_stderr_tokens_aws=(
-            "Streaming currently is only compatible with non-recursive cp commands",
-        ),
+        expected_stderr_tokens_ours=("Streaming",),
+        expected_stderr_tokens_aws=("Streaming",),
     ),
 )

@@ -54,7 +54,7 @@ from boto3_s3.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
+    from collections.abc import Callable, Generator, Iterable, Iterator
     from typing import BinaryIO
 
 
@@ -266,7 +266,7 @@ def _glacier_gate(
     """Run the glacier gate; ``True`` when it consumed the item.
 
     A blocked item is either silently skipped (``ignore_glacier_warnings``,
-    counted) or warned away with aws's message - the caller drops it either way.
+    counted) or warned away - the caller drops it either way.
     """
     if not _glacier_blocked(info, options=options):
         return False
@@ -419,8 +419,7 @@ def upload_items(
     subclass that overrides ``scan`` is honored; a single (non-dir_op) source is
     a point op walked directly (the local analog of ``head_single`` - no
     directory check, so a directory source becomes an item the engine fails
-    with [Errno 21] Is a directory, rc 1; aws fails it too, with wording that
-    differs on purpose - design/aws-cli-option-handling.md section 6). The recursive listing
+    with [Errno 21] Is a directory, rc 1, as aws fails it). The recursive listing
     stamps each entry's ``compare_key`` and applies ``item_filter`` inside the
     scan (``scan_pages``' contract); the single source, having no scan filter, is
     filtered here.
@@ -742,20 +741,6 @@ def scan_s3_source(
     return storage.scan(scan_options)
 
 
-def _retry_info(response: Mapping[str, Any]) -> str:
-    """The `` (reached max retries: N)`` fragment botocore puts in a message.
-
-    botocore's ``ClientError._get_retry_info``, reproduced so a rewritten
-    error message keeps what the original carried: botocore appends this to
-    the operation name whenever the retry handler exhausted its attempts, and
-    a message rebuilt from scratch would silently drop it.
-    """
-    metadata = response.get("ResponseMetadata", {})
-    if metadata.get("MaxAttemptsReached", False) and "RetryAttempts" in metadata:
-        return f" (reached max retries: {metadata['RetryAttempts']})"
-    return ""
-
-
 def head_single(
     src_storage: S3Storage,
     *,
@@ -765,12 +750,13 @@ def head_single(
 ) -> Iterator[FileInfo]:
     """Resolve a single S3 source by HeadObject (aws-cli's `_list_single_object`).
 
-    Any 404 is rewritten to aws's ``Key "..." does not exist`` message; a
-    copy source is headed with the copy-source SSE-C parameters. Like aws-cli's
-    filegenerator, the HEAD carries ``ChecksumMode=ENABLED`` when the client
-    resolves checksum validation to ``when_supported`` (the botocore default),
-    and the stamp the response carries is rejected here when the local calendar
-    cannot hold it, aws-cli's conversion at the same slot.
+    A bare 404 is rewritten to a message naming the missing key (aws's
+    ``Key "..." does not exist``); a copy source is headed with the
+    copy-source SSE-C parameters. Like aws-cli's filegenerator, the HEAD
+    carries ``ChecksumMode=ENABLED`` when the client resolves checksum
+    validation to ``when_supported`` (the botocore default), and the stamp the
+    response carries is rejected here when the local calendar cannot hold it,
+    aws-cli's conversion at the same slot.
     """
     key = src_storage.key
     if transfer_type is TransferType.COPY:
@@ -799,16 +785,13 @@ def head_single(
         response = cast("dict[str, Any]", raw_response) if isinstance(raw_response, dict) else {}
         if response.get("Error", {}).get("Code") != "404":
             raise
-        # Chain the originating ClientError directly: this aws-worded error
-        # replaces the s3_errors translation wholesale, and the section 2.1
-        # reachability guarantee (exceptions.md) promises the ClientError on
-        # the *direct* `__cause__` of an error raised for a failed S3 request.
-        # aws rewrites the response and lets botocore render it, so its retry
-        # info lands right after the operation name; this text is composed, so
-        # the fragment has to be placed there by hand.
+        # The bare 404 names no key; this error does. Chain the originating
+        # ClientError directly: this error replaces the s3_errors translation
+        # wholesale, and the section 2.1 reachability guarantee
+        # (exceptions.md) promises the ClientError on the *direct*
+        # `__cause__` of an error raised for a failed S3 request.
         raise NotFoundError(
-            "An error occurred (404) when calling the HeadObject operation"
-            f"{_retry_info(response)}: "
+            "An error occurred (404) when calling the HeadObject operation: "
             f'Key "{key}" does not exist',
             operation=operation,
             bucket=src_storage.bucket,
@@ -817,13 +800,10 @@ def head_single(
     # aws-cli's `_list_single_object` reads the two elements the HEAD must
     # carry by subscript - `ContentLength` first, then `LastModified` - and
     # `ETag` with a default, so a response missing one of the two ends the run
-    # with a MalformedResponseError naming it - the KeyError's text, so the
-    # CLI's line still reads `fatal error: 'ContentLength'` / `'LastModified'`
-    # at rc 1 (measured against aws) - rather than riding on as None: the
-    # single-object counterpart of the listing rule the S3 backend applies
-    # (design/storage.md). The order decides which element a doubly
-    # incomplete response is blamed on. The stream route never comes here, and
-    # aws is lenient there too.
+    # with a MalformedResponseError naming it (rc 1 in the CLI, as on aws)
+    # rather than riding on as None: the single-object counterpart of the
+    # listing rule the S3 backend applies (design/storage.md). The stream
+    # route never comes here, and aws is lenient there too.
     bucket = src_storage.bucket
     size: int = read_required(head, "ContentLength", operation=operation, bucket=bucket, key=key)
     mtime = aware_stamp(
@@ -948,8 +928,8 @@ def open_upload_items(
     does not ``open`` the source (no side effect on the backend).
 
     A single source the backend cannot resolve (``get_fileinfo`` -> ``None``)
-    raises the same ``NotFoundError`` a missing local source does (aws's wording,
-    no ``ClientError`` cause) - rather than transferring nothing - but from inside
+    raises the same ``NotFoundError`` a missing local source does (no
+    ``ClientError`` cause) - rather than transferring nothing - but from inside
     the generator (in-pipeline, as the items are drained), not a pre-flight check,
     so a CLI-type consumer maps it to a fatal error (rc 1), not the pre-check's
     rc 255. A recursive source is an enumeration: an empty ``scan`` yields zero

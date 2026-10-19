@@ -147,7 +147,7 @@ class _Parser:
         self._resolve_paramfiles = False
 
     def parse(self) -> dict[str, _ShorthandValue]:
-        """Parse the complete map, rejecting duplicate keys with aws-cli wording."""
+        """Parse the complete map, rejecting duplicate keys."""
         params: dict[str, _ShorthandValue] = {}
         key, val = self._keyval()
         params[key] = val
@@ -169,8 +169,7 @@ class _Parser:
         """Parse one key/value pair, arming the optional `@=` paramfile operator."""
         # No empty-key guard - aws-cli's _keyval has none: with the cursor on
         # "=" the key is "" ("=bar" parses to {"": "bar"} and the transfer
-        # proceeds, rc 0), and anything else fails _expect with aws's
-        # "Expected: '='" wording (rc 252 either way).
+        # proceeds, rc 0), and anything else fails _expect (rc 252).
         key = self._key()
         # aws grammar: keyval = key "=" [values] / key "@=" [file-optional-values].
         # '@' opts the value into paramfile resolution; aws probes it with the

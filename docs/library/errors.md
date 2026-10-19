@@ -64,9 +64,9 @@ attributes**.
 Every [`Boto3S3Error`](../reference/exceptions.md#boto3s3error) carries
 `operation`, `bucket` and `key`. `BatchError` adds its counters and leaves
 `bucket` and `key` empty — it stands for a whole run rather than one entry.
-Message strings are **display only** — they mostly follow `aws s3`'s wording,
-but the wording is not part of the contract and can change in any release, so
-branch on the class and read the attributes, and never parse `str(exc)`.
+Message strings are **display only** — the wording is not part of the
+contract and can change in any release, so branch on the class and read the
+attributes, and never parse `str(exc)`.
 
 The context attributes are best-effort. `operation=None` is a legitimate value
 rather than a gap: it means no single operation was in scope — while a client is

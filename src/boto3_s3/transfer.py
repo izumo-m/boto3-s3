@@ -56,8 +56,8 @@ Engine choices (parity-driven):
   `_SetAnnotations`, aws-cli's subscriber ported, which writes them after
   the copy behind the tagging write; the preload `AnnotationCopyMode`s stage
   the source payloads up front and ``DEFERRED`` reads them post-copy. A
-  write that fails part way keeps the copied object and reports aws-cli's
-  ``AnnotationCopyError`` wording.
+  write that fails part way keeps the copied object and reports the failure,
+  as aws-cli's ``AnnotationCopyError`` does.
 """
 
 from __future__ import annotations
@@ -1544,18 +1544,13 @@ class Transferrer:
 
     def _submit_upload(self, item: TransferItem) -> Any | None:
         """Map one upload and attach close, move-delete, completion, and tracking hooks."""
-        # Mapped first, like aws-cli's _do_submit: the mapper is what rejects a
-        # malformed --grants, and aws raises that before it looks at the source
-        # at all, so a directory source paired with a bad option must still fail
-        # on the option.
+        # Mapped first, like aws-cli's _do_submit.
         extra_args = requestparams.map_put_object_params(self._options, self._operation)
-        # A directory source is handed through to fail like aws-cli ([Errno 21]
-        # Is a directory, rc 1; aws words the failed line differently, its CRT
-        # lane's untranslated "Unknown Error Code" included - a deliberate
-        # difference, design/aws-cli-option-handling.md section 6);
-        # botocore's default checksum wrapper would otherwise open it and mask
-        # the read failure as an opaque rewind error, so detect it and surface
-        # the OS error directly. A stream (src_fileobj) is never a directory.
+        # A directory source is handed through to fail as on aws-cli ([Errno 21]
+        # Is a directory, rc 1); botocore's default checksum wrapper would
+        # otherwise open it and mask the read failure as an opaque rewind
+        # error, so detect it and surface the OS error directly. A stream
+        # (src_fileobj) is never a directory.
         if item.src_fileobj is None and item.src_path and os.path.isdir(item.src_path):
             self._record_failure(
                 item, IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), item.src_path)
@@ -2238,7 +2233,7 @@ class Transferrer:
         the calling thread under ``use_threads=False`` - after a successful
         download. Failure
         does not undo the transfer (the bytes are on disk): it adds a WARNED
-        record with aws's wording - the broad catch is deliberate, ``os.utime``
+        record - the broad catch is deliberate, ``os.utime``
         can raise ``OverflowError`` / ``ValueError`` on Windows for timestamps
         outside ``localtime()``'s range besides the common ``OSError``.
 
@@ -3047,7 +3042,8 @@ class _SetAnnotations:
     ``VersionId``, as aws-cli pins it - kept for it by `_CopyCompletions`,
     since s3transfer discards that response. A write that
     fails does not stop the others, and any failure settles the future with
-    aws-cli's ``AnnotationCopyError`` wording, the destination kept.
+    an `_AnnotationCopyError` (aws-cli's ``AnnotationCopyError``), the
+    destination kept.
     """
 
     def __init__(
@@ -3216,10 +3212,9 @@ class _SetAnnotations:
 class _AnnotationCopyError(Exception):
     """A completed multipart copy that could not carry every annotation.
 
-    aws-cli's ``AnnotationCopyError``, word for word (measured): names written
-    join with ``", "`` and collapse to ``(none)`` when the first write already
-    failed, failures join with ``"; "`` as ``name: message``, both in the
-    source listing's order.
+    aws-cli's ``AnnotationCopyError``: names written join with ``", "`` and
+    collapse to ``(none)`` when the first write already failed, failures join
+    with ``"; "`` as ``name: message``, both in the source listing's order.
     """
 
     def __init__(
@@ -3473,7 +3468,7 @@ class _SetTags:
             )
         # aws-cli subscripts the reply's TagSet, then each tag's Key and Value
         # as it serializes them; a missing one is a MalformedResponseError
-        # naming the source, with the KeyError's text aws-cli prints.
+        # naming the source.
         tags = read_required(
             response,
             "TagSet",

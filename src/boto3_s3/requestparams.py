@@ -15,10 +15,10 @@ aws-cli's CreateMultipartUpload /
 UploadPart variants are ``s3transfer``'s internal concern - it splits the
 submit-time extra args itself.
 
-The grants shape is validated here with aws-cli's exact wording, but the
-*call site* is the transfer submit path: aws-cli maps params per item inside
-its pipeline, so a bad ``--grants`` surfaces as an in-flight fatal error
-(rc 1), never as a usage error - keep mapping lazy to preserve that.
+The grants shape is validated here, but the *call site* is the transfer
+submit path: aws-cli maps params per item inside its pipeline, so a bad
+``--grants`` surfaces as an in-flight fatal error (rc 1), never as a usage
+error - keep mapping lazy to preserve that.
 """
 
 from __future__ import annotations

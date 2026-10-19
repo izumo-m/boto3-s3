@@ -110,13 +110,9 @@ solidified design is added here.
 - **Parse error text.** `_ParamValidationArgumentParser` is the base of
   every parser, as aws's `CLIArgParser` is of its own: each argparse failure
   is a usage error (252), reported with argparse's own message through the
-  CLI's error formatter. The wording is not aws's - its `Found invalid
-  choice` with close-match suggestions, the usage block it appends to every
-  report, its `too few arguments` - and when several things are wrong on one
-  command line, which one is reported may differ from aws
-  ([`overview.md`](./overview.md) section 3). The one wording kept is
-  `Unknown options: <a>,<b>` (joined with a comma and no space, as aws's
-  command layer joins them), which ported aws-cli tests read. One interpreter
+  CLI's error formatter ([`overview.md`](./overview.md) section 3).
+  `Unknown options: <a>,<b>` (joined with a comma and no space) keeps aws's
+  form, which the ported aws-cli tests read. One interpreter
   difference remains that decides what is accepted, not how a failure reads:
   - **Ambiguous abbreviations met before their turn** (Python 3.10 / 3.11
     only). Argparse raises the ambiguity there while *classifying* the token
@@ -225,7 +221,7 @@ solidified design is added here.
 | `shorthand.py` | Parsing of map-type option values (`--metadata k=v,...` / JSON form / the `@=` paramfile operator). The grammar is aws's, cut down to scalar values: it accepts exactly what aws accepts, and refuses while parsing the lists and nested maps aws parses and then rejects, as well as bytes from `@=fileb://`. Every refusal is the parser's `Error parsing parameter '<name>'` (252). A `{`- or `[`-led value is read as JSON, and only an object of strings is accepted |
 | `paramfile.py` | aws's local paramfile loaders (`file://` text, `fileb://` binary; the `get_paramfile` counterpart) shared by the option resolution and the shorthand `@=` operator. A load failure is a `ParamfileLoadError`, whose exit code the caller decides: `named_argument` (aws's `load-cli-arg` handler) turns it into the named argument's rc-252 parse error, and the shorthand's `@=` stays outside it for aws's bare rc 255 |
 | `output.py` | `aws s3`-compatible output formatting (`ls` listing lines, `rm` delete lines. Kept as pure functions; not turned into a class) |
-| `usage.py` | The single home of the aws-matching usage / error strings shared across subcommands (`single_uri_usage` / `bare_single_uri_usage` / `two_path_usage` / `invalid_bucket_name_message`); commands interpolate only their own name or value |
+| `usage.py` | The single home of the usage / error strings shared across subcommands (`single_uri_usage` / `two_path_usage` / `invalid_bucket_name_message`); commands interpolate only their own name or value |
 
 **Library consumption contract**: the CLI reaches `boto3_s3` only through its
 public surfaces (the two-layer export contract of
@@ -313,7 +309,7 @@ numbers in the bold item labels below are that document's.
   ([`crt.md`](./crt.md)). Leaving it unresolved had the two engines trusting
   different roots. An empty or whitespace-only answer is **refused** rather
   than used: `_reject_empty_ca_bundle` raises botocore's own
-  `InvalidConfigError` (rc 255, its exact wording), which is what aws v2 does
+  `InvalidConfigError` (rc 255), which is what aws v2 does
   from 2.36.6 on and what the installed botocore does from 1.43.54 - the
   supported floor is older, so the CLI supplies the check itself and the
   rejection holds across the whole range. aws runs it in every
@@ -460,11 +456,9 @@ numbers in the bold item labels below are that document's.
      --validate-same-s3-paths` exited 255 on the validator's client where aws
      ran the move). A degenerate `s3 =` line, which botocore's section provider
      hands over as a string rather than a mapping, is passed through untouched:
-     that shape is botocore's to report, in its own place and wording, and the
-     key aws does not have must not be the one that fails there. It is not the
-     whole story for a presigned URL, whose endpoint stock botocore resolves as
-     if the region
-     were `aws-global` regardless of this setting; the library's `presign`
+     that shape is botocore's to report, and aws fails on the same read. It
+     is not the whole story for a presigned URL, whose endpoint stock botocore
+     resolves as if the region were `aws-global` regardless of this setting; the library's `presign`
      clears the flag that does it, so a URL from either layer names the
      client's own regional host like aws (docs/reference/operations/presign.md).
   4. **a pure-Python pin for symmetric SigV4 signing** - when awscrt is
@@ -558,9 +552,7 @@ numbers in the bold item labels below are that document's.
      a `JSONFileCache` over `~/.aws/cli/cache`; `_open_botocore_session` does
      the same to every session it opens, at aws's timing (its event fires after
      the driver has bound `--profile`, so the provider chain built here is the
-     run's own) and with aws's `ProfileNotFound` guard, so an unknown profile
-     is still reported by the caller's config read rather than from inside the
-     injection. The directory is aws's literal one and the cache key is
+     run's own). The directory is aws's literal one and the cache key is
      botocore's, so the two tools reuse each other's entries - measured in both
      directions. The class installed is a `JSONFileCache` **subclass carrying
      aws's own write** (`_credential_cache_class`): the entry goes straight to
@@ -797,18 +789,18 @@ client-side validation for `Bucket=""` (the same leading branch as rm).
 ### 5.4 `rb`
 
 Equivalent to `aws s3 rb <S3Uri>` (aws-cli `RbCommand`). A non-`s3://` path is
-rc 252. **A URI with a key is also rc 252** ("Please specify a valid bucket
-name only. E.g. s3://<bucket>" - the same wording for a key on a valid bucket
-and for `s3:///k` (an empty bucket name in that example). A bare trailing
-slash in `s3://b/` is allowed, treating the key as empty = same as aws).
+rc 252. **A key on a bucket is also rc 252** ("Please specify a valid bucket
+name only. E.g. s3://<bucket>"). A bare trailing slash in `s3://b/` is
+allowed, treating the key as empty = same as aws. An empty bucket name
+(`s3://`, `s3:///k`) is the rc 1 below.
 
 | flag | handling |
 |---|---|
-| `--force` | **Before** delete_bucket, it internally runs the entire `rm <S3Uri> --recursive` (delegating to `RmCommand` - `delete:` lines also appear the same as rm. aws likewise re-enters `RmCommand`). The inner run shares rb's `S3` (`Context.with_s3`), as aws's `RmCommand(self._session)` shares the one CLI session - credentials resolve once, so a `credential_process` / MFA flow does not re-prompt and the object deletes run under the same identity as the final delete_bucket. If rm's rc != 0, the fixed text "remove_bucket failed: Unable to delete all objects in the bucket, bucket will not be deleted." is raised as an `InvalidValueError`, so it reaches stderr through `main`'s general handler with its `boto3-s3: [ERROR]: ` prefix rather than a direct write - **rc 255** (the path where aws's own `RuntimeError` reaches its general handler the same way, `aws: [ERROR]: `). Every failure of the inner rm ends there, its span reporting by position rather than by exception type (section 6), so this is the only report a `--force` deletion failure produces - measured against aws line for line, ordering included, down to a listing entry the response left incomplete. It does not attempt to delete the bucket |
+| `--force` | **Before** delete_bucket, it internally runs the entire `rm <S3Uri> --recursive` (delegating to `RmCommand` - `delete:` lines also appear the same as rm. aws likewise re-enters `RmCommand`). The inner run shares rb's `S3` (`Context.with_s3`), as aws's `RmCommand(self._session)` shares the one CLI session - credentials resolve once, so a `credential_process` / MFA flow does not re-prompt and the object deletes run under the same identity as the final delete_bucket. If rm's rc != 0, the fixed text "remove_bucket failed: Unable to delete all objects in the bucket, bucket will not be deleted." is raised as an `InvalidValueError`, so it reaches stderr through `main`'s general handler with its `boto3-s3: [ERROR]: ` prefix rather than a direct write - **rc 255** (the path where aws's own `RuntimeError` reaches its general handler the same way, `aws: [ERROR]: `). Every failure of the inner rm ends there, its span reporting by position rather than by exception type (section 6), so this is the only report a `--force` deletion failure produces. It does not attempt to delete the bucket |
 
 Output: stdout `remove_bucket: <bucket>` / stderr `remove_bucket failed: <path>
 <msg>`. A delete_bucket failure (`BucketNotEmpty` / `NoSuchBucket` / the
-`Bucket=""` of `rb s3://`) is uniformly **rc 1**, reusing the same
+`Bucket=""` of `rb s3://` / `rb s3:///k`) is uniformly **rc 1**, reusing the same
 `usage.invalid_bucket_name_message()` wording and `format_remove_bucket_failed`
 wrapper as `mb` / `rm`'s equivalent empty-bucket check. An unwritable success
 line is rc 1 as well: aws's local catch spans its `uni_print` exactly as mb's
@@ -851,8 +843,8 @@ section 6), a non-integer `--expires-in` is 255, and so is the CRT signer's
 refusal of a non-positive `--expires-in` on a SigV4a target (the table above).
 A key with no bucket (`s3:///k`, or the scheme-less `/k`) is part of that
 botocore 252 rather than a rejection of the form: aws splits it into `Bucket=""`
-plus the key and signs, so the bad-bucket-name text - regex tail included - is
-botocore's own. The CLI therefore builds the storage through `build_s3_storage`
+plus the key and signs, and botocore refuses the empty bucket name. The CLI
+therefore builds the storage through `build_s3_storage`
 (the `rm` / transfer-family carve-out), which keeps the strict ARN rejections
 but lets this one form ride.
 
@@ -870,21 +862,20 @@ Path handling follows the same procedure as aws's `_get_bucket_name`: `s3://` is
 optional -> strip **exactly one trailing slash** -> treat the whole remainder as
 the bucket name. Because aws **keeps a key (`s3://b/some/key`) folded into the
 bucket name** and lets botocore's name regex reject it (rc 252), the CLI side
-reproduces the same shape with a `ValidationError` naming the *unsplit*
+refuses the same names with a `ValidationError` naming the *unsplit*
 remainder. Only the remainders whose rejection the split would otherwise hide
 need that - every remainder the split does not keep whole as the bucket:
 whatever `S3Storage` read as a key, the bucket-less `s3:///k`
-(measured: aws rejects the name `/k`, so `build_s3_storage`'s carve-out is used
-here too - without it `S3Storage` would refuse the bucket-less form first, with
-its own wording), the `/` left after stripping (`s3://b//`), and an Outposts
-access point closed with `:` (`.../accesspoint/ap:`), whose `:` the split eats
-as the key separator. Every other name
+(measured: aws rejects the name `/k`; `build_s3_storage`'s carve-out lets that
+form reach the check here), the `/` left after stripping (`s3://b//`), and an
+Outposts access point closed with `:` (`.../accesspoint/ap:`), whose `:` the
+split eats as the key separator. Every other name
 botocore refuses - a slash-free bad one (`b@d`, `s3://b b`), the empty bucket of
 `s3://` - survives the split unchanged and rides on to PutBucketWebsite, where
-botocore's own rejection (regex tail included) is byte-identical to aws's. So
-website has **two** 252 sources for a bad bucket name: the one raised here,
-worded by botocore's own `validate_bucket_name` (`usage.py`), and botocore's at
-the request. An accesspoint ARN passes through
+botocore refuses it. So website has **two** 252 sources for a bad bucket name:
+the one raised here (`usage.invalid_bucket_name_message`,
+`Invalid bucket name "<name>"`), and botocore's at the request. An accesspoint
+ARN passes through
 entirely as `Bucket` (aws's `block_unsupported_resources` rejects only Object
 Lambda / Outposts bucket ARNs = same as `S3Storage`'s parsing).
 
@@ -953,7 +944,7 @@ which one is reported is not matched ([`overview.md`](./overview.md) section
 `--expires` `--metadata` (k=v,... / JSON) `--metadata-directive` `--copy-props`
 `--acl` `--grants` `--storage-class` `--website-redirect` `--sse` `--sse-kms-key-id`
 `--sse-c(-key)` `--sse-c-copy-source(-key)` (pair validation and the s3s3-only
-restriction are 252 with aws's wording, **the value is passed through** - aws
+restriction are 252, **the value is passed through** - aws
 does not base64-decode. Only `fileb://` reads raw bytes)
 `--force-glacier-transfer` `--ignore-glacier-warnings`
 `--request-payer` `--source-region` (effective only for s3s3. The source client
@@ -1089,11 +1080,7 @@ backstop keeps the pre-pipeline spans - and the printer's final drain, which
 is past aws's recorder span: a Ctrl-C there escapes to aws's 130 while its
 printer thread writes every queued line, so `TransferPrinter.finish` holds
 the interrupt until the lines are out and then lets it reach the
-dispatcher, whatever the run ended with). aws only reaches that line through a
-*cancelled transfer future*, so where none is in flight - before the first
-submit, during a dryrun, after the last completion - it closes with an empty
-`fatal error:` instead; the uniform line here is ours, an error detail
-(overview.md section 3), not a claim of a match. Any other library exception ->
+dispatcher, whatever the run ended with). Any other library exception ->
 a single `fatal error:` line + 1 (a single s3 src's HeadObject 404 = `Key "..."
 does not exist`, a listing error, a malformed `--grants`, a non-integer
 `--expected-size`, an absent stdin, and case-conflict `error` are also here;
@@ -1154,8 +1141,8 @@ code. This section records only the differences. The library side is `S3.mv`
 `EXPECTED_SIZE` + `VALIDATE_SAME_S3_PATHS`): `--expected-size` is not declared
 (`Unknown options` 252). `--validate-same-s3-paths` is added. streaming is
 **rejected post-parse in `run()`**: if either src / dest is `-`, it is 252 (`Streaming
-currently is only compatible with non-recursive cp commands` - the aws-cli wording
-stays "cp commands" even for mv).
+currently is only compatible with non-recursive cp commands` - the message names
+cp even for mv).
 
 **mv-specific validation** (for s3s3, in `run()` after `classify_paths` has
 built the session-backed `S3` **and its client** - step 3 of the family's
@@ -1185,15 +1172,12 @@ construction in section 5.7):
    resolves the source side through `AWS_REGION` and the like, as aws's does
    (its ARG_TABLE default is dead) - while the dest side's s3control is handed
    `--region` itself (a transcription of aws-cli `from_session`). An outposts **alias** is unresolvable, 252, and a missing MRAP
-   alias is also 252 (the wording is verbatim from aws-cli). A ClientError from
+   alias is also 252. A ClientError from
    s3control / sts keeps `__cause__` and is **254** (aws is also 254 on
-   a GetCallerIdentity failure). Because the main S3 client already exists by
-   the time this branch runs, an empty region reports the *s3* endpoint's
-   failure (`Invalid endpoint: https://s3..amazonaws.com`, 255) rather than the
-   s3control endpoint this resolver would otherwise reach first; a merely
-   *absent* region builds the s3 client fine and lands on s3control's `NoRegion`
-   253 instead (section 6), which is the contrast that keeps the early build
-   from swallowing it.
+   a GetCallerIdentity failure). A resolver client that cannot be built
+   stops the move before anything is transferred: with no region at all the
+   s3 client still builds (global endpoint) and s3control's `NoRegion` is 253
+   (section 6).
 3. **A warning** (validation off and same_key and either side is an access-point form
    = `pathresolver.has_underlying_s3_path`): the aws-cli-worded permanent warning
    (`warning: Provided s3 paths may resolve to same underlying s3 object(s) ...`)
@@ -1247,7 +1231,7 @@ all of that):
 2. Route type: local->local is usage 252 (`usage: boto3-s3 sync <LocalPath>
    <S3Uri> or <S3Uri> <LocalPath> or <S3Uri> <S3Uri>` + `Error: Invalid argument
    type`), then the refused ARN forms (252, the normalization of section 5.7)
-3. If `-` is on either side, 252 (the wording stays "cp commands" - same as mv)
+3. If `-` is on either side, 252 (the same message as mv)
 4. Checksum path type 252 (the cp / mv-shared `validate_checksum_paths_type` -
    aws-cli `_validate_path_args` applies to sync too)
 5. A nonexistent locals3 src -> 255 (aws-cli `_validate_path_args`)
@@ -1312,7 +1296,7 @@ reviewed with it.
 | 1 | A subcommand-specific "no result" etc. (`ls` is a specified key / prefix with 0 entries), **all errors after the start of rm / cp / mv / sync / mb / rb** (below; the rm stage of `rb --force` is the 255 below) | the convention of the S3-family commands / a task failure of the transfer family |
 | 2 | **A transfer that completed with warnings only** (cp / mv / sync's glacier skip, an mtime stamp failure, an unreadable local file, etc. section 5.7) | a task warning of the transfer family |
 | 252 | A usage error (an unknown option = `Unknown options: ...`, an invalid choice / value), a client-side `ValidationError` | `PARAM_VALIDATION_ERROR_RC` |
-| 253 | `ConfigurationError` (credentials / region unresolved, reported with botocore's own text; an absent awscrt x the `[s3] preferred_transfer_client=crt` degradation section 8 or an MRAP target's SigV4a section 4 item 4, which aws cannot reach), plus an unknown `cli_timestamp_format`, checked when a command opens its session (below) | `CONFIGURATION_ERROR_RC`, from its `NoCredentialsErrorHandler` / `NoRegionErrorHandler` / `ConfigurationErrorHandler` - three of its four rc-253 handlers, the `PagerErrorHandler` being the one with no counterpart here (below) |
+| 253 | `ConfigurationError` (credentials / region unresolved; an absent awscrt x the `[s3] preferred_transfer_client=crt` degradation section 8 or an MRAP target's SigV4a section 4 item 4, which aws cannot reach), plus an unknown `cli_timestamp_format`, checked when a command opens its session (below) | `CONFIGURATION_ERROR_RC`, from its `NoCredentialsErrorHandler` / `NoRegionErrorHandler` / `ConfigurationErrorHandler` - three of its four rc-253 handlers, the `PagerErrorHandler` being the one with no counterpart here (below) |
 | 254 | A server-side error (a `Boto3S3Error` whose `__cause__` is a botocore `ClientError`) | `CLIENT_ERROR_RC` |
 | 255 | Any other general error (including `TransportError`, a `NotFoundError` with no `ClientError` cause such as a missing local source, the refining `InvalidValueError` / `InvalidConfigError` (below), an unparseable config / credentials file, an unknown `cli_binary_format` or an IMDS setting botocore refuses - each found when a command opens its session (below) - and any otherwise-uncaught exception via `_dispatch`'s backstop - a `BrokenPipeError` from the `ls \| head` pipeline included, since aws has no special case for it either: both tools report `[Errno 32] Broken pipe` here and the *process* then exits **120**, the interpreter's shutdown flush having failed on the closed pipe as well (measured)), **a failure of the rm stage of `rb --force`** (section 5.4) | `GENERAL_ERROR_RC` |
 
@@ -1325,22 +1309,15 @@ the **refining subclasses are checked before their parents**: aws routes a
 post-parse value failure (`InvalidValueError`) or a bad / unusable config
 (`InvalidConfigError`) through its general handler, so both are 255 - not the
 252 / 253 of plain `ValidationError` / `ConfigurationError`
-([`exceptions.md`](./exceptions.md) section 2). Parameter validation
-failures mapped to 252 use aws-cli's default enhanced-style
-envelope, `An error occurred (ParamValidation): <message>`. This includes
-argparse failures, unknown options and plain `ValidationError`. No other
-report is enveloped: an unresolved credential or region (253) is botocore's
-own text, without the `NoCredentials` / `NoRegion` envelope and the `aws
-login` / `aws configure` hints aws adds, and a 254 `ClientError` already
-carries its own `An error occurred (<Code>) when calling ...`. Inside the
-transfer pipeline nothing is enveloped on aws either: a credential-less run
-reports rc 1 with botocore's own text - a per-item `upload failed: ...
-Unable to locate credentials` when it lands on an object (cp / mv / a keyed
-rm), a whole-run `fatal error: Unable to locate credentials` when it lands on
-the listing a recursive run opens with (sync, `rm --recursive`).
-The program-name prefix is rewritten on aws's side before the comparison
-(class 1), and alternate `--cli-error-format` renderings are not implemented
-([`aws-cli-option-handling.md`](./aws-cli-option-handling.md) sections 2.1 and 6).
+([`exceptions.md`](./exceptions.md) section 2). A 252 report reads
+`An error occurred (ParamValidation): <message>` - argparse failures, unknown
+options and plain `ValidationError` alike - and every other report is the
+message alone, whatever `--cli-error-format` says
+([`aws-cli-option-handling.md`](./aws-cli-option-handling.md) section 2.1).
+Inside the transfer pipeline a credential-less run is rc 1: a per-item
+`upload failed:` line when it lands on an object (cp / mv / a keyed rm), a
+whole-run `fatal error:` line when it lands on the listing a recursive run
+opens with (sync, `rm --recursive`).
 
 Of aws's **two other rc-253 handlers**, only one is reachable here.
 `PagerErrorHandler` (`Pager`) belongs to the output pager, which this CLI does
@@ -1355,12 +1332,9 @@ config value), every time `_open_botocore_session` opens a session - so every
 command stops, while `help` and `--version`, which open none, succeed (the
 accepted ordering difference of section 1). Both values come from botocore's
 scoped config, so the profile is the one the session is bound to; an undeclared
-profile makes that read raise `ProfileNotFound`, which aws's handlers catch,
-and the check stands down the same way, leaving the profile to the session's
-other reads (rc 255). The report is this CLI's own `ConfigurationError` /
-`InvalidConfigError`, bare: aws's `Configuration` envelope and its `KeyError`
-text for the binary format are not reproduced
-([`overview.md`](./overview.md) section 3).
+profile makes that read raise `ProfileNotFound`, which stops the run at rc 255
+as on aws. The report is this CLI's own `ConfigurationError` /
+`InvalidConfigError`.
 
 The same session open is where the other config failures stop a command: a
 config or credentials file botocore cannot parse (`Unable to parse config
@@ -1379,11 +1353,6 @@ against the pinned aws-cli on a live endpoint: `ls`, `ls --recursive`, the
 all-buckets listing and `--human-readable --summarize` were byte-identical
 under `wire`, `iso8601` and no setting at all. So only the validation is
 implemented; there is no parser to swap.
-
-**The envelope stays when the run names a profile no config file declares.**
-aws renders the envelope through its session, so there the profile's
-`ProfileNotFound` costs a 252 report its envelope (the rc is unchanged); that
-rendering detail is not reproduced.
 
 **`AWS_CLI_OUTPUT_ENCODING` is checked, not applied.** An unknown codec
 stops the run at rc 255 before any command runs, as aws stops it. A valid one
@@ -1406,7 +1375,7 @@ result, so a failure outside the library's taxonomy is the same one `fatal
 error:` line at rc 1 as a `Boto3S3Error` (measured on both tools; the listing
 element a response left out and the timestamp the local zone cannot hold,
 aws's bare `KeyError` / `OverflowError`, arrive as the library's
-`MalformedResponseError` carrying the same text). `KeyboardInterrupt` keeps its own arm
+`MalformedResponseError`). `KeyboardInterrupt` keeps its own arm
 (the cancelled-run line above), the rest of the `BaseException` family passes,
 and `AssertionError` is re-raised - the same carve-out the dispatcher's backstop
 below makes. What becomes 252 is only a usage
@@ -1507,9 +1476,7 @@ section 4. The key points as the CLI sees them:
   `transferconfig.py`, resolves the `default` -> `classic` alias, and validates
   invalid values. An invalid value is the library's `InvalidConfigError`
   (rc 255 - aws-cli's class of the same name is also 255 at the general
-  handler. It is placed **after**
-  the usage 252 / src-absent 255 validation: an invalid `[s3]` value loses to
-  both). Classic transfers read `multipart_threshold` and the like from the
+  handler). Classic transfers read `multipart_threshold` and the like from the
   config through this same path.
 - **The engine decision tree** (`resolve_transfer_client`, a port of aws-cli
   `TransferManagerFactory`): `s3s3` -> unconditionally classic; `preferred` is

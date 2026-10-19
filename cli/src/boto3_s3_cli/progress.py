@@ -11,7 +11,7 @@ lines:
   prefix; local sides rendered relative to the cwd at print time
   (``LocalStorage.relative_path``, the aws-cli renderer), S3 sides as ``s3://...``.
 - failures / warnings (stderr): ``upload failed: ... <error>`` /
-  ``warning: <body>`` - the bodies arrive aws-cli-worded from the library.
+  ``warning: <body>`` - the bodies arrive composed by the library.
 - progress (stdout): ``Completed 1.2 MiB/9.0 MiB (3.4 MiB/s) with 1 file(s)
   remaining`` rewritten in place via aws-cli's carriage-return protocol:
   each statement is left-justified to the longest one painted since the last

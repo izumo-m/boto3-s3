@@ -40,50 +40,15 @@ environment variables. A difference of that kind anywhere else is a
 bug worth reporting; an error report's wording, or which of two mistakes it
 names, is not.
 
-**Do not parse the console output.** Not because the wording differs: result
-lines, warnings and most error text are aws's own, with this command's name
-substituted for `aws` — the error prefix is `boto3-s3:`, not `aws:`, and usage
-lines read `boto3-s3 <subcommand>` where aws's read `aws s3 <subcommand>`. (A
-command line the parser rejects is reported in Python's own argparse words,
-which is one of the error reports not listed below.) That is exactly what
-makes parsing fragile: the wording is aws's to change, and it
-does change from one `aws` release to the next. Six of section 2's entries
-cover the text that differs on purpose — the progress display, help pages and
-`--debug` traces, the failure lines of a batched delete, the `--dryrun` line
-of a directory copied without `--recursive`, the `--version` line, and the
-history warning `aws` writes and this command has not. Other error reports
-worded differently from aws's are not listed. And the ordering of concurrent output is not reproducible on either
-tool (below).
-
-Parameter-validation errors use aws's envelope,
-`An error occurred (ParamValidation): <message>`. No other report has one:
-the exit-code 253 reports for unresolved credentials and an unresolved region
-are botocore's own text, without aws's `NoCredentials` / `NoRegion` envelope
-and its `aws login` / `aws configure` hints, and an unusable
-`cli_timestamp_format`, which `aws` reports as
-`An error occurred (Configuration): ...`, is reported in this command's own
-words (see [`exit-codes.md`](./exit-codes.md)). `aws` drops the envelope
-when the profile you named does not exist in any config file, keeping the
-exit code; this command keeps it. The two also part
-on the error format — `--cli-error-format`, `AWS_CLI_ERROR_FORMAT` and
-the profile key `cli_error_format`: `aws` acts on all three, this command
-accepts every value and ignores it. On `aws`, `enhanced` puts the envelope
-back in that dropped-envelope situation (as the option or the variable — the
-profile key would have to come from the profile that does not exist),
-`legacy` drops the envelope, and `json`, `yaml`, `text` and `table` re-render
-the report itself — into a JSON object, a YAML mapping, a tab-separated line,
-an ASCII table — where here the report keeps its usual one-line form
-throughout. `aws` applies the setting from the point where it has read it:
-the reports it makes before that — `--profile` without a value, `--debug=1`
-— never change, and the option, unlike the
-variable and the profile key, does not reach a failure of the very parse that
-reads it (`ls --output bad --cli-error-format legacy` keeps its envelope). A
-value outside that list, in the variable or the profile, is an error on
-neither tool: `aws` falls back to `enhanced`, and says so in a line of its
-own (`Invalid cli_error_format: 'x'. Using 'enhanced' format.`) ahead of a
-usage error in its top-level options — a global that does not parse, a bad
-`--endpoint-url` or `--query` — which this command never prints. Whichever
-value is set, the exit code is the same on both tools.
+**Do not parse the console output.** Not because it differs on a successful
+run: result lines are aws's own. That is exactly what makes
+parsing fragile: the wording is aws's to change, and it does change from one
+`aws` release to the next. Five of section 2's entries cover the text that
+differs on purpose — the progress display, help pages and `--debug` traces,
+the `--dryrun` line of a directory copied without `--recursive`, the
+`--version` line, and the history warning `aws` writes and this command has
+not. Error reports are not held to aws's wording at all. And the ordering of
+concurrent output is not reproducible on either tool (below).
 
 **Ordering**, as promised above: with concurrent transfers, result lines — and
 `delete:` lines against transfer lines — interleave freely, on either tool.
@@ -244,39 +209,25 @@ that say outright that the run comes out differently, listed in section 1.
   Everywhere else the two prefixes work as on `aws`: a `file://` path
   argument (other than `website`'s) is read as the path, and option values
   load as before.
-- **A batched delete names a different operation when a key fails.** Deletes go
-  out in batches here — up to a thousand keys per `DeleteObjects` request —
-  where `aws` sends one `DeleteObject` per key. Batching is a settled design,
-  and the differences it causes — this entry's, and the Ctrl-C during deletes
-  under the CRT engine below — are accepted rather than open: where a batch
-  can cheaply be brought closer to `aws`'s per-key outcome it is, by sending
-  keys again one by one. For a run that finishes
-  enumerating, the objects removed and the exit code are the same (a key that
-  no longer exists is a success on both wire shapes) unless the endpoint keeps
-  failing requests (below); the per-key failure line is not. A key the batch
-  response fails reads `delete failed: s3://bkt/key An error occurred
-  (AccessDenied) when calling the DeleteObjects operation: <message>` — the
-  plural operation name, and never the `(reached max retries: N)` suffix —
-  because the line is composed from that batch response's own per-key error
-  rather than written by botocore, where `aws`'s reads `... when calling the
-  DeleteObject operation: <message>`, with that suffix where botocore spent
-  the request's attempts (`AWS_MAX_ATTEMPTS=1` gives `(reached max retries:
-  0)`; its CRT client's line never carries one). A batch request that fails as
-  a whole — a missing bucket, a refusal, a server error — is not one of these:
-  its keys are sent again one by one (below), so their lines are aws's.
-  (A key the batch reports with a fault the service
+- **Deletes go out in batches.** Up to a thousand keys go out per
+  `DeleteObjects` request here, where `aws` sends one `DeleteObject` per key.
+  Batching is a settled design, and the differences it causes — this entry's,
+  and the Ctrl-C during deletes under the CRT engine below — are accepted
+  rather than open: where a batch can cheaply be brought closer to `aws`'s
+  per-key outcome it is, by sending keys again one by one. For a run that
+  finishes enumerating, the objects removed and the exit code are the same (a
+  key that no longer exists is a success on both wire shapes) unless the
+  endpoint keeps failing requests (below). A batch request that fails as a
+  whole — a missing bucket, a refusal, a server error — has its keys sent
+  again one by one (below). A key the batch reports with a fault the service
   asks to have retried — `InternalError`, `SlowDown`, `ServiceUnavailable`,
-  `RequestTimeout` — is the exception: it is sent again as a `DeleteObject`
-  of its own, retried as `aws` retries it, and if it still fails its line is
-  aws's. With retries turned off — `AWS_MAX_ATTEMPTS=1` — on the classic
-  engine it is not sent again, fails as it does on `aws`, and keeps the
-  batch's line; the CRT client retries whatever that setting says, so under
-  it the key is always sent again.) Only the batching routes are affected —
-  `rm --recursive`, an S3-side `sync --delete`, and `rb --force` — while a
-  single `rm s3://bkt/key` still issues `DeleteObject` and its line is aws's.
-  So a script grepping for the singular name, or for the retry suffix, keeps
-  matching on single deletes and can quietly stop matching on
-  recursive ones.
+  `RequestTimeout` — is sent again as a `DeleteObject` of its own and retried
+  as `aws` retries it. (With retries turned off — `AWS_MAX_ATTEMPTS=1` — on
+  the classic engine it is not sent again and fails as it does on `aws`; the
+  CRT client retries whatever that setting says, so under it the key is always
+  sent again.) Only the batching routes are affected — `rm --recursive`, an
+  S3-side `sync --delete`, and `rb --force` — while a single
+  `rm s3://bkt/key` still issues `DeleteObject`.
 
   Batching is also what makes those same three routes end differently when the
   **listing that feeds them dies part way** — the service failing mid-pagination,
@@ -314,17 +265,16 @@ that say outright that the run comes out differently, listed in section 1.
   answers for two keys, or a single 429 or 403, or a single 500 under
   `AWS_MAX_ATTEMPTS=1` — where three `InternalError` or `Throttling` answers
   leave both tools deleting both). A delete that keeps failing ends the same
-  on both tools, in the same words.
+  on both tools.
 
   Under the CRT engine (`preferred_transfer_client = crt`) the batches ride
   the CRT client, as `aws`'s per-key deletes ride its own — `rm` and a
   `sync --delete` from a local directory (an S3-to-S3 sync is on the classic
-  client on both tools) — so the CRT's retry policy, its failure text and the
-  `[s3]` keys that tune the CRT client apply to them as they do on `aws`. The
-  CRT re-sends a server error answer itself (a 500, a 503, a
-  `RequestTimeout`), and once its attempts are spent it reports its own error
-  rather than the answer; either way the batch's keys are sent again key by
-  key, as on the classic engine.
+  client on both tools) — so the CRT's retry policy and the `[s3]` keys that
+  tune the CRT client apply to them as they do on `aws`. The CRT re-sends a
+  server error answer itself (a 500, a 503, a `RequestTimeout`), and once its
+  attempts are spent the batch's keys are sent again key by key, as on the
+  classic engine.
 - **A plain-HTTP endpoint named anywhere but `--endpoint-url` still reaches
   the CRT engine.** Under `preferred_transfer_client = crt`, `aws` decides
   whether its CRT client speaks TLS from `--endpoint-url` alone, so an
@@ -505,12 +455,6 @@ and have no effect — the help page groups them under `recognized but ignored`.
 Where an option has a fixed choice list the value is still validated, so an
 invalid one is still an error, and `--query` is still compiled as a JMESPath
 expression and rejected if malformed.
-
-Having no effect here is not the same as having no effect on `aws`:
-`--cli-error-format` — like `AWS_CLI_ERROR_FORMAT` and the profile key
-`cli_error_format` — does change how `aws` renders an error report, so a script reading `aws`'s `json` or
-`text` error output gets this command's usual one-line report instead
-(section 1).
 
 ## 4. Options limited by one direction
 

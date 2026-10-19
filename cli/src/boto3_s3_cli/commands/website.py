@@ -68,7 +68,7 @@ class WebsiteCommand(Command):
         client = s3.client()
         # build_s3_storage keeps the strict ARN rejections; its bucket-less
         # carve-out is what keeps "s3:///k" from failing S3Storage.validate
-        # before the rejection below can shape it aws's way.
+        # before the rejection below.
         storage = transferargs.build_s3_storage(f"s3://{path}", client=client)
         if storage.bucket != path:
             # aws hands the whole remainder to PutBucketWebsite as the Bucket
@@ -81,8 +81,8 @@ class WebsiteCommand(Command):
             # silently drop, and an Outposts ".../accesspoint/ap:", whose ":"
             # the split eats as the key separator. Every other name botocore
             # refuses - a slash-free bad one, the empty bucket of "s3://" -
-            # survives the split intact and rides on to keep botocore's own
-            # text. An accesspoint ARN is the whole bucket and passes through,
+            # survives the split intact and is refused by botocore at the
+            # request. An accesspoint ARN is the whole bucket and passes through,
             # exactly like aws.
             raise ValidationError(
                 usage.invalid_bucket_name_message(path),

@@ -211,8 +211,8 @@ exception directly instead: an unknown key in `**options`
 (`ValidationError`), a client that cannot be built (`ConfigurationError` or its
 `InvalidConfigError` refinement), an S3 Express location or a requested feature
 the installed SDK predates (`ConfigurationError`, naming the version it needs —
-see [`../../compatibility.md`](../../compatibility.md)), a missing local source (`NotFoundError`,
-worded as the AWS CLI words it), a listing rejected outright.
+see [`../../compatibility.md`](../../compatibility.md)), a missing local source (`NotFoundError`),
+a listing rejected outright.
 
 `mb`, `rb`, `presign` and `website` act on a single thing and raise their
 category exception directly; they never raise `BatchError`. `ls` has no item

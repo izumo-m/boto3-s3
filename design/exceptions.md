@@ -99,9 +99,8 @@ What a consumer may rely on across releases is **class identity** (the
 hierarchy above) and the **structured attributes**: `operation` / `bucket` /
 `key` on every `Boto3S3Error`, plus `BatchError`'s counters (`succeeded` /
 `failed` / `warned` / `skipped` and the derived `total`, section 4).
-**Message strings are display only**: they follow aws-cli's wording and may
-change in any release, so never parse `str(exc)` - branch on the class and
-read the attributes.
+**Message strings are display only**: they may change in any release, so
+never parse `str(exc)` - branch on the class and read the attributes.
 
 `__cause__` reachability: an error raised for a failed S3 request carries the
 originating botocore `ClientError` on `__cause__` (the `raise ... from`

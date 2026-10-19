@@ -14,7 +14,7 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
 |---|---|
 | `transferplan.py` | The transfer planner: the aws-cli `fileformat.py` counterpart (`plan_transfer` = `FileFormat.format` / `TransferPlan`, plus `find_dest_path_comp_key` as `item_paths`/`dest_for`). Sits above the backends and routes by concrete type (isinstance against `S3Storage`/`LocalStorage`); each side formats *itself* through the polymorphic `Storage.format` (`S3Storage` = aws's `s3_format` from the held bucket/key, `LocalStorage` = aws's `local_format` from the held abspath/raw form, the base = the open-route rule) and carries its own separator (`Storage.sep`). The per-backend string grammars also live on the backends (`S3Storage.split_bucket_key` and friends, `LocalStorage.relative_path`); `identify_type` (string classification) is the CLI's. The CLI and the library derive paths and key naming from the **same code** |
 | `producers.py` | The per-info item builders and gates cp / mv / sync share: `TransferPlan` + listing entries -> `TransferItem`s, with the aws-cli item gates applied on the way (case-conflict, glacier, parent-reference, oversize; the open-route capability checks). Plain functions over the plan and the entry - no `S3` instance state - called by the orchestrator as `producers.upload_items(...)` etc. Kept out of `transfer.py` so the engine stays blind to `transferplan` (its backend knowledge stays narrow: the `LocalStorage` `isinstance` for the fsync barrier, section 11) |
-| `requestparams.py` | Pure-function port of `TransferOptions` (snake_case) -> S3 API parameters (PascalCase) (aws-cli `RequestParamsMapper`). The format validation of grants is also done with aws's wording |
+| `requestparams.py` | Pure-function port of `TransferOptions` (snake_case) -> S3 API parameters (PascalCase) (aws-cli `RequestParamsMapper`). The format validation of grants is also done here |
 | `mimetable.py` | Generated data: CPython 3.14's built-in `mimetypes` tables, the ones the official `aws` distribution guesses an upload's `ContentType` from (it is frozen against that interpreter). `transfer.py` builds its own `mimetypes.MimeTypes` from them - plus the same live overlays `mimetypes.init` applies, the Windows registry and the existing `knownfiles` - so the guess is the shipped distribution's on every supported interpreter instead of the running one's (3.10 knows no `.php`, 3.15 re-types `.texinfo`), the same pin the CLI applies to argparse behaviour that moved between releases ([`cli.md`](./cli.md) section 2). The algorithm is pinned with the tables: `_guess_content_type` ports 3.14's `guess_type` (a scheme-like prefix takes the URL branch and a `posixpath` split, a file path is split with the host's `os.path` after its drive is removed), because a host interpreter before 3.13 split every name with `posixpath` - on Windows `C:\d\.json` then kept `.json` as its extension and went up as `application/json` where aws, to whose `ntpath` the name is all extension, sends it untyped (measured 2026-10-06, 8 of 12 names under Python 3.10). An overlay that exists but cannot be read fails the item the guess was for (aws guesses inside s3transfer's queued subscriber, so its `[Errno 13]` is that item's `upload failed:` and the run - a sync's deletes included - goes on), never the run |
 | `localstorage.py` | `LocalStorage` (the `Storage` ABC for a local path) plus `LocalFileGenerator`, the customizable directory walk it composes (boto3-s3's aws-cli `FileGenerator`). `LocalFileGenerator.list_files` reproduces aws-cli `FileGenerator.list_files` behavior (byte-order walk, warning rules) on an `os.scandir` engine - `d_type` types entries syscall-free and, where the platform allows (`have_dir_fd`), the directory is scanned through its fd so per-entry stats are dir-relative (`fstatat`; Windows falls back to path-based scandir). An app customizes it by subclassing `LocalFileGenerator` (public `list_files` / `should_ignore_file` / `entry_stat_result` / `scan_children` / `classify_child` / `stat_info` / `restat_leaf` / `finalize_children` / `normalize_sort` seams, aws-cli names where a counterpart exists) and injecting via `LocalStorage(path, walker=...)`; the walk's source-config (`follow_symlinks` / `detect_symlink_loops` / `enumerate_all_entries`) is set on the same constructor; complete enumeration includes every metadata-readable native entry before filtering, and `LoopDetector` guards symlink cycles |
 | `transfer.py` | `Transferrer`: the transfer engine proper that drives the classic / CRT transfer manager (the subject of this document). With `is_move` it deletes the source and reports MOVE (section 11). Engine selection is in section 2 / [`crt.md`](./crt.md) |
@@ -161,7 +161,7 @@ add nothing the `getattr` protocol uses.
    (absolute values) to `on_progress`. Emits one 0-byte notification on queueing
    (to track the in-flight set; the CLI does not print this).
 3. download: `_DirectoryCreator` (creates the parent dir; tolerates EEXIST,
-   otherwise fails with aws-cli's wording `Could not create directory ...`).
+   otherwise fails the item with `Could not create directory ...`).
 4. copy: the copy-props chain (section 4).
 5. download: `_StampMtime` - stamps the source LastModified onto the downloaded
    file on success (section 5), registered before the mv deletion pair below
@@ -397,8 +397,8 @@ The caller's stream is never closed by `IOStorage`.
 
 - **Single item, no gates**: a stream is always a single transfer (the same as
   aws's stream path, which does not go through the generator). `recursive` is a
-  `ValidationError` with aws-cli's wording (`Streaming currently is only
-  compatible with non-recursive cp commands`), and an `IOStorage` on both sides
+  `ValidationError` (`Streaming currently is only compatible with
+  non-recursive cp commands`), and an `IOStorage` on both sides
   is also rejected. The glacier / parent-ref gates are not run.
 - **Stream option policy (follows aws-cli per option)**: a meaningless option is
   rejected, an additive one that degrades to a no-op is ignored. `recursive`
@@ -583,11 +583,9 @@ dest-existence check for download. We ported the same three faces:
 - **symlink-loop guard** (`detect_symlink_loops`, a **library extension**, default
   off so `cp` / `mv` / `sync` match aws - `aws s3` has no such option):
   off, a symlink cycle descends until the kernel's `ELOOP` / path-length
-  boundary ends it with aws's `File does not exist.` warning battery and the
-  walk skips the directory, exactly like aws-cli (the boundary comes long
-  before any `RecursionError` could - and the stop comes from the
-  vetting-time boundary probe one level up rather than from the descent's own
-  `os.open`, which is what keeps aws's wording on the bare path); on
+  boundary ends it with aws's warning battery and the walk skips the
+  directory, exactly like aws-cli (the boundary comes long before any
+  `RecursionError` could); on
   (and with `follow_symlinks`), the recursive walk keeps an ancestor stack of
   `(st_dev, st_ino)` and skips a directory that resolves to one of its own
   ancestors with a `Symbolic link loop detected` warning. An ancestor stack (not
@@ -603,12 +601,10 @@ dest-existence check for download. We ported the same three faces:
   `--follow-symlinks` into the storage it builds).
 - **a directory that changes underneath the walk** - replaced by a file,
   removed, or locked away between its parent's scan and its own descent:
-  aws-cli re-tests every child immediately before recursing into it, on the
-  *separator-terminated* path its sort key carries, and warn-skips it
-  (`Skipping file <dir>/. File does not exist.`, or `... File/Directory is not
-  readable.` for the chmod race - rc 2) rather than failing the run.
-  Establishing the descent's own scan **is** that re-test here, so the same
-  battery runs on the path as given, separator and all, and the walk continues;
+  aws-cli re-tests every child immediately before recursing into it and
+  warn-skips it (rc 2) rather than failing the run. Establishing the
+  descent's own scan **is** that re-test here, so the same battery runs and
+  the walk continues;
   when the battery finds nothing wrong the `OSError` propagates instead, so
   nothing is ever pruned silently.
 - **a leaf that changes between its parent's scan and its own turn** - the other
@@ -616,12 +612,12 @@ dest-existence check for download. We ported the same three faces:
   name (`os.path.isdir` then `_safely_get_file_stats`, both in its descent loop).
   `LocalFileGenerator.restat_leaf` is that one `os.stat`, taken just before the
   leaf is emitted - after every earlier sibling's whole subtree has been read -
-  and it decides three outcomes. Gone: the `File does not exist.` battery runs on
-  the path and the leaf is dropped (rc 2) rather than submitted and failed at
+  and it decides three outcomes. Gone: the warning battery runs on the path and
+  the leaf is dropped (rc 2) rather than submitted and failed at
   open (rc 1). A directory by now: the record comes back promoted
   (`promoted_directory`) and the walk descends it, so its children are
   transferred and `--dryrun` previews them - addressed by the **bare** name the
-  leaf sorted under, since the separator-terminated addressing above belongs to
+  leaf sorted under, since addressing with a trailing separator belongs to
   names that were directories at scan time, which is also where the subtree
   lands in the emitted order. Still a leaf: `size` / `mtime` / `stat_result` are
   refreshed from that stat, so what is uploaded and what `sync` compares is the
@@ -636,28 +632,21 @@ dest-existence check for download. We ported the same three faces:
   hides what aws-cli's own full-path `stat` would trip on - an ancestor
   symlink chain crossing `SYMLOOP_MAX`, or a path crossing `PATH_MAX` - and can
   admit a child the transfer then fails to open (rc 1) where aws warn-skips it
-  at enumeration (rc 2, `File does not exist.`). Only near either boundary
+  at enumeration (rc 2). Only near either boundary
   (`sym_depth` for a symlink child, the full path's length for any child - both
   floors sit well below the real OS limits, so an ordinary walk never reaches
   them) does the walk re-run the full-path warning battery
   (`LocalFileGenerator.crosses_full_path_boundary`) and drop a child it would
-  warn away, so the two agree. **Directories take that probe too**, by their
-  bare full path: aws-cli names a child by its bare path when it vets it and
-  with the trailing separator when it descends, so a boundary-crossing
-  directory left to fail its own descent would be warned with the separator
-  aws-cli's vetting-time warning does not carry.
+  warn away, so the two agree. Directories take that probe too.
   On Windows (`have_dir_fd` false) the walk
   addresses entries by full path, but the scandir-cached stat still hides an
   over-`MAX_PATH` length on a host without long-path support
   (`LongPathsEnabled=0`, the default), so the readability probe is what fails
-  there; the probe's failure path re-checks existence by full path and picks
-  the wording aws-cli's exists-first battery emits (`File does not exist.`,
-  never `not readable`) - same skip set, same wording, rc 2 as `aws.exe`
-  (verified against the pinned aws-cli; pinned by
-  `test_over_max_path_entries_warn_does_not_exist_like_aws`). The same
-  re-check makes an entry that races away between its stat and the probe warn
-  `File does not exist.` like aws's full-path battery would, on every
-  platform. Two known residuals: `sym_depth` counts one
+  there; the probe's failure path re-checks existence by full path, so such an
+  entry is reported as missing rather than unreadable - the same skip set and
+  rc 2 as `aws.exe` (verified against the pinned aws-cli). The same re-check
+  reports an entry that races away between its stat and the probe as missing,
+  on every platform. Two known residuals: `sym_depth` counts one
   hop per *followed symlinked directory* descended, not the actual number of
   links the kernel resolves for a chain of nested symlinks in one hop, so it
   can undercount relative to the real `SYMLOOP_MAX` counter in an adversarial,
@@ -845,8 +834,8 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
 - **The `_DeleteSource` subscriber** (the position in section 3): performs the deletion
   only when the future succeeded. An upload removes the source through its
   `Storage.delete(info)` (keyed by `TransferItem.src_info`); `LocalStorage.delete`
-  maps the OS error to the library taxonomy, preserving the wording aws's
-  `move failed: ... [Errno 13] Permission denied: '<abs>'` form shows; download is
+  maps the OS error to the library taxonomy, keeping the OS error's message
+  (`move failed: ... [Errno 13] Permission denied: '<abs>'`); download is
   a per-object DeleteObject against the manager's client, and copy against the
   **source-side client** (RequestPayer is passed through via
   `map_delete_object_params`). **A deletion failure flips the already-settled
@@ -938,8 +927,8 @@ and has no `aws s3` counterpart to compare with.
 - **enumeration / single source**: `opens3` enumerates a recursive source
   through `Storage.scan` and resolves a single source through
   `Storage.get_fileinfo`. An unresolvable single source raises `The user-provided
-  path <as_text> does not exist.` (`NotFoundError` with no `ClientError` cause,
-  aws's missing-local-source wording; unlike the local up-front check it
+  path <as_text> does not exist.` (`NotFoundError` with no `ClientError` cause;
+  unlike the local up-front check it
   surfaces lazily, once the pipeline pulls the item); an empty recursive
   `scan` transfers nothing (rc 0, like an empty S3 prefix). `s3open`
   enumerates its S3 source exactly like the built-in download (recursive

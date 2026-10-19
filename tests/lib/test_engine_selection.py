@@ -405,5 +405,5 @@ class TestCallerSettings:
     def test_an_invalid_section_value_is_refused(self) -> None:
         from boto3_s3 import InvalidConfigError
 
-        with pytest.raises(InvalidConfigError, match="must be a positive integer"):
+        with pytest.raises(InvalidConfigError):
             _build({"max_concurrent_requests": "0"}, "classic")

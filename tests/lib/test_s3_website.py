@@ -140,4 +140,4 @@ class TestWebsiteErrors:
         client = boto3.session.Session().client("s3", region_name="us-east-1")
         with pytest.raises(ValidationError) as excinfo:
             S3().website(S3Storage("s3://", client=client))
-        assert "Invalid bucket name" in str(excinfo.value)
+        assert isinstance(excinfo.value.__cause__, ParamValidationError)

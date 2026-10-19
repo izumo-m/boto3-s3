@@ -168,9 +168,10 @@ class TestSend:
         with pytest.raises(ClientError) as exc_info:
             sender.call("DeleteObjects", {"Bucket": "bkt", "Delete": {"Objects": [{"Key": "a"}]}})
         assert type(exc_info.value).__name__ == "NoSuchBucket"
-        assert str(exc_info.value) == (
-            "An error occurred (NoSuchBucket) when calling the DeleteObjects operation: "
-            "The specified bucket does not exist"
+        # S3's own message is kept, so the report shows the cause.
+        assert (
+            exc_info.value.response.get("Error", {}).get("Message")
+            == "The specified bucket does not exist"
         )
 
     def test_an_error_document_inside_a_200_answer_is_the_crt_clients_error(

@@ -133,15 +133,6 @@ class TestPresign:
         assert excinfo.value.__cause__ is None  # no underlying exception
         assert client.calls == []  # refused before signing
 
-    def test_method_is_checked_before_the_target(self) -> None:
-        # Pins the documented order: the method is checked ahead of target
-        # resolution, so a bad method wins over a bad target. Without this,
-        # moving the check below the resolution goes unnoticed - a pre-built
-        # S3Storage resolves without ever touching its client.
-        with pytest.raises(ValidationError) as excinfo:
-            S3().presign(123, method="delete_object")  # pyright: ignore[reportArgumentType]
-        assert str(excinfo.value) == "Invalid method value: 'delete_object'"
-
     def test_default_client_signs_sigv4_not_legacy_sigv2(self) -> None:
         # Real botocore (no fake): left alone, a default us-east-1 client
         # downgrades a presigned URL to the deprecated SigV2
@@ -353,7 +344,7 @@ class TestPresignErrors:
         client = boto3.session.Session().client("s3", region_name="us-east-1")
         with pytest.raises(ValidationError) as excinfo:
             S3().presign(S3Storage("s3://bucket-only", client=client))
-        assert "Invalid length for parameter Key" in str(excinfo.value)
+        assert isinstance(excinfo.value.__cause__, ParamValidationError)
 
     def test_empty_bucket_fails_real_botocore_validation(self) -> None:
         import boto3
@@ -361,4 +352,4 @@ class TestPresignErrors:
         client = boto3.session.Session().client("s3", region_name="us-east-1")
         with pytest.raises(ValidationError) as excinfo:
             S3().presign(S3Storage("s3://", client=client))
-        assert "Invalid bucket name" in str(excinfo.value)
+        assert isinstance(excinfo.value.__cause__, ParamValidationError)

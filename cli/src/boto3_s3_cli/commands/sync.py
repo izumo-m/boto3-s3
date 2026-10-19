@@ -60,8 +60,8 @@ class SyncCommand(Command):
         src, dest = head.src, head.dest
         src_type, dest_type = head.src_type, head.dest_type
         if src == "-" or dest == "-":
-            # aws-cli's _validate_streaming_paths: only cp streams, and its
-            # wording names cp even from sync.
+            # aws-cli's _validate_streaming_paths: only cp streams, so the
+            # message names cp even from sync.
             raise ValidationError(
                 "Streaming currently is only compatible with non-recursive cp commands",
                 operation="sync",

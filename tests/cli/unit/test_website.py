@@ -16,7 +16,7 @@ import pytest
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
 from tests.utils.fakes3 import client_error
-from tests.utils.harness import bucket_name_report, client_ctx, unused_ctx
+from tests.utils.harness import client_ctx, unused_ctx
 
 
 class _FakeWebsiteClient:
@@ -133,7 +133,7 @@ class TestWebsiteExitCodeShape:
             ctx=client_ctx(client),
         )
         assert rc == 252
-        assert "Parameter validation failed" in capsys.readouterr().err
+        assert "Invalid bucket name" in capsys.readouterr().err
         assert client.calls == []
 
     def test_double_trailing_slash_is_252(self) -> None:
@@ -149,27 +149,10 @@ class TestWebsiteExitCodeShape:
         assert client.calls == []
 
     def test_empty_uri_is_param_validation_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # The empty name survives the fold intact and rides on to botocore, so
-        # the report is botocore's whole one - the truncation below never
-        # applies here (measured; design/aws-cli-option-handling.md section 6).
+        # The empty name survives the fold intact and rides on to botocore.
         rc = cli.main(["website", "s3://", "--index-document", "i.html"], ctx=_real_client_ctx())
-        err = capsys.readouterr().err
         assert rc == 252
-        assert 'Invalid bucket name ""' in err
-        assert "Bucket name must match the regex" in err
-
-    def test_a_name_botocore_rejects_keeps_the_whole_report(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # The same for a slash-free bad name: only the key-carrying URIs
-        # refused up front get the one-line form.
-        rc = cli.main(
-            ["website", "s3://in!valid", "--index-document", "i.html"], ctx=_real_client_ctx()
-        )
-        err = capsys.readouterr().err
-        assert rc == 252
-        assert 'Invalid bucket name "in!valid"' in err
-        assert "Bucket name must match the regex" in err
+        assert "Invalid bucket name" in capsys.readouterr().err
 
     def test_bucketless_key_folds_into_the_bucket_name(
         self, capsys: pytest.CaptureFixture[str]
@@ -180,7 +163,7 @@ class TestWebsiteExitCodeShape:
         client = _FakeWebsiteClient()
         rc = cli.main(["website", "s3:///k", "--index-document", "i.html"], ctx=client_ctx(client))
         assert rc == 252
-        assert f"{bucket_name_report('/k')}\n" in capsys.readouterr().err
+        assert '"/k"' in capsys.readouterr().err  # the refusal names the folded name
         assert client.calls == []
 
     @pytest.mark.parametrize("sep", ["/", ":"])
@@ -198,16 +181,7 @@ class TestWebsiteExitCodeShape:
         client = _FakeWebsiteClient()
         rc = cli.main(["website", f"s3://{name}", "--index-document", "i"], ctx=client_ctx(client))
         assert rc == 252
-        assert f"{bucket_name_report(name)}\n" in capsys.readouterr().err
-        assert client.calls == []
-
-    def test_bucketless_key_schemeless_folds_into_the_bucket_name(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        client = _FakeWebsiteClient()
-        rc = cli.main(["website", "/k", "--index-document", "i.html"], ctx=client_ctx(client))
-        assert rc == 252
-        assert f"{bucket_name_report('/k')}\n" in capsys.readouterr().err
+        assert f'"{name}"' in capsys.readouterr().err
         assert client.calls == []
 
     def test_extra_positional_is_unknown_options_252(

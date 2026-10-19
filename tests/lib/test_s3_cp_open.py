@@ -279,7 +279,6 @@ class TestOpenUploadRoute:
         assert outcomes.count(OpOutcome.WARNED) == 1
         assert outcomes.count(OpOutcome.SUCCEEDED) == 1
         warned = next(r for r in results if r.outcome is OpOutcome.WARNED)
-        assert "exceeds s3 upload limit of 48.8 TiB." in str(warned.error)
         assert "big.bin" in str(warned.error)
 
     def test_recursive_upload_takes_the_backend_arrival_order(self) -> None:
@@ -363,7 +362,7 @@ class TestOpenUploadRoute:
         with pytest.raises(NotFoundError) as excinfo:
             S3().cp(src, S3Storage("s3://b/k", client=client), transfer_config=_SYNC)
         assert excinfo.value.__cause__ is None
-        assert str(excinfo.value) == "The user-provided path mem://data/gone.txt does not exist."
+        assert "mem://data/gone.txt" in str(excinfo.value)
         assert calls == []
 
     def test_recursive_empty_source_transfers_nothing(self) -> None:

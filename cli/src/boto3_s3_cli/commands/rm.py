@@ -162,7 +162,7 @@ class RmCommand(Command):
             # The enumerating bucket-less forms (keyless service root, or
             # --recursive): aws sends Bucket="" to the listing and botocore's
             # client-side validation makes it a fatal rc 1, --dryrun included
-            # (measured). Synthesized with aws's wording rather than dialed,
+            # (measured). Reported here rather than dialed,
             # keeping the fake-driven paths (rb --force's inner rm included)
             # deterministic; the blind single delete instead rides
             # to the API via build_s3_storage below - its dryrun records at

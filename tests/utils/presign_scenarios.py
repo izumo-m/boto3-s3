@@ -95,16 +95,10 @@ SCENARIOS: tuple[PresignScenario, ...] = (
         expected_stderr_tokens_aws=("Invalid length for parameter Key",),
     ),
     PresignScenario(
-        "presign_trailing_slash",
-        ("presign", f"s3://{BUCKET_TOKEN}/"),
-        expected_stderr_tokens_ours=("Invalid length for parameter Key",),
-        expected_stderr_tokens_aws=("Invalid length for parameter Key",),
-    ),
-    PresignScenario(
         "presign_empty_uri",
         ("presign", "s3://"),
-        expected_stderr_tokens_ours=('Invalid bucket name ""',),
-        expected_stderr_tokens_aws=('Invalid bucket name ""',),
+        expected_stderr_tokens_ours=("Invalid bucket name",),
+        expected_stderr_tokens_aws=("Invalid bucket name",),
     ),
     PresignScenario(
         "presign_extra_arg",

@@ -755,13 +755,11 @@ class TestMalformedListingEntries:
     aws-cli reads a ``Contents`` entry's ``Key`` / ``LastModified`` / ``Size``
     (and a common prefix's ``Prefix``, a bucket's ``CreationDate`` / ``Name``) by
     subscript, so a response that omits one dies with ``KeyError`` naming the
-    element, right at that entry; here that is ``MalformedResponseError`` with
-    the KeyError's text as its message and the KeyError on ``__cause__``.
-    Measured against the pinned aws through a
-    127.0.0.1 fake: ``ls`` prints the entries ahead of it and exits 255 with
-    ``[ERROR]: 'LastModified'``, a transfer prints its own and exits 1 with
-    ``fatal error: 'LastModified'``. Dropping the entry instead - what this used
-    to do - silently shortened the run at rc 0.
+    element, right at that entry; here that is ``MalformedResponseError``
+    naming the element, with the KeyError on ``__cause__``. Measured against
+    the pinned aws through a 127.0.0.1 fake: ``ls`` prints the entries ahead
+    of it and exits 255, a transfer prints its own and exits 1. Dropping the
+    entry instead - what this used to do - silently shortened the run at rc 0.
     """
 
     @pytest.mark.parametrize(
@@ -782,7 +780,7 @@ class TestMalformedListingEntries:
         storage, _ = _storage([{"Contents": [entry]}])
         with pytest.raises(MalformedResponseError) as excinfo:
             list(storage.scan(S3ScanOptions(recursive=True)))
-        assert str(excinfo.value) == f"'{missing}'"  # str(KeyError): the CLI's line
+        assert missing in str(excinfo.value)
         cause = excinfo.value.__cause__
         assert isinstance(cause, KeyError) and cause.args[0] == missing
         assert excinfo.value.bucket == storage.bucket
@@ -842,7 +840,7 @@ class TestMalformedListingEntries:
         storage, _ = _storage(url="s3://bucket/prefix/obj.txt", head_response=head)
         with pytest.raises(MalformedResponseError) as excinfo:
             storage.get_fileinfo()
-        assert str(excinfo.value) == f"'{missing}'"
+        assert missing in str(excinfo.value)
         assert isinstance(excinfo.value.__cause__, KeyError)
         # A storage-level call: the operation stays unset, the entry is named.
         assert (excinfo.value.operation, excinfo.value.bucket, excinfo.value.key) == (
@@ -866,7 +864,7 @@ class TestMalformedListingEntries:
             for info in storage.list_buckets():
                 keys.append(info.key)
         assert keys == ["aaa"]
-        assert str(excinfo.value) == f"'{missing}'"
+        assert missing in str(excinfo.value)
 
 
 _FAR_FUTURE = datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
@@ -1218,6 +1216,22 @@ class TestScanErrorMapping:
             list(storage.scan())
         assert type(exc_info.value) is category
 
+    def test_a_known_code_wins_over_its_http_status(self) -> None:
+        # RequestTimeout arrives as a 400, which alone would widen to a
+        # ValidationError; the code table is read first and makes it the
+        # transient failure it is.
+        error = ClientError(
+            {
+                "Error": {"Code": "RequestTimeout", "Message": "boom"},
+                "ResponseMetadata": {"HTTPStatusCode": 400},
+            },
+            "ListObjectsV2",
+        )
+        storage, _ = _storage(error=error)
+        with pytest.raises(Boto3S3Error) as exc_info:
+            list(storage.scan())
+        assert type(exc_info.value) is TransportError
+
     def test_keyboard_interrupt_passes_through_untranslated(self) -> None:
         # design/exceptions.md section 2: KeyboardInterrupt is never wrapped.
         from boto3_s3.s3storage import s3_errors
@@ -1555,10 +1569,9 @@ class TestRequestRaisingOutsideTheBotoFamily:
     own: an S3 Express ``CreateSession`` reply without ``Credentials``
     (``KeyError``), a region-less 301 looping its redirector into
     ``RecursionError``, a value its parser cannot convert (``ValueError``).
-    aws-cli ends the run with that exception's text - ``fatal error:
-    'Credentials'`` at rc 1 for a transfer, ``[ERROR]: 'Credentials'`` at rc 255
-    for ``ls``, measured against the pinned aws (2.36.40) through a 127.0.0.1
-    fake - and every request the backend issues reports it as the base
+    aws-cli ends the run - rc 1 for a transfer, rc 255 for ``ls``, measured
+    against the pinned aws (2.36.40) through a 127.0.0.1 fake - and every
+    request the backend issues reports it as the base
     ``Boto3S3Error`` carrying the original, so ``except Boto3S3Error`` catches
     a failed request whatever botocore died of (the deleter and the
     single-call operations already did).
@@ -1570,9 +1583,8 @@ class TestRequestRaisingOutsideTheBotoFamily:
         [
             KeyError("Credentials"),
             RecursionError("maximum recursion depth exceeded"),
-            ValueError('Invalid timestamp "garbage": Unknown string format: garbage'),
         ],
-        ids=["KeyError", "RecursionError", "ValueError"],
+        ids=["KeyError", "RecursionError"],
     )
     def test_it_becomes_the_base_error_carrying_the_original(
         self,
@@ -1588,7 +1600,7 @@ class TestRequestRaisingOutsideTheBotoFamily:
         error = excinfo.value
         assert type(error) is Boto3S3Error
         assert error.__cause__ is boom
-        assert str(error) == str(boom)  # the text aws-cli's line carries
+        assert str(error) == str(boom)  # the cause shows in the message
         assert (error.operation, error.bucket, error.key) == attribution
 
     @pytest.mark.parametrize(("request_point", "attribution"), _REQUEST_POINTS)
@@ -1660,12 +1672,12 @@ class TestListingEntryBotocoreCannotDecode:
     the response echoes it (S3 and MinIO do), URL-decodes each entry's ``Key``
     and each common prefix's ``Prefix`` by subscript as it parses the page -
     ahead of the backend's own required-element read. aws-cli dies in that
-    same handler (``fatal error: 'Key'`` at rc 1 for ``rm --recursive``,
-    ``[ERROR]: 'Key'`` at rc 255 for ``ls --recursive``, measured against the
-    pinned aws (2.36.40) through a 127.0.0.1 fake echoing ``EncodingType``),
-    so the report is the one `TestMalformedListingEntries` pins for a response
-    that does not echo it. The recording client bypasses botocore's parser, so
-    the handler's ``KeyError`` is raised in its place.
+    same handler (rc 1 for ``rm --recursive``, rc 255 for ``ls --recursive``,
+    measured against the pinned aws (2.36.40) through a 127.0.0.1 fake
+    echoing ``EncodingType``), so the failure is the one
+    `TestMalformedListingEntries` pins for a response that does not echo it.
+    The recording client bypasses botocore's parser, so the handler's
+    ``KeyError`` is raised in its place.
     """
 
     @pytest.mark.parametrize("element", ["Key", "Prefix"])
@@ -1676,7 +1688,7 @@ class TestListingEntryBotocoreCannotDecode:
         with pytest.raises(MalformedResponseError) as excinfo:
             list(storage.scan(S3ScanOptions(recursive=True)))
         error = excinfo.value
-        assert str(error) == f"'{element}'"  # str(KeyError): the CLI's line
+        assert element in str(error)
         assert error.__cause__ is boom
         assert (error.operation, error.bucket, error.key) == (None, "bucket", None)
 

@@ -12,8 +12,8 @@ parser's ``@=`` operator (``shorthand.py``), and the plain-option expansions
 presign ``--expires-in``). A bad ``AWS_CLI_FILE_ENCODING`` raises
 ``LookupError`` into the general handler (255), as in aws.
 
-A read failure is a `ParamfileLoadError` carrying aws's bare wording, and
-which exit code it becomes depends on the caller - aws's own split.
+A read failure is a `ParamfileLoadError` naming no argument, and which exit
+code it becomes depends on the caller - aws's own split.
 aws registers a ``load-cli-arg`` handler (``URIArgumentHandler``) that catches
 its ``ResourceLoadingError`` and re-raises it as the named argument's
 ``ParamError`` (rc 252), so every *named* argument's load reports that way; its
@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 class ParamfileLoadError(InvalidValueError):
     """A paramfile reference that could not be loaded (aws's ``ResourceLoadingError``).
 
-    The message is aws's bare wording, with no argument name in it. Left
+    The message names no argument. Left
     unhandled it is the general handler's rc 255; `named_argument` converts it
     into the rc-252 ``Error parsing parameter '<name>'`` form.
     """
@@ -96,8 +96,8 @@ def read_text_paramfile(original: str, *, operation: str) -> str:
         with open(path, encoding=encoding) as handle:
             return handle.read()
     except UnicodeDecodeError as exc:
-        # aws wording (paramfile.get_file): the decode-error message names the
-        # EXPANDED path in parentheses; the OSError one names the full original.
+        # The decode-error message names the EXPANDED path in parentheses; the
+        # OSError one names the full original.
         raise ParamfileLoadError(
             f"Unable to load paramfile ({path}), "
             "text contents could not be decoded.  If this is a binary file, please use "

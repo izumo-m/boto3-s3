@@ -42,7 +42,8 @@ class RbCommand(Command):
         """Delete the bucket and return an ``aws s3 rb``-style exit code.
 
         Exit-code shape (aws-cli RbCommand): usage errors - a non-``s3://``
-        path, a key part, a rejected ARN form - exit 252 via ``main``.
+        path, a key part on a bucket, a rejected ARN form - exit 252 via
+        ``main``; an empty bucket name is rc 1, like a delete_bucket failure.
         ``--force`` runs a full ``rm --recursive`` first; a failure there is
         rc 255 (aws raises RuntimeError into the general handler) and the
         bucket delete is not attempted. Every failure from delete_bucket
@@ -56,26 +57,17 @@ class RbCommand(Command):
         target: str = args.path
         if not target.startswith("s3://"):
             # aws rb: S3 paths only -> rc 252.
-            raise ValidationError(usage.bare_single_uri_usage(), operation="rb")
+            raise ValidationError(usage.single_uri_usage("rb"), operation="rb")
 
-        bucket_part, _, key_part = target[len("s3://") :].partition("/")
-        if not bucket_part and key_part:
-            # aws splits the path first: an empty bucket carrying a key is the
-            # "specify a valid bucket name only" usage error (252, ending in a
-            # bare "s3://").
-            raise ValidationError(
-                f"Please specify a valid bucket name only. E.g. s3://{bucket_part}",
-                operation="rb",
-            )
+        bucket_part = target[len("s3://") :].partition("/")[0]
 
         s3 = ctx.s3(args)
         client = s3.client()
         if not bucket_part:
-            # An empty bucket with no key goes to delete_bucket on aws, where
-            # botocore's client-side validation fails inside rb's local catch
-            # -> rc 1 (the same botocore-shaped line as mb / rm). Handled
-            # before construction, which S3Storage.validate() would otherwise
-            # reject with library-internal wording.
+            # An empty bucket goes to delete_bucket on aws, where botocore's
+            # client-side validation fails inside rb's local catch -> rc 1
+            # (the same line as mb / rm). Handled before construction, which
+            # would refuse a key-carrying form (`s3:///k`) as a usage error.
             # aws has no empty-bucket short-circuit: --force still runs the
             # inner rm --recursive first, and its (inevitable) failure aborts
             # at rc 255 before delete_bucket is attempted.
@@ -86,8 +78,8 @@ class RbCommand(Command):
             return 1
 
         # Rejected ARN forms -> 252 from S3Storage.validate (deferred from the now
-        # non-raising construction); a key on a valid bucket is the same usage
-        # error as above (aws's post-split key check).
+        # non-raising construction); a key on the bucket is aws's post-split
+        # key check, also a usage error (252).
         storage = S3Storage(target, client=client)
         storage.validate()
         if storage.key:

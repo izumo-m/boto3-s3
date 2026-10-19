@@ -105,7 +105,7 @@ _OUTPUT_ENCODING_ENV_VAR = "AWS_CLI_OUTPUT_ENCODING"
 def _write_error(message: object, *, rc: int | None = None) -> None:
     """Write one CLI error report to stderr.
 
-    A usage error (rc 252) carries aws's ``An error occurred
+    A usage error (rc 252) carries the ``An error occurred
     (ParamValidation):`` envelope; every other report is the message alone (an
     rc-254 ``ClientError`` already names its code in its own text). Stripping
     keeps a message that ends with a newline from surfacing as a trailing

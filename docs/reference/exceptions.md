@@ -67,9 +67,9 @@ that entry in the address space it came from, not necessarily an S3 key: a
 locally-originating error puts a filesystem path there and leaves `bucket`
 unset.
 
-The message is available as `str(exc)` and is display only. It follows
-`aws s3` wording where it can and may change in any release, so branch on the
-class and read the attributes; do not parse it. What is stable is class
+The message is available as `str(exc)` and is display only. It may change in
+any release, so branch on the class and read the attributes; do not parse
+it. What is stable is class
 identity and the structured attributes — those two, and `BatchError`'s
 counters.
 
@@ -245,9 +245,8 @@ The service answered, but with a response the library cannot consume. Raised
 where the AWS CLI itself dies reading the same response: a `ListObjectsV2`
 entry missing `Key`, `LastModified` or `Size`, a `CommonPrefixes` entry
 missing `Prefix`, a `ListBuckets` entry missing `CreationDate` or `Name`, or a
-single-object `HeadObject` missing `ContentLength` or `LastModified` — each
-element read in the CLI's own order, so a doubly incomplete entry is blamed on
-the same element (the exact rules are under `scan_pages`, `list_buckets` and
+single-object `HeadObject` missing `ContentLength` or `LastModified` (the
+exact rules are under `scan_pages`, `list_buckets` and
 `get_fileinfo` in [`storage.md`](./storage.md); the access point replies
 [`S3PathResolver`](./misc.md#s3pathresolver) reads are listed there), a copy's
 source `GetObjectTagging` reply missing `TagSet` or a tag's `Key` / `Value`, or
@@ -267,9 +266,8 @@ parser's `ValueError`.
 
 The run stops where the CLI's stops: the entries ahead of the bad one are
 already delivered — an `ls` has reported them, a transfer has submitted them —
-and nothing after it is read. The message is the text the AWS CLI prints for
-the same response: the `KeyError`'s `str()`, which is the element name in
-quotes (`'LastModified'`), or `date value out of range` (on Windows,
+and nothing after it is read. The message is the `KeyError`'s `str()`, which
+is the element name in quotes (`'LastModified'`), or `date value out of range` (on Windows,
 `[Errno 22] Invalid argument` for the timestamps only it refuses); that
 original exception is on `__cause__`. `bucket` and `key` name the entry when the
 response carried them (an entry missing `Key` names only its bucket; a bucket

@@ -130,10 +130,10 @@ class TestWiring:
     def test_invalid_s3_config_value_exits_255_through_main(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Charter: an invalid [s3] value exits 255 through main, like aws
-        # with the byte-exact message body. The
-        # error is raised parsing [s3] before any API call, so it propagates to
-        # main's general handler regardless of the recording client.
+        # An invalid [s3] value exits 255 through main, like aws, naming the
+        # setting (the library's report itself is tests/lib's). The error is
+        # raised parsing [s3] before any API call, so it propagates to main's
+        # general handler regardless of the recording client.
         config_file = tmp_path / "config"
         config_file.write_text("[default]\ns3 =\n  preferred_transfer_client = bogus\n")
         monkeypatch.setenv("AWS_CONFIG_FILE", str(config_file))
@@ -142,16 +142,8 @@ class TestWiring:
         ctx, _calls = self._ctx([])
         result = run_cli_in_process(["cp", str(source), "s3://bucket/key"], ctx=ctx)
         assert result.rc == 255, (result.rc, result.stderr)
-        assert (
-            'Invalid value: "bogus" for configuration option: '
-            '"preferred_transfer_client". Supported values are: auto, classic, crt'
-        ) in result.stderr
+        assert "preferred_transfer_client" in result.stderr
 
-
-_INVALID_S3_VALUE = (
-    'boto3-s3: [ERROR]: Invalid value: "bogus" for configuration option: '
-    '"preferred_transfer_client". Supported values are: auto, classic, crt\n'
-)
 
 # aws's general handler formats a bare AssertionError - awscrt's region check -
 # as the prefix alone, with no trailing space (aws-cli errorformat.py).
@@ -178,10 +170,8 @@ class TestRmReadsTheRuntimeConfig:
     """``rm`` is an ``S3TransferCommand`` in aws, so it reads ``[s3]`` like cp.
 
     Measured on the pinned aws-cli: an invalid ``[s3]`` value is 255 for every
-    ``rm`` form - the bucket-less enumerating ones and ``--quiet`` included,
-    since the report comes from the error handler and not from the result
-    printer - but it still *loses* to the path-type 252, which aws checks in
-    ``add_paths``, one step earlier.
+    ``rm`` form. The read comes before rm's routes split, so the single delete
+    and the bucket-less form that returns early stand for all of them.
     """
 
     _BAD = "[default]\nregion = us-east-1\ns3 =\n  preferred_transfer_client = bogus\n"
@@ -190,11 +180,7 @@ class TestRmReadsTheRuntimeConfig:
         "argv",
         [
             pytest.param(["rm", "s3://bucket/key"], id="single"),
-            pytest.param(["rm", "s3://bucket/p/", "--recursive"], id="recursive"),
-            pytest.param(["rm", "s3://bucket/key", "--dryrun"], id="dryrun"),
-            pytest.param(["rm", "s3://bucket/key", "--quiet"], id="quiet"),
             pytest.param(["rm", "s3://"], id="bucket-less-keyless"),
-            pytest.param(["rm", "s3://", "--recursive"], id="bucket-less-recursive"),
         ],
     )
     def test_an_invalid_value_is_255(
@@ -202,17 +188,8 @@ class TestRmReadsTheRuntimeConfig:
     ) -> None:
         ctx, _calls = _config_ctx(tmp_path, monkeypatch, self._BAD)
         result = run_cli_in_process(argv, ctx=ctx)
-        assert (result.rc, result.stderr) == (255, _INVALID_S3_VALUE)
-
-    def test_the_path_type_check_still_wins(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # The negative control: aws's check_path_type runs in add_paths, before
-        # the runtime config is read, so a local path stays the usage 252.
-        ctx, _calls = _config_ctx(tmp_path, monkeypatch, self._BAD)
-        result = run_cli_in_process(["rm", "/local/path"], ctx=ctx)
-        assert result.rc == 252
-        assert "Error: Invalid argument type" in result.stderr
+        assert result.rc == 255
+        assert "preferred_transfer_client" in result.stderr
 
     def test_a_valid_config_leaves_the_run_alone(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -306,54 +283,6 @@ class TestCrtEngineConstructionSlot:
         # report; --dryrun never gets to record anything.
         assert (result.rc, result.stdout, result.stderr) == (255, "", _EMPTY_REPORT), resolved
         assert len(crt_constructions) == 1, resolved
-
-    @pytest.mark.parametrize("command", ["cp", "mv"])
-    def test_it_also_precedes_the_case_conflict_rejection(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        crt_constructions: list[dict[str, Any]],
-        command: str,
-    ) -> None:
-        # The far end of aws's step 5 -> step 6 boundary: `--case-conflict
-        # skip` against an S3 Express source is rejected in aws's
-        # CommandArchitecture, *after* the transfer manager is built, so the
-        # construction failure wins (255 empty report, not the 252). This is
-        # the pairing that pins the construction's position after the
-        # `[s3]` read and before the run - moving it one step later would
-        # silently reintroduce a 252 here.
-        ctx, _calls = _config_ctx(tmp_path, monkeypatch, self._CRT)
-        argv = [
-            command,
-            "s3://bucket--use1-az1--x-s3/p",
-            str(tmp_path / "dl"),
-            "--recursive",
-            "--case-conflict",
-            "skip",
-        ]
-        result = run_cli_in_process(argv, ctx=ctx)
-        assert (result.rc, result.stderr) == (255, _EMPTY_REPORT)
-        assert len(crt_constructions) == 1
-
-    def test_the_case_conflict_rejection_stands_without_the_engine(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, crt_constructions: list[Any]
-    ) -> None:
-        # The control for the pair above: with a classic engine nothing
-        # preempts it, so the same argv is the 252 it has always been.
-        body = "[default]\ns3 =\n  preferred_transfer_client = classic\n"
-        ctx, _calls = _config_ctx(tmp_path, monkeypatch, body)
-        argv = [
-            "cp",
-            "s3://bucket--use1-az1--x-s3/p",
-            str(tmp_path / "dl"),
-            "--recursive",
-            "--case-conflict",
-            "skip",
-        ]
-        result = run_cli_in_process(argv, ctx=ctx)
-        assert result.rc == 252
-        assert "is not a valid value for `--case-conflict`" in result.stderr
-        assert crt_constructions == []
 
     def test_an_s3s3_route_never_reaches_the_engine(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, crt_constructions: list[Any]

@@ -36,7 +36,8 @@ different things at each:
 ## 2. Recognized-and-ignored (no-op) options - CLI
 
 Several `aws s3` global options have **no observable effect** on any
-`aws s3` subcommand. As aws-cli does, `boto3-s3-cli` **accepts them after
+`aws s3` subcommand's outcome (`--cli-error-format` changes only how aws
+renders an error report, below). As aws-cli does, `boto3-s3-cli` **accepts them after
 parsing and then ignores them** (validating `choices` where aws-cli
 does, so an invalid value still errors the same way). Passing them
 changes nothing about the operation.
@@ -81,11 +82,11 @@ and prints its `upload:` / `download:` / progress lines unconditionally.
 `aws s3 ... --color on` therefore produces no color, and `boto3-s3-cli`
 matches that.
 
-`--cli-error-format` controls the top-level CLI exception rendering in
-aws-cli. `boto3-s3-cli` accepts the flag but always uses aws-cli's
-default enhanced-style rendering; alternate legacy, text, JSON, YAML, and
-table renderings are not provided. In particular, parameter
-validation failures use `An error occurred (ParamValidation): <message>`.
+`--cli-error-format` selects how aws-cli renders an error report. Error
+reports are not a compatibility target ([`overview.md`](./overview.md)
+section 3), so `boto3-s3-cli` accepts the flag and ignores it: its reports
+keep one form whatever the value (a parameter-validation failure reads
+`An error occurred (ParamValidation): <message>`).
 
 `--cli-binary-format base64` (the default) base64-decodes only the parameters
 the *API operation model* declares as a `blob` shape:
@@ -285,18 +286,6 @@ normalization rather than an exemption from it. The root tokens `aws` /
 onto our single one - are rewritten on aws's side before the comparison, and
 the surrounding message is then compared in full.
 
-The default enhanced-style parameter-validation envelope is reproduced as
-well: parser failures, unknown options and path/option validation failures
-use
-`An error occurred (ParamValidation): <message>`. This target is the default
-output of aws-cli; selecting another `--cli-error-format` does not alter
-`boto3-s3-cli` output, as described in section 2.1.
-
-aws drops that envelope - keeping the exit code - when the run names a profile
-no config file declares, because it renders the envelope through the session
-that fails to resolve. That rendering detail is not reproduced: the envelope
-stays here ([`cli.md`](./cli.md) section 6).
-
 ### Recorded deviations
 
 These are the places `boto3-s3-cli` deliberately displays something other than
@@ -305,15 +294,10 @@ functional differences**: nothing here licenses an unrecorded one, and a new
 one is added by the same explicit decision a new normalization rule takes.
 Those a user sees on a successful run (the pipeline's five, the help pages
 and `--debug` traces, the `--version` line, the missing `cli_history`
-warning, and the `--dryrun` line of a directory-source copy below) and the
-batched delete's failure line are carried in
-[`aws-differences.md`](../docs/cli/aws-differences.md) section 2 as well. The
-rest are kept here only as implementation notes: an interrupted `mv`'s record,
-an error's details (the doubly-malformed listing entry, Ctrl-C's closing line,
-the directory-source failure line), a difference that comes only from an SDK
-version (botocore's own messages) - none of which the policy records for users
-([`overview.md`](./overview.md) section 3) - and the last, which no real run
-reaches.
+warning, and the `--dryrun` line of a directory-source copy below) are
+carried in [`aws-differences.md`](../docs/cli/aws-differences.md) section 2
+as well. The rest are kept here only as implementation notes: an interrupted
+`mv`'s record, and the last, which no real run reaches.
 
 The first five are the output pipeline's (`progress.py`; the rendering thread
 itself mirrors aws-cli's `ResultProcessor`):
@@ -352,28 +336,8 @@ itself mirrors aws-cli's `ResultProcessor`):
   total: the byte meter reads done over expected for the real transfers
   alone, and the two meters disagree mid-run and at the end.
 
-Three more are in the result text itself rather than in its rendering:
+One more is in the result text itself rather than in its rendering:
 
-- **A batched delete's per-key failure line**, composed from a batch
-  response's own `Errors[]` entry, names the `DeleteObjects` operation and
-  never carries the `(reached max retries: N)` suffix, where aws's line names
-  `DeleteObject` and, on its classic client, carries the suffix botocore
-  appends once the request's attempts are spent. (A batch request failing as
-  a whole sends its keys on their own, whose lines are aws's.) It follows from the
-  accepted batching ([`deleter.md`](./deleter.md) section 4): the line is
-  composed from the batch response's own `Errors[]` entry rather than by
-  botocore. It reaches the batching routes alone - `rm --recursive`, an S3-side
-  `sync --delete`, `rb --force` - while a single-key `rm` still issues
-  `DeleteObject` and writes aws's bytes.
-- **The element a doubly-malformed listing entry is blamed on.** aws reads an
-  entry's required elements in one order while displaying a listing
-  (`LastModified` -> `Size` -> `Key`) and in another while enumerating a
-  transfer (`Key` -> `LastModified` -> `Size`); one shared listing converter
-  here follows the transfer order. So an `ls` against an entry missing `Key`
-  *together with* another required element quotes `'Key'` where aws quotes the
-  other name. Reproducing both orders would make a backend's read order depend
-  on its consumer. The exit code, the entries printed before it and the stream
-  they go to all agree, and the transfer commands agree entirely.
 - **An interrupted `mv`'s record.** aws can delete sources for which it
   printed no `move:` line (measured); this command prints the line for every
   source it deletes.
@@ -394,32 +358,12 @@ The rest sit outside the pipeline:
   the program identifying itself, but the shape of the line differs beyond a
   token rewrite, so it is recorded here rather than folded into the
   program-identity mapping.
-- **Ctrl-C's closing line.** `aws` produces its `cancelled: ctrl-c received`
-  closing line only from a cancelled classic transfer future; every other
-  interrupted shape closes with an empty `fatal error:` line (a rendering
-  accident), or with no closing line at all when the CRT manager swallows a
-  drain-time interrupt. This command keeps one uniform
-  `cancelled: ctrl-c received` ending wherever the interrupt reaches its
-  handler ([`crt.md`](./crt.md) section 6).
-- **The non-recursive directory-source failure line** keeps the up-front
-  `[Errno 21]` report (`./d`) where aws threads the trailing-separator form
-  through its engines — under CRT an untranslated `Unknown Error Code` —
-  because mirroring that rendering would cost the clear errno report
-  (decided 2026-08-01). Under `--dryrun` the same threading shows in the
-  previewed line of a successful run (`upload: d/ to s3://bkt/` on aws,
-  `upload: ./d to s3://bkt/d` here), which aws-differences.md records.
-- **A message botocore itself writes is the installed botocore's wording**,
-  where aws prints its bundled fork's. This is not class 2 (the same aws
-  version installed from PyPI still carries the fork), but it comes only from
-  an SDK version difference, which is not matched
-  ([`overview.md`](./overview.md) section 3). It reaches the console on
-  exactly one input on this surface - a `max_attempts` below the minimum,
-  which aws ends `greater than or equal to one.` and this ends `greater than
-  or equal to 1.` (rc 255 on both, measured 2026-08-08). The
-  invalid-bucket-name report is the same family - the installed botocore words
-  it, the names refused before any request included - and the rest of the
-  fork's wording differences sit on aws's SSO / login paths, which this command
-  does not have.
+- **The `--dryrun` line of a non-recursive directory source** names the
+  source as given (`(dryrun) upload: ./d to s3://bkt/d`) where aws threads
+  its trailing-separator form through its engines
+  (`(dryrun) upload: d/ to s3://bkt/`). The source keeps its given form so
+  that the run without `--dryrun` fails the item with the operating
+  system's `[Errno 21]` (rc 1) (decided 2026-08-01).
 - **No `cli_history` warning.** This command has no history mechanism, so it
   never writes aws's `Warning: Unable to record CLI history. ...` line.
 - **`--human-readable` past EiB.** aws's suffix loop falls through above EiB
@@ -430,5 +374,4 @@ The rest sit outside the pipeline:
 One further difference comes from the **parser** rather than the display
 layer: an ambiguous abbreviation used as an option value is rejected on
 Python 3.10 / 3.11, recorded with its rationale in [`cli.md`](./cli.md)
-section 2. The parser's own reports are argparse's wording rather than aws's,
-an error detail (same section).
+section 2.

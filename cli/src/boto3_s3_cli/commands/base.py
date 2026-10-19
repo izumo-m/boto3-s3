@@ -146,15 +146,13 @@ def parse_integer_option(value: object, *, operation: str) -> int | None:
     if isinstance(value, int):  # an argparse integer default, already converted
         return value
     # argparse hands us a str, a fileb:// paramfile hands us bytes; both go
-    # straight into int() the way aws does. int() coerces str and bytes alike,
-    # and its ValueError repr differs (``'abc'`` vs ``b'abc'``), so the failure
-    # message matches aws's for a file:// vs a fileb:// source.
+    # straight into int() the way aws does. int() coerces str and bytes alike.
     text = value if isinstance(value, (str, bytes)) else str(value)
     try:
         return int(text)
     except ValueError as exc:
         # InvalidValueError: main() maps it to 255 (aws's general handler),
-        # not ValidationError's 252, and the text mirrors aws's message.
+        # not ValidationError's 252.
         raise InvalidValueError(str(exc), operation=operation) from exc
 
 

@@ -76,8 +76,8 @@ class MalformedResponseError(Boto3S3Error):
     local zone cannot represent (aws-cli converts every S3 timestamp it reads
     to local time, so such an object ends its run). aws-cli dies with the
     bare ``KeyError`` / ``OverflowError``; this class carries that exception
-    on ``__cause__`` and its ``str()`` as the message, so the CLI's line reads
-    the same. The run stops where aws-cli's stops: the entries ahead of the
+    on ``__cause__`` and its ``str()`` as the message. The run stops where
+    aws-cli's stops: the entries ahead of the
     bad one are already delivered (design/exceptions.md section 3).
     """
 
