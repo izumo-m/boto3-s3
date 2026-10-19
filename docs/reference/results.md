@@ -65,8 +65,9 @@ discarded after acceptance:
   batch for it ([`../../design/deleter.md`](../../design/deleter.md)).
 
 An item whose request died without any response — the connection closed, the
-read timed out — is an ordinary `FAILED` record, although `aws s3` loses it
-(no output line, exit code 0). Such a record does not say S3 left the object
+read timed out — is an ordinary `FAILED` record, although `aws s3` on its
+classic engine loses it (no output line, exit code 0) unless it was a
+download's read of the object, which it retries and then reports. Such a record does not say S3 left the object
 alone: the request may have reached S3, and the object been written, copied
 or deleted, before the response was lost; a listing, or running the
 operation again, shows which. A batched `DeleteObjects` that dies this way is not itself a

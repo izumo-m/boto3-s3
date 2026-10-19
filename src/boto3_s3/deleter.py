@@ -571,8 +571,8 @@ class S3Deleter:
             # It decides nothing for the keys: aws-cli sends each of them as a
             # DeleteObject of its own, with attempts of its own, so each goes
             # out on that route of the same client and takes that request's
-            # outcome - a delete, a failure (a wrong bucket fails every key), or
-            # on botocore a loss. Measured: a
+            # outcome - a delete or a failure (a wrong bucket fails every key).
+            # Measured: a
             # server failing the first three deletes with InternalError, or
             # with Throttling, leaves aws deleting both keys of a two-key run
             # at rc 0, and a single 429 fails one key and deletes the other.

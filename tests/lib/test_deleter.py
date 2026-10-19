@@ -1404,7 +1404,7 @@ class TestCrtRoute:
 
     def test_keys_that_die_again_fail_with_the_crt_error(self, built: list[Any]) -> None:
         # What is left is awscrt's error, which aws-cli reports for each key
-        # (measured: rc 1) - none is lost, as botocore's would be.
+        # (measured: rc 1) - each key fails, as on botocore.
         awscrt_exceptions = pytest.importorskip("awscrt.exceptions")
         dead = awscrt_exceptions.from_code(1051)
         fake = _FakeS3Client(script=[dead], single_script=[dead, dead])

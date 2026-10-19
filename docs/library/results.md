@@ -26,8 +26,9 @@ never enumerated because the run ended first. The S3 delete lane of `rm` and
 be dropped without a record when a cancellation or an error ends the run.
 
 An item whose request died without any response — the connection closed, or
-the read timed out — is an ordinary `FAILED` record, where `aws s3` loses it
-(no output line, exit code 0). Such a failure does not mean nothing happened:
+the read timed out — is an ordinary `FAILED` record, where `aws s3` on its
+classic engine loses it (no output line, exit code 0) unless it was a
+download's read of the object, which it retries and then reports. Such a failure does not mean nothing happened:
 the request may have reached S3, and the object been written, copied or
 deleted, before the response was lost. A listing, or running the operation
 again, shows which.

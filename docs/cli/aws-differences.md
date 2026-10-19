@@ -107,8 +107,10 @@ that say outright that the run comes out differently, listed in section 1.
   request's connection is closed before any response, or its read times out,
   once the client's retries are spent — or the HTTP layer refuses to send a
   header value (a line break in `--cache-control`) — `aws`'s completion
-  handler fails on the missing response and loses the item: on the classic
-  engine it prints no line for it and, if nothing else failed, exits 0,
+  handler on its classic engine fails on the missing response and loses the
+  item (a download's read of the object aside, which s3transfer retries and
+  then reports as a failure): it prints no line for it and, if nothing else
+  failed, exits 0,
   whether or not the request took effect (measured on `cp`, `mv`, recursive
   `cp` and `rm`). Under the CRT engine an `mv` download meets it in
   its source delete, a plain `DeleteObject`, and there `aws` writes an
@@ -283,8 +285,8 @@ that say outright that the run comes out differently, listed in section 1.
   answers for two keys, or a single 429 or 403, or a single 500 under
   `AWS_MAX_ATTEMPTS=1` — where three `InternalError` or `Throttling` answers
   leave both tools deleting both). A delete that keeps failing ends the same
-  on both tools, bar one whose requests die without any response (the first
-  entry of this section).
+  on both tools, bar one whose requests die without any response on the
+  classic engine (the first entry of this section).
 
   Under the CRT engine (`preferred_transfer_client = crt`) the batches ride
   the CRT client, as `aws`'s per-key deletes ride its own — `rm` and a
