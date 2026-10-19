@@ -1108,43 +1108,48 @@ class TestResults:
             ("c", OpOutcome.SUCCEEDED),
         ]
 
-    def test_keys_whose_own_delete_dies_too_are_lost(self) -> None:
-        # The per-key requests die as well: each is lost the way aws-cli's
-        # classic completion handler loses it - no record, no count, rc 0.
-        dead = ConnectionClosedError(endpoint_url="http://h/")
+    @pytest.mark.parametrize(
+        "dead",
+        [
+            ConnectionClosedError(endpoint_url="http://h/"),
+            ReadTimeoutError(endpoint_url="http://h/"),
+            EndpointConnectionError(endpoint_url="http://h/"),
+        ],
+        ids=["connection-closed", "read-timeout", "refused"],
+    )
+    def test_keys_whose_own_delete_dies_too_fail(self, dead: Exception) -> None:
+        # The per-key requests die as well: each key fails with its own
+        # request's error. aws-cli's classic completion handler loses a
+        # closed or timed-out one (no line, rc 0), which is not copied: S3 may
+        # have acted before the connection went, but nothing confirmed it.
         fake = _FakeS3Client(script=[dead], single_script=[dead, dead])
         results: list[OpResult] = []
         deleter = _deleter(fake, batch_size=2, on_result=results.append)
         deleter.submit(_info("a"))
         deleter.submit(_info("b"))
         deleter.close()
-        assert results == []
-        assert (deleter.succeeded, deleter.failed) == (0, 0)
-        assert deleter.first_error is None
+        assert len(fake.single_calls) == 2
+        assert [(r.compare_key, r.outcome) for r in results] == [
+            ("a", OpOutcome.FAILED),
+            ("b", OpOutcome.FAILED),
+        ]
+        for result in results:
+            assert isinstance(result.error, TransportError)
+            assert result.error.__cause__ is dead
+        assert (deleter.succeeded, deleter.failed) == (0, 2)
+        assert isinstance(deleter.first_error, TransportError)
 
-    def test_a_single_key_that_dies_without_a_response_records_nothing(self) -> None:
-        fake = _FakeS3Client(single_script=[ReadTimeoutError(endpoint_url="http://h/")])
+    def test_a_single_key_that_dies_without_a_response_fails(self) -> None:
+        dead = ReadTimeoutError(endpoint_url="http://h/")
+        fake = _FakeS3Client(single_script=[dead])
         results: list[OpResult] = []
         deleter = _deleter(fake, on_result=results.append)
         deleter.submit(_info("k\x01"))  # XML-incompatible: the per-key route
         deleter.close()
-        assert results == []
-        assert (deleter.succeeded, deleter.failed) == (0, 0)
-
-    def test_a_refused_connection_still_fails_the_key(self) -> None:
-        # EndpointConnectionError carries no response attribute at all, so
-        # aws-cli's check answers normally and the key fails there too
-        # (`delete failed: ... Could not connect to the endpoint URL`, rc 1).
-        # The batch's refusal sends the key again on its own, refused as well.
-        refused = EndpointConnectionError(endpoint_url="http://h/")
-        fake = _FakeS3Client(script=[refused], single_script=[refused])
-        results: list[OpResult] = []
-        deleter = _deleter(fake, on_result=results.append)
-        deleter.submit(_info("a"))
-        deleter.close()
-        assert len(fake.single_calls) == 1
         assert [r.outcome for r in results] == [OpOutcome.FAILED]
         assert isinstance(results[0].error, TransportError)
+        assert results[0].error.__cause__ is dead
+        assert (deleter.succeeded, deleter.failed) == (0, 1)
 
     def test_later_batches_run_after_request_failure(self) -> None:
         fake = _FakeS3Client(

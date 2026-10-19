@@ -25,16 +25,12 @@ never enumerated because the run ended first. The S3 delete lane of `rm` and
 `sync` is an exception: entries the deleter accepted but had not yet sent can
 be dropped without a record when a cancellation or an error ends the run.
 
-The other exception follows `aws s3`: an item whose request, sent through
-botocore, died without any response — the connection closed, or the read
-timed out (bar a download's read of the object, which is retried and then
-fails) — produces no record and is not counted, so the
-run can finish without an error although that item did not happen. `aws s3`
-loses such a failure the same way (no output line, exit code 0). A refused
-connection, that retried read, an error the
-service answered with, and a failure the CRT engine reports itself — a delete
-sent on the CRT client included — are ordinary `FAILED` records.
-Turn on debug logging for `boto3_s3` to see a dropped failure.
+An item whose request died without any response — the connection closed, or
+the read timed out — is an ordinary `FAILED` record, where `aws s3` loses it
+(no output line, exit code 0). Such a failure does not mean nothing happened:
+the request may have reached S3, and the object been written, copied or
+deleted, before the response was lost. A listing, or running the operation
+again, shows which.
 
 Three checks that run *before* an item is submitted turn it away with an
 advisory and nothing else, so those items get no terminal record either: an

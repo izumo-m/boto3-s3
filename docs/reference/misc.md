@@ -692,9 +692,7 @@ inline, where an exception it raises propagates out of `submit` directly.
 
 One [`OpResult`](./results.md#opresult) per dispatched entry, emitted in
 submission order within a batch (bar a per-key request an abandoned run never
-sent — the last paragraph of this section — and, on the botocore client, a
-key whose own `DeleteObject` died without a response, dropped as `aws s3`
-drops it). `transfer_type` is
+sent — the last paragraph of this section). `transfer_type` is
 [`TransferType.DELETE`](./results.md#transfertype) and `bytes_transferred`
 stays `0`. `compare_key` is the entry's own `compare_key` when it has one and
 its `key` otherwise. `src` is `s3://<bucket>/<key>`, `src_info` is the

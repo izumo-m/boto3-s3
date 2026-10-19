@@ -61,9 +61,9 @@ choice is the client the deletes ride, as `aws s3 rm` carries them on its
 transfer manager: the storage's botocore client, or — when it selects the CRT
 engine — the CRT client, with this instance's CRT postures (see
 [`S3Deleter`](../misc.md#s3deleter)). That client's retry policy and error
-text are the deletes', and a delete that dies without a response is dropped
-without a record on botocore, as `aws s3` drops it, and a `FAILED` record on
-the CRT client ([`../results.md`](../results.md)). A dryrun builds no engine.
+text are the deletes'. A delete that dies without a response is a `FAILED`
+record on either client, where `aws s3` drops it without a line on botocore
+([`../results.md`](../results.md)). A dryrun builds no engine.
 
 `target` names what to delete: an `"s3://bucket/key"` string (the `s3://`
 scheme is optional, so `"bucket/key"` works too), an `os.PathLike[str]`

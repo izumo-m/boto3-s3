@@ -1447,10 +1447,10 @@ class TestDeletesOnTheCrtEngine:
     """Which client the sync's deletes ride.
 
     An upload's deletes ride the CRT client when the run selects the CRT
-    engine, as aws-cli's ride its CRT client, and a request that dies there is
-    reported; an S3-to-S3 sync always runs on aws-cli's classic client
-    (`_compute_transfer_client_type`), so its deletes stay on botocore, where
-    the same request is lost (`lost_like_aws`).
+    engine, as aws-cli's ride its CRT client; an S3-to-S3 sync always runs on
+    aws-cli's classic client (`_compute_transfer_client_type`), so its deletes
+    stay on botocore. A request that dies without a response fails its key on
+    either client.
     """
 
     @pytest.fixture
@@ -1482,20 +1482,25 @@ class TestDeletesOnTheCrtEngine:
         self, built: list[Any]
     ) -> None:
         src_client, _ = make_recording_client([listing()])
+        key_dead = self._dead()
         dest_client, dest_calls = make_recording_client(
-            [listing(("p/z.txt", 1)), self._dead(), self._dead()]
+            [listing(("p/z.txt", 1)), self._dead(), key_dead]
         )
         results: list[OpResult] = []
-        S3().sync(
-            S3Storage("s3://src-b/p", client=src_client),
-            S3Storage("s3://dest-b/p", client=dest_client),
-            delete_filter=True,
-            on_result=results.append,
-            transfer_config=self._crt(),
-        )
+        with pytest.raises(BatchError):
+            S3().sync(
+                S3Storage("s3://src-b/p", client=src_client),
+                S3Storage("s3://dest-b/p", client=dest_client),
+                delete_filter=True,
+                on_result=results.append,
+                transfer_config=self._crt(),
+            )
         assert built == []
         assert ops(dest_calls) == ["ListObjectsV2", "DeleteObjects", "DeleteObject"]
-        assert results == []
+        assert [r.outcome for r in results] == [OpOutcome.FAILED]
+        error = results[0].error
+        assert isinstance(error, TransportError)
+        assert error.__cause__ is key_dead
 
     def test_an_upload_sync_deletes_on_the_crt_client(
         self, built: list[Any], tmp_path: Path

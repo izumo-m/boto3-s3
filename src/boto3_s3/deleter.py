@@ -55,7 +55,6 @@ from boto3_s3.exceptions import Boto3S3Error, TransportError, ValidationError
 from boto3_s3.s3storage import (
     S3_CODE_CATEGORIES,
     S3Storage,
-    drop_like_aws,
     request_failure,
     s3_errors,
 )
@@ -203,8 +202,7 @@ class S3Deleter:
     Per-key completion is reported through ``on_result`` - one ``OpResult`` per
     submitted entry, in submission order within a batch (entries abandoned by
     ``close(flush=False)``, by an error-path close, or by a close under a
-    cancelled token get no result, and so does a key whose own DeleteObject
-    died without a response on botocore - `lost_like_aws`);
+    cancelled token get no result);
     rollup
     ``succeeded`` / ``failed`` / ``first_error`` are approximate while running
     and final after ``close``. The deleter never raises ``BatchError``
@@ -520,22 +518,20 @@ class S3Deleter:
             (batchable if _delete_objects_compatible(info.key) else singles).append((index, info))
         errors: list[Boto3S3Error | None] = [None] * len(batch)
         deletes: list[dict[str, Any] | None] = [None] * len(batch)
-        # A key that gets no record and no count: its own request died without
-        # a response, which aws-cli's per-key DeleteObject loses without a
-        # trace (`lost_like_aws`), or the run was abandoned before its own
-        # request went out - no request, like an entry still in the buffer and
-        # like aws-cli's never-started future.
-        lost = [False] * len(batch)
+        # A key that gets no record and no count: the run was abandoned before
+        # its own request went out - no request, like an entry still in the
+        # buffer and like aws-cli's never-started future.
+        unsent = [False] * len(batch)
 
         if batchable:
-            self._run_delete_objects(batchable, errors, deletes, lost)
+            self._run_delete_objects(batchable, errors, deletes, unsent)
         if singles:
             self._send_singly(
-                singles, errors, deletes, lost, purpose="deleting XML-incompatible key"
+                singles, errors, deletes, unsent, purpose="deleting XML-incompatible key"
             )
 
         for index, info in enumerate(batch):
-            if not lost[index]:
+            if not unsent[index]:
                 self._record(info, errors[index], deletes[index])
 
     def _run_delete_objects(
@@ -543,7 +539,7 @@ class S3Deleter:
         batch: list[tuple[int, FileInfo]],
         errors: list[Boto3S3Error | None],
         deletes: list[dict[str, Any] | None],
-        lost: list[bool],
+        unsent: list[bool],
     ) -> None:
         """Delete the XML-compatible portion with one ``DeleteObjects`` request."""
         objects: list[ObjectIdentifierTypeDef] = [{"Key": info.key} for _, info in batch]
@@ -589,7 +585,7 @@ class S3Deleter:
             failure = request_failure(exc, operation=self._operation, bucket=self._bucket)
             logger.debug("delete_objects failed for s3://%s: %s", self._bucket, failure)
             self._send_singly(
-                batch, errors, deletes, lost, purpose="resending a failed DeleteObjects request"
+                batch, errors, deletes, unsent, purpose="resending a failed DeleteObjects request"
             )
             return
         else:
@@ -629,7 +625,7 @@ class S3Deleter:
             # (`_retries_disabled`; the CRT client retries whatever that
             # policy says) and the key keeps the batch's error.
             self._send_singly(
-                resend, errors, deletes, lost, purpose="retrying transient DeleteObjects failure"
+                resend, errors, deletes, unsent, purpose="retrying transient DeleteObjects failure"
             )
 
     def _send_singly(
@@ -637,7 +633,7 @@ class S3Deleter:
         entries: list[tuple[int, FileInfo]],
         errors: list[Boto3S3Error | None],
         deletes: list[dict[str, Any] | None],
-        lost: list[bool],
+        unsent: list[bool],
         *,
         purpose: str,
     ) -> None:
@@ -656,7 +652,7 @@ class S3Deleter:
         ``close(flush=False)`` for any reason but a graceful cancel (which
         drains the batch in flight, these requests included), a ``close()``
         that was itself interrupted, or the token cancelled in IMMEDIATE
-        mode. An entry left out gets no record (``lost``), as aws-cli's
+        mode. An entry left out gets no record (``unsent``), as aws-cli's
         never-started future prints nothing, and the requests already out
         finish, as the batch request itself does. An unclosed deleter's last batch can get here
         while the interpreter is shutting down, when no thread can be started
@@ -669,10 +665,10 @@ class S3Deleter:
             if self._abandoned or (
                 self._cancel_token is not None and self._cancel_token.mode is CancelMode.IMMEDIATE
             ):
-                lost[index] = True
+                unsent[index] = True
                 return
             logger.debug("%s with DeleteObject: s3://%s/%s", purpose, self._bucket, info.key)
-            self._run_delete_object(index, info, errors, deletes, lost)
+            self._run_delete_object(index, info, errors, deletes)
 
         if len(entries) == 1:
             send(entries[0])
@@ -702,16 +698,16 @@ class S3Deleter:
         info: FileInfo,
         errors: list[Boto3S3Error | None],
         deletes: list[dict[str, Any] | None],
-        lost: list[bool],
     ) -> None:
         """Delete one key through aws-cli's per-key route, on the run's client.
 
         Taken by a key the batch cannot carry, by a key the batch response
         reported a transient fault for - the request the client's retry policy
         covers, which a per-key entry of a 200 response never reaches - and by
-        every key of a batch request that failed as a whole. A request that
-        died without a response is lost as aws-cli loses it (`drop_like_aws`),
-        which only a botocore failure can be.
+        every key of a batch request that failed as a whole. Whatever the
+        request raised fails the key, a request that died without any
+        response included (aws-cli's classic client loses that one with no
+        line; this does not copy it).
         """
         kwargs: dict[str, Any] = {"Bucket": self._bucket, "Key": info.key}
         if self._request_payer is not None:
@@ -726,13 +722,9 @@ class S3Deleter:
         except AssertionError:
             raise  # as in _run_delete_objects
         except Exception as exc:
-            failure = request_failure(
+            errors[index] = request_failure(
                 exc, operation=self._operation, bucket=self._bucket, key=info.key
             )
-            if drop_like_aws(failure):
-                lost[index] = True
-            else:
-                errors[index] = failure
         else:
             if self._capture_response:
                 deletes[index] = strip_response_metadata(response)

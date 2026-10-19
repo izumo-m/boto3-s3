@@ -44,8 +44,8 @@ reaches the operation produces nothing: one a filter excluded during
 enumeration, one a `sync` decision declined to act on (`create_filter`,
 `update_filter`, `delete_filter`, or the `pair_filter` that replaces all three,
 [`operations/sync.md`](./operations/sync.md)), or one never enumerated because
-the run ended first. Three carve-outs exist, items consumed before submission,
-discarded after acceptance, or lost the way `aws s3` loses them:
+the run ended first. Two carve-outs exist, items consumed before submission or
+discarded after acceptance:
 
 - an item a pre-transfer gate rejects with an advisory instead of an outcome:
   the glacier gate without `ignore_glacier_warnings` (one `WARNED` record), a
@@ -62,21 +62,16 @@ discarded after acceptance, or lost the way `aws s3` loses them:
   own (one the XML round trip cannot carry, a re-send of a transient per-key
   failure, any key of a batch request that failed as a whole) that had not
   gone out when the run was abandoned, even where S3 had already answered the
-  batch for it ([`../../design/deleter.md`](../../design/deleter.md));
-- an item whose botocore request died without any response — botocore's
-  closed-connection and read-timeout errors — on a transfer, a per-key
-  delete, or a single-key `rm`. It produces no record
-  and is in no count, because `aws s3` loses it too: its per-item completion
-  handler fails on the missing response, so the item prints no line and the
-  run exits 0 when nothing else failed. A refused connection, a download's
-  read timeout (s3transfer retries it and then fails), a service error
-  response, and a failure the CRT engine reports itself — a delete sent on
-  the CRT client included, as a run that selects the CRT engine sends them —
-  are ordinary `FAILED` records. A batched
-  `DeleteObjects` that dies without a response is not itself lost or failed,
-  on either client: its keys are sent again one `DeleteObject` each, the
-  request `aws s3` sends, and each takes its own outcome. The dropped failure is logged at debug level on the
-  `boto3_s3.s3storage` logger.
+  batch for it ([`../../design/deleter.md`](../../design/deleter.md)).
+
+An item whose request died without any response — the connection closed, the
+read timed out — is an ordinary `FAILED` record, although `aws s3` loses it
+(no output line, exit code 0). Such a record does not say S3 left the object
+alone: the request may have reached S3, and the object been written, copied
+or deleted, before the response was lost; a listing, or running the
+operation again, shows which. A batched `DeleteObjects` that dies this way is not itself a
+failure: its keys are sent again one `DeleteObject` each, the request
+`aws s3` sends, and each takes its own outcome.
 
 `WARNED` and `NOTICE` sit outside that rule in the other direction as well.
 Being advisories rather than outcomes, they are not tied one-to-one to an item:

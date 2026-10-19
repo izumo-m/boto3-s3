@@ -100,9 +100,7 @@ rehearsing; this flag is for code driving the deleter directly.
 
 `on_result` receives one `OpResult` per dispatched key, with `transfer_type`
 `delete` and `bytes_transferred` 0, in submission order within a batch. Keys
-discarded without being sent produce no record, and neither does a key whose
-own `DeleteObject` died without a response on the botocore client (see
-[Failures](#3-failures)).
+discarded without being sent produce no record (see [Failures](#3-failures)).
 
 **It is called from the worker thread.** Keep it fast and do not let it raise.
 If it does raise, the records already delivered are counted, the rest of that
@@ -153,9 +151,9 @@ request's outcome. The deleter then continues with the following batches. A
 wrong bucket name still fails everything, each key on its own request, and the
 counts show it. One batch request has one set of attempts, where `aws s3`
 gives each key its own, so a key can get more attempts here than there —
-never fewer. On botocore a re-sent key that dies without a response is
-dropped without a record, as `aws s3` drops it; on the CRT client it is a
-failure carrying the CRT's own error, as `aws s3` reports it. A key the run is
+never fewer. A re-sent key that dies without a response is a failure on
+either client, carrying that client's own error, where `aws s3` drops it
+without a line on botocore; S3 may still have deleted it. A key the run is
 abandoned before re-sending gets no record, like an entry still in the
 buffer.
 

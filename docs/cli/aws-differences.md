@@ -33,8 +33,8 @@ access point, a plain-HTTP endpoint named anywhere but `--endpoint-url` under
 the CRT engine, a `REQUESTS_CA_BUNDLE` the CRT engine cannot use, a
 `[plugins]` section, an alias file, a `cli_history` directory `aws` cannot
 create, the modification time a download stamps in some local zones (and the
-`sync` runs that follow from it), a CRT-engine `mv` download whose source
-delete dies without a response, a help page that cannot be written, a
+`sync` runs that follow from it), a transfer or delete whose request dies
+without any response, a help page that cannot be written, a
 `file://` or `fileb://` reference `aws` mishandles, and the `PYTHON*`
 environment variables. A difference of that kind anywhere else is a
 bug worth reporting; an error report's wording, or which of two mistakes it
@@ -102,17 +102,24 @@ syncing with `--delete` onto such a directory.
 These are visible, or make no difference to the result — except the ones
 that say outright that the run comes out differently, listed in section 1.
 
-- **An `mv` download whose source delete dies without a response hangs `aws`
-  under the CRT engine.** With `preferred_transfer_client = crt`, an `mv` from
-  S3 to a local path downloads on the CRT client and then deletes the source
-  with a plain `DeleteObject`. When that request's connection is closed before
-  any response, `aws`'s completion handler fails on the missing response (the
-  same failure that makes it drop such an item on the classic engine), but the
-  CRT engine does not swallow it: `aws` writes an `Exception ignored in:`
-  traceback ending in `AttributeError: 'NoneType' object has no attribute
-  'get'` and never exits (measured: still waiting after 90 seconds). Here the
-  item is dropped as on the classic engine: no line, exit code 0, the file
-  downloaded and the source kept.
+- **A request that dies without any response fails its item here.** When a
+  request's connection is closed before any response, or its read times out,
+  once the client's retries are spent — or the HTTP layer refuses to send a
+  header value (a line break in `--cache-control`) — `aws`'s completion
+  handler fails on the missing response and loses the item: on the classic
+  engine it prints no line for it and, if nothing else failed, exits 0,
+  whether or not the request took effect (measured on `cp`, `mv`, recursive
+  `cp` and `rm`). Under the CRT engine an `mv` download meets it in
+  its source delete, a plain `DeleteObject`, and there `aws` writes an
+  `Exception ignored in:` traceback ending in `AttributeError: 'NoneType'
+  object has no attribute 'get'` and never exits (measured: still waiting
+  after 90 seconds). This command reports such an item like any other
+  failure — `upload failed:`, `move failed:`, `delete failed:` and so on,
+  with the client's error — and exits 1; `rb --force` then stops with 255
+  before removing the bucket. S3 may have acted on the request before the
+  response was lost, so the object may have been written or deleted all the
+  same. A request the CRT client sends itself — a CRT transfer, a delete
+  under the CRT engine — is reported as a failure by both tools.
 - **A download's modification time differs in some zones.** Both tools give
   the downloaded file the object's `LastModified`; here the object's own
   instant is stamped, always. `aws` converts the timestamp to local time and
@@ -265,7 +272,8 @@ that say outright that the run comes out differently, listed in section 1.
   answers for two keys, or a single 429 or 403, or a single 500 under
   `AWS_MAX_ATTEMPTS=1` — where three `InternalError` or `Throttling` answers
   leave both tools deleting both). A delete that keeps failing ends the same
-  on both tools.
+  on both tools, bar one whose requests die without any response (the first
+  entry of this section).
 
   Under the CRT engine (`preferred_transfer_client = crt`) the batches ride
   the CRT client, as `aws`'s per-key deletes ride its own — `rm` and a

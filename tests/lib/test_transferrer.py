@@ -2255,14 +2255,10 @@ class _CrtRenameFuture(_FakeCrtFuture):
         self._coordinator.set_exception(exception, override=True)
 
 
-class _CrtRenameFailing(_CrtDrainManager):
-    """The CRT manager's download whose rename into place fails: its done
-    handler (``RenameTempFileHandler``) runs before the subscribers and hands
-    the error to the already-done coordinator."""
-
-    def __init__(self, error: OSError) -> None:
-        super().__init__()
-        self._error = error
+class _CrtDownloading(_CrtDrainManager):
+    """The CRT manager's download that succeeds: the queued subscribers run at
+    submission and the done ones at the drain, on a coordinator that takes a
+    subscriber's late ``set_exception`` (mv's source delete)."""
 
     def download(self, **kwargs: Any) -> _FakeCrtFuture:
         future = _CrtRenameFuture(kwargs["fileobj"])
@@ -2273,6 +2269,16 @@ class _CrtRenameFailing(_CrtDrainManager):
                 on_queued(future)
         self._accepted.append((future, subscribers))
         return future
+
+
+class _CrtRenameFailing(_CrtDownloading):
+    """The CRT manager's download whose rename into place fails: its done
+    handler (``RenameTempFileHandler``) runs before the subscribers and hands
+    the error to the already-done coordinator."""
+
+    def __init__(self, error: OSError) -> None:
+        super().__init__()
+        self._error = error
 
     def _drain(self) -> None:
         for future, _subscribers in self._accepted:
@@ -2478,14 +2484,15 @@ class TestStreamDownloadRetry:
         assert written == [(b"abcd", 0), (b"ef", 4)]
 
 
-class TestFailureLostLikeAws:
-    """A per-item failure without a response vanishes, as it does on aws-cli.
+class TestFailureWithoutAResponse:
+    """A per-item failure without any response is FAILED like every other.
 
     aws-cli's completion handler reads ``exception.response.get(...)`` and
     raises on the ``None`` response botocore's closed-connection and timeout
-    errors carry; s3transfer swallows that, so the item gets no line and no
-    count (measured against the pinned aws through a 127.0.0.1 server that
-    closes every connection: cp, mv, recursive cp and rm all exit 0 silently).
+    errors carry; s3transfer swallows that, so aws prints no line and exits 0
+    for the item (measured on cp, mv, recursive cp and rm). A failure is never
+    reported as a success (design/overview.md section 3), so that is not
+    copied: the item fails as a refused connection does.
     """
 
     @staticmethod
@@ -2501,34 +2508,25 @@ class TestFailureLostLikeAws:
         [
             ConnectionClosedError(endpoint_url="http://h/"),
             ReadTimeoutError(endpoint_url="http://h/"),
+            EndpointConnectionError(endpoint_url="http://h/"),
         ],
-        ids=["connection-closed", "read-timeout"],
+        ids=["connection-closed", "read-timeout", "refused"],
     )
-    def test_an_upload_that_dies_without_a_response_leaves_no_record(
-        self, tmp_path: Path, raised: Exception
-    ) -> None:
+    def test_an_upload_whose_request_dies_fails(self, tmp_path: Path, raised: Exception) -> None:
         calls, _, results, transferrer = _run(
             TransferType.UPLOAD, [self._upload_item(tmp_path)], [raised]
         )
         assert ops(calls) == ["PutObject"]
-        assert results == []
-        assert (transferrer.succeeded, transferrer.failed, transferrer.skipped) == (0, 0, 0)
-        assert transferrer.first_error is None
-
-    def test_a_refused_connection_still_fails(self, tmp_path: Path) -> None:
-        # No response attribute at all: aws-cli's check answers normally and
-        # the item fails (`upload failed: ... Could not connect`, rc 1).
-        _, _, results, transferrer = _run(
-            TransferType.UPLOAD,
-            [self._upload_item(tmp_path)],
-            [EndpointConnectionError(endpoint_url="http://h/")],
-        )
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
-        assert transferrer.failed == 1
+        error = results[0].error
+        assert isinstance(error, TransportError)
+        assert error.__cause__ is raised
+        assert (transferrer.succeeded, transferrer.failed, transferrer.skipped) == (0, 1, 0)
+        assert transferrer.first_error is error
 
-    def test_a_move_whose_source_delete_dies_keeps_quiet(self) -> None:
-        # The source delete is translated in-pipeline (s3_errors); the check
-        # reads the botocore cause, the exception aws-cli's handler holds.
+    def test_a_move_whose_source_delete_dies_fails(self) -> None:
+        # S3 may have deleted the source before the connection closed; the
+        # client cannot tell, so the move is not reported as done.
         item = TransferItem(
             compare_key="a.bin",
             size=7,
@@ -2538,17 +2536,49 @@ class TestFailureLostLikeAws:
             dest_bucket="dest-b",
             dest_key="cp/a.bin",
         )
+        dead = ConnectionClosedError(endpoint_url="http://h/")
         calls, source_calls, results, transferrer = _run(
-            TransferType.COPY,
-            [item],
-            [{}],
-            source_responses=[ConnectionClosedError(endpoint_url="http://h/")],
-            is_move=True,
+            TransferType.COPY, [item], [{}], source_responses=[dead], is_move=True
         )
         assert ops(calls) == ["CopyObject"]
         assert ops(source_calls) == ["DeleteObject"]
-        assert results == []
-        assert (transferrer.succeeded, transferrer.failed) == (0, 0)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        error = results[0].error
+        assert isinstance(error, TransportError)
+        assert error.__cause__ is dead
+        assert (error.bucket, error.key) == ("src-b", "d/a.bin")
+        assert (transferrer.succeeded, transferrer.failed) == (0, 1)
+
+    def test_a_crt_move_whose_source_delete_dies_fails(self, tmp_path: Path) -> None:
+        # Under the CRT engine the download lands and the source goes through
+        # a botocore DeleteObject; aws hangs there (aws-differences.md).
+        dest = tmp_path / "a.bin"
+        dest.write_bytes(b"payload")
+        item = TransferItem(
+            compare_key="a.bin",
+            size=7,
+            etag='"abc123"',
+            mtime=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            src_bucket="bucket",
+            src_key="d/a.bin",
+            dest_path=str(dest),
+        )
+        dead = ConnectionClosedError(endpoint_url="http://h/")
+        client, calls = make_recording_client([dead])
+        results: list[OpResult] = []
+        with Transferrer(
+            TransferType.DOWNLOAD, client, is_move=True, on_result=results.append
+        ) as transferrer:
+            transferrer._manager = _CrtDownloading()  # pyright: ignore[reportPrivateUsage]
+            transferrer.submit(item)
+        assert ops(calls) == ["DeleteObject"]
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        error = results[0].error
+        assert isinstance(error, TransportError)
+        assert error.__cause__ is dead
+        assert (error.bucket, error.key) == ("bucket", "d/a.bin")
+        assert transferrer.failed == 1
+        assert dest.read_bytes() == b"payload"
 
 
 class TestNoOverwrite:

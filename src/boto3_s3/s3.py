@@ -68,7 +68,6 @@ from boto3_s3.s3storage import (
     CA_BUNDLE_ENVIRONMENT_VETTED,
     S3Storage,
     client_build_error,
-    drop_like_aws,
     reject_empty_ca_bundle,
     request_failure,
     s3_errors,
@@ -2610,8 +2609,8 @@ class S3:
         carries them on its transfer manager - botocore, or the CRT client when
         it selects the CRT engine (`crt_delete_sender`, with this instance's
         CRT postures). That client's retry policy and error text are the
-        deletes', and a delete that dies without a response is lost on
-        botocore and reported on the CRT, as on aws.
+        deletes'. A delete that dies without any response fails its key on
+        either client, where aws's classic client loses it with no line.
         """
         text = os.fspath(target) if isinstance(target, (str, os.PathLike)) else None
         if isinstance(text, str):
@@ -2756,8 +2755,7 @@ class S3:
         stamped on the hand-built ``FileInfo``. A token cancelled from the
         ``FAILED`` record's callback wins over the failure's ``BatchError``,
         the precedence the batched path and the transfers give it; the caller
-        polls the token after a success, a dry run, or a failure lost the way
-        aws-cli loses it (`lost_like_aws`).
+        polls the token after a success or a dry run.
 
         The request rides the client the recursive route's would
         (`crt_delete_sender`): the storage's own ``delete`` on botocore, or a
@@ -2803,15 +2801,10 @@ class S3:
             # that failure - the delete's own translated error, or anything
             # else botocore threw from inside the call, wrapped by
             # request_failure the way the deleter wraps it (aws's task records
-            # both alike).
+            # both alike). A request that died without any response is no
+            # exception: aws-cli's classic task loses it with no line at rc 0,
+            # which is not copied (design/opresult.md).
             failure = request_failure(exc, operation="rm", bucket=storage.bucket, key=key)
-            if drop_like_aws(failure):
-                # Died without a response on botocore: aws-cli's classic task
-                # loses it - no line, rc 0 (`lost_like_aws`) - so no record and
-                # no BatchError. On the CRT client the failure is awscrt's
-                # error, which is reported, as aws-cli's CRT client reports it.
-                held.raise_if_held()
-                return
             if held.interrupt is None:
                 # A failure after a Ctrl-C is not recorded: on aws's transfer
                 # futures a completion wins over the cancel mark and a failure

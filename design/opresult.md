@@ -107,34 +107,25 @@ the same item's real outcome). Aggregate counts always agree with the records: t
 engine's rollup counters and `BatchError`'s fields are the per-outcome record
 counts ([`exceptions.md`](./exceptions.md) section 4).
 
-One carve-out mirrors aws-cli rather than the rule: an item whose request died
-without a response produces no record and no count. aws-cli's per-item
-completion handler (`DoneResultSubscriber`) checks for S3's conditional-write
-rejection with `exception.response.get("Error", {}).get("Code")`, botocore's
+An item whose request died without any response is no exception: it is a
+`FAILED` record like any other failure, on every route and either engine -
+a transfer, `mv`'s source delete, the deleter's per-key requests, the blind
+single-key `rm`. aws-cli loses some of these: its per-item completion handler
+(`DoneResultSubscriber`) checks for S3's conditional-write rejection with
+`exception.response.get("Error", {}).get("Code")`, botocore's
 `HTTPClientError` family (a connection closed before the response, a read
 timeout) carries `response = None`, and s3transfer's callback runner swallows
-the `AttributeError` that follows - so the item prints no line and the run
-exits 0 when nothing else failed (measured on cp / mv / recursive cp / rm
-against a 127.0.0.1 server closing every connection). `s3storage.lost_like_aws`
-evaluates that same expression on the exception aws-cli would hold (an
-in-pipeline translation is judged by its botocore cause; only the botocore
-family qualifies), `drop_like_aws` logs what it drops at debug level, and the routes
-aws-cli sends through that handler with a botocore client apply it: the
-transfer engine's terminal (`Transferrer._record_failure`, after the
-cancellation branch as in aws-cli), the S3 deleter's per-key requests, and the
-blind single-key `rm` (no record, no `BatchError`). A run whose engine is the
-CRT sends its deletes on the CRT client, as aws-cli does
-(`deleter.crt_delete_sender`; an S3-to-S3 sync stays classic whatever the
-preference), and a dead request there is an awscrt error, which never
-qualifies - aws-cli's CRT client reports it too. A batched `DeleteObjects` that dies this way loses nothing
-by itself - aws-cli never sends one - so its keys go out again one
-`DeleteObject` each and take their own outcomes ([`deleter.md`](./deleter.md)
-section 3). Failures outside that handler, or that reach it without a
-`response`, stay failures: a refused connection or connect timeout
-(botocore's `ConnectionError` family has no `response` attribute), a
-download's read timeout (s3transfer retries it and raises
-`RetriesExceededError`), an awscrt error, a synchronous local or
-custom-backend delete, the single-call operations.
+the `AttributeError` that follows, so the item prints no line and the run
+exits 0 (measured on cp / mv / recursive cp / rm against a 127.0.0.1 server
+closing every connection; under the CRT engine an `mv` download whose source
+delete dies this way hangs aws instead). That is a failure reported as a
+success, which [`overview.md`](./overview.md) section 3 does not copy. The
+record cannot say whether S3 acted before the response was lost - an object
+may have been written, copied or deleted all the same - and its error, with
+the client's own exception as the cause, says only that no response came.
+A batched `DeleteObjects` that dies this way decides nothing for its
+keys - aws-cli never sends one - so they go out again one `DeleteObject`
+each and take their own outcomes ([`deleter.md`](./deleter.md) section 3).
 
 A cancellation (on the classic engine: a fatal elsewhere in the run,
 `CancelToken` immediate mode, a Ctrl-C; on the CRT engine: a `CancelToken`

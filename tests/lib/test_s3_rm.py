@@ -36,6 +36,7 @@ from boto3_s3 import (
     OpOutcome,
     OpResult,
     S3Storage,
+    TransportError,
     ValidationError,
     rm_filter_root,
 )
@@ -222,12 +223,21 @@ class TestRmSingleKey:
         assert [(r.compare_key, r.outcome) for r in results] == [("k", OpOutcome.FAILED)]
         assert isinstance(results[0].error, NotFoundError)
 
-    def test_a_delete_that_dies_without_a_response_is_lost_like_aws(self) -> None:
-        # aws-cli's task loses it: no line, rc 0 (measured against the pinned
-        # aws through a 127.0.0.1 server that closes every connection).
-        client = _FakeS3Client(delete_object_error=ConnectionClosedError(endpoint_url="http://h/"))
-        assert _rm("s3://b/k", client) == []
+    def test_a_delete_that_dies_without_a_response_fails(self) -> None:
+        # aws-cli's task loses it with no line at rc 0 (measured against the
+        # pinned aws through a 127.0.0.1 server that closes every connection);
+        # a failure is not reported as a success, so it fails here.
+        dead = ConnectionClosedError(endpoint_url="http://h/")
+        client = _FakeS3Client(delete_object_error=dead)
+        results: list[OpResult] = []
+        with pytest.raises(BatchError) as exc_info:
+            S3().rm(S3Storage("s3://b/k", client=client), on_result=results.append)
         assert client.delete_object_calls == [{"Bucket": "b", "Key": "k"}]
+        assert (exc_info.value.succeeded, exc_info.value.failed) == (0, 1)
+        assert [(r.compare_key, r.outcome) for r in results] == [("k", OpOutcome.FAILED)]
+        assert isinstance(results[0].error, TransportError)
+        assert results[0].error.__cause__ is dead
+        assert exc_info.value.__cause__ is results[0].error
 
     def test_excluded_by_matcher_is_silent(self) -> None:
         client = _FakeS3Client()

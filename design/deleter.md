@@ -57,8 +57,7 @@ constant is `boto3_s3.deleter.S3_DELETE_BATCH`.
   within a batch; it is not emitted for keys in a discarded buffer, nor for a
   per-key request an abandoned run never sent - an XML-incompatible key, a
   re-send of a transient failure, any key of a batch request that failed as a
-  whole - nor for a key whose own `DeleteObject` died without a response on
-  botocore - section 3). The callback
+  whole - section 3). The callback
   must finish quickly and must not raise. If it does raise: records up to that
   point are counted, the rest of the same batch remain undelivered, and the
   exception is re-raised to the caller on the next **non-empty** `flush()` or on
@@ -138,13 +137,12 @@ the per-key route of the same client, whatever the retry policy, and takes
 that request's outcome. A key can so get more attempts than aws-cli gives
 it, never fewer. The same holds for a batch request that failed in any other
 way (below). A per-key
-`DeleteObject` that dies this way on botocore leaves its key with no record
-and no count: aws-cli's classic completion handler loses each such failure
-([`opresult.md`](./opresult.md), `lost_like_aws`), so `rm --recursive`
-against an endpoint that drops every delete exits 0 silently on both tools.
-On the CRT client the failure is awscrt's error, which aws-cli's CRT client
-reports too, so the key is an ordinary failure (rc 1 on both, in the same
-words).
+`DeleteObject` that dies this way fails its key, on either client. aws-cli's
+classic completion handler loses such a failure ([`opresult.md`](./opresult.md)),
+so `rm --recursive` against an endpoint that drops every delete exits 0
+silently there; here every key is a failure (rc 1), as it is on aws-cli's CRT
+client. S3 may have deleted the key before the response was lost; the
+failure says only that nothing confirmed it.
 
 `capture_response=True` instead sends `Quiet=False`, so the response also lists
 the successful `Deleted[]` entries; each is reconstructed into a per-key

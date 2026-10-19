@@ -103,7 +103,6 @@ from boto3_s3.s3storage import (
     attribute_failure,
     client_build_error,
     crt_error_name,
-    drop_like_aws,
     read_required,
     s3_errors,
     s3_request,
@@ -2144,11 +2143,9 @@ class Transferrer:
                 self._cancelled += 1
             self._emit(self._result(item, OpOutcome.CANCELLED, error=error))
             return
-        if drop_like_aws(exc):
-            # A failure without a response (a connection closed, a timeout):
-            # aws-cli's completion handler raises on it and s3transfer swallows
-            # that, so the item vanishes - no record, no count (`lost_like_aws`).
-            return
+        # A failure without any response (a connection closed, a read timeout)
+        # is FAILED like every other: aws-cli's completion handler loses it
+        # with no line at rc 0, which is not copied (design/opresult.md).
         if _is_precondition_failed(exc):
             # --no-overwrite's IfNoneMatch rejection: the object already
             # exists, which is the asked-for outcome - a silent skip, not a

@@ -192,7 +192,7 @@ class RmCommand(Command):
                 request_payer=args.request_payer,
                 on_result=printer,
                 # The engine aws would carry these deletes on, which decides
-                # how one that dies without a response is reported.
+                # the client they ride and its retry policy.
                 transfer_config=transfer_config,
             )
         except BatchError:
