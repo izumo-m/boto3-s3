@@ -20,11 +20,13 @@ the command produces them is recorded in
 
 ### 0 — success
 
-`help` and `--version` exit 0 as well. Piping into a reader that closes early
-(`ls | head`) is not one of them: the broken pipe is reported like any other
-write failure — `boto3-s3: [ERROR]: [Errno 32] Broken pipe`, exit code 255 —
-and the process then usually ends at 120 anyway, once Python fails to flush to
-the closed pipe at shutdown. `aws` does the same, so do not branch on it.
+`help` and `--version` exit 0 as well. Output that cannot be written is not a
+success: piping into a reader that closes early (`ls | head`) reports the
+broken pipe like any other write failure — `boto3-s3: [ERROR]: [Errno 32]
+Broken pipe`, exit code 255 — and so does a command whose work succeeded but
+whose output stdout could not take (a full disk, a reader gone): the work is
+done, the exit code is 255 with the error. With stdout closed (`1>&-`) nothing
+is written and the code is the work's.
 
 ### 1 — the operation failed after it started
 
@@ -33,7 +35,10 @@ at 1 — **including errors S3 itself returned** — except a failed object
 deletion under `rb --force`, which is 255 (section 2). The transfer commands
 deliberately do not report 254 once running, matching `aws s3`. Per-item
 failures were already printed as `... failed:` lines while the run proceeded;
-a failure that stops the whole run prints one `fatal error:` line.
+a failure that stops the whole run prints one `fatal error:` line. A download
+to stdout that stdout cannot take — full, or its reader gone, as in `cp
+s3://bucket/key - | head -c1` on an object larger than the pipe holds — is
+such a failure: `download failed: … [Errno 32] Broken pipe`.
 
 Ctrl-C during a running transfer or delete is also 1, with a
 `cancelled: ctrl-c received` line. `rb --force` is the

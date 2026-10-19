@@ -147,8 +147,9 @@ solidified design is added here.
 - **Missing standard streams.** A descriptor closed before startup leaves
   `sys.stdout` `None`. `--version` then writes its line to stderr and exits
   0, as argparse's own version action does, and a help page falls back to
-  stderr the same way (aws writes it nowhere). Anything further - both
-  streams closed, a write that fails - is the host interpreter's.
+  stderr the same way (aws writes it nowhere). Both streams closed is the
+  host interpreter's; a write that fails ends as section 6 describes (the
+  final flush).
 - **Negative-number classification.** The other place aws's behaviour comes
   from its interpreter rather than its code. argparse asks
   `_negative_number_matcher` whether a dash-led token that matches no option
@@ -741,7 +742,9 @@ way aws's `ResultProcessor._process_result` wraps each handler call, and by
 then the deletes have happened, so the run keeps the outcome they gave it
 (measured: `rm --recursive 1>&-` is rc 0 with the objects gone on both tools).
 It covers the three lines the printer writes - success, dryrun and per-key
-failure. **The output order of the delete lines is
+failure. A full stdout or a reader that left still ends the run at 255 once
+the deletes succeeded: the lines stdout refused are found by the final flush
+(section 6), not by the printer. **The output order of the delete lines is
 non-contractual** (aws is non-deterministic, ordered by the parallel completion
 of transfer futures. Tests use sort normalization + a final-state comparison,
 testing.md).
@@ -966,7 +969,7 @@ immediate death - the library default keeps waiting), and the operations
 thread it into every scan they start ([`storage.md`](./storage.md) section 2).
 
 **streaming (`-`)**: src `-` = stdin upload, dest `-` = stdout download (passing
-`sys.std{in,out}.buffer` to the library. [`transfer.md`](./transfer.md) section 6). In
+`StdioStorage()` to the library. [`transfer.md`](./transfer.md) section 6). In
 the form where the dest adopts the source name, the literal `-` becomes the
 basename, per aws's naming (`cp - s3://b/pre/` -> key `pre/-`); this is derived in
 transferplan.py before `S3Storage` is assembled. A run involving a stream **forces the
@@ -978,7 +981,13 @@ streaming downloads`). An absent stdin is an in-pipeline fatal (`fatal error:
 stdin is required for this operation, but is not available.`, rc 1). An absent
 stdout has no counterpart check, aws guarding stdin only, so it fails the one
 item instead: `download failed: s3://b/k to - 'NoneType' object has no
-attribute 'write'`, rc 1 either way (transfer.md section 6).
+attribute 'write'`, rc 1 either way (transfer.md section 6). A stdout that
+cannot take the bytes - full, or a reader that left the pipe (`cp s3://b/k - |
+head -c1` on an object larger than the pipe holds) - fails the item the same
+way, whether a write or the flush as the item settles meets it:
+`download failed: s3://b/k to - [Errno 32] Broken pipe`, rc 1. Bytes the pipe
+accepted before its reader left count as delivered, so a small object there is
+rc 0.
 `--expected-size` (a multipart design hint) is **converted with a bare `int()`
 just before the `S3().cp` call - inside the same in-pipeline boundary,
 `finish_transfer` - and only on the streaming-upload route** (`src == "-"`)
@@ -1298,7 +1307,24 @@ reviewed with it.
 | 252 | A usage error (an unknown option = `Unknown options: ...`, an invalid choice / value), a client-side `ValidationError` | `PARAM_VALIDATION_ERROR_RC` |
 | 253 | `ConfigurationError` (credentials / region unresolved; an absent awscrt x the `[s3] preferred_transfer_client=crt` degradation section 8 or an MRAP target's SigV4a section 4 item 4, which aws cannot reach), plus an unknown `cli_timestamp_format`, checked when a command opens its session (below) | `CONFIGURATION_ERROR_RC`, from its `NoCredentialsErrorHandler` / `NoRegionErrorHandler` / `ConfigurationErrorHandler` - three of its four rc-253 handlers, the `PagerErrorHandler` being the one with no counterpart here (below) |
 | 254 | A server-side error (a `Boto3S3Error` whose `__cause__` is a botocore `ClientError`) | `CLIENT_ERROR_RC` |
-| 255 | Any other general error (including `TransportError`, a `NotFoundError` with no `ClientError` cause such as a missing local source, the refining `InvalidValueError` / `InvalidConfigError` (below), an unparseable config / credentials file, an unknown `cli_binary_format` or an IMDS setting botocore refuses - each found when a command opens its session (below) - and any otherwise-uncaught exception via `_dispatch`'s backstop - a `BrokenPipeError` from the `ls \| head` pipeline included, since aws has no special case for it either: both tools report `[Errno 32] Broken pipe` here and the *process* then exits **120**, the interpreter's shutdown flush having failed on the closed pipe as well (measured)), **a failure of the rm stage of `rb --force`** (section 5.4) | `GENERAL_ERROR_RC` |
+| 255 | Any other general error (including `TransportError`, a `NotFoundError` with no `ClientError` cause such as a missing local source, the refining `InvalidValueError` / `InvalidConfigError` (below), an unparseable config / credentials file, an unknown `cli_binary_format` or an IMDS setting botocore refuses - each found when a command opens its session (below) - and any otherwise-uncaught exception via `_dispatch`'s backstop - a `BrokenPipeError` from the `ls \| head` pipeline included, since aws has no special case for it either), **a failure of the rm stage of `rb --force`** (section 5.4), **a run that succeeded but whose stdout output could not be flushed at the end** (below) | `GENERAL_ERROR_RC` |
+
+**The code `main` returns is the one the process ends with.** Bytes a
+standard stream refused - a full disk, a reader that left the pipe - stay in
+Python's buffer, and the interpreter flushes the streams again as it exits: a
+failure there replaces any exit code with 120 (aws ends there too). So `main`
+flushes stdout and stderr before returning (`_settle_std_streams`), and a
+stream that cannot be flushed is pointed at the null device (`os.dup2`,
+Python's own recipe for a broken pipe), where the exit's flush lands
+harmlessly. A run that already failed keeps its code, its failure reported (a
+`download failed:` line, `ls`'s `[Errno 32] Broken pipe` at 255). A run that
+succeeded but whose stdout output was lost - the result lines of a transfer or
+a delete the printer could not get out, a help page - exits 255 with the cause
+(`boto3-s3: [ERROR]: [Errno 28] No space left on device`): the output asked
+for was lost, a local I/O failure rather than a success. A stdout that is
+`None` (closed before the process started, `1>&-`) takes nothing and is left
+alone; the code is the work's. A stderr that cannot be flushed changes no
+code.
 
 The mapping is `cli.exit_code_for`. It prioritizes "**whether the server was
 reached** (whether it derives from `ClientError`)" over the library's exception

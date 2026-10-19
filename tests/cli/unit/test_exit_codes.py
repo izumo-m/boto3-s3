@@ -13,6 +13,7 @@ around the whole dispatch in `main`.
 from __future__ import annotations
 
 import argparse
+import errno
 import sys
 from pathlib import Path
 from typing import Any
@@ -263,16 +264,12 @@ class TestMainExitCodes:
     def test_broken_pipe_from_a_command_is_reported_like_any_write_failure(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws-cli has no BrokenPipeError case: the write failure reaches its
-        # general handler, which reports it and exits 255 (measured on the
-        # pinned aws-cli: `aws: [ERROR]: [Errno 32] Broken pipe`). In the common
-        # `ls | head` pipeline the interpreter's shutdown flush then fails on the
-        # closed pipe as well and the *process* exits 120 on both tools, so the
-        # rc a script sees does not depend on this at all - the report does.
-        # The real seam is the stdout write: ls has a line to print and the pipe
-        # is gone, so ``uni_write(sys.stdout, ...)`` raises. The library does not
+        # The `ls | head` shape: ls has a line to print and the reader is gone,
+        # so ``uni_write(sys.stdout, ...)`` raises. The library does not
         # translate it (``s3_errors`` catches only ClientError / BotoCoreError),
-        # so it escapes the command and lands on _dispatch's general backstop.
+        # so it escapes the command and lands on _dispatch's general backstop,
+        # reported with its cause at 255. The final flush then fails as well;
+        # the run keeps its 255 and reports nothing twice.
         class _DeadPipe:
             encoding = "utf-8"
 
@@ -287,6 +284,34 @@ class TestMainExitCodes:
         rc = cli.main(["ls", "s3://bucket/p/"], ctx=ctx)
         assert rc == 255
         assert capsys.readouterr().err == "boto3-s3: [ERROR]: [Errno 32] Broken pipe\n"
+
+    def test_a_successful_run_whose_output_cannot_be_flushed_exits_255(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The work is done but the output asked for is lost (a full disk, a
+        # reader that left): a local I/O failure, reported with its cause -
+        # not a success, and not Python's 120 from its own flush at exit.
+        class _FullStdout:
+            def write(self, text: str) -> int:
+                return len(text)
+
+            def flush(self) -> None:
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr(cli, "_main", lambda _argv, _ctx: 0)
+        monkeypatch.setattr(sys, "stdout", _FullStdout())
+        assert cli.main(["ls"]) == 255
+        assert capsys.readouterr().err == "boto3-s3: [ERROR]: [Errno 28] No space left on device\n"
+
+    def test_a_run_without_a_stdout_keeps_its_code(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # `1>&-`: Python starts with no stdout, nothing was written to one, and
+        # the code is the work's.
+        monkeypatch.setattr(cli, "_main", lambda _argv, _ctx: 0)
+        monkeypatch.setattr(sys, "stdout", None)
+        assert cli.main(["ls"]) == 0
+        assert capsys.readouterr().err == ""
 
     def test_keyboard_interrupt_exits_130_with_a_bare_newline(
         self, capsys: pytest.CaptureFixture[str]

@@ -32,9 +32,8 @@ no-op (nothing to release): the caller's stream is **never closed** by
 ``sys.stdin`` (forced non-seekable, so s3transfer takes its buffered upload path -
 Windows stdin reports a false ``seekable()``), as a destination it writes
 ``sys.stdout``; both via ``.buffer`` (binary). Its stdout writer buffers nothing
-of its own and swallows the transfer's ``close`` outright, exactly like the
-writer aws hands s3transfer: whatever the process stream buffered is left for
-the interpreter to flush when it exits.
+of its own, and it too absorbs the transfer's ``close`` into a flush of the
+process stream, so a stdout that cannot take the bytes fails the item.
 
 Like its peers it is imported by submodule path and imports no AWS SDK module, so
 ``import boto3_s3.iostorage`` stays SDK-free.
@@ -107,12 +106,17 @@ class _WriteOnly:
     nothing is held from ``open`` time: a process without a stdout therefore
     fails on the ``write`` itself, from inside the transfer, which reports it
     as that item's failure the way aws does - not as a precondition of
-    starting one. ``close`` neither flushes nor closes: aws's writer has no
-    ``close`` at all and a non-seekable download's final task is a no-op, so
-    the bytes the process stream buffered wait for the interpreter's flush at
-    exit. A stdout that cannot take them then fails the *process* on that
-    shutdown flush rather than the transfer, and the caller's stdout is left
-    open either way.
+    starting one.
+
+    ``close`` flushes the process stream and never closes it. The transfer
+    closes its writer as the item settles (`transfer._CloseFileobj`), so a
+    stdout that cannot take the bytes it still buffers - a full disk, a
+    reader that left the pipe - fails the item, and a ``mv`` keeps its
+    source. aws's writer has no ``close`` and leaves those bytes for the
+    interpreter's flush at exit, where a failure can no longer reach the item.
+    The bytes a failed flush refused stay in the process stream's buffer, and
+    the interpreter tries them again at exit (exit status 120): the process's
+    stdout is the application's, so what happens to them is too.
     """
 
     def write(self, data: Any) -> int:
@@ -120,7 +124,8 @@ class _WriteOnly:
         return getattr(stdout, "buffer", stdout).write(data)
 
     def close(self) -> None:
-        pass
+        stdout: Any = sys.stdout
+        getattr(stdout, "buffer", stdout).flush()
 
 
 class _SequentialWriter:
@@ -450,7 +455,9 @@ class StdioStorage(IOStorage):
     destination ``open("wb")`` writes ``sys.stdout.buffer`` through a
     write-only view (`_WriteOnly`, aws's ``StdoutBytesWriter``), so a
     download always streams sequentially even when stdout is redirected to
-    a seekable file. The direction is chosen
+    a seekable file; the transfer's ``close`` of that view flushes
+    ``sys.stdout.buffer`` without closing it, so a stdout that cannot take
+    the bytes fails the item. The direction is chosen
     by ``mode``, so a single instance serves either one and
     picks up a redirected ``sys.stdin`` / ``sys.stdout``.
 

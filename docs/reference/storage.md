@@ -1244,10 +1244,12 @@ streams sequentially even when stdout is redirected to a seekable file: a
 `>>`-opened file lands every write at the end regardless of position, which a
 seek-based parallel download would interleave. That view holds nothing from
 `open` time — it reads `sys.stdout` again on every write, as the AWS CLI's
-writer does — and its `close` neither flushes nor closes, so the bytes a
-download hands over sit in the process stream's own buffer until the
-interpreter flushes it at exit. A caller that needs them out earlier flushes
-`sys.stdout` itself.
+writer does — and its `close` flushes `sys.stdout.buffer` without closing it.
+The transfer closes the view as the item settles, so a stdout that cannot take
+the bytes (a full disk, a reader that left the pipe) fails the item, and a
+`mv` keeps its source. The bytes a failed flush refused stay in that buffer,
+and Python tries them again when the process exits (exit status 120); what
+becomes of them is the application's, whose stdout it is.
 
 Raises: `ValidationError` ([`./exceptions.md`](./exceptions.md)) when `mode` is
 `"rb"` and this process has no `sys.stdin`, rather than letting a transfer

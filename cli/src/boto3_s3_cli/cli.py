@@ -8,7 +8,7 @@ import importlib
 import os
 import re
 import sys
-from typing import NoReturn, cast
+from typing import NoReturn, TextIO, cast
 
 from boto3_s3 import (
     Boto3S3Error,
@@ -465,14 +465,16 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
     ``SystemExit``, whose orderly exit is honored) - argparse's ``SystemExit`` is
     absorbed downstream so usage errors map to aws-cli's 252, not argparse's 2,
     and a Ctrl-C mirrors aws's ``InterruptExceptionHandler``: a bare
-    newline on stdout and rc 130 (128+SIGINT), never a traceback.
+    newline on stdout and rc 130 (128+SIGINT), never a traceback. The
+    standard streams are flushed before the code is returned
+    (`_settle_std_streams`), so the code is the one the process ends with.
     """
     try:
-        return _main(argv, ctx)
+        rc = _main(argv, ctx)
     except KeyboardInterrupt:
         with contextlib.suppress(Exception):
             sys.stdout.write("\n")
-        return 130
+        rc = 130
     except AssertionError:
         # An internal-invariant violation, kept loud (see `_run_command`).
         raise
@@ -485,7 +487,62 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
         # a traceback.
         rc = _exit_code_for_unexpected(exc)
         _write_error(exc, rc=rc)
-        return rc
+    try:
+        return _settle_std_streams(rc)
+    except KeyboardInterrupt:
+        # A flush held up by a reader that stopped reading, cut short.
+        return 130
+
+
+def _settle_std_streams(rc: int) -> int:
+    """Flush stdout and stderr, and return the exit code the process ends with.
+
+    Bytes a standard stream refused - a full disk, a reader that left the
+    pipe - stay in Python's buffer, and the interpreter flushes the streams
+    again as it exits: a failure there replaces any exit code with 120 and
+    prints an ``Exception ignored`` report. A stream that cannot be flushed
+    here is therefore pointed at the null device (`_flush_or_discard`), so the
+    exit's flush succeeds and the code stands. A run that already failed
+    keeps its code: its failure was reported (a ``download failed:`` line,
+    ``ls``'s broken pipe). A run that succeeded but whose output could not be
+    written exits 255 with the cause: the output asked for was lost, which is
+    a local I/O failure, not a success. A stream that is None (closed before
+    the process started, ``1>&-``) is left alone and the code is the work's.
+    """
+    failure = _flush_or_discard(sys.stdout)
+    if failure is not None and rc == 0:
+        rc = _GENERAL_ERROR_RC
+        with contextlib.suppress(Exception):
+            _write_error(failure, rc=rc)
+    _flush_or_discard(sys.stderr)
+    return rc
+
+
+def _flush_or_discard(stream: TextIO | None) -> OSError | None:
+    """Flush *stream*; on failure, point its descriptor at the null device.
+
+    Python's own recipe for a broken pipe (``os.dup2`` of ``os.devnull``):
+    the bytes the stream still holds then go nowhere at exit instead of
+    failing the interpreter's flush. A stream without a descriptor (a test
+    double) has nothing to repoint; a closed one has nothing left to flush.
+    Returns the flush's error, or None when the stream took everything.
+    """
+    if stream is None:
+        return None
+    try:
+        stream.flush()
+    except ValueError:
+        return None
+    except OSError as exc:
+        with contextlib.suppress(Exception):
+            fd = stream.fileno()
+            null = os.open(os.devnull, os.O_WRONLY)
+            try:
+                os.dup2(null, fd)
+            finally:
+                os.close(null)
+        return exc
+    return None
 
 
 def _main(argv: list[str] | None, ctx: Context | None) -> int:

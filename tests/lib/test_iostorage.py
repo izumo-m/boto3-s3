@@ -24,7 +24,7 @@ from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.types import FileInfo, OpOutcome, OpResult, ScanOptions
 from tests.utils.fakes3 import get_response, head_response
-from tests.utils.recorder import make_recording_client
+from tests.utils.recorder import make_recording_client, ops
 
 _SYNC = TransferConfig(use_threads=False)
 
@@ -579,30 +579,26 @@ class TestStdioStorage:
         writer.write(b"hi")
         assert (first.buffer.getvalue(), second.buffer.getvalue()) == (b"", b"hi")
 
-    def test_close_neither_flushes_nor_closes_stdout(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # The writer aws hands s3transfer has no close and no flush, and a
-        # non-seekable download's final task is a no-op: whatever the process
-        # stream buffered is the interpreter's to flush at exit. Flushing here
-        # instead would turn a stdout that cannot take the bytes into a per-item
-        # transfer failure, where aws lets the process's own shutdown flush fail.
+    def test_close_flushes_but_never_closes_stdout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The transfer closes its writer as the item settles: the view flushes
+        # what the process stream still buffers, so a stdout that cannot take
+        # it fails the item, and leaves the process's stdout open.
         buffer = _RecordingBuffer()
         monkeypatch.setattr("sys.stdout", _BufferStdio(buffer))
         writer = StdioStorage().open("k", "wb")
         writer.write(b"hi")
         writer.close()
-        assert (buffer.flushes, buffer.closes) == (0, 0)
+        assert (buffer.flushes, buffer.closes) == (1, 0)
         assert buffer.getvalue() == b"hi"
 
 
 class TestStreamDownloadWithABrokenStdout:
-    """Which stdout failures a streaming download owns, and which the process does.
+    """A stdout that cannot take a streaming download's bytes fails the item.
 
-    aws's stdout writer only writes: the transfer therefore fails an item when a
-    *write* fails, and never learns about anything that only surfaces when the
-    process stream's buffer is flushed - measured on the pinned aws, where a
-    stdout of ``/dev/full`` gives one ``download failed: ... [Errno 28] No space
-    left on device`` (rc 1) for an object too big for the buffer and a silent
-    exit status 120 for one that fits.
+    Whether the bytes are refused by a ``write`` or by the flush the writer's
+    ``close`` makes as the item settles, the item is FAILED with the stream's
+    error as the cause - never a success whose bytes are still waiting in the
+    process stream's buffer.
     """
 
     @staticmethod
@@ -615,16 +611,35 @@ class TestStreamDownloadWithABrokenStdout:
             on_result=results.append,
         )
 
-    def test_a_flush_that_would_fail_is_never_attempted(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_a_failing_flush_fails_the_item(self, monkeypatch: pytest.MonkeyPatch) -> None:
         buffer = _FailingBuffer(on_flush=True)
         monkeypatch.setattr("sys.stdout", _BufferStdio(buffer))
         results: list[OpResult] = []
-        self._download(StdioStorage(), results)
-        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
-        assert buffer.getvalue() == b"payload"
-        assert buffer.flushes == 0
+        with pytest.raises(BatchError):
+            self._download(StdioStorage(), results)
+        assert buffer.flushes == 1
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        error = results[0].error
+        assert isinstance(error, Boto3S3Error)
+        assert isinstance(error.__cause__, OSError)
+        assert error.__cause__.errno == errno.ENOSPC
+        assert str(error) == str(error.__cause__)  # the cause shows in the message
+
+    def test_a_failing_flush_keeps_a_move_s_source(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The flush runs before the source delete, so a move whose bytes stdout
+        # refused deletes nothing.
+        monkeypatch.setattr("sys.stdout", _BufferStdio(_FailingBuffer(on_flush=True)))
+        client, calls = make_recording_client([head_response(), get_response()])
+        results: list[OpResult] = []
+        with pytest.raises(BatchError):
+            S3().mv(
+                S3Storage("s3://b/d/a.txt", client=client),
+                StdioStorage(),
+                transfer_config=_SYNC,
+                on_result=results.append,
+            )
+        assert ops(calls) == ["HeadObject", "GetObject"]  # and no DeleteObject
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
 
     def test_a_failing_write_fails_the_item(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("sys.stdout", _BufferStdio(_FailingBuffer(on_write=True)))

@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `file://` and `fileb://` are now refused where `aws` mishandles them (a `fileb://` path argument, a `website` bucket read from a file, `--metadata fileb://`, a single `--grants` file), and a `--metadata` value no map can hold is reported in plainer words (exit codes changed).
 - A transfer or delete whose connection is closed or times out before any response now prints its failure line and fails the run, `rb --force` included (exit codes changed).
 - A multipart copy whose post-copy tag write and its cleanup delete both fail now prints its failure line and fails the run, and `mv` keeps its source (exit codes changed).
+- A download to stdout that stdout cannot take (full, or its reader gone) now prints its failure line and fails the run, and a command whose output cannot be written no longer ends at Python's 120 (exit codes changed).
 
 ## [0.9.0] - 2026-10-18
 

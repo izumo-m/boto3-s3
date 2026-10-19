@@ -719,6 +719,35 @@ class TestStreaming:
         assert shim.buffer.getvalue() == b"foo\n"
         assert shim.text == ""  # no result/progress lines around the bytes
 
+    def test_stdout_that_cannot_take_the_bytes_fails_the_download(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The bytes fit the process stream's buffer, so only the flush the
+        # writer makes as the item settles can find stdout full: the item
+        # fails with its line and rc 1, not a success left to Python's flush
+        # at exit.
+        import errno
+        import io
+
+        class _FullBuffer(io.BytesIO):
+            def flush(self) -> None:
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+        shim = _StdoutShim()
+        shim.buffer = _FullBuffer()
+        monkeypatch.setattr("sys.stdout", shim)
+        ctx, _calls = _recording_ctx(
+            [
+                {"ContentLength": 4, "ETag": '"foo"'},
+                {"Body": io.BytesIO(b"foo\n"), "ContentLength": 4, "ETag": '"foo"'},
+            ]
+        )
+        rc = cli.main(["cp", "s3://bucket/streaming.txt", "-"], ctx=ctx)
+        assert rc == 1
+        assert capsys.readouterr().err == (
+            "download failed: s3://bucket/streaming.txt to - [Errno 28] No space left on device\n"
+        )
+
 
 class TestNoOverwrite:
     def test_upload_carries_if_none_match(self, tmp_path: Path) -> None:

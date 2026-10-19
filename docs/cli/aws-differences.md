@@ -199,7 +199,7 @@ that say outright that the run comes out differently, listed in section 1.
   full. A help page that cannot be written ends differently as well: `aws`
   hands its page to a pager process and exits 0 whatever becomes of it, while
   this command writes the page itself, so `help > /dev/full`, or a reader that
-  closes at once, is exit code 120 here.
+  closes at once, is exit code 255 here, with the write error.
 - **A delete answered `412 PreconditionFailed` fails here.** `aws` turns a
   `PreconditionFailed` answer into a silent skip whatever the request was - a
   rule meant for `--no-overwrite`'s conditional writes - so a `DeleteObject`

@@ -457,9 +457,9 @@ The contract:
 `StdioStorage` is the convenience for the process's own stdio — `sys.stdin` as a
 source, `sys.stdout` as a destination (both binary, via `.buffer`) — the
 equivalent of `aws s3 cp - …` / `aws s3 cp … -`. Its stdout writer hands each
-chunk straight to `sys.stdout.buffer` and never flushes it, aws's writer having
-neither `flush` nor `close`, so a finished download can still be sitting in the
-process stream's buffer until the interpreter's own flush at exit.
+chunk straight to `sys.stdout.buffer`, and its `close` flushes that buffer
+without closing it, so a stdout that cannot take the bytes fails the item
+rather than the process at exit ([`transfer.md`](./transfer.md) section 6).
 
 ## 6. Single-request object transfer: `S3Storage.get_file` / `put_file`
 

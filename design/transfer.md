@@ -451,23 +451,26 @@ The caller's stream is never closed by `IOStorage`.
   `StdoutBytesWriter`), so s3transfer always takes its non-seekable path and
   writes ranged chunks in order - a redirected stdout can report seekable
   while `>>` opened it `O_APPEND`, where seek-based parallel writes would
-  interleave. That writer has no `flush` and its `close` does nothing, since
-  aws's has neither method and the non-seekable download manager's final task
-  is a no-op: **nothing in either codebase flushes the process stream**, so the
-  bytes wait for the interpreter's shutdown flush. That decides where an
-  unwritable stdout surfaces: a failing `write` is the item's failure
-  (`download failed:` + rc 1), while a failure only the buffered flush can
-  raise arrives at interpreter shutdown instead, as the process's 120 with no
-  failure line, the boundary between the two being the interpreter's stdout
-  buffer size rather than anything here (both fail either way, so which one
-  you get is an error detail, overview.md section 3). Only stdin is checked ahead of the transfer (`open("rb")` raises
+  interleave. The writer's `close` flushes the process stream (never closes
+  it), and the transfer closes the writer as the item settles
+  (`_CloseFileobj`, ahead of a `mv`'s source delete): a stdout that cannot
+  take the bytes - a full disk, a reader that left the pipe - fails the item
+  whether a `write` or that final flush meets it (`download failed:` + rc
+  1), and a `mv` keeps its source. aws's writer has no `close`, so the bytes
+  still buffered wait for the interpreter's flush at exit, where a failure
+  reaches only the process (120) and the item stays a success; error rule 1
+  (overview.md section 3) fails the item instead. The bytes a failed flush
+  refused stay in the process stream's buffer and the interpreter tries them
+  again at exit: the CLI points the stream at the null device first
+  ([`cli.md`](./cli.md) section 6), and a library caller's process is the
+  caller's. Only stdin is checked ahead of the transfer (`open("rb")` raises
   `ValidationError`, aws's `StdinMissingError` sentence); stdout has no
-  counterpart on either side, so a process without one fails the item with
-  `'NoneType' object has no attribute 'write'` from inside the transfer.
+  counterpart on either side, so a process without one fails the item from
+  inside the transfer (`'NoneType' object has no attribute 'write'`, or
+  `'flush'` for an empty object).
   An `IOStorage` (caller-supplied stream) keeps the stream's own
   seekability: the caller chose the object, so its protocol governs - and its
-  writer view still absorbs the transfer's `close` into a flush, the
-  `StdioStorage` no-op being the aws-shaped exception.
+  writer view absorbs the transfer's `close` into a flush in the same way.
 - The display renders the stream side as `-` (`src_display` / `dest_display`).
   The `BatchError` on failure is `1 of 1 transfers failed`.
 
