@@ -34,7 +34,8 @@ the CRT engine, a `REQUESTS_CA_BUNDLE` the CRT engine cannot use, a
 `[plugins]` section, an alias file, a `cli_history` directory `aws` cannot
 create, the modification time a download stamps in some local zones (and the
 `sync` runs that follow from it), a transfer or delete whose request dies
-without any response, a help page that cannot be written, a
+without any response, a multipart copy whose tag write and its cleanup both
+fail, a help page that cannot be written, a
 `file://` or `fileb://` reference `aws` mishandles, and the `PYTHON*`
 environment variables. A difference of that kind anywhere else is a
 bug worth reporting; an error report's wording, or which of two mistakes it
@@ -120,6 +121,16 @@ that say outright that the run comes out differently, listed in section 1.
   response was lost, so the object may have been written or deleted all the
   same. A request the CRT client sends itself — a CRT transfer, a delete
   under the CRT engine — is reported as a failure by both tools.
+- **A multipart copy whose tag write and its cleanup both fail fails here.**
+  An S3-to-S3 copy at or above the multipart threshold writes a tag set too
+  large for its create request after the copy, and deletes the copied object
+  again when that write fails. When the delete fails too, `aws` prints the
+  copy's success line and exits 0, the copied object is left without its
+  tags (under `--copy-props all`, with its annotations written), and a `mv`
+  deletes its source. This command reports the item as failed (`copy
+  failed:` / `move failed:` with the tagging error) and exits 1; the copied
+  object is left without its tags or annotations, and a `mv` keeps its
+  source.
 - **A download's modification time differs in some zones.** Both tools give
   the downloaded file the object's `LastModified`; here the object's own
   instant is stamped, always. `aws` converts the timestamp to local time and

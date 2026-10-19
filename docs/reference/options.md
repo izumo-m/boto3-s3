@@ -637,13 +637,13 @@ option says.
 Under `DEFAULT` and `ALL`, a multipart copy whose tag set is too large for the
 create request applies it after the copy succeeds; if that call fails, the
 destination is deleted on a best-effort basis and the item is reported as
-failed — except when the cleanup itself also fails, where the item is reported
-successful with the destination left carrying no tags, as `aws s3` reports it.
+failed. When that cleanup fails too, the item is still reported as failed, with
+the tagging error, and the destination is left in place without its tags.
 `ALL` additionally
 requires an SDK that models S3 object annotations — botocore 1.43.31 or newer.
 A multipart copy under `ALL` writes the annotations after the copy, behind that
-post-copy tag write, as `aws s3` does: a tag write whose failure deleted the
-destination leaves no annotation written, and an annotation write that fails
+post-copy tag write, as `aws s3` does: a tag write that fails leaves no
+annotation written, and an annotation write that fails
 leaves the copied object in place. On an older SDK the transfer engine refuses `ALL`
 up front with [`ConfigurationError`](./exceptions.md#configurationerror), unless
 `metadata_directive` has disabled the chain so that the annotations path is

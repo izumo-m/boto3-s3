@@ -158,11 +158,13 @@ and for an item whose stored outcome is itself an interrupt, which is
 (`Transferrer._record_failure`). On the CRT engine that is a download whose
 sink raised `KeyboardInterrupt` / `SystemExit`: awscrt puts what the write
 callback raised on the future as it is. An upload's reader raising one is not
-stored that way (awscrt turns `KeyboardInterrupt` into its own
-`AWS_ERROR_UNKNOWN`, a `FAILED`, and does not return from a `SystemExit`),
-nor is a classic threaded download's sink (upstream's IO task swallows it and
-the item reports `SUCCEEDED`); both are upstream's behaviour, measured and
-left as it is.
+stored that way: awscrt reads it on its own thread, where it would lose a
+`KeyboardInterrupt` in its own `AWS_ERROR_UNKNOWN` and never return from a
+`SystemExit`, so the body handed to it (`_GuardedReader`) notes the interrupt
+for the caller and raises an ordinary exception in its place - the item is
+`FAILED`, and the interrupt is re-raised to the caller. A classic threaded
+download's sink raising one is settled on its IO worker (`_TaskGuard`): the
+item is `CANCELLED` and the interrupt re-raised.
 Every other CRT cancellation (awscrt's `AWS_ERROR_S3_CANCELED`) reports
 `FAILED` with the error carrying awscrt's cancellation wording - aws-cli's
 measured classification: a fatal or Ctrl-C folding its CRT manager counts

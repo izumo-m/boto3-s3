@@ -272,10 +272,11 @@ def _outcome(future: Any) -> BaseException | None:
     on purpose: an interrupt can be the stored outcome - upstream's submission
     task stores whatever stopped it, a ``KeyboardInterrupt`` under
     ``use_threads=False`` included, and the subscribers here store one that
-    lands in their own work (`_CloseFileobj`, `_DeleteSource`) - and a
-    subscriber that let it escape would skip its failure branch and leave the
-    item without a record. `Transferrer._record_failure` turns that outcome
-    into CANCELLED and hands the interrupt back to the caller.
+    lands in their own work (`_CloseFileobj`, `_SetTags`, `_SetAnnotations`,
+    `_DeleteSource`) - and a subscriber that let it escape would skip its
+    failure branch and leave the item without a record.
+    `Transferrer._record_failure` turns that outcome into CANCELLED and hands
+    the interrupt back to the caller.
     """
     try:
         future.result()
@@ -2390,13 +2391,14 @@ class _SerialExecutor(_TaskGuard, NonThreadedExecutor):
     with neither the file nor the object, and ``SubmissionTask._main``
     swallowed the interrupt, so the run went on to the next item). An
     interrupt escaping a done callback (past ``_execute_main``) is noted at
-    this executor's boundary the same way, and the terminal subscribers run
-    once per item so upstream's second announce, re-running the uncleared
-    list, cannot double-count. The subscribers whose own work decides the
-    item's fate do not let one escape at all - the open route's commit and
-    mv's source delete store it as the future's outcome, as upstream's
-    submission task does for one that lands in its own body - and that
-    outcome records CANCELLED and is handed back the same way (`_outcome`,
+    this executor's boundary the same way, and the terminal subscribers and
+    those that send requests run once per item so upstream's second
+    announce, re-running the uncleared list, cannot double-count or send
+    twice. The subscribers whose own work decides the item's fate do not let
+    one escape at all - the open route's commit, copy-props' post-copy
+    writes and mv's source delete store it as the future's outcome, as
+    upstream's submission task does for one that lands in its own body - and
+    that outcome records CANCELLED and is handed back the same way (`_outcome`,
     `Transferrer._record_failure`). The last gap is the submission task's own
     unwind after its final task settled the item: upstream swallows an
     interrupt there without storing it, so the hook that would have stored it
@@ -3023,10 +3025,10 @@ class _SetAnnotations:
     onto the destination after the copy completes, from this subscriber's
     ``on_done`` - aws-cli's ``SetAnnotationsSubscriber``. Registered after
     `_SetTags`, it sees the outcome the post-copy tagging write left: a
-    tagging failure that rolled the object back has already settled the
-    future, so nothing is written; a rollback that failed too escapes
-    `_SetTags` and leaves the future a success, so the annotations are
-    written - aws-cli's order and request set in every corner.
+    tagging failure has already settled the future, so nothing is written -
+    aws-cli's order and request set, except where the rollback delete fails
+    too: aws-cli's future is then left a success and it writes the
+    annotations, while here the item has failed and none is written.
 
     The reads follow ``annotation_copy_mode``: the memory and tempfile modes
     list every page and read every payload in ``on_queued``, before the
@@ -3040,7 +3042,10 @@ class _SetAnnotations:
     since s3transfer discards that response. A write that
     fails does not stop the others, and any failure settles the future with
     an `_AnnotationCopyError` (aws-cli's ``AnnotationCopyError``), the
-    destination kept.
+    destination kept. An interrupt landing in a deferred read or a write
+    stops there and is stored as the item's outcome, as `_SetTags` stores
+    one, and the subscriber runs once per item, so upstream's second announce
+    (`_SerialExecutor`) neither re-reads the source nor re-sends the writes.
     """
 
     def __init__(
@@ -3066,6 +3071,7 @@ class _SetAnnotations:
         self._temp_dir = temp_dir
         self._operation = operation
         self._multipart = False
+        self._ran = False
         self._store: _MemoryAnnotationStore | _TempfileAnnotationStore | None = None
 
     def on_queued(self, future: Any, **kwargs: Any) -> None:
@@ -3077,8 +3083,9 @@ class _SetAnnotations:
             self._read_source()
 
     def on_done(self, future: Any, **kwargs: Any) -> None:
-        if not self._multipart:
+        if not self._multipart or self._ran:
             return
+        self._ran = True
         bucket = future.meta.call_args.bucket
         key = future.meta.call_args.key
         completed = self._completions.take(bucket, key)
@@ -3088,7 +3095,9 @@ class _SetAnnotations:
             if self._store is None:
                 try:
                     self._read_source()
-                except Exception as exc:
+                except BaseException as exc:
+                    # An interrupt included: stored as the outcome, it becomes
+                    # CANCELLED and is re-raised to the caller (`_outcome`).
                     future.set_exception(exc)
                     return
             self._write(future, bucket, key, completed or {})
@@ -3197,6 +3206,11 @@ class _SetAnnotations:
                 written.append(name)
             except Exception as exc:
                 failed.append((name, str(exc)))
+            except BaseException as exc:
+                # An interrupt: the remaining writes are not sent, and it is
+                # stored as the outcome in place of any write failure so far.
+                future.set_exception(exc)
+                return
         if failed:
             future.set_exception(_AnnotationCopyError(bucket, key, written, failed))
 
@@ -3388,12 +3402,21 @@ class _SetTags:
     create blacklist, like aws-cli's bundled table; the
     `_mpu_inline_tagging_supported` probe guards the alignment) or apply it
     with a post-copy PutObjectTagging - rolling the destination object back
-    with a delete
-    when that tagging write fails, then surfacing the tagging failure on the
-    transfer future. If the rollback delete itself also fails, aws-cli lets
-    that delete error escape the done callback (s3transfer swallows it) and
-    records the transfer as a success; we mirror that, leaving the future
-    settled (and, for ``mv``, letting the source delete proceed).
+    with a delete when that tagging write fails, then surfacing the tagging
+    failure on the transfer future. A rollback delete that fails too leaves
+    the destination in place without its tags, and the item still fails with
+    the tagging error (`_rollback`); aws-cli lets that delete error escape its
+    done callback before the future is settled, so its copy reads as a
+    success and a ``mv`` deletes its source - not copied (a failure is never
+    reported as a success).
+
+    An interrupt landing in either request (``use_threads=False`` runs this
+    on the calling thread) is stored as the item's outcome rather than let
+    escape, as `_DeleteSource` stores one: the item records CANCELLED, a
+    ``mv`` keeps its source, the interrupt is re-raised to the caller, and no
+    rollback is sent after it. It runs once per item, so upstream's second
+    announce after an interrupt escaping a later done callback
+    (`_SerialExecutor`) does not send the tagging write again.
     """
 
     def __init__(
@@ -3412,6 +3435,7 @@ class _SetTags:
         self._multipart_threshold = multipart_threshold
         self._options = options
         self._operation = operation
+        self._ran = False
 
     def on_queued(self, future: Any, **kwargs: Any) -> None:
         extra_args: dict[str, Any] = future.meta.call_args.extra_args
@@ -3433,6 +3457,9 @@ class _SetTags:
             future.meta.user_context[_POST_TAGGING_KEY] = tag_set
 
     def on_done(self, future: Any, **kwargs: Any) -> None:
+        if self._ran:
+            return
+        self._ran = True
         tag_set = future.meta.user_context.get(_POST_TAGGING_KEY)
         if not tag_set:
             return
@@ -3448,7 +3475,12 @@ class _SetTags:
                 **requestparams.map_put_object_tagging_params(self._options),
             )
         except Exception as exc:
-            self._rollback(bucket, key)
+            interrupt = self._rollback(bucket, key)
+            future.set_exception(exc if interrupt is None else interrupt)
+        except BaseException as exc:
+            # An interrupt: whether the write reached the service is unknown.
+            # Stored as the outcome, it becomes CANCELLED and is re-raised to
+            # the caller (`_outcome`); no rollback goes out after it.
             future.set_exception(exc)
 
     def _get_source_tags(self) -> list[dict[str, str]]:
@@ -3493,14 +3525,30 @@ class _SetTags:
             for tag in tags
         ]
 
-    def _rollback(self, bucket: str, key: str) -> None:
-        # A raised delete error is left to escape on_done (matching aws-cli): the
-        # already-swallowed on_done callback keeps the future settled as success.
-        self._dest_client.delete_object(
-            Bucket=bucket,
-            Key=key,
-            **requestparams.map_delete_object_params(self._options),
-        )
+    def _rollback(self, bucket: str, key: str) -> BaseException | None:
+        """Delete the destination whose tagging write failed, best-effort.
+
+        A delete that fails is logged at debug level and leaves the
+        destination untagged; the item still fails with the tagging error.
+        An interrupt that cuts the delete short is returned, to be stored as
+        the item's outcome in place of that error.
+        """
+        try:
+            self._dest_client.delete_object(
+                Bucket=bucket,
+                Key=key,
+                **requestparams.map_delete_object_params(self._options),
+            )
+        except Exception:
+            logger.debug(
+                "deleting s3://%s/%s after its tagging write failed also failed",
+                bucket,
+                key,
+                exc_info=True,
+            )
+        except BaseException as exc:
+            return exc
+        return None
 
 
 __all__ = [

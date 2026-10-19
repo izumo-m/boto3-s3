@@ -1277,34 +1277,24 @@ class TestCopy:
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
         assert "ann2" in str(results[0].error)
 
-    def test_a_tagging_failure_rolls_back_before_any_annotation_is_written(self) -> None:
+    @pytest.mark.parametrize(
+        "rollback",
+        [{}, client_error("AccessDenied", 403, "DeleteObject")],
+        ids=["rollback-deletes", "rollback-fails"],
+    )
+    def test_a_tagging_failure_fails_before_any_annotation_is_written(
+        self, rollback: dict[str, Any] | BaseException
+    ) -> None:
+        # A rollback delete that fails too still leaves the item failed with
+        # the tagging error and no annotation written (aws-cli's future stays
+        # a success there, and it writes the annotations and exits 0).
         calls, results, _ = self._all_with_oversized_tags(
-            [client_error("AccessDenied", 403, "PutObjectTagging"), {}]
+            [client_error("AccessDenied", 403, "PutObjectTagging"), rollback, {}, {}]
         )
         assert ops(calls)[-3:] == ["CompleteMultipartUpload", "PutObjectTagging", "DeleteObject"]
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert isinstance(results[0].error, AccessDeniedError)
         assert "PutObjectTagging" in str(results[0].error)
-
-    def test_a_failed_rollback_leaves_a_success_that_still_gets_its_annotations(self) -> None:
-        # The rollback's own error escapes the tags subscriber before it
-        # settles the future (aws-cli's shape), so the annotations subscriber
-        # sees a success and writes them: annotations, no tags, rc 0.
-        calls, results, transferrer = self._all_with_oversized_tags(
-            [
-                client_error("AccessDenied", 403, "PutObjectTagging"),
-                client_error("AccessDenied", 403, "DeleteObject"),
-                {},
-                {},
-            ]
-        )
-        assert ops(calls)[-4:] == [
-            "PutObjectTagging",
-            "DeleteObject",
-            "PutObjectAnnotation",
-            "PutObjectAnnotation",
-        ]
-        assert transferrer.succeeded == 1
-        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
 
     def test_post_copy_tagging_failure_rolls_back_the_destination(self) -> None:
         big = "v" * 3000
@@ -1880,6 +1870,131 @@ class TestSerialExecutorInterrupt:
         assert (tmp_path / "out" / "a.bin").read_bytes() == b"payload"
         assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
         assert (transferrer.succeeded, transferrer.cancelled) == (0, 1)
+
+    def _move_with_post_copy_writes(
+        self,
+        dest_tail: list[dict[str, Any] | BaseException],
+        source_tail: list[dict[str, Any] | BaseException],
+        *,
+        on_result: Callable[[OpResult], None],
+    ) -> tuple[list[ApiCall], list[ApiCall], Transferrer]:
+        """A ``mv`` multipart copy under ``copy_props=ALL`` whose tag set only
+        fits a post-copy write; the tails are what each side answers after
+        the copy completes and after the tag read."""
+        client, calls = make_recording_client(
+            [
+                {"UploadId": "u"},
+                {"CopyPartResult": {"ETag": '"p1"'}},
+                {"CopyPartResult": {"ETag": '"p2"'}},
+                {"ETag": '"dest-etag"'},
+                *dest_tail,
+            ]
+        )
+        source_client, source_calls = make_recording_client(
+            [{}, {"TagSet": [{"Key": "k", "Value": "v" * 3000}]}, *source_tail]
+        )
+        transferrer = Transferrer(
+            TransferType.COPY,
+            client,
+            source_client=source_client,
+            transfer_config=_SYNC_CONFIG,
+            options=TransferOptions(copy_props=CopyPropsMode.ALL),
+            is_move=True,
+            on_result=on_result,
+        )
+        item = TransferItem(
+            compare_key="a.bin",
+            size=9 * _MIB,
+            etag='"abc123"',
+            src_bucket="src-b",
+            src_key="d/a.bin",
+            dest_bucket="dest-b",
+            dest_key="cp/a.bin",
+        )
+        with pytest.raises(KeyboardInterrupt), transferrer:
+            transferrer.submit(item)
+        return calls, source_calls, transferrer
+
+    @staticmethod
+    def _fresh_annotations() -> list[dict[str, Any] | BaseException]:
+        """The source's two annotations, read when the copy is queued."""
+        return [
+            {
+                "Annotations": [
+                    {"AnnotationName": "ann1", "LastModified": MTIME, "Size": 1},
+                    {"AnnotationName": "ann2", "LastModified": MTIME, "Size": 1},
+                ]
+            },
+            {"AnnotationPayload": io.BytesIO(b"1")},
+            {"AnnotationPayload": io.BytesIO(b"2")},
+        ]
+
+    @pytest.mark.parametrize(
+        ("dest_tail", "sent"),
+        [
+            ([KeyboardInterrupt(), {}, {}, {}], ["PutObjectTagging"]),
+            (
+                [
+                    client_error("AccessDenied", 403, "PutObjectTagging"),
+                    KeyboardInterrupt(),
+                    {},
+                    {},
+                ],
+                ["PutObjectTagging", "DeleteObject"],
+            ),
+            (
+                [{}, KeyboardInterrupt(), {}, {}, {}],
+                ["PutObjectTagging", "PutObjectAnnotation"],
+            ),
+        ],
+        ids=["in-the-tagging-write", "in-the-rollback", "in-an-annotation-write"],
+    )
+    def test_interrupt_inside_a_post_copy_write_records_cancelled(
+        self, dest_tail: list[dict[str, Any] | BaseException], sent: list[str]
+    ) -> None:
+        # Past the copy, inside copy-props' own requests: stored as the item's
+        # outcome, not let escape - escaping, it would have upstream's second
+        # announce re-send the writes, record SUCCEEDED and delete the source.
+        # No rollback follows a tagging write it cut short.
+        results: list[OpResult] = []
+        calls, source_calls, transferrer = self._move_with_post_copy_writes(
+            dest_tail, [*self._fresh_annotations(), {}, {}, {}], on_result=results.append
+        )
+        assert ops(calls)[4:] == sent
+        assert ops(source_calls) == [
+            "HeadObject",
+            "GetObjectTagging",
+            "ListObjectAnnotations",
+            "GetObjectAnnotation",
+            "GetObjectAnnotation",
+        ]
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+        assert (transferrer.succeeded, transferrer.cancelled) == (0, 1)
+
+    def test_an_interrupt_after_the_post_copy_writes_sends_them_once(self) -> None:
+        # The interrupt escapes on_result, after every request: upstream
+        # re-runs the uncleared callback list, and the post-copy writes must
+        # not go out (or the annotations be read) a second time.
+        results: list[OpResult] = []
+
+        def on_result(result: OpResult) -> None:
+            results.append(result)
+            raise KeyboardInterrupt
+
+        calls, source_calls, transferrer = self._move_with_post_copy_writes(
+            [{}, {}, {}, {}, {}, {}], [*self._fresh_annotations(), {}, {}, {}], on_result=on_result
+        )
+        assert ops(calls)[4:] == ["PutObjectTagging", "PutObjectAnnotation", "PutObjectAnnotation"]
+        assert ops(source_calls) == [
+            "HeadObject",
+            "GetObjectTagging",
+            "ListObjectAnnotations",
+            "GetObjectAnnotation",
+            "GetObjectAnnotation",
+            "DeleteObject",
+        ]
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+        assert (transferrer.succeeded, transferrer.cancelled) == (1, 0)
 
     def test_interrupt_in_the_submission_stage_records_cancelled(self) -> None:
         # A non-seekable stream is read by upstream's submission task, outside
@@ -2879,9 +2994,18 @@ class TestMove:
         assert (transferrer.failed, transferrer.skipped) == (0, 1)
         assert [result.outcome for result in results] == [OpOutcome.SKIPPED]
 
-    def test_post_copy_tagging_failure_keeps_the_source(self) -> None:
+    @pytest.mark.parametrize(
+        "rollback",
+        [{}, client_error("AccessDenied", 403, "DeleteObject")],
+        ids=["rollback-deletes", "rollback-fails"],
+    )
+    def test_post_copy_tagging_failure_keeps_the_source(
+        self, rollback: dict[str, Any] | BaseException
+    ) -> None:
         # _SetTags settles (rolls back the destination, flips the future)
-        # before _DeleteSource looks at it: the source object survives.
+        # before _DeleteSource looks at it: the source object survives -
+        # also when the rollback delete fails, where aws-cli's future stays a
+        # success and its mv deletes the source.
         big = "v" * 3000
         item = TransferItem(
             compare_key="a.bin",
@@ -2892,17 +3016,18 @@ class TestMove:
             dest_bucket="dest-b",
             dest_key="cp/a.bin",
         )
-        responses: list[dict[str, Any] | Exception] = [
+        responses: list[dict[str, Any] | BaseException] = [
             {"UploadId": "u"},
             {"CopyPartResult": {"ETag": '"p1"'}},
             {"CopyPartResult": {"ETag": '"p2"'}},
             {},
             client_error("AccessDenied", 403, "PutObjectTagging"),
-            {},  # rollback DeleteObject (destination side)
+            rollback,  # rollback DeleteObject (destination side)
         ]
-        source_responses: list[dict[str, Any] | Exception] = [
+        source_responses: list[dict[str, Any] | BaseException] = [
             {},
             {"TagSet": [{"Key": "k", "Value": big}]},
+            {},  # a source-side DeleteObject, were one sent
         ]
         calls, source_calls, results, transferrer = _run(
             TransferType.COPY, [item], responses, source_responses=source_responses, is_move=True
@@ -2913,44 +3038,7 @@ class TestMove:
         assert ops(source_calls) == ["HeadObject", "GetObjectTagging"]
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
-
-    def test_post_copy_tagging_and_rollback_both_fail_succeeds(self) -> None:
-        # aws parity: when the post-copy PutObjectTagging fails and the rollback
-        # DeleteObject also fails, aws-cli lets the delete error escape the done
-        # callback (swallowed) without flipping the future - the transfer is a
-        # success. We mirror that: the mv's source delete then proceeds.
-        big = "v" * 3000
-        item = TransferItem(
-            compare_key="a.bin",
-            size=9 * _MIB,
-            etag='"abc123"',
-            src_bucket="src-b",
-            src_key="d/a.bin",
-            dest_bucket="dest-b",
-            dest_key="cp/a.bin",
-        )
-        responses: list[dict[str, Any] | Exception] = [
-            {"UploadId": "u"},
-            {"CopyPartResult": {"ETag": '"p1"'}},
-            {"CopyPartResult": {"ETag": '"p2"'}},
-            {},
-            client_error("AccessDenied", 403, "PutObjectTagging"),
-            client_error("AccessDenied", 403, "DeleteObject"),  # rollback also fails
-        ]
-        source_responses: list[dict[str, Any] | Exception] = [
-            {},
-            {"TagSet": [{"Key": "k", "Value": big}]},
-            {},  # mv source-side DeleteObject
-        ]
-        calls, source_calls, results, transferrer = _run(
-            TransferType.COPY, [item], responses, source_responses=source_responses, is_move=True
-        )
-        assert ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
-        # The source delete proceeds - the transfer is recorded as a success.
-        assert ops(source_calls) == ["HeadObject", "GetObjectTagging", "DeleteObject"]
-        assert source_calls[-1].params == {"Bucket": "src-b", "Key": "d/a.bin"}
-        assert (transferrer.succeeded, transferrer.failed) == (1, 0)
-        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+        assert "PutObjectTagging" in str(results[0].error)
 
     def test_non_transfer_outcomes_report_the_move_kind(self) -> None:
         client, calls = make_recording_client([])

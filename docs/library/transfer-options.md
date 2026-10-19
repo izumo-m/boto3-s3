@@ -118,9 +118,9 @@ whole mechanism.
 
 Under `default` and `all`, tags too large for the request header are applied
 after the copy succeeds. If that call fails, the destination is deleted on a
-best-effort basis and the item is reported as failed. There is one corner where
-that cleanup itself fails: the item is then reported **successful** with the
-destination left carrying no tags, which is `aws s3`'s behavior as well.
+best-effort basis and the item is reported as failed. If that cleanup fails
+too, the item is still reported as failed, and the destination is left in
+place without its tags (`aws s3` reports this case as a success).
 
 `annotation_copy_mode` chooses how a multipart copy under `copy_props="all"`
 stages the source annotations

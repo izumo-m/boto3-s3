@@ -230,31 +230,36 @@ chain:
   aws).
 - **Double failure on the post-copy tagging rollback** (`default` / `all`,
   multipart only): if the post-copy `PutObjectTagging` fails and the
-  best-effort rollback `DeleteObject` *also* fails, the rollback's own
-  exception is left to propagate out of the subscriber's `on_done` uncaught -
-  the same shape as aws-cli's `SetTagsSubscriber._on_success`. s3transfer runs
-  each `on_done` subscriber in its own try/except and only logs an escaping
-  one, so `future.set_exception` (the line right after the rollback call) never
-  runs and the future is left in whatever state it already had - success,
-  since the transfer itself completed. The item is therefore reported
-  **SUCCEEDED (rc 0)**, with the destination left as the multipart copy
-  produced it (no tags, since a multipart copy never carries them natively)
-  rather than either fully tagged or deleted, and for `mv` the source-delete
-  subscriber (which sits after this one in the chain) still runs and removes
-  the source. This is aws-cli's own double-failure outcome.
+  best-effort rollback `DeleteObject` *also* fails, the item still fails with
+  the tagging error (the delete's own error is logged at debug level). The
+  destination is left as the multipart copy produced it - no tags, and under
+  `all` no annotations - and for `mv` the source stays, since the
+  source-delete subscriber sits after this one and sees the failure.
+  aws-cli's `SetTagsSubscriber._on_success` lets the delete error escape
+  before its `future.set_exception` runs; s3transfer logs and drops an
+  escaping `on_done` error, so aws-cli's future stays a success: rc 0, and
+  its `mv` deletes the source. That is a failure reported as a success, and
+  is not copied (overview section 3).
+- **An interrupt in a post-copy write** (`use_threads=False`, where the
+  `on_done` subscribers run on the calling thread): a `KeyboardInterrupt` /
+  `SystemExit` landing in the tagging write, its rollback delete, or a
+  deferred annotation read or an annotation write is stored as the item's
+  outcome, as `_DeleteSource` stores one: the item records CANCELLED, `mv`
+  keeps its source, the interrupt is re-raised to the caller, and no
+  rollback is sent after it. `_SetTags` and `_SetAnnotations` also run once
+  per item, so upstream's second announce after an interrupt escaping a
+  later done callback (`on_result`) sends none of their requests again.
 - **The tagging write and the annotation writes** (`all`, multipart, a tag
   set too large for the create header) go out in aws-cli's order, because
   both are `on_done` subscribers registered tags-first, as aws-cli's are:
   PutObjectTagging, then the PutObjectAnnotation calls. A tagging failure
-  whose rollback delete succeeds settles the future first, so no annotation
-  is written and no destination is left; a rollback that fails too escapes
-  `_SetTags` before it settles the future (the bullet above), so
-  `_SetAnnotations` sees a success and writes them - the surviving object
-  carries the copied annotations and no tags, on both tools. An annotation
-  write that fails leaves the tagged object in place. Every failure corner -
-  every combination of an annotation write, the tagging write and the
-  rollback delete being denied - sends the same requests in the same order
-  as the pinned aws-cli.
+  settles the future first, so no annotation is written, whether or not its
+  rollback delete succeeds. An annotation write that fails leaves the tagged
+  object in place. Every failure corner - every combination of an annotation
+  write, the tagging write and the rollback delete being denied - sends the
+  same requests in the same order as the pinned aws-cli, except a denied
+  rollback delete: aws-cli's future is then still a success, and it goes on
+  to write the annotations.
 - **Annotations** (aws-cli 2.35.6+, S3 Object Annotations): every mode short
   of `all` appends `_ExcludeAnnotationDirective` (aws-cli's
   ExcludeAnnotationDirectiveSubscriber), sending `AnnotationDirective=EXCLUDE`
@@ -864,7 +869,8 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
   transfer failure, a `LocalStorage(fsync=True)` durability failure (above). For
   copy-props' post-copy tagging failure (the rollback of
   section 4), because `_SetTags` flips the future first, the source remains and only the
-  dest is rolled back (aws-cli's order). A folder marker is not transferred, so it
+  dest is rolled back (aws-cli's order) - also when that rollback fails, where
+  aws-cli deletes the source (section 4). A folder marker is not transferred, so it
   is not deleted either. An emptied local dir is left in place (as in aws).
 - **The same-path guard** (always in `S3.mv`; the CLI also does it at the argv
   stage - cli.md section 5.8): apply `S3Storage.same_path`'s rule to the
