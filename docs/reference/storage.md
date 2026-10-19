@@ -874,8 +874,7 @@ An entry the service returned incomplete stops the listing rather than being
 dropped from it: a `Contents` entry missing `Key`, `LastModified` or `Size`, or
 a `CommonPrefixes` entry missing `Prefix`, raises
 [`MalformedResponseError`](./exceptions.md#malformedresponseerror) naming the
-element (the AWS CLI's `KeyError` text, that `KeyError` on `__cause__`), read
-in that order. The entries converted before it are still delivered — that
+element (that `KeyError` on `__cause__`). The entries converted before it are still delivered — that
 page is emitted short and the error follows it — so a consumer sees them ahead
 of the failure exactly as the AWS CLI's entry-by-entry listing does. One shape
 loses the whole page instead: when the response echoes `EncodingType` (S3 and
@@ -944,7 +943,7 @@ omitted when falsy. The page size is the storage's own `page_size`.
 
 As in `scan_pages`, a bucket entry missing `CreationDate` or `Name` raises
 [`MalformedResponseError`](./exceptions.md#malformedresponseerror) naming the
-element, read in that order — the order the AWS CLI renders them in — at that
+element at that
 bucket, with the buckets ahead of it already delivered.
 
 Requesting either filter on a botocore whose `ListBuckets` model lacks the
@@ -1012,7 +1011,7 @@ transport, 5xx — is raised translated, because existence could not be
 determined, with `operation` unset like every storage-level call's. A response
 missing `ContentLength` or `LastModified` raises
 [`MalformedResponseError`](./exceptions.md#malformedresponseerror) naming the
-element, read in that order — the AWS CLI's own reading of its single-object
+element — the AWS CLI's own reading of its single-object
 HEAD, and the single-entry counterpart of the `scan_pages` rule. A
 `LastModified` the host's local zone cannot represent raises the same class
 (`date value out of range`) instead of being returned, the same test

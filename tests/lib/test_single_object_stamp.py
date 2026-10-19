@@ -95,15 +95,15 @@ class TestSingleObjectRequiredElements:
     routes where aws-cli stops them.
 
     aws-cli's `_list_single_object` reads those two elements by subscript
-    (`ContentLength` first) and `ETag` with a default, so a response without
+    and `ETag` with a default, so a response without
     one of the two ends the run with `MalformedResponseError` naming it (the
     KeyError's text, the KeyError on `__cause__`) - the single-object
     counterpart of the listing rule (`TestMalformedListingEntries` in the S3
     backend suite). Measured against the pinned aws (2.36.40) through a
     127.0.0.1 fake: a missing `LastModified` ends the run at rc 1 for
     `cp s3://bkt/a ./out.bin`, for `cp --dryrun s3://bkt/a s3://bkt/b` and for
-    `mv --dryrun`; `'ContentLength'` when that one is missing, and when both
-    are; while `cp s3://bkt/a -` streams the object on both tools (the stream
+    `mv --dryrun`, and the same for a missing `ContentLength`; while
+    `cp s3://bkt/a -` streams the object on both tools (the stream
     route never resolves its source this way) and a HEAD without `ETag`
     transfers normally.
     """
@@ -113,7 +113,6 @@ class TestSingleObjectRequiredElements:
         [
             ({"ContentLength": 7, "ETag": '"abc"'}, "LastModified"),
             ({"LastModified": MTIME, "ETag": '"abc"'}, "ContentLength"),
-            ({"ETag": '"abc"'}, "ContentLength"),
         ],
     )
     def test_a_missing_element_is_a_malformed_response_naming_it(

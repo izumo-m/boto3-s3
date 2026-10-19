@@ -91,10 +91,10 @@ front only when the declaration is honest:
   the failure reach the consumer first - the entry-by-entry order aws-cli dies
   in, where a page is the smallest chunk this interface can deliver. The
   built-in S3 backend is what needs it: it reads the elements a listing entry
-  must carry by subscript, in aws-cli's own order (`Key` -> `LastModified` ->
-  `Size` for an object, `Prefix` for a common prefix, `CreationDate` -> `Name`
+  must carry by subscript, as aws-cli does (`Key`, `LastModified` and
+  `Size` for an object, `Prefix` for a common prefix, `CreationDate` and `Name`
   for a bucket), so an entry missing one raises `MalformedResponseError`
-  naming the element (aws-cli's `KeyError` text and cause) instead of being
+  naming the element (the `KeyError` as its cause) instead of being
   silently dropped - the object listing emitting the part of
   the page it had converted, the bucket listing being streamed entry by entry
   to begin with. (A response that echoes `EncodingType` has botocore

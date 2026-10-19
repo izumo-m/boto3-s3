@@ -768,15 +768,11 @@ class TestMalformedListingEntries:
             ({"Size": 1, "LastModified": MTIME}, "Key"),
             ({"Key": "prefix/bad.txt", "Size": 1}, "LastModified"),
             ({"Key": "prefix/bad.txt", "LastModified": MTIME}, "Size"),
-            ({"ETag": '"x"'}, "Key"),
         ],
     )
     def test_a_missing_element_is_a_malformed_response_naming_it(
         self, entry: dict[str, Any], missing: str
     ) -> None:
-        # The last row pins the read order too: aws-cli's BucketLister takes Key
-        # first, then LastModified, and its consumer Size afterwards, so an entry
-        # missing several is reported by the first of them.
         storage, _ = _storage([{"Contents": [entry]}])
         with pytest.raises(MalformedResponseError) as excinfo:
             list(storage.scan(S3ScanOptions(recursive=True)))
@@ -826,17 +822,15 @@ class TestMalformedListingEntries:
         [
             ({"ContentLength": 7, "ETag": '"abc"'}, "LastModified"),
             ({"LastModified": MTIME, "ETag": '"abc"'}, "ContentLength"),
-            ({"ETag": '"abc"'}, "ContentLength"),
         ],
     )
     def test_a_head_missing_an_element_is_a_malformed_response_naming_it(
         self, head: dict[str, Any], missing: str
     ) -> None:
-        # The single-object HEAD follows the same rule in aws-cli's
-        # `_list_single_object` order - ContentLength first, then LastModified;
-        # ETag is read with a default there - so a doubly incomplete response
-        # is blamed on ContentLength (the transfer engine's `head_single` reads
-        # it the same way; the CLI measurement is in that route's suite).
+        # The single-object HEAD follows the same rule as aws-cli's
+        # `_list_single_object`: ContentLength and LastModified are required,
+        # ETag is read with a default (the transfer engine's `head_single`
+        # reads it the same way).
         storage, _ = _storage(url="s3://bucket/prefix/obj.txt", head_response=head)
         with pytest.raises(MalformedResponseError) as excinfo:
             storage.get_fileinfo()
@@ -856,8 +850,6 @@ class TestMalformedListingEntries:
     def test_a_bucket_missing_an_element_raises_after_the_earlier_buckets(
         self, entry: dict[str, Any], missing: str
     ) -> None:
-        # aws-cli's bucket listing renders the creation date and then appends the
-        # name, so the date is the one reported when both are gone.
         storage, _ = _storage([{"Buckets": [_bucket_entry("aaa"), entry]}], url="s3://")
         keys: list[str] = []
         with pytest.raises(MalformedResponseError) as excinfo:

@@ -408,7 +408,7 @@ class S3PathResolver:
         """Read an element of a reply aws reads by subscript (`s3storage.read_required`).
 
         aws dies on the ``KeyError`` naming a missing element; here that is a
-        ``MalformedResponseError`` with the same text, read in aws's order.
+        ``MalformedResponseError`` naming it.
         """
         from boto3_s3.s3storage import read_required
 

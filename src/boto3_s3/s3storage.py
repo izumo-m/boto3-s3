@@ -911,8 +911,8 @@ def _page_to_bucket_infos(page: ListBucketsOutputTypeDef, storage: Storage) -> I
     ``storage`` (the service-level ``S3Storage``) is stamped as the producing
     backend, like every other producer's entries.
 
-    Both elements are read as required, in the order aws-cli's bucket listing
-    subscripts them (it renders the creation date, then appends the name), so a
+    Both elements are read as required, as aws-cli's bucket listing
+    subscripts them, so a
     bucket entry missing one stops the listing at that bucket with
     `MalformedResponseError` naming the element - the buckets ahead of it are
     already delivered, this being a generator its caller yields straight
@@ -1735,8 +1735,8 @@ class S3Storage(Storage):
                 head = self.get_client().head_object(Bucket=self._bucket, Key=target_key)
         except NotFoundError:
             return None
-        # Read as required in aws-cli's own subscript order (`ContentLength`,
-        # then `LastModified`; `ETag` takes a default), like the listing
+        # Read as required as aws-cli subscripts them (`ContentLength` and
+        # `LastModified`; `ETag` takes a default), like the listing
         # converter above and the transfer engine's `producers.head_single`: a
         # response missing one is a MalformedResponseError naming it instead
         # of an entry with the value unset.
