@@ -2026,6 +2026,35 @@ class TestSerialExecutorInterrupt:
         assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
         assert (transferrer.succeeded, transferrer.cancelled) == (0, 1)
 
+    def test_interrupt_while_a_failed_rollback_is_logged_records_cancelled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The tag write and its rollback both fail, and the interrupt lands
+        # while the rollback's failure is logged: stored all the same.
+        real_debug = transfer.logger.debug
+
+        def debug(msg: object, *args: object, **kwargs: Any) -> None:
+            if isinstance(msg, str) and msg.startswith("deleting s3://"):
+                raise KeyboardInterrupt
+            real_debug(msg, *args, **kwargs)
+
+        monkeypatch.setattr(transfer.logger, "debug", debug)
+        results: list[OpResult] = []
+        calls, source_calls, transferrer = self._move_with_post_copy_writes(
+            [
+                client_error("AccessDenied", 403, "PutObjectTagging"),
+                client_error("AccessDenied", 403, "DeleteObject"),
+                {},
+                {},
+            ],
+            [*self._fresh_annotations(), {}],
+            on_result=results.append,
+        )
+        assert ops(calls)[4:] == ["PutObjectTagging", "DeleteObject"]
+        assert "DeleteObject" not in ops(source_calls)
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+        assert (transferrer.succeeded, transferrer.cancelled) == (0, 1)
+
     def test_an_interrupt_after_the_post_copy_writes_sends_them_once(self) -> None:
         # The interrupt escapes on_result, after every request: upstream
         # re-runs the uncleared callback list, and the post-copy writes must

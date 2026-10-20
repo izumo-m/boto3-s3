@@ -2772,8 +2772,9 @@ class _DeleteSource:
             response = self._delete()
         except BaseException as exc:
             # An interrupt included (use_threads=False runs this on the calling
-            # thread), anywhere past the flag: whether the delete reached the
-            # service is unknown, so the item must not be recorded as moved.
+            # thread), anywhere past the flag until the delete returns: whether
+            # the delete reached the service is unknown, so the item must not
+            # be recorded as moved.
             # Stored as the outcome, it becomes CANCELLED and is re-raised to
             # the caller (`_outcome`).
             future.set_exception(exc)
