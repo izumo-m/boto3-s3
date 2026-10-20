@@ -564,16 +564,12 @@ def _set_file_utime(path: str, timestamp: float) -> None:
     A permission failure (EPERM - typically a file owned by another user) is
     re-worded the way aws words it, so the resulting warning carries
     aws-cli's "attempting to modify the utime" text; every other error keeps
-    its own message - with the path in it: Python 3.10 to 3.12's POSIX
-    ``os.utime`` leaves the path off its error, which 3.13 and the 3.14
-    aws bundles name (``[Errno 36] File name too long: '<path>'``).
+    its own message.
     """
     try:
         os.utime(path, (timestamp, timestamp))
     except OSError as exc:
         if exc.errno != errno.EPERM:
-            if exc.filename is None and exc.errno is not None and os.name != "nt":
-                raise OSError(exc.errno, exc.strerror, path) from exc
             raise
         raise AccessDeniedError(
             "The file was downloaded, but attempting to modify the utime of the file "
@@ -2613,14 +2609,6 @@ class _DirectoryCreator:
                 key=future.meta.call_args.fileobj.replace(os.sep, "/"),
                 message=f"Could not create directory {directory}: {exc}",
             ) from exc
-        except ValueError as exc:
-            # A key with an embedded NUL (an S3-compatible listing can carry
-            # one): aws's subscriber lets the ValueError through, worded by
-            # its bundled 3.14, whose os functions name themselves in it -
-            # 3.10 and 3.11 say "embedded null byte".
-            if str(exc) == "embedded null byte":
-                raise ValueError("mkdir: embedded null character in path") from exc
-            raise
 
 
 class _FsyncDest:

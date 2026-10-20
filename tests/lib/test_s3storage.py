@@ -19,9 +19,8 @@ import stat
 import sys
 import threading
 import time
-from collections.abc import Collection, Generator, Iterator
+from collections.abc import Generator, Iterator
 from datetime import datetime, timedelta, timezone, tzinfo
-from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +29,7 @@ import pytest
 from botocore.exceptions import (
     ClientError,
     IncompleteReadError,
+    ParamValidationError,
     ProfileNotFound,
     ResponseStreamingError,
 )
@@ -57,7 +57,6 @@ from boto3_s3 import (
     s3storage,
 )
 from boto3_s3.storage import sieve_pages
-from tests.utils.fakemodel import model_meta
 from tests.utils.fakes3 import MTIME, client_error, listing
 from tests.utils.recorder import ApiCall, make_recording_client, ops
 
@@ -77,11 +76,6 @@ class _FakePaginator:
         return iter(self._pages)
 
 
-# What a current botocore's ListBuckets models. The fakes below carry it unless
-# a test asks for an older model: a subset, or None for no input shape at all.
-_LIST_BUCKETS_MEMBERS = frozenset({"Prefix", "BucketRegion"})
-
-
 class _FakeS3Client:
     def __init__(
         self,
@@ -89,7 +83,6 @@ class _FakeS3Client:
         error: Exception | None = None,
         head_response: dict[str, Any] | None = None,
         head_error: Exception | None = None,
-        list_buckets_members: Collection[str] | None = _LIST_BUCKETS_MEMBERS,
     ) -> None:
         self._pages = pages or []
         self._error = error
@@ -98,8 +91,6 @@ class _FakeS3Client:
         self.calls: list[dict[str, Any]] = []
         self.paginator_names: list[str] = []
         self.head_calls: list[dict[str, Any]] = []
-        # The ListBuckets filter gate reads the model, so the fake carries one.
-        self.meta = model_meta({"ListBuckets": list_buckets_members})
 
     def can_paginate(self, name: str) -> bool:
         return True
@@ -124,14 +115,12 @@ def _storage(
     url: str = "s3://bucket/prefix/",
     page_size: int = 1000,
     fetch_owner: bool = False,
-    list_buckets_members: Collection[str] | None = _LIST_BUCKETS_MEMBERS,
 ) -> tuple[S3Storage, _FakeS3Client]:
     client = _FakeS3Client(
         pages=pages,
         error=error,
         head_response=head_response,
         head_error=head_error,
-        list_buckets_members=list_buckets_members,
     )
     return S3Storage(url, client=client, page_size=page_size, fetch_owner=fetch_owner), client
 
@@ -608,11 +597,10 @@ def _bucket_entry(name: str) -> dict[str, Any]:
 
 class _NoPaginatorClient:
     """A botocore < 1.34.162 client: no ListBuckets paginator, and a
-    ListBuckets model with no input shape at all."""
+    ListBuckets model with no input shape, so a filter would go out unchecked."""
 
     def __init__(self) -> None:
         self.list_buckets_calls = 0
-        self.meta = model_meta({"ListBuckets": None})
 
     def can_paginate(self, name: str) -> bool:
         return False
@@ -675,14 +663,17 @@ class TestListBuckets:
 
     @pytest.mark.parametrize("filters", [{"name_prefix": "al"}, {"region": "us-west-2"}])
     def test_filters_below_the_paginator_floor_are_refused(self, filters: dict[str, str]) -> None:
-        # That old a botocore models no ListBuckets input shape at all, so the
-        # fallback call cannot carry a filter: a filtered listing must fail
-        # rather than answer with the account's whole bucket list.
+        # That old a botocore models no ListBuckets input shape at all, so it
+        # would send the fallback call without the filter: a filtered listing
+        # must fail rather than answer with the account's whole bucket list.
+        # It fails as a later botocore's own parameter validation fails it.
         client = _NoPaginatorClient()
         storage = S3Storage("s3://", client=client)  # type: ignore[arg-type]
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ValidationError) as exc_info:
             list(storage.list_buckets(**filters))
         assert client.list_buckets_calls == 0
+        # A storage-level call names no operation; `S3.ls` stamps its own.
+        assert exc_info.value.operation is None
 
     @pytest.mark.parametrize("filters", [{"name_prefix": ""}, {"region": ""}])
     def test_empty_filters_are_not_a_request(self, filters: dict[str, str]) -> None:
@@ -694,39 +685,15 @@ class TestListBuckets:
         assert client.list_buckets_calls == 1
         assert [(r.key, r.kind) for r in results] == [("alpha", FileKind.BUCKET)]
 
-    @pytest.mark.parametrize("filters", [{"name_prefix": "al"}, {"region": "us-west-2"}])
-    def test_filters_the_model_cannot_carry_are_refused(self, filters: dict[str, str]) -> None:
+    def test_a_filter_botocore_refuses_is_a_validation_error(self) -> None:
         # botocore 1.34.162 through 1.35.41 paginates ListBuckets but models
-        # neither filter input; sending one there fails botocore's own param
-        # validation, so the request is refused first - as a ConfigurationError
-        # (the SDK floor lacks the capability), not a ValidationError.
-        storage, client = _storage([], url="s3://", list_buckets_members=set())
-        with pytest.raises(ConfigurationError) as exc_info:
-            list(storage.list_buckets(**filters))
-        message = str(exc_info.value)
-        assert "1.35.42" in message
-        assert version("botocore") in message
-        # A storage-level call names no operation; `S3.ls` stamps its own.
-        assert exc_info.value.operation is None
-        assert client.calls == []
-
-    def test_prefix_only_model_carries_name_prefix_and_refuses_region(self) -> None:
-        # Each filter rides its own input member, so a model with one of the two
-        # serves that filter and refuses the other.
-        storage, client = _storage([], url="s3://", list_buckets_members={"Prefix"})
-        list(storage.list_buckets(name_prefix="al"))
-        assert client.calls[0]["Prefix"] == "al"
-        with pytest.raises(ConfigurationError):
-            list(storage.list_buckets(region="us-west-2"))
-        assert len(client.calls) == 1
-
-    def test_bucket_region_only_model_carries_region_and_refuses_name_prefix(self) -> None:
-        storage, client = _storage([], url="s3://", list_buckets_members={"BucketRegion"})
-        list(storage.list_buckets(region="us-west-2"))
-        assert client.calls[0]["BucketRegion"] == "us-west-2"
-        with pytest.raises(ConfigurationError):
+        # neither filter input; its parameter validation refuses one on the
+        # first page, before anything is sent.
+        error = ParamValidationError(report='Unknown parameter in input: "Prefix"')
+        storage, _ = _storage([], url="s3://", error=error)
+        with pytest.raises(ValidationError) as exc_info:
             list(storage.list_buckets(name_prefix="al"))
-        assert len(client.calls) == 1
+        assert exc_info.value.__cause__ is error
 
 
 def _keys_until_raise(entries: Iterator[FileInfo], expected: type[Exception]) -> list[str]:
@@ -1034,19 +1001,6 @@ class TestZonelessStamp:
         assert info.mtime.utcoffset() == timedelta(0)
         assert info.mtime.timestamp() == self._NAIVE.timestamp()
 
-    @_needs_tzset
-    def test_a_wall_clock_time_the_zone_skips_is_read_as_aws_cli_reads_it(self) -> None:
-        # 02:30 on the day New York's clocks jump from 02:00 to 03:00 does not
-        # exist. aws-cli, on Python 3.14, places it at 07:30Z (measured: a
-        # download is stamped 1741505400); `astimezone()` on a naive value
-        # says 06:30Z before Python 3.12, which is why the instant is taken
-        # through `timestamp()`.
-        gap = datetime(2025, 3, 9, 2, 30)
-        with _local_zone("America/New_York"):
-            storage, _ = _storage([{"Contents": [_stamped("prefix/a.txt", gap)]}])
-            [entry] = storage.scan(S3ScanOptions(recursive=True))
-        assert entry.mtime == datetime(2025, 3, 9, 7, 30, tzinfo=timezone.utc)
-
     def test_the_microseconds_survive_the_reading(self) -> None:
         precise = datetime(2025, 1, 1, 12, 0, 0, 123457)
         storage, _ = _storage([{"Contents": [_stamped("prefix/a.txt", precise)]}])
@@ -1056,44 +1010,6 @@ class TestZonelessStamp:
         assert entry.mtime.replace(microsecond=0).timestamp() == (
             precise.replace(microsecond=0).timestamp()
         )
-
-    def test_the_last_day_of_the_range_is_malformed(self) -> None:
-        # aws-cli's Python places a naive value by solving for it on both
-        # sides of a possible fold, and the second solution reads the local
-        # calendar a day ahead - so a zone-less stamp from 9999-12-31T00:00:00
-        # on ends its run (measured under UTC, Asia/Tokyo and
-        # America/New_York: `ls` at rc 255 from that second on, rc 0 one
-        # microsecond before).
-        pages = [{"Contents": [_stamped("prefix/far.txt", datetime(9999, 12, 31, 0, 0, 0))]}]
-        storage, _ = _storage(pages)
-        with pytest.raises(MalformedResponseError):
-            list(storage.scan(S3ScanOptions(recursive=True)))
-
-    @_needs_tzset
-    @pytest.mark.parametrize("zone", ["UTC", "Asia/Tokyo", "America/New_York"])
-    def test_the_last_day_is_malformed_whatever_the_zone(self, zone: str) -> None:
-        # East of UTC and at UTC the stamp's own instant is in range; only the
-        # day-ahead step leaves it. The error is the one that step raises, the
-        # year running out, as it is for aws-cli.
-        pages = [{"Contents": [_stamped("prefix/far.txt", datetime(9999, 12, 31, 0, 0, 0))]}]
-        with _local_zone(zone):
-            storage, _ = _storage(pages)
-            with pytest.raises(MalformedResponseError) as exc_info:
-                list(storage.scan(S3ScanOptions(recursive=True)))
-        if sys.platform == "linux":
-            # The step's own error (glibc reads the calendar a day ahead and
-            # CPython then refuses the year); another libc may fail the read
-            # itself, so only the kind of outcome is held elsewhere.
-            assert isinstance(exc_info.value.__cause__, ValueError)
-            assert "10000" in str(exc_info.value)
-
-    @pytest.mark.skipif(sys.platform == "win32", reason="Windows' localtime ends at the year 3000")
-    def test_the_microsecond_before_the_last_day_is_kept(self) -> None:
-        stamp = datetime(9999, 12, 30, 23, 59, 59, 999999)
-        storage, _ = _storage([{"Contents": [_stamped("prefix/far.txt", stamp)]}])
-        with _local_zone("UTC"):
-            [entry] = storage.scan(S3ScanOptions(recursive=True))
-        assert entry.mtime == stamp.replace(tzinfo=timezone.utc)
 
     def test_a_bucket_creation_date_gets_the_same_reading(self) -> None:
         pages = [{"Buckets": [{"Name": "alpha", "CreationDate": self._NAIVE}]}]
@@ -1995,7 +1911,7 @@ class TestGetFile:
         # get_file failure.
         dest = tmp_path / "f"
         dest.write_bytes(b"what was there")
-        unreadable = datetime(9999, 12, 31, 12, 0, 0)  # zone-less, in the range's last day
+        unreadable = datetime(1, 1, 1, 12, 0, 0)  # zone-less, no local reading in range
         client, _ = make_recording_client([dict(_get_response(b"new", LastModified=unreadable))])
         with pytest.raises(MalformedResponseError) as exc_info:
             S3Storage("s3://bucket/prefix/", client=client).get_file(dest, key="f")

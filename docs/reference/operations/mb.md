@@ -60,8 +60,11 @@ Raises:
 
 - [`ValidationError`](../exceptions.md#validationerror) — `target` is neither
   a string, an `os.PathLike`, nor an `S3Storage`; the location is an
-  unsupported ARN form or has a key but no bucket; or its bucket part is empty
-  (`"s3://"`). No request is sent in these cases.
+  unsupported ARN form or has a key but no bucket; its bucket part is empty
+  (`"s3://"`); or botocore's client-side parameter validation rejects the
+  request, as it does for what the request carries where the installed S3
+  model predates it — `tags` (botocore 1.39.2), a `-an` bucket name
+  (1.42.67). No request is sent in these cases.
 - [`ConfigurationError`](../exceptions.md#configurationerror), or its
   [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement —
   a client had to be built from a profile, region, endpoint or partial
@@ -70,10 +73,9 @@ Raises:
   constructed without a `client`, which builds its default on first use; `mb`
   reads the location constraint from that client, so the failure precedes the
   request. Missing credentials fail no build: they raise `ConfigurationError`
-  when the `CreateBucket` request is signed. An SDK whose S3 model predates
-  what the request carries — `tags` (botocore 1.39.2), a `-an` bucket name
-  (1.42.67) — or an S3 Express location it predates raises `ConfigurationError`
-  naming the version, before the request.
+  when the `CreateBucket` request is signed. An S3 Express location the SDK
+  predates raises `ConfigurationError` naming the version, before the
+  request.
 - The `CreateBucket` rejection itself, translated to its category:
   [`AccessDeniedError`](../exceptions.md#accessdeniederror),
   [`NotFoundError`](../exceptions.md#notfounderror),

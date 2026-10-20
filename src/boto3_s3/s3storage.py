@@ -644,33 +644,16 @@ def aware_stamp(
     reading here, converted to UTC: the instant aws-cli compares, stamps a
     download with and prints.
 
-    The instant is taken through ``timestamp()`` rather than ``astimezone()``.
-    The two agree except for a wall-clock time the local zone skips (the gap
-    a daylight-saving change, or any other change of offset, jumps over),
-    which ``astimezone()`` places earlier by the gap's length before Python
-    3.12 than from it; ``timestamp()`` gives the 3.12 reading on every
-    version, and aws-cli runs on a later one (measured under
-    ``TZ=America/New_York``: ``2025-03-09T02:30:00`` is 07:30Z for aws-cli).
-    Only whole seconds go through the float, the microseconds are put back
-    exactly.
-
-    Where the conversion itself fails, aws-cli dies on it, and it is reported
-    the way `reject_unrepresentable_stamp` reports the aware case. That
-    includes a failure of a step whose answer is not otherwise needed:
-    aws-cli's Python places a naive value by solving for it on both sides of
-    a possible fold, and the second solution reads the local calendar a day
-    ahead. So a zone-less stamp in the last day of ``datetime``'s range
-    (``9999-12-31T00:00:00`` on) ends an aws-cli run in every zone, and on
-    Windows so does one within a day of where its ``localtime`` stops, as
-    well as any below the epoch (all measured). The same second call is made
-    here, for its exception alone.
+    The instant is taken through ``timestamp()``; only whole seconds go
+    through the float, the microseconds are put back exactly. Where the
+    conversion itself fails, aws-cli dies on it, and it is reported the way
+    `reject_unrepresentable_stamp` reports the aware case.
     """
     if mtime.utcoffset() is not None:
         return mtime
     try:
         whole = mtime.replace(microsecond=0)
         seconds = int(whole.timestamp())
-        whole.replace(fold=1).timestamp()  # the far side of a fold: a day ahead
         return _EPOCH + timedelta(seconds=seconds, microseconds=mtime.microsecond)
     except (OverflowError, ValueError, OSError) as exc:
         raise MalformedResponseError(str(exc), operation=operation, bucket=bucket, key=key) from exc
@@ -872,42 +855,6 @@ def _page_to_bucket_infos(page: ListBucketsOutputTypeDef, storage: Storage) -> I
             compare_key=name,
             storage=storage,
         )
-
-
-# Back-compat (supported floor botocore 1.31, docs/compatibility.md): the
-# ListBuckets Prefix / BucketRegion input parameters arrived in botocore
-# 1.35.42, so below that a bucket filter cannot ride the request at all - an
-# unsent filter would answer a filtered listing with every bucket the account
-# has. Asking for one is therefore refused up front, ahead of botocore's own
-# opaque param validation. Drop this gate once the floor reaches 1.35.42.
-_BUCKET_FILTERS_MIN_BOTOCORE = "1.35.42"
-
-
-def _bucket_filters_unsupported_reason(
-    client: S3Client, *, name_prefix: str | None, region: str | None
-) -> str | None:
-    """Why the installed SDK cannot carry the requested bucket filters, or ``None``.
-
-    ``name_prefix`` / ``region`` ride the ``ListBuckets`` ``Prefix`` /
-    ``BucketRegion`` input members, so the client's S3 model must define the
-    ones actually requested. Membership is introspected directly
-    (version-agnostic - a botocore old enough to lack the operation's input
-    shape altogether reads as no members), while the returned message names the
-    minimum version as a hint. An unfiltered listing needs neither member, so
-    it is never probed. Returns ``None`` when the listing is supported.
-    """
-    if not name_prefix and not region:
-        return None
-    members = getattr(
-        client.meta.service_model.operation_model("ListBuckets").input_shape, "members", {}
-    )
-    if (name_prefix and "Prefix" not in members) or (region and "BucketRegion" not in members):
-        return (
-            "--bucket-name-prefix / --bucket-region require botocore >= "
-            f"{_BUCKET_FILTERS_MIN_BOTOCORE} for ListBuckets (Prefix / BucketRegion); "
-            f"the installed botocore is {version('botocore')}."
-        )
-    return None
 
 
 # The ``operation`` the single-request lane stamps on the errors it raises.
@@ -1525,8 +1472,9 @@ class S3Storage(Storage):
         ``region`` map to ``ListBuckets`` ``Prefix`` / ``BucketRegion`` (omitted
         when falsy, aws-cli's truthiness check). Each requires a botocore whose
         ``ListBuckets`` can carry it (the input parameters landed in 1.35.42);
-        requesting one where the model has no such member raises
-        ``ConfigurationError`` naming that version, so a filtered listing either
+        on an older one a filter is refused before any request with a
+        ``ValidationError`` (botocore's own parameter validation, or this
+        method's below the paginator floor), so a filtered listing either
         filters or fails (docs/compatibility.md). An unfiltered listing needs
         neither member: below the ListBuckets-paginator floor (botocore
         1.34.162) it falls back to one unpaginated ``list_buckets()``. Errors
@@ -1536,25 +1484,29 @@ class S3Storage(Storage):
         # its own name on what this raises, a direct call has none in scope.
         with s3_errors(operation=None):
             client = self.get_client()
-        reason = _bucket_filters_unsupported_reason(client, name_prefix=name_prefix, region=region)
-        if reason is not None:
-            # The environment (SDK floor) lacks the capability, not the
-            # caller's arguments: a ConfigurationError.
-            raise ConfigurationError(reason)
+        filters: dict[str, Any] = {}
+        if name_prefix:
+            filters["Prefix"] = name_prefix
+        if region:
+            filters["BucketRegion"] = region
         if not client.can_paginate("list_buckets"):
             # Back-compat (floor botocore 1.31): the ListBuckets paginator is a
             # late-2024 addition (botocore 1.34.162), so an older botocore has
-            # only the single unpaginated call to list with. Drop this branch
-            # once the floor reaches the paginator.
+            # only the single unpaginated call to list with. That botocore
+            # gives ListBuckets no input shape, so it would drop a filter
+            # unvalidated and answer with every bucket; the filter is refused
+            # here instead, as a later botocore's parameter validation refuses
+            # it. Drop this branch once the floor reaches the paginator.
+            if filters:
+                raise ValidationError(
+                    f"ListBuckets on botocore {version('botocore')} takes no "
+                    f"{' or '.join(filters)}; bucket filters need botocore 1.35.42 or later."
+                )
             with s3_request(operation=None):
                 listing = client.list_buckets()
             yield from _page_to_bucket_infos(listing, self)
             return
-        paging: dict[str, Any] = {"PaginationConfig": {"PageSize": self._page_size}}
-        if name_prefix:
-            paging["Prefix"] = name_prefix
-        if region:
-            paging["BucketRegion"] = region
+        paging: dict[str, Any] = {"PaginationConfig": {"PageSize": self._page_size}, **filters}
         with s3_request(operation=None):
             pages = iter(client.get_paginator("list_buckets").paginate(**paging))
         while True:

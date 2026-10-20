@@ -13,9 +13,8 @@ knobs aws-cli keeps in its `[s3]` runtime config plus annotation staging:
   second (aws-cli ``target_bandwidth``; becomes the CRT client's
   ``target_throughput``). The classic engine's cap stays ``max_bandwidth``.
 - ``should_stream`` / ``disk_throughput`` / ``direct_io`` - aws-cli's CRT
-  file-I/O options. The pip ``s3transfer`` CRT client cannot apply them yet
-  (no ``fio_options`` parameter as of 0.19); they are accepted now and passed
-  through automatically once ``create_s3_crt_client`` grows support.
+  file-I/O options. They are accepted and have no effect: the pip
+  ``s3transfer`` CRT client has no ``fio_options`` parameter to take them.
 - `annotation_temp_dir` - directory for
   `AnnotationCopyMode.PRELOAD_TEMPFILE`; `None` delegates to the operating
   system's standard temporary-directory selection.

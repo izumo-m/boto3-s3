@@ -33,7 +33,6 @@ from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Se
 from concurrent.futures import Executor, Future
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, replace
-from importlib.metadata import version
 from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any, Concatenate, Generic, Literal, ParamSpec, TypeVar, cast
 
@@ -1049,47 +1048,6 @@ def _bucket_tags(
     return [{"Key": key, "Value": value} for key, value in pairs]
 
 
-# Back-compat (supported floor botocore 1.31, docs/compatibility.md): the two
-# CreateBucket inputs aws-cli's mb sends beyond the bucket and its location
-# reached botocore's S3 model late - CreateBucketConfiguration.Tags in 1.39.2,
-# BucketNamespace (the account-regional namespace of a name ending in -an) in
-# 1.42.67, each read from the published wheels. Below those, mb is refused up
-# front with the version named, instead of failing in botocore's param
-# validation with an "Unknown parameter" naming a member the caller never
-# typed. Drop each gate once the floor reaches it.
-_BUCKET_TAGS_MIN_BOTOCORE = "1.39.2"
-_BUCKET_NAMESPACE_MIN_BOTOCORE = "1.42.67"
-
-
-def _create_bucket_unsupported_reason(client: S3Client, params: Mapping[str, Any]) -> str | None:
-    """Why the installed SDK cannot send the ``CreateBucket`` request in ``params``, or ``None``.
-
-    Membership is introspected on the client's S3 model (version-agnostic, like
-    the ``ListBuckets`` filter gate); the returned message names the minimum
-    version as a hint. Only the two late members are probed, and only when
-    ``params`` carries them.
-    """
-    wants_namespace = "BucketNamespace" in params
-    wants_tags = "Tags" in params.get("CreateBucketConfiguration", {})
-    if not wants_namespace and not wants_tags:
-        return None
-    shape = client.meta.service_model.operation_model("CreateBucket").input_shape
-    members = getattr(shape, "members", {})
-    if wants_namespace and "BucketNamespace" not in members:
-        return (
-            "a bucket name ending in -an (the account-regional namespace) requires "
-            f"botocore >= {_BUCKET_NAMESPACE_MIN_BOTOCORE} for CreateBucket "
-            f"(BucketNamespace); the installed botocore is {version('botocore')}."
-        )
-    config_members = getattr(members.get("CreateBucketConfiguration"), "members", {})
-    if wants_tags and "Tags" not in config_members:
-        return (
-            f"--tags requires botocore >= {_BUCKET_TAGS_MIN_BOTOCORE} for CreateBucket "
-            f"(CreateBucketConfiguration.Tags); the installed botocore is {version('botocore')}."
-        )
-    return None
-
-
 class S3:
     """Entry point for ``aws s3``-style operations (``cp`` / ``ls`` / ``mv`` / ...).
 
@@ -1416,8 +1374,8 @@ class S3:
         ``bucket_name_prefix`` / ``bucket_region`` filter *that* bucket listing
         and are meaningless for an object listing; each requires a botocore
         whose ``ListBuckets`` can carry it, and one that cannot raises
-        ``ConfigurationError`` naming the version it needs
-        (`S3Storage.list_buckets`); conversely ``recursive`` /
+        ``ValidationError`` before any request (`S3Storage.list_buckets`);
+        conversely ``recursive`` /
         ``request_payer`` are meaningless at the service root (both ignored, like
         aws-cli). The listing page size (object listings, and bucket listings on a
         paginator-capable botocore - the floor's fallback issues one
@@ -2830,8 +2788,8 @@ class S3:
         and duplicate keys (passed through for the server to reject, which is
         what the CLI's repeated ``--tags`` parity rests on). An SDK whose S3
         model predates the namespace or the tags member (botocore 1.42.67 /
-        1.39.2) is refused before the request with a ``ConfigurationError``
-        naming the version. A single-call
+        1.39.2) refuses the request in its own parameter validation, before
+        anything is sent: a ``ValidationError``. A single-call
         operation: failures raise their category error directly, never
         ``BatchError``, and whatever else the request raised from inside
         botocore is the base error carrying it as ``__cause__``
@@ -2855,11 +2813,6 @@ class S3:
             config["Tags"] = bucket_tags
         if config:
             params["CreateBucketConfiguration"] = config
-        reason = _create_bucket_unsupported_reason(storage.get_client(), params)
-        if reason is not None:
-            # The environment (SDK floor) lacks the capability, not the
-            # caller's arguments: a ConfigurationError.
-            raise ConfigurationError(reason, operation="mb", bucket=bucket)
         with _single_request("mb", bucket=bucket):
             storage.get_client().create_bucket(**params)
 

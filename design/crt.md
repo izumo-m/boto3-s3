@@ -216,10 +216,9 @@ config=None read as `'auto'` - with the same rules as boto3.
     `None` if unset (CRT dynamic). Determined via boto3's `UNSET_DEFAULT`
     sentinel (a faithful version of the same rule as the aws-cli factory)
   - target_throughput = `getattr(config, "target_bandwidth", None)`
-  - the fio family (should_stream / disk_throughput / direct_io): no released
-    pip s3transfer's `create_s3_crt_client` accepts `fio_options` (still absent
-    at 0.19.0), so they are passed only when the signature check accepts them
-    (forward-compatible; the fork bundled with aws-cli supports them)
+  - the fio family (should_stream / disk_throughput / direct_io) is not
+    passed: no released pip s3transfer's `create_s3_crt_client` accepts
+    `fio_options` (still absent at 0.19.0; the fork bundled with aws-cli does)
 
 ### subscriber compatibility
 
@@ -590,10 +589,8 @@ error's details need not (checked by the e2e CRT lane - testing.md).
   and the closing line stays ours deliberately (decided 2026-08-01; what it
   reports is an error detail, overview.md section 3).
 - **fio_options**: unavailable on any pip s3transfer
-  ([`compatibility.md`](../docs/compatibility.md)). `_add_fio_options` probes
-  `create_s3_crt_client`'s signature rather than a version, so the keys are
-  passed whenever the installed s3transfer's `create_s3_crt_client` accepts
-  the parameter.
+  ([`compatibility.md`](../docs/compatibility.md)), so the three keys are
+  accepted and do nothing.
 - **TransferConfig on old s3transfer**: below s3transfer 0.16.0 the config
   cannot reach `CRTTransferManager` and is dropped with boto3's own warning
   (`configured values will be ignored`), boto3-faithfully; the CRT client itself

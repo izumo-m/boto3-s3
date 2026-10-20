@@ -118,8 +118,8 @@ parameter not at all. It is ignored at the service root.
 `""` behaves as `None` does. They apply at the service root only and are
 ignored when the target names a bucket. Both need a recent enough SDK
 ([`../../compatibility.md`](../../compatibility.md)); requesting either on an
-SDK below that raises `ConfigurationError`, so a filtered bucket listing either
-filters or fails.
+SDK below that raises `ValidationError` before any request, so a filtered
+bucket listing either filters or fails.
 
 `cancel_token` accepts a `CancelToken` shared with anything else that holds it
 (see [`../results.md`](../results.md)). It is consulted once before the listing
@@ -176,8 +176,10 @@ raises them unnamed (the object listing is shared with the recursive forms of
 - [`ValidationError`](../exceptions.md#validationerror) — `target` is neither an
   `S3Storage` nor a `str` / `os.PathLike[str]`; it is an S3 Object Lambda or an
   Outposts bucket ARN, which these operations do not serve; it has a key but no
-  bucket (`"s3:///k"`); botocore rejects a listing parameter client-side; or the
-  service answers with a 4xx whose error code the category table does not name.
+  bucket (`"s3:///k"`); botocore rejects a listing parameter client-side, such
+  as a bucket filter (`bucket_name_prefix` / `bucket_region`) on an SDK whose
+  `ListBuckets` lacks the matching input member; or the service answers with
+  a 4xx whose error code the category table does not name.
 - [`CancelledError`](../exceptions.md#cancellederror) — `cancel_token` was
   cancelled before or during the run.
 - [`NotFoundError`](../exceptions.md#notfounderror) — the bucket does not exist
@@ -189,12 +191,9 @@ raises them unnamed (the object listing is shared with the recursive forms of
   `ServiceUnavailable`, `InternalError`, `RequestTimeout`), or another 5xx.
 - [`ConfigurationError`](../exceptions.md#configurationerror), or its
   [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement — a
-  bucket filter (`bucket_name_prefix` / `bucket_region`) on an SDK whose
-  `ListBuckets` model lacks the matching input member, raised as the bucket
-  listing starts and before any request; a client that cannot be built: a
-  set-but-unusable profile, partial credentials, a malformed region or
-  endpoint; and missing credentials, which fail the listing's first request
-  rather than the build.
+  client that cannot be built: a set-but-unusable profile, partial
+  credentials, a malformed region or endpoint; and missing credentials, which
+  fail the listing's first request rather than the build.
 - [`Boto3S3Error`](../exceptions.md#boto3s3error) itself — a failure the
   translator cannot classify.
 

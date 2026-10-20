@@ -287,13 +287,10 @@ class's default-sentinel machinery, and each defaults to `None`.
 second, becoming the CRT client's `target_throughput`. It does not cap the
 classic engine — `max_bandwidth` is that engine's limit.
 
-`should_stream`, `disk_throughput` and `direct_io` are the CRT file-I/O
-settings (`disk_throughput` in bytes per second, converted to the gigabits per
-second the CRT client takes). They are accepted and stored, and are passed to
-the CRT client only where the installed s3transfer's `create_s3_crt_client`
-accepts a `fio_options` parameter. No released pip s3transfer does, so on a
-pip-installed s3transfer the three are inert
-([`../compatibility.md`](../compatibility.md)).
+`should_stream`, `disk_throughput` and `direct_io` are aws-cli's CRT file-I/O
+settings (`disk_throughput` in bytes per second). They are accepted and
+stored, but have no effect: no released s3transfer takes the file-I/O options
+that carry them ([`../compatibility.md`](../compatibility.md)).
 
 `annotation_temp_dir` is the directory used by
 `AnnotationCopyMode.PRELOAD_TEMPFILE`; `None` delegates to the operating

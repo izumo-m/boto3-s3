@@ -2485,20 +2485,7 @@ class _CrtRenameFailing(_CrtDownloading):
         super()._drain()
 
 
-class TestDirectoryCreatorWording:
-    def test_an_embedded_nul_reads_as_the_bundled_interpreter_words_it(
-        self, tmp_path: Path
-    ) -> None:
-        # aws's subscriber lets the ValueError through; its 3.14 names the
-        # path function, which 3.10 and 3.11 do not.
-        future = SimpleNamespace(
-            meta=SimpleNamespace(
-                call_args=SimpleNamespace(fileobj=str(tmp_path / "d\x00e" / "f.txt"))
-            )
-        )
-        with pytest.raises(ValueError, match=r"^mkdir: embedded null character in path$"):
-            transfer._DirectoryCreator().on_queued(future)  # pyright: ignore[reportPrivateUsage]
-
+class TestDirectoryCreator:
     def test_a_directory_it_cannot_create_names_the_file(self, tmp_path: Path) -> None:
         # A local failure carries the file in key and no bucket, as the
         # engine's own record of the item's local file does.

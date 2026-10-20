@@ -781,33 +781,6 @@ class TestCredentialsIdentity:
             )  # pyright: ignore[reportArgumentType]
 
 
-class TestFioOptions:
-    def test_skipped_when_create_fn_lacks_the_parameter(self, stubs: CrtStubs) -> None:
-        config = TransferConfig(should_stream=True, disk_throughput=1_000_000_000, direct_io=True)
-        crtsupport.create_crt_transfer_manager(FakeClient(), config)  # pyright: ignore[reportArgumentType]
-        [kwargs] = stubs.create_kwargs
-        assert "fio_options" not in kwargs
-
-    def test_forwarded_once_s3transfer_supports_it(
-        self, stubs: CrtStubs, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        recorded: list[dict[str, Any]] = []
-
-        def create_client_with_fio(*, fio_options: Any = None, **kwargs: Any) -> Any:
-            recorded.append({"fio_options": fio_options, **kwargs})
-            return stubs.crt_client
-
-        monkeypatch.setattr(s3transfer_crt, "create_s3_crt_client", create_client_with_fio)
-        config = TransferConfig(should_stream=False, disk_throughput=1_000_000_000, direct_io=True)
-        crtsupport.create_crt_transfer_manager(FakeClient(), config)  # pyright: ignore[reportArgumentType]
-        [kwargs] = recorded
-        assert kwargs["fio_options"] == {
-            "should_stream": False,
-            "disk_throughput_gbps": 8.0,  # 1e9 bytes/s * 8 / 1e9
-            "direct_io": True,
-        }
-
-
 class TestCrtRegion:
     """The CRT client's region is the built client's own, boto3's source."""
 

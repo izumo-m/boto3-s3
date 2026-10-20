@@ -947,9 +947,9 @@ element at that
 bucket, with the buckets ahead of it already delivered.
 
 Requesting either filter on a botocore whose `ListBuckets` model lacks the
-matching input member raises `ConfigurationError` naming the version they need
-(see [`../compatibility.md`](../compatibility.md)), so a filtered listing
-either filters or fails. An unfiltered listing needs neither member: below the
+matching input member raises `ValidationError` before any request (see
+[`../compatibility.md`](../compatibility.md)), so a filtered listing either
+filters or fails. An unfiltered listing needs neither member: below the
 botocore version that added the `ListBuckets` paginator it is issued as a
 single unpaginated `ListBuckets` call. Errors surface on the consumer's pull.
 

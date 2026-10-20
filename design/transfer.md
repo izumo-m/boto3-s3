@@ -515,9 +515,9 @@ dest-existence check for download. We ported the same three faces:
   rejection wording (naming the minimum botocore / s3transfer as a hint) or
   `None` when supported - it introspects the client's model and s3transfer's
   table directly, version-agnostic. A
-  compatible tool calls it *before* the pipeline to reproduce aws's up-front
-  rejection (the CLI's `validate_no_overwrite_supported` maps it to rc 252);
-  aws itself never gates here because it bundles a current SDK. Download
+  compatible tool can call it *before* the pipeline; the library's own check
+  stops the run before any request (the CLI reports it on a `fatal error:`
+  line, rc 1); aws itself never gates here because it bundles a current SDK. Download
   and `sync` never send `IfNoneMatch`, so they stay usable on an old botocore.
 
 ## 8. The semantics of gates and warnings
@@ -568,18 +568,9 @@ dest-existence check for download. We ported the same three faces:
   `get_fileinfo`, bucket creation dates) and keeps it as aware UTC, so the
   `FileInfo.mtime` contract holds and sync's size-and-time judgment compares
   the instant aws-cli compares (measured against aws-cli under `TZ=UTC`,
-  `TZ=Asia/Tokyo` and `TZ=America/New_York`). Two details follow aws-cli's
-  bundled Python rather than the host's. A wall-clock time the zone skips (the
-  gap a change of offset jumps over - an hour for most daylight-saving
-  changes, half an hour or a whole day in some zones) is placed where Python
-  3.12 and later place it - `astimezone()` on a naive value says earlier by
-  the gap's length before 3.12, so the instant is taken through `timestamp()`,
-  which agrees on every version. And that Python places a naive value by
-  solving for it on both sides of a possible fold, the second solution reading
-  the local calendar a day ahead; the same second call is made here for its
-  failure alone, so a zone-less stamp in the last day of `datetime`'s range
-  (`9999-12-31T00:00:00` on) is a `MalformedResponseError` in every zone, and
-  on Windows so is one within a day of where `localtime` stops.
+  `TZ=Asia/Tokyo` and `TZ=America/New_York`). A stamp whose local reading
+  fails (one at the edge of `datetime`'s range) is a
+  `MalformedResponseError`, as aws-cli dies on the same conversion.
 - **a single-object HEAD missing `ContentLength` or `LastModified` ends the
   run** the same way: aws-cli's `_list_single_object` reads those two by
   subscript (`ContentLength` first) and `ETag` with a default, so
@@ -739,11 +730,9 @@ dest-existence check for download. We ported the same three faces:
   `XXHASH64` / `XXHASH3` / `XXHASH128`) is delegated by botocore to `awscrt`.
   Because botocore auto-detects awscrt at import time, it is enabled with no
   extra configuration as long as awscrt is present. The installed botocore lets
-  `BOTO_DISABLE_CRT` turn that detection off, and the botocore aws bundles has
-  no such switch; the CLI drops the variable before any of its modules can
-  reach botocore, so it decides nothing there either (cli.md section 4 item 10).
-  The library leaves it alone - an application embedding `boto3_s3` keeps its
-  own botocore's behavior.
+  `BOTO_DISABLE_CRT` turn that detection off (the botocore aws bundles has no
+  such switch); the library and the CLI leave it alone, so setting it turns
+  that detection off for them as well.
   awscrt is **not a default dependency but an opt-in extra**: the library
   provides `boto3-s3[crt]`
   (delegating to boto3's own `boto3[crt]`), and the CLI's `boto3-s3-cli[crt]`

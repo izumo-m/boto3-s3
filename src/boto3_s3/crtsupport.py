@@ -631,7 +631,6 @@ def _initialize(
     # The object the wrapper holds, kept beside it for the identity
     # short-circuit (`_is_compatible_request`); neither resolves it here.
     credentials = _client_credentials(client) if cred_wrapper is not None else None
-    _add_fio_options(create_kwargs, config, create_s3_crt_client)
     crt_client = create_s3_crt_client(**create_kwargs)
     return serializer, _CrtS3Client(
         crt_client,
@@ -1014,33 +1013,6 @@ def _explicit_chunksize(config: Any | None) -> int | None:
     if value is config.UNSET_DEFAULT:
         return None
     return value
-
-
-def _add_fio_options(kwargs: dict[str, Any], config: Any | None, create_fn: Any) -> None:
-    """aws-cli's file-I/O options, applied only once s3transfer can take them.
-
-    No released pip s3transfer has a ``fio_options`` parameter (still absent at
-    0.19.0); the settings are accepted on the config today and start flowing
-    automatically when the installed s3transfer grows the parameter (aws-cli's
-    bundled fork already has it).
-    """
-    import inspect
-
-    if "fio_options" not in inspect.signature(create_fn).parameters:
-        return
-    fio_options: dict[str, Any] = {}
-    should_stream = getattr(config, "should_stream", None)
-    if should_stream is not None:
-        fio_options["should_stream"] = should_stream
-    disk_throughput = getattr(config, "disk_throughput", None)
-    if disk_throughput is not None:
-        # Bytes per second to gigabits per second, aws-cli's conversion.
-        fio_options["disk_throughput_gbps"] = disk_throughput * 8 / 1_000_000_000
-    direct_io = getattr(config, "direct_io", None)
-    if direct_io is not None:
-        fio_options["direct_io"] = direct_io
-    if fio_options:
-        kwargs["fio_options"] = fio_options
 
 
 def _reset_for_tests() -> None:  # pyright: ignore[reportUnusedFunction] # test seam

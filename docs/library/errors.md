@@ -96,9 +96,9 @@ synthesized from the response body and has no exception behind it, so its
 | S3 404 / `NoSuchKey` / `NoSuchBucket`; a local `FileNotFoundError` or missing source | `NotFoundError` |
 | S3 5xx or throttling (`InternalError`, `SlowDown`, `ServiceUnavailable`); a connection failure, a timeout, a local I/O `OSError` | `TransportError` |
 | a listing, bucket or HeadObject response missing an element the AWS CLI reads; a `LastModified` the host's local zone cannot represent | `MalformedResponseError` |
-| `NoCredentialsError` / `NoRegionError`; an SDK too old for a requested feature | `ConfigurationError` |
+| `NoCredentialsError` / `NoRegionError`; an SDK too old for a requested feature, where the library checks it | `ConfigurationError` |
 | an unusable profile, partial credentials, a config value that will not convert | `InvalidConfigError` |
-| an invalid argument or a violated precondition | `ValidationError` |
+| an invalid argument or a violated precondition; a request botocore's own parameter validation refuses (an `mb` or `ls` input the installed SDK predates) | `ValidationError` |
 | `CancelToken.cancel()` | `CancelledError` |
 
 An S3 error code not in the table falls back to its HTTP status: 403 and 404 as
