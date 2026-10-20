@@ -167,8 +167,12 @@ immutable: one instance serves any number of operations, both sides of a
 `sync` and every thread, and it pickles by its rules. It is accepted wherever a
 `FileFilter` is — `sync`'s `create_filter` and `delete_filter` lanes and
 `ScanOptions.filter` included — and can be called from a predicate of your
-own. `update_filter` and `pair_filter` take pairs, so wrap it there:
-`lambda pair: web(pair.src)`. `rules` is the list as given.
+own. `update_filter` takes a `SyncPair`, so wrap it there:
+`lambda pair: web(pair.src)`. A `pair_filter` receives a `DestOnlyPair` too,
+which has only `dest`, so a wrap there picks the side present —
+`lambda pair: web(pair.dest if isinstance(pair, DestOnlyPair) else pair.src)` —
+though `filter=` already prunes both sides before they are paired. `rules` is
+the list as given.
 
 **Decision order.** The patterns apply in the order given and the last one that
 matches decides; an entry no pattern matches is included. So `Exclude("*")`
@@ -199,8 +203,10 @@ against R, and one the join puts in place of the base against F:
 So an absolute pattern never matches an S3 entry, whose `bucket/key` has no
 root, and a pattern rooted at the local side of a `sync` prunes that side
 only. On Windows a pattern whose drive part is a glob is matched as written:
-`*:*` matches every drive-letter path and every S3 key that holds a `:`. A
-bare `C:` on drive C: is the empty pattern. The base is matched literally,
+`*:*` matches every drive-letter path, every S3 key that holds a `:`, and
+every key under an access point or Outposts ARN, whose `bucket/key` starts
+with `arn:` — as the AWS CLI does. A bare `C:` on drive C: is the empty
+pattern. The base is matched literally,
 where the AWS CLI reads glob characters in it. An entry without F (a custom
 backend's, or an `S3FileInfo` without `storage`) is decided by the patterns
 matched against R alone, and one whose `compare_key` is `None` by those matched

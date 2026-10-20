@@ -90,6 +90,13 @@ class TestRules:
         with pytest.raises(ValidationError):
             globsieve.compile(["*.txt"])  # type: ignore[list-item]
 
+    def test_a_rule_rejects_a_pattern_that_is_not_a_string(self) -> None:
+        # A list passed whole instead of unpacked is the likely mistake.
+        with pytest.raises(ValidationError):
+            Exclude(["*.tmp", "*.log"])  # type: ignore[arg-type]
+        with pytest.raises(ValidationError):
+            Include("*.txt", None)  # type: ignore[arg-type]
+
     def test_rules_attribute_is_the_list_as_given(self) -> None:
         rules = [Exclude("*"), Include("*.txt", "*.md")]
         assert globsieve.compile(rules).rules == tuple(rules)
@@ -317,7 +324,8 @@ class TestWindowsCaseMapping:
     for a few hundred code points. Measured against aws.exe 2.36.40:
     ``--exclude 'k*'`` does not keep a key that starts with the Kelvin sign,
     ``--exclude 'i*'`` not one that starts with U+0130, and ``str.lower`` would
-    have kept both. Run on Python 3.10 (the direct call) and 3.14 (the stdlib).
+    have kept both. The direct call serves a Python whose ``_winapi`` lacks it
+    (an early 3.10 release); the stdlib serves every other.
     """
 
     @pytest.mark.parametrize(
@@ -336,8 +344,8 @@ class TestWindowsCaseMapping:
         assert globsieve.normcase(text) == folded
 
     def test_the_direct_call_agrees_with_the_stdlib_where_the_stdlib_has_it(self) -> None:
-        if sys.version_info < (3, 12):
-            pytest.skip("ntpath.normcase lower-cases with str.lower before Python 3.12")
+        if not globsieve._NTPATH_FOLDS:
+            pytest.skip("this Python's ntpath.normcase lower-cases with str.lower")
         for code in (*range(0x20, 0x250), 0x130, 0x212A, 0x1E9E, 0x3A3, 0x10400, 0x1F600):
             text = "x" + chr(code) + "/y"
             assert globsieve._lcmap_lower(text.replace("/", _BS)) == ntpath.normcase(text), hex(

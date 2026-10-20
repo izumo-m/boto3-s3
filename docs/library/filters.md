@@ -56,8 +56,9 @@ one. Such a pattern never matches an S3 entry, so one rooted at the local
 source of a `sync` prunes that side only; relative patterns are symmetric
 across sides. On Windows a drive-relative `C:foo` is relative for entries on
 drive C: and is matched as written against the full path of every other
-entry, so `*:*` matches every drive-letter path and every S3 key that holds a
-`:`. The
+entry, so on Windows `*:*` matches every drive-letter path, every S3 key that
+holds a `:`, and every key under an access point or Outposts ARN (whose
+`bucket/key` starts with `arn:`). The
 [reference](../reference/filters.md#globfilter) has the full table.
 
 Matching follows `aws s3` on each platform: byte-exact on Linux and macOS,

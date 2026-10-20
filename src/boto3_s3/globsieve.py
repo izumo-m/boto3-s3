@@ -39,8 +39,10 @@ base, the pattern is matched against R; where it drops the base, against F:
 - Windows ``\x`` (a root without a drive): ``D + \x`` against F;
 - Windows ``C:x`` (a drive without a root): against R as ``x`` when the drive
   is D, compared case-insensitively as ``ntpath.join`` compares; otherwise as
-  written against F (``*:*`` matches every drive-letter path and every S3 key
-  that holds a ``:``). A bare ``C:`` on drive C: is the empty pattern.
+  written against F (so on Windows ``*:*`` matches every drive-letter path,
+  every S3 key that holds a ``:``, and every key under an access point or
+  Outposts ARN, whose ``bucket/key`` starts with ``arn:`` - as on aws). A
+  bare ``C:`` on drive C: is the empty pattern.
 
 aws matches both strings through ``normcase``: byte-exact on POSIX, where
 ``\`` is an ordinary character; on Windows lower-cased by the operating
@@ -100,13 +102,19 @@ class _Rule:
 
     ``patterns`` is the tuple the constructor was given. Each pattern is a rule
     of its own, at its own position in the list; a rule with no pattern
-    changes nothing. Two values are equal when they are of one kind with the
-    same patterns; they are hashable.
+    changes nothing. A pattern that is not a ``str`` (a list passed whole, say)
+    raises ``ValidationError`` here. Two values are equal when they are of
+    one kind with the same patterns; they are hashable.
     """
 
     patterns: tuple[str, ...]
 
     def __init__(self, *patterns: str) -> None:
+        for pattern in patterns:
+            if not isinstance(pattern, str):  # pyright: ignore[reportUnnecessaryIsInstance]
+                raise ValidationError(
+                    f"{type(self).__name__} takes patterns as strings, got {type(pattern).__name__}"
+                )
         object.__setattr__(self, "patterns", patterns)
 
     def __repr__(self) -> str:
@@ -125,8 +133,14 @@ class Include(_Rule):
 
 
 if sys.platform == "win32":
+    import _winapi
     import ctypes
     import functools
+
+    # Whether ``ntpath.normcase`` makes the system call itself: it does where
+    # ``_winapi`` has it (3.11, and 3.10 from a patch release on), and an
+    # early 3.10 release lower-cases with ``str.lower`` instead.
+    _NTPATH_FOLDS = hasattr(_winapi, "LCMapStringEx")
 
     @functools.lru_cache(maxsize=1)
     def _lcmap_string_ex() -> Any:
@@ -149,7 +163,7 @@ if sys.platform == "win32":
     def _lcmap_lower(text: str) -> str:
         """Windows' locale-invariant lower-casing (``LCMapStringEx``), through ctypes.
 
-        What ``ntpath.normcase`` calls from Python 3.12 on. The mapping is the
+        What ``ntpath.normcase`` calls where ``_winapi`` has it. The mapping is the
         operating system's one-to-one table, not Unicode's full case mapping:
         it leaves U+0130, the Kelvin sign and U+1E9E alone and has no final
         sigma, where ``str.lower`` does otherwise (447 code points differ on
@@ -193,17 +207,17 @@ def _windows_normcase(text: str) -> str:
     ``a\b``, and ``--exclude "k*"`` does not keep a key starting with the
     Kelvin sign.
 
-    The stdlib function is that mapping from Python 3.12 on, the version
-    aws-cli ships; on a Windows host running 3.10 or 3.11 it still lower-cases
-    with ``str.lower``, so the system call is made directly there (a version
-    difference that changes which entries a normal run selects, so it is
-    matched; design/overview.md section 3). Drop that branch once the
-    supported floor reaches 3.12. Off Windows this is only reached by tests
-    that simulate the host, where ``ntpath.normcase`` falls back to
-    ``str.lower`` itself. The engine relies on the fold working character by
-    character, which the Windows table does.
+    The stdlib function is that mapping wherever ``_winapi`` offers the call
+    (Python 3.11, and 3.10 from a patch release on); an early 3.10 release
+    still lower-cases with ``str.lower``, so the system call is made directly
+    there (a version difference that changes which entries a normal run
+    selects, so it is matched; design/overview.md section 3). Drop that branch
+    once no supported release lacks the call. Off Windows this is only
+    reached by tests that simulate the host, where ``ntpath.normcase`` falls
+    back to ``str.lower`` itself. The engine relies on the fold working
+    character by character, which the Windows table does.
     """
-    if sys.platform == "win32" and sys.version_info < (3, 12):
+    if sys.platform == "win32" and not _NTPATH_FOLDS:
         text = text.replace("/", "\\")
         # The two mappings part only outside ASCII, and str.lower is far
         # cheaper than a system call per key.

@@ -90,9 +90,12 @@ Notes:
 - D is compared in aws's native spelling: a UNC drive written `//s/sh` is
   another drive than `\\s\sh` for `ntpath.join`.
 - A glob in the drive part is matched as written: `--exclude '*:*'` on
-  Windows matches every drive-letter path and every S3 key that holds a `:`
-  (`a:b` on the S3 side is a drive `a:`, never the key). A bare `C:` on drive
-  C: is the empty pattern. Both measured on `aws.exe` 2.36.40.
+  Windows matches every drive-letter path, every S3 key that holds a `:`,
+  and every key under an access point or Outposts ARN, whose `bucket/key`
+  starts with `arn:` (`a:b` on the S3 side is a drive `a:`, never the key).
+  A bare `C:` on drive C: is the empty pattern. Measured on `aws.exe`
+  2.36.40, except the ARN case (the dev stack has no access point), which
+  follows from the same join.
 - On POSIX a pattern is anchored exactly when it starts with `/`; `\` and
   `C:` are ordinary characters.
 
@@ -126,12 +129,14 @@ matching is case-insensitive and the two separators are one - in an S3 key
 that holds a literal backslash as much as in a pattern (measured against
 `aws.exe` 2.36.40 by real deletion: `--exclude a/b` keeps the key `a\b`). The
 fold is not `str.lower` (447 code points differ on Windows 11; the Kelvin
-sign and U+0130 are kept). Python 3.12+ `ntpath.normcase` is that table; on a
-Windows host running 3.10 or 3.11 the engine calls `LCMapStringEx` itself
-(`_lcmap_lower`), a Python-version difference that changes which entries a
-normal run selects and is therefore matched (overview.md section 3). Matching
-in the `\` form is what keeps a character class such as `[+-9]`, which spans
-`/` but not `\`, deciding as aws decides.
+sign and U+0130 are kept). `ntpath.normcase` is that table wherever
+`_winapi` offers the call (3.11, and 3.10 from a patch release on); on a
+Windows host whose Python lacks it (an early 3.10 release) the engine calls
+`LCMapStringEx` itself (`_lcmap_lower`), a Python-version difference that
+changes which entries a normal run selects and is therefore matched
+(overview.md section 3). Matching in the `\` form is what keeps a character
+class such as `[+-9]`, which spans `/` but not `\`, deciding as aws
+decides.
 
 The host model (POSIX or Windows rules and fold) is bound when a filter is
 compiled, from `globsieve._WINDOWS`; the tests simulate the other family by
@@ -196,7 +201,10 @@ destination entry pruned here is invisible to `--delete` (aws: files excluded
 by filters are excluded from deletion). The pair-level `create_filter` /
 `update_filter` / `delete_filter` are a separate layer after the merge-join
 (sync.md); a `GlobFilter` works in `create_filter` / `delete_filter`, and in
-the pair predicates wrapped: `lambda pair: web(pair.src)`.
+`update_filter` wrapped: `lambda pair: web(pair.src)`. A `pair_filter` also
+receives a `DestOnlyPair`, which has only `dest`, so a wrap there picks the
+side (`web(pair.dest if isinstance(pair, DestOnlyPair) else pair.src)`) -
+though `filter=` already prunes both sides before pairing.
 
 **`rm`** wraps the filter for the bucket-root folder-marker sweep (marker test
 first, then the filter - aws's order). Its prefix is `rm_filter_root(key,
