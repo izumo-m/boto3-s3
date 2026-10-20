@@ -102,8 +102,11 @@ maintaining high functional compatibility.
   profile used, the retries made, the arguments accepted), the library and
   the CLI match aws-cli, each where the difference reaches it; a difference
   that shows only in an error or in an unusual environment is not
-  compensated. The rules for errors below still hold on every supported
-  version.
+  compensated. The defaults of a client and its session that the caller does
+  not supply (the region, the profile, the default checksum) follow boto3 in
+  the library and aws-cli in the CLI: a library caller sets them as for any
+  boto3 application. The rules for errors below still hold on every
+  supported version.
 - **Security before compatibility**: where matching aws-cli would expose a
   secret or silently turn a protection off, the library and the CLI do not
   match it. For example, credentials are masked in debug logs
