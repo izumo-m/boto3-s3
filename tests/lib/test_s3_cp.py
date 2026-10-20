@@ -46,6 +46,7 @@ from boto3_s3.types import (
     FileFilter,
     FileInfo,
     FileKind,
+    LocalFileInfo,
     OpOutcome,
     OpResult,
     TransferOptions,
@@ -54,6 +55,7 @@ from boto3_s3.types import (
 from tests.utils.fakes3 import MTIME, client_error, get_response, head_response
 from tests.utils.host import is_case_insensitive, skip_if_chmod_is_inert
 from tests.utils.recorder import ApiCall, make_recording_client, ops
+from tests.utils.roottree import RootTree
 
 _SYNC = TransferConfig(use_threads=False)
 
@@ -827,6 +829,61 @@ class TestFilters:
         assert calls == []
         assert seen == [(relative, root + full)]
         assert [r.outcome for r in results] == ([OpOutcome.DRYRUN] if kept else [])
+
+    @pytest.mark.parametrize(
+        ("pattern", "kept"),
+        [
+            # aws matches the walk of a filesystem root as `/bin/x`: a
+            # relative `bin/*` misses it, a leading `*` reaches it.
+            ("bin/*", ["bin/x", "etc/y"]),
+            ("*bin/*", ["etc/y"]),
+        ],
+    )
+    def test_a_filesystem_root_source_is_matched_as_aws_does(
+        self, pattern: str, kept: list[str]
+    ) -> None:
+        keep = globsieve.compile([Exclude(pattern)])
+        seen: list[str | None] = []
+
+        def spy(info: FileInfo) -> bool:
+            seen.append(info.compare_key)
+            return keep(info)
+
+        client, calls = make_recording_client([])
+        results: list[OpResult] = []
+        S3().cp(
+            RootTree("bin/x", "etc/y"),
+            S3Storage("s3://b/up", client=client),
+            recursive=True,
+            filter=spy,
+            dryrun=True,
+            on_result=results.append,
+        )
+        assert calls == []
+        assert seen == ["/bin/x", "/etc/y"]
+        # The records keep their own relative keys, which name the destination.
+        assert [r.compare_key for r in results] == kept
+
+    def test_the_case_conflict_pre_walk_of_a_filesystem_root(self) -> None:
+        # The gate's destination walk meets the run's filter as aws's reverse
+        # generator does, each entry matched below the root as `/bin/x`.
+        seen: list[str | None] = []
+
+        def spy(info: FileInfo) -> bool:
+            if isinstance(info, LocalFileInfo):
+                seen.append(info.compare_key)
+            return True
+
+        client, _calls = make_recording_client([{}])
+        S3().cp(
+            S3Storage("s3://b/pre", client=client),
+            RootTree("bin/x"),
+            recursive=True,
+            filter=spy,
+            dryrun=True,
+            **TransferOptions(case_conflict=CaseConflictMode.WARN),
+        )
+        assert seen == ["/bin/x"]
 
     def test_nested_s3_to_s3_patterns_do_not_cross(self) -> None:
         # aws joins every pattern onto both sides' bases and applies both to

@@ -972,9 +972,12 @@ def _local_entries(rng: random.Random, os: _Os, base: str, count: int) -> list[_
     entries: list[_Entry] = []
     for _ in range(count):
         parts = [_text(rng, name_chars, 1, 3) for _ in range(rng.randint(1, 3))]
-        relative = "/".join(parts)
-        joint = "" if base.endswith(os.sep) else os.sep
-        native = base + joint + os.sep.join(parts)
+        # aws walks from local_format's abspath plus a separator, which doubles
+        # the separator of a filesystem root (`//bin/x`); the library's walk
+        # keys the same, and its view of a root walk adds the leading `/` aws's
+        # join onto the root leaves (producers.local_walk_filter).
+        native = base + os.sep + os.sep.join(parts)
+        relative = ("/" if base.endswith(os.sep) else "") + "/".join(parts)
         full = native.replace(os.sep, "/")
         entries.append(_Entry(_AwsFileInfo(native, "local"), relative, full, base))
     return entries

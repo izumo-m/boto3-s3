@@ -42,6 +42,7 @@ from boto3_s3.types import (
     CaseConflictMode,
     FileInfo,
     FileKind,
+    LocalFileInfo,
     OpOutcome,
     OpResult,
     TransferOptions,
@@ -50,6 +51,7 @@ from boto3_s3.types import (
 from tests.utils.fakes3 import MTIME, crt_sender_factory, get_response, listing
 from tests.utils.host import skip_if_chmod_is_inert
 from tests.utils.recorder import make_recording_client, ops
+from tests.utils.roottree import RootTree
 
 _SERIAL = TransferConfig(use_threads=False)
 
@@ -1024,6 +1026,54 @@ class TestSyncDownload:
         assert excinfo.value.operation == "sync"
         assert isinstance(excinfo.value.__cause__, ValueError)  # the enum's own refusal
         assert calls == []
+
+
+class TestSyncFilesystemRoot:
+    """A local side at the filesystem root: aws matches its walk as `/bin/x`.
+
+    aws walks from ``local_format``'s ``abspath`` plus a separator and joins the
+    patterns onto ``abspath(path)``, which already ends in one; both of sync's
+    local sides show the filter that form, and keep their records' own keys.
+    """
+
+    def test_a_root_source_side(self) -> None:
+        keep = globsieve.compile([Exclude("bin/*")])
+        seen: list[str | None] = []
+
+        def spy(info: FileInfo) -> bool:
+            if isinstance(info, LocalFileInfo):
+                seen.append(info.compare_key)
+            return keep(info)
+
+        client, _calls = make_recording_client([{}])
+        results: list[OpResult] = []
+        S3().sync(
+            RootTree("bin/x", "etc/y"),
+            S3Storage("s3://b/up", client=client),
+            filter=spy,
+            dryrun=True,
+            on_result=results.append,
+        )
+        assert seen == ["/bin/x", "/etc/y"]
+        # `bin/*` misses `/bin/x` on aws too: both are uploaded.
+        assert sorted(r.compare_key for r in results) == ["bin/x", "etc/y"]
+
+    def test_a_root_destination_side(self) -> None:
+        seen: list[str | None] = []
+
+        def spy(info: FileInfo) -> bool:
+            if isinstance(info, LocalFileInfo):
+                seen.append(info.compare_key)
+            return True
+
+        client, _calls = make_recording_client([{}])
+        S3().sync(
+            S3Storage("s3://b/pre", client=client),
+            RootTree("bin/x"),
+            filter=spy,
+            dryrun=True,
+        )
+        assert seen == ["/bin/x"]
 
 
 class TestSyncS3SourceCommonPrefixes:

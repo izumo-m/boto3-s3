@@ -53,12 +53,17 @@ unchanged (it names the destination):
   `d/`; `d/`, `.` and `../` give `""`; a bare `..` gives `None`, so only
   patterns matched against the full path apply.
 
-On Windows an S3 location typed ending in a backslash is one more case: the AWS
-CLI's `ntpath.join` reads that backslash as a separator, so an entry `pre\/x`
-under `s3://bucket/pre\` is shown as `/x`. Each operation page states which key
-its filter matches ([`operations/README.md`](./operations/README.md)). `storage`
-is stamped before the filter runs too, so a predicate can reach the backend the
-entry came from (a `HeadObject` for a tag the listing omits, for instance).
+Two recursive cases differ too, and are shown a copy with a leading `/` in
+`compare_key`: a local walk of a filesystem root (`/`, `D:\`), which the AWS
+CLI walks from the root plus a separator — its entries read `//bin/x`, as
+their `key` does — and matches as `/bin/x`, so a relative `bin/*` misses them
+where `*bin/*` does not; and on Windows an S3 location typed ending in a
+backslash, which the AWS CLI's `ntpath.join` reads as a separator, so an entry
+`pre\/x` under `s3://bucket/pre\` is shown as `/x`. Each operation page
+states which key its filter matches
+([`operations/README.md`](./operations/README.md)). `storage` is stamped
+before the filter runs too, so a predicate can reach the backend the entry
+came from (a `HeadObject` for a tag the listing omits, for instance).
 `size` and `mtime` are populated for file entries and may be `None` for
 directory / prefix entries; on `rm`'s blind single-key path there is no listing
 at all, so only `key`, `compare_key` and `storage` are set and `size` / `mtime`

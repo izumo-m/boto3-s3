@@ -91,8 +91,8 @@ group (`aws s3`).
   and what a relative `--exclude` / `--include` pattern is matched against (a
   root-anchored pattern matches the full path instead): every entry the
   library hands to a filter carries aws-cli's path below its base here, through
-  a view where the record's own differs (a single source;
-  [`globsieve.md`](./globsieve.md) section 5).
+  a view where the record's own differs (a single source, a walk of a
+  filesystem root; [`globsieve.md`](./globsieve.md) section 5).
   It is carried on `FileInfo.compare_key`: each backend's
   listing stamps it on every entry it yields (a `scan` contract of the backend,
   not something the base `Storage.scan` does - see [`storage.md`](./storage.md)

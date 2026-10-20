@@ -5,7 +5,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- `--exclude` / `--include` now take the path a command names literally (a `[1]` in it is no longer read as a pattern), and between nested S3 prefixes a pattern applies only to its own side's entries.
+- `--exclude` / `--include` now take the path a command names literally, the working directory a relative path counts from included (a `[1]` there is no longer read as a pattern), and between nested S3 prefixes a pattern applies only to its own side's entries.
 - The `[plugins]` section of the config file is no longer read: no `aws` plugin is loaded, and a section naming one is no error.
 - `~/.aws/cli/alias` is no longer read: no alias applies, and a file there is no error; a shell alias does the same job.
 - The interactive auto-prompt and the `autoprompt` extra are gone: `--cli-auto-prompt` and `--no-cli-auto-prompt` are accepted and ignored, and `AWS_CLI_AUTO_PROMPT` and `cli_auto_prompt` are not read.

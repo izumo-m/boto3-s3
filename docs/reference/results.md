@@ -390,7 +390,10 @@ name unchanged. Each backend's `scan_pages` stamps it on every entry it yields â
 a contract of the backend's listing rather than of the base `Storage.scan` â€” so
 a `ScanOptions.filter` predicate, `GlobFilter` in particular, can match it
 without re-deriving it from `key`. The built-in single-entry lookups use the
-basename. A hand-built `FileInfo` may leave it `None`.
+basename; an operation shows its filter the AWS CLI's form of a single source
+instead (and of the few recursive bases where the two differ), on a copy,
+while the record keeps its own ([`filters.md`](./filters.md#filefilter)). A
+hand-built `FileInfo` may leave it `None`.
 
 `storage` is the backend the entry was listed from, stamped by the producer
 during the scan and before any filter runs. It lets a filter predicate reach

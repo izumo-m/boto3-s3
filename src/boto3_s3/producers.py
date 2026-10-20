@@ -95,8 +95,13 @@ def walk_source_scan_options(
     the tree - ``sync_entries`` for a deleting destination) turns the page-ahead
     overlap off, while ``True`` leaves a backend that seeded ``read_ahead=False``
     in its ``default_scan_options`` untouched.
+
+    A recursive walk's item filter is shown each entry as aws-cli matches it
+    (`local_walk_filter`).
     """
     base = storage.default_scan_options()
+    if item_filter is not None and recursive:
+        item_filter = local_walk_filter(item_filter, storage)
     options = replace(
         base,
         recursive=recursive,
@@ -451,10 +456,9 @@ def upload_items(
             _warn_absent_local_source(plan.src, transferrer)
         infos = iter([single] if single is not None else [])
         if item_filter is not None:
-            if isinstance(plan.src, LocalStorage):
-                infos = _filter_single_local_source(infos, item_filter, plan.src)
-            else:
-                infos = (info for info in infos if item_filter(info))
+            # Only the locals3 route comes here, so the source is local.
+            src = cast("LocalStorage", plan.src)
+            infos = _filter_single_local_source(infos, item_filter, src)
     for info in infos:
         yield upload_item_from_info(plan, info, dest_bucket=dest_bucket, transferrer=transferrer)
 
@@ -604,12 +608,35 @@ def s3_listing_filter(item_filter: FileFilter, base_key: str) -> FileFilter:
     """
     if not base_key.endswith(_JOIN_SEPARATORS) or base_key.endswith("/"):
         return item_filter
+    return _rooted_view(item_filter)
 
-    def flush(info: FileInfo) -> bool:
+
+def local_walk_filter(item_filter: FileFilter, storage: Storage) -> FileFilter:
+    """``item_filter`` as aws-cli applies it to a recursive walk of ``storage``.
+
+    A walk stamps each entry's path below its root, which is aws's relative
+    path for every local root but a filesystem root (``/``, ``D:\\``,
+    ``\\\\srv\\share\\``): aws walks from ``local_format``'s ``abspath`` plus a
+    separator, so its entries read ``//bin/x``, and joins the patterns onto
+    ``abspath(path)``, which already ends in that separator - matching the
+    entry as ``/bin/x``. The filter is shown a copy carrying that form there
+    (the record keeps its own, which names the destination and pairs
+    ``sync``'s sides; its ``key`` already reads ``//bin/x``); every other root,
+    and a custom backend, runs it as given.
+    """
+    if not isinstance(storage, LocalStorage) or not storage.abspath.endswith(("/", os.sep)):
+        return item_filter
+    return _rooted_view(item_filter)
+
+
+def _rooted_view(item_filter: FileFilter) -> FileFilter:
+    """``item_filter`` shown each entry with a leading ``/`` on its ``compare_key``."""
+
+    def rooted(info: FileInfo) -> bool:
         relative = info.compare_key
         return item_filter(info if relative is None else replace(info, compare_key=f"/{relative}"))
 
-    return flush
+    return rooted
 
 
 def _filter_single_s3_source(

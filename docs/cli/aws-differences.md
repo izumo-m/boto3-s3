@@ -38,8 +38,9 @@ time a download stamps in some local zones (and the `sync` runs that follow
 from it), a transfer or delete whose request dies
 without any response, a multipart copy whose tag write and its cleanup both
 fail, a local source that cannot be walked as a directory, a path with no
-bucket, a filtered path holding glob characters, a timestamp only `aws`'s
-local-time conversion cannot hold, a
+bucket, a filtered path holding glob characters, `--exclude` / `--include`
+between nested S3 prefixes or across sides on Windows (below), a timestamp
+only `aws`'s local-time conversion cannot hold, a
 malformed `--grants`, a file whose size and time could not be read and then
 could, the destination directory of a refused run, a help page or an `mb` /
 `rb` success line that cannot be written, a
@@ -78,19 +79,26 @@ usually keeps the copy, and sometimes does not; in the other form both tools
 end either way from run to run. Neither outcome is
 promised by either tool, so such a run is not something the two can be
 compared on. Do not pass `--delete` when one side of a same-bucket sync
-contains the other. `--exclude` / `--include` between such prefixes differ
-too, deterministically: `aws` joins each pattern onto both sides and applies
-both to every entry, so `cp s3://bkt/d s3://bkt/d/backup --recursive
---exclude 'x*'` skips the source's `d/backup/x1.txt`; this command matches
-each entry under its own side only and copies it. The same cross-side reach
-lets `aws` on Windows match a local path with a root-relative or
-drive-relative pattern joined onto the S3 side (`C:?b*`, `\?srv\...`); this
-command does not reproduce that either.
+contains the other.
 
-Timing decides the same way for **a `sync --delete` against an S3-compatible
-endpoint whose listing is not in key order**: both tools pair such a listing
-the same way, and that pairing can copy a key and delete it in one run, so
-whether the key survives is timing on either tool (measured: lost in four of six runs on
+Nested prefixes also change what `--exclude` / `--include` select, on any
+command and with no timing involved: `aws` joins each pattern onto both
+sides' bases and applies both to every entry, so where one side's base lies
+inside the other's, the other side's patterns reach it. `cp s3://bkt/d
+s3://bkt/d/backup --recursive --exclude 'x*'` skips the source's
+`d/backup/x1.txt`, and a single object whose parents nest is caught the same
+way (`cp s3://bkt/a/x s3://bkt/z --exclude 'a/*'` excludes the object on
+`aws`). This command matches each entry under its own side's base only, so
+it copies both. The same cross-side reach lets `aws` on Windows match a local
+path with a root-relative or drive-relative pattern joined onto the S3 side,
+which has no drive to anchor it (`C:?b*` matching `C:\b...`, `\?srv\...`
+matching a UNC path); this command does not reproduce that either.
+
+Timing decides the result on either tool, as in the nested `sync --delete`
+above, for **a `sync --delete` against an S3-compatible endpoint whose
+listing is not in key order**: both tools pair such a listing the same way,
+and that pairing can copy a key and delete it in one run, so whether the key
+survives is timing on either tool (measured: lost in four of six runs on
 each). Real S3's general purpose buckets and MinIO list in key order; an S3
 Express directory bucket does not, and `sync` refuses it on both tools — and,
 on this command only, an access point of one as well (section 2).
@@ -497,10 +505,13 @@ that say outright that the run comes out differently, listed in section 1.
   pattern, so a `[`, `*` or `?` in that path is read as part of the pattern:
   `rm s3://bkt/f[1]/ --recursive --exclude '*'` matches nothing and deletes
   every object, and `cp --recursive 'dir[1]' s3://bkt/ --exclude '*'` still
-  uploads (measured on 2.36.40; aws-cli issues #7330 and #5452). The AWS
-  reference allows no wildcards in a path argument and documents a filter as
-  relative to the source directory, so this command takes the path
-  literally: both runs exclude everything. This holds until AWS documents
+  uploads (measured on 2.36.40; aws-cli issues #7330 and #5452). A relative
+  local path counts from the working directory, so glob characters there do
+  the same: in `Album [2020]`, `aws s3 sync . s3://bkt --exclude '*.tmp'`
+  uploads the `.tmp` files. The AWS reference allows no wildcards in a path
+  argument and documents a filter as relative to the source directory, so
+  this command takes the path - the working directory included - literally:
+  those runs exclude what the patterns name. This holds until AWS documents
   the behavior as intended.
 - **The `--version` line.** `aws` names itself and its interpreter; this
   command names the four packages that decide its behavior —
