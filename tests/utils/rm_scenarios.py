@@ -182,19 +182,6 @@ SCENARIOS: tuple[RmScenario, ...] = (
         expected_stderr_tokens_ours=("fatal error", "NoSuchBucket"),
         expected_stderr_tokens_aws=("fatal error", "NoSuchBucket"),
     ),
-    # botocore client-side validation of Bucket="" -> rc 1 (not 252).
-    RmScenario(
-        "rm_empty_bucket_uri",
-        ("rm", "s3://"),
-        expected_stderr_tokens_ours=("fatal error", "Invalid bucket name"),
-        expected_stderr_tokens_aws=("fatal error", "Invalid bucket name"),
-    ),
-    RmScenario(
-        "rm_empty_bucket_with_key",
-        ("rm", "s3:///key"),
-        expected_stderr_tokens_ours=("delete failed", "Invalid bucket name"),
-        expected_stderr_tokens_aws=("delete failed", "Invalid bucket name"),
-    ),
     # A non-integer page size dies in the CLI's own int() conversion -> rc
     # 255 on both sides (aws's bare int() escapes to its *general* handler).
     # No server contact, nothing seeded, nothing deleted.

@@ -153,16 +153,14 @@ class TestPostStartErrors:
         assert [c.operation for c in calls] == ["DeleteBucket"]
 
     @pytest.mark.parametrize("uri", ["s3://", "s3:///k"])
-    def test_empty_uri_is_rc_1(self, uri: str) -> None:
-        # aws sends Bucket="" to DeleteBucket and fails client-side inside the
-        # local catch -> rc 1 (same form as mb/rm), handled before
-        # construction so the client is never used.
-        client, calls = make_recording_client([])
-        result = run_cli_in_process(["rb", uri], ctx=client_ctx(client))
-        assert result.rc == 1
-        assert result.stderr.startswith(f"remove_bucket failed: {uri} ")
-        assert "Invalid bucket name" in result.stderr
-        assert calls == []
+    @pytest.mark.parametrize("force", [[], ["--force"]], ids=["plain", "force"])
+    def test_a_path_with_no_bucket_is_a_usage_error(self, uri: str, force: list[str]) -> None:
+        # Refused before the client is built (252), --force or not: aws sends
+        # Bucket="" and reports an rb failure at rc 1, or with --force runs
+        # the inner rm first and ends at 255.
+        result = run_cli_in_process(["rb", uri, *force], ctx=unused_ctx())
+        assert result.rc == 252
+        assert 'Invalid bucket name ""' in result.stderr
 
 
 class TestForce:
@@ -189,18 +187,6 @@ class TestForce:
         assert "fatal error:" in result.stderr
         assert "remove_bucket failed:" in result.stderr
         assert client.delete_bucket_calls == []
-
-    def test_force_empty_uri_is_255_and_skips_delete_bucket(self) -> None:
-        # aws has no empty-bucket short-circuit: rb s3:// --force runs the
-        # inner rm first, whose (inevitable) failure aborts through the
-        # RuntimeError path (255) before delete_bucket - measured on the
-        # pinned aws-cli, where the non-force rb s3:// stays rc 1.
-        client, calls = make_recording_client([])
-        result = run_cli_in_process(["rb", "s3://", "--force"], ctx=client_ctx(client))
-        assert result.rc == 255
-        assert "fatal error:" in result.stderr
-        assert "remove_bucket failed:" in result.stderr
-        assert calls == []
 
     def test_an_inner_rm_255_escapes_unwrapped(
         self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch

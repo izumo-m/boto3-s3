@@ -143,8 +143,8 @@ class RmCommand(Command):
             raise ValidationError(usage.single_uri_usage("rm"), operation="rm")
         # Next in aws's add_paths: the refused ARN forms (252) and the keyless
         # trailing "/" whose re-read gives an Outposts "...:accesspoint/ap:"
-        # the key "/".
-        target = transferargs.normalize_s3_path(target)
+        # the key "/". A path that names no bucket is refused here too (252).
+        target = transferargs.normalize_s3_path(target, operation="rm")
 
         s3 = ctx.s3(args)
         client = s3.client()
@@ -157,23 +157,6 @@ class RmCommand(Command):
         transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type="s3")
         transferargs.materialize_transfer_engine(s3, client, transfer_config)
 
-        bucket_part, _, key_part = target[len("s3://") :].partition("/")
-        if not bucket_part and (args.recursive or not key_part):
-            # The enumerating bucket-less forms (keyless service root, or
-            # --recursive): aws sends Bucket="" to the listing and botocore's
-            # client-side validation makes it a fatal rc 1, --dryrun included
-            # (measured). Reported here rather than dialed,
-            # keeping the fake-driven paths (rb --force's inner rm included)
-            # deterministic; the blind single delete instead rides
-            # to the API via build_s3_storage below - its dryrun records at
-            # rc 0 and its live run fails per-key, exactly aws's shapes.
-            if not args.quiet:
-                sys.stderr.write(f"fatal error: {usage.invalid_bucket_name_message()}\n")
-            return 1
-
-        # The refused ARN forms already failed at aws's slot above; the
-        # bucket-less blind single delete flows through build_s3_storage's
-        # carve-out instead of failing validation.
         storage = transferargs.build_s3_storage(target, client=client, page_size=page_size)
 
         # The target is both filter sides (aws sets dest = src for rm).
@@ -218,11 +201,9 @@ class RmCommand(Command):
             # rc 1, by position rather than by type: aws's rm runs inside the
             # same `CommandResultRecorder` cp/mv/sync do, which turns whatever
             # escapes the pipeline into an ErrorResult. So a listing entry the
-            # response left incomplete and a timestamp the local calendar
-            # cannot hold - `MalformedResponseError` here, a bare KeyError /
-            # OverflowError on aws-cli - report as `fatal error:
-            # 'LastModified'` / `fatal error: date value out of range` at rc 1,
-            # measured, rather than reaching the dispatcher's 255.
+            # response left incomplete - `MalformedResponseError` here, a bare
+            # KeyError on aws-cli - reports as `fatal error: 'LastModified'` at
+            # rc 1, measured, rather than reaching the dispatcher's 255.
             # `SystemExit` is a BaseException and still passes, like there.
             if not args.quiet:
                 sys.stderr.write(f"fatal error: {exc}\n")

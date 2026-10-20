@@ -144,15 +144,13 @@ class TestUsageErrors:
 
 class TestPostStartErrors:
     @pytest.mark.parametrize("uri", ["s3://", "s3:///k"])
-    def test_empty_bucket_is_rc_1(self, uri: str) -> None:
-        # aws sends Bucket="" and botocore's client-side validation fails
-        # inside mb's local catch -> rc 1 (the empty-bucket check short-circuits
-        # before the client is used, so a benign factory suffices). mb drops
-        # the key, so "s3:///k" is the same empty bucket.
-        result = run_cli_in_process(["mb", uri], ctx=client_ctx(None))
-        assert result.rc == 1
-        assert result.stderr.startswith(f"make_bucket failed: {uri} ")
-        assert "Invalid bucket name" in result.stderr
+    def test_a_path_with_no_bucket_is_a_usage_error(self, uri: str) -> None:
+        # Refused before the client is built (252); aws sends Bucket="" and
+        # reports an mb failure at rc 1. mb drops the key, so "s3:///k" is
+        # the same missing bucket.
+        result = run_cli_in_process(["mb", uri], ctx=unused_ctx())
+        assert result.rc == 252
+        assert 'Invalid bucket name ""' in result.stderr
 
     def test_create_failure_is_rc_1_not_254(self) -> None:
         client = _RaisingCreateClient(client_error("BucketAlreadyOwnedByYou", 409, "CreateBucket"))

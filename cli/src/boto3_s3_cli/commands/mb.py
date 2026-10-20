@@ -11,7 +11,12 @@ from typing import Any, ClassVar, cast
 # the lazy dispatch), after the command is determined.
 from boto3_s3 import S3Storage, ValidationError
 from boto3_s3_cli import output, usage
-from boto3_s3_cli.commands.base import Command, Context, expand_positional_paramfile
+from boto3_s3_cli.commands.base import (
+    Command,
+    Context,
+    expand_positional_paramfile,
+    refuse_bucketless,
+)
 
 
 class _AppendTagsAction(argparse.Action):
@@ -67,7 +72,8 @@ class MbCommand(Command):
         """Create the bucket and return an ``aws s3 mb``-style exit code.
 
         Exit-code shape (aws-cli MbCommand): usage errors - a non-``s3://``
-        path, an S3 Express (``--x-s3``) bucket, a rejected ARN form - exit
+        path, a path that names no bucket, an S3 Express (``--x-s3``) bucket,
+        a rejected ARN form - exit
         252 via ``main``; every failure of the create is rc 1 with one
         ``make_bucket failed:`` line (aws catches every create_bucket
         exception locally, even request-time credential errors). The success
@@ -86,18 +92,13 @@ class MbCommand(Command):
             # aws mb: S3 paths only -> rc 252.
             raise ValidationError(usage.single_uri_usage("mb"), operation="mb")
 
+        # A path that names no bucket (`s3://`, `s3:///k`) is a usage error
+        # (252), where aws sends Bucket="" and reports an mb failure (rc 1).
+        bucket_part = target[len("s3://") :].partition("/")[0]
+        refuse_bucketless(bucket_part, operation="mb")
+
         s3 = ctx.s3(args)
         client = s3.client()
-
-        bucket_part, _, _key_part = target[len("s3://") :].partition("/")
-        if not bucket_part:
-            # aws sends Bucket="" to the API and botocore's client-side
-            # validation fails inside mb's local catch -> rc 1. S3Storage.validate()
-            # would reject "s3:///k" as a ValidationError (252-shaped), so handle
-            # the form before construction to keep this path at rc 1 (same as rm).
-            message = usage.invalid_bucket_name_message()
-            sys.stderr.write(output.format_make_bucket_failed(target, message) + "\n")
-            return 1
 
         # Rejected ARN forms (S3 Object Lambda / Outposts bucket) raise
         # ValidationError from S3Storage.validate -> rc 252, matching aws (the

@@ -74,6 +74,10 @@ class CpCommand(Command):
             # RuntimeError -> rc 255); '-' is a stream, not a path. NotFoundError
             # without a ClientError cause maps to the same rc 255.
             raise NotFoundError(f"The user-provided path {src} does not exist.", operation="cp")
+        if args.recursive and src_type == "local":
+            transferargs.refuse_unwalkable_source(
+                src, follow_symlinks=args.follow_symlinks, operation="cp"
+            )
         transferargs.validate_sse_c_pairing(args, paths_type, operation="cp")
 
         s3 = head.s3
@@ -92,8 +96,6 @@ class CpCommand(Command):
                 recursive=False,
             )
             dest, _compare_key = item_paths(plan, plan.src_root)
-            # Strict aws-cli validation with the measured bucket-less
-            # carve-out (a dryrun stream upload to s3:///k is aws rc 0).
             dest_location = transferargs.build_s3_storage(f"s3://{dest}", client=client)
         elif dest == "-":
             src_location = transferargs.build_s3_storage(src, client=client)

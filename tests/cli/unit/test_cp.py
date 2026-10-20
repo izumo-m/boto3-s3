@@ -185,6 +185,37 @@ class TestUsageErrors:
         assert "--grants" in err
         assert calls == []
 
+    @pytest.mark.parametrize(
+        "paths",
+        [
+            ["{local}", "s3:///k"],
+            ["{local}", "s3://"],
+            ["s3:///k", "{local}"],
+            ["s3://", "{local}"],
+            ["s3:///k", "s3://b/k"],
+            ["-", "s3:///k"],
+        ],
+    )
+    @pytest.mark.parametrize("dryrun", [[], ["--dryrun"]], ids=["live", "dryrun"])
+    def test_a_path_with_no_bucket_is_refused_before_the_run(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        paths: list[str],
+        dryrun: list[str],
+    ) -> None:
+        # aws sends Bucket="" onward: each upload fails on its own (rc 1), a
+        # dryrun upload prints its line at rc 0, and a download or listing is
+        # a fatal error (rc 1).
+        local = tmp_path / "a.txt"
+        local.write_bytes(b"x")
+        argv = ["cp", *(p.format(local=local) for p in paths), *dryrun]
+        ctx, calls = _recording_ctx([])
+        rc = cli.main(argv, ctx=ctx)
+        assert rc == 252
+        assert 'Invalid bucket name ""' in capsys.readouterr().err
+        assert calls == []
+
 
 class TestGeneralErrors:
     def test_page_size_non_integer_is_255(self) -> None:
@@ -255,57 +286,6 @@ class TestPipelineErrors:
         assert rc == 1
         assert "upload failed:" in captured.err
         assert "NoSuchBucket" in captured.err
-
-    def test_bucketless_upload_fails_per_item(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # aws sends Bucket="" onward and botocore's client-side validation
-        # fails the upload at submit time: a per-item `upload failed:` line,
-        # rc 1 (measured). A real (offline) client is required - the
-        # parameter validation IS the behavior under test, and it fires
-        # before any connection.
-        import boto3
-
-        src = tmp_path / "a.txt"
-        src.write_bytes(b"x")
-        client = boto3.session.Session().client("s3", region_name="us-east-1")
-        ctx = Context(client_factory=lambda _args: client)
-        rc = cli.main(["cp", str(src), "s3:///k"], ctx=ctx)
-        captured = capsys.readouterr()
-        assert rc == 1
-        assert "upload failed:" in captured.err
-        assert "Invalid bucket name" in captured.err
-
-    def test_bucketless_upload_dryrun_is_rc_0(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # The dryrun never reaches the submit-time validation: aws prints the
-        # dryrun record and exits 0 (measured).
-        src = tmp_path / "a.txt"
-        src.write_bytes(b"x")
-        ctx, calls = _recording_ctx([])
-        rc = cli.main(["cp", str(src), "s3:///k", "--dryrun"], ctx=ctx)
-        captured = capsys.readouterr()
-        assert rc == 0
-        assert " to s3:///k" in captured.out
-        assert captured.out.startswith("(dryrun) upload: ")
-        assert calls == []
-
-    def test_bucketless_download_is_fatal_even_dryrun(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # The blind single download HEADs first, and Bucket="" dies at
-        # botocore's client-side validation - fatal rc 1, --dryrun included
-        # (measured).
-        import boto3
-
-        client = boto3.session.Session().client("s3", region_name="us-east-1")
-        ctx = Context(client_factory=lambda _args: client)
-        rc = cli.main(["cp", "s3:///k", str(tmp_path / "x"), "--dryrun"], ctx=ctx)
-        captured = capsys.readouterr()
-        assert rc == 1
-        assert captured.err.startswith("fatal error: ")
-        assert "Invalid bucket name" in captured.err
 
 
 class TestWarnings:

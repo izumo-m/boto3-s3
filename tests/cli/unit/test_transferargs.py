@@ -32,35 +32,17 @@ class TestIdentifyType:
 
 
 class TestBuildS3Storage:
-    """The strict aws-cli validation plus its one bucket-less carve-out.
+    """The path refusals ahead of the pipeline (252): a path that names no
+    bucket and the unsupported ARN families."""
 
-    A key with no bucket must reach the API the way aws lets it (the
-    ``validate`` pass-through); every other malformed form must still be
-    rejected here, ahead of the pipeline.
-    """
-
-    def test_bucketless_key_skips_validation(self) -> None:
-        storage = transferargs.build_s3_storage("s3:///k", client=object())
-        assert (storage.bucket, storage.key) == ("", "k")
-        storage.validate()  # the carve-out: no up-front rejection
-
-    def test_bucketless_key_schemeless_skips_validation(self) -> None:
-        # presign takes the scheme-less spelling of the same URI; the split
-        # must read it as S3Storage's own constructor does.
-        storage = transferargs.build_s3_storage("/k", client=object())
-        assert (storage.bucket, storage.key) == ("", "k")
-        storage.validate()
-
-    def test_service_root_is_not_the_carve_out(self) -> None:
-        # No key, so nothing is carved out - and validate() accepts it.
-        storage = transferargs.build_s3_storage("s3://", client=object())
-        assert not isinstance(storage, transferargs._BucketlessS3Storage)
-        assert (storage.bucket, storage.key) == ("", "")
-        storage.validate()
+    @pytest.mark.parametrize("arg", ["s3:///k", "/k", "s3://", ""])
+    def test_a_path_with_no_bucket_is_refused(self, arg: str) -> None:
+        # presign takes the scheme-less spelling ("/k") of the same URI.
+        with pytest.raises(ValidationError, match='Invalid bucket name ""'):
+            transferargs.build_s3_storage(arg, client=object())
 
     def test_bucket_and_key_is_validated_normally(self) -> None:
         storage = transferargs.build_s3_storage("b/k", client=object())
-        assert not isinstance(storage, transferargs._BucketlessS3Storage)
         assert (storage.bucket, storage.key) == ("b", "k")
 
     def test_object_lambda_arn_is_still_rejected(self) -> None:
@@ -100,8 +82,6 @@ class TestNormalizeS3Path:
             ("s3://b", "s3://b/"),
             ("s3://b/", "s3://b/"),
             ("s3://b/k", "s3://b/k"),
-            ("s3://", "s3://"),
-            ("s3:///k", "s3:///k"),
             ("local/dir", "local/dir"),
             ("-", "-"),
             (f"s3://{_OUTPOSTS_AP}", f"s3://{_OUTPOSTS_AP}/"),
@@ -111,7 +91,7 @@ class TestNormalizeS3Path:
         ],
     )
     def test_keyless_paths_gain_the_bucket_root_slash(self, path: str, expected: str) -> None:
-        assert transferargs.normalize_s3_path(path) == expected
+        assert transferargs.normalize_s3_path(path, operation="cp") == expected
 
     @pytest.mark.parametrize(
         ("path", "match"),
@@ -123,7 +103,13 @@ class TestNormalizeS3Path:
     )
     def test_refused_arns_fail_here(self, path: str, match: str) -> None:
         with pytest.raises(ValidationError, match=match):
-            transferargs.normalize_s3_path(path)
+            transferargs.normalize_s3_path(path, operation="cp")
+
+    @pytest.mark.parametrize("path", ["s3://", "s3:///k", "s3:////"])
+    def test_a_path_with_no_bucket_is_refused(self, path: str) -> None:
+        with pytest.raises(ValidationError, match='Invalid bucket name ""') as excinfo:
+            transferargs.normalize_s3_path(path, operation="cp")
+        assert excinfo.value.operation == "cp"
 
 
 class TestNormalizedPathsAreUsed:
@@ -257,12 +243,16 @@ class TestGrantsParamfile:
         transferargs._resolve_grants(args, operation="cp")
         assert args.grants == ["read=id=X", "full=id=Y"]
         args = argparse.Namespace(grants=["read=id=X", f"file://{p}"])
-        with pytest.raises(ValidationError, match="permission=grantee"):
+        with pytest.raises(ValidationError, match="permission=principal"):
             transferargs._resolve_grants(args, operation="cp")
 
     @pytest.mark.parametrize(
         ("grant", "match"),
-        [("foo", "permission=grantee"), ("", "permission=grantee"), ("write=id=X", "'write'")],
+        [
+            ("foo", "permission=principal"),
+            ("", "permission=principal"),
+            ("write=id=X", "permission must be one of"),
+        ],
         ids=["no-equals", "empty", "unknown-permission"],
     )
     def test_a_malformed_grant_is_a_usage_error(self, grant: str, match: str) -> None:
@@ -270,6 +260,7 @@ class TestGrantsParamfile:
         with pytest.raises(ValidationError, match=match) as excinfo:
             transferargs._resolve_grants(args, operation="cp")
         assert excinfo.value.operation == "cp"
+        assert str(excinfo.value).startswith("Error parsing parameter '--grants': ")
 
     def test_none_is_untouched(self) -> None:
         args = argparse.Namespace(grants=None)

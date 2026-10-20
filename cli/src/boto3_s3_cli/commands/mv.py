@@ -83,6 +83,10 @@ class MvCommand(Command):
             # bare RuntimeError -> rc 255). NotFoundError without a ClientError
             # cause maps to the same rc 255.
             raise NotFoundError(f"The user-provided path {src} does not exist.", operation="mv")
+        if args.recursive and src_type == "local":
+            transferargs.refuse_unwalkable_source(
+                src, follow_symlinks=args.follow_symlinks, operation="mv"
+            )
         transferargs.validate_sse_c_pairing(args, paths_type, operation="mv")
 
         s3 = head.s3

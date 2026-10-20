@@ -237,13 +237,15 @@ covers the write-side request options on a download - `--acl`,
 `--storage-class`, the content headers, `--metadata`, the SSE family,
 `--grants` - because the `GetObject` mapping emits only SSE-C / request-payer /
 checksum-mode: either the corresponding S3 request parameter is never emitted,
-or the route-specific logic just does not run. Ignoring an option is not
-accepting a malformed one, though: a `--grants` value that is not
-`<permission>=<grantee>` with a known permission is refused (252) on a
-download too, where aws never parses it. aws-cli applies the shared transfer arguments
-uniformly and acts only on the route-relevant ones. `boto3-s3` does the same:
-the internal snake->PascalCase translation only emits the parameters that are
-valid for the chosen direction.
+or the route-specific logic just does not run. aws-cli applies the shared
+transfer arguments uniformly and acts only on the route-relevant ones.
+`boto3-s3` does the same - the internal snake->PascalCase translation only
+emits the parameters that are valid for the chosen direction - with one
+exception: ignoring an option is not accepting a malformed one, so a
+`--grants` value that is not `<permission>=<grantee>` with a known permission
+is refused before the run (252) on every route, a download included, where
+aws never parses it on a download (and on an upload or copy finds it only at
+the first item).
 
 The full direction matrix follows aws-cli; the canonical reference is
 aws-cli's `awscli/customizations/s3/`.

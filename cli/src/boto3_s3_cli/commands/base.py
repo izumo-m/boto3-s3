@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 # These exception names do not themselves import the AWS SDK.
 from boto3_s3 import InvalidValueError, ValidationError
-from boto3_s3_cli import paramfile
+from boto3_s3_cli import paramfile, usage
 from boto3_s3_cli.clientfactory import build_client, build_s3, build_service_client
 
 if TYPE_CHECKING:
@@ -241,6 +241,22 @@ def expand_positional_paramfile(
             operation=operation,
         )
     _expand_string_paramfile(args, dest, name=name, operation=operation)
+
+
+def refuse_bucketless(bucket: str, *, operation: str | None = None) -> None:
+    """Refuse an S3 path that names no bucket (252).
+
+    aws has no such check: it sends ``Bucket=""`` toward the API, and each
+    command fails wherever that first bites - a fatal error (rc 1) at a
+    listing or a single object's lookup, every upload or copy failing on its
+    own, a ``--dryrun`` upload or single ``rm`` reporting success at rc 0, an
+    ``mb`` / ``rb`` failure line at 1, ``rb --force`` at 255. A path with no
+    bucket names nothing to transfer to or from, so here it is a
+    command-line error before anything runs, on every command but ``ls``,
+    where ``s3://`` lists the buckets.
+    """
+    if not bucket:
+        raise ValidationError(usage.invalid_bucket_name_message(), operation=operation)
 
 
 def add_page_size_argument(parser: argparse.ArgumentParser) -> None:

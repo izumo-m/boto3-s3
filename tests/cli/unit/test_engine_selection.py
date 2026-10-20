@@ -166,7 +166,7 @@ class TestRmReadsTheRuntimeConfig:
 
     Measured on the pinned aws-cli: an invalid ``[s3]`` value is 255 for every
     ``rm`` form. The read comes before rm's routes split, so the single delete
-    and the bucket-less form that returns early stand for all of them.
+    stands for all of them.
     """
 
     _BAD = "[default]\nregion = us-east-1\ns3 =\n  preferred_transfer_client = bogus\n"
@@ -175,7 +175,6 @@ class TestRmReadsTheRuntimeConfig:
         "argv",
         [
             pytest.param(["rm", "s3://bucket/key"], id="single"),
-            pytest.param(["rm", "s3://"], id="bucket-less-keyless"),
         ],
     )
     def test_an_invalid_value_is_255(
@@ -229,7 +228,6 @@ class TestCrtEngineConstructionSlot:
         pytest.param(["rm", "s3://bucket/key"], id="rm"),
         pytest.param(["rm", "s3://bucket/key", "--dryrun"], id="rm-dryrun"),
         pytest.param(["rm", "s3://bucket/key", "--quiet"], id="rm-quiet"),
-        pytest.param(["rm", "s3://"], id="rm-bucket-less"),
     )
 
     @pytest.fixture

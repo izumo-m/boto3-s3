@@ -49,10 +49,12 @@ def named_argument(name: str, *, operation: str) -> Generator[None, None, None]:
     """Report a paramfile failure inside as *name*'s parse error (aws rc 252).
 
     The port of aws's ``URIArgumentHandler`` boundary: it wraps the load of
-    every argument that has a CLI name to report - the options, the positionals,
-    and the whole-value form of a map option. Values loaded from *inside* a
-    parsed value (the shorthand ``@=`` operator) have no such name and are
-    resolved outside this scope.
+    every argument that has a CLI name to report - the options, the
+    positionals, the whole-value form of a map option, and the values loaded
+    from *inside* a map option's parsed value (the shorthand ``@=`` operator,
+    reported as that option's error: `shorthand.parse_map_option` parses
+    within this scope), where aws's shorthand parser loads outside its
+    handler and reaches its general one (255).
     """
     try:
         yield

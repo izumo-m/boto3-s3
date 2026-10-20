@@ -234,7 +234,8 @@ planner,
 core, `awsclicompare`, `crtsupport`, `masking`'s `SecretMaskingFilter`, and
 `pathresolver`'s pin stand-down probes `is_mrap_path` / `is_outpost_path` /
 `is_outpost_alias_path` / `is_s3express_path` / `is_s3express_accesspoint_path`,
-and `s3storage`'s `CA_BUNDLE_ENVIRONMENT_VETTED` mark).
+`requestparams.validate_grants` (the `--grants` check the CLI makes before the
+run), and `s3storage`'s `CA_BUNDLE_ENVIRONMENT_VETTED` mark).
 What the in-repo CLI needs, any other application built on the library needs
 too (the library is the product, overview.md section 1), so a CLI dependency
 is met by *publishing* the symbol, never by importing a private one. Enforced
@@ -644,6 +645,14 @@ of [`testing.md`](./testing.md) section 9):
 - Exit code: 1 when a key / prefix is specified and there are 0 entries, 0
   otherwise (aws's `_check_no_objects`. Bucket listing is always 0, even with 0
   entries or a non-matching `--bucket-name-prefix`).
+- A timestamp the local calendar cannot hold (within the zone's offset of the
+  end of year 9999 or the start of year 1; on Windows, before 1970 or past
+  about 3001) is listed by the library as the UTC value it is, but the line
+  renders local time, so `ls` stops at that entry: the lines ahead of it are
+  already printed, and the conversion's error is reported at 255. aws stops
+  at the same entry, its own conversion failing where it reads the listing.
+  The transfer commands, which render no stamp, carry on (overview.md
+  section 3).
 
 ### 5.2 `rm`
 
@@ -652,10 +661,10 @@ non-`s3://` path is rc 252 ("Invalid argument type").
 
 rm is an `S3TransferCommand` in aws, so it follows the family's construction
 (section 5.7), its deletes riding the engine that construction builds: the
-path check above and the normalization that follows it (section 5.7: the
-refused ARN forms, the keyless trailing `/`) come first, then the S3 client,
+path check above and the normalization that follows it (section 5.7: a path
+that names no bucket, the refused ARN forms, the keyless trailing `/`) come first, then the S3 client,
 and then the `[s3]` runtime config is read and the transfer engine
-materialized, before the bucket-less form below. An invalid `[s3]` value is
+materialized. An invalid `[s3]` value is
 therefore 255 for every rm form, `--quiet` included (the report comes from
 the error handler, not the result printer). A CRT selection builds the CRT
 client there, and
@@ -712,11 +721,12 @@ non-contractual** (aws is non-deterministic, ordered by the parallel completion
 of transfer futures. Tests use sort normalization + a final-state comparison,
 testing.md).
 
-An empty bucket URI (`rm s3://` / `rm s3:///key`) is not a usage error but
-**rc 1** (aws sends `Bucket=""` to the API and it fails botocore's client-side
-validation) - unless the client build or the `[s3]` read above already failed,
-both of which preempt it. `rm s3:///key --dryrun` records its line at rc 0 on
-both tools, since the single blind delete never reaches the API (measured). A
+A URI that names no bucket (`rm s3://` / `rm s3:///key`) is a usage error
+(252), refused with the path normalization before the client is built
+(`base.refuse_bucketless`, section 5.7). aws sends `Bucket=""` to the API
+and fails there: a fatal error at the listing (rc 1, `--dryrun` included), a
+per-key failure for the single delete (rc 1), and a `(dryrun) delete:` line
+at rc 0 for the single delete under `--dryrun` (measured). A
 recursive run with 0 matches is rc 0 and silent (unlike ls's rc 1, there is no
 equivalent of `_check_no_objects`).
 
@@ -749,32 +759,32 @@ bucket exists once `s3.mb` returns, so a stdout that cannot take
 at rc 255, as for every command (section 6) - and a process started without
 a stdout (`1>&-`) writes nothing and keeps rc 0 (`output.write_result_line`).
 aws's catch spans the line's `uni_print`, so there it is one more mb failure
-(`make_bucket failed:`, rc 1, measured) for a bucket that was created. `mb s3://` / `mb s3:///k` is rc 1 by the equivalent of
-client-side validation for `Bucket=""` (the same leading branch as rm).
+(`make_bucket failed:`, rc 1, measured) for a bucket that was created.
+`mb s3://` / `mb s3:///k` names no bucket and is refused before the client is
+built (252, `base.refuse_bucketless`), where aws sends `Bucket=""` and
+reports an mb failure at rc 1.
 
 ### 5.4 `rb`
 
 Equivalent to `aws s3 rb <S3Uri>` (aws-cli `RbCommand`). A non-`s3://` path is
 rc 252. **A key on a bucket is also rc 252** ("Please specify a valid bucket
 name only. E.g. s3://<bucket>"). A bare trailing slash in `s3://b/` is
-allowed, treating the key as empty = same as aws. An empty bucket name
-(`s3://`, `s3:///k`) is the rc 1 below.
+allowed, treating the key as empty = same as aws. A path that names no bucket
+(`s3://`, `s3:///k`) is refused before the client is built (252,
+`base.refuse_bucketless`), `--force` or not; aws sends `Bucket=""` and reports
+an rb failure at rc 1, or under `--force` runs the inner rm first and ends at
+255.
 
 | flag | handling |
 |---|---|
 | `--force` | **Before** delete_bucket, it internally runs the entire `rm <S3Uri> --recursive` (delegating to `RmCommand` - `delete:` lines also appear the same as rm. aws likewise re-enters `RmCommand`). The inner run shares rb's `S3` (`Context.with_s3`), as aws's `RmCommand(self._session)` shares the one CLI session - credentials resolve once, so a `credential_process` / MFA flow does not re-prompt and the object deletes run under the same identity as the final delete_bucket. If rm's rc != 0, the fixed text "remove_bucket failed: Unable to delete all objects in the bucket, bucket will not be deleted." is raised as an `InvalidValueError`, so it reaches stderr through `main`'s general handler with its `boto3-s3: [ERROR]: ` prefix rather than a direct write - **rc 255** (the path where aws's own `RuntimeError` reaches its general handler the same way, `aws: [ERROR]: `). Every failure of the inner rm ends there, its span reporting by position rather than by exception type (section 6), so this is the only report a `--force` deletion failure produces. It does not attempt to delete the bucket |
 
 Output: stdout `remove_bucket: <bucket>` / stderr `remove_bucket failed: <path>
-<msg>`. A delete_bucket failure (`BucketNotEmpty` / `NoSuchBucket` / the
-`Bucket=""` of `rb s3://` / `rb s3:///k`) is uniformly **rc 1**, reusing the same
-`usage.invalid_bucket_name_message()` wording and `format_remove_bucket_failed`
-wrapper as `mb` / `rm`'s equivalent empty-bucket check. The success line is
+<msg>`. A delete_bucket failure (`BucketNotEmpty` / `NoSuchBucket`) is
+uniformly **rc 1**. The success line is
 outside that catch, as mb's is (section 5.3): the bucket is gone by then, so
 a line stdout cannot take is lost output (rc 255) rather than an rb failure,
-and no stdout at all keeps rc 0. With `--force` the
-empty-bucket case never reaches that line: aws has no empty-bucket
-short-circuit, so the inner rm runs first and its (inevitable) failure aborts
-at **rc 255** via the `--force` row above, before delete_bucket is attempted.
+and no stdout at all keeps rc 0.
 
 ### 5.5 `presign`
 
@@ -807,12 +817,10 @@ region is no failure: the client signs for us-east-1), a client-creation
 failure is 255 for a present-but-unusable config (`InvalidConfigError`,
 section 6), a non-integer `--expires-in` is 255, and so is the CRT signer's
 refusal of a non-positive `--expires-in` on a SigV4a target (the table above).
-A key with no bucket (`s3:///k`, or the scheme-less `/k`) is part of that
-botocore 252 rather than a rejection of the form: aws splits it into `Bucket=""`
-plus the key and signs, and botocore refuses the empty bucket name. The CLI
-therefore builds the storage through `build_s3_storage`
-(the `rm` / transfer-family carve-out), which keeps the strict ARN rejections
-but lets this one form ride.
+A path that names no bucket (`s3://`, `s3:///k`, or the scheme-less `/k`) is
+refused before signing by `build_s3_storage` (252, `base.refuse_bucketless`,
+as on every command); aws signs with `Bucket=""` and botocore refuses the
+empty name, also at 252.
 
 ### 5.6 `website`
 
@@ -831,14 +839,14 @@ bucket name** and lets botocore's name regex reject it (rc 252), the CLI side
 refuses the same names with a `ValidationError` naming the *unsplit*
 remainder. Only the remainders whose rejection the split would otherwise hide
 need that - every remainder the split does not keep whole as the bucket:
-whatever `S3Storage` read as a key, the bucket-less `s3:///k`
-(measured: aws rejects the name `/k`; `build_s3_storage`'s carve-out lets that
-form reach the check here), the `/` left after stripping (`s3://b//`), and an
-Outposts access point closed with `:` (`.../accesspoint/ap:`), whose `:` the
-split eats as the key separator. Every other name
-botocore refuses - a slash-free bad one (`b@d`, `s3://b b`), the empty bucket of
-`s3://` - survives the split unchanged and rides on to PutBucketWebsite, where
-botocore refuses it. So website has **two** 252 sources for a bad bucket name:
+whatever `S3Storage` read as a key, the `/` left after stripping (`s3://b//`),
+and an Outposts access point closed with `:` (`.../accesspoint/ap:`), whose
+`:` the split eats as the key separator. A path that names no bucket
+(`s3://`, `s3:///k`) is refused before that by `build_s3_storage` (252, as on
+every command; aws rejects the name `/k` or the empty name, 252 too). Every
+other name botocore refuses - a slash-free bad one (`b@d`, `s3://b b`) -
+survives the split unchanged and rides on to PutBucketWebsite, where botocore
+refuses it. So website has **two** 252 sources for a bad bucket name:
 the one raised here (`usage.invalid_bucket_name_message`,
 `Invalid bucket name "<name>"`), and botocore's at the request. An accesspoint
 ARN passes through
@@ -893,16 +901,17 @@ which one is reported is not matched ([`overview.md`](./overview.md) section
    onto-itself guard and resolver, the checksum / SSE-C pairings, the
    missing local source, sync's directory-bucket rejection. Which of these a
    command runs is recorded with its command. aws's `_validate_path_args`
-   also creates the `s3local` destination here; this CLI creates it after
-   step 5, once every check has passed, so a refused run leaves nothing
-   behind.
+   also creates the `s3local` destination here; this CLI creates it right
+   before the run, after every check including step 6's `--case-conflict`
+   rejection, so a refused run leaves nothing behind.
 5. **The `[s3]` runtime config and the transfer manager** - aws's
    `_get_transfer_manager`: `transferargs.resolve_transfer_config` (an invalid
    `[s3]` value is 255) then `transferargs.materialize_transfer_engine`, which
    pays a CRT selection's whole construction even for a `--dryrun`
    ([`crt.md`](./crt.md) section 4).
 6. **The run** - aws's `CommandArchitecture`: the `--case-conflict` x S3
-   Express rejection (252), then the transfer itself.
+   Express rejection (252), the `s3local` destination pre-create (255 on an
+   OSError), then the transfer itself.
 
 **The declaration surface is the full aws-cli ARG_TABLE**:
 `--recursive` `--dryrun` `--quiet` `--only-show-errors` `--no-progress`
@@ -966,8 +975,13 @@ which never converts it (rc 0 on both tools, measured). The
 existence check for a single local src excludes `-`.
 
 **`--no-overwrite`**: passed through to the library's `no_overwrite`
-(transfer.md section 7). Both the server's PreconditionFailed and an existing download
-dest are a **silent skip** (rc 0, no line emitted).
+(transfer.md section 7). The server's PreconditionFailed answer to the
+conditional write `--no-overwrite` sends (PutObject, CopyObject or
+CompleteMultipartUpload) and an existing download dest are a **silent skip**
+(rc 0, no line emitted). Any other PreconditionFailed - a multipart download's
+or copy's part whose source changed since it was listed, a post-copy tag
+write - fails its item (`... failed:`, rc 1), where aws skips every one of
+them in silence.
 
 **`--case-conflict`** (`ignore` (default) / `skip` / `warn` / `error`): passed
 through to the library's case-conflict gate (transfer.md section 8). The skip / warn
@@ -1028,8 +1042,10 @@ the free-string text block,
 `--progress-frequency`, then `--page-size`; a load is 252, a bad `int()` is
 255) -> **`--metadata` resolution (a whole-value `fileb://` refused 252,
 paramfile load 252, shorthand parse 252)** -> cp's **`--expected-size`
-paramfile (252)** -> the route type (local-local 252) and the refused ARN
-forms (252) -> **client creation** (step 3 above: a schemeless
+paramfile (252)** -> the route type (local-local 252), a path that names no
+bucket (`s3://`, `s3:///k`: 252, `base.refuse_bucketless` - aws sends
+`Bucket=""` on and fails per item, at the lookup or the listing, or not at all
+under `--dryrun`) and the refused ARN forms (252) -> **client creation** (step 3 above: a schemeless
 `--endpoint-url` is 252; an undeclared profile, an empty region or an invalid
 configuration is 255, section 6; an absent region and missing credentials
 are no construction failure, the latter fail the first request) ->
@@ -1038,7 +1054,12 @@ type** (`--checksum-algorithm` is locals3 / s3s3, `--checksum-mode` is s3local
 only. `Expected <param> parameter to be used with one of following path formats:
 ...` 252 - shared with mv) -> **a nonexistent single local
 src (255**, equivalent to aws's bare RuntimeError.
-`-` is excluded) -> the SSE-C pair (252) -> the `[s3]` runtime config (255) and
+`-` is excluded) -> **a `--recursive` local source whose root the walk would
+skip (255**, `transferargs.refuse_unwalkable_source`: a file, a special or
+unreadable path, a symlink under `--no-follow-symlinks` - the library's
+walker decides; aws skips the root, with a warning or in silence, and runs on
+an empty source, which a `sync --delete` turns into emptying the destination)
+-> the SSE-C pair (252) -> the `[s3]` runtime config (255) and
 the transfer-manager construction (255 on a CRT client the region cannot build)
 -> the `--case-conflict` Express branch (252; taken for an access point of a
 directory bucket too, which aws's `--x-s3` test misses) -> **the s3local
@@ -1096,10 +1117,11 @@ the recorded progress-display deviations (option-handling section 6).
 
 rc forms: **0 / 1 / 2 / 252 / 253 / 255**. 254 cannot occur (the transfer family
 folds every error after the start into 1). 255 is for the pre-pipeline general
-errors of the checks above - the timeout and integer coercions,
-`--metadata`'s bytes, client construction (an undeclared profile, an empty
+errors of the checks above - the timeout and integer coercions, client
+construction (an undeclared profile, an empty
 region, an invalid config), **a nonexistent single local src** (aws's bare
-RuntimeError -> general handler), the destination pre-create, the `[s3]` config
+RuntimeError -> general handler), a directory source the walk would skip,
+the destination pre-create, the `[s3]` config
 and the transfer-manager construction.
 The sources of a warning (rc 2): glacier skip, an mtime
 stamp failure, an unreadable/special local file, a broken symlink, an invalid
@@ -1208,11 +1230,15 @@ all of that):
 1. Integer-option conversion (255; part of the shared steps above)
 2. Route type: local->local is usage 252 (`usage: boto3-s3 sync <LocalPath>
    <S3Uri> or <S3Uri> <LocalPath> or <S3Uri> <S3Uri>` + `Error: Invalid argument
-   type`), then the refused ARN forms (252, the normalization of section 5.7)
+   type`), then a path that names no bucket and the refused ARN forms (252,
+   the normalization of section 5.7)
 3. If `-` is on either side, 252 (the same message as mv)
 4. Checksum path type 252 (the cp / mv-shared `validate_checksum_paths_type` -
    aws-cli `_validate_path_args` applies to sync too)
-5. A nonexistent locals3 src -> 255 (aws-cli `_validate_path_args`)
+5. A nonexistent locals3 src -> 255 (aws-cli `_validate_path_args`), and a
+   local source whose root the walk would skip -> 255 (the cp row of section
+   5.7; aws warns, or for a symlink under `--no-follow-symlinks` stays silent,
+   and runs on an empty source - so `--delete` empties the destination)
 6. SSE-C pair 252
 7. **An S3 Express directory bucket or one of its access points on either
    side is 252** (`Cannot use sync command with a directory bucket.` - aws-cli

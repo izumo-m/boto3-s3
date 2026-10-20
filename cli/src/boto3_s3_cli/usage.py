@@ -20,12 +20,10 @@ def two_path_usage(command: str) -> str:
 
 
 def invalid_bucket_name_message(name: str = "") -> str:
-    """The report for a bucket name the commands refuse before any request.
+    """The report for a bucket name the commands refuse before any request (252).
 
-    The commands refuse a few URIs before any request is built (``mb s3://`` /
-    ``mb s3:///key`` / ``rb s3://`` / ``rb s3:///key`` / ``rm s3://``, and a
-    ``website`` name the bucket/key split would disturb), where aws lets
-    botocore refuse the name.
-    The rc is the caller's: ``mb`` / ``rb`` / ``rm`` 1, ``website`` 252.
+    A path that names no bucket at all (``s3://``, ``s3:///k``;
+    ``base.refuse_bucketless``), and a ``website`` name the bucket/key split
+    would disturb - where aws lets botocore refuse the name, or sends it.
     """
     return f'Invalid bucket name "{name}"'

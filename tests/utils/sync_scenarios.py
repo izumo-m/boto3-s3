@@ -203,13 +203,6 @@ SCENARIOS: tuple[CpScenario, ...] = (
         expected_stderr_tokens_ours=("does not exist",),
         expected_stderr_tokens_aws=("does not exist",),
     ),
-    CpScenario(
-        name="sync_upload_source_is_a_file",
-        argv=("sync", "src/a.txt", f"s3://{BUCKET_TOKEN}/up"),
-        local_src={"src/a.txt": b"alpha\n"},
-        expected_stderr_tokens_ours=("File does not exist.",),
-        expected_stderr_tokens_aws=("File does not exist.",),
-    ),
     # -- downloads ------------------------------------------------------------
     CpScenario(
         name="sync_download_fresh",

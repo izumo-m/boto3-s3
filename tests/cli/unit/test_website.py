@@ -154,16 +154,16 @@ class TestWebsiteExitCodeShape:
         assert rc == 252
         assert "Invalid bucket name" in capsys.readouterr().err
 
-    def test_bucketless_key_folds_into_the_bucket_name(
+    def test_a_bucketless_key_is_refused_as_naming_no_bucket(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # website does not split: the whole scheme-stripped remainder is the
-        # bucket name, so aws rejects the name "/k" (measured) rather than the
-        # bucket-less URI form.
+        # website does not split: aws takes the whole scheme-stripped
+        # remainder "/k" as the bucket name and rejects it (measured, 252).
+        # Here the path names no bucket and is refused as such, at 252 too.
         client = _FakeWebsiteClient()
         rc = cli.main(["website", "s3:///k", "--index-document", "i.html"], ctx=client_ctx(client))
         assert rc == 252
-        assert '"/k"' in capsys.readouterr().err  # the refusal names the folded name
+        assert 'Invalid bucket name ""' in capsys.readouterr().err
         assert client.calls == []
 
     @pytest.mark.parametrize("sep", ["/", ":"])

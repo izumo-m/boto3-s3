@@ -24,6 +24,7 @@ from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
 from tests.utils.fakes3 import MTIME, listing
 from tests.utils.harness import built_client_ctx
+from tests.utils.host import skip_if_chmod_is_inert
 from tests.utils.recorder import make_recording_client, ops
 
 _SERIAL = TransferConfig(use_threads=False)
@@ -135,6 +136,72 @@ class TestGeneralErrors:
         dest = afile / "sub"
         rc = cli.main(["sync", "s3://b/pre", str(dest)], ctx=built_client_ctx())
         assert rc == 255
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["sync", "{src}", "s3://b/p", "--delete"],
+            ["cp", "{src}", "s3://b/p", "--recursive"],
+            ["mv", "{src}", "s3://b/p", "--recursive"],
+        ],
+        ids=["sync", "cp", "mv"],
+    )
+    def test_a_file_as_a_directory_source_stops_the_run(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], argv: list[str]
+    ) -> None:
+        # The walk would skip the root, leaving an empty source - aws warns
+        # (rc 2) and a sync --delete then empties the destination. Here the
+        # run stops before it starts, like a missing source: nothing listed,
+        # sent or deleted.
+        src = tmp_path / "afile.txt"
+        src.write_bytes(b"x")
+        rc = cli.main([a.format(src=src) for a in argv], ctx=built_client_ctx())
+        assert rc == 255
+        err = capsys.readouterr().err
+        assert f"The user-provided path {src} cannot be walked as a directory." in err
+        assert "not a directory" in err
+
+    def test_a_symlink_root_not_followed_stops_the_run(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws skips the root in silence (rc 0) and a --delete empties the
+        # destination; here the run stops before anything is deleted.
+        real = tmp_path / "real"
+        real.mkdir()
+        (real / "a.txt").write_bytes(b"x")
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
+        rc = cli.main(
+            ["sync", str(link), "s3://b/p", "--delete", "--no-follow-symlinks"],
+            ctx=built_client_ctx(),
+        )
+        assert rc == 255
+        assert "symbolic link" in capsys.readouterr().err
+
+    def test_a_followed_symlink_root_is_walked(self, tmp_path: Path) -> None:
+        real = tmp_path / "real"
+        real.mkdir()
+        (real / "a.txt").write_bytes(b"x")
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
+        client, calls = make_recording_client([listing(), {}])
+        rc = cli.main(["sync", str(link), "s3://b/p", "--no-progress"], ctx=_ctx(client))
+        assert rc == 0
+        assert ops(calls) == ["ListObjectsV2", "PutObject"]
+
+    @skip_if_chmod_is_inert
+    def test_an_unreadable_directory_source_stops_the_run(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        src = tmp_path / "locked"
+        src.mkdir()
+        src.chmod(0)
+        try:
+            rc = cli.main(["sync", str(src), "s3://b/p", "--delete"], ctx=built_client_ctx())
+        finally:
+            src.chmod(0o700)
+        assert rc == 255
+        assert "cannot be walked as a directory" in capsys.readouterr().err
 
     def test_a_refused_run_leaves_no_destination_directory(self, tmp_path: Path) -> None:
         # aws creates the destination in the middle of its validation and
@@ -252,17 +319,3 @@ class TestOutputShapes:
         assert rc == 0
         assert ops(calls) == ["ListObjectsV2"]
         assert capsys.readouterr().out == ""
-
-    def test_source_file_warns_and_exits_2(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # A FILE as the sync source degrades to the walk warning
-        # ("File does not exist." with the trailing separator), rc 2.
-        src = tmp_path / "afile.txt"
-        src.write_bytes(b"x")
-        client, _calls = make_recording_client([listing()])
-        rc = cli.main(["sync", str(src), "s3://b/p", "--no-progress"], ctx=_ctx(client))
-        assert rc == 2
-        err = capsys.readouterr().err
-        assert err.startswith("warning: ")
-        assert str(src) in err

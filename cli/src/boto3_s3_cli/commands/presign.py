@@ -43,12 +43,10 @@ class PresignCommand(Command):
         computation, so rc 1 cannot happen and no S3 request is sent (a
         deferred credential resolution - an assume-role profile - can still
         dial STS during signing, whose ClientError maps to 254). 0 on
-        success; 252 for the strict aws-cli path rejections (the unsupported
-        ARN families) and for botocore's client-side parameter validation
-        while signing (an absent key, and an empty bucket - the bare
-        ``s3://`` service root and the bucket-less ``s3:///k``, which aws
-        splits into Bucket="" plus a key rather than refusing up front),
-        both surfaced as the library's ValidationError through main; 253 for
+        success; 252 for the path refusals (a path that names no bucket -
+        ``s3://``, ``s3:///k`` - and the unsupported ARN families) and for
+        botocore's client-side parameter validation while signing (an absent
+        key), both surfaced as the library's ValidationError through main; 253 for
         credentials that cannot be located when signing (a missing region is
         no failure: the client signs for us-east-1); 255 for client
         construction's botocore failures - a bad ``--profile``, partial
@@ -67,9 +65,8 @@ class PresignCommand(Command):
         # aws-cli's presign takes the path with or without the s3:// scheme
         # (PresignCommand merely strips a present one), so unlike mb/rb/rm
         # there is no path-type check here; build_s3_storage reads both forms
-        # the same way. It keeps the strict ARN rejections and carves out the
-        # bucket-less key-carrying form, which aws signs with Bucket="" and
-        # lets botocore's bad-bucket-name validation refuse.
+        # the same way and makes the path refusals (no bucket, the
+        # unsupported ARNs).
         s3 = ctx.s3(args)
         storage = transferargs.build_s3_storage(args.path, client=s3.client())
         url = s3.presign(storage, expires_in=expires_in)

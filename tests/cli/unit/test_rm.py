@@ -23,7 +23,6 @@ from boto3_s3_cli.commands.base import Context
 from boto3_s3_cli.commands.rm import _DeletePrinter
 from tests.utils.fakes3 import client_error
 from tests.utils.harness import (
-    built_client_ctx,
     client_ctx,
     run_cli_in_process,
     run_recorded,
@@ -32,16 +31,6 @@ from tests.utils.harness import (
 from tests.utils.recorder import make_recording_client
 
 _MTIME = dt.datetime(2026, 1, 2, tzinfo=dt.timezone.utc)
-
-
-def _real_client_ctx() -> Context:
-    # A real botocore client (still offline: the client-side parameter
-    # validation under test fires before any connection is attempted).
-    import boto3
-
-    return Context(
-        client_factory=lambda _args: boto3.session.Session().client("s3", region_name="us-east-1")
-    )
 
 
 def _obj(key: str, size: int = 1) -> dict[str, Any]:
@@ -302,11 +291,8 @@ class TestExitCodeShape:
     def test_an_unclassified_run_error_is_rc_1_fatal(self) -> None:
         # rm's span reports by exception *position*, not by type: whatever the
         # operation raises is one `fatal error:` line at rc 1, because aws runs
-        # rm inside the same result recorder cp/mv/sync use. The measured case
-        # is a listed timestamp the local calendar cannot hold, where aws-cli's
-        # conversion raises OverflowError('date value out of range') mid-listing
-        # (`fatal error: date value out of range`, rc 1 - the zone-dependent
-        # rejection itself is pinned in the library tier).
+        # rm inside the same result recorder cp/mv/sync use - here an
+        # exception from outside the library's taxonomy, raised by the listing.
         result, _ = run_recorded(
             [OverflowError("date value out of range")],
             ["rm", "s3://b/p/", "--recursive", "--dryrun"],
@@ -369,36 +355,24 @@ class TestExitCodeShape:
         assert result.rc == 252
         assert "S3 Object Lambda" in result.stderr
 
-    def test_empty_bucket_with_key_is_rc_1_delete_failed(self) -> None:
-        # aws sends Bucket="" onward and botocore fails client-side at the
-        # delete submit: shaped as a per-key failure, not a usage error. A
-        # real (offline) client is required - the parameter validation IS the
-        # behavior under test, and it fires before any connection.
-        result = run_cli_in_process(["rm", "s3:///key"], ctx=_real_client_ctx())
-        assert result.rc == 1
-        assert result.stderr.startswith("delete failed: s3:///key ")
-        assert "Invalid bucket name" in result.stderr
-
-    def test_empty_bucket_with_key_dryrun_is_rc_0(self) -> None:
-        # The dryrun never reaches the submit-time validation: aws prints the
-        # dryrun record and exits 0 (measured).
-        result = run_cli_in_process(["rm", "s3:///key", "--dryrun"], ctx=client_ctx(object()))
-        assert result.rc == 0
-        assert result.stdout == "(dryrun) delete: s3:///key\n"
-
-    def test_empty_bucket_enumerating_paths_fail_at_the_listing(self) -> None:
-        # Recursive / keyless forms die at ListObjectsV2's client-side
-        # validation on aws - fatal rc 1 even under --dryrun (measured). Here
-        # the report is written before any request, so no call is ever made.
-        for argv in (
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["rm", "s3:///key"],
+            ["rm", "s3:///key", "--dryrun"],
             ["rm", "s3:///key", "--recursive", "--dryrun"],
             ["rm", "s3://", "--dryrun"],
             ["rm", "s3://"],
-        ):
-            result = run_cli_in_process(argv, ctx=built_client_ctx())
-            assert result.rc == 1, argv
-            assert result.stderr.startswith("fatal error: "), argv
-            assert "Invalid bucket name" in result.stderr, argv
+        ],
+    )
+    def test_a_path_with_no_bucket_is_a_usage_error(self, argv: list[str]) -> None:
+        # Refused before the client is built or anything is listed or sent.
+        # aws sends Bucket="" onward: a single delete fails per key (rc 1) or,
+        # under --dryrun, prints its line (rc 0); a listing is fatal (rc 1).
+        result = run_cli_in_process(argv, ctx=unused_ctx())
+        assert result.rc == 252, argv
+        assert 'Invalid bucket name ""' in result.stderr, argv
+        assert result.stdout == "", argv
 
 
 class TestFilterWiring:

@@ -73,6 +73,10 @@ class SyncCommand(Command):
             # RuntimeError -> rc 255 (NotFoundError without a ClientError
             # cause maps the same).
             raise NotFoundError(f"The user-provided path {src} does not exist.", operation="sync")
+        if src_type == "local":
+            transferargs.refuse_unwalkable_source(
+                src, follow_symlinks=args.follow_symlinks, operation="sync"
+            )
         transferargs.validate_sse_c_pairing(args, paths_type, operation="sync")
         if any(
             transferargs.is_s3express_path(path) or transferargs.is_s3express_accesspoint_path(path)

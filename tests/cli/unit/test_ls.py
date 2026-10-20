@@ -220,6 +220,29 @@ class TestListingTimestampEndToEnd:
             "1000-06-15 12:00:00 y1000",
         ]
 
+    @needs_tzset
+    def test_a_stamp_the_local_calendar_cannot_hold_stops_the_listing_at_it(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The library reads the stamp as UTC and lists it; the line renders
+        # local time, which year 9999 plus a positive offset cannot hold, so
+        # ls stops at that entry with the error at 255 - the lines ahead of it
+        # already printed (aws stops there too, as its own conversion fails).
+        last = dt.datetime(9999, 12, 31, 23, 0, tzinfo=dt.timezone.utc)
+        page = {
+            "Contents": [
+                _obj("p/a.txt"),
+                {"Key": "p/late.txt", "Size": 1, "LastModified": last},
+                _obj("p/z.txt"),
+            ]
+        }
+        ctx, _ = _fake_ctx([page])
+        with local_zone("Asia/Tokyo"):
+            assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 255
+        captured = capsys.readouterr()
+        assert [line.split()[-1] for line in captured.out.splitlines()] == ["a.txt"]
+        assert captured.err.startswith("boto3-s3: [ERROR]: ")
+
 
 class TestMalformedListing:
     """A listing entry ``ls`` cannot read stops it where aws-cli stops.

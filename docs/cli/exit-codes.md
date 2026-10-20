@@ -71,8 +71,10 @@ remaining lines.
 ### 252 — the command line was rejected
 
 An unknown option, an invalid choice or value, a path that is not a usable S3
-URI, or an option that does not apply to the direction being run (for example
-`--checksum-algorithm` on a download). No transfer request was sent.
+URI (one that names no bucket, `s3://` or `s3:///key`, included - `ls`
+aside, where `s3://` lists the buckets), or an option that does not apply to
+the direction being run (for example `--checksum-algorithm` on a download).
+No transfer request was sent.
 
 ### 253 — the environment cannot supply what is needed
 
@@ -122,7 +124,9 @@ narrower than it first looks.
 
 ### 255 — everything else
 
-A network or local I/O failure, a missing local source, a `--profile` that does
+A network or local I/O failure, a missing local source (or one a recursive
+`cp` / `mv` or a `sync` cannot walk as a directory: a file, an unreadable
+directory, a symbolic link under `--no-follow-symlinks`), a `--profile` that does
 not exist or is incomplete, a non-integer value for an option that takes a
 number, or an unexpected internal error. `aws` documents 255 as a catch-all
 whose specific cases may narrow over time; treat it the same way and do not

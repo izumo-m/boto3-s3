@@ -21,10 +21,12 @@ from boto3_s3 import (
     CaseConflictMode,
     CopyPropsMode,
     LocalStorage,
+    NotFoundError,
     S3Storage,
     TransferOptions,
     ValidationError,
     crtsupport,
+    requestparams,
 )
 from boto3_s3.localstorage import translate_os_error
 from boto3_s3.pathresolver import is_s3express_accesspoint_path, is_s3express_path
@@ -41,6 +43,7 @@ from boto3_s3_cli.commands.base import (
     expand_integer_paramfile,
     expand_option_paramfile,
     parse_integer_option,
+    refuse_bucketless,
 )
 from boto3_s3_cli.output import uni_write
 from boto3_s3_cli.progress import TransferPrinter
@@ -342,10 +345,6 @@ def resolve_paramfile_values(args: argparse.Namespace, *, operation: str) -> tup
     return page_size, progress_frequency
 
 
-# The permissions a ``--grants`` value may name (``<permission>=<grantee>``).
-_GRANT_PERMISSIONS = ("read", "readacl", "writeacl", "full")
-
-
 def _resolve_grants(args: argparse.Namespace, *, operation: str) -> None:
     """Refuse a lone ``--grants`` paramfile reference, and a malformed grant (252).
 
@@ -358,12 +357,13 @@ def _resolve_grants(args: argparse.Namespace, *, operation: str) -> None:
     grant as on aws.
 
     Each grant must then be ``<permission>=<grantee>`` with a known
-    permission, checked here, before the run, on every route: a malformed
-    value is a command-line error. aws checks it only as it maps the first
-    upload or copy - an in-flight fatal error after any deletes already sent,
-    rc 0 when nothing needs transferring, never on a download. The library
-    refuses the same shapes before its runs for its own callers; this is the
-    CLI's argument check, which reports them as usage errors.
+    permission - the library's own check (``requestparams.validate_grants``),
+    made here before the run, on every route, so a malformed value is a
+    command-line error naming the option. aws checks it only as it maps the
+    first upload or copy - an in-flight fatal error after any deletes already
+    sent, rc 0 when nothing needs transferring, never on a download. (The
+    library makes the same check at the start of its operations, inside the
+    run span, where it would be a ``fatal error`` at rc 1.)
     """
     grants: object = args.grants
     if not isinstance(grants, list):
@@ -379,20 +379,12 @@ def _resolve_grants(args: argparse.Namespace, *, operation: str) -> None:
             "is not supported; give each grant as an argument",
             operation=operation,
         )
-    for grant in items:
-        permission, separator, _grantee = str(grant).partition("=")
-        if not separator:
-            raise ValidationError(
-                f"Error parsing parameter '--grants': {grant!r} is not of the form "
-                "permission=grantee",
-                operation=operation,
-            )
-        if permission not in _GRANT_PERMISSIONS:
-            raise ValidationError(
-                f"Error parsing parameter '--grants': {permission!r} is not a permission "
-                f"(one of: {'|'.join(_GRANT_PERMISSIONS)})",
-                operation=operation,
-            )
+    try:
+        requestparams.validate_grants(cast("list[str]", items), operation=operation)
+    except ValidationError as exc:
+        raise ValidationError(
+            f"Error parsing parameter '--grants': {exc}", operation=operation
+        ) from exc
 
 
 def _resolve_integer_option(args: argparse.Namespace, dest: str, *, operation: str) -> int | None:
@@ -477,8 +469,8 @@ def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) ->
         raise ValidationError(usage.two_path_usage(operation), operation=operation)
     # aws's add_paths runs _normalize_s3_trailing_slash right after the
     # path-type check.
-    src = normalize_s3_path(src)
-    dest = normalize_s3_path(dest)
+    src = normalize_s3_path(src, operation=operation)
+    dest = normalize_s3_path(dest, operation=operation)
     s3 = ctx.s3(args)
     client = s3.client()
     return TransferPaths(
@@ -494,7 +486,7 @@ def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) ->
     )
 
 
-def normalize_s3_path(path: str) -> str:
+def normalize_s3_path(path: str, *, operation: str) -> str:
     """One path argument as aws's ``_normalize_s3_trailing_slash`` leaves it.
 
     aws runs this over cp / mv / sync / rm's paths right after the path-type
@@ -505,18 +497,55 @@ def normalize_s3_path(path: str) -> str:
     spelling: an Outposts access point ARN set off with ``:`` and no key
     (``.../accesspoint/ap:``) becomes ``.../accesspoint/ap:/``, whose key is
     ``/`` - so ``rm --recursive`` lists under ``/`` and a single download
-    heads the key ``/``, not the whole access point. A local path, and the
-    bucket-less forms the commands handle on their own (``s3://``,
-    ``s3:///k``), pass unchanged.
+    heads the key ``/``, not the whole access point. A local path passes
+    unchanged; a path that names no bucket (``s3://``, ``s3:///k``) is
+    refused first (`refuse_bucketless`, 252).
     """
     if not path.startswith("s3://"):
         return path
     bucket, _key = S3Storage.split_bucket_key(S3Storage.strip_scheme(path))
-    if bucket:
-        # The ARN rejections are all S3Storage.validate checks here; its other
-        # one (a key without a bucket) needs no bucket to apply to.
-        S3Storage(path).validate()
+    refuse_bucketless(bucket, operation=operation)
+    # The ARN rejections are all S3Storage.validate checks here.
+    S3Storage(path).validate()
     return S3Storage.normalize_s3_uri(path)
+
+
+def refuse_unwalkable_source(src: str, *, follow_symlinks: bool, operation: str) -> None:
+    """Refuse a directory source whose root the walk would skip (255).
+
+    A recursive ``cp`` / ``mv`` and every ``sync`` walk a local source as a
+    directory, and the walk vets its root first - the library's walker
+    decides (``LocalFileGenerator.should_ignore_file`` on the root with a
+    trailing separator): a file, a special or unreadable path, a path whose
+    ``..`` after a symlinked directory names nothing, or a symlink under
+    ``--no-follow-symlinks``. aws skips such a root - with a warning, or in
+    silence for the symlink - and runs on an empty source, so a ``sync
+    --delete`` then empties the destination. Here the run stops before it
+    starts, like a missing source (`NotFoundError`, 255), before anything is
+    listed, sent or deleted. The library refuses the same roots for its own
+    callers; this is the CLI's check, made where the missing-source one is.
+    """
+    storage = LocalStorage(src, follow_symlinks=follow_symlinks)
+    reasons: list[str] = []
+    if not storage.walker.should_ignore_file(
+        storage.abspath + os.sep, follow_symlinks=follow_symlinks, notify=reasons.append
+    ):
+        return
+    path = storage.abspath
+    if not follow_symlinks and os.path.islink(path):
+        why = "It is a symbolic link, which --no-follow-symlinks does not follow."
+    elif not os.path.isdir(path):
+        why = "It is not a directory."
+    elif reasons:
+        # The walk's warning names the path and then the reason
+        # ("Skipping file <path>. File/Directory is not readable.").
+        why = reasons[0].rpartition(". ")[2]
+    else:
+        why = "The walk skips it."
+    raise NotFoundError(
+        f"The user-provided path {src} cannot be walked as a directory. {why}",
+        operation=operation,
+    )
 
 
 def create_local_dest_dir(dest: str, *, operation: str) -> None:
@@ -796,9 +825,9 @@ def resolve_locations(
     """
 
     def _s3(arg: str, client_for: Any) -> S3Storage:
-        # build_s3_storage applies the strict aws-cli validation (rc 252
-        # ahead of the pipeline) with the measured bucket-less carve-out. The
-        # CLI's process-fatal Ctrl-C posture is not a storage concern:
+        # build_s3_storage applies the path refusals (rc 252 ahead of the
+        # pipeline). The CLI's process-fatal Ctrl-C posture is not a storage
+        # concern:
         # build_s3 declares it once (S3's reusable_after_interrupt).
         return build_s3_storage(arg, client=client_for, page_size=page_size)
 
@@ -811,9 +840,10 @@ def resolve_locations(
         # aws-cli reads an empty destination of a single download as the
         # working directory (its local_format absolutizes "" to the cwd, which
         # is a directory); the library refuses "" as no location at all, so
-        # the CLI spells out what aws-cli means. A dir_op never gets here with
-        # "": pre-creating the destination already failed it (rc 255, like
-        # aws-cli), and an empty source is refused as missing before that.
+        # the CLI spells out what aws-cli means. A dir_op with "" gets here
+        # too, and the destination pre-create that follows every check stops
+        # it before the run (`os.makedirs("")` fails: rc 255, as aws-cli's own
+        # pre-create does); an empty source is refused as missing earlier.
         return _s3(src, client), _local(dest or os.curdir)
     source_client = client
     if args.source_region:
@@ -836,48 +866,19 @@ def path_storage(arg: str, kind: str) -> S3Storage | LocalStorage:
     return S3Storage(arg) if kind == "s3" else LocalStorage(arg)
 
 
-class _BucketlessS3Storage(S3Storage):
-    """A key-carrying bucket-less s3 URI (``s3:///k``) riding onward.
-
-    aws has no up-front rejection for the form: it sends Bucket="" toward the
-    API and each command fails wherever that first bites. ``S3Storage.validate``
-    (which the library entry re-runs via ``_validate_storage``) would instead
-    refuse the form as a 252-shaped ``ValidationError``, so this override is
-    what lets it ride, and the failure that follows is aws's own. Measured
-    against the pinned aws-cli: on the transfer family botocore's client-side
-    validation makes the blind single download's HeadObject and every listing
-    fatal (rc 1, ``--dryrun`` included), a live upload/copy fails per item at
-    submit time, and a dryrun upload never reaches the submit at all (rc 0);
-    ``presign`` fails the same validation while signing (rc 252). ``website``
-    never reaches botocore - it folds the whole remainder into the bucket name
-    like aws does and rejects it itself - and needs the pass-through only to
-    get that far. The ARN rejections this override skips cannot apply to a
-    bucket-less URI.
-    """
-
-    def validate(self) -> None:
-        """aws-faithful pass-through: botocore validates at request time."""
-
-
 def build_s3_storage(arg: str, *, client: Any, page_size: int | None = None) -> S3Storage:
-    """An ``S3Storage`` for a CLI s3 path, validated the aws-cli way.
+    """An ``S3Storage`` for a CLI s3 path, validated before anything runs.
 
     Shared by the transfer family, ``rm``, ``presign`` and ``website``. The
-    strict aws-cli rejections (the unsupported ARN families) fire here, ahead
-    of the pipeline (rc 252, aws's parse-time parity); the bucket-less
-    key-carrying form is the one carve-out, flowing through
-    ``_BucketlessS3Storage`` so aws's stage-shaped failures fall out of the
-    normal machinery.
-
-    The split reads *arg* exactly as the ``S3Storage`` constructor reads it -
-    the ``s3://`` scheme optional, access-point ARNs kept whole - so the
-    scheme-less path ``presign`` accepts (``/k``) is recognized as the same
-    carve-out its ``s3:///k`` spelling is.
+    refusals fire here, ahead of the pipeline (rc 252): a path that names no
+    bucket (``s3://``, ``s3:///k`` - `refuse_bucketless`) and the
+    unsupported ARN families. The storage reads *arg* the way its
+    constructor does - the ``s3://`` scheme optional, access-point ARNs kept
+    whole - so the scheme-less path ``presign`` accepts (``/k``) is refused
+    as its ``s3:///k`` spelling is.
     """
-    bucket, key = S3Storage.split_bucket_key(S3Storage.strip_scheme(arg))
-    if not bucket and key:
-        return _BucketlessS3Storage(arg, client=client, page_size=page_size)
     storage = S3Storage(arg, client=client, page_size=page_size)
+    refuse_bucketless(storage.bucket)
     storage.validate()
     return storage
 
@@ -1025,6 +1026,7 @@ __all__ = [
     "materialize_transfer_engine",
     "normalize_s3_path",
     "path_storage",
+    "refuse_unwalkable_source",
     "resolve_case_conflict",
     "resolve_locations",
     "resolve_metadata_option",

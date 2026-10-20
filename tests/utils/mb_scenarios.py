@@ -67,14 +67,6 @@ SCENARIOS: tuple[MbScenario, ...] = (
         expected_stderr_tokens_ours=("directory bucket",),
         expected_stderr_tokens_aws=("directory bucket",),
     ),
-    # --- post-start errors (rc 1, never 254) ----------------------------------
-    # botocore client-side validation of Bucket="" -> rc 1 (same as rm).
-    MbScenario(
-        "mb_empty_uri",
-        ("mb", "s3://"),
-        expected_stderr_tokens_ours=("make_bucket failed", "Invalid bucket name"),
-        expected_stderr_tokens_aws=("make_bucket failed", "Invalid bucket name"),
-    ),
     # --- quirks ----------------------------------------------------------------
     # aws mb silently drops the key part (split_s3_bucket_key keeps the
     # bucket); the end state pins that the bucket exists with no objects.

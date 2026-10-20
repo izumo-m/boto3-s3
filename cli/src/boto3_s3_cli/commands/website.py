@@ -35,8 +35,8 @@ class WebsiteCommand(Command):
         mb/rb, aws's WebsiteCommand lets PutBucketWebsite exceptions reach
         its general handler chain, so server rejections (NoSuchBucket, an
         endpoint refusing the configuration) are rc **254** through main's
-        ClientError-cause mapping; botocore's client-side parameter
-        validation (empty bucket) is 252; credentials that cannot be located
+        ClientError-cause mapping; a path that names no bucket is refused
+        before the request (252); credentials that cannot be located
         are 253 at the request (a missing region is no failure: the client
         defaults to us-east-1), while client construction's botocore failures
         - a bad ``--profile``, partial credentials - are 255.
@@ -66,9 +66,8 @@ class WebsiteCommand(Command):
 
         s3 = ctx.s3(args)
         client = s3.client()
-        # build_s3_storage keeps the strict ARN rejections; its bucket-less
-        # carve-out is what keeps "s3:///k" from failing S3Storage.validate
-        # before the rejection below.
+        # build_s3_storage makes the path refusals (no bucket, the
+        # unsupported ARNs) before the rejection below.
         storage = transferargs.build_s3_storage(f"s3://{path}", client=client)
         if storage.bucket != path:
             # aws hands the whole remainder to PutBucketWebsite as the Bucket
@@ -76,14 +75,12 @@ class WebsiteCommand(Command):
             # splits it instead, which would hide that rejection, so a
             # remainder the split did not keep whole as the bucket is refused
             # here from the unsplit path: whatever S3Storage read as a key
-            # ("b/some/key"), the bucket-less "/k" (whose split leaves no
-            # bucket at all), "b//", whose leftover slash the split would
+            # ("b/some/key"), "b//", whose leftover slash the split would
             # silently drop, and an Outposts ".../accesspoint/ap:", whose ":"
             # the split eats as the key separator. Every other name botocore
-            # refuses - a slash-free bad one, the empty bucket of "s3://" -
-            # survives the split intact and is refused by botocore at the
-            # request. An accesspoint ARN is the whole bucket and passes through,
-            # exactly like aws.
+            # refuses - a slash-free bad one - survives the split intact and
+            # is refused by botocore at the request. An accesspoint ARN is the
+            # whole bucket and passes through, exactly like aws.
             raise ValidationError(
                 usage.invalid_bucket_name_message(path),
                 operation="website",
