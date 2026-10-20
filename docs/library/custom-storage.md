@@ -101,8 +101,11 @@ the second naming what is absent.
 
 - **Errors.** Map your backend's failures onto the library taxonomy described in
   [`errors.md`](./errors.md). An exception that is not already a `Boto3S3Error`
-  is wrapped in the base class when it surfaces as a per-item failure, but one
-  raised during enumeration reaches your caller unchanged, so map those yourself.
+  is wrapped in the base class, with yours on `__cause__`, when it surfaces as
+  a per-item failure or while a `sync` content comparison
+  (`EtagComparison` / `ChecksumComparison`) reads your entry, which aborts the
+  `sync`; a `Boto3S3Error` passes as it is. One raised during enumeration
+  reaches your caller unchanged, so map those yourself.
 - **Streams are opened late.** `open` is not called until bytes actually need to
   move, so a dry run never opens anything, and an item that fails before its
   first byte leaves your backend untouched.

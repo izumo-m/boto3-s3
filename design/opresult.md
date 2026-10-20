@@ -178,9 +178,12 @@ for the caller and raises an ordinary exception in its place; awscrt fails the
 request with its own error, and the item's completion reads the kept
 interrupt back as the outcome - the item is `CANCELLED`, and the interrupt is
 re-raised to the caller. An ordinary exception the reader raises there awscrt
-reports as its own `AWS_ERROR_UNKNOWN`, dropping it; the guard keeps the first
-one, and when that is the request's outcome the item fails with it instead (the
-base error with it on `__cause__`), as on the classic engine. A classic threaded
+reports as its own `AWS_ERROR_UNKNOWN`, dropping it; the guard keeps the last
+one (awscrt fails the request on the first it does not handle itself, such as
+a `BlockingIOError`), and when that is the request's outcome the item fails
+with it instead, as on the classic engine: a `Boto3S3Error` the stream raised
+is recorded as it is, anything else becomes the base error with it on
+`__cause__`. A classic threaded
 download's sink raising an interrupt is settled on its IO worker (`_TaskGuard`): the
 item is `CANCELLED` and the interrupt re-raised.
 The classic engine settles every revoked item with s3transfer's

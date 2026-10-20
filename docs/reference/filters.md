@@ -261,6 +261,6 @@ Applies the rules to `info` and returns whether the entry is included. A
 relative pattern is matched against `info.compare_key`; a root-anchored pattern
 against `info.key`. Compiles the rules first if they are not compiled yet.
 
-It relies on `info.compare_key`, which every backend's `scan_pages` stamps
-([`storage.md`](./storage.md)); a hand-built `FileInfo` passed to it directly
-must set it.
+It relies on `info.compare_key`, which every backend's `scan_pages` and
+`get_fileinfo` stamp ([`storage.md`](./storage.md)); a hand-built `FileInfo`
+passed to it directly must set it.

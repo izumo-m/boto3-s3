@@ -2532,8 +2532,10 @@ class _GuardedReader:
     An ordinary exception the stream raises on awscrt's thread (a text
     stream's ``UnicodeEncodeError``, an ``OSError``) reaches awscrt as is,
     and awscrt reports the request as ``AWS_ERROR_UNKNOWN``, dropping it.
-    The first one is kept in ``failure``, so the item fails with it instead
-    (`_Completion`), as it does on the classic engine.
+    The last one is kept in ``failure`` - awscrt handles some on its own (a
+    ``BlockingIOError`` meaning "no data yet") and fails the request on the
+    first it does not, so the last is the cause - and the item fails with it
+    instead (`_Completion`), as it does on the classic engine.
     """
 
     _GUARDED = frozenset({"read", "read1", "readinto", "readinto1", "seek", "tell"})
@@ -2560,8 +2562,7 @@ class _GuardedReader:
                 if threading.get_ident() == caller:
                     raise
                 if isinstance(exc, Exception):
-                    if guard.failure is None:
-                        guard.failure = exc
+                    guard.failure = exc
                     raise
                 if guard.interrupt is None:
                     guard.interrupt = exc
@@ -2848,21 +2849,21 @@ class _DeleteSource:
             if _outcome(future) is not None:
                 return
             response = self._delete()
+            # mv's S3 source removal returns a DeleteObject response; stash it
+            # (minus ResponseMetadata) for _Completion to surface under
+            # extra_info["delete"]. A local source delete returns None (nothing
+            # to capture); a custom backend may return its own Mapping response.
+            if self._capture and response is not None:
+                future.meta.user_context[_DELETE_RESPONSE_KEY] = strip_response_metadata(response)
         except BaseException as exc:
             # An interrupt included (use_threads=False runs this on the calling
-            # thread), anywhere past the flag until the delete returns: whether
-            # the delete reached the service is unknown, so the item must not
-            # be recorded as moved.
-            # Stored as the outcome, it becomes CANCELLED and is re-raised to
-            # the caller (`_outcome`).
+            # thread), anywhere past the flag: whether the delete reached the
+            # service is unknown, so the item must not be recorded as moved -
+            # and whatever this subscriber raises must settle the item here,
+            # not escape into the engine's callback loop.
+            # Stored as the outcome, it becomes CANCELLED (an interrupt) or
+            # FAILED, and an interrupt is re-raised to the caller (`_outcome`).
             future.set_exception(exc)
-            return
-        # mv's S3 source removal returns a DeleteObject response; stash it (minus
-        # ResponseMetadata) for _Completion to surface under extra_info["delete"].
-        # A local source delete returns None (nothing to capture); a custom backend
-        # may return its own Mapping response.
-        if self._capture and response is not None:
-            future.meta.user_context[_DELETE_RESPONSE_KEY] = strip_response_metadata(response)
 
 
 class _CloseFileobj:

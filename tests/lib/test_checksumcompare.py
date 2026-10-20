@@ -25,13 +25,16 @@ even without awscrt installed.
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
+import io
 import zlib
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO, ClassVar, Literal
 
 import pytest
+from typing_extensions import override
 
 import boto3_s3.checksumcompare as cf
 from boto3_s3.checksumcompare import (
@@ -43,7 +46,10 @@ from boto3_s3.checksumcompare import (
     _whole_b64,  # pyright: ignore[reportPrivateUsage]
 )
 from boto3_s3.comparator import SyncPair
-from boto3_s3.exceptions import Boto3S3Error, ConfigurationError, TransportError
+from boto3_s3.etagcompare import EtagComparison
+from boto3_s3.exceptions import Boto3S3Error, ConfigurationError, NotFoundError, TransportError
+from boto3_s3.localstorage import LocalStorage
+from boto3_s3.storage import Storage
 from boto3_s3.types import FileInfo, S3FileInfo, TransferType
 from tests.utils.pairbuilders import local_info, make_pair, native_key, write_file
 
@@ -767,6 +773,78 @@ class TestBotoCoreErrorAborts:
             _upload_filter(client)(self._pair_at(tmp_path))
         assert excinfo.value is err
         assert err.__cause__ is None
+
+
+class _RaisingStorage(Storage):
+    """A custom backend whose ``open`` raises what it was given."""
+
+    scheme: ClassVar[str] = "stub"
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    @override
+    def as_text(self) -> str:
+        return "stub://"
+
+    @override
+    def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
+        raise self._exc
+
+
+class _MidReadFailingLocal(LocalStorage):
+    """A ``LocalStorage`` whose stream fails mid-read with a raw ``OSError``."""
+
+    @override
+    def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
+        class _Failing(io.BytesIO):
+            def read(self, size: int | None = -1, /) -> bytes:
+                raise FileNotFoundError(errno.ENOENT, "gone")
+
+        return _Failing()
+
+
+class TestReadableSideFailure:
+    """A failure reading the readable side leaves either strategy as a library
+    error (`ContentComparison._read_readable`): the caller's backend's as the
+    base error with its own on ``__cause__`` (a family error as it is), the
+    local file's in the local taxonomy."""
+
+    @staticmethod
+    def _strategies() -> list[Any]:
+        client = _FakeClient({"obj": _full("sha256", _GOLDEN["sha256"])})
+        return [EtagComparison(), _upload_filter(client)]
+
+    @staticmethod
+    def _pair(storage: Storage) -> SyncPair:
+        src = FileInfo(key="k", compare_key="obj", size=10, storage=storage)
+        dest = S3FileInfo(key="obj", etag='"abc"', size=10)
+        return SyncPair(compare_key="obj", transfer_type=TransferType.UPLOAD, src=src, dest=dest)
+
+    @pytest.mark.parametrize("strategy", [0, 1], ids=["etag", "checksum"])
+    @pytest.mark.parametrize(
+        "raised",
+        [OSError("broken"), KeyError("k"), NotFoundError("gone")],
+        ids=["oserror", "keyerror", "family"],
+    )
+    def test_a_custom_backend_failure(self, strategy: int, raised: Exception) -> None:
+        compare = self._strategies()[strategy]
+        with pytest.raises(Boto3S3Error) as excinfo:
+            compare(self._pair(_RaisingStorage(raised)))
+        if isinstance(raised, Boto3S3Error):
+            assert excinfo.value is raised
+            return
+        assert type(excinfo.value) is Boto3S3Error
+        assert excinfo.value.__cause__ is raised
+        assert (excinfo.value.operation, excinfo.value.key) == ("sync", "obj")
+
+    @pytest.mark.parametrize("strategy", [0, 1], ids=["etag", "checksum"])
+    def test_a_local_read_failure_is_translated(self, strategy: int, tmp_path: Path) -> None:
+        compare = self._strategies()[strategy]
+        with pytest.raises(NotFoundError) as excinfo:
+            compare(self._pair(_MidReadFailingLocal(str(tmp_path))))
+        assert isinstance(excinfo.value.__cause__, FileNotFoundError)
+        assert (excinfo.value.operation, excinfo.value.key) == ("sync", "obj")
 
 
 # -- request payer -------------------------------------------------------------

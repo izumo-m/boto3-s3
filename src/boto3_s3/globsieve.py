@@ -594,8 +594,9 @@ class GlobFilter:
 
     As a ``FileFilter`` it is invoked with a ``FileInfo``:
     a relative pattern matches its relative ``compare_key`` (which every scan
-    stamps; a hand-built entry must set it); a root-anchored (absolute)
-    pattern matches its ``key`` (the full path), exactly like ``compile``.
+    and ``get_fileinfo`` stamps; a hand-built entry must set it); a
+    root-anchored (absolute) pattern matches its ``key`` (the full path),
+    exactly like ``compile``.
     Byte-exact (the permissive building block); host case-folding for
     ``aws s3`` parity is the CLI layer's job.
     """
@@ -624,7 +625,8 @@ class GlobFilter:
         return self
 
     def __call__(self, info: FileInfo) -> bool:
-        # compare_key is stamped by every scan (the storage protocol).
+        # compare_key is stamped by every scan and get_fileinfo (the storage
+        # protocol).
         key = cast("str", info.compare_key)
         compiled = self._compiled
         if compiled is None:
