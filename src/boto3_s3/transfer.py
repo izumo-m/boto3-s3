@@ -2765,16 +2765,17 @@ class _DeleteSource:
         # second announce re-runs the whole list (`_SerialExecutor`).
         if self._ran:
             return
-        self._ran = True
-        if _outcome(future) is not None:
-            return
         try:
+            self._ran = True
+            if _outcome(future) is not None:
+                return
             response = self._delete()
         except BaseException as exc:
             # An interrupt included (use_threads=False runs this on the calling
-            # thread): whether the delete reached the service is unknown, so
-            # the item must not be recorded as moved. Stored as the outcome, it
-            # becomes CANCELLED and is re-raised to the caller (`_outcome`).
+            # thread), anywhere past the flag: whether the delete reached the
+            # service is unknown, so the item must not be recorded as moved.
+            # Stored as the outcome, it becomes CANCELLED and is re-raised to
+            # the caller (`_outcome`).
             future.set_exception(exc)
             return
         # mv's S3 source removal returns a DeleteObject response; stash it (minus
@@ -3450,26 +3451,23 @@ class _SetTags:
                 return  # the copy itself failed; nothing to tag or roll back
             bucket = future.meta.call_args.bucket
             key = future.meta.call_args.key
+            try:
+                self._dest_client.put_object_tagging(
+                    Bucket=bucket,
+                    Key=key,
+                    Tagging={"TagSet": tag_set},
+                    **requestparams.map_put_object_tagging_params(self._options),
+                )
+            except Exception as exc:
+                interrupt = self._rollback(bucket, key)
+                future.set_exception(exc if interrupt is None else interrupt)
         except BaseException as exc:
-            # An interrupt past the flag but before the write: stored as the
-            # outcome, so a second announce cannot find the flag set and
+            # An interrupt anywhere past the flag - in the write (whether it
+            # reached the service is unknown, and no rollback goes out after
+            # it), around it, or while a failed write is handled: stored as the
+            # outcome, it becomes CANCELLED and is re-raised to the caller
+            # (`_outcome`), so a second announce cannot find the flag set and
             # record a success for an untagged copy.
-            future.set_exception(exc)
-            return
-        try:
-            self._dest_client.put_object_tagging(
-                Bucket=bucket,
-                Key=key,
-                Tagging={"TagSet": tag_set},
-                **requestparams.map_put_object_tagging_params(self._options),
-            )
-        except Exception as exc:
-            interrupt = self._rollback(bucket, key)
-            future.set_exception(exc if interrupt is None else interrupt)
-        except BaseException as exc:
-            # An interrupt: whether the write reached the service is unknown.
-            # Stored as the outcome, it becomes CANCELLED and is re-raised to
-            # the caller (`_outcome`); no rollback goes out after it.
             future.set_exception(exc)
 
     def _get_source_tags(self) -> list[dict[str, str]]:

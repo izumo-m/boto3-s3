@@ -15,6 +15,7 @@ import errno
 import io
 import os
 import re
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -1987,6 +1988,41 @@ class TestSerialExecutorInterrupt:
         )
         assert ops(calls)[4:] == ["PutObjectTagging"]
         assert ops(source_calls) == ["HeadObject", "GetObjectTagging", "ListObjectAnnotations"]
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+        assert (transferrer.succeeded, transferrer.cancelled) == (0, 1)
+
+    @pytest.mark.parametrize(
+        ("subscriber", "dest_sent"),
+        [
+            ("_SetTags", []),
+            ("_SetAnnotations", ["PutObjectTagging"]),
+            ("_DeleteSource", ["PutObjectTagging", "PutObjectAnnotation", "PutObjectAnnotation"]),
+        ],
+    )
+    def test_interrupt_past_a_subscribers_flag_records_cancelled(
+        self, monkeypatch: pytest.MonkeyPatch, subscriber: str, dest_sent: list[str]
+    ) -> None:
+        # An interrupt that lands past a post-copy subscriber's once-per-item
+        # flag but outside its request (here, in its read of the outcome so
+        # far) is stored all the same: escaping, it would let a second
+        # announce find the flag set and record a success.
+        real_outcome = transfer._outcome
+        fired: list[bool] = []
+
+        def outcome(future: Any) -> BaseException | None:
+            caller = sys._getframe(1).f_locals.get("self")
+            if type(caller).__name__ == subscriber and not fired:
+                fired.append(True)
+                raise KeyboardInterrupt
+            return real_outcome(future)
+
+        monkeypatch.setattr(transfer, "_outcome", outcome)
+        results: list[OpResult] = []
+        calls, source_calls, transferrer = self._move_with_post_copy_writes(
+            [{}, {}, {}], [*self._fresh_annotations(), {}], on_result=results.append
+        )
+        assert ops(calls)[4:] == dest_sent
+        assert "DeleteObject" not in ops(source_calls)
         assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
         assert (transferrer.succeeded, transferrer.cancelled) == (0, 1)
 
