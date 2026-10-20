@@ -1307,7 +1307,7 @@ reviewed with it.
 | 252 | A usage error (an unknown option = `Unknown options: ...`, an invalid choice / value), a client-side `ValidationError` | `PARAM_VALIDATION_ERROR_RC` |
 | 253 | `ConfigurationError` (credentials / region unresolved; an absent awscrt x the `[s3] preferred_transfer_client=crt` degradation section 8 or an MRAP target's SigV4a section 4 item 4, which aws cannot reach), plus an unknown `cli_timestamp_format`, checked when a command opens its session (below) | `CONFIGURATION_ERROR_RC`, from its `NoCredentialsErrorHandler` / `NoRegionErrorHandler` / `ConfigurationErrorHandler` - three of its four rc-253 handlers, the `PagerErrorHandler` being the one with no counterpart here (below) |
 | 254 | A server-side error (a `Boto3S3Error` whose `__cause__` is a botocore `ClientError`) | `CLIENT_ERROR_RC` |
-| 255 | Any other general error (including `TransportError`, a `NotFoundError` with no `ClientError` cause such as a missing local source, the refining `InvalidValueError` / `InvalidConfigError` (below), an unparseable config / credentials file, an unknown `cli_binary_format` or an IMDS setting botocore refuses - each found when a command opens its session (below) - and any otherwise-uncaught exception via `_dispatch`'s backstop - a `BrokenPipeError` from the `ls \| head` pipeline included, since aws has no special case for it either), **a failure of the rm stage of `rb --force`** (section 5.4), **a run that succeeded but whose stdout output could not be flushed at the end** (below) | `GENERAL_ERROR_RC` |
+| 255 | Any other general error (including `TransportError`, a `NotFoundError` with no `ClientError` cause such as a missing local source, the refining `InvalidValueError` / `InvalidConfigError` (below), an unparseable config / credentials file, an unknown `cli_binary_format` or an IMDS setting botocore refuses - each found when a command opens its session (below) - and any otherwise-uncaught exception via `_dispatch`'s backstop - a `BrokenPipeError` from the `ls \| head` pipeline included, since aws has no special case for it either), **a failure of the rm stage of `rb --force`** (section 5.4), **a run that succeeded (0, or 2 with warnings only) but whose stdout output could not be flushed at the end** (below) | `GENERAL_ERROR_RC` |
 
 **The code `main` returns is the one the process ends with.** Bytes a
 standard stream refused - a full disk, a reader that left the pipe - stay in
@@ -1318,10 +1318,15 @@ stream that cannot be flushed is pointed at the null device (`os.dup2`,
 Python's own recipe for a broken pipe), where the exit's flush lands
 harmlessly. A run that already failed keeps its code, its failure reported (a
 `download failed:` line, `ls`'s `[Errno 32] Broken pipe` at 255). A run that
-succeeded but whose stdout output was lost - the result lines of a transfer or
-a delete the printer could not get out, a help page - exits 255 with the cause
-(`boto3-s3: [ERROR]: [Errno 28] No space left on device`): the output asked
-for was lost, a local I/O failure rather than a success. A stdout that is
+succeeded (0, or 2 with warnings only) but whose stdout output was lost - the
+result lines of a transfer or a delete the printer could not get out - exits
+255 with the cause (`boto3-s3: [ERROR]: [Errno 28] No space left on device`):
+the output asked for was lost, a local I/O failure rather than a success. A
+help page is written by `_print_help`, not argparse's `print_help`, which from
+Python 3.11 swallows the write's `OSError` (a page larger than the buffer would
+be lost at 0); a page stdout refuses reaches `main`'s backstop at 255 instead.
+A Ctrl-C during the final flush ends at 130 with both streams pointed at the
+null device, so the exit's flush does not wait on the same reader again. A stdout that is
 `None` (closed before the process started, `1>&-`) takes nothing and is left
 alone; the code is the work's. A stderr that cannot be flushed changes no
 code.

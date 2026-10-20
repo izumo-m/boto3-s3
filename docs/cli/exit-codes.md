@@ -23,10 +23,11 @@ the command produces them is recorded in
 `help` and `--version` exit 0 as well. Output that cannot be written is not a
 success: piping into a reader that closes early (`ls | head`) reports the
 broken pipe like any other write failure — `boto3-s3: [ERROR]: [Errno 32]
-Broken pipe`, exit code 255 — and so does a command whose work succeeded but
-whose output stdout could not take (a full disk, a reader gone): the work is
-done, the exit code is 255 with the error. With stdout closed (`1>&-`) nothing
-is written and the code is the work's.
+Broken pipe`, exit code 255 — and so does a command whose work succeeded, with
+or without warnings, but whose output stdout could not take (a full disk, a
+reader gone), a help page included: the work is done, the exit code is 255
+with the error. With stdout closed (`1>&-`) nothing is written and the code is
+the work's.
 
 ### 1 — the operation failed after it started
 

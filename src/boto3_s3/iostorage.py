@@ -125,6 +125,10 @@ class _WriteOnly:
 
     def close(self) -> None:
         stdout: Any = sys.stdout
+        if stdout is None:
+            # No stdout: a non-empty object already failed on its write, and
+            # an empty one, which writes nothing, has nothing to flush.
+            return
         getattr(stdout, "buffer", stdout).flush()
 
 

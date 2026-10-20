@@ -1261,7 +1261,7 @@ the one it is performing — the streaming `cp` that reads stdin reports `"cp"`
 Stdout has no such precondition, again like the AWS CLI: a process without one
 fails on the writer's first `write`, from inside the transfer, so it is that
 item's failure (`'NoneType' object has no attribute 'write'`) and not a reason
-for the run not to start.
+for the run not to start. An empty object writes nothing, so it succeeds.
 
 ## LocalFileGenerator
 

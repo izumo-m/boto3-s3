@@ -490,7 +490,11 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
     try:
         return _settle_std_streams(rc)
     except KeyboardInterrupt:
-        # A flush held up by a reader that stopped reading, cut short.
+        # A flush held up by a reader that stopped reading, cut short: what
+        # the streams still hold is dropped, or the interpreter's flush at
+        # exit would wait on the same reader again (or end at 120).
+        _discard(sys.stdout)
+        _discard(sys.stderr)
         return 130
 
 
@@ -504,13 +508,14 @@ def _settle_std_streams(rc: int) -> int:
     here is therefore pointed at the null device (`_flush_or_discard`), so the
     exit's flush succeeds and the code stands. A run that already failed
     keeps its code: its failure was reported (a ``download failed:`` line,
-    ``ls``'s broken pipe). A run that succeeded but whose output could not be
-    written exits 255 with the cause: the output asked for was lost, which is
-    a local I/O failure, not a success. A stream that is None (closed before
-    the process started, ``1>&-``) is left alone and the code is the work's.
+    ``ls``'s broken pipe). A run that succeeded - 0, or 2 for a transfer
+    that finished with warnings only - but whose output could not be written
+    exits 255 with the cause: the output asked for was lost, which is a local
+    I/O failure, not a success. A stream that is None (closed before the
+    process started, ``1>&-``) is left alone and the code is the work's.
     """
     failure = _flush_or_discard(sys.stdout)
-    if failure is not None and rc == 0:
+    if failure is not None and rc in (0, 2):
         rc = _GENERAL_ERROR_RC
         with contextlib.suppress(Exception):
             _write_error(failure, rc=rc)
@@ -519,13 +524,10 @@ def _settle_std_streams(rc: int) -> int:
 
 
 def _flush_or_discard(stream: TextIO | None) -> OSError | None:
-    """Flush *stream*; on failure, point its descriptor at the null device.
+    """Flush *stream*; on failure, `_discard` what it still holds.
 
-    Python's own recipe for a broken pipe (``os.dup2`` of ``os.devnull``):
-    the bytes the stream still holds then go nowhere at exit instead of
-    failing the interpreter's flush. A stream without a descriptor (a test
-    double) has nothing to repoint; a closed one has nothing left to flush.
-    Returns the flush's error, or None when the stream took everything.
+    A closed stream has nothing left to flush. Returns the flush's error, or
+    None when the stream took everything.
     """
     if stream is None:
         return None
@@ -534,15 +536,28 @@ def _flush_or_discard(stream: TextIO | None) -> OSError | None:
     except ValueError:
         return None
     except OSError as exc:
-        with contextlib.suppress(Exception):
-            fd = stream.fileno()
-            null = os.open(os.devnull, os.O_WRONLY)
-            try:
-                os.dup2(null, fd)
-            finally:
-                os.close(null)
+        _discard(stream)
         return exc
     return None
+
+
+def _discard(stream: TextIO | None) -> None:
+    """Point *stream*'s descriptor at the null device.
+
+    Python's own recipe for a broken pipe (``os.dup2`` of ``os.devnull``):
+    the bytes the stream still holds then go nowhere at exit instead of
+    failing - or waiting on - the interpreter's flush. A stream without a
+    descriptor (a test double) has nothing to repoint.
+    """
+    if stream is None:
+        return
+    with contextlib.suppress(Exception):
+        fd = stream.fileno()
+        null = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(null, fd)
+        finally:
+            os.close(null)
 
 
 def _main(argv: list[str] | None, ctx: Context | None) -> int:
@@ -610,6 +625,21 @@ def _dispatch(argv: list[str], ctx: Context) -> int:
     return _resolve_command(tokens, head, ctx)
 
 
+def _print_help(parser: argparse.ArgumentParser) -> None:
+    """Write *parser*'s help page to stdout, or to stderr without a stdout.
+
+    Not argparse's ``print_help``: from Python 3.11 it swallows an
+    ``OSError`` from the write, and a page larger than the stream's buffer
+    goes straight to the descriptor, so a page stdout cannot take would be
+    lost with no report and rc 0. Written here, the error reaches `main`,
+    which reports it at 255. The stderr fallback is the one ``print_help``
+    makes for a process without a stdout.
+    """
+    stream = sys.stdout if sys.stdout is not None else sys.stderr
+    if stream is not None:
+        stream.write(parser.format_help())
+
+
 def _unknown_options_message(tokens: list[str]) -> str:
     """aws's report for tokens no parser placed (its customizations command
     layer joins them with "," and no space; two ported aws-cli tests read it)."""
@@ -624,7 +654,7 @@ def _resolve_command(tokens: list[str], head: argparse.Namespace, ctx: Context) 
     table.
     """
     if tokens == ["help"]:
-        _build_stage1_parser().print_help()
+        _print_help(_build_stage1_parser())
         return 0
 
     index = _find_command_token(tokens)
@@ -667,7 +697,7 @@ def _run_command(
         # page, rc 0 - even where a normal parse would fail or run a listing.
         # The globals are already stripped, so a `help` wrapped in globals
         # still pages (aws: `s3 presign help --region us-east-1` pages).
-        _build_command_parser(name, command).print_help()
+        _print_help(_build_command_parser(name, command))
         return 0
     # The top-level pass's namespace carries every parsed global (either side
     # of the subcommand - all consumed there) plus their defaults; the leaf

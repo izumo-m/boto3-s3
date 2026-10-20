@@ -285,12 +285,14 @@ class TestMainExitCodes:
         assert rc == 255
         assert capsys.readouterr().err == "boto3-s3: [ERROR]: [Errno 32] Broken pipe\n"
 
+    @pytest.mark.parametrize("work_rc", [0, 2])
     def test_a_successful_run_whose_output_cannot_be_flushed_exits_255(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, work_rc: int, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # The work is done but the output asked for is lost (a full disk, a
-        # reader that left): a local I/O failure, reported with its cause -
-        # not a success, and not Python's 120 from its own flush at exit.
+        # The work is done - cleanly, or with warnings only - but the output
+        # asked for is lost (a full disk, a reader that left): a local I/O
+        # failure, reported with its cause - not a success, and not Python's
+        # 120 from its own flush at exit.
         class _FullStdout:
             def write(self, text: str) -> int:
                 return len(text)
@@ -298,9 +300,28 @@ class TestMainExitCodes:
             def flush(self) -> None:
                 raise OSError(errno.ENOSPC, "No space left on device")
 
-        monkeypatch.setattr(cli, "_main", lambda _argv, _ctx: 0)
+        monkeypatch.setattr(cli, "_main", lambda _argv, _ctx: work_rc)
         monkeypatch.setattr(sys, "stdout", _FullStdout())
         assert cli.main(["ls"]) == 255
+        assert capsys.readouterr().err == "boto3-s3: [ERROR]: [Errno 28] No space left on device\n"
+
+    @pytest.mark.parametrize("argv", [["help"], ["cp", "help"]])
+    def test_a_help_page_stdout_cannot_take_exits_255(
+        self, argv: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # argparse's print_help swallows the write's OSError from Python 3.11,
+        # and a page larger than the buffer goes straight to the descriptor,
+        # so the page would be lost at rc 0; written by the CLI, the error is
+        # reported once, at 255.
+        class _FullStdout:
+            def write(self, text: str) -> int:
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+            def flush(self) -> None:
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr(sys, "stdout", _FullStdout())
+        assert cli.main(argv) == 255
         assert capsys.readouterr().err == "boto3-s3: [ERROR]: [Errno 28] No space left on device\n"
 
     def test_a_run_without_a_stdout_keeps_its_code(
