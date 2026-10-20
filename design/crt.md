@@ -104,8 +104,8 @@ config=None read as `'auto'` - with the same rules as boto3.
   the same identity by construction and is admitted without resolving it,
   which keeps a refreshable credential unresolved until the delegate needs
   it (section 4, "Entering the CRT engine without credentials"); boto3's
-  frozen comparison is kept for a client holding another object; a client
-  that resolved no credentials at all is refused, boto3's rule. On an
+  frozen comparison is kept for a client holding another object; a signing
+  client that resolved no credentials at all is refused, boto3's rule. On an
   explicit `'crt'` it also
   ports boto3's `_validate_crt_transfer_config` (which rejects an explicit
   setting of a CRT-unsupported option). Whatever the construction raises is

@@ -119,7 +119,8 @@ Some exceptions stay outside the hierarchy by design. Programming bugs
 (`TypeError`, `AssertionError`) propagate unwrapped on the synchronous paths —
 the library's own code, that is: what botocore raises from inside a request is
 the request failing, reported as above, with `AssertionError` alone left
-untranslated there too. `KeyboardInterrupt` and `SystemExit` always propagate. A response the service
+untranslated there too (bar the CRT signer's refusal of a non-positive
+`expires_in` in `presign`, an `InvalidValueError`). `KeyboardInterrupt` and `SystemExit` always propagate. A response the service
 returned incomplete, or a timestamp the host cannot represent, is inside it:
 [`MalformedResponseError`](#malformedresponseerror) carries the `KeyError` /
 `OverflowError` the AWS CLI dies with on `__cause__` and its text as the
@@ -212,9 +213,10 @@ those two failure modes; a library consumer can ignore it and catch
 class InvalidValueError(ValidationError): ...
 ```
 
-Adds no attributes and no constructor of its own. Inside `boto3_s3` one path
-raises it: [`presign`](./operations/presign.md) with a non-positive
-`expires_in` the CRT signer refuses. Otherwise it is raised by the
+Adds no attributes and no constructor of its own. Inside `boto3_s3` two paths
+raise it: [`presign`](./operations/presign.md) with a non-positive
+`expires_in` the CRT signer refuses, and an `IOStorage` given an unknown
+`encoding` ([`storage.md`](./storage.md)). Otherwise it is raised by the
 `boto3-s3-cli` distribution (and is available to callers who want the same
 refinement); a handler around library calls need only catch
 `ValidationError`.

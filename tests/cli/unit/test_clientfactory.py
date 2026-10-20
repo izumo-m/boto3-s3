@@ -113,8 +113,15 @@ class TestBuildClient:
             ([], {}, "classic", False),
             ([], {"AWS_REGION": "eu-west-1"}, "crt", False),
             (["--region", "ap-northeast-1"], {}, "crt", False),
+            (["--region", "aws-global"], {}, "crt", False),
         ],
-        ids=["crt-nothing-resolves", "classic-nothing-resolves", "crt-env", "crt-explicit"],
+        ids=[
+            "crt-nothing-resolves",
+            "classic-nothing-resolves",
+            "crt-env",
+            "crt-explicit",
+            "crt-explicit-aws-global",
+        ],
     )
     def test_a_crt_run_needs_a_resolved_region(
         self,

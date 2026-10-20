@@ -3746,8 +3746,8 @@ class TestCrtEngineErrors:
     The engine is built by third-party code (boto3's config validation,
     awscrt's client factory, a credential resolution), and
     `transfer.crt_engine_errors` gives each failure the category
-    design/exceptions.md names for its cause - awscrt's bare region assertion
-    alone passes through, for the CLI's single conversion site.
+    design/exceptions.md names for its cause - an `AssertionError` (an
+    invariant or a test double's guard) alone passes through.
     """
 
     @staticmethod
@@ -3873,7 +3873,7 @@ class TestCrtEngineErrors:
         with pytest.raises(InvalidConfigError):
             transferrer._get_manager()
 
-    def test_awscrts_region_assertion_passes_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_an_assertion_passes_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
         transferrer = self._transferrer_whose_engine_raises(monkeypatch, AssertionError())
         with pytest.raises(AssertionError):
             transferrer._get_manager()

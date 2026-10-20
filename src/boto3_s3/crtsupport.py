@@ -40,10 +40,10 @@ client (design/crt.md):
   refreshable credential is first resolved inside the delegate, per request,
   as aws-cli's factory lets it be - boto3's value comparison, kept for a
   client holding another object, would resolve it ahead of the transfer. A
-  client that resolved no credentials at all never gets the CRT engine
-  (boto3's rule), so its transfer runs classic and fails there.
-- **region**: the CRT client's region is the built client's own, boto3's
-  source.
+  signing client that resolved no credentials at all never gets the CRT
+  engine (boto3's rule), so its transfer runs classic and fails there.
+
+The CRT client's region is the built client's own, as in boto3.
 
 Nothing here imports awscrt or ``s3transfer.crt`` at module import time; the
 classic path never pays for them (design/imports.md).
