@@ -23,8 +23,7 @@ this command does from the same environment.
   `default`. Present wins here too, so `AWS_PROFILE=` fails with a
   profile-not-found error.
 - **Retries**: `standard` mode with 3 attempts, unless `AWS_RETRY_MODE` /
-  `AWS_MAX_ATTEMPTS` or the profile supplies one. Only `standard` and `adaptive`
-  are accepted; `legacy` is rejected, as `aws` v2 rejects it.
+  `AWS_MAX_ATTEMPTS` or the profile supplies one.
 
 ## 2. Environment variables
 
@@ -61,13 +60,10 @@ error, exit code 255, on either variable.
 `true` (case-insensitively). `AWS_CLI_AUTO_PROMPT` and the profile key
 `cli_auto_prompt` are not read: there is no interactive prompt.
 
-Three variables the installed SDK would otherwise act on are ignored here,
-because `aws` cannot see them either: `SSLKEYLOGFILE` (its frozen interpreter
-ignores the environment for that), `BOTO_DISABLE_CRT` (a switch its bundled SDK
-does not have) and `AWS_S3_US_EAST_1_REGIONAL_ENDPOINT`, along with the
-matching `us_east_1_regional_endpoint` config key (dropped from its bundled SDK
-— us-east-1 is regional there, always). Setting any of them changes nothing
-here, an unusable value included.
+`AWS_S3_US_EAST_1_REGIONAL_ENDPOINT` and the matching
+`us_east_1_regional_endpoint` config key do not move us-east-1 off its regional
+endpoint, because `aws` cannot see them (its bundled SDK dropped the key —
+us-east-1 is regional there, always).
 
 `AWS_PAGER` and the `cli_pager` config key change nothing on either tool's `s3`
 commands: `aws` routes only the structured output of its API commands through a

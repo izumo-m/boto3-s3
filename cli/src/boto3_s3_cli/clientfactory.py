@@ -91,16 +91,6 @@ def _open_botocore_session(args: argparse.Namespace) -> BotocoreSession:
     restores aws's env order (stock botocore reads ``AWS_DEFAULT_PROFILE``
     first, botocore #1725) without that promotion.
 
-    The session also pins ``api_versions`` empty. aws-cli v2 removed that
-    setting in 2.0.0 (aws/aws-cli#4751) and its bundled botocore has no such
-    config variable, so aws ignores the key outright; the installed botocore
-    still reads it in ``create_client``, where a version other than the model's
-    fails *every* command with ``Unable to load data for:
-    s3/<version>/service-2`` - a config left over from aws-cli v1 would take
-    the whole CLI down. An empty mapping as the session instance variable heads
-    the config chain, so no env var or config file can put one back. The
-    library's own ``S3()`` keeps reading it, staying boto3-faithful.
-
     ``retry_mode`` / ``max_attempts`` are redeclared with the defaults aws v2's
     bundled botocore hard-codes (``standard`` / 3, where stock botocore
     declares ``legacy`` and no cap). Declaring them on the *session* is what
@@ -131,9 +121,7 @@ def _open_botocore_session(args: argparse.Namespace) -> BotocoreSession:
     )
     if args.profile:
         session.set_config_variable("profile", args.profile)
-    session.set_config_variable("api_versions", {})
     _pin_regional_s3_endpoint(session)
-    _drop_tls_key_log()
     session.set_default_client_config(_default_client_config(args))
     _check_every_client(session)
     _reject_unknown_cli_formats(session, args)
@@ -230,18 +218,12 @@ class _RegionalS3Section:
     """The profile's ``[s3]`` section with ``us_east_1_regional_endpoint`` pinned.
 
     aws v2's bundled botocore dropped that key from its ``[s3]`` table outright
-    - us-east-1 is regional there, always - so neither
-    ``AWS_S3_US_EAST_1_REGIONAL_ENDPOINT`` nor the config key decides anything
-    on that side, an invalid or empty value included. The installed botocore
-    still reads *and validates* it, for every client that resolves an endpoint
-    ruleset: dropping the key alone would not do, because its absence selects
-    the legacy global endpoint here (``_should_force_s3_global`` reads a
-    missing key as ``legacy``), so the value is pinned to ``regional`` instead.
-
-    A value botocore's own section provider hands over as something other than
-    a mapping (a degenerate ``s3 =`` line arrives as ``""``) is passed through
-    untouched: that shape is botocore's to report, and aws fails on the same
-    read.
+    - us-east-1 is regional there, always - so ``legacy`` from
+    ``AWS_S3_US_EAST_1_REGIONAL_ENDPOINT`` or the config key decides nothing on
+    that side. The installed botocore still reads it, and dropping the key
+    alone would not do, because its absence selects the legacy global endpoint
+    here (``_should_force_s3_global`` reads a missing key as ``legacy``), so
+    the value is pinned to ``regional`` instead.
     """
 
     def __init__(self, section_provider: Any) -> None:
@@ -249,8 +231,6 @@ class _RegionalS3Section:
 
     def provide(self) -> Any:
         section = self._section_provider.provide()
-        if section is not None and not isinstance(section, dict):
-            return section
         pinned: dict[str, Any] = dict(cast("dict[str, Any]", section or {}))
         pinned["us_east_1_regional_endpoint"] = "regional"
         return pinned
@@ -267,21 +247,9 @@ class _RegionalS3Section:
         ``'_RegionalS3Section' object has no attribute 'set_default_provider'``
         where aws - whose bundled botocore has no defaults modes at all -
         simply ran (measured for every valid mode, config key and env var
-        alike). Delegating leaves botocore's own bookkeeping intact, and a
-        wrapped provider that has no such method fails exactly as the
-        unwrapped one would.
-
-        The one key not passed on is the pinned one. Smart defaults write
-        exactly that key, and letting the write through puts back the override
-        entry `_pin_regional_s3_endpoint` took out - so on a degenerate
-        ``s3 =`` line botocore again assigns into what is still a string
-        (``'str' object does not support item assignment``), where aws, which
-        has neither the key nor the defaults modes, reports its usual
-        ``'str' object has no attribute 'get'`` (measured, rc 255 on both).
-        Nothing is lost by dropping it: `provide` pins the value regardless.
+        alike). Delegating leaves botocore's own bookkeeping intact; `provide`
+        pins the value whatever the write says.
         """
-        if key == "us_east_1_regional_endpoint":
-            return
         self._section_provider.set_default_provider(key, default_provider)
 
 
@@ -292,43 +260,11 @@ def _pin_regional_s3_endpoint(session: BotocoreSession) -> None:
     from - the S3 client, ``mv``'s s3control / sts resolver clients, and the
     clients the credential providers build for themselves - so pinning it here
     covers all of them at once, where a ``Config(s3=...)`` covers only what
-    this module passes it (measured: with
-    ``AWS_S3_US_EAST_1_REGIONAL_ENDPOINT=zzz``, ``mv
-    --validate-same-s3-paths`` exited 255 on the validator's client where aws
-    ran the move).
-
-    The section provider's own entry for the key goes first, so the env var
-    and the top-level ``s3_us_east_1_regional_endpoint`` key are not read at
-    all - what a table without the key does. It shows through on a degenerate
-    ``s3 =`` line, where botocore writes an override into what is still a
-    string: the key aws does not have must not be the one that fails there.
-    Botocore's own name for that table is private, so a botocore that renames
-    it simply keeps reading the key, and the pin above still decides the
-    value.
+    this module passes it.
     """
     config_store = session.get_component("config_store")
     section_provider = config_store.get_config_provider("s3")
-    section_overrides = getattr(section_provider, "_override_providers", None)
-    if isinstance(section_overrides, dict):
-        cast("dict[str, Any]", section_overrides).pop("us_east_1_regional_endpoint", None)
     config_store.set_config_provider("s3", _RegionalS3Section(section_provider))
-
-
-def _drop_tls_key_log() -> None:
-    """Take ``SSLKEYLOGFILE`` out of the environment, as the aws build does.
-
-    botocore hands the variable to the SSL context it builds for every client,
-    under a ``sys.flags.ignore_environment`` guard. aws ships a frozen
-    interpreter that runs isolated, so the guard is always false there and the
-    variable decides nothing: with a writable path aws writes no key log, and
-    with an unopenable one it runs normally. Here the same botocore code runs
-    on the host interpreter, so the path is opened while the client's HTTP
-    session builds - writing TLS session keys aws would not write, and failing
-    every client-building command (``presign`` included, rc 255) when the path
-    cannot be opened. Dropping the variable as the session opens reproduces
-    aws's outcome.
-    """
-    os.environ.pop("SSLKEYLOGFILE", None)
 
 
 def _default_client_config(args: argparse.Namespace) -> Any:
@@ -1108,15 +1044,7 @@ def build_client(
 
 
 def _create_client(session: Boto3Session, service: str, **kwargs: Any) -> Any:
-    """``session.client`` with aws v2's retry-mode vocabulary around it.
-
-    The retry configuration itself is the session's (`_open_botocore_session`
-    declares aws v2's ``standard`` / 3 defaults), so botocore resolves and
-    validates it while it builds the client. Only the vocabulary differs: aws
-    v2's bundled botocore accepts ``standard`` / ``adaptive`` alone, while the
-    installed botocore still counts ``legacy`` as valid. So the mode of the
-    built client is checked once more, which refuses the ``legacy`` botocore
-    let through (255).
+    """``session.client`` with the CONNECT pin and the CA bundle check around it.
 
     Every client this CLI hands out is created here, which is what makes this
     the place the CONNECT pin goes on (`proxytunnel`): an HTTPS proxy sees the
@@ -1127,8 +1055,6 @@ def _create_client(session: Boto3Session, service: str, **kwargs: Any) -> Any:
 
     proxytunnel.pin_connect_request()
     client = session.client(service, **kwargs)  # pyright: ignore[reportUnknownMemberType]
-    retries = cast("dict[str, Any] | None", client.meta.config.retries) or {}
-    _reject_unsupported_retry_mode(retries.get("mode"))
     _reject_empty_ca_bundle(kwargs.get("verify"))
     return client
 
@@ -1166,17 +1092,3 @@ def _reject_empty_ca_bundle(verify: Any) -> None:
                 "CA bundle file."
             )
         )
-
-
-def _reject_unsupported_retry_mode(mode: Any) -> None:
-    """Reject a retry mode aws v2 does not have.
-
-    ``legacy`` is stock botocore's default and one of its three valid modes;
-    aws v2's bundled botocore dropped it, so a profile carrying the aws-cli v1
-    value (or any other typo) is rc 255 there.
-    """
-    if mode is None or mode in ("standard", "adaptive"):
-        return
-    raise InvalidConfigError(
-        f'Invalid value provided to "mode": "{mode}" must be one of: "standard" or "adaptive"'
-    )

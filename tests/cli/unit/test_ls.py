@@ -16,7 +16,6 @@ import pytest
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
 from tests.cli.unit.test_output import local_zone, needs_tzset
-from tests.utils.fakemodel import model_meta
 from tests.utils.harness import unused_ctx
 
 _MTIME = dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc)
@@ -37,9 +36,6 @@ class _FakeS3Client:
         self._pages = pages
         self.calls: list[dict[str, Any]] = []
         self.paginator_names: list[str] = []
-        # The ListBuckets filter gate reads the model, so the fake carries the
-        # one a current botocore has.
-        self.meta = model_meta({"ListBuckets": {"Prefix", "BucketRegion"}})
 
     def can_paginate(self, name: str) -> bool:
         return True

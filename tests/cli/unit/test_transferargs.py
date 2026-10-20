@@ -1,13 +1,8 @@
 """CLI-layer shared transfer-argument pieces (``transferargs``).
 
-The ``--no-overwrite`` gate (``validate_no_overwrite_supported``): the
-upload/copy parallel of the streaming rejection - on a botocore without S3
-conditional writes it must reject ``--no-overwrite`` with a ``ValidationError``
-(rc 252) for ``locals3`` / ``s3s3`` and stay out of the way for the routes that
-never send ``IfNoneMatch`` (``s3local`` download, and ``sync``, which pops the
-flag before transfer). Plus ``identify_type`` (aws-cli's
-``FileFormat.identify_type``: string classification is the CLI's job) and the
-``file://`` paramfile resolution.
+``identify_type`` (aws-cli's ``FileFormat.identify_type``: string
+classification is the CLI's job) and the ``file://`` paramfile resolution,
+among others.
 """
 
 from __future__ import annotations
@@ -21,37 +16,6 @@ import pytest
 from boto3_s3.exceptions import InvalidValueError, ValidationError
 from boto3_s3.types import CaseConflictMode
 from boto3_s3_cli.commands import transferargs
-from tests.utils.fakemodel import model_only_client
-
-
-def test_rejects_upload_on_old_botocore() -> None:
-    client = model_only_client(set())
-    with pytest.raises(ValidationError, match=r"1\.35\.2"):
-        transferargs.validate_no_overwrite_supported(True, "locals3", client, operation="cp")
-
-
-def test_rejects_copy_on_old_botocore() -> None:
-    client = model_only_client({"PutObject"})  # upload ok, copy needs 1.40.61
-    with pytest.raises(ValidationError, match=r"1\.40\.61"):
-        transferargs.validate_no_overwrite_supported(True, "s3s3", client, operation="cp")
-
-
-def test_skips_download_route() -> None:
-    # s3local never sends IfNoneMatch; must stay usable on an old botocore.
-    transferargs.validate_no_overwrite_supported(
-        True, "s3local", model_only_client(set()), operation="cp"
-    )
-
-
-def test_skips_when_flag_absent() -> None:
-    transferargs.validate_no_overwrite_supported(
-        False, "locals3", model_only_client(set()), operation="cp"
-    )
-
-
-def test_allows_upload_when_supported() -> None:
-    client = model_only_client({"PutObject"})
-    transferargs.validate_no_overwrite_supported(True, "locals3", client, operation="cp")
 
 
 class TestIdentifyType:

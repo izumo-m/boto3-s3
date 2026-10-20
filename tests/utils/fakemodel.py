@@ -1,16 +1,13 @@
 """A stand-in S3 client exposing only the service-model surface the
-SDK-capability probes read, with no API calls, plus the same surface as a
-``meta`` a hand-rolled fake client can carry.
+SDK-capability probes read, with no API calls.
 
 `conditional_write_unsupported_reason` / `annotations_copy_unsupported_reason`
-(with the CLI and library gates built on those two), the ``ListBuckets``
-filter gate and the ``CreateBucket`` gate of ``S3.mb`` decide support by
-introspecting ``client.meta.service_model.operation_model(op).input_shape.members``
-for a member (``IfNoneMatch`` / ``AnnotationDirective`` / ``Prefix`` /
-``BucketRegion`` / ``BucketNamespace``), or for a member of a member
-(``CreateBucketConfiguration.Tags``). A real client always carries them on the
-current botocore, so to exercise the old-botocore path these fakes report only
-the members they are told to.
+(with the library gates built on those two) and the checksum-algorithm gate
+decide support by introspecting
+``client.meta.service_model.operation_model(op).input_shape.members`` for a
+member (``IfNoneMatch`` / ``AnnotationDirective`` / ``Checksum<ALG>``). A real
+client always carries them on the current botocore, so to exercise the
+old-botocore path these fakes report only the members they are told to.
 """
 
 from __future__ import annotations
@@ -21,29 +18,16 @@ from typing import Any
 
 class _Shape:
     def __init__(self, members: Collection[str]) -> None:
-        # A dotted name ("CreateBucketConfiguration.Tags") nests: the outer
-        # member is itself a shape carrying the inner one.
-        self.members: dict[str, Any] = {}
-        nested: dict[str, list[str]] = {}
-        for name in members:
-            outer, dot, inner = name.partition(".")
-            if dot:
-                nested.setdefault(outer, []).append(inner)
-            else:
-                self.members[name] = object()
-        for outer, inner_names in nested.items():
-            self.members[outer] = _Shape(inner_names)
+        self.members: dict[str, Any] = {name: object() for name in members}
 
 
 class _OperationModel:
-    def __init__(self, members: Collection[str] | None) -> None:
-        # None models a botocore old enough to give the operation no input
-        # shape at all, which the probes read as "no members".
-        self.input_shape = _Shape(members) if members is not None else None
+    def __init__(self, members: Collection[str]) -> None:
+        self.input_shape = _Shape(members)
 
 
 class _ServiceModel:
-    def __init__(self, members_by_op: Mapping[str, Collection[str] | None]) -> None:
+    def __init__(self, members_by_op: Mapping[str, Collection[str]]) -> None:
         self._members_by_op = members_by_op
 
     def operation_model(self, name: str) -> _OperationModel:
@@ -51,27 +35,19 @@ class _ServiceModel:
 
 
 class _Meta:
-    def __init__(self, members_by_op: Mapping[str, Collection[str] | None]) -> None:
+    def __init__(self, members_by_op: Mapping[str, Collection[str]]) -> None:
         self.service_model = _ServiceModel(members_by_op)
 
 
 class _ModelOnlyClient:
-    def __init__(self, members_by_op: Mapping[str, Collection[str] | None]) -> None:
+    def __init__(self, members_by_op: Mapping[str, Collection[str]]) -> None:
         self.meta = _Meta(members_by_op)
 
 
-def model_meta(members_by_op: Mapping[str, Collection[str] | None]) -> Any:
-    """A ``client.meta`` stand-in whose operation models carry exactly the
-    named input members (e.g. ``{"ListBuckets": {"Prefix"}}``, or a dotted
-    ``"CreateBucketConfiguration.Tags"`` for a member's member); an op mapped to
-    ``None`` has no input shape, and an unnamed op has no members. For a fake
-    client that answers real calls and must also satisfy a capability probe."""
-    return _Meta(members_by_op)
-
-
-def model_client(members_by_op: Mapping[str, Collection[str] | None]) -> Any:
+def model_client(members_by_op: Mapping[str, Collection[str]]) -> Any:
     """A client whose S3 model carries exactly the named input members per op
-    (the shapes `model_meta` describes), with no API calls."""
+    (e.g. ``{"PutObject": {"ChecksumCRC32"}}``; an unnamed op has no members),
+    with no API calls."""
     return _ModelOnlyClient(members_by_op)
 
 

@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A multipart copy whose post-copy tag write and its cleanup delete both fail now prints its failure line and fails the run, and `mv` keeps its source (exit codes changed).
 - A download to stdout that stdout cannot take (full, or its reader gone) now prints its failure line and fails the run, and a command whose output cannot be written no longer ends at Python's 120 (exit codes changed).
 - Under the CRT engine, a run with no credentials now fails each item with `Unable to locate credentials` and no traceback, a run with no region stops with botocore's missing-region report, and a FIPS pseudo-region signs for the plain region; `presign` names the expiry the CRT signer refuses (exit codes changed).
+- `retry_mode = legacy`, `api_versions`, `SSLKEYLOGFILE` and `BOTO_DISABLE_CRT` now take effect as for any boto3 application, and a too-old SDK's refusal of `--no-overwrite`, of `ls`'s bucket filters and of an S3 Express access point under `mv --validate-same-s3-paths` is reported as the library reports it (exit codes changed).
 
 ## [0.9.0] - 2026-10-18
 

@@ -83,18 +83,21 @@ carry it ([`compatibility.md`](../compatibility.md) lists what each feature
 needs). Not every such case lands here:
 
 - a CRT-only `--checksum-algorithm` without the extra fails per item (1);
-- `--copy-props all`, a `--checksum-algorithm` newer than the SDK, or a `cp` /
-  `mv` / `rm` on an S3 Express bucket or access point the SDK predates ends the
-  run with one `fatal error:` line (1) — `sync`, and `--case-conflict skip` /
-  `error` on a recursive download, refuse them at every SDK version (252);
+- `--copy-props all`, a `--checksum-algorithm` newer than the SDK,
+  `--no-overwrite` on an upload or copy the SDK cannot send, or a `cp` / `mv` /
+  `rm` on an S3 Express bucket or access point the SDK predates ends the run
+  with one `fatal error:` line (1) — `sync`, and `--case-conflict skip` /
+  `error` on a recursive download, refuse an S3 Express bucket at every SDK
+  version (252);
 - `mb` and `rb` report a too-old SDK — `mb`'s `--tags` or `-an` bucket name, an
   S3 Express bucket or access point — on their one `make_bucket failed:` /
   `remove_bucket failed:` line (1) like any of their failures, and `rb --force`
   as its failed delete (255);
-- `--no-overwrite` on an upload or copy with a too-old SDK is rejected up front
-  as a usage error (252).
+- `ls --bucket-name-prefix` / `--bucket-region` on an SDK that cannot send
+  them is refused before any request, as a usage error (252).
 
-Of the S3 Express refusals, then, only `ls`, `presign` and `website` land here.
+Of the S3 Express refusals, then, only `ls`, `presign`, `website` and an
+access point under `mv --validate-same-s3-paths` land here.
 An unusable `cli_timestamp_format` in the profile lands here too: every
 subcommand stops on it. `help` and `--version` do not read the config files,
 so they still work, where `aws` fails them as well

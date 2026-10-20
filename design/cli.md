@@ -297,7 +297,7 @@ numbers in the bold item labels below are that document's.
   its `sign_request` parameter and never the client's signature version),
   `--cli-read-timeout` /
   `--cli-connect-timeout` -> `Config` and the session's default client config
-  (item 9 below). The assembled client is handed to the
+  (item 8 below). The assembled client is handed to the
   library via `S3Storage(uri, client=...)` (the library does not rebuild the
   connection settings). `verify` is never left to botocore to resolve later:
   `_resolve_verify` walks `--no-verify-ssl` > `--ca-bundle` > the `ca_bundle`
@@ -326,11 +326,13 @@ numbers in the bold item labels below are that document's.
   `session.client` has built the client. `--no-verify-ssl` resolves to
   `False` ahead of the chain and is unaffected.
 - **The alignment with aws v2**: `build_client` and the botocore session every
-  client is opened on absorb ten differences between the installed botocore on
-  a host interpreter and the botocore aws v2 ships frozen (the CLI's exception
-  to not compensating for SDK version differences, overview.md section 3:
-  items 1, 8 and 9 port aws-cli's own logic, the rest change a normal run's
-  requests, profile or retries). Where a correction
+  client is opened on absorb eight differences between the installed botocore on
+  a host interpreter and the botocore aws v2 ships frozen (the exception
+  overview.md section 3 makes for a version difference that changes a normal
+  run: items 1, 7 and 8 port aws-cli's own logic, the rest change a normal
+  run's requests, profile or retries). A difference that shows only in an
+  error or in an unusual environment - an unknown setting aws's botocore no
+  longer reads, a value it refuses - is left to the installed botocore. Where a correction
   belongs to the *session* rather than to a client kwarg, that is deliberate:
   the session is what the clients botocore builds for itself - chiefly the STS
   / SSO clients the credential chain creates - are built from, and a per-client
@@ -430,34 +432,23 @@ numbers in the bold item labels below are that document's.
      group reporting the same on both tools whether the pin applies or not.
   3. **us-east-1 regional endpoint** - aws v2 resolves us-east-1 as regional
      (`s3.us-east-1.amazonaws.com`), its bundled botocore having dropped the
-     `us_east_1_regional_endpoint` key from its `[s3]` table outright, so
-     neither `AWS_S3_US_EAST_1_REGIONAL_ENDPOINT` nor the config key decides
-     anything there - an invalid or empty value included. The installed
-     botocore still reads *and validates* the key, for every client that
-     resolves an endpoint ruleset, so the value is pinned on the **session's
-     config store** (`_pin_regional_s3_endpoint` / `_RegionalS3Section`): the
-     wrapper drops the key's own entry from botocore's `[s3]` table - what a
-     table without the key does, so the env var and the config key are not read
-     at all - and forces the value to `regional`, because dropping it alone
-     would select the legacy global endpoint here (a missing key reads as
-     `legacy`; botocore's own name for that table is private, so a botocore
-     that renames it simply reads the key again, with the pin still deciding
-     the value). The wrapper also passes botocore's smart-defaults write
-     through to the provider it wraps (`set_default_provider`): a
-     `defaults_mode` other than `legacy`, from the config key or
-     `AWS_DEFAULTS_MODE`, sends that call at the `[s3]` section provider, and a
-     wrapper answering only `provide()` failed *every* command at rc 255 where
-     aws - whose bundled botocore has no defaults modes at all - simply ran.
-     Delegating leaves botocore's bookkeeping intact and changes nothing the
-     pin decides, since the value it writes for the key is `regional` too.
-     The store is where every client reads the section, so mv's
-     s3control / sts resolver clients and the credential chain's own are
-     covered too, where a client `Config` covered only what this module passes
-     it (measured: with an invalid value in the environment, `mv
-     --validate-same-s3-paths` exited 255 on the validator's client where aws
-     ran the move). A degenerate `s3 =` line, which botocore's section provider
-     hands over as a string rather than a mapping, is passed through untouched:
-     that shape is botocore's to report, and aws fails on the same read. It
+     `us_east_1_regional_endpoint` key from its `[s3]` table outright, so a
+     `legacy` from `AWS_S3_US_EAST_1_REGIONAL_ENDPOINT` or the config key
+     decides nothing there. The installed botocore still reads the key, so
+     the value is pinned on the **session's config store**
+     (`_pin_regional_s3_endpoint` / `_RegionalS3Section`): the wrapper forces
+     the section's value to `regional`, because dropping the key would select
+     the legacy global endpoint here (a missing key reads as `legacy`). The
+     wrapper also passes botocore's smart-defaults write through to the
+     provider it wraps (`set_default_provider`): a `defaults_mode` other than
+     `legacy`, from the config key or `AWS_DEFAULTS_MODE`, sends that call at
+     the `[s3]` section provider, and a wrapper answering only `provide()`
+     failed *every* command at rc 255 where aws - whose bundled botocore has no
+     defaults modes at all - simply ran. Delegating leaves botocore's
+     bookkeeping intact and changes nothing the pin decides. The store is where
+     every client reads the section, so mv's s3control / sts resolver clients
+     and the credential chain's own are covered too, where a client `Config`
+     covers only what this module passes it. It
      is not the whole story for a presigned URL, whose endpoint stock botocore
      resolves as if the region were `aws-global` regardless of this setting; the library's `presign`
      clears the flag that does it, so a URL from either layer names the
@@ -487,9 +478,11 @@ numbers in the bold item labels below are that document's.
      botocore falls through to the symmetric scheme instead of raising, and the
      presigned URL comes back at rc 0 signed `AWS4-HMAC-SHA256` with no
      `X-Amz-Region-Set` (measured; recorded for the reader in
-     [`compatibility.md`](../docs/compatibility.md) section 2). Nothing
-     reproduces it from the environment - item 10 drops the one variable that
-     could turn CRT off on an installation that has it.
+     [`compatibility.md`](../docs/compatibility.md) section 2).
+     `BOTO_DISABLE_CRT`, the installed botocore's switch that hides an
+     installed awscrt from it, puts an installation that has the extra in the
+     same state; aws's bundled botocore has no such switch, and the CLI leaves
+     the variable to botocore (an unusual environment, overview.md section 3).
   5. **profile env precedence** - aws v2 resolves the active profile as
      `--profile` > `AWS_PROFILE` > `AWS_DEFAULT_PROFILE` > `default` (its bundled
      botocore lists the env vars as `['AWS_PROFILE', 'AWS_DEFAULT_PROFILE']`),
@@ -530,21 +523,8 @@ numbers in the bold item labels below are that document's.
      3 times and ends `(reached max retries: 2)` as under aws, where the
      per-client `Config` this used to be left it at legacy's 5 (measured).
      botocore then resolves and validates the whole retry configuration inside
-     `create_client`. Only the mode *vocabulary* is corrected, once the client
-     is built (`_create_client` / `_reject_unsupported_retry_mode`): stock
-     botocore's `legacy`, which aws v2 dropped and botocore still counts as
-     valid, is refused there (`InvalidConfigError`, rc 255); botocore refuses
-     every other unknown mode itself.
-  7. **`api_versions` is neutralized** - aws v2 dropped the setting and its
-     bundled botocore declares no such config variable, so aws ignores the key
-     outright, while the installed botocore still reads it in `create_client`,
-     where a version other than the model's fails *every* command with `Unable
-     to load data for: s3/<version>/service-2`; `_open_botocore_session`
-     therefore pins an empty mapping as the session instance variable - the
-     head of the config chain, so neither an env var nor a config file left
-     over from aws-cli v1 can put one back - while the library's own `S3()`
-     keeps reading it, boto3-faithfully.
-  8. **temporary credentials are cached on disk** - botocore caches what the
+     `create_client`, in its own vocabulary.
+  7. **temporary credentials are cached on disk** - botocore caches what the
      `assume-role` / `assume-role-with-web-identity` / `sso` providers fetch in
      a per-process dict, so every invocation would re-call `AssumeRole` and an
      `mfa_serial` profile would prompt for a code every time - fatal (rc 255 on
@@ -567,7 +547,7 @@ numbers in the bold item labels below are that document's.
      `UTC+09:00` - which dateutil reads back with POSIX's inverted sign,
      leaving the entry looking valid for hours after it expired, for either
      tool sharing the directory.
-  9. **the CLI timeouts reach the session** - aws resolves
+  8. **the CLI timeouts reach the session** - aws resolves
      `--cli-read-timeout` / `--cli-connect-timeout` into the session's default
      client config as it binds the top-level arguments (its `_resolve_timeout`
      / `_update_default_client_config`, falling back to botocore's 60 s when
@@ -581,24 +561,6 @@ numbers in the bold item labels below are that document's.
      the run there (255); the clients this module builds pass the same two
      values in their own `Config`, which botocore merges on top - the same
      number either way.
-  10. **two environment variables the frozen build cannot read** - item 7's
-      neutralization, one layer out. botocore hands `SSLKEYLOGFILE` to the SSL
-      context it builds for every client under a `sys.flags.ignore_environment`
-      guard; aws's frozen interpreter runs isolated, so the guard is always
-      false there and the variable decides nothing, while the same code on a
-      host interpreter wrote TLS session keys aws would not write and failed
-      every client-building command (`presign` included, rc 255) when the path
-      could not be opened. `_drop_tls_key_log` takes it out of the environment
-      as the session opens. `BOTO_DISABLE_CRT` is stock botocore's own switch,
-      read once while `botocore.compat` imports and frozen into `HAS_CRT`;
-      aws's bundled botocore has no such switch, so with it set aws still signs
-      MRAP and Outposts presigns with SigV4a and still computes the CRT
-      checksum families, where here an MRAP target was rc 253, an Outposts one
-      silently fell back to plain SigV4, and a CRT-family
-      `--checksum-algorithm` failed. The package's `__init__` pops it before
-      any module of this CLI can reach botocore (all measured).
-      Both drops are the CLI's: an application that imports `boto3_s3` alone
-      keeps whatever its own interpreter and environment decide.
 - **Recognized and ignored (no-op, section 2)**: `--output` / `--query` / `--no-paginate`
   / `--no-cli-pager` / `--color` / `--cli-error-format`.
   They are accepted (the `choices` are validated) and have no effect on behavior.
@@ -769,9 +731,8 @@ Request shaping is done by the library's `S3.mb` in the same shape as aws-cli:
 `LocationConstraint` is the client's region (not sent when it is `us-east-1`); if
 the bucket name ends in `-an`, `BucketNamespace=account-regional`; tags go to
 `CreateBucketConfiguration.Tags`. On a botocore whose model predates either
-member (`BucketNamespace` 1.42.67, `Tags` 1.39.2) `S3.mb` refuses before the
-request with a `ConfigurationError` naming the version, which the command
-reports on its `make_bucket failed:` line (rc 1).
+member, botocore's own parameter validation refuses the request before it is
+sent, which the command reports on its `make_bucket failed:` line (rc 1).
 
 | flag | handling |
 |---|---|
@@ -1074,9 +1035,7 @@ src (255**, equivalent to aws's bare RuntimeError.
 `-` is excluded) -> **the
 s3local `--recursive` destination-directory pre-create (255** on an OSError -
 the dir_op half of the same `_validate_path_args`; sync shares it,
-unconditionally) -> the SSE-C pair (252) -> the `--no-overwrite` floor check
-(252, an upload or copy on an installed botocore without S3 conditional
-writes; no aws counterpart) -> the `[s3]` runtime config (255) and
+unconditionally) -> the SSE-C pair (252) -> the `[s3]` runtime config (255) and
 the transfer-manager construction (255 on a CRT client the region cannot build)
 -> the `--case-conflict` Express branch (252; taken for an access point of a
 directory bucket too, which aws's `--x-s3` test misses) -> `S3().cp(...)`.

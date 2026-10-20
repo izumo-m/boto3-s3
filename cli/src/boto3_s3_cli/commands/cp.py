@@ -83,12 +83,6 @@ class CpCommand(Command):
 
         s3 = head.s3
         client = head.client
-        # --no-overwrite on uploads/copies needs a botocore with S3 conditional
-        # writes; reject up front (rc 252) on an older one (design/overview.md
-        # section 2). Placed after the client exists so its model can be probed.
-        transferargs.validate_no_overwrite_supported(
-            args.no_overwrite, paths_type, client, operation="cp"
-        )
         src_location: object
         dest_location: object
         if src == "-":

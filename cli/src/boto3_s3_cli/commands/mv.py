@@ -15,8 +15,6 @@ from boto3_s3 import (
     ValidationError,
     has_underlying_s3_path,
 )
-from boto3_s3.pathresolver import is_s3express_accesspoint_path
-from boto3_s3.s3storage import s3express_unsupported_reason
 from boto3_s3_cli import filters
 from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import Command, Context
@@ -93,12 +91,6 @@ class MvCommand(Command):
 
         s3 = head.s3
         client = head.client
-        # --no-overwrite on uploads/copies needs a botocore with S3 conditional
-        # writes; reject up front (rc 252) on an older one (design/overview.md
-        # section 2). Placed after the client exists so its model can be probed.
-        transferargs.validate_no_overwrite_supported(
-            args.no_overwrite, paths_type, client, operation="mv"
-        )
         src_location, dest_location = transferargs.resolve_locations(
             args,
             ctx,
@@ -194,36 +186,14 @@ class MvCommand(Command):
                 s3control_client=ctx.service_client("s3control", args, s3, region=args.region),
                 sts_client=ctx.service_client("sts", args, s3),
             )
-            # An S3 Express access point the installed botocore predates
-            # cannot be looked up (S3PathResolver refuses it) and is left as
-            # typed, as before this CLI resolved the shape: the other side
-            # still resolves - its own failures keep their exit codes - and a
-            # run that gets past the check stops at S3.mv's floor gate, the
-            # `fatal error:` line every other route gives.
-            src_paths = (
-                [norm_src]
-                if _predates_access_point(norm_src)
-                else src_resolver.resolve_underlying_s3_paths(norm_src)
-            )
-            dest_paths = (
-                [norm_dest]
-                if _predates_access_point(norm_dest)
-                else dest_resolver.resolve_underlying_s3_paths(norm_dest)
-            )
+            src_paths = src_resolver.resolve_underlying_s3_paths(norm_src)
+            dest_paths = dest_resolver.resolve_underlying_s3_paths(norm_dest)
             for src_path in src_paths:
                 for dest_path in dest_paths:
                     if S3Storage.same_path(src_path, dest_path):
                         raise ValidationError(message, operation="mv")
         elif has_underlying_s3_path(norm_src) or has_underlying_s3_path(norm_dest):
             sys.stderr.write(_VALIDATE_WARNING)
-
-
-def _predates_access_point(path: str) -> bool:
-    """Whether *path* names an S3 Express access point the installed botocore predates."""
-    if not is_s3express_accesspoint_path(path):
-        return False
-    bucket, _key = S3Storage.split_bucket_key(S3Storage.strip_scheme(path))
-    return s3express_unsupported_reason(bucket) is not None
 
 
 __all__ = ["MvCommand"]

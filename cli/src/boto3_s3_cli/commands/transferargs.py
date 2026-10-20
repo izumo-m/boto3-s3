@@ -28,7 +28,6 @@ from boto3_s3 import (
 )
 from boto3_s3.localstorage import translate_os_error
 from boto3_s3.pathresolver import is_s3express_accesspoint_path, is_s3express_path
-from boto3_s3.transfer import conditional_write_unsupported_reason
 from boto3_s3_cli import (
     checksumdefault,
     filters,
@@ -564,21 +563,6 @@ def validate_sse_c_pairing(args: argparse.Namespace, paths_type: str, *, operati
         )
 
 
-def validate_no_overwrite_supported(
-    no_overwrite: bool, paths_type: str, client: Any, *, operation: str
-) -> None:
-    """Reject ``--no-overwrite`` (252) when the installed botocore lacks the S3
-    conditional-write parameter for this route - the upload/copy parallel of the
-    streaming rejection. Only ``locals3`` (upload) and ``s3s3`` (copy) send
-    ``IfNoneMatch``; ``s3local`` (download) and ``sync`` never do, so they stay
-    usable on an old botocore (back-compat floor, docs/compatibility.md)."""
-    if not no_overwrite or paths_type not in ("locals3", "s3s3"):
-        return
-    reason = conditional_write_unsupported_reason(client, is_copy=paths_type == "s3s3")
-    if reason is not None:
-        raise ValidationError(reason, operation=operation)
-
-
 def resolve_case_conflict(
     args: argparse.Namespace,
     src: str,
@@ -1018,6 +1002,5 @@ __all__ = [
     "resolve_text_paramfile",
     "resolve_transfer_config",
     "validate_checksum_paths_type",
-    "validate_no_overwrite_supported",
     "validate_sse_c_pairing",
 ]
