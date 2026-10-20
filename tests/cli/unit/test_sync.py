@@ -178,6 +178,9 @@ class TestGeneralErrors:
         assert rc == 255
         assert "symbolic link" in capsys.readouterr().err
 
+    @pytest.mark.skipif(
+        os.name == "nt", reason="Windows folds `..` before the filesystem sees the path"
+    )
     def test_a_source_found_only_through_a_symlinked_dotdot_stops_the_run(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
