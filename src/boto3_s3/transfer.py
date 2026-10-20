@@ -722,18 +722,13 @@ def crt_engine_errors(operation: str | None) -> Generator[None, None, None]:
     object other than the singleton's, the serializer's client build - goes
     through `s3_errors`, and what that build raises outside the family
     (``ValueError`` / ``AttributeError`` reading a malformed configuration)
-    through `client_build_error`, as for any client build. awscrt's bare
-    ``AssertionError`` on an unresolved region passes through untouched: the
-    CLI converts it at its one call site, and the library documents it as the
-    programming-error family.
+    through `client_build_error`, as for any client build.
     boto3's ``MissingDependencyException`` never reaches this seam - the
     engine selection raises it ahead, and keeps its documented pass-through.
     """
     with s3_errors(operation=operation):
         try:
             yield
-        except AssertionError:
-            raise
         except (ClientError, BotoCoreError):
             # The boto family ahead of the OSError clause: four of botocore's
             # transport errors (SSLError, the connect / read timeouts,
@@ -1028,9 +1023,7 @@ class Transferrer:
         cancel_token: CancelToken | None = None,
         capture_response: bool = False,
         crt_endpoint: str | None = None,
-        crt_allow_absent_credentials: bool = False,
         crt_allow_lockless: bool = False,
-        crt_region: crtsupport.CrtRegion = crtsupport.CLIENT_REGION,
         crt_sign_requests: bool | None = None,
         session: Session | None = None,
     ) -> None:
@@ -1123,18 +1116,10 @@ class Transferrer:
         # the CRT engine so it pins a custom endpoint the host heuristic would
         # miss (a VPC interface endpoint under an AWS domain); None = heuristic.
         self._crt_endpoint = crt_endpoint
-        # aws-cli's posture on a client that resolved no credentials: enter the
-        # CRT engine anyway (crtsupport.create_crt_transfer_manager). False =
-        # boto3's classic fallback, which every library caller keeps.
-        self._crt_allow_absent_credentials = crt_allow_absent_credentials
         # aws-cli's posture on cross-process lock contention under an explicit
         # 'crt' preference: build the CRT client without the lock. False =
         # boto3's classic fallback (crtsupport.create_crt_transfer_manager).
         self._crt_allow_lockless = crt_allow_lockless
-        # The caller's resolved CRT region (crtsupport.CLIENT_REGION = read it
-        # off the client, boto3's source); a declared None is what reaches
-        # awscrt's own region assertion, as aws-cli's region chain does.
-        self._crt_region: crtsupport.CrtRegion = crt_region
         # The caller's CRT signing declaration, aws-cli's sign_request. None =
         # derive it from the client, boto3's rule; a declared False is what
         # keeps --no-sign-request anonymous on the CRT lane even when
@@ -1914,8 +1899,7 @@ class Transferrer:
         ``preferred_transfer_client`` is read with boto3's defaults (no config
         = ``'auto'``); a copy run is unconditionally classic - the CRT manager
         has no copy, the same rule boto3 and aws-cli apply to s3->s3.
-        ``crt_allow_absent_credentials``, ``crt_allow_lockless``,
-        ``crt_region`` and ``crt_sign_requests`` are the caller-declared
+        ``crt_allow_lockless`` and ``crt_sign_requests`` are the caller-declared
         posture departures from boto3's rules available here, and apply only
         when the caller asks for them.
         """
@@ -1947,9 +1931,7 @@ class Transferrer:
                 self._transfer_config,
                 endpoint=endpoint,
                 session=self._session,
-                allow_absent_credentials=self._crt_allow_absent_credentials,
                 allow_lockless=self._crt_allow_lockless,
-                region=self._crt_region,
                 sign_requests=self._crt_sign_requests,
             )
 

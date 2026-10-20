@@ -30,10 +30,11 @@ whose endpoint fails its batch requests, a Ctrl-C during deletes under the CRT
 engine, a delete answered `412`, a CRT download that cannot put its file in
 place, a `mv` between two spellings of one Outposts object, an S3 Express
 access point, a plain-HTTP endpoint named anywhere but `--endpoint-url` under
-the CRT engine, a `REQUESTS_CA_BUNDLE` the CRT engine cannot use, a
-`[plugins]` section, an alias file, a `cli_history` directory `aws` cannot
-create, the modification time a download stamps in some local zones (and the
-`sync` runs that follow from it), a transfer or delete whose request dies
+the CRT engine, a FIPS pseudo-region under the CRT engine, a
+`REQUESTS_CA_BUNDLE` the CRT engine cannot use, a `[plugins]` section, an
+alias file, a `cli_history` directory `aws` cannot create, the modification
+time a download stamps in some local zones (and the `sync` runs that follow
+from it), a transfer or delete whose request dies
 without any response, a multipart copy whose tag write and its cleanup both
 fail, a help page that cannot be written, a
 `file://` or `fileb://` reference `aws` mishandles, and the `PYTHON*`
@@ -309,6 +310,15 @@ that say outright that the run comes out differently, listed in section 1.
   `--endpoint-url` and the two agree again
   ([`../../design/crt.md`](../../design/crt.md) section 3 records the
   measurement).
+- **A FIPS pseudo-region under the CRT engine.** Under
+  `preferred_transfer_client = crt`, a region named in the old FIPS form
+  (`--region fips-us-east-1`, `us-east-1-fips`) reaches `aws`'s CRT client as
+  the region to sign for, which S3 is expected to refuse for every item (not
+  measured). Here the CRT engine signs for the region the client resolved -
+  the plain region, on the FIPS endpoint - so the run transfers, as the
+  classic engine does on both tools. Name the plain region with
+  `use_fips_endpoint = true` and the two agree
+  ([`../../design/crt.md`](../../design/crt.md) section 4).
 - **Ctrl-C during deletes under the CRT engine.** For transfers the two
   agree: an interrupt landing in the CRT engine's transfer drain is swallowed
   by the CRT manager on both tools, which print their per-item failure lines

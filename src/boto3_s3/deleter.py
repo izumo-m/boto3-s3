@@ -126,9 +126,7 @@ def crt_delete_sender(
     operation: str,
     session: Session | None = None,
     crt_endpoint: str | None = None,
-    crt_allow_absent_credentials: bool = False,
     crt_allow_lockless: bool = False,
-    crt_region: crtsupport.CrtRegion = crtsupport.CLIENT_REGION,
     crt_sign_requests: bool | None = None,
 ) -> CrtRequestSender | None:
     """The CRT client a run's deletes ride, or ``None`` for botocore.
@@ -160,9 +158,7 @@ def crt_delete_sender(
             transfer_config,
             endpoint=crtsupport.caller_endpoint(client, crt_endpoint),
             session=session,
-            allow_absent_credentials=crt_allow_absent_credentials,
             allow_lockless=crt_allow_lockless,
-            region=crt_region,
             sign_requests=crt_sign_requests,
         )
 
@@ -251,9 +247,7 @@ class S3Deleter:
         transfer_config: TransferConfig | None = None,
         session: Session | None = None,
         crt_endpoint: str | None = None,
-        crt_allow_absent_credentials: bool = False,
         crt_allow_lockless: bool = False,
-        crt_region: crtsupport.CrtRegion = crtsupport.CLIENT_REGION,
         crt_sign_requests: bool | None = None,
     ) -> None:
         # Runtime guard for untyped callers (e.g. S3.resolve routing a bare
@@ -304,9 +298,7 @@ class S3Deleter:
                 operation=operation,
                 session=session,
                 crt_endpoint=crt_endpoint,
-                crt_allow_absent_credentials=crt_allow_absent_credentials,
                 crt_allow_lockless=crt_allow_lockless,
-                crt_region=crt_region,
                 crt_sign_requests=crt_sign_requests,
             )
         )

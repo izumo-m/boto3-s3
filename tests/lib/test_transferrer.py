@@ -3492,9 +3492,7 @@ class TestEngineSelection:
             *,
             endpoint: str | None = None,
             session: Any | None = None,
-            allow_absent_credentials: bool = False,
             allow_lockless: bool = False,
-            region: Any = crtsupport.CLIENT_REGION,
             sign_requests: bool | None = None,
         ) -> Any:
             seen.append((client, config, endpoint, session))
@@ -3519,9 +3517,7 @@ class TestEngineSelection:
             *,
             endpoint: str | None = None,
             session: Any | None = None,
-            allow_absent_credentials: bool = False,
             allow_lockless: bool = False,
-            region: Any = crtsupport.CLIENT_REGION,
             sign_requests: bool | None = None,
         ) -> Any:
             seen.append(endpoint)
@@ -3559,9 +3555,7 @@ class TestEngineSelection:
             *,
             endpoint: str | None = None,
             session: Any | None = None,
-            allow_absent_credentials: bool = False,
             allow_lockless: bool = False,
-            region: Any = crtsupport.CLIENT_REGION,
             sign_requests: bool | None = None,
         ) -> Any:
             seen.append(endpoint)
@@ -3589,9 +3583,7 @@ class TestEngineSelection:
             *,
             endpoint: str | None = None,
             session: Any | None = None,
-            allow_absent_credentials: bool = False,
             allow_lockless: bool = False,
-            region: Any = crtsupport.CLIENT_REGION,
             sign_requests: bool | None = None,
         ) -> Any:
             seen.append(session)
@@ -3608,42 +3600,6 @@ class TestEngineSelection:
         )
         transferrer._get_manager()
         assert seen == [caller_session]
-
-    @pytest.mark.parametrize("allow", [False, True], ids=["library-default", "cli-opt-in"])
-    def test_absent_credentials_posture_is_threaded_to_crtsupport(
-        self, monkeypatch: pytest.MonkeyPatch, allow: bool
-    ) -> None:
-        # The library default is boto3's (classic without credentials); only a
-        # caller that asks - boto3-s3-cli - gets aws-cli's CRT entry.
-        from boto3_s3 import crtsupport
-
-        seen: list[bool] = []
-
-        def fake_create(
-            client: Any,
-            config: Any,
-            *,
-            endpoint: str | None = None,
-            session: Any | None = None,
-            allow_absent_credentials: bool = False,
-            allow_lockless: bool = False,
-            region: Any = crtsupport.CLIENT_REGION,
-            sign_requests: bool | None = None,
-        ) -> Any:
-            seen.append(allow_absent_credentials)
-            return object()
-
-        monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", fake_create)
-        client, _ = make_recording_client([])
-        kwargs: dict[str, Any] = {"crt_allow_absent_credentials": True} if allow else {}
-        transferrer = Transferrer(
-            TransferType.UPLOAD,
-            client,
-            transfer_config=TransferConfig(preferred_transfer_client="crt"),
-            **kwargs,
-        )
-        transferrer._get_manager()
-        assert seen == [allow]
 
     @pytest.mark.parametrize(
         "declaration", [None, False, True], ids=["library-default", "cli-unsigned", "cli-signed"]
@@ -3664,9 +3620,7 @@ class TestEngineSelection:
             *,
             endpoint: str | None = None,
             session: Any | None = None,
-            allow_absent_credentials: bool = False,
             allow_lockless: bool = False,
-            region: Any = crtsupport.CLIENT_REGION,
             sign_requests: bool | None = None,
         ) -> Any:
             seen.append(sign_requests)
@@ -3695,9 +3649,7 @@ class TestEngineSelection:
             *,
             endpoint: str | None = None,
             session: Any | None = None,
-            allow_absent_credentials: bool = False,
             allow_lockless: bool = False,
-            region: Any = crtsupport.CLIENT_REGION,
             sign_requests: bool | None = None,
         ) -> Any:
             raise AssertionError("copy reached the CRT path")  # must not run

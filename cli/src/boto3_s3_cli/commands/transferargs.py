@@ -20,7 +20,6 @@ from boto3_s3 import (
     BatchError,
     CaseConflictMode,
     CopyPropsMode,
-    InvalidConfigError,
     LocalStorage,
     S3Storage,
     TransferOptions,
@@ -881,9 +880,7 @@ def resolve_transfer_config(ctx: Context, s3: S3, *, paths_type: str) -> Any:
     return s3.resolve_transfer_config(ctx.transfer_config, copy=paths_type == "s3s3")
 
 
-def materialize_transfer_engine(
-    s3: S3, client: S3Client, transfer_config: Any, *, operation: str
-) -> None:
+def materialize_transfer_engine(s3: S3, client: S3Client, transfer_config: Any) -> None:
     """aws's transfer-manager construction slot, for every command that has one.
 
     aws builds the manager (``TransferManagerFactory.create_transfer_manager``)
@@ -894,21 +891,11 @@ def materialize_transfer_engine(
     (with the deleter, or just before a single key's request). Call it at that
     slot so the same failures land at the same point.
 
-    The one failure it converts is awscrt's own ``assert isinstance(region,
-    str)``, which fires when the region chain resolved nothing (`clientfactory`
-    declares the chain's answer as the CRT region). aws catches it in its
-    general handler, which formats a bare ``AssertionError`` as an empty rc-255
-    report; this CLI re-raises ``AssertionError`` everywhere else (an
-    internal-invariant bug, and the test doubles' unexpected-call guards depend
-    on it), so the conversion is scoped to this one call site and keeps the
-    empty message verbatim.
+    The CLI's `S3` stops a CRT run there when the region chain resolved
+    nothing (`clientfactory.build_s3`); every failure the construction raises
+    is reported as it is.
     """
-    try:
-        s3.materialize_crt_engine(client, transfer_config=transfer_config)
-    except AssertionError as exc:
-        # InvalidConfigError -> rc 255, aws's general handler; str(exc) is ''
-        # for a bare assert, which the error writer renders without a detail.
-        raise InvalidConfigError(str(exc), operation=operation) from exc
+    s3.materialize_crt_engine(client, transfer_config=transfer_config)
 
 
 def build_printer(

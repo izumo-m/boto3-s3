@@ -825,7 +825,7 @@ Key") -> rc 252.
 
 | flag | handling |
 |---|---|
-| `--expires-in <seconds>` | Default 3600. **No range validation** (0 / a negative value / over 604800 are all signed as-is = same as aws. S3 rejects it only **when the URL is used**). A non-integer is rc **255** (the integer-conversion rule of section 6). On a SigV4a target (an MRAP ARN) the CRT signer refuses 0 / a negative value with awscrt's bare `AssertionError`, which aws's general handler reports as an empty rc-255 line; `presign` converts it at that one call, the same shape as the CRT-region refusal (crt.md section 6) |
+| `--expires-in <seconds>` | Default 3600. **No range validation** (0 / a negative value / over 604800 are all signed as-is = same as aws. S3 rejects it only **when the URL is used**). A non-integer is rc **255** (the integer-conversion rule of section 6). On a SigV4a target (an MRAP ARN) the CRT signer refuses 0 / a negative value with awscrt's bare `AssertionError`; the library raises it as `InvalidValueError`, so it is rc **255** as on aws (where the general handler reports the assertion) |
 
 Output: a single URL line to stdout. With `--no-sign-request`, a bare URL with no
 query (matches aws). The signature format derives from the client
@@ -1529,12 +1529,14 @@ section 4. The key points as the CLI sees them:
   `ctx.transfer_config` supplies the settings it sets.
   `preferred_transfer_client` has no CLI option (config key only. Same as
   aws-cli).
-- **No credentials under CRT**: aws enters the CRT engine anyway and fails
-  inside its credentials delegate; the library, boto3-faithfully, would fall
-  back to classic and report `Unable to locate credentials` instead.
-  `clientfactory.build_s3` opts into aws's behavior with
-  `S3(crt_allow_absent_credentials=True)` (crt.md section 4). The lock
-  posture is declared the same way: `S3(crt_allow_lockless=True)` makes an
+- **No credentials or no region under CRT**: with no credentials aws enters
+  the CRT engine anyway and fails each item inside its credentials delegate;
+  the CLI keeps the library's boto3 rule, falls back to classic and fails the
+  same items with `Unable to locate credentials` (crt.md section 4). With no
+  region resolved, `build_s3`'s `S3` stops a CRT run at the engine's
+  construction slot with botocore's missing-region error, rc 253, as aws's
+  CRT run stops there (crt.md section 4, "Where the CRT region comes from").
+  The lock posture is declared on `S3`: `S3(crt_allow_lockless=True)` makes an
   explicit `crt` preference build the CRT client even when another process
   holds the cross-process slot, aws's factory shape (crt.md section 4). The
   signing posture too: `S3(crt_sign_requests=not args.no_sign_request)`

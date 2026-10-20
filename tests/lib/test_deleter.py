@@ -1475,9 +1475,7 @@ class TestCrtRoute:
             operation="rm",
             session=session,
             crt_endpoint="http://e",
-            crt_allow_absent_credentials=True,
             crt_allow_lockless=True,
-            crt_region=None,
             crt_sign_requests=False,
         ).close()
         ((_, config, kwargs),) = built
@@ -1486,9 +1484,7 @@ class TestCrtRoute:
             "operation": "rm",
             "session": session,
             "crt_endpoint": "http://e",
-            "crt_allow_absent_credentials": True,
             "crt_allow_lockless": True,
-            "crt_region": None,
             "crt_sign_requests": False,
         }
 
@@ -1528,9 +1524,7 @@ class TestCrtDeleteSender:
             operation="rm",
             session=session,
             crt_endpoint="http://e",
-            crt_allow_absent_credentials=True,
             crt_allow_lockless=True,
-            crt_region="eu-west-1",
             crt_sign_requests=True,
         )
         assert got is sender
@@ -1541,9 +1535,7 @@ class TestCrtDeleteSender:
                 {
                     "endpoint": "http://e",
                     "session": session,
-                    "allow_absent_credentials": True,
                     "allow_lockless": True,
-                    "region": "eu-west-1",
                     "sign_requests": True,
                 },
             )

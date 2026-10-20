@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A request that dies without any response (a connection closed, a read timeout) now fails its item instead of leaving no record.
 - A multipart copy whose post-copy tag write and its cleanup delete both fail is now reported as failed, so `mv` keeps its source, and a Ctrl-C in a copy's post-copy writes under `use_threads=False` now cancels the item.
 - A download to `StdioStorage` now flushes standard output when it finishes, so a stdout that cannot take the bytes fails the item, and `mv` keeps its source, instead of the process failing at exit.
+- Removed `S3(crt_allow_absent_credentials=..., crt_region=...)` and `CLIENT_REGION` / `CrtRegion`: the CRT engine always takes the client's region and boto3's rule for a client without credentials, and `presign` raises `InvalidValueError` for an expiry the CRT signer refuses.
 
 ## [0.12.0] - 2026-10-18
 

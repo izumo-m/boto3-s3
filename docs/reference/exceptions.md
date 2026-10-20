@@ -212,10 +212,12 @@ those two failure modes; a library consumer can ignore it and catch
 class InvalidValueError(ValidationError): ...
 ```
 
-Adds no attributes and no constructor of its own. No code path inside
-`boto3_s3` raises it — it is raised by the `boto3-s3-cli` distribution (and is
-available to callers who want the same refinement) — so a handler around
-library calls need only catch `ValidationError`.
+Adds no attributes and no constructor of its own. Inside `boto3_s3` one path
+raises it: [`presign`](./operations/presign.md) with a non-positive
+`expires_in` the CRT signer refuses. Otherwise it is raised by the
+`boto3-s3-cli` distribution (and is available to callers who want the same
+refinement); a handler around library calls need only catch
+`ValidationError`.
 
 ## TransportError
 

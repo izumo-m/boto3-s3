@@ -54,9 +54,9 @@ signature and `presign` applies no range check of its own: a number above the
 604800-second maximum S3 accepts is signed and returned, and S3 applies its
 own limit only when the URL is presented. A non-positive value depends on the
 signer botocore uses. With `awscrt` installed — the `crt` extra — signing goes
-through the CRT signer, which rejects `0` and negative values with a bare
-`AssertionError`; that is not a `Boto3S3Error` and is not translated into one.
-Without `awscrt` the same values are signed and returned, carrying
+through the CRT signer, which rejects `0` and negative values; `presign` raises
+that refusal as [`InvalidValueError`](../exceptions.md#invalidvalueerror),
+with awscrt's bare `AssertionError` as its `__cause__`. Without `awscrt` the same values are signed and returned, carrying
 `X-Amz-Expires=0` or a negative count — as they are for a directory bucket
 with or without it, since the S3 Express signature has no CRT implementation.
 
@@ -140,7 +140,9 @@ The category contracts are specified in
   resolved location is one of the forms the strict checks reject (an S3 Object
   Lambda ARN, an Outposts bucket ARN, a key with no bucket); or botocore's
   client-side parameter validation rejects the request, which is what an absent
-  key or an empty bucket name produces.
+  key or an empty bucket name produces. Its
+  [`InvalidValueError`](../exceptions.md#invalidvalueerror) refinement is the
+  CRT signer's refusal of a non-positive `expires_in` (above).
 - [`ConfigurationError`](../exceptions.md#configurationerror) — credentials
   cannot be resolved while the request is signed; or an optional dependency
   the resolved signer needs is absent, which is what a multi-region access
@@ -163,8 +165,8 @@ categories do not arise from the signing itself; any other botocore error
 raised on the way is translated by the same category table, and any other
 exception the signing raised from inside botocore surfaces as the base
 [`Boto3S3Error`](../exceptions.md#boto3s3error) with the original on
-`__cause__` — except the CRT signer's `AssertionError` above, which is not
-translated.
+`__cause__`. An `AssertionError` other than the CRT signer's refusal above is
+not translated.
 
 ## boto3_s3.presign
 

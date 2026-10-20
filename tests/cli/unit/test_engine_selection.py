@@ -145,11 +145,6 @@ class TestWiring:
         assert "preferred_transfer_client" in result.stderr
 
 
-# aws's general handler formats a bare AssertionError - awscrt's region check -
-# as the prefix alone, with no trailing space (aws-cli errorformat.py).
-_EMPTY_REPORT = "boto3-s3: [ERROR]:\n"
-
-
 def _config_ctx(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str
 ) -> tuple[Context, list[ApiCall]]:
@@ -212,39 +207,40 @@ class TestCrtEngineConstructionSlot:
     aws's ``_get_transfer_manager`` runs right after the ``[s3]`` read and
     before anything about the run is decided, so a CRT selection pays the whole
     construction even for a ``--dryrun``, and even for ``rm``, whose deletes
-    ride it but build it later (design/crt.md sections 4 and 6).
-    When no region
-    resolves, that construction is awscrt's ``assert isinstance(region, str)``:
-    a bare ``AssertionError`` that aws's general handler renders as an empty
-    rc-255 report.
+    ride it but build it later (design/crt.md sections 4 and 6). A
+    construction failure therefore stops the run before it starts; the rows
+    below use a CA bundle awscrt cannot parse (its ``RuntimeError``), which the
+    library reports as an ``InvalidConfigError`` - rc 255, aws's general
+    handler. And with no region resolved, the CLI stops a CRT run at the same
+    slot without building anything (rc 253, botocore's missing-region report).
 
     awscrt is faked here (the suite must run without it, and a real CRT client
-    would hold the host-wide process lock for the rest of the session): the
-    construction itself is stubbed to raise the same bare ``AssertionError``.
-    `tests/lib/test_crtsupport.py` pins that the declared region really reaches
-    ``create_s3_crt_client``, and `tests/cli/functional/test_crt_no_region.py`
-    runs the whole thing against the real awscrt.
+    would hold the host-wide process lock for the rest of the session).
     """
 
     _CRT = "[default]\ns3 =\n  preferred_transfer_client = crt\n"
-
-    @pytest.fixture(autouse=True)
-    def _no_region(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # The real shape of these rows: nothing anywhere resolves a region, so
-        # the CLI declares None and awscrt is the thing that refuses. Only that
-        # refusal is faked below.
-        for var in ("AWS_REGION", "AWS_DEFAULT_REGION"):
-            monkeypatch.delenv(var, raising=False)
-        monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    _UNPARSABLE = "34 (AWS_ERROR_INVALID_ARGUMENT): An invalid argument was passed to a function."
+    _ARGV = (
+        pytest.param(["cp", "{file}", "s3://bucket/key"], id="cp-upload"),
+        pytest.param(["cp", "s3://bucket/key", "{dir}/dl.txt"], id="cp-download"),
+        pytest.param(["cp", "{file}", "s3://bucket/key", "--dryrun"], id="cp-dryrun"),
+        pytest.param(["mv", "{file}", "s3://bucket/key"], id="mv"),
+        pytest.param(["sync", "{dir}", "s3://bucket/p"], id="sync"),
+        pytest.param(["rm", "s3://bucket/key"], id="rm"),
+        pytest.param(["rm", "s3://bucket/key", "--dryrun"], id="rm-dryrun"),
+        pytest.param(["rm", "s3://bucket/key", "--quiet"], id="rm-quiet"),
+        pytest.param(["rm", "s3://"], id="rm-bucket-less"),
+    )
 
     @pytest.fixture
     def crt_constructions(self, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
         """Fake a usable awscrt and record every CRT construction attempt."""
         seen: list[dict[str, Any]] = []
+        unparsable = self._UNPARSABLE
 
         def create(client: Any, config: Any, **kwargs: Any) -> Any:
             seen.append({"client": client, "config": config, **kwargs})
-            raise AssertionError  # awscrt's own, message-less
+            raise RuntimeError(unparsable)  # awscrt refusing the CA bundle
 
         monkeypatch.setattr(crtsupport, "has_minimum_crt_version", lambda: True)
         monkeypatch.setattr(crtsupport, "has_crt_s3transfer", lambda: True)
@@ -253,21 +249,8 @@ class TestCrtEngineConstructionSlot:
         monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", create)
         return seen
 
-    @pytest.mark.parametrize(
-        "argv",
-        [
-            pytest.param(["cp", "{file}", "s3://bucket/key"], id="cp-upload"),
-            pytest.param(["cp", "s3://bucket/key", "{dir}/dl.txt"], id="cp-download"),
-            pytest.param(["cp", "{file}", "s3://bucket/key", "--dryrun"], id="cp-dryrun"),
-            pytest.param(["mv", "{file}", "s3://bucket/key"], id="mv"),
-            pytest.param(["sync", "{dir}", "s3://bucket/p"], id="sync"),
-            pytest.param(["rm", "s3://bucket/key"], id="rm"),
-            pytest.param(["rm", "s3://bucket/key", "--dryrun"], id="rm-dryrun"),
-            pytest.param(["rm", "s3://bucket/key", "--quiet"], id="rm-quiet"),
-            pytest.param(["rm", "s3://"], id="rm-bucket-less"),
-        ],
-    )
-    def test_a_construction_failure_is_the_empty_255_report(
+    @pytest.mark.parametrize("argv", _ARGV)
+    def test_a_construction_failure_stops_the_run(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -281,8 +264,53 @@ class TestCrtEngineConstructionSlot:
         result = run_cli_in_process(resolved, ctx=ctx)
         # --quiet suppresses the result printer's lines, never the handler's
         # report; --dryrun never gets to record anything.
-        assert (result.rc, result.stdout, result.stderr) == (255, "", _EMPTY_REPORT), resolved
+        expected = (255, "", f"boto3-s3: [ERROR]: {self._UNPARSABLE}\n")
+        assert (result.rc, result.stdout, result.stderr) == expected, resolved
         assert len(crt_constructions) == 1, resolved
+
+    @pytest.mark.parametrize("argv", _ARGV)
+    def test_no_resolved_region_stops_a_crt_run_before_the_engine(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        crt_constructions: list[dict[str, Any]],
+        argv: list[str],
+    ) -> None:
+        # The CLI's own S3 (no injected client): nothing resolves a region,
+        # so the client carries `aws-global` and the CRT would sign every
+        # request for it. The run stops at the construction slot instead,
+        # before any request, the dryrun included.
+        from botocore.exceptions import NoRegionError
+
+        for var in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+        monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "http://127.0.0.1:1")
+        config_file = tmp_path / "config"
+        config_file.write_text(self._CRT)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config_file))
+        source = tmp_path / "f.txt"
+        source.write_bytes(b"x")
+        resolved = [token.format(file=source, dir=tmp_path) for token in argv]
+        result = run_cli_in_process(resolved, ctx=Context())
+        expected = (253, "", f"boto3-s3: [ERROR]: {NoRegionError()}\n")
+        assert (result.rc, result.stdout, result.stderr) == expected, resolved
+        assert crt_constructions == [], resolved
+
+    def test_no_resolved_region_leaves_a_classic_run_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, crt_constructions: list[Any]
+    ) -> None:
+        # The classic engine signs a region-less run itself (botocore's
+        # `aws-global`), on both tools.
+        for var in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+        config_file = tmp_path / "config"
+        config_file.write_text("[default]\ns3 =\n  preferred_transfer_client = classic\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config_file))
+        result = run_cli_in_process(["rm", "s3://bucket/key", "--dryrun"], ctx=Context())
+        assert (result.rc, result.stdout) == (0, "(dryrun) delete: s3://bucket/key\n")
+        assert crt_constructions == []
 
     def test_an_s3s3_route_never_reaches_the_engine(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, crt_constructions: list[Any]

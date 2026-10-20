@@ -25,6 +25,7 @@ from boto3_s3 import (
     BatchError,
     Boto3S3Error,
     ConfigurationError,
+    InvalidValueError,
     S3Storage,
     ValidationError,
     s3storage,
@@ -328,12 +329,23 @@ class TestPresignErrors:
             "k",
         )
 
-    def test_the_crt_signers_assertion_passes_through(self) -> None:
-        # docs/reference/operations/presign.md: the CRT signer's refusal of a
-        # non-positive expiry is awscrt's bare AssertionError, not translated.
-        client = _FakePresignClient(error=AssertionError())
-        with pytest.raises(AssertionError):
-            S3().presign(_storage("s3://b/k", client), expires_in=0)
+    @pytest.mark.parametrize("expires_in", [0, -1])
+    def test_the_crt_signers_refusal_is_an_invalid_value(self, expires_in: int) -> None:
+        # The CRT signer refuses a non-positive expiry with awscrt's bare
+        # AssertionError; it is reported as the value's failure, cause kept.
+        refusal = AssertionError()
+        client = _FakePresignClient(error=refusal)
+        with pytest.raises(InvalidValueError, match="expires_in") as info:
+            S3().presign(_storage("s3://b/k", client), expires_in=expires_in)
+        assert info.value.__cause__ is refusal
+        assert (info.value.operation, info.value.bucket, info.value.key) == ("presign", "b", "k")
+
+    def test_another_assertion_passes_through(self) -> None:
+        # Only a non-positive expiry names what the signer refused; with a
+        # positive one the assertion is a bug or a test double's guard.
+        client = _FakePresignClient(error=AssertionError("guard"))
+        with pytest.raises(AssertionError, match="guard"):
+            S3().presign(_storage("s3://b/k", client), expires_in=60)
 
     def test_empty_key_fails_real_botocore_validation(self) -> None:
         # Real botocore (no fake): presign validates the request shape

@@ -25,6 +25,7 @@ from boto3_s3_cli import checksumdefault
 from boto3_s3_cli.globalargs import PROFILE_ENV_VARS
 
 if TYPE_CHECKING:
+    from boto3.s3.transfer import TransferConfig
     from boto3.session import Session as Boto3Session
     from botocore.session import Session as BotocoreSession
     from mypy_boto3_s3 import S3Client
@@ -551,10 +552,16 @@ def build_s3(args: argparse.Namespace) -> S3:
     last link is the EC2 IMDS probe, which on a host with no region configured
     and no metadata service answering costs seconds - and the chain's answer
     cannot change within one invocation, since the env, the bound session's
-    config and IMDS are all fixed by then. The same value is what the CRT
-    posture below declares, so client and engine can never disagree on it, and
-    `_bind_region` puts it on the session so the clients *botocore* builds
-    resolve it too.
+    config and IMDS are all fixed by then. `_bind_region` puts it on the
+    session so the clients *botocore* builds resolve it too.
+
+    A run on the CRT engine needs that answer: aws hands its region chain's
+    answer to the CRT client, and with none the run stops before it starts,
+    `--dryrun` included, where botocore would give the client the
+    ``aws-global`` pseudo-region and the CRT would sign every request for it.
+    The check sits at the engine's construction slot
+    (`S3.materialize_crt_engine`, which every transfer command and ``rm``
+    call there) and reports botocore's own missing-region error, rc 253.
     """
     from boto3_s3 import S3
 
@@ -567,6 +574,18 @@ def build_s3(args: argparse.Namespace) -> S3:
         def client(self) -> S3Client:
             return build_client(args, session=session, region=region)
 
+        def materialize_crt_engine(
+            self, client: S3Client, *, transfer_config: TransferConfig | None = None
+        ) -> None:
+            if region is None:
+                from boto3_s3 import crtsupport
+
+                if crtsupport.selects_crt(self.resolve_transfer_config(transfer_config)):
+                    from botocore.exceptions import NoRegionError
+
+                    raise ConfigurationError(str(NoRegionError()))
+            super().materialize_crt_engine(client, transfer_config=transfer_config)
+
     # reusable_after_interrupt=False: Ctrl-C is process-fatal in the CLI, so an
     # operation's unwind must not wait for an in-flight listing page pull
     # (aws dies immediately); the library default keeps waiting.
@@ -575,25 +594,13 @@ def build_s3(args: argparse.Namespace) -> S3:
     # CRT lane's explicit-endpoint pin (design/crt.md) - without it, an
     # --endpoint-url under an AWS domain (a VPC interface endpoint) would be
     # dropped by the host heuristic and the CRT would re-resolve to public S3.
-    # crt_allow_absent_credentials=True: aws-cli hands its CRT client a
-    # credentials delegate built from whatever the session resolved, ``None``
-    # included, so a credential-less CRT upload fails inside the delegate
-    # rather than falling back to classic. The library defaults to boto3's
-    # opposite rule; the aws-faithful entry is this layer's (design/crt.md
-    # section 4).
     # crt_allow_lockless=True: aws-cli's factory acquires the cross-process
     # CRT lock best-effort and, under an explicit 'crt' preference, builds the
     # CRT client regardless - so its construction-time failures (a bad CA
-    # bundle, an unresolved region) surface under contention too, where the
-    # library default silently selects classic and would report success. An
+    # bundle) surface under contention too, where the library default
+    # silently selects classic and would report success. An
     # 'auto' preference respects the lock on both tools (design/crt.md
     # section 6).
-    # crt_region: aws-cli resolves the CRT region from its own region chain
-    # (the same `_resolve_region` every client here is built with), which
-    # yields None when nothing is configured - where botocore would hand the
-    # client the `aws-global` pseudo-region. Declaring the chain's answer is
-    # what lets awscrt's own region assertion fire, as it does under aws
-    # (design/crt.md section 6).
     # crt_sign_requests: aws-cli's CRT factory attaches a credentials provider
     # on its own `sign_request` parameter - `--no-sign-request` and nothing
     # else - so the per-client Config(signature_version='s3v4') that
@@ -609,9 +616,7 @@ def build_s3(args: argparse.Namespace) -> S3:
         session=session,
         endpoint_url=args.endpoint_url,
         reusable_after_interrupt=False,
-        crt_allow_absent_credentials=True,
         crt_allow_lockless=True,
-        crt_region=region,
         crt_sign_requests=not args.no_sign_request,
     )
 

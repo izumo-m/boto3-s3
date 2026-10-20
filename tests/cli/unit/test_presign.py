@@ -73,19 +73,18 @@ class _RefusingSignerClient:
 
 
 class TestPresignExitCodeShape:
-    def test_the_crt_signers_refusal_is_awss_empty_255(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_the_crt_signers_refusal_is_255(self, capsys: pytest.CaptureFixture[str]) -> None:
         # An MRAP ARN signs SigV4a through the CRT signer, which refuses
-        # --expires-in 0 / negative with a bare AssertionError; aws's general
-        # handler reports it as an empty line at rc 255 (measured, 2.36.40).
-        # The dispatcher re-raises AssertionError everywhere else, so the
-        # command converts it at its one call.
+        # --expires-in 0 / negative with a bare AssertionError; the library
+        # reports it as the value's failure, and aws's code for a refused
+        # value is its general handler's 255.
         rc = cli.main(
             ["presign", "s3://b/k", "--expires-in", "0"], ctx=client_ctx(_RefusingSignerClient())
         )
         assert rc == 255
-        assert capsys.readouterr().err == "boto3-s3: [ERROR]:\n"
+        err = capsys.readouterr().err
+        assert err.startswith("boto3-s3: [ERROR]: ")
+        assert "expires_in" in err
 
     def test_non_integer_expires_in_exits_255(self, capsys: pytest.CaptureFixture[str]) -> None:
         # aws converts integer options with a bare int(); the ValueError hits

@@ -336,8 +336,6 @@ its own path (`from boto3_s3 import crtsupport`) and imports no awscrt or
 `s3transfer.crt` until a function that needs them runs. Its stable surface is
 its `__all__`:
 
-- `CLIENT_REGION` and `CrtRegion` — the region declaration `S3(crt_region=...)`
-  takes, [documented with `S3`](./s3.md#crtregion).
 - `has_minimum_crt_version()` — whether awscrt is importable at boto3's minimum
   version for the engine; `has_crt_s3transfer()` — whether the installed
   s3transfer exposes the CRT surface the engine needs (it arrived in 0.8.0,
@@ -364,9 +362,8 @@ its `__all__`:
   process-wide CRT client for `client` and returns an s3transfer
   `CRTTransferManager`, or `None` where boto3 would fall back to classic (the
   lock held elsewhere, a client incompatible with the one the engine was built
-  for). The keyword arguments — `endpoint`, `session`,
-  `allow_absent_credentials`, `allow_lockless`, `region`, `sign_requests` —
-  are the postures [`S3`](./s3.md#s3) declares and threads through; the
+  for). The keyword arguments — `endpoint`, `session`, `allow_lockless`,
+  `sign_requests` — are the postures [`S3`](./s3.md#s3) declares and threads through; the
   failures it raises are classified at `S3`'s seams, not here.
   `materialize_crt_engine(client, config, ...)` — the same construction with
   the result dropped, after `selects_crt`; `caller_endpoint(client, endpoint)`
@@ -521,9 +518,7 @@ S3Deleter(
     transfer_config: TransferConfig | None = None,
     session: Session | None = None,
     crt_endpoint: str | None = None,
-    crt_allow_absent_credentials: bool = False,
     crt_allow_lockless: bool = False,
-    crt_region: CrtRegion = CLIENT_REGION,
     crt_sign_requests: bool | None = None,
 )
 ```

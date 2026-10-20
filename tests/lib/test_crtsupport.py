@@ -69,9 +69,7 @@ class FakeCredWrapper:
     """Stands in for BotocoreCRTCredentialsWrapper: wraps botocore credentials.
 
     Wrapping ``None`` is legal and only fails when the delegate is called -
-    the real wrapper raises ``NoCredentialsError`` from ``_get_credentials``,
-    which is what turns a credential-less CRT transfer into the C layer's
-    delegate failure instead of a construction-time error.
+    the real wrapper raises ``NoCredentialsError`` from ``_get_credentials``.
     """
 
     def __init__(self, credentials: Any) -> None:
@@ -504,81 +502,6 @@ class TestCreateCrtTransferManager:
         # and reports botocore's "Unable to locate credentials".
         assert crtsupport.create_crt_transfer_manager(FakeClient(creds=None), None) is None  # pyright: ignore[reportArgumentType]
 
-    def test_absent_credentials_may_be_admitted_by_the_caller(self, stubs: CrtStubs) -> None:
-        # aws-cli's posture (boto3-s3-cli opts in): the CRT client is built
-        # around a delegate that has nothing to resolve, and the failure comes
-        # back from inside it as the C layer's delegate error.
-        manager = crtsupport.create_crt_transfer_manager(
-            FakeClient(creds=None),  # pyright: ignore[reportArgumentType]
-            None,
-            allow_absent_credentials=True,
-        )
-        assert manager is not None
-        [kwargs] = stubs.create_kwargs
-        assert kwargs["crt_credentials_provider"] == "crt-provider"
-
-    @pytest.mark.parametrize(
-        "mismatch",
-        [
-            {"region": "eu-west-1", "creds": None},
-            {"endpoint": "http://127.0.0.1:9000", "creds": None},
-            {"verify": False, "creds": None},
-            {"s3_config": {"addressing_style": "path"}, "creds": None},
-            {"unsigned": True},
-            # The relaxation is "no credentials on both sides", not "skip the
-            # identity check": a later client that did resolve credentials must
-            # not ride a singleton delegate that resolves none.
-            {},
-        ],
-        ids=["region", "endpoint", "verify", "s3-config", "unsigned", "credentials-appeared"],
-    )
-    def test_admitting_absent_credentials_relaxes_no_other_pin(
-        self, stubs: CrtStubs, mismatch: dict[str, Any]
-    ) -> None:
-        first = crtsupport.create_crt_transfer_manager(
-            FakeClient(creds=None),  # pyright: ignore[reportArgumentType]
-            None,
-            allow_absent_credentials=True,
-        )
-        assert first is not None
-        other = FakeClient(**mismatch)
-        assert (
-            crtsupport.create_crt_transfer_manager(
-                other,  # pyright: ignore[reportArgumentType]
-                None,
-                allow_absent_credentials=True,
-            )
-            is None
-        )
-
-    def test_absent_credentials_do_not_ride_a_credentialed_singleton(self, stubs: CrtStubs) -> None:
-        # The mirror of the case above: the singleton signs with real keys, so
-        # a later credential-less client must not borrow them.
-        assert crtsupport.create_crt_transfer_manager(FakeClient(), None) is not None  # pyright: ignore[reportArgumentType]
-        assert (
-            crtsupport.create_crt_transfer_manager(
-                FakeClient(creds=None),  # pyright: ignore[reportArgumentType]
-                None,
-                allow_absent_credentials=True,
-            )
-            is None
-        )
-
-    def test_absent_credentials_do_not_ride_an_unsigned_singleton(self, stubs: CrtStubs) -> None:
-        # An unsigned singleton (--no-sign-request) has no delegate at all, so
-        # there is nothing for a signed client to fail inside: admitting it
-        # would transfer the run unsigned. The relaxed branch must therefore
-        # stay below the "singleton has no wrapper" guard.
-        assert crtsupport.create_crt_transfer_manager(FakeClient(unsigned=True), None) is not None  # pyright: ignore[reportArgumentType]
-        assert (
-            crtsupport.create_crt_transfer_manager(
-                FakeClient(creds=None),  # pyright: ignore[reportArgumentType]
-                None,
-                allow_absent_credentials=True,
-            )
-            is None
-        )
-
     def test_unsigned_client_omits_the_credentials_provider(self, stubs: CrtStubs) -> None:
         client = FakeClient(unsigned=True)
         assert crtsupport.create_crt_transfer_manager(client, None) is not None  # pyright: ignore[reportArgumentType]
@@ -885,69 +808,15 @@ class TestFioOptions:
         }
 
 
-class TestCrtRegionPosture:
-    """Where the CRT client's region comes from (design/crt.md section 6).
+class TestCrtRegion:
+    """The CRT client's region is the built client's own, boto3's source."""
 
-    boto3 reads it off the built client; aws-cli resolves its own region chain,
-    which yields ``None`` where the client carries the ``aws-global``
-    pseudo-region (the regional mode the CLI pins) - and ``None`` is what
-    awscrt refuses. `CLIENT_REGION` keeps boto3's source; any other
-    value is the caller's declaration and rides verbatim.
-    """
-
-    def test_the_default_reads_the_clients_region(self, stubs: CrtStubs) -> None:
+    def test_the_client_region_reaches_the_crt_client(self, stubs: CrtStubs) -> None:
         assert crtsupport.create_crt_transfer_manager(FakeClient(region="eu-west-1"), None)  # pyright: ignore[reportArgumentType]
         [kwargs] = stubs.create_kwargs
         assert kwargs["region"] == "eu-west-1"
         [(_, client_kwargs)] = stubs.serializer_args
         assert client_kwargs["region_name"] == "eu-west-1"
-
-    def test_a_declared_region_overrides_the_clients(self, stubs: CrtStubs) -> None:
-        assert crtsupport.create_crt_transfer_manager(
-            FakeClient(region="aws-global"),  # pyright: ignore[reportArgumentType]
-            None,
-            region="ap-northeast-1",
-        )
-        [kwargs] = stubs.create_kwargs
-        assert kwargs["region"] == "ap-northeast-1"
-
-    def test_a_declared_absent_region_reaches_the_crt_factory(self, stubs: CrtStubs) -> None:
-        # The whole point: botocore handed this client `aws-global`, but the
-        # caller's chain resolved nothing, and None is what the CRT factory
-        # must see (where the real awscrt asserts).
-        assert crtsupport.create_crt_transfer_manager(
-            FakeClient(region="aws-global"),  # pyright: ignore[reportArgumentType]
-            None,
-            region=None,
-        )
-        [kwargs] = stubs.create_kwargs
-        assert kwargs["region"] is None
-
-    def test_the_singleton_pin_compares_the_declared_value(self, stubs: CrtStubs) -> None:
-        # Two clients botocore resolved identically, declaring different
-        # regions: the second must not ride the first one's CRT client.
-        assert crtsupport.create_crt_transfer_manager(
-            FakeClient(region="aws-global"),  # pyright: ignore[reportArgumentType]
-            None,
-            region="us-east-1",
-        )
-        assert (
-            crtsupport.create_crt_transfer_manager(
-                FakeClient(region="aws-global"),  # pyright: ignore[reportArgumentType]
-                None,
-                region="us-west-2",
-            )
-            is None
-        )
-
-    def test_the_same_declaration_reuses_the_singleton(self, stubs: CrtStubs) -> None:
-        for _ in range(2):
-            assert crtsupport.create_crt_transfer_manager(
-                FakeClient(region="aws-global"),  # pyright: ignore[reportArgumentType]
-                None,
-                region=None,
-            )
-        assert len(stubs.create_kwargs) == 1
 
 
 class TestCrtSigningPosture:
@@ -1070,10 +939,9 @@ class TestMaterializeCrtEngine:
     ) -> None:
         set_optimized(monkeypatch, False)  # the host must not decide this one
         config = TransferConfig(preferred_transfer_client="crt")
-        crtsupport.materialize_crt_engine(FakeClient(), config, region=None)  # pyright: ignore[reportArgumentType]
+        crtsupport.materialize_crt_engine(FakeClient(), config)  # pyright: ignore[reportArgumentType]
         assert stubs.lock_names == ["boto3-s3"]
-        [kwargs] = stubs.create_kwargs
-        assert kwargs["region"] is None
+        assert len(stubs.create_kwargs) == 1
 
     @pytest.mark.parametrize("preferred", ["classic", "auto"])
     def test_a_classic_selection_builds_nothing(

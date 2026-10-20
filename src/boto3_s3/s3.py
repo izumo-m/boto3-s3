@@ -59,6 +59,7 @@ from boto3_s3.exceptions import (
     Boto3S3Error,
     CancelledError,
     ConfigurationError,
+    InvalidValueError,
     NotFoundError,
     ValidationError,
 )
@@ -236,9 +237,8 @@ def _single_request(
     missing an element it reads - is that request failing all the same, and
     becomes the base ``Boto3S3Error`` carrying it as ``__cause__``, the
     `request_failure` shape the blind single-key ``rm`` applies. Only
-    ``AssertionError`` passes through: an invariant, a test double's guard,
-    or the CRT signer's refusal of a non-positive presign expiry, which the
-    reference documents as untranslated.
+    ``AssertionError`` passes through: an invariant or a test double's guard
+    (``presign`` reads the CRT signer's own one itself).
     """
     try:
         with s3_errors(operation=operation, bucket=bucket, key=key):
@@ -1144,17 +1144,9 @@ class S3:
     requests an *orderly* termination). The posture reaches the scans through
     ``ScanOptions.reusable_after_interrupt``.
 
-    ``crt_allow_absent_credentials`` is the second such posture declaration,
-    for the CRT transfer engine. ``False`` (the default) is boto3's rule: a
-    client that resolved no credentials never gets the CRT engine, so the
-    transfer runs classic and reports botocore's "Unable to locate
-    credentials". ``True`` is aws-cli's: the CRT client is built around a
-    credentials delegate that has nothing to resolve, and the failure surfaces
-    from inside it instead. Only the CLI distribution, which follows aws-cli
-    here, sets it (design/crt.md section 4).
-
-    ``crt_allow_lockless`` is the third, for cross-process lock contention
-    under an **explicit** ``'crt'`` preference. ``False`` (the default) is
+    ``crt_allow_lockless`` is the second such posture declaration, for the
+    CRT transfer engine under cross-process lock contention and an
+    **explicit** ``'crt'`` preference. ``False`` (the default) is
     boto3's rule: another process of this application holding the CRT slot
     silently selects the classic engine. ``True`` is aws-cli's: its factory
     acquires the lock best-effort and builds the CRT client regardless, so a
@@ -1163,20 +1155,7 @@ class S3:
     aws-cli's own ``auto`` resolution. Only the CLI distribution sets it
     (design/crt.md section 6).
 
-    ``crt_region`` is the fourth, and names where the CRT engine's region comes
-    from. ``CLIENT_REGION`` (the default) is boto3's source, the built client's
-    own ``meta.region_name``; an explicit value is the application's already
-    resolved region and rides verbatim. The distinction only shows when nothing
-    resolves a region at all: botocore then hands the client a concrete region
-    anyway - ``us-east-1`` in its default (legacy) us-east-1 endpoint mode, the
-    ``aws-global`` pseudo-region under the regional mode the CLI pins - while
-    aws-cli's own region chain yields
-    ``None`` and awscrt refuses to build (its ``assert isinstance(region,
-    str)``). Passing ``crt_region=None`` declares that absence and reproduces
-    that refusal; again only the CLI distribution sets it (design/crt.md
-    section 6).
-
-    ``crt_sign_requests`` is the fifth, and says whether the CRT engine signs
+    ``crt_sign_requests`` is the third, and says whether the CRT engine signs
     at all. ``None`` (the default) derives it from the built client, boto3's
     rule: only a client configured with botocore's ``UNSIGNED`` signature
     transfers anonymously. ``True`` / ``False`` is the application's own
@@ -1196,9 +1175,7 @@ class S3:
         config: Config | None = None,
         transfer_config: TransferConfig | None = None,
         reusable_after_interrupt: bool = True,
-        crt_allow_absent_credentials: bool = False,
         crt_allow_lockless: bool = False,
-        crt_region: crtsupport.CrtRegion = crtsupport.CLIENT_REGION,
         crt_sign_requests: bool | None = None,
     ) -> None:
         self._session = session
@@ -1206,9 +1183,7 @@ class S3:
         self._config = config
         self._transfer_config = transfer_config
         self._reusable_after_interrupt = reusable_after_interrupt
-        self._crt_allow_absent_credentials = crt_allow_absent_credentials
         self._crt_allow_lockless = crt_allow_lockless
-        self._crt_region: crtsupport.CrtRegion = crt_region
         self._crt_sign_requests = crt_sign_requests
         # Memoized AwsConfig (aws_config()): resolve+parse the config file once
         # per instance, since a sync filter may consult it per object. A benign,
@@ -1307,9 +1282,9 @@ class S3:
         """Build the CRT transfer engine now, for an operation that will not use it.
 
         ``aws s3 rm`` constructs its transfer manager before deciding anything
-        about the run, so the engine's construction-time failures - awscrt
-        refusing a client with no region above all - belong to the command, not
-        to the deletes. `rm` here builds the engine later - with its deleter,
+        about the run, so the engine's construction-time failures - a CA
+        bundle the CRT cannot read, say - belong to the command, not to the
+        deletes. `rm` here builds the engine later - with its deleter,
         just before the listing, or just before a single key's request, and
         never for a ``dryrun`` - so an application that owes ``aws s3`` parity
         calls this to pay the same construction (cross-process lock included)
@@ -1341,9 +1316,7 @@ class S3:
                 config,
                 endpoint=crtsupport.caller_endpoint(client, self._endpoint_url),
                 session=self._session,
-                allow_absent_credentials=self._crt_allow_absent_credentials,
                 allow_lockless=self._crt_allow_lockless,
-                region=self._crt_region,
                 sign_requests=self._crt_sign_requests,
             )
 
@@ -1365,9 +1338,7 @@ class S3:
         return {
             "session": self._session,
             "crt_endpoint": self._endpoint_url,
-            "crt_allow_absent_credentials": self._crt_allow_absent_credentials,
             "crt_allow_lockless": self._crt_allow_lockless,
-            "crt_region": self._crt_region,
             "crt_sign_requests": self._crt_sign_requests,
         }
 
@@ -1761,9 +1732,7 @@ class S3:
             cancel_token=cancel_token,
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
-            crt_allow_absent_credentials=self._crt_allow_absent_credentials,
             crt_allow_lockless=self._crt_allow_lockless,
-            crt_region=self._crt_region,
             crt_sign_requests=self._crt_sign_requests,
             session=self._session,
         )
@@ -1999,9 +1968,7 @@ class S3:
             cancel_token=cancel_token,
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
-            crt_allow_absent_credentials=self._crt_allow_absent_credentials,
             crt_allow_lockless=self._crt_allow_lockless,
-            crt_region=self._crt_region,
             crt_sign_requests=self._crt_sign_requests,
             session=self._session,
         )
@@ -2419,9 +2386,7 @@ class S3:
             cancel_token=cancel_token,
             capture_response=capture_response,
             crt_endpoint=self._endpoint_url,
-            crt_allow_absent_credentials=self._crt_allow_absent_credentials,
             crt_allow_lockless=self._crt_allow_lockless,
-            crt_region=self._crt_region,
             crt_sign_requests=self._crt_sign_requests,
             session=self._session,
         )
@@ -2936,7 +2901,8 @@ class S3:
         enforces its 604800-second maximum only when the URL is *used*) -
         though with awscrt installed botocore signs SigV4 and SigV4A through
         the CRT signer, which refuses ``0`` and negative values with awscrt's
-        own bare ``AssertionError``, left untranslated
+        own bare ``AssertionError``; that refusal is raised as
+        `InvalidValueError`, the assertion kept as its ``__cause__``
         (docs/reference/operations/presign.md). A directory bucket is the
         exception: its S3 Express signature has no CRT implementation, so
         such a value is signed there whether awscrt is installed or not. An
@@ -2973,13 +2939,25 @@ class S3:
             _require_s3express_support(storage, operation="presign")
         client = storage.get_client()
         operation = "GetObject" if method == "get_object" else "PutObject"
-        with _single_request("presign", bucket=storage.bucket, key=storage.key):
-            with _sigv4_presign(client, operation), _regional_presign(client):
-                return client.generate_presigned_url(
-                    method,
-                    Params={"Bucket": storage.bucket, "Key": storage.key},
-                    ExpiresIn=expires_in,
-                )
+        try:
+            with _single_request("presign", bucket=storage.bucket, key=storage.key):
+                with _sigv4_presign(client, operation), _regional_presign(client):
+                    return client.generate_presigned_url(
+                        method,
+                        Params={"Bucket": storage.bucket, "Key": storage.key},
+                        ExpiresIn=expires_in,
+                    )
+        except AssertionError as exc:
+            if expires_in > 0:
+                raise
+            # The CRT signer's own bare assertion on a non-positive expiry -
+            # the one it is known to raise here; any other passes through.
+            raise InvalidValueError(
+                f"The CRT signer refuses a non-positive expires_in ({expires_in})",
+                operation="presign",
+                bucket=storage.bucket,
+                key=storage.key,
+            ) from exc
 
     def website(
         self,

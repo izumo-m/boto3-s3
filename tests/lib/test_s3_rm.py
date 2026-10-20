@@ -731,13 +731,12 @@ class TestCrtEngine:
         self, built: list[Any]
     ) -> None:
         client = _FakeS3Client([{"Contents": [_obj("p/a"), _obj("p/b")]}])
-        S3(crt_allow_absent_credentials=True, crt_region=None).rm(
+        S3(crt_allow_lockless=True).rm(
             S3Storage("s3://b/p", client=client), recursive=True, transfer_config=self._crt()
         )
         ((sender, _, kwargs),) = built
         assert [op for op, _ in sender.calls] == ["DeleteObjects"]
-        assert kwargs["crt_allow_absent_credentials"] is True
-        assert kwargs["crt_region"] is None
+        assert kwargs["crt_allow_lockless"] is True
         assert kwargs["operation"] == "rm"
 
     def test_a_rehearsal_builds_no_engine(self, built: list[Any]) -> None:

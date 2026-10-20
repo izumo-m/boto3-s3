@@ -16,7 +16,6 @@ from botocore.config import Config
 from botocore.exceptions import ClientError, ProfileNotFound
 
 from boto3_s3 import (
-    CLIENT_REGION,
     S3,
     AccessDeniedError,
     BatchError,
@@ -725,77 +724,6 @@ class TestTransferConfigDefault:
         assert _captured_transferrer_kwargs["transfer_config"].max_concurrency == 5
 
 
-class TestCrtAbsentCredentialsPosture:
-    """``crt_allow_absent_credentials`` reaches every route that builds a Transferrer.
-
-    The flag is what makes ``boto3-s3-cli`` enter the CRT engine with no
-    credentials the way ``aws s3`` does (design/crt.md section 4); a route that
-    forgot to thread it would silently keep boto3's classic fallback there.
-    """
-
-    def _run(self, s3: S3, tmp_path: Any, route: str) -> None:
-        src = tmp_path / "x.txt"
-        src.write_text("hi")
-        if route == "cp":
-            s3.cp(str(src), "s3://bucket/key")
-        elif route == "stream":
-            # The streaming route builds its own Transferrer (s3.py `_cp_stream`).
-            s3.cp(IOStorage(io.BytesIO(b"hi")), "s3://bucket/key")
-        else:
-            s3.sync(str(tmp_path), "s3://bucket/pfx")
-
-    @pytest.mark.parametrize("route", ["cp", "stream", "sync"])
-    @pytest.mark.parametrize("allow", [False, True], ids=["default", "opt-in"])
-    def test_posture_reaches_every_route(
-        self,
-        _captured_transferrer_kwargs: dict[str, Any],
-        tmp_path: Any,
-        route: str,
-        allow: bool,
-    ) -> None:
-        s3 = S3(crt_allow_absent_credentials=allow) if allow else S3()
-        with pytest.raises(_StopTransferError):
-            self._run(s3, tmp_path, route)
-        assert _captured_transferrer_kwargs["crt_allow_absent_credentials"] is allow
-
-
-class TestCrtRegionPosture:
-    """``crt_region`` reaches every route that builds a Transferrer.
-
-    Same reason as the credentials posture above: the declared region - a
-    ``None`` that says "the chain resolved nothing" included - is what makes
-    ``boto3-s3-cli`` reproduce ``aws s3``'s CRT construction failure
-    (design/crt.md section 6), and a route that forgot to thread it would
-    silently fall back to the client's ``aws-global``.
-    """
-
-    def _run(self, s3: S3, tmp_path: Any, route: str) -> None:
-        src = tmp_path / "x.txt"
-        src.write_text("hi")
-        if route == "cp":
-            s3.cp(str(src), "s3://bucket/key")
-        elif route == "stream":
-            s3.cp(IOStorage(io.BytesIO(b"hi")), "s3://bucket/key")
-        else:
-            s3.sync(str(tmp_path), "s3://bucket/pfx")
-
-    @pytest.mark.parametrize("route", ["cp", "stream", "sync"])
-    @pytest.mark.parametrize(
-        "declared", [CLIENT_REGION, None, "eu-west-1"], ids=["default", "absent", "explicit"]
-    )
-    def test_posture_reaches_every_route(
-        self,
-        _captured_transferrer_kwargs: dict[str, Any],
-        tmp_path: Any,
-        route: str,
-        declared: Any,
-    ) -> None:
-        s3 = S3() if declared is CLIENT_REGION else S3(crt_region=declared)
-        with pytest.raises(_StopTransferError):
-            self._run(s3, tmp_path, route)
-        assert _captured_transferrer_kwargs["crt_region"] is declared
-
-
 class TestCrtSignRequestsPosture:
     """``crt_sign_requests`` reaches every route that builds a Transferrer.
 
@@ -865,9 +793,7 @@ class TestMaterializeCrtEngine:
         s3 = S3(
             session=session,
             endpoint_url=endpoint,
-            crt_allow_absent_credentials=True,
             crt_allow_lockless=True,
-            crt_region=None,
             crt_sign_requests=False,
         )
         s3.materialize_crt_engine(client, transfer_config=config)  # pyright: ignore[reportArgumentType]
@@ -877,9 +803,7 @@ class TestMaterializeCrtEngine:
                 "client": client,
                 "endpoint": endpoint,
                 "session": session,
-                "allow_absent_credentials": True,
                 "allow_lockless": True,
-                "region": None,
                 "sign_requests": False,
             }
         ]
@@ -1005,20 +929,6 @@ class TestMaterializeCrtEngine:
             S3(transfer_config=config).materialize_crt_engine(client)  # pyright: ignore[reportArgumentType]
         assert str(info.value) == str(raised)
         assert info.value.__cause__ is raised
-
-    def test_awscrts_region_assertion_passes_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # The CLI converts awscrt's bare AssertionError at its one call site
-        # (aws's empty rc-255 report), so the library must hand it over as is.
-        from boto3_s3 import crtsupport
-
-        def fake(_client: Any, _config: Any, **_kwargs: Any) -> None:
-            raise AssertionError
-
-        monkeypatch.setattr(crtsupport, "materialize_crt_engine", fake)
-        client = SimpleNamespace(meta=SimpleNamespace(endpoint_url=None))
-        config = TransferConfig(preferred_transfer_client="crt")
-        with pytest.raises(AssertionError):
-            S3(transfer_config=config).materialize_crt_engine(client)  # pyright: ignore[reportArgumentType]
 
 
 class TestModuleLevelConvenienceSignatures:

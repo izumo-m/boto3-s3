@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A transfer or delete whose connection is closed or times out before any response now prints its failure line and fails the run, `rb --force` included (exit codes changed).
 - A multipart copy whose post-copy tag write and its cleanup delete both fail now prints its failure line and fails the run, and `mv` keeps its source (exit codes changed).
 - A download to stdout that stdout cannot take (full, or its reader gone) now prints its failure line and fails the run, and a command whose output cannot be written no longer ends at Python's 120 (exit codes changed).
+- Under the CRT engine, a run with no credentials now fails each item with `Unable to locate credentials` and no traceback, a run with no region stops with botocore's missing-region report, and a FIPS pseudo-region signs for the plain region; `presign` names the expiry the CRT signer refuses (exit codes changed).
 
 ## [0.9.0] - 2026-10-18
 

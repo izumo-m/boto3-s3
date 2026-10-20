@@ -132,7 +132,7 @@ class CpCommand(Command):
         transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
         # aws builds the transfer manager here, before it decides anything about
         # the run: a CRT selection pays its construction even for a --dryrun.
-        transferargs.materialize_transfer_engine(s3, client, transfer_config, operation="cp")
+        transferargs.materialize_transfer_engine(s3, client, transfer_config)
         # aws validates --case-conflict against S3 Express while building the
         # run's instructions, past the transfer manager.
         case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="cp")

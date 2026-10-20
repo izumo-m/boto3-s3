@@ -79,15 +79,6 @@ class TestBuildClient:
         # so the Transferrer's meta-equality gate recognizes the CLI client.
         assert s3._endpoint_url == "http://localhost:9000"  # pyright: ignore[reportPrivateUsage]
 
-    def test_build_s3_takes_aws_clis_posture_on_absent_credentials(self) -> None:
-        # aws-cli hands its CRT client a credentials delegate built from
-        # whatever the session resolved - None included - so a credential-less
-        # CRT upload fails inside the delegate rather than dropping to classic.
-        # The library keeps boto3's opposite default; the CLI opts in
-        # (design/crt.md section 4).
-        s3 = clientfactory.build_s3(_parse([]))
-        assert s3._crt_allow_absent_credentials is True  # pyright: ignore[reportPrivateUsage]
-
     def test_build_s3_takes_aws_clis_posture_on_lock_contention(self) -> None:
         # aws-cli's factory acquires the cross-process CRT lock best-effort
         # and, under an explicit 'crt' preference, builds the CRT client
@@ -97,27 +88,50 @@ class TestBuildClient:
         s3 = clientfactory.build_s3(_parse([]))
         assert s3._crt_allow_lockless is True  # pyright: ignore[reportPrivateUsage]
 
+    @pytest.fixture
+    def crt_builds(self, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+        """Fake a usable awscrt and record every CRT construction attempt."""
+        from boto3_s3 import crtsupport
+
+        seen: list[dict[str, Any]] = []
+
+        def create(client: Any, config: Any, **kwargs: Any) -> Any:
+            seen.append({"client": client, **kwargs})
+            return object()
+
+        monkeypatch.setattr(crtsupport, "has_minimum_crt_version", lambda: True)
+        monkeypatch.setattr(crtsupport, "has_crt_s3transfer", lambda: True)
+        monkeypatch.setattr(crtsupport, "acquire_process_lock", lambda: True)
+        monkeypatch.setattr(crtsupport, "should_use_crt", lambda preferred: preferred == "crt")
+        monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", create)
+        return seen
+
     @pytest.mark.parametrize(
-        ("argv", "env", "expected"),
+        ("argv", "env", "preferred", "stops"),
         [
-            ([], {"AWS_REGION": "eu-west-1"}, "eu-west-1"),
-            (["--region", "ap-northeast-1"], {"AWS_REGION": "eu-west-1"}, "ap-northeast-1"),
-            ([], {}, None),
+            ([], {}, "crt", True),
+            ([], {}, "classic", False),
+            ([], {"AWS_REGION": "eu-west-1"}, "crt", False),
+            (["--region", "ap-northeast-1"], {}, "crt", False),
         ],
-        ids=["env", "explicit-wins", "nothing-resolves"],
+        ids=["crt-nothing-resolves", "classic-nothing-resolves", "crt-env", "crt-explicit"],
     )
-    def test_build_s3_declares_aws_clis_resolved_region_for_the_crt_engine(
+    def test_a_crt_run_needs_a_resolved_region(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        crt_builds: list[dict[str, Any]],
         argv: list[str],
         env: dict[str, str],
-        expected: str | None,
+        preferred: str,
+        stops: bool,
     ) -> None:
-        # aws-cli resolves the CRT region from its own region chain, so an
-        # environment that resolves nothing declares None - where botocore
-        # hands the *client* the `aws-global` pseudo-region and the CRT would
-        # never see the absence (design/crt.md section 6).
+        # aws hands its region chain's answer to the CRT client, so a CRT run
+        # with nothing resolved stops before the engine is built - where
+        # botocore gives the client the `aws-global` pseudo-region the CRT
+        # would sign every request for. The classic engine needs no region.
+        from boto3_s3 import TransferConfig
+
         for var in ("AWS_REGION", "AWS_DEFAULT_REGION"):
             monkeypatch.delenv(var, raising=False)
         for var, value in env.items():
@@ -125,10 +139,20 @@ class TestBuildClient:
         monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "absent-config"))
         monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
         s3 = clientfactory.build_s3(_parse(argv))
-        assert s3._crt_region == expected  # pyright: ignore[reportPrivateUsage]
-        if expected is None:
-            # The contrast that makes the declaration necessary at all.
-            assert s3.client().meta.region_name == "aws-global"
+        client = s3.client()
+        config = TransferConfig(preferred_transfer_client=preferred)
+        if stops:
+            assert client.meta.region_name == "aws-global"
+            with pytest.raises(ConfigurationError) as info:
+                s3.materialize_crt_engine(client, transfer_config=config)
+            assert str(info.value) == str(NoRegionError())
+            assert exit_code_for(info.value) == 253
+            assert crt_builds == []
+        else:
+            s3.materialize_crt_engine(client, transfer_config=config)
+            assert len(crt_builds) == (1 if preferred == "crt" else 0)
+            if crt_builds:
+                assert "region" not in crt_builds[0]
 
     def test_the_region_chain_is_walked_once_per_invocation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

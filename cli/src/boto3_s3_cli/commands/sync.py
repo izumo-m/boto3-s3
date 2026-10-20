@@ -122,7 +122,7 @@ class SyncCommand(Command):
         transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
         # aws builds the transfer manager here, before it decides anything about
         # the run: a CRT selection pays its construction even for a --dryrun.
-        transferargs.materialize_transfer_engine(s3, client, transfer_config, operation="sync")
+        transferargs.materialize_transfer_engine(s3, client, transfer_config)
         # After the engine is resolved: the upload checksum default is the
         # engine's.
         options = transferargs.build_transfer_options(

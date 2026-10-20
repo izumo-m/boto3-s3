@@ -155,7 +155,7 @@ class RmCommand(Command):
         # (design/crt.md sections 4 and 6) - so its construction failures are
         # brought forward here, where they stop the run as they do on aws.
         transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type="s3")
-        transferargs.materialize_transfer_engine(s3, client, transfer_config, operation="rm")
+        transferargs.materialize_transfer_engine(s3, client, transfer_config)
 
         bucket_part, _, key_part = target[len("s3://") :].partition("/")
         if not bucket_part and (args.recursive or not key_part):

@@ -1,24 +1,17 @@
-"""The CRT engine reached with no region at all (design/crt.md section 6).
+"""The CRT engine reached with no region at all (design/crt.md section 4).
 
-aws-cli resolves the CRT client's region from its own region chain, which
-answers ``None`` when nothing is configured - where botocore instead hands the
-*botocore* client the ``aws-global`` pseudo-region. ``create_s3_crt_client``
-passes that ``None`` straight to ``awscrt.s3.S3Client``, whose
-``assert isinstance(region, str)`` fires; the bare ``AssertionError`` carries
-no message, and aws's general exception handler renders it as the prefix alone
-at rc 255. The transfer manager is built before the run is decided, so every
-transfer command reports it - ``--dryrun`` and ``--quiet`` included - and so
-does ``rm``, which builds the engine like aws before its deletes ride it.
+aws hands the CRT client its own region chain's answer, and with nothing
+configured there is none, so its CRT run stops before it starts. botocore would
+instead give the *botocore* client the ``aws-global`` pseudo-region, which the
+CRT client would sign every request for. The CLI stops a CRT run with no
+resolved region at the engine's construction slot - before any request, so
+every transfer command reports it, ``--dryrun`` and ``--quiet`` included, and
+so does ``rm``, whose deletes ride the engine - with botocore's missing-region
+report at rc 253.
 
-These run the real awscrt: the whole point is that the assertion is awscrt's
-own, not a hand-written mirror of it. `tests/cli/unit/test_engine_selection.py`
-pins the ordering and the rendered bytes with the construction faked, and
-`tests/lib/test_crtsupport.py` pins that the declared region is what reaches
-``create_s3_crt_client``.
-
-The runs need a real subprocess: standing up a CRT client in the pytest process
-would hold the cross-process lock for the rest of the session. They contact
-nothing - construction fails before any request is built.
+The runs need a real subprocess, with no ``AWS_*`` variable of the host's or
+the root conftest's: the region chain is what is under test. They contact
+nothing.
 """
 
 from __future__ import annotations
@@ -29,6 +22,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from botocore.exceptions import NoRegionError
 
 from boto3_s3 import crtsupport
 
@@ -41,7 +35,7 @@ if not crtsupport.has_crt_s3transfer():
 
 _BUCKET = "boto3-s3-crt-noregion"
 _RUN_CLI = "import sys; from boto3_s3_cli.cli import main; sys.exit(main())"
-_EMPTY_REPORT = "boto3-s3: [ERROR]:\n"
+_NO_REGION_REPORT = f"boto3-s3: [ERROR]: {NoRegionError()}\n"
 
 
 def _run_cli(
@@ -90,32 +84,6 @@ def source(tmp_path: Path) -> Path:
     return path
 
 
-@pytest.fixture
-def crt_lock_is_free() -> None:
-    """Skip when this application's CRT slot is already taken.
-
-    ``PROCESS_LOCK_NAME`` is host-wide, so a child whose slot is held elsewhere
-    never reaches ``create_s3_crt_client`` at all (the construction returns
-    ``None`` and the run falls back to classic). Probed in a throwaway
-    subprocess so the probe itself does not hold the lock when the child
-    starts - the same reason ``test_crt_no_credentials.py`` probes it.
-    """
-    probe = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "from s3transfer.crt import acquire_crt_s3_process_lock as acquire;"
-            "print(acquire('boto3-s3') is not None)",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    if probe.stdout.strip() != "True":
-        pytest.skip("this application's CRT process slot is held by another process")
-
-
-@pytest.mark.usefixtures("crt_lock_is_free")
 @pytest.mark.parametrize(
     "argv",
     [
@@ -126,14 +94,14 @@ def crt_lock_is_free() -> None:
         pytest.param(["rm", f"s3://{_BUCKET}/key", "--quiet"], id="rm-quiet"),
     ],
 )
-def test_no_resolvable_region_is_awscrts_own_empty_report(
+def test_no_resolvable_region_stops_a_crt_run(
     tmp_path: Path, source: Path, argv: list[str]
 ) -> None:
     resolved = [token.format(source=source, cwd=tmp_path) for token in argv]
     result = _run_cli(tmp_path, "crt", resolved)
-    assert result.returncode == 255, (result.stdout, result.stderr)
+    assert result.returncode == 253, (result.stdout, result.stderr)
     assert result.stdout == ""
-    assert result.stderr == _EMPTY_REPORT
+    assert result.stderr == _NO_REGION_REPORT
 
 
 def test_a_resolvable_region_builds_the_engine_and_runs(tmp_path: Path) -> None:

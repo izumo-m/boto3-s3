@@ -21,8 +21,7 @@ which are not objects; submitting them would try to delete prefixes.
 S3Deleter(storage, *, request_payer=None, on_result=None, cancel_token=None,
           batch_size=1000, operation="delete", capture_response=False,
           dryrun=False, transfer_config=None, session=None, crt_endpoint=None,
-          crt_allow_absent_credentials=False, crt_allow_lockless=False,
-          crt_region=CLIENT_REGION, crt_sign_requests=None)
+          crt_allow_lockless=False, crt_sign_requests=None)
 ```
 
 `storage` must be an `S3Storage`; anything else raises `ValidationError`. Only
