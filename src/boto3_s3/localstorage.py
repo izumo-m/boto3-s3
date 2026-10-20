@@ -530,7 +530,7 @@ class LocalFileGenerator:
             # content compare - can reach it. Then the filter runs; no filter (or a
             # custom finalize_children that already pruned) -> the page passes
             # untouched. storage is None only for a hand-built options object
-            # (Storage.scan's backstop fills FileInfo.storage afterwards).
+            # (Storage.scan fills FileInfo.storage afterwards).
             if storage is not None:
                 for info in page:
                     info.storage = storage

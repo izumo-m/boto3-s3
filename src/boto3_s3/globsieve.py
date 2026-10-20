@@ -58,7 +58,7 @@ import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
     from boto3_s3.types import FileInfo
@@ -593,10 +593,11 @@ class GlobFilter:
     patterns are read-only and every compilation is equivalent).
 
     As a ``FileFilter`` it is invoked with a ``FileInfo``:
-    a relative pattern matches its relative ``compare_key``; a root-anchored
-    (absolute) pattern matches its ``key`` (the full path), exactly like
-    ``compile``. Byte-exact (the permissive building block); host case-folding
-    for ``aws s3`` parity is the CLI layer's job.
+    a relative pattern matches its relative ``compare_key`` (which every scan
+    stamps; a hand-built entry must set it); a root-anchored (absolute)
+    pattern matches its ``key`` (the full path), exactly like ``compile``.
+    Byte-exact (the permissive building block); host case-folding for
+    ``aws s3`` parity is the CLI layer's job.
     """
 
     __slots__ = ("_compiled", "_patterns")
@@ -623,14 +624,8 @@ class GlobFilter:
         return self
 
     def __call__(self, info: FileInfo) -> bool:
-        key = info.compare_key
-        if key is None:
-            raise ValueError(
-                "GlobFilter matches FileInfo.compare_key, which Storage.scan "
-                "stamps on each entry; it is unset here (a hand-built FileInfo). "
-                "Filter through Storage.scan / S3.cp / mv / rm / sync rather than "
-                "calling it directly."
-            )
+        # compare_key is stamped by every scan (the storage protocol).
+        key = cast("str", info.compare_key)
         compiled = self._compiled
         if compiled is None:
             compiled = self._compiled = compile(self._patterns)

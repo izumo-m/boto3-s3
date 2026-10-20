@@ -194,10 +194,9 @@ class Storage(abc.ABC):
     takes the base ``ScanOptions`` needs nothing here.)
 
     ``scan_pages_filters`` - whether this backend's ``scan_pages`` already applies
-    ``options.filter`` itself. When ``False`` (default), ``scan`` applies it as
-    a safety net after ``scan_pages`` (on the prefetch worker), so a custom backend
-    that forgets to filter cannot silently leak excluded entries into ``--exclude``
-    / ``--include`` and, on a ``sync --delete`` destination, into deletion. The
+    ``options.filter`` itself. When ``False`` (default), ``scan`` applies it
+    after ``scan_pages`` (on the prefetch worker), so such a backend need not
+    filter at all; when ``True``, filtering is the backend's to get right. The
     built-ins set ``True`` (their ``scan_pages`` filters: ``S3Storage`` sieves;
     ``LocalStorage``'s walk applies it late, after the aws-cli vetting that still
     warns on excluded files - a custom ``LocalFileGenerator``'s
@@ -257,18 +256,18 @@ class Storage(abc.ABC):
         reaches it, for a consumer that mutates what it enumerates (see
         ``ScanOptions``); the stream is otherwise identical - only the thread
         the producer, the filter and ``on_warning`` run on changes.
-        ``options.filter`` is applied here as a
-        safety net (on the prefetch worker) **unless** the backend declares
-        ``scan_pages_filters`` - so a custom backend that does not filter in
-        ``scan_pages`` cannot silently leak excluded entries; a backend that
-        filters at its source or prunes early declares the flag to skip the
-        redundant re-filter. Pass ``options`` to control the walk (defaults to
+        ``options.filter`` is applied here (on the prefetch worker)
+        **unless** the backend declares ``scan_pages_filters`` - so a backend
+        need not filter in ``scan_pages``; one that filters at its source or
+        prunes early declares the flag to skip the redundant re-filter. Pass
+        ``options`` to control the walk (defaults to
         ``default_scan_options``). To customize the entries, override
         ``scan_pages``, not this method. Each entry has its
-        ``FileInfo.storage`` set to this backend as a safety net (only when a
-        ``scan_pages`` left it ``None``), ahead of the filter - so a predicate
-        always sees the producing backend, per ``FileInfo``'s contract (the
-        built-ins already stamp it during the scan). Used by ``ls`` and the recursive forms of
+        ``FileInfo.storage`` set to this backend (only when a ``scan_pages``
+        left it ``None``, so a backend need not stamp it), ahead of the
+        filter - so a predicate always sees the producing backend, per
+        ``FileInfo``'s contract (the built-ins already stamp it during the
+        scan). Used by ``ls`` and the recursive forms of
         ``cp`` / ``mv`` / ``rm`` / ``sync``. `cancel_token` stops the prefetch
         producer before another page pull without changing entries already
         yielded to the consumer.
@@ -276,13 +275,13 @@ class Storage(abc.ABC):
         opts = options if options is not None else self.default_scan_options()
 
         def stamped() -> Iterator[Sequence[FileInfo]]:
-            # Safety net: stamp the producing backend so a downstream consumer
-            # (an `options.filter` predicate, sync's content compare via
-            # pair.src.storage, an on_result callback) can reach it even when a
-            # custom scan_pages did not set it. Runs ahead of the filter below,
+            # Stamp the producing backend so a downstream consumer (an
+            # `options.filter` predicate, sync's content compare via
+            # pair.src.storage, an on_result callback) can reach it; a
+            # scan_pages need not set it. Runs ahead of the filter below,
             # honoring FileInfo's contract that `storage` is stamped before any
             # filter runs; the built-ins stamp during the scan, so this only
-            # fills a None left by a bespoke backend.
+            # fills a None another backend left.
             for page in self.scan_pages(opts):
                 for info in page:
                     if info.storage is None:

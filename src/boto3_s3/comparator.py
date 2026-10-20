@@ -51,16 +51,20 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, TypeVar, cast
 
+from boto3_s3.exceptions import Boto3S3Error
 from boto3_s3.types import FileInfo, S3FileInfo, TransferType
 
 if TYPE_CHECKING:
     from concurrent.futures import Executor
+    from typing import BinaryIO
 
     from boto3_s3.storage import Storage
 
 _T = TypeVar("_T")
+# What a content strategy's digest of the readable side returns.
+_R = TypeVar("_R")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -124,9 +128,9 @@ class DestOnlyPair:
 
 
 # What `Comparator.compare` yields: each merge-joined entry as exactly one of
-# the three pair shapes, telling by type which side(s) hold it. Per entry, not
-# per key - a custom backend that yields a key twice gets a pair per
-# occurrence; the built-in scans never duplicate a key.
+# the three pair shapes, telling by type which side(s) hold it. Per entry -
+# one per key because a listing names each compare key once (the storage
+# protocol).
 MergedPair = SrcOnlyPair | SyncPair | DestOnlyPair
 
 # The update judgment: a predicate over the both-sides pair, `True` = copy.
@@ -212,9 +216,8 @@ class Comparator:
     compares sizes or times: that is the lane filters'
     job (a ``PairFilter`` for the ``SyncPair``s, ``create_filter`` /
     ``delete_filter`` for the one-sided shapes). Every input entry becomes one
-    pair, which is one pair per key only while each side's keys are unique: a
-    custom backend repeating a key yields a pair per occurrence (the built-in
-    scans never repeat one).
+    pair, which is one pair per key because a listing names each compare key
+    once (the storage protocol; not checked here).
     ``transfer_type`` is
     stamped onto every emitted pair verbatim - context, not a judgment, and
     neither validated nor interpreted here; ``S3.sync`` puts the run's
@@ -362,9 +365,9 @@ class ContentComparison:
         if src_is_s3 and dest_is_s3:
             return self._copy_differs(src, dest)
         if dest_is_s3 and not src_is_s3:  # upload-shaped: src is the readable side
-            return self._readable_remote_differ(src.storage, src, dest, pair.transfer_type)
+            return self._readable_remote_differ(src, dest, pair.transfer_type)
         if src_is_s3 and not dest_is_s3:  # download-shaped: dest is the readable side
-            return self._readable_remote_differ(dest.storage, dest, src, pair.transfer_type)
+            return self._readable_remote_differ(dest, src, pair.transfer_type)
         # Neither side is an S3 object: no stored digest to compare against -> copy.
         return True
 
@@ -374,21 +377,49 @@ class ContentComparison:
 
     def _readable_remote_differ(
         self,
-        storage: Storage | None,
         readable: FileInfo,
         remote: FileInfo,
         transfer_type: TransferType,
     ) -> bool:
         """Whether the readable side's content differs from the S3 ``remote`` side.
 
-        ``storage`` opens the readable side (``storage.open(readable.compare_key,
-        "rb")``) - any backend, not just a local file; ``None`` (a pair built
-        without a backend) means it cannot be read, so the strategy copies.
-        ``transfer_type`` tells which endpoint ``remote`` belongs to (UPLOAD -> the
-        destination, DOWNLOAD -> the source) for a strategy that must reach that
-        endpoint's client.
+        The readable side is read through its own backend (`_read_readable`) -
+        any backend, not just a local file. ``transfer_type`` tells which
+        endpoint ``remote`` belongs to (UPLOAD -> the destination, DOWNLOAD ->
+        the source) for a strategy that must reach that endpoint's client.
         """
         raise NotImplementedError
+
+    @staticmethod
+    def _read_readable(readable: FileInfo, digest: Callable[[BinaryIO], _R]) -> _R:
+        """Open the readable side as ``storage.open(compare_key, "rb")`` and digest it.
+
+        Relies on the entry's ``storage`` and ``compare_key``, which every scan
+        stamps (a hand-built pair must set both). A ``LocalStorage`` side is
+        the library's own file: its ``open`` translates its own failure, and a
+        raw ``OSError`` from the stream (a fault mid-read or on close) takes
+        the local taxonomy's category too. Any other backend is the caller's
+        code (design/overview.md section 3): a ``Boto3S3Error`` it raises
+        passes as it is, and anything else becomes the base error with the
+        original as ``__cause__``. Either way the exception leaves the
+        strategy, aborting a ``sync`` as any raising predicate does.
+        """
+        storage = cast("Storage", readable.storage)
+        key = cast("str", readable.compare_key)
+        try:
+            with storage.open(key, "rb") as fh:
+                return digest(fh)
+        except Boto3S3Error:
+            raise
+        except Exception as exc:
+            # Deferred import: this module stays SDK-free at import time.
+            from boto3_s3.localstorage import LocalStorage, translate_os_error
+
+            if not isinstance(storage, LocalStorage):
+                raise Boto3S3Error(str(exc), operation="sync", key=key) from exc
+            if isinstance(exc, OSError):
+                raise translate_os_error(exc, operation="sync", key=key) from exc
+            raise
 
 
 def all_of(*predicates: Callable[[_T], bool]) -> Callable[[_T], bool]:

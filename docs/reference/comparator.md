@@ -128,9 +128,9 @@ size-and-time judgment is one — without being told the route separately.
 backend it was listed from on its `storage` attribute, so a filter that needs
 bytes rather than listing metadata opens that side through `pair.src.storage` /
 `pair.dest.storage` ([`./storage.md`](./storage.md)) — which is how the content
-strategies compare against any backend, not only a local filesystem. It is
-`None` on a hand-built `FileInfo`, which the content strategies treat as
-unreadable and copy.
+strategies compare against any backend, not only a local filesystem. The
+content strategies rely on it and on `compare_key`, which every scan stamps; a
+hand-built pair must set both.
 
 The dataclass is frozen and keyword-only, so construction is
 `SyncPair(compare_key=..., transfer_type=..., src=..., dest=...)`. It defines
@@ -404,10 +404,9 @@ skip a copy — MD5 can collide, and the size is independent evidence.
 
 **What reads as differing**, so that the strategy never skips on a comparison
 it could not make: an absent `etag` on either side of an s3-to-s3 pair; an
-absent or empty `etag` on the S3 side of an upload or download; a readable side
-whose `storage` or `compare_key` is `None`, which is what a hand-built
-`FileInfo` gives; and a multipart ETag whose readable side reports no `size`,
-without which the part split cannot be reconstructed.
+absent or empty `etag` on the S3 side of an upload or download; and a
+multipart ETag whose readable side reports no `size`, without which the part
+split cannot be reconstructed.
 
 **The effective part size.** On the multipart branch the held `part_size` is a
 request rather than the split used: per file it is adjusted the way an upload
@@ -444,19 +443,22 @@ without `part_size` and the config read fails — a `[s3] multipart_chunksize`
 that is not a size, or a set-but-missing profile where the `S3` was built
 without a session.
 
-Raises, from a call: an `OSError` raised while reading the readable side is
-translated into the library taxonomy —
+Raises, from a call: a failure reading the readable side, as a
+[`Boto3S3Error`](./exceptions.md#boto3s3error). On a `LocalStorage` side an
+`OSError` is translated into the library taxonomy —
 [`NotFoundError`](./exceptions.md#notfounderror) for a missing file,
 [`AccessDeniedError`](./exceptions.md#accessdeniederror) for a permission
 failure, [`TransportError`](./exceptions.md#transporterror) otherwise —
-carrying `operation="sync"` and the entry's compare key. A `LocalStorage`
-readable side translates its own `open` failure first, the same way but
-unnamed, so a file removed between the listing and the compare surfaces as a
-`NotFoundError` whose `operation` is `"sync"` when the strategy ran under
-`sync` and `None` when it was called directly. Whatever else a
-custom backend raises propagates unchanged. Either way the exception aborts the
-`sync` run rather than being recorded as a per-item failure, as
-[`PairFilter`](#pairfilter) states for any raising predicate.
+carrying `operation="sync"` and the entry's compare key; its own `open`
+failure is translated first, the same way but unnamed, so a file removed
+between the listing and the compare surfaces as a `NotFoundError` whose
+`operation` is `"sync"` when the strategy ran under `sync` and `None` when it
+was called directly. On any other backend a `Boto3S3Error` the backend raises
+passes as it is, and anything else becomes the `Boto3S3Error` base with the
+original on `__cause__`, carrying `operation="sync"` and the compare key.
+Either way the exception aborts the `sync` run rather than being recorded as a
+per-item failure, as [`PairFilter`](#pairfilter) states for any raising
+predicate.
 
 The object holds no mutable state, so it is safe to wrap in
 [`ParallelFilter`](#parallelfilter), which is how the per-pair reads are
@@ -619,7 +621,6 @@ an object carrying no native checksum; an algorithm outside `crc32`, `crc32c`,
 not be read in full (no part listing, a part without a size, a continuation
 marker that does not move past the page it came with); two S3 sides whose
 stored checksums use different algorithms or are of different kinds; a
-readable side whose `storage` or `compare_key` is `None`; a
 readable side longer than the sum of the parts, an appended tail the per-part
 digests would not otherwise see; and any `ClientError` from a
 `GetObjectAttributes` call — a 404, a denied `s3:GetObjectAttributes`, an
@@ -639,8 +640,8 @@ resolve — [`InvalidConfigError`](./exceptions.md#invalidconfigerror) or the
 Raises, from a call: a `BotoCoreError` from `GetObjectAttributes` — absent
 credentials, an unreachable endpoint, a read timeout — is not a per-object
 verdict but a broken environment, so it is translated into the taxonomy and
-raised, aborting the run instead of silently copying everything. An `OSError`
-reading the readable side is translated exactly as it is for
+raised, aborting the run instead of silently copying everything. A failure
+reading the readable side is raised exactly as it is for
 [`EtagComparison`](#etagcomparison).
 
 ## ParallelFilter

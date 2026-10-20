@@ -159,8 +159,9 @@ class TestNonSeekableSource:
         assert reader.seekable()
 
     def test_a_closed_stream_is_left_to_the_transfer(self) -> None:
-        # seekable() raises ValueError on a closed stream: nothing is hidden,
-        # the transfer reports the closed stream as it already does.
+        # seekable() raises ValueError on a closed stream: a probe that cannot
+        # answer adds no failure and no view of its own, so the transfer meets
+        # the stream as it would without the probe.
         buf = io.BytesIO(b"x")
         buf.close()
         reader = IOStorage(buf).open("k", "rb")
@@ -170,10 +171,7 @@ class TestNonSeekableSource:
         # A tarfile member reads through a BufferedReader whose `fileno` is
         # forwarded to a wrapped object that has none (AttributeError) while
         # its `seekable` answers True: it uploaded on both engines before the
-        # check existed and must still reach the engine untouched. A
-        # stream-mode member's `seekable` is forwarded the same way and never
-        # answered - s3transfer's own probe failed such a member on both
-        # engines - so that one is read through the view, which uploads.
+        # check existed and must still reach the engine untouched.
         import tarfile
 
         payload = os.urandom(70000)
@@ -190,38 +188,6 @@ class TestNonSeekableSource:
             reader = IOStorage(member).open("k", "rb")
             assert hasattr(reader, "seek")
             assert reader.read() == payload
-        with tarfile.open(archive, "r|") as stream_tar:
-            streamed = stream_tar.extractfile(next(iter(stream_tar)))
-            assert streamed is not None
-            with pytest.raises(AttributeError):
-                streamed.seekable()
-            reader = IOStorage(streamed).open("k", "rb")
-            assert not hasattr(reader, "seek")
-            assert reader.read() == payload
-
-    def test_a_stream_mode_tarfile_member_uploads_on_the_classic_engine(
-        self, tmp_path: Path
-    ) -> None:
-        import tarfile
-
-        archive = tmp_path / "a.tar"
-        with tarfile.open(archive, "w") as tar:
-            info = tarfile.TarInfo("member.bin")
-            info.size = 5
-            tar.addfile(info, io.BytesIO(b"tarry"))
-        client, calls = make_recording_client([{"ETag": '"e"'}])
-        results: list[OpResult] = []
-        with tarfile.open(archive, "r|") as stream_tar:
-            streamed = stream_tar.extractfile(next(iter(stream_tar)))
-            assert streamed is not None
-            S3().cp(
-                IOStorage(streamed),
-                S3Storage("s3://b/k", client=client),
-                transfer_config=_SYNC,
-                on_result=results.append,
-            )
-        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED]
-        assert [c.operation for c in calls] == ["PutObject"]
 
     def test_a_download_into_a_gzip_over_a_write_only_sink_succeeds(self) -> None:
         # The append cue asks a destination for its descriptor: a GzipFile
@@ -420,10 +386,9 @@ class TestTextAdapter:
         assert reader.read() == text.encode("utf-16")
 
     def test_non_textiobase_text_stream_is_wrapped(self) -> None:
-        # The constructor accepts any IO[str], but a text-mode
-        # SpooledTemporaryFile (like codecs.open's StreamReaderWriter) reads
-        # str without deriving from io.TextIOBase. Recognized by its encoding
-        # attribute, it is still adapted to bytes rather than passed through raw.
+        # A text-mode SpooledTemporaryFile reads str without deriving from
+        # io.TextIOBase. Recognized by its encoding attribute, it is still
+        # adapted to bytes rather than passed through raw.
         with tempfile.SpooledTemporaryFile(max_size=1024, mode="w+", encoding="utf-8") as sp:
             sp.write("café")
             sp.seek(0)

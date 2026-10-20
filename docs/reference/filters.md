@@ -261,9 +261,6 @@ Applies the rules to `info` and returns whether the entry is included. A
 relative pattern is matched against `info.compare_key`; a root-anchored pattern
 against `info.key`. Compiles the rules first if they are not compiled yet.
 
-Raises the built-in `ValueError` when `info.compare_key` is `None`. Stamping it
-is a contract of the concrete backend's `scan_pages`, not of the base
-`Storage.scan`, which backfills a missing `storage` as a safety net but never
-`compare_key` ([`storage.md`](./storage.md)). So it is raised for a hand-built
-`FileInfo` — the filter called outside an operation or a scan — and for an
-entry from a custom `Storage` whose `scan_pages` omits the stamp.
+It relies on `info.compare_key`, which every backend's `scan_pages` stamps
+([`storage.md`](./storage.md)); a hand-built `FileInfo` passed to it directly
+must set it.

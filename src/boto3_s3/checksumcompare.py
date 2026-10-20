@@ -50,8 +50,8 @@ indeterminate comparison. An upload / download comparison reads the
 **readable** (non-S3) side through its ``Storage.open`` on whatever thread
 drives the ``update_filter`` lane (``sync``'s calling thread, or a pool worker
 under ``ParallelFilter``) - any backend, not just a
-local file - so a read failure surfaces as that backend's error (a
-``Boto3S3Error`` for a local file). SSE-C objects need the customer key to
+local file - and a read failure leaves the strategy as a ``Boto3S3Error``
+(`ContentComparison`'s ``_read_readable``). SSE-C objects need the customer key to
 ``GetObjectAttributes`` and are not supported (they read as indeterminate ->
 copy).
 """
@@ -74,7 +74,7 @@ if TYPE_CHECKING:
     from typing import BinaryIO
 
     from boto3_s3.s3 import S3
-    from boto3_s3.storage import Location, Storage
+    from boto3_s3.storage import Location
     from boto3_s3.types import FileInfo
 
 # GetObjectAttributes ``Checksum.<key>`` -> our algorithm name. An object carries
@@ -174,7 +174,6 @@ class ChecksumComparison(ContentComparison):
 
     def _readable_remote_differ(
         self,
-        storage: Storage | None,
         readable: FileInfo,
         remote: FileInfo,
         transfer_type: TransferType,
@@ -189,9 +188,6 @@ class ChecksumComparison(ContentComparison):
             return True
         if not _can_compute(remote_checksum.algorithm, readable.size, self.pure_max_size):
             return True
-        key = readable.compare_key
-        if storage is None or key is None:
-            return True  # cannot open the readable side -> treat as differing (copy)
         part_sizes = remote_checksum.part_sizes
         if part_sizes is not None and remote_checksum.part_count not in (
             None,
@@ -200,24 +196,16 @@ class ChecksumComparison(ContentComparison):
             # The value's own part count disagrees with the part listing: the
             # two describe different objects, so nothing read here could match.
             return True
-        try:
-            with storage.open(key, "rb") as fh:
-                if part_sizes is not None:
-                    # None = the readable side outruns the parts sum (an appended
-                    # tail): definitely different content, whatever the digests say.
-                    readable_value = _composite_b64(fh, remote_checksum.algorithm, part_sizes)
-                else:
-                    readable_value = _whole_b64(fh, remote_checksum.algorithm)
-        except OSError as exc:
-            # LocalStorage.open translates its own open failure, but a fault
-            # *mid-read* (or on close) is a raw OSError from the stream; keep
-            # the module's promise that a local read failure surfaces as a
-            # taxonomy error. A custom backend's own exceptions pass through
-            # as that backend's error, unchanged. (Deferred import: this
-            # module stays SDK-free at import time.)
-            from boto3_s3.localstorage import translate_os_error
+        algorithm = remote_checksum.algorithm
 
-            raise translate_os_error(exc, operation="sync", key=key) from exc
+        def digest(fh: BinaryIO) -> str | None:
+            if part_sizes is not None:
+                # None = the readable side outruns the parts sum (an appended
+                # tail): definitely different content, whatever the digests say.
+                return _composite_b64(fh, algorithm, part_sizes)
+            return _whole_b64(fh, algorithm)
+
+        readable_value = self._read_readable(readable, digest)
         return readable_value != remote_checksum.value
 
     def _copy_differs(self, src: FileInfo, dest: FileInfo) -> bool:

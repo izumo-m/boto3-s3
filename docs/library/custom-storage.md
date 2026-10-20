@@ -48,16 +48,15 @@ minimal backend implements exactly what it promised.
 Two key spaces meet here. `key` is yours — whatever addresses an entry in your
 backend. `compare_key` is the operation-relative, `/`-separated identity that
 globs match and that `sync` pairs the two sides on. **Your `scan_pages` must
-stamp `compare_key` on every entry it yields.** Nothing downstream can recover
-it if you do not.
+stamp `compare_key` on every entry it yields, and no two entries of one listing
+may share one.** Nothing downstream checks either or makes up for it.
 
 ### Filtering
 
-`options.filter` is applied by `scan()` as a safety net, so forgetting it in
-`scan_pages` cannot leak excluded entries into a `sync` with
-`delete_filter=True` and destroy data. If your backend can filter at its source,
-apply it in `scan_pages` and set `scan_pages_filters = True` to skip the
-redundant second pass.
+By default `scan()` applies `options.filter` itself, to what `scan_pages`
+yields, so a backend need not filter at all. If yours can filter at its source,
+apply `options.filter` in `scan_pages` and set `scan_pages_filters = True` to
+skip the second pass; filtering is then yours to get right.
 
 The predicate runs on the prefetch worker thread. Keep that in mind if your
 implementation shares state. The one exception is a scan with
@@ -86,14 +85,13 @@ part-way through.
 The reading flags nest: `SORTABLE_SCAN` implies `SCAN` implies
 `GET_FILEINFO`. Declaring the strongest one promises the weaker methods too.
 
-**`SORTABLE_SCAN` is not optional for `sync`.** Its pairing walks both listings
-in UTF-8 byte order; an unsorted listing manufactures pairs that do not exist
-and, with `delete_filter`, deletes objects that were never orphans. Nothing
-checks the promise: `sync` merges such a listing the way `aws s3 sync` merges
-an unsorted one from an S3-compatible endpoint, mis-pairing as it goes, so the
-order is yours to get right. `sync` is the only order-sensitive consumer — recursive `cp`
-and `mv` take entries in whatever order you yield them, so a plain `SCAN`
-backend needs no ordering guarantee at all.
+**`SORTABLE_SCAN` is not optional for `sync`, and it is a promise:** asked
+for `sort=True`, your listing comes in UTF-8 byte order of `compare_key`.
+`sync`'s pairing, its deletes included, walks both listings in that order.
+Nothing checks the promise, so the order is yours to get right. `sync` is the
+only order-sensitive consumer — recursive `cp` and `mv` take entries in
+whatever order you yield them, so a plain `SCAN` backend needs no ordering
+guarantee at all.
 
 The gates are also callable directly, so an application can check before it
 starts: `storage.supports(needed)` and `storage.missing_capabilities(needed)`,

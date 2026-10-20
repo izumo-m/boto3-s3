@@ -220,30 +220,20 @@ def _cannot_seek(stream: Any) -> bool:
     console) or a socket cannot be positioned whatever ``seekable()`` says,
     and ``os.fstat`` reports a Windows pipe as a FIFO too (measured).
 
-    What cannot answer is handled by what the engines would do with it. A
-    closed stream raises ``ValueError`` from ``seekable()`` and is left as
-    it is: the transfer reports the closed stream as it already does, where
-    the view would leave the CRT lane's failure wordless (measured). A
-    stream whose ``seekable`` raises anything else cannot be asked twice -
-    a stream-mode tarfile member's ``BufferedReader`` forwards ``seekable``
-    to a wrapped object that has none (``AttributeError``), and s3transfer's
-    own ``seekable()`` probe would fail the item the same way - so it is
-    read through the view, which both engines then upload. A stream without
-    ``fileno``, or whose ``fileno`` cannot answer (a ``BytesIO``'s
-    ``io.UnsupportedOperation``; a regular tarfile member, whose wrapped
-    object has ``seekable`` but no ``fileno``, ``AttributeError``), is left
-    as it is: ``seekable()`` already answered True, and there is no
-    descriptor to say otherwise.
+    A stream that cannot answer is left as it is: this probe adds no failure
+    of its own, and the engines meet the stream as they would without it - a
+    closed stream, or one whose ``seekable()`` raises (outside the stream
+    contract), fails there. A stream without ``fileno``, or whose ``fileno``
+    cannot answer (a ``BytesIO``, a wrapper with no descriptor behind it),
+    has no descriptor to say otherwise.
     """
     seekable = getattr(stream, "seekable", None)
     if seekable is not None:
         try:
             if not seekable():
                 return True
-        except ValueError:
-            return False
         except Exception:
-            return True
+            return False
     fileno = getattr(stream, "fileno", None)
     if fileno is None:
         return False
@@ -321,9 +311,8 @@ def _is_text_stream(stream: IO[Any]) -> bool:
     """Whether ``stream`` trades in ``str`` (so ``open`` must adapt it to bytes).
 
     ``io.TextIOBase`` covers the stdlib's usual text streams (``TextIOWrapper``,
-    ``StringIO``), but the constructor accepts any ``IO[str]`` - ``codecs.open``'s
-    ``StreamReaderWriter`` or a text-mode ``SpooledTemporaryFile`` read ``str``
-    without deriving from it. Those carry the text hallmark instead: an
+    ``StringIO``), but a text-mode ``SpooledTemporaryFile`` reads ``str``
+    without deriving from it. It carries the text hallmark instead: an
     ``encoding`` attribute, which no binary stream has. Without this probe such a
     stream would pass through as "binary" and s3transfer would fail obscurely on
     its ``str`` chunks.
@@ -371,9 +360,9 @@ class IOStorage(Storage):
     read through a read-only one (`_NonSeekable`) so both engines take their
     buffered upload path instead of probing it with ``seek`` / ``tell``; a text
     stream - recognized as an
-    ``io.TextIOBase`` or by its ``encoding`` attribute (``codecs.open``'s
-    ``StreamReaderWriter``, a text-mode ``SpooledTemporaryFile``) - is wrapped
-    with ``encoding`` (default utf-8), so it carries the object as text. A text
+    ``io.TextIOBase`` or by its ``encoding`` attribute (a text-mode
+    ``SpooledTemporaryFile``) - is wrapped with ``encoding`` (default
+    utf-8), so it carries the object as text. A text
     stream is never swapped for its ``.buffer``: text it has already read ahead
     would be skipped, and the encoding it was opened with ignored; a caller
     wanting the bytes as they are passes a binary stream, or `StdioStorage` for

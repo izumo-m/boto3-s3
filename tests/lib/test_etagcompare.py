@@ -236,11 +236,6 @@ class TestCopyDirectEtag:
             )
             assert EtagComparison()(pair) is True
 
-    def test_non_s3_side_counts_as_differ(self) -> None:
-        # A side that is not an S3FileInfo has no comparable etag -> differ.
-        pair = _pair(TransferType.COPY, src=FileInfo(key="k"), dest=_s3(etag="abc"))
-        assert EtagComparison()(pair) is True
-
     def test_size_collision_guard(self) -> None:
         # Equal etag but different size: check_size forces a copy (MD5 collisions
         # exist), while pure-etag mode trusts the equality and skips.

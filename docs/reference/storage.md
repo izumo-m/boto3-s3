@@ -101,10 +101,9 @@ backend that defines its own subclass sets this attribute and overrides
 nothing; a backend that takes the base `ScanOptions` sets nothing.
 
 `scan_pages_filters` declares that `scan_pages` already applies
-`options.filter` itself. When it is `False` (the default), `scan` re-applies
-the predicate after `scan_pages` as a safety net, so a backend that forgets to
-filter cannot leak excluded entries into an include/exclude run or, on a `sync`
-destination with deletes enabled, into deletion. Both built-ins set `True`.
+`options.filter` itself. When it is `False` (the default), `scan` applies the
+predicate after `scan_pages`, so such a backend need not filter at all; when it
+is `True`, filtering is the backend's to get right. Both built-ins set `True`.
 
 ### Capability gates
 
@@ -166,9 +165,9 @@ reject a foreign options type.
 next page pull. Entries already yielded to the consumer are unaffected.
 
 Two things happen between the producer and the consumer. Each entry whose
-`storage` is still `None` is stamped with this backend — a safety net for a
-`scan_pages` that did not stamp it, applied ahead of the filter so a predicate
-always sees the producing backend. Then, unless the class declares
+`storage` is still `None` is stamped with this backend, so a `scan_pages`
+need not stamp it; this runs ahead of the filter, so a predicate always sees
+the producing backend. Then, unless the class declares
 `scan_pages_filters`, `options.filter` is applied page by page on the prefetch
 worker; a page emptied by the predicate is dropped rather than yielded empty.
 
@@ -352,10 +351,9 @@ gates raise is built from this.
 
 `ScanOptions.sort` requests entries in UTF-8 byte order of their `compare_key`
 ([`./options.md`](./options.md)). **A backend declaring `SORTABLE_SCAN` must
-honor `sort=True`; nothing else promises any order.** The promise is not
-checked: a stream that breaks it is merged the way the AWS CLI merges an
-unsorted listing, mis-pairing — and with deletes on, removing destination
-entries the source has too ([`./comparator.md`](./comparator.md)).
+honor `sort=True`; nothing else promises any order.** Within one listing no two
+entries share a `compare_key`. Neither promise is checked: `sync`'s pairing, its
+deletes included, relies on both ([`./comparator.md`](./comparator.md)).
 
 `sync` is the only operation that sets `sort=True` — its merge-join walks both
 listings in ascending key order ([`./comparator.md`](./comparator.md)) — and it
@@ -1137,10 +1135,9 @@ its descriptor as a FIFO, character device or socket, which a Windows pipe is
 even though it claims to seek), which an upload reads through a view that
 offers nothing but `read`, so both transfer engines take their buffered path
 instead of probing it with `seek` / `tell`. A text stream — recognized either as an
-`io.TextIOBase` or by carrying an `encoding` attribute, which covers
-`codecs.open`'s reader/writer and a text-mode `SpooledTemporaryFile` — is
-wrapped with an incremental codec instead, encoding on read for an upload and
-decoding on write for a download.
+`io.TextIOBase` or by carrying an `encoding` attribute, which covers a
+text-mode `SpooledTemporaryFile` — is wrapped with an incremental codec
+instead, encoding on read for an upload and decoding on write for a download.
 
 `encoding` is that codec's encoding and applies only to a text stream; a name
 `codecs.lookup` does not know raises `InvalidValueError` from the constructor.
@@ -1152,14 +1149,15 @@ its newline translation apply to what is read and written. Text that will not
 convert fails the transfer — on a download, an object that is not valid text
 in `encoding` or a character the stream cannot write; on an upload, bytes the
 stream cannot read or a character `encoding` cannot encode. A failed download
-leaves in the stream whatever was decoded before the failure, and the item's
-`OpResult.error` is a `Boto3S3Error` with the `UnicodeDecodeError` or
-`UnicodeEncodeError` on `__cause__`. A text stream is never swapped for its
-`.buffer` — text it has read ahead would be skipped and the encoding it was
-opened with ignored — so pass a binary stream (a file opened `"rb"` or `"wb"`)
-or [`StdioStorage`](#stdiostorage) for the bytes as they are; `StdioStorage`
-writes standard output in order, where `IOStorage(sys.stdout.buffer)` on the
-classic engine writes a redirected file from offset 0.
+leaves in the stream whatever was decoded before the failure. Either way the
+item's `OpResult.error` is a `Boto3S3Error` with the `UnicodeDecodeError` or
+`UnicodeEncodeError` on `__cause__`, on either transfer engine. A text stream
+is never swapped for its `.buffer` — text it has read ahead would be skipped
+and the encoding it was opened with ignored — so pass a binary stream (a file
+opened `"rb"` or `"wb"`) or [`StdioStorage`](#stdiostorage) for the bytes as
+they are; `StdioStorage` writes standard output in order, where
+`IOStorage(sys.stdout.buffer)` on the classic engine writes a redirected file
+from offset 0.
 
 **The caller's stream is never closed by this class.** The transfer closes
 every file object `open` returns, since that close is how a real backend
@@ -1180,6 +1178,18 @@ only, from the descriptor's `O_APPEND` flag; Windows cannot be asked for the
 flag, so a stream that appends under another `mode` string is not recognized
 there, and a `>>` redirect from `cmd` — which appends nothing, it only starts
 at the end — is an ordinary seekable stream.
+
+The class relies on the stream keeping the `io` module's contract and does not
+check it: `read` returns bytes (`str` for a text stream) and an empty value at
+the end, `write` takes them, and `seekable()`, where present, answers `True`
+or `False`. A stream that breaks it is not supported — one whose `seekable()`
+raises, such as a `tarfile` member read in stream mode (`"r|"`), fails its
+transfer. What the stream raises fails the item: a `Boto3S3Error` is recorded
+as it is, any other exception becomes a `Boto3S3Error` with the original on
+`__cause__`, and an interrupt cancels the item and reaches the caller. Where
+the SDK reads the stream itself (the classic engine hands a seekable binary
+stream to the SDK as the request body), a failure there takes the SDK's
+category instead, with the original further down the exception chain.
 
 Of the four contract operations only `open` is implemented. `get_fileinfo` and
 `delete` keep `Storage`'s base implementations and raise `NotImplementedError`

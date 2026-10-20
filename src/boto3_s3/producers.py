@@ -137,9 +137,9 @@ def _single_source_info(
 ) -> FileInfo | None:
     """Resolve the single (non-dir_op) source through ``get_fileinfo``.
 
-    Stamps the producing backend as a safety net (mirroring ``Storage.scan``'s):
-    the built-ins stamp their own ``get_fileinfo`` results, so this only fills a
-    ``None`` left by a bespoke backend - keeping ``src_info.storage`` in
+    Stamps the producing backend (mirroring ``Storage.scan``), so a backend's
+    ``get_fileinfo`` need not: the built-ins stamp their own results, and this
+    fills a ``None`` another backend left - keeping ``src_info.storage`` in
     agreement with ``OpResult.src_storage`` on the single-object routes too.
 
     A family error the storage raises (a stat the local backend could not

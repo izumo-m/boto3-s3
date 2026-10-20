@@ -80,7 +80,6 @@ if TYPE_CHECKING:
 
     from boto3_s3.exceptions import Boto3S3Error
     from boto3_s3.s3 import S3
-    from boto3_s3.storage import Storage
     from boto3_s3.types import FileInfo, TransferType
 
 # Default multipart part size: boto3 `TransferConfig.multipart_chunksize`.
@@ -137,11 +136,11 @@ class EtagComparison(ContentComparison):
     hash. ``check_size=False`` restores pure-ETag semantics.
 
     An upload / download comparison reads the **readable** (non-S3) side through
-    its ``Storage.open`` - any backend, not just a local file - so a read failure
-    surfaces as that backend's error (a ``Boto3S3Error``
-    for a local file removed between the listing and the compare); the s3-to-s3
-    path reads nothing. A pair with no readable-side backend, or neither side an
-    S3 object, is treated as differing (copy).
+    its ``Storage.open`` - any backend, not just a local file - and a read
+    failure leaves the strategy as a ``Boto3S3Error`` (`ContentComparison`'s
+    ``_read_readable``: a ``NotFoundError`` for a local file removed between
+    the listing and the compare); the s3-to-s3 path reads nothing. A pair with
+    neither side an S3 object is treated as differing (copy).
 
     ``content_differs`` applies the same judgment to a **single** source - a
     local path or an open binary stream against an ETag the caller supplies -
@@ -269,7 +268,6 @@ class EtagComparison(ContentComparison):
 
     def _readable_remote_differ(
         self,
-        storage: Storage | None,
         readable: FileInfo,
         remote: FileInfo,
         transfer_type: TransferType,
@@ -278,23 +276,14 @@ class EtagComparison(ContentComparison):
         remote_etag = _s3_etag(remote)
         if not remote_etag:
             return True
-        key = readable.compare_key
-        if storage is None or key is None:
-            return True  # cannot open the readable side -> treat as differing (copy)
         chunk: int | None = None
         if "-" in remote_etag:
             if readable.size is None:
                 return True  # need the size to reconstruct the multipart part split
             chunk = _effective_part_size(self.part_size, readable.size)
-        try:
-            with storage.open(key, "rb") as fh:
-                computed = self._computed_etag(fh, chunk_size=chunk)
-        except OSError as exc:
-            # LocalStorage.open translates its own open failure; a fault
-            # *mid-read* (or on close) is a raw OSError from the stream. Keep
-            # the promise that a local read failure surfaces as a taxonomy
-            # error; a custom backend's own exceptions pass through unchanged.
-            raise _taxonomy_error(exc, operation="sync", key=key) from exc
+        computed = self._read_readable(
+            readable, lambda fh: self._computed_etag(fh, chunk_size=chunk)
+        )
         return remote_etag != computed
 
     def _computed_etag(self, fh: BinaryIO, *, chunk_size: int | None) -> str:
@@ -316,8 +305,7 @@ def _taxonomy_error(exc: OSError, *, operation: str, key: str) -> Boto3S3Error:
     """A local read failure as a library error: missing -> ``NotFoundError``, and so on.
 
     Deferred import, so this module stays SDK-free at import time; ``operation``
-    names the caller's context (``"sync"`` for the pair filter, ``"compare"``
-    for ``content_differs``).
+    names the caller's context (``"compare"`` for ``content_differs``).
     """
     from boto3_s3.localstorage import translate_os_error
 

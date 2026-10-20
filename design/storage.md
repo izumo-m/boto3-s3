@@ -106,11 +106,9 @@ front only when the declaration is honest:
   `_list_single_object` order.
 
   `options.filter` (the `--exclude`/`--include` predicate) is applied by
-  **`scan()` as a safety net** by default, so a `scan_pages` that forgets it
-  cannot silently leak excluded entries into `--exclude`/`--include` or, on a
-  `sync --delete` destination, into deletion. A backend that filters at its
-  source applies it in `scan_pages` and declares
-  **`scan_pages_filters = True`** to skip the redundant re-filter
+  **`scan()`** by default, after `scan_pages`, so a backend need not filter at
+  all. A backend that filters at its source applies it in `scan_pages` and
+  declares **`scan_pages_filters = True`** to skip the redundant re-filter
   (`storage.sieve_pages` is the helper; a custom
   `LocalFileGenerator.finalize_children` override prunes by its *own* rules -
   it never sees `options.filter` - so it does not qualify by itself). Honor
@@ -296,12 +294,12 @@ of deep inside the run:
 
 The reading members form a lattice: `SORTABLE_SCAN` implies `SCAN` implies
 `GET_FILEINFO`. `sync`'s merge-join walks both listings in UTF-8 byte order, so a
-custom `sync` side **must** declare `SORTABLE_SCAN` — an unsorted listing would
-manufacture phantom pairs and, with `--delete`, corrupt the destination. The
-promise is taken on trust: the merge follows aws-cli's step for step and does
-not check the order, so a backend that breaks it - like an S3-compatible
-endpoint returning an unsorted `ListObjectsV2`, on which aws-cli mis-pairs the
-same way - gets aws-cli's mis-pairing ([`sync.md`](./sync.md) section 3).
+custom `sync` side **must** declare `SORTABLE_SCAN` and honor it, listing each
+`compare_key` once. Both promises are taken on trust: the merge follows
+aws-cli's step for step and checks neither, and what a backend breaking them
+leads to is not specified ([`overview.md`](./overview.md) section 3). An
+S3-compatible endpoint returning an unsorted `ListObjectsV2` is the library's
+own reach, and gets aws-cli's mis-pairing ([`sync.md`](./sync.md) section 3).
 **`sync` is the only order-sensitive consumer**: recursive `cp` / `mv` take the
 backend's entries in whatever order `scan` yields them (they never pass
 `ScanOptions(sort=True)`), so a plain `SCAN` side needs no ordering guarantee

@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Failures `aws s3` loses or finds late are now reported: a `PreconditionFailed` to any request but `no_overwrite`'s own write fails the item, a single-key `rm` records a failed delete after Ctrl-C, a file whose stat failed and then recovered is warned about, a malformed `grants` is refused before the run, and a run refused before it starts no longer creates its destination directory.
 - On the CRT engine, items cut short by a fatal error or Ctrl-C, or by an interrupt from an upload's stream, are now `CANCELLED` as on the classic engine, and a Ctrl-C the CRT manager swallows during its drain is re-raised instead of ending in `BatchError`.
 - A local source that cannot be walked as a directory (a file, an unreadable or special path, a symlink not followed) now stops a `sync` or recursive `cp` / `mv` before it starts instead of running on an empty source, a `LastModified` only a local-time conversion cannot hold no longer stops a run, and `requestparams.validate_grants` checks a grants value on its own.
+- The library no longer checks or works around code you hand it that breaks its documented contract (streams, custom storages, `GlobFilter`'s `compare_key`), and records what that code raises as the error policy says: a `CancelledError` it raises as it is, a CRT stream upload's read failure instead of awscrt's unknown error, and a custom backend's failure during a content comparison as a `Boto3S3Error`.
 
 ## [0.12.0] - 2026-10-18
 

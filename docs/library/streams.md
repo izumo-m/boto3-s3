@@ -61,9 +61,9 @@ stream cannot write in the encoding it was opened with; on an upload, bytes the
 stream cannot read in that encoding (a text-mode `open("photo.jpg")`) or a
 character `encoding` cannot encode. A failed download leaves in the stream
 whatever was decoded before the failure. `cp` (or `mv`) then raises
-`BatchError`, whose `__cause__` is the item's `OpResult.error`; on a download
-that is a `Boto3S3Error` with the `UnicodeDecodeError` or
-`UnicodeEncodeError` on its own `__cause__`.
+`BatchError`, whose `__cause__` is the item's `OpResult.error`: a
+`Boto3S3Error` with the `UnicodeDecodeError` or `UnicodeEncodeError` on its
+own `__cause__`, on either transfer engine.
 
 For the bytes exactly as they are, hand over a binary stream instead — a file
 opened `"rb"` or `"wb"` — or use `StdioStorage()` for standard input and
@@ -150,3 +150,20 @@ therefore drop. `expected_size` applies to uploads only, where it lets
 multipart be planned in advance for a stream whose length is not otherwise
 knowable (a non-seekable one; a seekable stream is sized by the engine itself
 and the hint is ignored, so it never shortens what is sent).
+
+## 4. What the stream must do
+
+`IOStorage` relies on your stream behaving as Python's own I/O streams do
+(the `io` module's contract) and does not check it: `read` returns bytes (or
+`str` for a text stream) and an empty value at the end, `write` takes them,
+and `seekable()`, where the stream has one, answers `True` or `False`. A
+stream that breaks this is not supported: one whose `seekable()` raises, such
+as a `tarfile` member read in stream mode (`"r|"`), fails its transfer.
+
+What the stream raises fails the item. A `Boto3S3Error` it raises is recorded
+as it is; any other exception becomes a `Boto3S3Error` with the original on
+`__cause__`, and an interrupt (Ctrl-C, `SystemExit`) cancels the item and
+reaches you. Where the SDK reads the stream itself (the classic engine hands
+a seekable binary stream to the SDK as the request body), a failure there
+takes the SDK's category instead, with the original further down the
+exception chain.

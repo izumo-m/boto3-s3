@@ -2,8 +2,7 @@
 
 ``Comparator.compare`` merge-joins two streams that are expected to ascend by
 compare key. A side that does not - an S3-compatible endpoint whose
-``ListObjectsV2`` does not sort (real S3 and MinIO both do), or a custom
-backend that declares ``SORTABLE_SCAN`` and breaks the promise - is merged all
+``ListObjectsV2`` does not sort (real S3 and MinIO both do) - is merged all
 the same, one comparison of the two entries in hand per step, exactly as
 aws-cli's ``Comparator.call`` merges it. The mis-pairing that follows is
 aws-cli's own: with ``--delete`` it deletes from the destination a key the

@@ -371,8 +371,8 @@ one that pays for it, and may stream natural order when `sort=False`.
 
 `filter` (default `None`, meaning no filtering) is a per-entry predicate over
 the entry's `FileInfo` that returns `True` to keep it. Each producer's
-`scan_pages` applies it and returns already-filtered pages, and `scan` re-sieves
-as a safety net for a backend that has not declared it filters
+`scan_pages` applies it and returns already-filtered pages, and `scan` applies
+it itself for a backend that has not declared it filters
 ([`storage.md`](./storage.md)). `FileInfo.storage` is set before the predicate
 runs, and a backend's listing stamps `FileInfo.compare_key` as part of its own
 contract, so a [`GlobFilter`](./filters.md#globfilter) matches the relative key
@@ -477,10 +477,9 @@ instance through this field so the shared, stateless walker can stamp each
 entry's `FileInfo.storage` before the filter runs, without the walker holding a
 back-reference to any one storage. It is `None` on a hand-built options object,
 but `LocalStorage.scan_pages` replaces it with itself before walking, so the
-walker stamps every entry a `LocalStorage` scan produces. `Storage.scan`'s
-backstop fills `FileInfo.storage` afterwards only for entries a `scan_pages`
-left `None` — a custom backend that drives the walker itself and leaves this
-field unset.
+walker stamps every entry a `LocalStorage` scan produces. `Storage.scan`
+fills `FileInfo.storage` afterwards for entries a `scan_pages` left `None` — a
+custom backend that drives the walker itself and leaves this field unset.
 
 ## S3ScanOptions
 

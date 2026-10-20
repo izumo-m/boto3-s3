@@ -2517,6 +2517,61 @@ class TestWorkerRaise:
         assert [type(exc) for exc in noted] == [SystemExit]
         assert [type(exc).__name__ for exc in raised] == ["_StreamInterruptedError"]
 
+    @pytest.mark.parametrize("raises", [True, False], ids=["body-raised", "body-fine"])
+    def test_a_crt_stream_upload_fails_with_what_its_body_raised(self, raises: bool) -> None:
+        # awscrt reads the body on its own thread and reports a read that
+        # raised as AWS_ERROR_UNKNOWN, dropping the exception; the item fails
+        # with it, as on the classic engine (base error, the raise on __cause__).
+        class _UnknownError(Exception):
+            # awscrt's AwsCrtError shape: matched by code / name, never imported.
+            code = 3
+            name = "AWS_ERROR_UNKNOWN"
+
+        class _ReadingManager(_CrtDrainManager):
+            def upload(self, **kwargs: Any) -> _FakeCrtFuture:
+                def read() -> None:
+                    with contextlib.suppress(Exception):
+                        kwargs["fileobj"].read(4)
+
+                worker = threading.Thread(target=read)
+                worker.start()
+                worker.join()
+                future = _FakeCrtFuture(_UnknownError("AWS_ERROR_UNKNOWN: Unknown error."))
+                self._accepted.append((future, list(kwargs["subscribers"])))
+                return future
+
+        encode_error = UnicodeEncodeError("ascii", "é", 0, 1, "ordinal not in range(128)")
+
+        class _Body:
+            def read(self, amount: int = -1) -> bytes:
+                if raises:
+                    raise encode_error
+                return b""
+
+        results: list[OpResult] = []
+        client, _ = make_recording_client([])
+        transferrer = Transferrer(TransferType.UPLOAD, client, on_result=results.append)
+        with transferrer:
+            transferrer._manager = _ReadingManager()  # pyright: ignore[reportPrivateUsage]
+            transferrer.submit(
+                TransferItem(
+                    compare_key="-",
+                    size=None,
+                    src_fileobj=cast("Any", _Body()),
+                    src_info=FileInfo(key="-"),
+                    dest_bucket="b",
+                    dest_key="k",
+                )
+            )
+        error = results[0].error
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert type(error) is Boto3S3Error
+        if raises:
+            assert error.__cause__ is encode_error
+            assert str(error) == str(encode_error)
+        else:
+            assert str(error) == "AWS_ERROR_UNKNOWN: Unknown error."
+
     def test_a_crt_stream_upload_hands_awscrt_the_guarded_body(self, tmp_path: Path) -> None:
         stream = io.BytesIO(b"payload")
         client, _ = make_recording_client([])

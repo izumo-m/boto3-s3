@@ -133,10 +133,10 @@ class TestCustomBackendScanOptions:
         assert type(base_opts) is ScanOptions
 
 
-class TestScanFilterSafetyNet:
-    """``scan()`` applies ``options.filter`` as a safety net unless the backend
-    declares ``scan_pages_filters`` - so a custom backend that forgets to filter in
-    ``scan_pages`` cannot silently leak excluded entries (``--exclude`` / ``--delete``)."""
+class TestScanDefaults:
+    """``scan()`` applies ``options.filter`` unless the backend declares
+    ``scan_pages_filters``, and stamps ``FileInfo.storage`` where ``scan_pages``
+    left it ``None`` - so a backend need do neither itself."""
 
     @staticmethod
     def _two_pages_unfiltered(options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
@@ -150,7 +150,7 @@ class TestScanFilterSafetyNet:
         class Unfiltered(_Stub):
             @override
             def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
-                yield from TestScanFilterSafetyNet._two_pages_unfiltered(options)
+                yield from TestScanDefaults._two_pages_unfiltered(options)
 
         opts = ScanOptions(filter=lambda i: i.key.endswith(".txt"))
         assert [i.key for i in Unfiltered().scan(opts)] == ["keep.txt"]  # scan() filtered
@@ -161,23 +161,23 @@ class TestScanFilterSafetyNet:
 
             @override
             def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
-                yield from TestScanFilterSafetyNet._two_pages_unfiltered(options)
+                yield from TestScanDefaults._two_pages_unfiltered(options)
 
         opts = ScanOptions(filter=lambda i: i.key.endswith(".txt"))
         # Declares it filters itself, so scan() does not re-apply -> the unfiltered
-        # ".log" survives (proving the safety net is off, not that filtering is lost).
+        # ".log" survives (proving scan() leaves the filtering to the backend).
         assert [i.key for i in SelfFiltered().scan(opts)] == ["keep.txt", "drop.log"]
 
     def test_builtins_declare_the_flag(self) -> None:
         assert S3Storage.scan_pages_filters is True
         assert LocalStorage.scan_pages_filters is True
-        assert Storage.scan_pages_filters is False  # the safe default
+        assert Storage.scan_pages_filters is False  # scan() filters by default
 
-    def test_scan_stamps_the_producing_backend_as_a_safety_net(self) -> None:
+    def test_scan_stamps_the_producing_backend(self) -> None:
         class Unfiltered(_Stub):
             @override
             def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
-                yield from TestScanFilterSafetyNet._two_pages_unfiltered(options)
+                yield from TestScanDefaults._two_pages_unfiltered(options)
 
         backend = Unfiltered()
         infos = list(backend.scan(ScanOptions()))
@@ -186,7 +186,7 @@ class TestScanFilterSafetyNet:
         # info.storage, an on_result callback) can reach it on custom backends.
         assert infos and all(info.storage is backend for info in infos)
 
-    def test_safety_net_stamp_precedes_the_filter(self) -> None:
+    def test_the_stamp_precedes_the_filter(self) -> None:
         # FileInfo's contract: `storage` is stamped before any filter runs, so
         # a predicate can reach the producing backend (e.g. a HeadObject for a
         # tag the listing omits) even on a backend whose scan_pages does not
@@ -194,7 +194,7 @@ class TestScanFilterSafetyNet:
         class Unfiltered(_Stub):
             @override
             def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
-                yield from TestScanFilterSafetyNet._two_pages_unfiltered(options)
+                yield from TestScanDefaults._two_pages_unfiltered(options)
 
         backend = Unfiltered()
         seen: list[Storage | None] = []

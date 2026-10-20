@@ -177,17 +177,21 @@ stored that way: awscrt reads it on its own thread, where it would lose a
 for the caller and raises an ordinary exception in its place; awscrt fails the
 request with its own error, and the item's completion reads the kept
 interrupt back as the outcome - the item is `CANCELLED`, and the interrupt is
-re-raised to the caller. A classic threaded
-download's sink raising one is settled on its IO worker (`_TaskGuard`): the
+re-raised to the caller. An ordinary exception the reader raises there awscrt
+reports as its own `AWS_ERROR_UNKNOWN`, dropping it; the guard keeps the first
+one, and when that is the request's outcome the item fails with it instead (the
+base error with it on `__cause__`), as on the classic engine. A classic threaded
+download's sink raising an interrupt is settled on its IO worker (`_TaskGuard`): the
 item is `CANCELLED` and the interrupt re-raised.
 The classic engine settles every revoked item with s3transfer's
 `CancelledError` shapes and re-raises a drain-time interrupt itself. A
 `CancelledError` a task
 itself raised - a caller's stream throwing `concurrent.futures.CancelledError`
 or the library's own, nobody having ordered a cancel - wears the type but is
-not a revocation, and the item is `FAILED` (the library's type is reported as
-the base error with the throw as its cause, so a `FAILED` record never carries
-the type that means "revoked"). The classic coordinator settles such a throw
+not a revocation, and the item is `FAILED` (the library's own type is recorded
+as it is, like any library exception the caller's code raises;
+`concurrent.futures`' becomes the base error with the throw as its cause).
+The classic coordinator settles such a throw
 as a failure and says so; the CRT engine keeps no such status and never
 produces either type itself, so there the type counts as a revocation only
 when the run ordered one.

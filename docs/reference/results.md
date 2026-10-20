@@ -397,8 +397,8 @@ during the scan and before any filter runs. It lets a filter predicate reach
 behind the entry — a `HeadObject` for a tag the listing omits — and it is the
 handle `sync` reads through a pair's `src` / `dest` to open the non-S3 side for
 a content compare ([`comparator.md`](./comparator.md)). It is `None` on a
-hand-built `FileInfo`; `Storage.scan` fills it as a backstop for a backend whose
-`scan_pages` did not.
+hand-built `FileInfo`; `Storage.scan` fills it on an entry its `scan_pages`
+left `None`, so a backend need not stamp it.
 
 The class is a mutable dataclass with `slots=True` and keyword-only fields.
 

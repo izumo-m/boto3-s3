@@ -82,7 +82,7 @@ class FileInfo:
     ``SyncPair.dest`` to open a pair's non-S3 side for a
     content compare (so ``pair.src.storage`` replaces a separately threaded
     backend). ``None`` on a hand-built ``FileInfo``; ``Storage.scan`` sets it
-    as a safety net for a backend whose ``scan_pages`` did not.
+    on an entry its ``scan_pages`` left ``None``, so a backend need not.
     """
 
     key: str
@@ -175,7 +175,7 @@ class ScanOptions:
 
     ``filter`` is a per-entry predicate (``True`` keeps the entry) applied by
     each ``Storage.scan_pages`` producer, which returns already-filtered pages
-    (``scan`` flattens + prefetches them, re-sieving only as a safety net for a
+    (``scan`` flattens + prefetches them, and applies the predicate itself for a
     backend that does not declare ``scan_pages_filters``). A backend may
     push the predicate to its source (a REST listing filtering server-side) or
     wrap its raw pages with ``storage.sieve_pages``; the built-ins run it on the
@@ -325,7 +325,7 @@ class LocalScanOptions(ScanOptions):
     ``FileInfo.storage`` before the visibility filter runs, without holding a
     back-reference to any one storage (which would misfire when one walker is
     shared across storages). ``None`` on a hand-built options object -
-    ``Storage.scan``'s backstop fills ``FileInfo.storage`` afterwards instead.
+    ``Storage.scan`` fills ``FileInfo.storage`` afterwards instead.
     """
 
     follow_symlinks: bool = True

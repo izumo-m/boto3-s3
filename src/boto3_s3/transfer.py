@@ -76,7 +76,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib.metadata import version
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlparse
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -1655,7 +1655,7 @@ class Transferrer:
         fileobj: Any = item.src_fileobj if item.src_fileobj is not None else item.src_path
         if item.src_fileobj is not None and not isinstance(manager, TransferManager):
             # The CRT engine reads the body on an awscrt thread (`_GuardedReader`);
-            # the completion reads back an interrupt the guard caught there.
+            # the completion reads back what the guard caught there.
             guard = _GuardedReader(item.src_fileobj, self._note_raise, self._caller_thread)
             completion.stream_guard = guard
             fileobj = guard
@@ -2210,15 +2210,9 @@ class Transferrer:
                 self._skipped += 1
             self._emit(self._result(item, OpOutcome.SKIPPED))
             return
-        if isinstance(exc, CancelledError):
-            # The library's cancellation type on a future nobody revoked: the
-            # caller's own code threw it. The item failed, and a FAILED record
-            # must not carry the type that means "revoked", so it is reported
-            # as the base error with the throw on __cause__ - what the same
-            # throw of concurrent.futures' CancelledError becomes.
-            thrown = exc
-            exc = Boto3S3Error(str(thrown))
-            exc.__cause__ = thrown
+        # The library's own CancelledError on a future nobody revoked was
+        # thrown by the caller's code: like every library exception the
+        # caller's code raises, it is recorded as it is (a FAILED record).
         error = self._local_failure(item, exc) or translate_boto_error(
             exc,
             operation=self._operation,
@@ -2481,13 +2475,13 @@ class _ThreadedExecutor(_TaskGuard, ThreadPoolExecutor):
 
     A signal is only ever delivered to the main thread, so a ``BaseException``
     outside ``Exception`` raised on one of these workers comes from the
-    caller's own code running there: an event handler registered on the
-    client (a CLI plugin's), the caller's stream read or written by a task.
+    caller's own code running there: an event handler the caller registered
+    on the client, the caller's stream read or written by a task.
     Upstream lets it pass `Task.__call__` with the transfer still unsettled -
     the item then recorded SUCCEEDED, so a ``mv`` deleted its source though
     no PutObject went out and a download into a stream reported success with
     nothing written - and the pool's work item swallowed it, so the run
-    returned normally (measured: ``sys.exit(3)`` in a plugin's PutObject
+    returned normally (measured: ``sys.exit(3)`` in a PutObject event
     handler). `_TaskGuard` settles the item CANCELLED and notes the exception;
     one escaping a task past its main (a done callback) is noted here.
     `Transferrer.submit` / ``__exit__`` re-raise it on the calling thread, so
@@ -2534,6 +2528,12 @@ class _GuardedReader:
     calling thread itself (s3transfer positioning the body at submit) the
     exception propagates unchanged. Every other attribute delegates to the
     stream.
+
+    An ordinary exception the stream raises on awscrt's thread (a text
+    stream's ``UnicodeEncodeError``, an ``OSError``) reaches awscrt as is,
+    and awscrt reports the request as ``AWS_ERROR_UNKNOWN``, dropping it.
+    The first one is kept in ``failure``, so the item fails with it instead
+    (`_Completion`), as it does on the classic engine.
     """
 
     _GUARDED = frozenset({"read", "read1", "readinto", "readinto1", "seek", "tell"})
@@ -2542,9 +2542,10 @@ class _GuardedReader:
         self._raw = raw
         self._note = note
         self._caller = caller
-        # The interrupt the stream raised on awscrt's thread, kept for the
-        # item's completion: awscrt reports only its own failure for the read.
+        # What the stream raised on awscrt's thread, kept for the item's
+        # completion: awscrt reports only its own failure for the read.
         self.interrupt: BaseException | None = None
+        self.failure: Exception | None = None
 
     def __getattr__(self, name: str) -> Any:
         attr = getattr(self._raw, name)
@@ -2556,7 +2557,11 @@ class _GuardedReader:
             try:
                 return attr(*args, **kwargs)
             except BaseException as exc:
-                if isinstance(exc, Exception) or threading.get_ident() == caller:
+                if threading.get_ident() == caller:
+                    raise
+                if isinstance(exc, Exception):
+                    if guard.failure is None:
+                        guard.failure = exc
                     raise
                 if guard.interrupt is None:
                     guard.interrupt = exc
@@ -2856,9 +2861,8 @@ class _DeleteSource:
         # ResponseMetadata) for _Completion to surface under extra_info["delete"].
         # A local source delete returns None (nothing to capture); a custom backend
         # may return its own Mapping response.
-        if self._capture and isinstance(response, Mapping):
-            captured = cast("Mapping[str, Any]", response)
-            future.meta.user_context[_DELETE_RESPONSE_KEY] = strip_response_metadata(captured)
+        if self._capture and response is not None:
+            future.meta.user_context[_DELETE_RESPONSE_KEY] = strip_response_metadata(response)
 
 
 class _CloseFileobj:
@@ -2971,6 +2975,16 @@ class _Completion:
                 # item's outcome is the interrupt, CANCELLED like every
                 # interrupted item (`Transferrer._record_failure`).
                 exc = guard.interrupt
+            elif (
+                guard is not None
+                and guard.failure is not None
+                and crt_error_name(exc) == "AWS_ERROR_UNKNOWN"
+            ):
+                # awscrt reported the read that raised as its own unknown
+                # error and dropped the exception: the item fails with what
+                # the stream raised, as on the classic engine. Any other
+                # outcome (a cancellation, a network failure) stays awscrt's.
+                exc = guard.failure
             self._on_failure(self._item, exc, _future_revoked(future))
             return
         # Classic s3transfer resolves an unknown-size download's size on the

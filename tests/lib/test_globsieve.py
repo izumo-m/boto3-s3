@@ -639,10 +639,6 @@ class TestGlobFilter:
         # Passing a filter without calling compile() works: __call__ compiles lazily.
         assert GlobFilter().exclude("*.log")(self._info("a.log")) is False
 
-    def test_missing_compare_key_raises(self) -> None:
-        with pytest.raises(ValueError, match="compare_key"):
-            GlobFilter().exclude("*")(FileInfo(key="a.txt"))
-
 
 class TestPickle:
     """Every matcher ``compile`` can return survives a pickle round trip.

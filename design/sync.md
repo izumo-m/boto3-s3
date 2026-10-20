@@ -116,19 +116,18 @@ pair (`PairFilter = Callable[[SyncPair], bool]`, True = copy).
   one-to-one onto aws-cli's strategy slots (section 2): `file_not_at_dest` ->
   `SrcOnlyPair`, `file_at_src_and_dest` -> `SyncPair`, `file_not_at_src` ->
   `DestOnlyPair`. The merge emits one pair **per entry**, which is one pair per
-  key only while each side's keys are unique. The `SORTABLE_SCAN` order contract
-  is not checked at merge time: an unordered side is merged step for step as
-  aws-cli's `Comparator.call` merges it (each step compares only the two
+  key because a listing names each compare key once (the storage protocol; a
+  custom backend's promise, like its `SORTABLE_SCAN` order, taken on trust:
+  [`overview.md`](./overview.md) section 3). The order is not checked at merge
+  time: an unordered S3-compatible listing is merged step for step as aws-cli's
+  `Comparator.call` merges it (each step compares only the two
   entries in hand), so the mis-pairing an S3-compatible endpoint's unsorted
   `ListObjectsV2` causes - with `--delete`, a destination key the source has
   too both deleted and copied - is aws-cli's own, measured against a listing
   mutated in flight. Which of the two requests reaches the service first is
   timing on both tools (aws-cli sends them from separate workers, this
   library batches its deletes), so whether the key survives differs from run
-  to run on either - measured, a key lost in 4 of 6 runs on each. A custom `SORTABLE_SCAN` backend that yields a key
-  twice produces a pair per occurrence rather than one merged pair; the
-  built-in local and S3 scans never duplicate a key, so this is a
-  custom-backend concern.
+  to run on either - measured, a key lost in 4 of 6 runs on each.
 - `create_filter` is the new (`SrcOnlyPair`) lane: `True` (default) copies every new
   entry, `False` none, a `FileFilter` only those it keeps (matched against the
   source `FileInfo` / compare key, the same shape as `rm`'s `filter`). aws-cli
