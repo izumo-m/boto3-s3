@@ -264,10 +264,9 @@ the CRT manager swallows during its transfer drain ends the run in `BatchError`
 depend on the token: an item whose outcome the engine holds as an interrupt —
 a `KeyboardInterrupt` or `SystemExit` that landed in, or was raised by, code
 running for that item — reports `CANCELLED`, and that interrupt is then raised
-to the caller. Not every engine route keeps an interrupt raised by a caller's
-stream as the outcome, though: `use_threads=False`, a threaded upload and a CRT
-download do; a threaded download and a CRT upload do not, and what happens
-there is the engine's. `error` is a
+to the caller. An interrupt raised by a caller's stream is kept that way on
+every route but a CRT upload, whose reader awscrt runs on its own thread: there
+the item is `FAILED`, and the interrupt is still raised to the caller. `error` is a
 [`CancelledError`](./exceptions.md#cancellederror) naming the cause where the
 canceller supplied one; an immediate-mode escalation arriving during a drain
 revokes without a message and those records carry the bare `canceled`, while the

@@ -63,7 +63,8 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   upstream's submission stage (a non-seekable stream's read, a copy's
   `on_queued` requests) is stored by upstream as the future's outcome, and one
   inside a done subscriber's own work - the open route's commit
-  (`_CloseFileobj`), mv's source delete (`_DeleteSource`) - is stored by that
+  (`_CloseFileobj`), copy-props' post-copy writes (`_SetTags`,
+  `_SetAnnotations`), mv's source delete (`_DeleteSource`) - is stored by that
   subscriber, so the subscribers after it see a failed transfer (no source
   delete), `_Completion` records CANCELLED, and the interrupt is handed back
   to the caller from `submit` (`_outcome`, `_record_failure`). One landing in

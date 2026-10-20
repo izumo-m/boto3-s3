@@ -1877,10 +1877,14 @@ class TestSerialExecutorInterrupt:
         source_tail: list[dict[str, Any] | BaseException],
         *,
         on_result: Callable[[OpResult], None],
+        annotation_copy_mode: AnnotationCopyMode | None = None,
     ) -> tuple[list[ApiCall], list[ApiCall], Transferrer]:
         """A ``mv`` multipart copy under ``copy_props=ALL`` whose tag set only
         fits a post-copy write; the tails are what each side answers after
         the copy completes and after the tag read."""
+        options = TransferOptions(copy_props=CopyPropsMode.ALL)
+        if annotation_copy_mode is not None:
+            options["annotation_copy_mode"] = annotation_copy_mode
         client, calls = make_recording_client(
             [
                 {"UploadId": "u"},
@@ -1898,7 +1902,7 @@ class TestSerialExecutorInterrupt:
             client,
             source_client=source_client,
             transfer_config=_SYNC_CONFIG,
-            options=TransferOptions(copy_props=CopyPropsMode.ALL),
+            options=options,
             is_move=True,
             on_result=on_result,
         )
@@ -1968,6 +1972,21 @@ class TestSerialExecutorInterrupt:
             "GetObjectAnnotation",
             "GetObjectAnnotation",
         ]
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+        assert (transferrer.succeeded, transferrer.cancelled) == (0, 1)
+
+    def test_interrupt_inside_the_deferred_annotation_read_records_cancelled(self) -> None:
+        # The deferred mode reads the source's annotations only after the
+        # copy and its tag write: an interrupt there is stored the same way.
+        results: list[OpResult] = []
+        calls, source_calls, transferrer = self._move_with_post_copy_writes(
+            [{}, {}, {}],
+            [KeyboardInterrupt(), {}, {}],
+            on_result=results.append,
+            annotation_copy_mode=AnnotationCopyMode.DEFERRED,
+        )
+        assert ops(calls)[4:] == ["PutObjectTagging"]
+        assert ops(source_calls) == ["HeadObject", "GetObjectTagging", "ListObjectAnnotations"]
         assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
         assert (transferrer.succeeded, transferrer.cancelled) == (0, 1)
 

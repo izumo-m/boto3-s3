@@ -3085,22 +3085,22 @@ class _SetAnnotations:
     def on_done(self, future: Any, **kwargs: Any) -> None:
         if not self._multipart or self._ran:
             return
-        self._ran = True
-        bucket = future.meta.call_args.bucket
-        key = future.meta.call_args.key
-        completed = self._completions.take(bucket, key)
         try:
+            self._ran = True
+            bucket = future.meta.call_args.bucket
+            key = future.meta.call_args.key
+            completed = self._completions.take(bucket, key)
             if _outcome(future) is not None:
                 return  # the copy (or the tagging write before this) failed
             if self._store is None:
-                try:
-                    self._read_source()
-                except BaseException as exc:
-                    # An interrupt included: stored as the outcome, it becomes
-                    # CANCELLED and is re-raised to the caller (`_outcome`).
-                    future.set_exception(exc)
-                    return
+                self._read_source()
             self._write(future, bucket, key, completed or {})
+        except BaseException as exc:
+            # A failed deferred read, or an interrupt anywhere past the flag:
+            # stored as the outcome (an interrupt becomes CANCELLED and is
+            # re-raised to the caller, `_outcome`), so a second announce
+            # cannot find the flag set and record a success.
+            future.set_exception(exc)
         finally:
             self.close()
 
@@ -3459,14 +3459,21 @@ class _SetTags:
     def on_done(self, future: Any, **kwargs: Any) -> None:
         if self._ran:
             return
-        self._ran = True
-        tag_set = future.meta.user_context.get(_POST_TAGGING_KEY)
-        if not tag_set:
+        try:
+            self._ran = True
+            tag_set = future.meta.user_context.get(_POST_TAGGING_KEY)
+            if not tag_set:
+                return
+            if _outcome(future) is not None:
+                return  # the copy itself failed; nothing to tag or roll back
+            bucket = future.meta.call_args.bucket
+            key = future.meta.call_args.key
+        except BaseException as exc:
+            # An interrupt past the flag but before the write: stored as the
+            # outcome, so a second announce cannot find the flag set and
+            # record a success for an untagged copy.
+            future.set_exception(exc)
             return
-        if _outcome(future) is not None:
-            return  # the copy itself failed; nothing to tag or roll back
-        bucket = future.meta.call_args.bucket
-        key = future.meta.call_args.key
         try:
             self._dest_client.put_object_tagging(
                 Bucket=bucket,
