@@ -124,13 +124,17 @@ def rm_filter_root(key: str, *, recursive: bool) -> str:
     its parent directory, and a bucket-root target uses ``""``
     (aws-cli ``filters._get_s3_root``). ``--exclude`` / ``--include``
     patterns resolve relative to this prefix, and the recursive listing uses
-    it as the ``Prefix``. Always empty or ``/``-terminated.
+    it as the ``Prefix``. Always empty or ending in a separator.
 
     aws joins the pattern onto that parent with ``os.path.join``, which adds
-    no second ``/`` after a parent that already ends in one, so the parent of
+    no separator after a parent that already ends in one, so the parent of
     ``a//b`` is ``a/`` (the entry is matched as ``/b``, not ``b``) and the
     parent of ``/b`` is ``""``; the same rule here keeps a glob's verdict on
-    such keys identical to aws's.
+    such keys identical to aws's. On Windows a backslash is such a
+    separator too: a non-recursive parent ending in one is returned as is,
+    and a recursive target typed ending in one keeps its ``/``-terminated
+    ``Prefix`` while its entries are shown to the filter with a leading
+    ``/`` (`producers.s3_listing_filter`).
     """
     if recursive:
         return f"{key}/" if key and not key.endswith("/") else key
@@ -1594,9 +1598,11 @@ class S3:
 
         ``filter`` keeps an item in the operation (rm's contract): a
         ``FileFilter`` predicate over the item's ``FileInfo``, whose
-        ``compare_key`` is stamped relative to the source directory or S3
-        ``Prefix`` - a `GlobFilter` matches that key (a relative pattern) or the
-        full ``key`` (an absolute one) while a richer
+        ``compare_key`` is stamped relative to aws-cli's base (the source
+        directory or S3 ``Prefix``; a single source is shown aws's own form,
+        design/globsieve.md section 5) - a `GlobFilter` matches that key (a
+        relative pattern) or the full path (an absolute one: a local entry's
+        ``key``, an S3 entry's ``bucket/key``) while a richer
         predicate can read size / mtime / storage_class. On the stream route (an
         ``IOStorage`` on one side) there is no listing to prune, so ``filter``
         does not apply - aws-cli applies no filter to a stream either.
@@ -2592,8 +2598,9 @@ class S3:
         ``filter`` keeps an item in the deletion when it is *included*: a
         ``Callable[[FileInfo], bool]`` over the entry's ``FileInfo``. Its
         ``compare_key`` is stamped to the key relative to the prefix returned by
-        `rm_filter_root` before the call, so a `GlobFilter` matches
-        that key (the CLI maps ``--exclude`` / ``--include`` here) while a
+        `rm_filter_root` before the call (with the Windows exception it
+        describes), so a `GlobFilter` matches that key as aws-cli matches it
+        (the CLI maps ``--exclude`` / ``--include`` here) while a
         richer predicate can read ``size`` / ``mtime`` / ``storage_class`` (on
         the blind single-key path ``size`` / ``mtime`` / ``storage_class`` are
         all ``None`` - only ``key``, ``compare_key`` and ``storage`` are set).
@@ -2678,7 +2685,7 @@ class S3:
             recursive=True,
             request_payer=request_payer,
             prefix=root,
-            filter=self._rm_scan_filter(filter, sweep=not recursive),
+            filter=self._rm_scan_filter(filter, sweep=not recursive, base_key=storage.key),
             reusable_after_interrupt=self._reusable_after_interrupt,
         )
 
@@ -2729,18 +2736,24 @@ class S3:
             ) from deleter.first_error
 
     @staticmethod
-    def _rm_scan_filter(item_filter: FileFilter | None, *, sweep: bool) -> FileFilter | None:
+    def _rm_scan_filter(
+        item_filter: FileFilter | None, *, sweep: bool, base_key: str
+    ) -> FileFilter | None:
         """The ``ScanOptions.filter`` for rm's enumerating paths.
 
         The scan stamps each entry's ``Prefix``-relative ``compare_key``, so a
-        glob/user filter reads it directly. The
-        keyless sweep additionally restricts to folder markers (marker test first,
-        then the user filter - aws-cli order). ``None`` when there is nothing to
-        test, so unfiltered paths pay no per-object call. Evaluated page by page on
-        the scan prefetch worker.
+        glob/user filter reads it directly - shown aws's own form of it where
+        the typed ``base_key`` makes the two differ
+        (`producers.s3_listing_filter`). The keyless sweep additionally
+        restricts to folder markers (marker test first, then the user filter -
+        aws-cli order). ``None`` when there is nothing to test, so unfiltered
+        paths pay no per-object call. Evaluated page by page on the scan
+        prefetch worker.
         """
         if not sweep:
-            return item_filter
+            if item_filter is None:
+                return None
+            return producers.s3_listing_filter(item_filter, base_key)
         if item_filter is None:
             return _is_folder_marker
         predicate = item_filter

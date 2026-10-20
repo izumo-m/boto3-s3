@@ -68,7 +68,9 @@ class FileInfo:
     yields (a contract of the backend's listing, not of the base ``Storage.scan``),
     so a custom ``ScanOptions.filter`` predicate - notably ``GlobFilter`` - matches
     it directly without re-deriving it from ``key``. The built-in
-    ``get_fileinfo`` methods use the basename for a single entry. The name mirrors
+    ``get_fileinfo`` methods use the basename for a single entry (an operation
+    shows a filter aws-cli's form of a single source instead,
+    design/globsieve.md section 5). The name mirrors
     aws-cli's ``FileInfo.compare_key``; a hand-built ``FileInfo`` may leave it as
     ``None``.
 
@@ -602,7 +604,8 @@ ListingCallback = Callable[[FileInfo], None]
 # predicate over the ``FileInfo`` returning True to keep the entry. The operation
 # stamps ``info.compare_key`` (aws-cli's --exclude/--include matching space)
 # before consulting it, so a glob predicate matches
-# ``compare_key`` while a richer predicate can decide on ``size`` / ``mtime`` /
+# ``compare_key`` (and an absolute pattern the full path: a local ``key``, an S3
+# ``bucket/key``) while a richer predicate can decide on ``size`` / ``mtime`` /
 # ``storage_class`` / ``key``, or reach the entry's backend through ``info.storage``
 # (e.g. a HeadObject for a tag the listing omits).
 # ``GlobFilter`` is the ready-made glob implementation.

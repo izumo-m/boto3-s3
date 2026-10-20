@@ -41,6 +41,7 @@ from boto3_s3 import (
     TransportError,
     ValidationError,
     globsieve,
+    producers,
     rm_filter_root,
 )
 from tests.utils.fakes3 import client_error, crt_sender_factory
@@ -137,6 +138,78 @@ class TestRmFilterRoot:
     )
     def test_root(self, key: str, recursive: bool, expected: str) -> None:
         assert rm_filter_root(key, recursive=recursive) == expected
+
+    @pytest.mark.parametrize(
+        ("key", "expected"),
+        [
+            # On Windows aws's ntpath.join takes a parent's trailing backslash
+            # for a separator, so a\\/b is matched as /b under a\\.
+            ("a\\/b", "a\\"),
+            ("a\\//b", "a\\/"),
+            ("a/b", "a/"),
+        ],
+    )
+    def test_windows_parent_ending_in_a_backslash(
+        self, monkeypatch: pytest.MonkeyPatch, key: str, expected: str
+    ) -> None:
+        monkeypatch.setattr(producers, "_JOIN_SEPARATORS", ("/", "\\"))
+        assert rm_filter_root(key, recursive=False) == expected
+
+
+class TestRmFilterBases:
+    """What a filter is matched against, where it differs from aws on purpose or by host."""
+
+    def test_glob_characters_in_the_target_are_literal(self) -> None:
+        # aws joins `*` onto the base `b/f[1]/` and reads `[1]` as a character
+        # class, so `--exclude '*'` matches nothing there and every object is
+        # deleted (measured on 2.36.40; aws-cli #7330, #5452). The base is
+        # taken literally here: everything is excluded (docs/cli/aws-differences.md).
+        client = _FakeS3Client([{"Contents": [_obj("f[1]/a.txt"), _obj("f[1]/b/c")]}])
+        assert (
+            _rm("s3://b/f[1]/", client, recursive=True, filter=globsieve.compile([Exclude("*")]))
+            == []
+        )
+        assert client.delete_objects_calls == []
+
+    def test_windows_backslash_ending_target_is_matched_as_aws_does(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Simulated Windows: aws joins patterns flush onto `b/pre\\`, matching
+        # the entry pre\\/x as /x; the record and the Prefix keep their forms.
+        monkeypatch.setattr(producers, "_JOIN_SEPARATORS", ("/", "\\"))
+        monkeypatch.setattr(globsieve, "_WINDOWS", True)
+        client = _FakeS3Client([{"Contents": [_obj("pre\\/x"), _obj("pre\\/y")]}])
+        results = _rm(
+            "s3://b/pre\\",
+            client,
+            recursive=True,
+            dryrun=True,
+            filter=globsieve.compile([Exclude("x", "?y")]),
+        )
+        assert client.list_calls[0]["Prefix"] == "pre\\/"
+        assert [r.compare_key for r in results] == ["x"]
+
+    def test_windows_single_key_under_a_backslash_parent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(producers, "_JOIN_SEPARATORS", ("/", "\\"))
+        monkeypatch.setattr(globsieve, "_WINDOWS", True)
+        kept = _rm(
+            "s3://b/a\\/x", _FakeS3Client(), dryrun=True, filter=globsieve.compile([Exclude("x")])
+        )
+        assert [r.compare_key for r in kept] == ["/x"]
+        dropped = _rm(
+            "s3://b/a\\/x", _FakeS3Client(), dryrun=True, filter=globsieve.compile([Exclude("?x")])
+        )
+        assert dropped == []
+
+    def test_a_plain_single_key_is_not_matched_across_its_parent(self) -> None:
+        # rm s3://b/a/x --exclude '?x' still deletes: the joined b/a/?x needs
+        # two characters after b/a/ (measured on 2.36.40).
+        results = _rm(
+            "s3://b/a/x", _FakeS3Client(), dryrun=True, filter=globsieve.compile([Exclude("?x")])
+        )
+        assert [r.compare_key for r in results] == ["x"]
 
 
 class TestRmSingleKey:

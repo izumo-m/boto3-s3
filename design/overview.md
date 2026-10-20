@@ -221,8 +221,8 @@ Markdown links inside each half resolve relatively and need no prefix.
   (the subclassing contract, `StorageCapability`, the open route).
 - [`deleter.md`](./deleter.md) - the design of `S3Deleter` (asynchronous batch
   deletion).
-- [`globsieve.md`](./globsieve.md) - the glob filter engine and the filter
-  contract of `S3.rm`.
+- [`globsieve.md`](./globsieve.md) - aws-cli's `--exclude` / `--include`
+  engine and what each operation shows a filter.
 - [`transfer.md`](./transfer.md) - the design of the transfer engine
   (`Transferrer` / `S3.cp` / `S3.mv`).
 - [`crt.md`](./crt.md) - the design of the CRT transfer engine mode

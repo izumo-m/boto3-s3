@@ -61,8 +61,9 @@ class TransferPlan:
     (the custom side's root stays bare ``""``, its directory-ness carried by
     ``use_src_name`` alone). ``--exclude`` / ``--include``
     need no source/destination path here: ``boto3_s3.globsieve`` matches a
-    relative pattern against each item's ``compare_key`` and a root-anchored one
-    against its full ``key`` at match time.
+    relative pattern against each entry's ``compare_key`` and a root-anchored one
+    against its full path (a local ``key``, an S3 ``bucket/key``), both stamped
+    as aws-cli's base makes them before the filter runs.
     """
 
     paths_type: PathsType

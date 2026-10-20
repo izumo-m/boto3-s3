@@ -118,6 +118,12 @@ _MAX_UPLOAD_SIZE_TEXT = "48.8 TiB"
 # Storage classes the glacier gate blocks unless restored or forced.
 _GLACIER_STORAGE_CLASSES = ("GLACIER", "DEEP_ARCHIVE")
 
+# What aws-cli's ``os.path.join`` takes as a separator already ending a base,
+# after which it joins a ``--exclude`` / ``--include`` pattern with no
+# separator of its own: ``/``, and on Windows the backslash as well - which an
+# S3 key may end in.
+_JOIN_SEPARATORS: tuple[str, ...] = ("/", "\\") if os.name == "nt" else ("/",)
+
 
 def _compare_key(info: FileInfo) -> str:
     """The producer-stamped ``compare_key``, narrowed to ``str``.
@@ -445,7 +451,10 @@ def upload_items(
             _warn_absent_local_source(plan.src, transferrer)
         infos = iter([single] if single is not None else [])
         if item_filter is not None:
-            infos = (info for info in infos if item_filter(info))
+            if isinstance(plan.src, LocalStorage):
+                infos = _filter_single_local_source(infos, item_filter, plan.src)
+            else:
+                infos = (info for info in infos if item_filter(info))
     for info in infos:
         yield upload_item_from_info(plan, info, dest_bucket=dest_bucket, transferrer=transferrer)
 
@@ -567,17 +576,40 @@ def single_object_filter_root(key: str) -> str:
     aws-cli's ``filters._get_s3_root`` for a non-``dir_op`` source: the key's
     parent directory, empty for a bucket-root key, and a folder-marker key
     its own root. aws joins the pattern onto that parent with
-    ``os.path.join``, which adds no second ``/`` after a parent that already
+    ``os.path.join``, which adds no separator after a parent that already
     ends in one, so the parent of ``a//b`` is ``a/`` (the entry is matched as
-    ``/b``, not ``b``) and the parent of ``/b`` is ``""``. Always empty or
-    ``/``-terminated. ``rm_filter_root`` is this for its non-recursive form.
+    ``/b``, not ``b``) and the parent of ``/b`` is ``""``. On Windows a
+    backslash ends a parent the same way (``a\\/b`` is matched as ``/b``
+    under ``a\\``). Always empty or ending in such a separator. ``rm_filter_root``
+    is this for its non-recursive form.
     """
     if not key or key.endswith("/"):
         return key
     head, sep, _tail = key.rpartition("/")
     if not sep or not head:
         return ""
-    return head if head.endswith("/") else f"{head}/"
+    return head if head.endswith(_JOIN_SEPARATORS) else f"{head}/"
+
+
+def s3_listing_filter(item_filter: FileFilter, base_key: str) -> FileFilter:
+    """``item_filter`` as aws-cli applies it to a recursive listing of ``base_key``.
+
+    A listing stamps each entry's key relative to its ``/``-normalized
+    ``Prefix``, which is aws's relative path for every base but one: on
+    Windows a key typed ending in a backslash, where aws's ``os.path.join``
+    takes that backslash for a separator and joins the patterns flush, so it
+    matches ``s3://b/pre\\`` + ``pre\\/x`` as ``/x``. The filter is shown a
+    copy carrying that form there (the record keeps its own, which names the
+    destination and pairs ``sync``'s sides); everywhere else it runs as given.
+    """
+    if not base_key.endswith(_JOIN_SEPARATORS) or base_key.endswith("/"):
+        return item_filter
+
+    def flush(info: FileInfo) -> bool:
+        relative = info.compare_key
+        return item_filter(info if relative is None else replace(info, compare_key=f"/{relative}"))
+
+    return flush
 
 
 def _filter_single_s3_source(
@@ -597,6 +629,34 @@ def _filter_single_s3_source(
         relative = info.key[len(single_object_filter_root(info.key)) :]
         view = info if relative == info.compare_key else replace(info, compare_key=relative)
         if item_filter(view):
+            yield info
+
+
+def _filter_single_local_source(
+    infos: Iterator[FileInfo], item_filter: FileFilter, storage: LocalStorage
+) -> Iterator[FileInfo]:
+    """Apply ``item_filter`` to a single local source the way aws-cli matches it.
+
+    The record carries the absolute path and its basename, which name the
+    source and the destination. aws-cli matches the source in its
+    ``local_format`` form instead - with a trailing separator for a
+    directory, or for a path typed with one (`LocalStorage.format`) - against
+    patterns joined onto ``abspath(dirname(path as typed))``
+    (`LocalStorage._single_filter_root`). The filter is shown a copy carrying
+    that full path as ``key`` (``/``-separated) and the path below that root
+    as ``compare_key``: ``d`` is ``d/``; ``d/``, ``.`` and ``../`` are ``""``;
+    and a bare ``..``, which lies outside its root, has none (``None``), so
+    only patterns matched against the full path apply. The record handed on
+    is the original, as for a single S3 source (`_filter_single_s3_source`).
+    """
+    full, _use_src_name = storage.format(dir_op=False)
+    root = storage._single_filter_root()  # pyright: ignore[reportPrivateUsage]
+    # The host's own join: no separator after a root that ends in one.
+    prefix = root if root.endswith(("/", os.sep)) else root + os.sep
+    relative = full[len(prefix) :].replace(os.sep, "/") if full.startswith(prefix) else None
+    key = full.replace(os.sep, "/")
+    for info in infos:
+        if item_filter(replace(info, key=key, compare_key=relative)):
             yield info
 
 
@@ -720,14 +780,16 @@ def scan_s3_source(
     application's Ctrl-C posture (``reusable_after_interrupt``).
     """
 
+    visible = None if item_filter is None else s3_listing_filter(item_filter, storage.key)
+
     def scan_filter(info: FileInfo) -> bool:
         # Zero-byte '/'-terminated "folder marker" objects never transfer
         # (aws-cli filegenerator); the user filter prunes what remains.
         if info.size == 0 and info.key.endswith("/"):
             return False
-        if item_filter is None:
+        if visible is None:
             return True
-        return item_filter(info)
+        return visible(info)
 
     scan_options = replace(
         storage.default_scan_options(),

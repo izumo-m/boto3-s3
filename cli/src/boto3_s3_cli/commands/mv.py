@@ -105,9 +105,7 @@ class MvCommand(Command):
             page_size=page_size,
         )
 
-        item_filter = filters.compile_filter(
-            args.filters, src=src_location, dest=dest_location, dir_op=args.recursive
-        )
+        item_filter = filters.compile_filter(args.filters)
         transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
         # aws builds the transfer manager here, before it decides anything about
         # the run: a CRT selection pays its construction even for a --dryrun.

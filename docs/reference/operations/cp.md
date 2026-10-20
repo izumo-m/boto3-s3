@@ -130,9 +130,11 @@ entry's `FileInfo` returning `True` to keep it
 all. A relative glob pattern is matched against the entry's stamped
 `compare_key` — for a recursive local source the path relative to the directory
 being enumerated, for a recursive S3 source the key with the listing's `Prefix`
-removed, and on the single-object routes the last `/`-separated component of
-the source key — while a root-anchored pattern is matched against the entry's
-full `key` instead. The same predicate is also applied to the destination walk
+removed, and on the single-object routes the AWS CLI's form of the source
+([`../filters.md`](../filters.md#filefilter): the key below its parent, or a
+local path below the typed path's parent) — while a root-anchored pattern is
+matched against the entry's full path instead (a local entry's absolute path,
+an S3 entry's `bucket/key`). The same predicate is also applied to the destination walk
 the `case_conflict` gate performs, so a pattern that hides destination entries
 changes what that gate considers already present. On the stream route there is
 no listing to prune and `filter` is not consulted.

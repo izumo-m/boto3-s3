@@ -1503,6 +1503,17 @@ class LocalStorage(Storage):
         """
         return self._abspath
 
+    def _single_filter_root(self) -> str:
+        """aws-cli's ``_get_local_root`` for this location as a single (non-``dir_op``) source.
+
+        The base aws joins ``--exclude`` / ``--include`` patterns onto:
+        ``abspath(dirname(path))`` of the path as typed - so ``d`` roots at
+        the working directory, while ``d/``, ``.`` and ``../`` root at the
+        location itself and ``..`` at the working directory below it -
+        anchored at the construction-time working directory like `abspath`.
+        """
+        return os.path.abspath(os.path.dirname(self._unnormalized))
+
     def exists(self) -> bool:
         """Whether the location exists, asked the way aws-cli's pre-check asks.
 

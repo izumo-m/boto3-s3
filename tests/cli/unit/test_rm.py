@@ -16,8 +16,14 @@ from typing import Any
 import pytest
 from botocore.exceptions import ClientError
 
-from boto3_s3 import FileInfo, OpOutcome, OpResult, S3Storage, TransferType
-from boto3_s3.globsieve import GlobPattern, PatternKind
+from boto3_s3 import (
+    Exclude,
+    GlobFilter,
+    Include,
+    OpOutcome,
+    OpResult,
+    TransferType,
+)
 from boto3_s3_cli import cli, filters
 from boto3_s3_cli.commands.base import Context
 from boto3_s3_cli.commands.rm import _DeletePrinter
@@ -437,11 +443,7 @@ class TestAppendFilterAction:
         parser.add_argument("--exclude", action=filters.AppendFilterAction, dest="filters")
         parser.add_argument("--include", action=filters.AppendFilterAction, dest="filters")
         args = parser.parse_args(["--include", "a", "--exclude", "b", "--include", "c"])
-        assert args.filters == [
-            GlobPattern(PatternKind.INCLUDE, "a"),
-            GlobPattern(PatternKind.EXCLUDE, "b"),
-            GlobPattern(PatternKind.INCLUDE, "c"),
-        ]
+        assert args.filters == [Include("a"), Exclude("b"), Include("c")]
 
     def test_a_dash_led_pattern_reaches_the_filter_list(self) -> None:
         # Through the parser the dispatch really parses with: aws's nargs=1
@@ -449,35 +451,18 @@ class TestAppendFilterAction:
         # pattern rather than a missing value or a positional.
         parser = cli._build_command_parse_parser("rm", cli._load_command("rm")())
         args = parser.parse_args(["s3://b/p", "--recursive", "--exclude", "-foo*"])
-        assert args.filters == [GlobPattern(PatternKind.EXCLUDE, "-foo*")]
+        assert args.filters == [Exclude("-foo*")]
         assert args.paths == "s3://b/p"
 
     def test_compile_filter_none_for_no_patterns(self) -> None:
-        target = S3Storage("s3://b")
-        assert filters.compile_filter(None, src=target, dest=target, dir_op=True) is None
-        assert filters.compile_filter([], src=target, dest=target, dir_op=True) is None
+        assert filters.compile_filter(None) is None
+        assert filters.compile_filter([]) is None
 
-    def test_absolute_pattern_is_dead_against_an_s3_key(self) -> None:
-        # rm lists S3 keys, whose bucket/key paths carry no drive / UNC anchor,
-        # so an absolute pattern can never match one (os.path.join replaces the
-        # base with it, fnmatch misses the anchorless path) - exactly aws-cli.
-        target = S3Storage("s3://b")
-        info = FileInfo(key="anything", compare_key="anything", storage=target)
-        # Alone, the absolute exclude is inert: everything survives.
-        inert = filters.compile_filter(
-            [GlobPattern.exclude("/elsewhere/*")], src=target, dest=target, dir_op=True
-        )
-        assert inert is not None
-        assert inert(info) is True
-        # Combined with a relative '*', only the relative pattern bites.
-        keep = filters.compile_filter(
-            [GlobPattern.exclude("/elsewhere/*"), GlobPattern.exclude("*")],
-            src=target,
-            dest=target,
-            dir_op=True,
-        )
-        assert keep is not None
-        assert keep(info) is False
+    def test_compile_filter_compiles_the_rules_in_order(self) -> None:
+        rules = [Exclude("*"), Include("*.txt")]
+        compiled = filters.compile_filter(rules)
+        assert isinstance(compiled, GlobFilter)
+        assert compiled.rules == tuple(rules)
 
 
 class TestScanInterruptPolicy:

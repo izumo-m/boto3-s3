@@ -1,261 +1,223 @@
-# globsieve (the glob filter engine) and the filter contract of `S3.rm`
+# globsieve: aws-cli's `--exclude` / `--include`, and the filter contract
 
-`boto3_s3/globsieve.py` is a self-contained module (depending only on the
-standard library). It provides the same semantics as aws-cli's
-`--exclude` / `--include` - **evaluate the patterns in sequence; the last one
-that matches wins, and a key that matches none is included**.
+`boto3_s3/globsieve.py` is the library's engine for aws-cli's `--exclude` /
+`--include`. It depends only on the standard library and the pure
+`boto3_s3.types` / `boto3_s3.exceptions` (design/imports.md). It is not a
+general glob engine: its job is to decide every entry exactly as aws-cli's
+`filters.py` does, on every OS, from the entry alone. A caller who wants
+another kind of filter writes a predicate of their own (`FileFilter`), or
+wraps a compiled `GlobFilter` in one.
 
-**Public surface**: the module's `__all__` is the contract, reached by
-submodule path (`from boto3_s3 import globsieve` / `from boto3_s3.globsieve
-import ...`); only `GlobFilter` / `GlobPattern` / `PatternKind` are additionally
-re-exported at the package root. Because the module is this self-contained, the
-whole engine is public:
-
-- the entry points (`compile`, `GlobFilter`, `GlobPattern`, `PatternKind`, the
-  `Matcher` / `SetMatcher` protocols);
-- every matcher class `compile` picks from (the section 2 table);
-- the two building-block helpers: `compile_set_matcher(patterns)` (the
-  shape-specialized `SetMatcher` that `IncludeOnly` / `ExcludeOnly` /
-  `Sequential` consume; an empty list yields a never-matching one) and
-  `is_anchored(pattern)` (the root-anchored/relative split of section 1).
-
-Kept internal: the shape predicates behind `compile_set_matcher`'s partitioning
-(`_is_literal` / `_is_pure_suffix` / `_is_pure_prefix`) - an implementation
-detail of the specialization, not part of the semantics.
+**Public surface** (the module's `__all__`): `Exclude`, `Include`,
+`GlobFilter`, `compile` and `normcase`. `Exclude`, `Include` and `GlobFilter`
+are also exported from the package root.
 
 ## 1. API
 
 ```python
-from boto3_s3 import globsieve
+from boto3_s3 import Exclude, Include, globsieve
 
-m = globsieve.compile([
-    globsieve.GlobPattern.exclude("*"),
-    globsieve.GlobPattern.include("*.txt"),
-])
-m.included("foo.txt")  # True
-m.included("foo.log")  # False
+web = globsieve.compile([Exclude("*"), Include("*.html", "*.css")])
+s3.sync("./site", "s3://bkt/site", filter=web)
+s3.cp("./b", "s3://bkt/b/", recursive=True, filter=lambda f: web(f) and (f.size or 0) < 10**8)
+web.included("x.html", "/home/u/site/x.html")  # the decision on plain strings
 ```
 
-- `GlobPattern.include(p)` / `GlobPattern.exclude(p)` - one rule. fnmatch form
-  (`*` is greedy across `/`).
-- `compile(patterns) -> Matcher` - `Matcher.included(compare_key, full_key=None)
-  -> bool`. A **relative** pattern matches `compare_key`;
-  a **root-anchored** (absolute) pattern matches `full_key` (the entry's full
-  path) - see the "Root-anchored" subsection below. Relative-only lists ignore
-  `full_key`.
-- `GlobFilter()` - the ergonomic front end and the type the operations consume
-  as `filter=`. A chainable `FileFilter` (`Callable[[FileInfo], bool]`) that
-  accumulates the same rules and matches a `FileInfo` (its `compare_key`, or
-  `key` for an absolute pattern):
+- `Exclude(*patterns)` / `Include(*patterns)`: frozen rule values with a
+  `patterns` tuple. Each pattern is a rule of its own, at its own position in
+  the list. Rules rather than `("exclude", p)` tuples, because a string
+  should not name an operation; rules rather than a builder, because the
+  list is plain data.
+- `compile(rules) -> GlobFilter`: splits and translates the patterns once,
+  for the host's path rules. A value that is not a rule raises
+  `ValidationError`.
+- `GlobFilter`: an immutable `FileFilter` (`__call__(info) -> bool`), with
+  `included(relative, full=None)` for plain strings and `rules`. It pickles
+  by its rules, so it crosses into a process pool.
+- `normcase(text)`: aws's matching fold on this host (section 4), for a
+  caller that reasons about patterns on its own (s3bak's pruning of whole
+  directories).
 
-  ```python
-  from boto3_s3 import GlobFilter
+The decision is aws's `Filter.call`: the patterns apply in order, the last
+one that matches decides, and an entry no pattern matches is included. A
+pattern is Python's `fnmatch` form: `*` and `?` match `/` too, `[seq]` /
+`[!seq]` match one character, there is no escape character, and the whole
+path must match.
 
-  keep = GlobFilter().exclude("*").include("*.tar.gz").compile()
-  s3.cp("./build", "s3://artifacts/", recursive=True, filter=keep)
-  ```
+## 2. What a pattern is matched against
 
-  `exclude` / `include` take one or more patterns and return `self`; finish with
-  `compile()`, which builds the underlying matcher eagerly and returns `self`
-  (the recommended form). It is not mandatory - an un-compiled filter compiles
-  lazily on first use and re-dirties when a rule is appended (no freeze). It is
-  pure sugar over `compile([GlobPattern...])` - same last-match-wins semantics,
-  same section 2 specialization.
+aws joins every pattern onto its side's base (`rootdir`) with `os.path.join`
+and fnmatches the entry's full path against the result
+(`filters._full_path_patterns`, `_match_pattern`). The base is
+`abspath(path)` for a local recursive side, `abspath(dirname(path as typed))`
+for a single local source, `bucket/key` as typed for an S3 recursive side,
+and `bucket/` + the key's parent for a single S3 object
+(`_get_local_root` / `_get_s3_root`). For any entry, the verdict depends on
+three values of the entry alone:
 
-### Root-anchored (absolute) patterns
+- **R**, the entry's path below aws's base: `FileInfo.compare_key`;
+- **F**, the full path aws matches: a `LocalFileInfo`'s `key` (the absolute
+  path, `/`-separated), `bucket/key` for an `S3FileInfo` (the bucket read from
+  its `storage`), none for any other entry;
+- **D**, the drive or UNC share of F in its native spelling (Windows only;
+  empty on the S3 side, whose path has none).
 
-aws-cli joins every pattern onto the operation root with `os.path.join` and
-fnmatches the result against the entry's full path (`filters.py`). `os.path.join`
-*drops* the root for an absolute right-hand side, so an absolute pattern is
-effectively matched against the full path and a relative one against its
-relative tail. globsieve mirrors that split: a pattern is **anchored** when
-`os.path.isabs` says so (POSIX `/foo`; Windows `C:/foo` / UNC), plus the Windows
-single-leading-separator forms `/foo` and `\foo`. The explicit Windows check is
-needed on Python 3.13+, where `ntpath.isabs` stopped recognizing those forms even
-though `ntpath.join` still replaces the root as aws-cli relies on. The `Anchored`
-matcher joins each anchored pattern onto the entry's `full_key`
-(`os.path.join(full_key, pattern)`, lending the entry's drive / UNC anchor to a
-driveless-absolute pattern exactly like aws-cli) before fnmatching `full_key`.
-A normal S3 key carries no drive / anchor, so an anchored pattern is inert
-against S3 entries by either route: a bare `included` call passes
-`full_key=None` (the anchored item is skipped), and `GlobFilter` passes the S3
-key as `full_key`, where the joined absolute pattern fnmatches nothing -
-tracking aws-cli, whose s3 paths carry no anchor. There are two exceptions.
-An S3 key that literally begins with `/` has a full key that genuinely is
-anchored, so an anchored pattern matches it (aws-cli, which matches against
-`bucket/key`, would not - the library reads its own anchored-vs-full-key rule
-honestly here). And on Windows a key shaped like a drive path (`C:/...`)
-picks up a drive from `ntpath.join` exactly as a local path's would - the
-matcher sees only key strings. This is what lets the **single**
-`sync` filter prune the two sides per-side: a source-rooted absolute pattern
-matches the local source's full path but not the S3 destination's anchorless key.
-A relative pattern keeps matching `compare_key`, which is symmetric across sides.
+So the compiled filter needs no base, and one object serves every operation,
+both sides of a `sync`, `sync`'s decision filters and the caller's own
+predicate. What it relies on is the stamping contract of section 5: every
+entry the library hands to a filter carries aws's R in `compare_key` and
+aws's F in `key`.
 
-**Host separator folding**: keys match in `/`-folded space (`compare_key` /
-`full_key` are `/`-separated on every OS), so `compile` folds each pattern's host
-separator to `/` up front (aws-cli's per-side `replace` in
-`filters._match_pattern`, collapsed to one step because boto3-s3 already matches
-in `/` space). On **Windows** a `\` in a pattern is therefore a separator
-(`--exclude "logs\*.txt"` matches `logs/x.txt`, a filename never contains a `\`
-there); on **POSIX** `os.sep` is already `/`, so folding is a no-op and `\` stays
-a literal - aws-cli-faithful on both.
+At compile time each pattern is split into drive, root and rest with a port
+of Python 3.14's `ntpath.splitroot` (`_splitroot`; aws-cli bundles 3.14, and
+3.10 / 3.11 split some forms differently), and each form becomes a rule:
 
-**Drive-relative patterns (Windows-only)**: a pattern like `C:foo` (a drive
-letter with no separator) is not anchored (`os.path.isabs` is false for it).
-aws-cli's `os.path.join` merges such a pattern onto a same-drive root as a
-plain relative tail (`ntpath.join('C:\\root', 'C:foo') ==
-'C:\\root\\foo'`), so `compile` mirrors that at compile time: it strips the
-drive (`_strip_drive_relative`) and matches what remains against
-`compare_key`, like any other relative pattern. `C:/foo` (drive-*absolute*)
-is untouched and still routes to `Anchored`. A known residual: `compile` has
-no root (and so no root drive) to compare against, so a drive-relative
-pattern naming a *different* drive than the source is folded to the same
-relative tail rather than kept drive-specific - aws-cli would keep it and it
-would never match. This is a rare Windows-only corner the compile-time engine
-cannot distinguish. POSIX is unaffected: `os.path.splitdrive` finds no drive
-there, so `C:foo` stays a literal filename (the colon is a valid character),
-aws-cli-faithful too.
+| Form of the pattern | aws's `join(base, p)` | Matched | Why it equals aws |
+|---|---|---|---|
+| Relative (no drive, no root) | base, separator, p | `normcase(p)` against `normcase(R)` | F is base, separator, R; the fold works per character; the base is literal (section 6) |
+| POSIX `/x` | `/x` | against F | the join drops the base; an S3 path starts with a bucket, never `/` |
+| Windows drive-absolute `C:\x`, UNC `\\s\sh\x` | p | `normcase(p)` against `normcase(F)` | the join drops the base |
+| Windows root-relative `\x` | D followed by p | `normcase(D + p)` against `normcase(F)`, D literal | the join keeps only the base's drive or share |
+| Windows drive-relative `C:x`, the drive being D | base, separator, rest | `normcase(rest)` against `normcase(R)` | joins like a relative pattern |
+| Windows drive-relative, another drive (or the S3 side, or no F) | p (a UNC drive: drive, separator, rest) | against F | the join ignores the base |
 
-## 2. Compile-time optimization
+Notes:
 
-`compile` detects the **macro shape** of the pattern sequence and picks the
-fastest Matcher:
+- "The drive being D" is `ntpath.join`'s test: equal ignoring case
+  (`str.lower`). Where Windows' fold and `str.lower` part (a UNC share name),
+  the joined path carries a prefix no entry under D has, and the rule
+  matches nothing - as on aws.
+- D is compared in aws's native spelling: a UNC drive written `//s/sh` is
+  another drive than `\\s\sh` for `ntpath.join`.
+- A glob in the drive part is matched as written: `--exclude '*:*'` on
+  Windows matches every drive-letter path and every S3 key that holds a `:`
+  (`a:b` on the S3 side is a drive `a:`, never the key). A bare `C:` on drive
+  C: is the empty pattern. Both measured on `aws.exe` 2.36.40.
+- On POSIX a pattern is anchored exactly when it starts with `/`; `\` and
+  `C:` are ordinary characters.
 
-| Shape | Matcher |
+## 3. Matching and its cost
+
+The rules of one form of match are compiled into one regular expression: the
+alternation of their `fnmatch.translate` forms, latest rule first, each
+alternative ending in an empty marker group whose index (`match.lastindex`)
+names the rule that decided. Relative rules match R and full-path rules match
+F; the later of the two matches wins, and the F regex is skipped when R's
+match is later than every full-path rule. When the list holds a Windows
+root-relative or drive-relative pattern, the two regexes depend on D, so they
+are built per drive on first sight and kept (up to 64 drives; an operation
+meets one or two).
+
+Per entry this is one regex call (two when the list has full-path rules), F
+is built only when full-path rules exist, and on Windows each string matched
+is folded once. The old general engine's shape specializations (literal /
+prefix / suffix sets, macro shapes) are gone; measured on a 20-pattern
+exclude list the new engine costs about 0.4 µs per entry against the old
+0.35, and half the old cost on mixed include/exclude lists - small next to a
+local walk's 4.6 to 5.7 µs per entry.
+
+## 4. Case and separators: `normcase`
+
+aws's `fnmatch.fnmatch` puts both the path and the pattern through
+`os.path.normcase`. On POSIX that is the identity: matching is byte-exact and
+`\` is an ordinary character. On Windows it turns `/` into `\` and lower-cases
+with the operating system's own locale-invariant table (`LCMapStringEx`), so
+matching is case-insensitive and the two separators are one - in an S3 key
+that holds a literal backslash as much as in a pattern (measured against
+`aws.exe` 2.36.40 by real deletion: `--exclude a/b` keeps the key `a\b`). The
+fold is not `str.lower` (447 code points differ on Windows 11; the Kelvin
+sign and U+0130 are kept). Python 3.12+ `ntpath.normcase` is that table; on a
+Windows host running 3.10 or 3.11 the engine calls `LCMapStringEx` itself
+(`_lcmap_lower`), a Python-version difference that changes which entries a
+normal run selects and is therefore matched (overview.md section 3). Matching
+in the `\` form is what keeps a character class such as `[+-9]`, which spans
+`/` but not `\`, deciding as aws decides.
+
+The host model (POSIX or Windows rules and fold) is bound when a filter is
+compiled, from `globsieve._WINDOWS`; the tests simulate the other family by
+replacing it.
+
+## 5. The stamping contract: what each route shows a filter
+
+Every entry the library hands to a filter carries aws's R in `compare_key`
+and, for a local or S3 entry, aws's F in `key` / `bucket/key`. Where the
+record the operation keeps differs from that (its `compare_key` names the
+destination and pairs `sync`'s sides), the filter is shown a copy (a *view*)
+and the record is handed on unchanged.
+
+| Route | R shown to the filter |
 |---|---|
-| empty | `AlwaysInclude` |
-| only `[exclude "*"]` | `AlwaysExclude` |
-| `exclude "*"` + include group | `IncludeOnly` (default-deny) |
-| `include "*"` + exclude group / exclude only | `ExcludeOnly` (default-allow) |
-| mixed order | `Sequential` (last-wins walk) |
-| contains an absolute pattern | `Anchored` (relative -> `compare_key`, absolute -> `full_key`; section 1) |
+| Recursive local walk (`cp` / `mv` source, `sync` local side, the case-conflict gate's destination pre-walk) | the path below the walked directory, `abspath(path)` - the record's own |
+| Recursive S3 listing (`cp` / `mv` / `sync` S3 sides, `rm --recursive`) | the key below the `/`-normalized `Prefix` - the record's own, except on Windows for a key typed ending in `\`: aws's `ntpath.join` takes that backslash for a separator and joins the patterns flush, so the view adds a leading `/` (`producers.s3_listing_filter`) |
+| Single S3 object (`cp` / `mv` source, `rm`'s blind delete) | the key below `single_object_filter_root` (aws's parent; `a//b` is `/b`, and on Windows `a\/b` is `/b`) - a view on `cp` / `mv` (`_filter_single_s3_source`), the stamped record on `rm` |
+| Single local source (`cp` / `mv` upload) | a view (`_filter_single_local_source`): `key` is aws's `local_format` path (`/`-separated, a trailing `/` for a directory or a path typed with one), `compare_key` the part below `abspath(dirname(path as typed))` - `d` is `d/`; `d/`, `.` and `../` are `""`; a bare `..` lies outside and gets `None`, so only full-path patterns apply |
+| A custom backend's entry | whatever the backend stamps; it has no F, so only relative patterns apply (and a drive-relative pattern, which needs D, never does) |
 
-Within each set it specializes further by **partitioning the patterns by
-shape** (literal -> `LiteralSet` (frozenset), `*X` -> `SuffixSet` (tuple
-endswith), `X*` -> `PrefixSet` (tuple startswith), anything else ->
-`UnionRegex` (alternation of `fnmatch.translate`)). A set that is uniformly one
-shape uses that shape's dedicated matcher directly. A **mixed** set - the usual
-case for a real exclude list (many `dir/*` directory excludes alongside a
-`*.ext` suffix and a couple of literals, e.g. a `.emacs.d` backup) - folds into
-a `CompositeSet`: one matcher per populated shape, OR-ed together. The OR is
-baked into a single closure (a few C-level `in` / `startswith` / `endswith`
-calls, each consuming the whole tuple at once) rather than a Python loop over
-sub-matcher objects, so it beats collapsing the mixed set into one big regex.
-This optimization presumes that the **entire glob pattern sequence is
-visible**, which is why `GlobFilter` defers compilation until the
-full chain of `exclude` / `include` calls has been accumulated (lazily, on
-first use).
+The single local view is what keeps `cp d s3://b/k --exclude d` transferring
+(and failing on the directory, rc 1) while `--exclude 'd/'` excludes it (rc 0),
+as measured on aws 2.36.40.
 
-## 3. The contract of `S3.rm(filter=...)`
+## 6. Deliberate differences
 
-`filter: FileFilter | None` where `FileFilter = Callable[[FileInfo], bool]` (so
-`None` = no filter). Every filter is one uniform shape - a predicate over the
-entry's `FileInfo` - returning True = include (a deletion target), False = skip
-(silently; as with aws, no OpResult is emitted either).
+- **The base is literal.** aws joins the operation's own path into every
+  pattern, so glob characters there are interpreted: `cp --recursive 'dir[1]'
+  s3://b/ --exclude '*'` still transfers on 2.36.40 (aws-cli #7330, #5452).
+  The engine matches relative patterns against R and takes D literally, so the
+  base never globs.
+- **No cross-side application.** aws applies the source's and the
+  destination's joined patterns to every entry. Each entry here meets its own
+  side's patterns only. That differs from aws in three places: nested s3->s3
+  prefixes (`cp s3://b/d s3://b/d/backup --exclude 'x*'` excludes the source's
+  `d/backup/x1.txt` on aws), single-object s3->s3 copies whose parents nest,
+  and, on Windows, a root-relative or drive-relative pattern joined onto the
+  S3 side - which has no drive, so it stays as written - reaching a local
+  entry (`C:?b*` matching `C:\b...`, `\?srv\...` matching a UNC path).
 
-The listing stamps **`info.compare_key`** on each entry: the entry's key
-relative to the prefix that `rm_filter_root(key, recursive=...)` determines.
-(Stamping is a contract the concrete backend's `scan_pages` producer fulfils,
-not the base `Storage.scan`; the single-key path stamps it inline.) The prefix
-is: for recursive, the target normalized to a `/`-terminated form; for a single
-key, everything through its final `/`, where a parent that already ends in `/`
-gains no second one (`a//b` roots at `a/` and is matched as `/b`, as aws's
-`os.path.join` of the pattern onto its root leaves it); for a bucket-level
-target, `""` (equivalent to the composition of aws's `filters._get_s3_root`
-plus `FileFormat.s3_format`). The
-relative form is what keeps `GlobPattern.exclude("*")`
-recognized as the catch-all and the section 2 optimizations in effect; the
-bucket name does not affect the decision under either aws's join or the
-relativization, so it is not part of the prefix.
+Both are in docs/cli/aws-differences.md.
 
-- **`GlobFilter`** (and any glob predicate) matches a relative pattern against
-  `info.compare_key`, so it sees the same key aws-cli's `--exclude`
-  / `--include` match, with the section 2 fast paths intact; an absolute pattern
-  it anchors against `info.key` (section 1). For `rm` the source is always s3,
-  whose key normally has no anchor, so an absolute pattern is inert (unless a
-  key literally begins with `/`, or, on Windows, is shaped like a drive path -
-  section 1) and only the relative ones bite. The CLI's `compile_filter`
-  (`cli/src/boto3_s3_cli/filters.py`) compiles the patterns in their order of
-  appearance with the operation's two bases (aws's `rootdir`s) and delegates to
-  this engine whenever the joined matching aws performs is provably the
-  `compare_key` match - see cli.md; glob characters in the operation path,
-  absolute patterns, and nested s3<->s3 pairs stay on its own aws-faithful
-  joined engine instead.
-- **a custom predicate** can instead decide on size / mtime / storage_class
-  (e.g. `filter=lambda info: info.size == 0`), or read `info.compare_key` for a
-  relative-path rule of its own. On the non-recursive blind single-key path
-  there is no listing, so the `FileInfo` has only `key`, the stamped
-  `compare_key` and `storage` populated (`size` / `mtime` / `storage_class` are
-  `None`).
+## 7. Where the filter runs
 
-### Application mechanism (`ScanOptions.filter`)
+`cp`, `mv`, `rm` and `sync` take one `filter: FileFilter | None`
+(`FileFilter = Callable[[FileInfo], bool]`, `True` = include). A recursive
+side applies it as `ScanOptions.filter`: the backend's `scan_pages` stamps
+`compare_key` and runs the predicate on the listing's prefetch worker, page by
+page (or on the consuming thread where the scan runs without read-ahead;
+[`storage.md`](./storage.md)), so an excluded entry is absent downstream and
+the predicate must be thread-safe and cheap. The local backend applies it
+inside the walk, after aws's vetting, so an excluded file still emits the
+warnings aws would. The single-object routes apply it inline on the calling
+thread. `ls` takes no filter.
 
-`S3.rm` wraps the filter (for the folder-marker sweep) and passes it as
-`ScanOptions.filter` to the enumeration; the backend's `scan_pages` producer
-stamps each entry's `Prefix`-relative `compare_key` (`info.key[len(prefix):]`) before
-the predicate runs.
-The evaluation is the **producer's** job: `scan_pages` returns already-filtered
-pages (`Storage.scan` flattens + prefetches them, applying the filter itself
-unless the backend declares `scan_pages_filters = True` — the built-ins do;
-[`storage.md`](./storage.md)). A backend may push the
-predicate to its source (a REST listing filtering server-side) or wrap its raw
-pages with `storage.sieve_pages` - the built-in S3 backend sieves client-side,
-and the local backend applies it inside the walk (after the aws-cli vetting, so
-an excluded file still emits the warnings aws-cli would). Whatever a producer
-omits is simply absent downstream, which makes the filter's effect easy to reason
-about (the per-side `sync` semantics - a filtered source entry versus a filtered
-destination entry - are the visibility layer described below). The predicate
-runs **per page** on the listing's prefetch worker thread (an excluded entry is
-not handed to the consumer; a page wiped out entirely never reaches the
-hand-off queue) - or on the consuming thread where the scan runs without
-read-ahead (`ScanOptions.read_ahead=False`: a local `sync` destination whose
-delete lane is on, or a backend that seeds it; [`storage.md`](./storage.md)) -
-so it must be thread-safe and lightweight.
+**`sync`** prunes each side's listing with the one filter before pairing (its
+visibility layer). A relative pattern prunes both sides alike; an absolute one
+matches each side's own F, so a pattern rooted at the local source prunes
+that side only and leaves the destination visible to `--delete`. A
+destination entry pruned here is invisible to `--delete` (aws: files excluded
+by filters are excluded from deletion). The pair-level `create_filter` /
+`update_filter` / `delete_filter` are a separate layer after the merge-join
+(sync.md); a `GlobFilter` works in `create_filter` / `delete_filter`, and in
+the pair predicates wrapped: `lambda pair: web(pair.src)`.
 
-The scan-level `ScanOptions.filter` is used by rm, cp, mv, and sync; ls does
-not apply it. **sync prunes each side's listing
-independently as its visibility layer** (before the comparator pairs the
-streams): the S3 side(s) do this through `ScanOptions.filter` (the same
-scan-level mechanism), while the local walk applies the predicate inline. Both
-sides are matched against the single `filter` (one symmetric predicate over
-each side's compare key). A destination entry pruned here
-is invisible to `--delete`, reproducing aws's "files excluded by filters are
-excluded from deletion". The pair-level lanes (`create_filter` / `update_filter` /
-`delete_filter`) are a separate sync-specific layer applied after the
-merge-join; see sync.md.
+**`rm`** wraps the filter for the bucket-root folder-marker sweep (marker test
+first, then the filter - aws's order). Its prefix is `rm_filter_root(key,
+recursive=...)`: the target normalized to end in `/` for a recursive delete
+(also the listing `Prefix`), the key's parent for a single key, `""` for the
+bucket root. On the blind single-key path no listing runs, so the `FileInfo`
+carries only `key`, the stamped `compare_key` and `storage`.
 
-cp / mv / sync take the same single `filter` parameter as rm; the two-parameter
-form exclude= / include= is not adopted because it cannot express the
-alternating order.
+The stream route (an `IOStorage` on either side) consults no filter, as aws
+applies none to a stream.
 
-## 4. Path separators and the key space
+## 8. Verification
 
-Every key the filter sees is **POSIX `/`-separated on every OS** - never the
-host `os.sep`. S3 keys are `/`-separated natively, and a local walk translates
-`os.sep` to `/` (`LocalFileInfo`), so both backends feed one key space (the
-basis of sync's merge-join). The **compare key** a glob filter is matched against
-(`GlobFilter`, via `FileInfo.compare_key`) is this `/`-form key made relative to
-the local directory or S3 `Prefix` being enumerated
-(`info.key[len(prefix):]`); see [`glossary.md`](./glossary.md).
-Matching therefore happens in `/`-space; `compile` folds the host separator in
-a pattern to `/` (on Windows `logs\*.txt` matches `logs/app.txt`), so **a
-pattern reaches the match `/`-form either way**:
-
-- **CLI**: patterns are written `/`-form and the CLI's `compile_filter` owns
-  full aws-cli fidelity with its own base-joined matching (cli.md), delegating
-  to this engine only for the plain relative case where the two coincide - so
-  what this engine sees from the CLI is always a `/`-form relative pattern
-  against the `/`-form `compare_key`. On Windows aws-cli `normcase`s both
-  sides, which makes the match **case-insensitive** and makes `/` and `\` one
-  separator - in an S3 key holding a literal backslash too;
-  `cli/src/boto3_s3_cli/filters.py` reproduces this by folding patterns at
-  compile and keys at match (`os.name == "nt"`) with that same `normcase` -
-  Windows' own lower-casing, which is not `str.lower` - and stays byte-exact
-  on POSIX. A pattern holding a `[` is not delegated there: a character class
-  is where the two spellings of the separator can part.
-- **library**: a `GlobFilter` matches a relative pattern against the `/`-form
-  `compare_key` (written `/`-form or in the host separator - `compile` folds
-  it) and an absolute one
-  against `info.key` (the `/`-form **full** key, which differs per side - whereas
-  `compare_key` is symmetric, so a relative-path rule should read it). The
-  library is byte-exact; host case-folding is the CLI layer's job.
+`tests/lib/test_globsieve.py` pins the measured aws 2.36.40 cases (Linux and
+`aws.exe`) at the `included()` level, the forms table on both host models, the
+Windows fold (the `LCMapStringEx` code points on a Windows host), and runs a
+seeded fuzz against a verbatim port of aws's `filters.py` (`create_filter`,
+`_get_*_root`, `Filter.call`, `_match_pattern`) on `posixpath` and a 3.14
+`ntpath` port, over bases without glob characters that do not nest: every
+entry's verdict equals aws's with its own side's patterns, and with both
+sides' except the Windows cross-side case of section 6. The `splitroot` /
+`join` ports are cross-checked against Python 3.14 when uv finds one. The
+operation tests pin each route's view (section 5) and the two deliberate
+differences.

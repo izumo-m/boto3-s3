@@ -44,7 +44,10 @@ A **relative** pattern therefore matches the entry's `compare_key` — its key
 relative to the root the operation is enumerating, `/`-separated on every
 operating system. For a recursive `rm s3://bucket/logs/`, an object at
 `logs/app/x.txt` has a compare key of `app/x.txt`, so `app/*` matches it and
-`logs/*` does not.
+`logs/*` does not. A single source is shown to the filter in `aws s3`'s form:
+`s3.cp("d", "s3://b/k")` matches the directory as `d/` (so `Exclude("d/")`
+skips it and `Exclude("d")` does not), and the key `a//b` as `/b`
+([reference](../reference/filters.md#filefilter)).
 
 A pattern the join takes in place of the root — `/data/*` on Linux and macOS;
 `C:\data\*`, a UNC path or a rooted `\data\*` on Windows — matches the entry's

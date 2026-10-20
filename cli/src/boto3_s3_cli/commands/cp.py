@@ -115,13 +115,8 @@ class CpCommand(Command):
                 page_size=page_size,
             )
 
-        item_filter = None
-        if not is_stream:
-            # Non-stream: the locations are the resolve_locations pair, whose
-            # bases the filter joins its patterns onto (aws create_filter).
-            item_filter = filters.compile_filter(
-                args.filters, src=src_location, dest=dest_location, dir_op=args.recursive
-            )
+        # The stream route consults no filter (aws applies none to a stream).
+        item_filter = None if is_stream else filters.compile_filter(args.filters)
         transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
         # aws builds the transfer manager here, before it decides anything about
         # the run: a CRT selection pays its construction even for a --dryrun.

@@ -215,16 +215,7 @@ class TestPickle:
 
 class TestPublicSurface:
     def test_all_is_the_documented_surface(self) -> None:
-        assert set(globsieve.__all__) == {
-            "Exclude",
-            "GlobFilter",
-            "GlobPattern",
-            "Include",
-            "PatternKind",
-            "compile",
-            "is_anchored",
-            "normcase",
-        }
+        assert set(globsieve.__all__) == {"Exclude", "GlobFilter", "Include", "compile", "normcase"}
         for name in globsieve.__all__:
             assert hasattr(globsieve, name), name
 

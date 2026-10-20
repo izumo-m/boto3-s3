@@ -7,9 +7,9 @@ include/exclude implementation of one. The narrative treatment is
 the AWS CLI is [`../../design/globsieve.md`](../../design/globsieve.md).
 
 `FileFilter` is importable from the package root and from `boto3_s3.types`.
-`Exclude`, `Include`, `GlobFilter`, `GlobPattern` and `PatternKind` are
-importable from the package root and from `boto3_s3.globsieve`; `compile`,
-`normcase` and `is_anchored` are public under `boto3_s3.globsieve` only.
+`Exclude`, `Include` and `GlobFilter` are importable from the package root and
+from `boto3_s3.globsieve`; `compile` and `normcase` are public under
+`boto3_s3.globsieve` only.
 
 ## FileFilter
 
@@ -34,28 +34,35 @@ the `FileInfo` of the one side that lane owns
 ([`options.md`](./options.md), [`storage.md`](./storage.md)).
 
 **What the `FileInfo` carries.** `compare_key` is stamped before the predicate
-is consulted, on every path that applies a filter, but what it is relative to
-depends on the path. On the enumerating paths it is the listing's relative key:
-for a local entry the key relative to the directory being enumerated, for an S3
-entry the key with the listing's `Prefix` removed. The single-entry paths stamp
-their own form — on the single-object `cp` / `mv` routes the last
-`/`-separated component of the key, so a pattern for
-`cp s3://bucket/a/b/c.txt .` is matched against `c.txt` and not `a/b/c.txt`;
-on `rm`'s blind single-key path the key relative to what
-[`rm_filter_root`](./operations/rm.md#rm_filter_root) returns. The two are the
-same string except for a key that doubles a slash or starts with one, where
-the AWS CLI matches `a//b` as `/b`: there a single S3 source's predicate on
-`cp` / `mv` is shown a copy of the entry carrying that `rm_filter_root`-relative
-key, while the record keeps the last component, which names the destination.
-Each operation
-page states which key its filter matches
-([`operations/README.md`](./operations/README.md)). `storage` is stamped before
-the filter runs too, so a predicate can reach the backend the entry came from
-(a `HeadObject` for a tag the listing omits, for instance). `size` and `mtime`
-are populated for file
-entries and may be `None` for directory / prefix entries; on `rm`'s blind
-single-key path there is no listing at all, so only `key`, `compare_key` and
-`storage` are set and `size` / `mtime` / `storage_class` are `None`.
+is consulted, on every path that applies a filter: it is the entry's path below
+the base the AWS CLI joins `--exclude` / `--include` patterns onto, so a
+[`GlobFilter`](#globfilter) decides as `aws s3` does. On the enumerating paths
+that is the listing's relative key: for a local entry the key relative to the
+directory being enumerated, for an S3 entry the key with the listing's `Prefix`
+removed. On the single-entry paths the predicate is shown a copy of the entry in
+the AWS CLI's form where the record's own differs, and the record handed on is
+unchanged (it names the destination):
+
+- a single S3 object (`cp` / `mv`, and `rm`'s blind single key) carries the key
+  relative to its parent as [`rm_filter_root`](./operations/rm.md#rm_filter_root)
+  returns it — `c.txt` for `s3://bucket/a/b/c.txt`, and `/b` for a key `a//b`
+  that doubles a slash;
+- a single local source (`cp` / `mv`) carries the AWS CLI's full path as `key`
+  (`/`-separated, with a trailing `/` for a directory or a path typed with
+  one) and its path below the typed path's parent as `compare_key`: `d` gives
+  `d/`; `d/`, `.` and `../` give `""`; a bare `..` gives `None`, so only
+  patterns matched against the full path apply.
+
+On Windows an S3 location typed ending in a backslash is one more case: the AWS
+CLI's `ntpath.join` reads that backslash as a separator, so an entry `pre\/x`
+under `s3://bucket/pre\` is shown as `/x`. Each operation page states which key
+its filter matches ([`operations/README.md`](./operations/README.md)). `storage`
+is stamped before the filter runs too, so a predicate can reach the backend the
+entry came from (a `HeadObject` for a tag the listing omits, for instance).
+`size` and `mtime` are populated for file entries and may be `None` for
+directory / prefix entries; on `rm`'s blind single-key path there is no listing
+at all, so only `key`, `compare_key` and `storage` are set and `size` / `mtime`
+/ `storage_class` are `None`.
 
 **Where it runs.** On the enumerating paths — a recursive `cp` / `mv`, the
 local destination pre-walk a recursive S3-to-local `cp` / `mv` performs when
@@ -205,33 +212,3 @@ through `normcase` first. On Linux and macOS that is the identity: matching is
 byte-exact and `\` is an ordinary character. On Windows it lower-cases with
 Windows' own table and turns `/` into `\`, so matching is case-insensitive and
 the two separators are one, in an S3 key as in a pattern.
-
-## PatternKind
-
-Whether a [`GlobPattern`](#globpattern) includes or excludes.
-
-```python
-class PatternKind(Enum):
-    INCLUDE = "include"
-    EXCLUDE = "exclude"
-```
-
-## GlobPattern
-
-One `--exclude` / `--include` option as the `boto3-s3` command parses it: a
-kind and a pattern string. A frozen dataclass, equal by `(kind, pattern)`.
-
-```python
-@dataclass(frozen=True)
-class GlobPattern:
-    kind: PatternKind
-    pattern: str
-```
-
-### include(pattern)
-
-Classmethod. Returns `GlobPattern(PatternKind.INCLUDE, pattern)`.
-
-### exclude(pattern)
-
-Classmethod. Returns `GlobPattern(PatternKind.EXCLUDE, pattern)`.

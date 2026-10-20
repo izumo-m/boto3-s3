@@ -80,7 +80,8 @@ everything. A predicate that reads only the compare key prunes the two sides
 identically, so an entry it excludes is invisible on both sides and is
 therefore neither transferred nor deleted; a predicate that reads side-specific
 state prunes per side instead — notably a `GlobFilter` whose pattern is
-root-anchored, which matches the entry's full key rather than its compare key.
+root-anchored, which matches the entry's full path rather than its compare
+key.
 Folder markers — zero-byte `/`-terminated objects — are dropped from an S3
 side's listing before `filter` sees them, and the local walk does not produce
 them, so `sync` neither transfers nor deletes markers. `filter` is evaluated

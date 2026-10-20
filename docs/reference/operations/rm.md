@@ -93,9 +93,11 @@ scan stamps it `Prefix`-relative, and that `Prefix` is
 [`rm_filter_root`](#rm_filter_root)'s return value; the blind single-key path
 has no listing and stamps the same relativization by hand. A relative
 [`GlobFilter`](../filters.md#globfilter) pattern therefore matches the key
-relative to that root, while an absolute pattern matches the full `key` — and
-since an S3 key normally has no leading `/`, an absolute pattern is inert here
-unless a key literally begins with one. On the bucket-root sweep the
+relative to that root, while an absolute pattern matches the full path
+`bucket/key`, which has no root — so an absolute pattern is inert here (on
+Windows a pattern whose drive part is a glob, such as `*:*`, is matched as
+written and can match a key holding a `:`). Glob characters in the target
+itself are taken literally. On the bucket-root sweep the
 folder-marker test runs before `filter`, so the predicate is consulted only for
 entries that are already zero-byte `/`-terminated keys.
 
@@ -222,7 +224,9 @@ filter pattern resolves against and, on the enumerating shapes, the `Prefix`
 the listing is issued with. It is a pure function of its arguments — no
 request, no client, no `S3` instance — so a caller can predict exactly which
 key a [`GlobFilter`](../filters.md#globfilter) pattern will be matched against
-before calling `rm`. It is exported from the `boto3_s3` root and from
+before calling `rm` (on Windows, a recursive target ending in a backslash adds
+a leading `/` to each key, as the AWS CLI's join does;
+[`../filters.md`](../filters.md#filefilter)). It is exported from the `boto3_s3` root and from
 `boto3_s3.s3`.
 
 ```python
@@ -243,12 +247,14 @@ cases are:
   opens the key, is not counted twice: `"a//b"` gives `"a/"` and `"/b"` gives
   `""`, so both entries are matched as `"/b"` — the relative key aws is left
   with after joining a pattern onto its root with `os.path.join`, which adds
-  no second `/`.
+  no second `/`. On Windows that join takes a backslash for a separator too,
+  so a parent ending in one is returned as is: `"a\\/b"` gives `"a\\"`, and the
+  entry is matched as `"/b"`.
 - `recursive=False` with a key that already ends in `/`, or an empty key — the
   key unchanged: `"data/"` gives `"data/"` and `""` gives `""`.
 
-The result is therefore either empty or `/`-terminated; no other form is
-returned.
+The result is therefore empty or ends in a separator: `/`, or on Windows the
+backslash of such a parent.
 
 An entry's `compare_key` is its full key with this prefix removed, which makes
 two cases worth predicting. Under `rm("s3://b/data", recursive=True)` the root
@@ -256,4 +262,5 @@ is `"data/"`, so `data-sibling.txt` is outside the listing altogether and an
 object at `data/app/x.txt` is matched as `app/x.txt`. Under the non-recursive
 `rm("s3://b/data/")` the root is the target key itself, so the single entry's
 `compare_key` is the empty string: a relative pattern has to match `""` to
-reject it, while an absolute pattern still matches the full key `data/`.
+reject it (`*` does), and an absolute pattern cannot, the full path `b/data/`
+having no root.

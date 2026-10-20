@@ -217,7 +217,7 @@ solidified design is added here.
 | `commands/base.py` | The `Command` ABC + `Context` (the injection point for runtime dependencies, section 3.1) |
 | `commands/<sub>.py` | The `Command` subclass for each subcommand (e.g., `LsCommand` in `ls.py`, `RmCommand` in `rm.py`) |
 | `commands/transferargs.py` | The surface shared by cp / mv / sync: the declaration equivalent to aws-cli `TRANSFER_ARGS` (`--expected-size` is cp-only opt-in, `--recursive` is opt-out for sync), validation of the SSE-C pair / checksum path types / case-conflict / S3 Express, conversion to `TransferOptions`, the non-stream location wiring (including the `--source-region` clone), transfer config resolution (`resolve_transfer_config`, section 8), and the tail of exit-code derivation |
-| `filters.py` | The order-preserving action for `--exclude` / `--include` + `FileFilter` construction. `compile_filter` is the aws `create_filter` + `Filter` equivalent: each side's already-built Storage contributes a base (aws's `rootdir`: `bucket/key`, or the absolutized local path; the parent for a single-file operation), every pattern is joined onto both bases with `os.path.join`, and the joined forms are fnmatched against each entry's full path, last match winning - glob characters in the base and cross-side application included, exactly like aws. When that is provably equivalent to matching the pattern against `FileInfo.compare_key` (plain bases, relative patterns, no nested s3<->s3 pair), it delegates to the specialized globsieve engine |
+| `filters.py` | The order-preserving action for `--exclude` / `--include`, appending `Exclude` / `Include` rules to one list, and `compile_filter`, which hands that list to `globsieve.compile` (`None` when there is none). aws's matching - each side's base, the absolute and Windows drive forms, the Windows fold, the single-source forms - is the library's ([`globsieve.md`](./globsieve.md)); the two places it deliberately differs from aws (glob characters in the operation's path, cross-side application) are in docs/cli/aws-differences.md |
 | `progress.py` | `TransferPrinter`: aws-compatible rendering of transfer result lines / progress (section 5.7-5.9. Worker-thread callbacks only count (the rc inputs) and enqueue slim records; a dedicated printer thread renders in queue order - aws's `ResultProcessor` shape, but with a **bounded** queue (aws-cli-option-handling.md section 6). The verb is `TransferType.value` - mv is `move` on every path. A record with no `dest` is rendered with a single endpoint - sync's `delete:` lines) |
 | `shorthand.py` | Parsing of map-type option values (`--metadata k=v,...` / JSON form / the `@=` paramfile operator). The grammar is aws's, cut down to scalar values: it accepts exactly what aws accepts, and refuses while parsing the lists and nested maps aws parses and then rejects, as well as bytes from `@=fileb://`. Every refusal is the parser's `Error parsing parameter '<name>'` (252). A `{`- or `[`-led value is read as JSON, and only an object of strings is accepted |
 | `paramfile.py` | aws's local paramfile loaders (`file://` text, `fileb://` binary; the `get_paramfile` counterpart) shared by the option resolution and the shorthand `@=` operator. A load failure is a `ParamfileLoadError`, which every caller - the shorthand's `@=` included - turns into the named argument's rc-252 parse error through `named_argument` (aws's `load-cli-arg` handler; aws's shorthand alone skips it and ends at 255) |
@@ -701,7 +701,7 @@ aws-cli's behavior):
 | `--dryrun` | Calls no delete API, emitting only `(dryrun) delete:` lines (the recursive ListObjectsV2 still runs = a listing failure is fatal even under dryrun) |
 | `--quiet` | **Suppresses all output** (not just success lines but also `delete failed:` / `fatal error:` lines. aws does not create the printer at all. The rc is unchanged) |
 | `--only-show-errors` | Suppresses only success lines. **dryrun lines do appear** (an aws quirk: `OnlyShowErrorsResultPrinter` does not suppress dryrun) |
-| `--exclude` / `--include` PATTERN | Evaluated in command-line appearance order, last wins (a shared dest of the same shape as aws's `AppendFilter`). `cli/src/boto3_s3_cli/filters.py` compiles it against the target's base (`bucket/key`, both sides for rm - aws sets `dest = src`) and passes it to `S3.rm(filter=)`; usually that is the `Prefix`-relative `compare_key` match, but glob characters in the target path glob-interpret the base exactly like aws (`[1]` in a prefix is a character class there, defeating `--exclude '*'`) |
+| `--exclude` / `--include` PATTERN | Evaluated in command-line appearance order, last wins (a shared dest of the same shape as aws's `AppendFilter`). `cli/src/boto3_s3_cli/filters.py` compiles the rules and passes them to `S3.rm(filter=)`, which matches each key below the target's base (`rm_filter_root`). Glob characters in the target path are taken literally, where aws reads them as part of the pattern (docs/cli/aws-differences.md) |
 | `--request-payer [requester]` | Applied to both ListObjectsV2 and DeleteObject(s) |
 | `--page-size N` | `S3Storage(uri, page_size=N)` (storage config, as for ls). No range validation (same policy as ls). However, when the server rejects the listing for a negative value, the exit code is **1 for rm** (fatal. Different from ls's 254 - section 6) |
 
@@ -871,7 +871,9 @@ Equivalent to `aws s3 cp <src> <dest>` (aws-cli `CpCommand`; transfer family =
 which of the two names to adopt, the bucket-root normalization of a keyless
 `s3://bucket` - are derived by `boto3_s3.transferplan` (a port of aws's
 `FileFormat`), shared between the CLI and the library. The filter bases are a
-separate derivation (`filters.py`, aws's `rootdir` - like aws keeps its two).
+separate derivation (aws's `rootdir`), which the library's operations make
+when they show each entry to the filter ([`globsieve.md`](./globsieve.md)
+section 5).
 
 **The construction of the transfer family** (cp / mv / sync / rm - aws's
 `S3TransferCommand` subclasses) follows aws's stages. Each step stops the run
@@ -1264,15 +1266,15 @@ all of that):
    refuses the run
 
 **The filter is compiled once**: the `--exclude` / `--include` sequence is turned
-into a single `FileFilter` with both sides' bases (`filters.py`: aws joins every
-pattern onto the source AND destination `rootdir` and applies both joined forms
-to every entry) and passed to `S3.sync(filter=)`, which applies it to both
-sides. A **relative** pattern under plain bases matches each side's compare key
+into a single `GlobFilter` (`filters.py`) and passed to `S3.sync(filter=)`,
+which applies it to both sides, each entry matched below its own side's base
+(aws's `rootdir`). A **relative** pattern matches each side's compare key
 symmetrically, so "what the filter excludes is also excluded from `--delete`"
-falls out (sync.md section 1); an **absolute** pattern replaces the base in the
-join, so it prunes per-side - a source-anchored pattern leaves the anchorless
+falls out (sync.md section 1); an **absolute** pattern replaces the base in
+aws's join, so it prunes per-side - a source-anchored pattern leaves the
 `bucket/key` destination visible, and `--delete` still removes it, exactly like
-aws.
+aws. aws also applies each side's joined patterns to the other side's
+entries; that is not reproduced (docs/cli/aws-differences.md).
 
 **Output**: the transfer lines are the same as section 5.7 (the verb is the route word
 upload / download / copy). A deletion is `delete: <endpoint>` (**no `to` clause** -

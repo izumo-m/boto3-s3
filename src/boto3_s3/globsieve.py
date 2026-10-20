@@ -53,11 +53,10 @@ pattern matched against F), plus one ``normcase`` call per string on Windows.
 A ``GlobFilter`` is immutable once compiled, so one instance serves every
 thread of an operation and any number of operations.
 
-The module is stdlib-only apart from the pure ``boto3_s3.types``; everything
-in ``__all__`` is public, and ``Exclude`` / ``Include`` / ``GlobFilter`` are
-also exported from the package root. ``GlobPattern``, ``PatternKind`` and
-``is_anchored`` are the CLI's own records of its options, kept until the CLI
-moves to the rules above.
+The module is stdlib-only apart from the pure ``boto3_s3.types`` and
+``boto3_s3.exceptions``; everything in ``__all__`` is public, and
+``Exclude`` / ``Include`` / ``GlobFilter`` are also exported from the package
+root.
 """
 
 from __future__ import annotations
@@ -69,7 +68,6 @@ import re
 import sys
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from enum import Enum
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from boto3_s3.exceptions import ValidationError
@@ -82,11 +80,8 @@ if TYPE_CHECKING:
 __all__ = [
     "Exclude",
     "GlobFilter",
-    "GlobPattern",
     "Include",
-    "PatternKind",
     "compile",
-    "is_anchored",
     "normcase",
 ]
 
@@ -414,7 +409,7 @@ class GlobFilter:
         patterns: list[_Pattern] = []
         for rule in rules:
             # Fail inside the taxonomy rather than with an AttributeError (a
-            # bare string or an old GlobPattern is the likely mistake).
+            # bare string is the likely mistake).
             if not isinstance(rule, (Exclude, Include)):  # pyright: ignore[reportUnnecessaryIsInstance]
                 raise ValidationError(
                     f"a glob rule must be Exclude or Include, got {type(rule).__name__}"
@@ -509,46 +504,3 @@ def compile(rules: Iterable[Exclude | Include]) -> GlobFilter:
     list compiles to a filter that keeps everything.
     """
     return GlobFilter(rules)
-
-
-# ----- the CLI's option records ---------------------------------------------------------
-
-
-class PatternKind(Enum):
-    """Whether a ``GlobPattern`` includes or excludes matching keys."""
-
-    INCLUDE = "include"
-    EXCLUDE = "exclude"
-
-
-@dataclass(frozen=True)
-class GlobPattern:
-    """One ``--exclude`` / ``--include`` option as the CLI parses it.
-
-    Use the ``include`` / ``exclude`` factories or build directly. Equality is
-    by ``(kind, pattern)``.
-    """
-
-    kind: PatternKind
-    pattern: str
-
-    @classmethod
-    def include(cls, pattern: str) -> GlobPattern:
-        return cls(PatternKind.INCLUDE, pattern)
-
-    @classmethod
-    def exclude(cls, pattern: str) -> GlobPattern:
-        return cls(PatternKind.EXCLUDE, pattern)
-
-
-def is_anchored(pattern: str) -> bool:
-    """Whether a pattern is root-anchored (absolute) on this host.
-
-    aws-cli joins every pattern onto its base with ``os.path.join``, which
-    drops the base for an absolute right-hand side. Host-aware via
-    ``os.path.isabs``: on POSIX only ``/foo`` qualifies, on Windows ``/foo``,
-    ``\\foo``, ``C:/foo`` and UNC paths do (Python 3.13 changed
-    ``ntpath.isabs`` to reject a single leading slash, so that form is checked
-    explicitly). A drive-relative ``C:foo`` is not anchored.
-    """
-    return os.path.isabs(pattern) or (os.sep == "\\" and pattern.startswith(("/", "\\")))

@@ -112,14 +112,10 @@ class SyncCommand(Command):
             page_size=page_size,
         )
 
-        # One filter applied to both sides by S3.sync (design/sync.md section 1),
-        # compiled with both sides as its bases: aws joins every pattern onto
-        # the source AND destination rootdir and applies both joined forms to
-        # every entry, which compile_filter reproduces (delegating to the
-        # symmetric compare_key match when provably identical).
-        item_filter = filters.compile_filter(
-            args.filters, src=src_location, dest=dest_location, dir_op=True
-        )
+        # One filter applied to both sides by S3.sync (design/sync.md section
+        # 1): each side's entries carry their path below that side's base, as
+        # aws joins every pattern onto each side's rootdir.
+        item_filter = filters.compile_filter(args.filters)
         transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
         # aws builds the transfer manager here, before it decides anything about
         # the run: a CRT selection pays its construction even for a --dryrun.

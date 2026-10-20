@@ -88,13 +88,14 @@ group (`aws s3`).
   scan, the key relative to the directory being enumerated; for an S3 object
   listing, the entry key with the `ListObjectsV2` `Prefix` removed. A bucket
   listing uses the bucket name unchanged. It is what sync's merge-join pairs on
-  and what a relative `GlobFilter` pattern is matched against (a root-anchored
-  pattern matches the full **key** instead; the CLI's `--exclude` / `--include`
-  follow aws-cli's base-joined matching, which delegates to `compare_key`
-  matching only when provably equivalent - see [`cli.md`](./cli.md) section 3).
+  and what a relative `--exclude` / `--include` pattern is matched against (a
+  root-anchored pattern matches the full path instead): every entry the
+  library hands to a filter carries aws-cli's path below its base here, through
+  a view where the record's own differs (a single source;
+  [`globsieve.md`](./globsieve.md) section 5).
   It is carried on `FileInfo.compare_key`: each backend's
   listing stamps it on every entry it yields (a `scan` contract of the backend,
   not something the base `Storage.scan` does - see [`storage.md`](./storage.md)
   section 2), so a custom filter can read it directly. The name mirrors
   aws-cli's `FileInfo.compare_key`. Pattern form and OS handling are in
-  [`globsieve.md`](./globsieve.md) section 4.
+  [`globsieve.md`](./globsieve.md) sections 2 and 4.

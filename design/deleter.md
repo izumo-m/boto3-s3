@@ -354,4 +354,5 @@ Each of the following lives outside this component:
 
 The wiring of `S3.rm` / CLI `rm` and the single-object `S3Storage.delete(info)` (a
 blind `DeleteObject` used by the single-shot path of a non-recursive rm) are
-implemented - see [`cli.md`](./cli.md) section 5.2 / [`globsieve.md`](./globsieve.md).
+implemented - see [`cli.md`](./cli.md) section 5.2 / [`globsieve.md`](./globsieve.md)
+section 7.

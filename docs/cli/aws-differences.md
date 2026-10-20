@@ -38,7 +38,8 @@ time a download stamps in some local zones (and the `sync` runs that follow
 from it), a transfer or delete whose request dies
 without any response, a multipart copy whose tag write and its cleanup both
 fail, a local source that cannot be walked as a directory, a path with no
-bucket, a timestamp only `aws`'s local-time conversion cannot hold, a
+bucket, a filtered path holding glob characters, a timestamp only `aws`'s
+local-time conversion cannot hold, a
 malformed `--grants`, a file whose size and time could not be read and then
 could, the destination directory of a refused run, a help page or an `mb` /
 `rb` success line that cannot be written, a
@@ -77,12 +78,19 @@ usually keeps the copy, and sometimes does not; in the other form both tools
 end either way from run to run. Neither outcome is
 promised by either tool, so such a run is not something the two can be
 compared on. Do not pass `--delete` when one side of a same-bucket sync
-contains the other.
+contains the other. `--exclude` / `--include` between such prefixes differ
+too, deterministically: `aws` joins each pattern onto both sides and applies
+both to every entry, so `cp s3://bkt/d s3://bkt/d/backup --recursive
+--exclude 'x*'` skips the source's `d/backup/x1.txt`; this command matches
+each entry under its own side only and copies it. The same cross-side reach
+lets `aws` on Windows match a local path with a root-relative or
+drive-relative pattern joined onto the S3 side (`C:?b*`, `\?srv\...`); this
+command does not reproduce that either.
 
-The same holds for **a `sync --delete` against an S3-compatible endpoint whose
-listing is not in key order**: both tools pair such a listing the same way,
-and that pairing can copy a key and delete it in one run, so whether the key
-survives is timing on either tool (measured: lost in four of six runs on
+Timing decides the same way for **a `sync --delete` against an S3-compatible
+endpoint whose listing is not in key order**: both tools pair such a listing
+the same way, and that pairing can copy a key and delete it in one run, so
+whether the key survives is timing on either tool (measured: lost in four of six runs on
 each). Real S3's general purpose buckets and MinIO list in key order; an S3
 Express directory bucket does not, and `sync` refuses it on both tools — and,
 on this command only, an access point of one as well (section 2).
@@ -484,6 +492,16 @@ that say outright that the run comes out differently, listed in section 1.
   its trailing-separator form and prints `(dryrun) upload: d/ to s3://bkt/` —
   with the destination key folded away — where this command prints
   `(dryrun) upload: ./d to s3://bkt/d`.
+- **Glob characters in a filtered command's path are literal here.** `aws`
+  joins the path a command names into every `--exclude` / `--include`
+  pattern, so a `[`, `*` or `?` in that path is read as part of the pattern:
+  `rm s3://bkt/f[1]/ --recursive --exclude '*'` matches nothing and deletes
+  every object, and `cp --recursive 'dir[1]' s3://bkt/ --exclude '*'` still
+  uploads (measured on 2.36.40; aws-cli issues #7330 and #5452). The AWS
+  reference allows no wildcards in a path argument and documents a filter as
+  relative to the source directory, so this command takes the path
+  literally: both runs exclude everything. This holds until AWS documents
+  the behavior as intended.
 - **The `--version` line.** `aws` names itself and its interpreter; this
   command names the four packages that decide its behavior —
   `boto3-s3-cli/<v> boto3-s3/<v> boto3/<v> botocore/<v> Python/<v>
@@ -606,5 +624,6 @@ included (section 2).
 `aws`. A backslash is treated as a separator there, in a pattern and in an S3
 key alike: `logs\*.txt` matches `logs/x.txt`, and `logs/*` matches a key
 spelled `logs\x.txt`. On Linux and macOS a backslash stays a literal
-character. The `boto3-s3` Python library applies neither rule — that
-tightening belongs to this command.
+character. The `boto3-s3` Python library's `GlobFilter` applies the same
+rules, as it applies `aws`'s reading of drive and root forms (`C:x`, `\x`,
+`*:*`) on Windows.

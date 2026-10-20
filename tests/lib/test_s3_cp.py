@@ -756,6 +756,129 @@ class TestFilters:
         S3().cp(str(src), S3Storage("s3://b/k.txt", client=client), filter=drop)
         assert calls == []
 
+    @pytest.mark.parametrize(
+        ("source", "patterns", "kept", "relative", "full"),
+        [
+            # Measured on aws 2.36.40 (cp --dryrun, Linux): aws matches the
+            # source in its local_format form, a directory with a trailing
+            # separator, against patterns joined onto abspath(dirname(path)).
+            ("d/", ("-d/",), True, "", "c2/sub/d/"),
+            ("d/", ("-",), False, "", "c2/sub/d/"),
+            ("d/", ("-d",), True, "", "c2/sub/d/"),
+            ("d/", ("-*",), False, "", "c2/sub/d/"),
+            ("d/", ("-*", "+"), True, "", "c2/sub/d/"),
+            ("./d/", ("-",), False, "", "c2/sub/d/"),
+            ("./d/", ("-d/",), True, "", "c2/sub/d/"),
+            ("d", ("-d/",), False, "d/", "c2/sub/d/"),
+            ("d", ("-d",), True, "d/", "c2/sub/d/"),
+            ("d", ("-",), True, "d/", "c2/sub/d/"),
+            (".", ("-",), False, "", "c2/sub/"),
+            (".", ("-*",), False, "", "c2/sub/"),
+            ("../", ("-",), False, "", "c2/"),
+            ("../", ("-*",), False, "", "c2/"),
+            # A bare `..` lies outside its root: only full-path patterns apply.
+            ("..", ("-*",), True, None, "c2/"),
+            ("..", ("-..",), True, None, "c2/"),
+            ("..", ("-../*",), True, None, "c2/"),
+            ("..", ("-/*",), False, None, "c2/"),
+            ("..", ("-{root}c2",), True, None, "c2/"),
+            ("..", ("-{root}c2/",), False, None, "c2/"),
+            # A file keeps its own path and basename.
+            ("d/f", ("-f",), False, "f", "c2/sub/d/f"),
+            ("d/f", ("-f/",), True, "f", "c2/sub/d/f"),
+        ],
+    )
+    def test_a_single_local_source_is_matched_in_aws_clis_form(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        source: str,
+        patterns: tuple[str, ...],
+        kept: bool,
+        relative: str | None,
+        full: str,
+    ) -> None:
+        # The record keeps the absolute path and its basename (the source and
+        # the destination name); the filter is shown aws's form of both.
+        sub = tmp_path / "c2" / "sub"
+        (sub / "d").mkdir(parents=True)
+        (sub / "d" / "f").write_bytes(b"x")
+        monkeypatch.chdir(sub)
+        root = str(tmp_path).replace(os.sep, "/") + "/"
+        keep = globsieve.compile(
+            Exclude(p[1:].format(root=root)) if p[0] == "-" else Include(p[1:].format(root=root))
+            for p in patterns
+        )
+        seen: list[tuple[str | None, str]] = []
+
+        def spy(info: FileInfo) -> bool:
+            seen.append((info.compare_key, info.key))
+            return keep(info)
+
+        client, calls = make_recording_client([])
+        results: list[OpResult] = []
+        S3().cp(
+            source.replace("/", os.sep),
+            S3Storage("s3://b/k", client=client),
+            filter=spy,
+            dryrun=True,
+            on_result=results.append,
+        )
+        assert calls == []
+        assert seen == [(relative, root + full)]
+        assert [r.outcome for r in results] == ([OpOutcome.DRYRUN] if kept else [])
+
+    def test_nested_s3_to_s3_patterns_do_not_cross(self) -> None:
+        # aws joins every pattern onto both sides' bases and applies both to
+        # every entry, so `x*` joined onto the destination `bucket/data/backup`
+        # excludes the source entry data/backup/x1.txt. Each entry here meets
+        # its own side's patterns only, so it is copied (a decided difference,
+        # docs/cli/aws-differences.md).
+        listing = {
+            "Contents": [
+                {"Key": "data/backup/x1.txt", "Size": 1, "LastModified": MTIME, "ETag": '"e"'},
+                {"Key": "data/x2.txt", "Size": 1, "LastModified": MTIME, "ETag": '"e"'},
+            ]
+        }
+        client, calls = make_recording_client([listing])
+        results: list[OpResult] = []
+        S3().cp(
+            S3Storage("s3://bucket/data", client=client),
+            S3Storage("s3://bucket/data/backup", client=client),
+            recursive=True,
+            filter=globsieve.compile([Exclude("x*")]),
+            dryrun=True,
+            on_result=results.append,
+        )
+        assert ops(calls) == ["ListObjectsV2"]
+        assert [r.compare_key for r in results] == ["backup/x1.txt"]
+
+    def test_windows_backslash_ending_prefix_matches_entries_as_aws_does(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # On Windows aws's ntpath.join reads a prefix typed ending in a
+        # backslash as ending in a separator and joins patterns flush: the
+        # entry pre\/x is matched as /x (simulated here). The record keeps x.
+        monkeypatch.setattr(producers, "_JOIN_SEPARATORS", ("/", "\\"))
+        monkeypatch.setattr(globsieve, "_WINDOWS", True)
+        listing = {
+            "Contents": [
+                {"Key": "pre\\/x", "Size": 1, "LastModified": MTIME, "ETag": '"e"'},
+                {"Key": "pre\\/y", "Size": 1, "LastModified": MTIME, "ETag": '"e"'},
+            ]
+        }
+        client, _calls = make_recording_client([listing])
+        results: list[OpResult] = []
+        S3().cp(
+            S3Storage("s3://b/pre\\", client=client),
+            str(tmp_path / "out"),
+            recursive=True,
+            filter=globsieve.compile([Exclude("x", "?y")]),
+            dryrun=True,
+            on_result=results.append,
+        )
+        assert [r.compare_key for r in results] == ["x"]
+
 
 class TestDownloadRoute:
     def test_single_download_heads_then_gets(self, tmp_path: Path) -> None:
