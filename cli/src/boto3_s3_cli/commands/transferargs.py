@@ -534,6 +534,11 @@ def refuse_unwalkable_source(src: str, *, follow_symlinks: bool, operation: str)
     path = storage.abspath
     if not follow_symlinks and os.path.islink(path):
         why = "It is a symbolic link, which --no-follow-symlinks does not follow."
+    elif not os.path.lexists(path):
+        # The kernel found the path as typed (the missing-source check), the
+        # walk's absolute form names nothing: a `..` after a symlinked
+        # directory, which the absolute form folds lexically.
+        why = f"It does not exist as {path}."
     elif not os.path.isdir(path):
         why = "It is not a directory."
     elif reasons:

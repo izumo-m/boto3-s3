@@ -45,13 +45,15 @@ class SyncCommand(Command):
         """Sync and return an ``aws s3 sync``-style exit code.
 
         The shape is cp's (design/cli.md section 6) with sync's own usage
-        errors: the local-local pair 252, any
-        ``-`` path 252 ("Streaming currently is only compatible with
+        errors: the local-local pair 252, a path that names no bucket 252,
+        any ``-`` path 252 ("Streaming currently is only compatible with
         non-recursive cp commands" - cp-worded even here), the checksum /
         SSE-C pairings 252, and an S3 Express directory bucket or one of
         its access points on either side 252 ("Cannot use sync command with
         a directory bucket."; aws refuses the bucket only). A missing local
-        source exits 255; the
+        source, and one whose root the walk would skip (a file, an
+        unreadable directory, a symlink under ``--no-follow-symlinks``),
+        exit 255; the
         ``--exclude`` / ``--include`` patterns compile once and apply to both
         sides (rootless anchoring; design/sync.md section 1).
         """

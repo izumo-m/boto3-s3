@@ -114,7 +114,7 @@ def built_client_ctx() -> Context:
 
     The counterpart of `unused_ctx` for every check past aws's client-build
     slot - the path-type gates, the onto-itself guard, the checksum / SSE-C
-    pairings, the missing local source, ``rm``'s bucket-less synthesis. The
+    pairings, the missing local source, an unwalkable source root. The
     factory hands out a recording client scripted with nothing, so the
     "unexpected call" guard simply moves from construction to the first API
     call (the root conftest fails the test on an exhausted recorder)."""

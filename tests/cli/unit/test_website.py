@@ -148,11 +148,12 @@ class TestWebsiteExitCodeShape:
         )
         assert client.calls == []
 
-    def test_empty_uri_is_param_validation_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # The empty name survives the fold intact and rides on to botocore.
+    def test_empty_uri_names_no_bucket_252(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # Refused before the request as a path that names no bucket (aws lets
+        # botocore's parameter validation refuse the empty name, 252 too).
         rc = cli.main(["website", "s3://", "--index-document", "i.html"], ctx=_real_client_ctx())
         assert rc == 252
-        assert "Invalid bucket name" in capsys.readouterr().err
+        assert 'Invalid bucket name ""' in capsys.readouterr().err
 
     def test_a_bucketless_key_is_refused_as_naming_no_bucket(
         self, capsys: pytest.CaptureFixture[str]

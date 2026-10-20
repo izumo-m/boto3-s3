@@ -55,10 +55,12 @@ class MvCommand(Command):
         """Move and return an ``aws s3 mv``-style exit code.
 
         The shape is cp's (design/cli.md section 6) with mv's own usage
-        errors: the local-local pair 252, any
-        ``-`` path 252 ("Streaming currently is only compatible with
+        errors: the local-local pair 252, a path that names no bucket 252,
+        any ``-`` path 252 ("Streaming currently is only compatible with
         non-recursive cp commands"), and for s3->s3 the onto-itself guard /
-        ``--validate-same-s3-paths`` resolution / access-point warning.
+        ``--validate-same-s3-paths`` resolution / access-point warning. A
+        missing local source, and a ``--recursive`` one whose root the walk
+        would skip, exit 255.
         Resolution failures keep their class: an unresolvable path 252, a
         failing s3control/sts call its translated category (a
         ClientError-caused failure 254, a transport failure 255).

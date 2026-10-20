@@ -28,14 +28,16 @@ class CpCommand(Command):
 
         Exit-code shape (design/cli.md section 5.7/6): pre-pipeline errors
         keep their class - paramfile / blob loads, ``--metadata`` parsing, a
-        malformed ``--grants``, path types, the ``--endpoint-url`` scheme,
+        malformed ``--grants``, path types, a path that names no bucket, the
+        ``--endpoint-url`` scheme,
         the checksum/path-format pairing,
         SSE-C pairing,
         streaming with ``--recursive`` (either side) or a streaming
         *download* with ``--no-overwrite``, and the S3
         Express case-conflict rejection are 252; the bare integer
         conversion, the session profile resolution, the missing local
-        source, and the ``--recursive`` destination-directory pre-create
+        source, a ``--recursive`` local source whose root the walk would
+        skip, and the ``--recursive`` destination-directory pre-create
         are 255 - while everything raised by the transfer pipeline is rc 1,
         credentials that cannot be located included (the client builds
         without them; the first request fails)

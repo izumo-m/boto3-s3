@@ -2,9 +2,10 @@
 
 The rc shape is unlike every other subcommand (design/cli.md section 6): pure
 client-side computation means 1 and 254 cannot happen - 0 on success, 252 for
-botocore's client-side parameter validation (empty bucket/key) and usage
-errors, 255 for a non-integer ``--expires-in`` (aws's bare ``int()``
-conversion escapes to its general handler).
+a path that names no bucket (refused before signing), botocore's client-side
+parameter validation (an empty key) and usage errors, 255 for a non-integer
+``--expires-in`` (aws's bare ``int()`` conversion escapes to its general
+handler).
 """
 
 from __future__ import annotations
@@ -104,19 +105,16 @@ class TestPresignExitCodeShape:
         assert rc == 252
         assert "Invalid length for parameter Key" in err
 
-    def test_empty_uri_is_param_validation_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = cli.main(["presign", "s3://"], ctx=_real_client_ctx())
-        assert rc == 252
-        assert "Invalid bucket name" in capsys.readouterr().err
-
-    def test_bucketless_key_is_botocores_rejection(
-        self, capsys: pytest.CaptureFixture[str]
+    @pytest.mark.parametrize("path", ["s3://", "s3:///k"])
+    def test_a_path_with_no_bucket_is_refused_before_signing(
+        self, path: str, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws splits the URI and signs with Bucket="" + Key="k", so the
-        # rejection is botocore's own bad-bucket-name check at signing time.
-        rc = cli.main(["presign", "s3:///k"], ctx=_real_client_ctx())
+        # Refused before signing as a path that names no bucket; aws signs
+        # with Bucket="" (+ Key="k") and botocore refuses the empty name, 252
+        # too.
+        rc = cli.main(["presign", path], ctx=_real_client_ctx())
         assert rc == 252
-        assert "Invalid bucket name" in capsys.readouterr().err
+        assert 'Invalid bucket name ""' in capsys.readouterr().err
 
     def test_extra_positional_is_unknown_options_252(
         self, capsys: pytest.CaptureFixture[str]

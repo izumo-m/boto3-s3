@@ -119,7 +119,8 @@ class RmCommand(Command):
         """Delete the target(s) and return an ``aws s3 rm``-style exit code.
 
         Exit-code shape (differs from ``ls``): usage errors - a
-        non-``s3://`` path, a rejected ARN form - exit 252 via ``main``, but
+        non-``s3://`` path, a path that names no bucket, a rejected ARN
+        form - exit 252 via ``main``, but
         every failure after the operation starts is rc 1 whatever its type
         (rm is an ``S3TransferCommand`` in aws too, so its execution span sits
         inside the same result recorder cp / mv / sync's does -

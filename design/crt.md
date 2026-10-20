@@ -338,8 +338,8 @@ calls the same method first (`transferargs.resolve_transfer_config`), so its
 materialization below gets the same config; a test-injected
 `ctx.transfer_config` supplies the settings it sets (the determinization
 lever). In the CLI the reading of `[s3]` is placed **before** everything the
-run itself does - for rm that includes the bucket-less enumerating synthesis,
-so an invalid `[s3]` value stops every rm form (measured).
+run itself does, so an invalid `[s3]` value stops every rm form (measured); a
+path with no bucket is refused earlier still, before the client is built.
 
 ### Materializing the engine (`materialize_transfer_engine`)
 

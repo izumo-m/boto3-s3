@@ -178,6 +178,18 @@ class TestGeneralErrors:
         assert rc == 255
         assert "symbolic link" in capsys.readouterr().err
 
+    def test_a_source_found_only_through_a_symlinked_dotdot_stops_the_run(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # `link/../sub` exists to the kernel (link -> real/sub), but the walk
+        # reads the lexical absolute form, `<tmp>/sub`, which names nothing.
+        (tmp_path / "real" / "sub").mkdir(parents=True)
+        (tmp_path / "link").symlink_to(tmp_path / "real" / "sub", target_is_directory=True)
+        src = os.path.join(str(tmp_path / "link"), os.pardir, "sub")
+        rc = cli.main(["sync", src, "s3://b/p", "--delete"], ctx=built_client_ctx())
+        assert rc == 255
+        assert f"It does not exist as {tmp_path / 'sub'}." in capsys.readouterr().err
+
     def test_a_followed_symlink_root_is_walked(self, tmp_path: Path) -> None:
         real = tmp_path / "real"
         real.mkdir()

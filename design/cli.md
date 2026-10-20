@@ -885,8 +885,10 @@ which one is reported is not matched ([`overview.md`](./overview.md) section
    parse.
 2. **The path-type gate and the normalization** - the local-local pair
    (252), then `_normalize_s3_trailing_slash` over the paths in order
-   (`transferargs.normalize_s3_path`: its `find_bucket_key` refuses the S3
-   Object Lambda and Outposts bucket ARNs (252), and a keyless `s3://` path
+   (`transferargs.normalize_s3_path`: a path that names no bucket, `s3://` or
+   `s3:///k`, is refused first (252, `base.refuse_bucketless`; aws has no such
+   check), then its `find_bucket_key` refuses the S3 Object Lambda and
+   Outposts bucket ARNs (252), and a keyless `s3://` path
    gains the trailing `/` every later step re-reads, which turns an Outposts
    `.../accesspoint/ap:` into the key `/`). In `classify_paths` (cp / mv /
    sync) and in rm's `run()` (section 5.2).
@@ -899,7 +901,9 @@ which one is reported is not matched ([`overview.md`](./overview.md) section
    builds fine on S3's global endpoint.
 4. **The rest of the path validation** - aws's `add_paths`: streaming, mv's
    onto-itself guard and resolver, the checksum / SSE-C pairings, the
-   missing local source, sync's directory-bucket rejection. Which of these a
+   missing local source, then a directory source whose root the walk would
+   skip (255, `transferargs.refuse_unwalkable_source`; aws runs on an empty
+   source there), sync's directory-bucket rejection. Which of these a
    command runs is recorded with its command. aws's `_validate_path_args`
    also creates the `s3local` destination here; this CLI creates it right
    before the run, after every check including step 6's `--case-conflict`
@@ -1044,8 +1048,9 @@ the free-string text block,
 paramfile load 252, shorthand parse 252)** -> cp's **`--expected-size`
 paramfile (252)** -> the route type (local-local 252), a path that names no
 bucket (`s3://`, `s3:///k`: 252, `base.refuse_bucketless` - aws sends
-`Bucket=""` on and fails per item, at the lookup or the listing, or not at all
-under `--dryrun`) and the refused ARN forms (252) -> **client creation** (step 3 above: a schemeless
+`Bucket=""` on: each upload or copy fails on its own (rc 1), a single
+object's lookup or a listing is a fatal error (rc 1, `--dryrun` included),
+and only a `--dryrun` upload passes, at rc 0) and the refused ARN forms (252) -> **client creation** (step 3 above: a schemeless
 `--endpoint-url` is 252; an undeclared profile, an empty region or an invalid
 configuration is 255, section 6; an absent region and missing credentials
 are no construction failure, the latter fail the first request) ->
@@ -1403,8 +1408,7 @@ flow to `main()`'s `exit_code_for` (the 254 family). The catch is **positional,
 not by type**: aws's recorder turns whatever the pipeline raises into an error
 result, so a failure outside the library's taxonomy is the same one `fatal
 error:` line at rc 1 as a `Boto3S3Error` (measured on both tools; the listing
-element a response left out and the timestamp the local zone cannot hold,
-aws's bare `KeyError` / `OverflowError`, arrive as the library's
+element a response left out, aws's bare `KeyError`, arrives as the library's
 `MalformedResponseError`). `KeyboardInterrupt` keeps its own arm
 (the cancelled-run line above), the rest of the `BaseException` family passes,
 and `AssertionError` is re-raised - the same carve-out the dispatcher's backstop
