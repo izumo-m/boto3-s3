@@ -27,6 +27,7 @@ from botocore.exceptions import ClientError, ConnectionClosedError
 
 from boto3_s3 import (
     S3,
+    AccessDeniedError,
     BatchError,
     CancelledError,
     CancelToken,
@@ -429,10 +430,10 @@ class TestRmSingleKeyInterrupted:
         assert client.delete_object_calls == [{"Bucket": "b", "Key": "k"}]
         assert [(r.compare_key, r.outcome) for r in results] == [("k", OpOutcome.SUCCEEDED)]
 
-    def test_a_delete_failing_after_the_interrupt_is_not_recorded(self) -> None:
-        # On aws's transfer futures a completion wins over the cancel mark and a
-        # failure does not (measured: a 403 after the Ctrl-C prints only the
-        # closing line).
+    def test_a_delete_failing_after_the_interrupt_is_recorded(self) -> None:
+        # aws's transfer futures let the cancel mark win over a failure and
+        # print only the closing line (measured on a 403); the refused delete
+        # is still this key's outcome here, recorded before the interrupt.
         class _InterruptedClient(_FakeS3Client):
             def delete_object(self, **kwargs: Any) -> dict[str, Any]:
                 interrupt_main_in("_send_through_interrupt")
@@ -444,11 +445,12 @@ class TestRmSingleKeyInterrupted:
         results: list[OpResult] = []
         with pytest.raises(KeyboardInterrupt):
             S3().rm(S3Storage("s3://b/k", client=client), on_result=results.append)
-        assert results == []
+        assert [(r.compare_key, r.outcome) for r in results] == [("k", OpOutcome.FAILED)]
+        assert isinstance(results[0].error, AccessDeniedError)
 
-    def test_a_second_ctrl_c_still_waits_but_records_nothing(self) -> None:
+    def test_a_second_ctrl_c_still_waits_and_records(self) -> None:
         # aws's executor threads are joined as it exits, so its request still
-        # completes after a second Ctrl-C - nothing more is printed (measured).
+        # completes after a second Ctrl-C (measured); the outcome is recorded.
         class _InterruptedTwice(_FakeS3Client):
             def delete_object(self, **kwargs: Any) -> dict[str, Any]:
                 interrupt_main_in("_send_through_interrupt")
@@ -460,7 +462,7 @@ class TestRmSingleKeyInterrupted:
         with pytest.raises(KeyboardInterrupt):
             S3().rm(S3Storage("s3://b/k", client=client), on_result=results.append)
         assert client.delete_object_calls == [{"Bucket": "b", "Key": "k"}]
-        assert results == []
+        assert [(r.compare_key, r.outcome) for r in results] == [("k", OpOutcome.SUCCEEDED)]
 
     def test_a_third_ctrl_c_stops_waiting(self) -> None:
         release = threading.Event()

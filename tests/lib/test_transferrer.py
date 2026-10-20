@@ -356,8 +356,9 @@ class TestUpload:
         assert isinstance(error.__cause__, ClientError)
 
     def test_invalid_grants_raise_at_submit_time(self, tmp_path: Path) -> None:
-        # aws maps request params per item inside its pipeline, so a bad
-        # --grants surfaces in-flight (fatal error, rc 1) - never upfront.
+        # The operation layer refuses a bad grants before the run; driven
+        # directly, the Transferrer's own per-item mapping still refuses it at
+        # submit, before any request.
         src = tmp_path / "a.bin"
         src.write_bytes(b"x")
         item = TransferItem(
@@ -1495,11 +1496,10 @@ class _CrtCapturingManager(_CrtDrainManager):
 
 
 class TestCrtCancelClassification:
-    """A CRT cancellation is a per-item failure unless this run's cancel token
-    ordered it (design/crt.md section 6) - aws-cli's measured classification:
-    a fatal or Ctrl-C folding its CRT manager prints a failed line per
-    in-flight transfer, and only the token, which aws-cli has no counterpart
-    for, revokes as CANCELLED.
+    """A CRT cancellation this run ordered - its cancel token, a fatal or a
+    Ctrl-C folding the manager - revokes the item as CANCELLED, as on the
+    classic engine (design/crt.md section 6); aws-cli prints a failed line per
+    such item instead. A CRT cancellation nobody ordered stays a failure.
 
     Driven with a stand-in manager because the real CRT stack needs awscrt's
     event loop; the stand-in reproduces exactly the seam under test - futures
@@ -1521,10 +1521,8 @@ class TestCrtCancelClassification:
 
     def test_uninitiated_cancellations_are_failures(self, tmp_path: Path) -> None:
         # Nobody here ordered a cancel, yet the drain settled the item
-        # cancelled: the trace of an interrupt the CRT manager swallowed.
-        # aws-cli classifies exactly this as a per-item failure (its
-        # DoneResultSubscriber, rc 1); a silent CANCELLED would report the
-        # interrupted run as success.
+        # cancelled: a failure, so a run cut short by something the library
+        # cannot see is never reported as a success.
         client, _ = make_recording_client([])
         results: list[OpResult] = []
         with Transferrer(TransferType.UPLOAD, client, on_result=results.append) as transferrer:
@@ -1534,12 +1532,11 @@ class TestCrtCancelClassification:
         assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
         assert (transferrer.failed, transferrer.cancelled) == (1, 0)
 
-    def test_fatal_ordered_cancellations_are_failures(self, tmp_path: Path) -> None:
+    def test_fatal_ordered_cancellations_are_cancelled(self, tmp_path: Path) -> None:
         # The fatal path orders the cancel (Transferrer.__exit__ under the
-        # exception), and aws-cli still counts each folded in-flight transfer
-        # as a per-item failure (measured: a mid-listing fatal under the CRT
-        # engine prints "download failed: ... AWS_ERROR_S3_CANCELED" per item
-        # before the fatal error line).
+        # exception): each folded in-flight transfer is revoked, as on the
+        # classic engine. aws-cli prints "upload failed: ...
+        # AWS_ERROR_S3_CANCELED" per item there (measured), not copied.
         client, _ = make_recording_client([])
         results: list[OpResult] = []
         transferrer = Transferrer(TransferType.UPLOAD, client, on_result=results.append)
@@ -1548,15 +1545,15 @@ class TestCrtCancelClassification:
                 transferrer._manager = _CrtDrainManager()  # pyright: ignore[reportPrivateUsage]
                 self._submit_one(transferrer, tmp_path)
                 raise RuntimeError("fatal elsewhere")
-        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
         assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
-        assert (transferrer.failed, transferrer.cancelled) == (1, 0)
+        assert (transferrer.failed, transferrer.cancelled) == (0, 1)
+        assert transferrer.first_error is None
 
     def test_token_ordered_cancellations_stay_cancelled(self, tmp_path: Path) -> None:
         # The cancel-token escalation (`_cancel_futures`, as the drain-time
-        # watcher runs it) is the one CRT cancel aws-cli has no counterpart
-        # for: an ordered revocation, CANCELLED, outside the failure counts -
-        # the on_result contract (design/opresult.md).
+        # watcher runs it): an ordered revocation, CANCELLED, outside the
+        # failure counts - the on_result contract (design/opresult.md).
         client, _ = make_recording_client([])
         results: list[OpResult] = []
         with Transferrer(TransferType.UPLOAD, client, on_result=results.append) as transferrer:
@@ -1570,9 +1567,8 @@ class TestCrtCancelClassification:
     def test_token_cancel_caught_mid_submission_stays_cancelled(self, tmp_path: Path) -> None:
         # An immediate token cancel surfacing in the submission loop reaches
         # __exit__ as the CancelledError that folds the manager
-        # (s3._raise_if_cancelled). That cancel is still the token's own
-        # order, so the in-flight item revokes CANCELLED exactly like the
-        # drain-time escalation above - not FAILED like a fatal's cancel.
+        # (s3._raise_if_cancelled): the in-flight item revokes CANCELLED
+        # exactly like the drain-time escalation above.
         client, _ = make_recording_client([])
         results: list[OpResult] = []
         token = CancelToken()
@@ -1589,9 +1585,9 @@ class TestCrtCancelClassification:
         assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
         assert (transferrer.failed, transferrer.cancelled) == (0, 1)
 
-    def test_interrupt_folded_cancellations_are_failures(self, tmp_path: Path) -> None:
-        # A Ctrl-C forcing the fold classifies its cancels FAILED like a
-        # fatal (aws-measured); the interrupt itself propagates.
+    def test_interrupt_folded_cancellations_are_cancelled(self, tmp_path: Path) -> None:
+        # A Ctrl-C forcing the fold revokes the in-flight items like a fatal;
+        # the interrupt itself propagates.
         client, _ = make_recording_client([])
         results: list[OpResult] = []
         transferrer = Transferrer(TransferType.UPLOAD, client, on_result=results.append)
@@ -1600,9 +1596,173 @@ class TestCrtCancelClassification:
                 transferrer._manager = _CrtDrainManager()  # pyright: ignore[reportPrivateUsage]
                 self._submit_one(transferrer, tmp_path)
                 raise KeyboardInterrupt
-        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
         assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
-        assert (transferrer.failed, transferrer.cancelled) == (1, 0)
+        assert (transferrer.failed, transferrer.cancelled) == (0, 1)
+
+
+class _CrtWait:
+    """One request's awscrt ``finished_future``, as the drain waits on it.
+
+    ``state`` is ``running`` until the request finishes ``ok`` or
+    ``cancelled``, which runs the done callbacks the way the CRT client does
+    (``settle``). A wait marked ``interrupt`` is where the Ctrl-C lands.
+    """
+
+    def __init__(self, *, interrupt: bool) -> None:
+        self.interrupt = interrupt
+        self.state = "running"
+        self.settle: Callable[[], None] = lambda: None
+
+    def done(self) -> bool:
+        return self.state != "running"
+
+    def result(self, timeout: float | None = None) -> None:
+        if self.state == "cancelled":
+            raise _CrtCancelError("AWS_ERROR_S3_CANCELED: Request successfully cancelled")
+        if self.state == "ok":
+            return
+        if self.interrupt:
+            self.interrupt = False
+            raise KeyboardInterrupt
+        raise AssertionError("the drain waited on a request that never finishes")
+
+    def finish(self, state: str) -> None:
+        self.state = state
+        self.settle()
+
+
+class _CrtRequest:
+    """An awscrt request whose cancel settles it - cancelled, or ``ok`` when
+    it had already completed (``completes``) by the time the cancel arrived."""
+
+    def __init__(self, wait: _CrtWait, *, completes: bool) -> None:
+        self.finished_future = wait
+        self._completes = completes
+
+    def cancel(self) -> None:
+        if self.finished_future.state == "running":
+            self.finished_future.finish("ok" if self._completes else "cancelled")
+
+
+def _swallowing_crt_manager(*requests: dict[str, bool]) -> Any:
+    """pip s3transfer's own CRT manager and coordinators over fake requests.
+
+    The drain (``shutdown`` / ``_shutdown``) and the coordinator's
+    ``result`` / ``cancel`` are s3transfer's, so a Ctrl-C landing in the
+    drain's wait is swallowed exactly as pip s3transfer swallows it; only the
+    awscrt requests underneath are stand-ins. Each upload takes the next of
+    ``requests``: ``interrupt`` (the drain's wait on it is interrupted),
+    ``completes`` (a cancel finds it already complete), ``done`` (finished
+    before the drain).
+    """
+    pytest.importorskip("awscrt")
+    from s3transfer.crt import CRTTransferCoordinator, CRTTransferFuture, CRTTransferManager
+
+    specs = list(requests)
+
+    class Manager(CRTTransferManager):
+        def upload(
+            self,
+            fileobj: Any,
+            bucket: Any,
+            key: Any,
+            extra_args: Any = None,
+            subscribers: Any = None,
+        ) -> Any:
+            spec = specs.pop(0)
+            coordinator = CRTTransferCoordinator(transfer_id=len(self._future_coordinators))
+            future = CRTTransferFuture(meta=cast(Any, _FakeCrtMeta()), coordinator=coordinator)
+            wait = _CrtWait(interrupt=spec.get("interrupt", False))
+
+            def settle() -> None:
+                for subscriber in subscribers or ():
+                    on_done = getattr(subscriber, "on_done", None)
+                    if on_done is not None:
+                        on_done(future)
+                coordinator.set_done_callbacks_complete()
+
+            wait.settle = settle
+            request = _CrtRequest(wait, completes=spec.get("completes", False))
+            coordinator.set_s3_request(cast(Any, request))
+            self._future_coordinators.append(coordinator)
+            if spec.get("done", False):
+                wait.finish("ok")
+            return future
+
+    manager = object.__new__(Manager)
+    manager._future_coordinators = []  # pyright: ignore[reportAttributeAccessIssue]
+    return manager
+
+
+class TestCrtSwallowedInterrupt:
+    """A Ctrl-C landing in pip s3transfer's CRT drain is swallowed there - the
+    coordinator turns it into its own ``cancel()`` and the manager's shutdown
+    drops what follows. Here what it cancelled is CANCELLED, as on the
+    classic engine, and the interrupt reaches the caller once the drain is
+    over (design/crt.md section 6)."""
+
+    def _run(self, tmp_path: Path, manager: Any) -> list[OpResult]:
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        transferrer = Transferrer(TransferType.UPLOAD, client, on_result=results.append)
+        with pytest.raises(KeyboardInterrupt):
+            with transferrer:
+                transferrer._manager = manager  # pyright: ignore[reportPrivateUsage]
+                for name in ("a.bin", "b.bin"):
+                    src = tmp_path / name
+                    src.write_bytes(b"x")
+                    transferrer.submit(
+                        TransferItem(
+                            compare_key=name,
+                            size=1,
+                            src_path=str(src),
+                            dest_bucket="b",
+                            dest_key=name,
+                        )
+                    )
+        assert transferrer.failed == 0
+        return results
+
+    def test_the_cancelled_transfer_is_cancelled_and_the_interrupt_raised(
+        self, tmp_path: Path
+    ) -> None:
+        # The coordinator cancels the transfer it was waiting on, and its
+        # cancellation error replaces the interrupt; the manager drops that.
+        manager = _swallowing_crt_manager({"interrupt": True}, {"done": True})
+        results = self._run(tmp_path, manager)
+        assert sorted((r.compare_key, r.outcome) for r in results) == [
+            ("a.bin", OpOutcome.CANCELLED),
+            ("b.bin", OpOutcome.SUCCEEDED),
+        ]
+
+    def test_a_transfer_complete_before_the_cancel_keeps_its_outcome(self, tmp_path: Path) -> None:
+        # The waited-on transfer had already completed, so the coordinator
+        # re-raises the interrupt and the manager's shutdown catches it,
+        # cancels every transfer still running, and drops it there instead.
+        manager = _swallowing_crt_manager({"interrupt": True, "completes": True}, {"done": True})
+        results = self._run(tmp_path, manager)
+        assert sorted((r.compare_key, r.outcome) for r in results) == [
+            ("a.bin", OpOutcome.SUCCEEDED),
+            ("b.bin", OpOutcome.SUCCEEDED),
+        ]
+
+    def test_a_cancel_without_an_interrupt_passes_through(self, tmp_path: Path) -> None:
+        # The guard reads the interrupt being handled; a cancel the run's
+        # token issues has none, and nothing is kept to raise.
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        with Transferrer(TransferType.UPLOAD, client, on_result=results.append) as transferrer:
+            transferrer._manager = _swallowing_crt_manager({})  # pyright: ignore[reportPrivateUsage]
+            src = tmp_path / "a.bin"
+            src.write_bytes(b"x")
+            transferrer.submit(
+                TransferItem(
+                    compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="a"
+                )
+            )
+            transferrer._cancel_futures()  # pyright: ignore[reportPrivateUsage]
+        assert [(r.compare_key, r.outcome) for r in results] == [("a.bin", OpOutcome.CANCELLED)]
 
 
 class TestFatalCancellation:
@@ -1610,8 +1770,7 @@ class TestFatalCancellation:
     (aws's manager-context behavior, measured live: a mid-listing fatal
     leaves every queued transfer unrun), and on the classic lane each revoked
     item reports one CANCELLED record naming the fatal (design/opresult.md;
-    the CRT lane's fatal cancels classify FAILED instead -
-    TestCrtCancelClassification)."""
+    the CRT lane's in TestCrtCancelClassification)."""
 
     @pytest.mark.parametrize(
         ("raise_exc", "raises", "match", "revoked_text"),
@@ -1628,7 +1787,7 @@ class TestFatalCancellation:
                 # the same way: the classic manager revokes the queued work
                 # with CancelledError (str(KI) is empty, so s3transfer's repr
                 # fallback names it) and the interrupt propagates - CANCELLED
-                # records, unlike the CRT lane's FAILED for the same window.
+                # records, as on the CRT lane for the same window.
                 KeyboardInterrupt,
                 KeyboardInterrupt,
                 None,
@@ -2846,6 +3005,127 @@ class TestNoOverwrite:
         assert "IfNoneMatch" not in calls[1].params
         assert "IfNoneMatch" not in calls[2].params
         assert calls[3].params["IfNoneMatch"] == "*"
+
+    def test_a_multipart_completion_rejected_is_a_silent_skip(self, tmp_path: Path) -> None:
+        src = tmp_path / "big.bin"
+        src.write_bytes(b"x" * (9 * _MIB))
+        item = TransferItem(
+            compare_key="big.bin", size=9 * _MIB, src_path=str(src), dest_bucket="b", dest_key="big"
+        )
+        calls, _, results, transferrer = _run(
+            TransferType.UPLOAD,
+            [item],
+            [
+                {"UploadId": "u"},
+                {"ETag": '"p1"'},
+                {"ETag": '"p2"'},
+                client_error("PreconditionFailed", 412, "CompleteMultipartUpload"),
+                {},
+            ],
+            options=TransferOptions(no_overwrite=True),
+        )
+        assert ops(calls)[-2:] == ["CompleteMultipartUpload", "AbortMultipartUpload"]
+        assert (transferrer.failed, transferrer.skipped) == (0, 1)
+        assert [result.outcome for result in results] == [OpOutcome.SKIPPED]
+
+
+class TestPreconditionFailedElsewhere:
+    """A 412 to any request but no_overwrite's own conditional write fails the item.
+
+    aws-cli skips every ``PreconditionFailed`` silently; here only the
+    conditional write's rejection is the asked-for skip, and a 412 anywhere
+    else - the object changed under a ranged GET or a part copy, a tag write
+    refused - is a failure, even with ``no_overwrite`` set.
+    """
+
+    def _copy_item(self) -> TransferItem:
+        return TransferItem(
+            compare_key="a.bin",
+            size=9 * _MIB,
+            etag='"abc123"',
+            src_bucket="src-b",
+            src_key="d/a.bin",
+            dest_bucket="dest-b",
+            dest_key="cp/a.bin",
+        )
+
+    def test_a_write_412_without_no_overwrite_fails(self, tmp_path: Path) -> None:
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x")
+        item = TransferItem(
+            compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="k"
+        )
+        _, _, results, transferrer = _run(
+            TransferType.UPLOAD, [item], [client_error("PreconditionFailed", 412, "PutObject")]
+        )
+        assert (transferrer.failed, transferrer.skipped) == (1, 0)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+
+    def test_a_ranged_get_412_fails_the_download(self, tmp_path: Path) -> None:
+        item = TransferItem(
+            compare_key="a.bin",
+            size=9 * _MIB,
+            etag='"abc123"',
+            src_bucket="bucket",
+            src_key="d/a.bin",
+            dest_path=str(tmp_path / "a.bin"),
+        )
+        first_part = {"Body": io.BytesIO(b"x" * (8 * _MIB)), "ETag": '"abc123"'}
+        calls, _, results, transferrer = _run(
+            TransferType.DOWNLOAD,
+            [item],
+            [first_part, client_error("PreconditionFailed", 412, "GetObject")],
+            options=TransferOptions(no_overwrite=True),
+        )
+        assert ops(calls) == ["GetObject", "GetObject"]
+        assert (transferrer.failed, transferrer.skipped) == (1, 0)
+        assert transferrer.first_error is not None
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert not (tmp_path / "a.bin").exists()
+
+    def test_a_part_copy_412_fails_the_copy(self) -> None:
+        calls, _, results, transferrer = _run(
+            TransferType.COPY,
+            [self._copy_item()],
+            [
+                {"UploadId": "u"},
+                client_error("PreconditionFailed", 412, "UploadPartCopy"),
+                {},
+            ],
+            source_responses=[],
+            options=TransferOptions(no_overwrite=True, metadata_directive="REPLACE"),
+        )
+        assert ops(calls) == [
+            "CreateMultipartUpload",
+            "UploadPartCopy",
+            "AbortMultipartUpload",
+        ]
+        assert (transferrer.failed, transferrer.skipped) == (1, 0)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+
+    def test_a_post_copy_tag_write_412_fails_the_copy(self) -> None:
+        responses: list[dict[str, Any] | BaseException] = [
+            {"UploadId": "u"},
+            {"CopyPartResult": {"ETag": '"p1"'}},
+            {"CopyPartResult": {"ETag": '"p2"'}},
+            {},
+            client_error("PreconditionFailed", 412, "PutObjectTagging"),
+            {},  # rollback DeleteObject
+        ]
+        source_responses: list[dict[str, Any] | BaseException] = [
+            {},
+            {"TagSet": [{"Key": "k", "Value": "v" * 3000}]},
+        ]
+        calls, _, results, transferrer = _run(
+            TransferType.COPY,
+            [self._copy_item()],
+            responses,
+            source_responses=source_responses,
+            options=TransferOptions(no_overwrite=True),
+        )
+        assert ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
+        assert (transferrer.failed, transferrer.skipped) == (1, 0)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
 
 
 class TestMove:

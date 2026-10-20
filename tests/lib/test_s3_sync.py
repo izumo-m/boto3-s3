@@ -792,18 +792,31 @@ class TestSyncDownload:
         assert (tmp_path / "out").read_bytes() == b"keep"
 
     @pytest.mark.parametrize("bucket", ["b--use1-az4--x-s3", "ap--use1-az4--xa-s3"])
-    def test_directory_bucket_source_is_rejected_after_dest_dir_creation(
+    def test_directory_bucket_source_is_rejected_before_dest_dir_creation(
         self, tmp_path: Path, bucket: str
     ) -> None:
-        # The rejection guards the source side too, and sits after the s3local
-        # dest-dir creation - aws creates the directory and then fails
-        # validation (measured; design/sync.md section 6) - but before any listing.
+        # The rejection guards the source side too, before any listing. aws
+        # creates the destination directory first and then fails validation
+        # (measured; design/sync.md section 6); here the directory is created
+        # only once every set-up check has passed, so the refusal leaves none.
         out = tmp_path / "out"
         client, calls = make_recording_client([])
         with pytest.raises(ValidationError) as excinfo:
             S3().sync(S3Storage(f"s3://{bucket}/p", client=client), str(out))
         assert excinfo.value.operation == "sync"
-        assert out.is_dir()
+        assert not out.exists()
+        assert calls == []
+
+    def test_a_refused_crt_engine_leaves_no_destination_directory(self, tmp_path: Path) -> None:
+        # The engine build is the last set-up check: a classic-only setting
+        # under the CRT engine is refused there, before the directory exists.
+        pytest.importorskip("awscrt")
+        out = tmp_path / "out"
+        client, calls = make_recording_client([])
+        config = TransferConfig(preferred_transfer_client="crt", io_chunksize=1024 * 1024)
+        with pytest.raises(ValidationError):
+            S3().sync(S3Storage("s3://bucket/d", client=client), str(out), transfer_config=config)
+        assert not out.exists()
         assert calls == []
 
     def test_precancelled_token_leaves_no_destination_directory(self, tmp_path: Path) -> None:

@@ -105,8 +105,9 @@ does not reach `data-sibling.txt`. Zero-byte `/`-terminated folder markers are
 dropped from that listing, so they never transfer on this path. An enumeration
 that yields nothing transfers nothing and does not raise. A recursive transfer
 into a local destination that does not exist creates that directory before
-enumerating; this pre-create is not gated on `dryrun`, so a dry run of such a
-transfer still leaves the directory behind.
+enumerating, once every check before the run has passed, so a run refused
+before it starts leaves none; this pre-create is not gated on `dryrun`, so a
+dry run of such a transfer still leaves the directory behind.
 
 Listing and walk behavior is configured on the storage, not here: an
 `S3Storage`'s `page_size` and `fetch_owner`, and a `LocalStorage`'s
@@ -137,8 +138,7 @@ no listing to prune and `filter` is not consulted.
 `cp` specifically: enumeration, the single-object `HeadObject` and the
 `case_conflict` destination walk still run; the missing local destination
 directory is still created; an upload's or copy's per-item request parameters
-are still mapped, so a malformed `grants` entry is still rejected; no transfer
-manager is built; and a stream endpoint is never opened, leaving a
+are still mapped; no transfer manager is built; and a stream endpoint is never opened, leaving a
 side-effecting stream untouched. Items the gates consume — a glacier
 skip, a parent-reference skip, a `no_overwrite` skip — keep their own record
 instead of becoming `DRYRUN` records.
@@ -216,8 +216,8 @@ The outcomes `cp` emits:
 - `FAILED` — the item's transfer failed; `error` is the translated exception.
   These are the items `BatchError` counts.
 - `SKIPPED` — a silent, non-warning skip: `no_overwrite` finding the local
-  destination file already present, S3 answering a conditional write with
-  `PreconditionFailed`, or an archived source under
+  destination file already present, S3 answering `no_overwrite`'s conditional
+  write with `PreconditionFailed`, or an archived source under
   `ignore_glacier_warnings=True`.
 - `WARNED` — an advisory that does not fail the run: local walk problems from
   the source walk or the `case_conflict` destination walk (unreadable, special
@@ -238,9 +238,9 @@ The outcomes `cp` emits:
   the same item's real outcome.
 - `DRYRUN` — under `dryrun=True`, one per item that reached the submit step.
 - `CANCELLED` — an accepted item revoked before it could complete, by an
-  immediate cancellation, a fatal error elsewhere in the run, or `Ctrl-C`. On
-  the CRT engine only a cancellation `cancel_token` ordered reports it; every
-  other CRT cancellation reports `FAILED`.
+  immediate cancellation, a fatal error elsewhere in the run, or `Ctrl-C`, on
+  either transfer engine. A CRT cancellation the run did not order itself
+  reports `FAILED`.
 
 The archived-object gate behind that warning and its
 `ignore_glacier_warnings` skip runs on downloads and copies only; an upload
@@ -271,9 +271,10 @@ upload, the parent reference) are emitted inline on the calling thread
   stream destination; a location `Storage.validate` rejects, such as an
   unsupported ARN form or a key with no bucket; a custom backend that does not
   declare what its route needs (`OPEN_READ` plus `SCAN` or `GET_FILEINFO` for a
-  custom source, `OPEN_WRITE` for a custom destination); an option value the
-  request mapper rejects, such as a malformed `grants` entry or an unrecognized
-  `copy_props` / `annotation_copy_mode`; an unrecognized `case_conflict` value,
+  custom source, `OPEN_WRITE` for a custom destination); a malformed `grants`
+  entry, refused before the run on every route; an option value the request
+  mapper rejects, such as an unrecognized `copy_props` /
+  `annotation_copy_mode`; an unrecognized `case_conflict` value,
   refused on every route including the streaming one, whose single item builds
   no gate; a `TransferConfig` carrying classic-only settings with
   `preferred_transfer_client="crt"`, rejected when the CRT engine is built —

@@ -739,10 +739,11 @@ class TestLeafVanishedBeforeItsTurn:
         assert walker.fired
         _assert_warned(warnings, (target, "does not exist"))
 
-    def test_a_healed_race_drops_the_leaf_silently(self, tmp_path: Path) -> None:
+    def test_a_healed_race_drops_the_leaf_with_the_stat_s_error(self, tmp_path: Path) -> None:
         # aws-cli skips whatever it could not stat, warning only for what its
-        # battery can still see wrong: a leaf whose stat failed and that is back
-        # by the time the battery looks is dropped with no warning at all.
+        # battery can still see wrong, so a leaf whose stat failed and that is
+        # back by the time the battery looks is dropped with no warning at all.
+        # Here the skip stays, warned with the failed stat's own error (rc 2).
         _make_tree(tmp_path, "aaa.txt", "mmm.txt")
         target = str(tmp_path / "mmm.txt")
         real_stat = os.stat
@@ -762,7 +763,7 @@ class TestLeafVanishedBeforeItsTurn:
             keys = _keys(tmp_path, on_warning=warnings.append)
         assert failed == [target]
         assert keys == ["aaa.txt"]
-        assert warnings == []
+        assert warnings == [f"Skipping file {target}. No such file or directory."]
 
 
 class TestLeafRewrittenBeforeItsTurn:

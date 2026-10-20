@@ -39,7 +39,14 @@ from typing import TYPE_CHECKING, Any, Concatenate, Generic, Literal, ParamSpec,
 import boto3
 from typing_extensions import Unpack
 
-from boto3_s3 import concurrency, crtsupport, producers, transferconfig, transferplan
+from boto3_s3 import (
+    concurrency,
+    crtsupport,
+    producers,
+    requestparams,
+    transferconfig,
+    transferplan,
+)
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3.awsconfig import AwsConfig
 from boto3_s3.comparator import (
@@ -132,17 +139,22 @@ _TRANSFER_OPTION_KEYS = frozenset(TransferOptions.__required_keys__) | frozenset
 
 
 def _validate_transfer_options(options: TransferOptions, *, operation: str) -> None:
-    """Reject unknown ``**options`` keys eagerly (pre-pipeline `ValidationError`).
+    """Reject unknown ``**options`` keys and a malformed ``grants`` eagerly.
 
-    ``Unpack[TransferOptions]`` already enforces the key set for type-checked
-    callers, but an unchecked caller's typo (``dry_run`` for ``dryrun``) would
-    otherwise be silently ignored - and on ``mv`` still delete the source.
+    Both are pre-pipeline `ValidationError`s. ``Unpack[TransferOptions]``
+    already enforces the key set for type-checked callers, but an unchecked
+    caller's typo (``dry_run`` for ``dryrun``) would otherwise be silently
+    ignored - and on ``mv`` still delete the source. A ``grants`` entry not of
+    the form ``permission=principal``, or naming an unknown permission, is
+    refused here on every route, where aws-cli finds it only as it maps the
+    first upload or copy (`requestparams.validate_grants`).
     """
     unknown = sorted(set(options) - _TRANSFER_OPTION_KEYS)
     if unknown:
         raise ValidationError(
             f"Unknown transfer option(s): {', '.join(unknown)}", operation=operation
         )
+    requestparams.validate_grants(options, operation)
 
 
 @contextmanager
@@ -288,15 +300,13 @@ def _raise_if_cancelled(cancel_token: CancelToken | None, operation: str) -> Non
 
 
 class _HeldInterrupt:
-    """The Ctrl-Cs `_send_through_interrupt` held back until its request settled.
+    """The Ctrl-C `_send_through_interrupt` held back until its request settled.
 
-    ``interrupt`` is the first, raised once the outcome is recorded;
-    ``silenced`` is set by a second, after which the outcome is not recorded.
+    ``interrupt`` is the first, raised once the outcome is recorded.
     """
 
     def __init__(self) -> None:
         self.interrupt: KeyboardInterrupt | None = None
-        self.silenced = False
 
     def raise_if_held(self) -> None:
         if self.interrupt is not None:
@@ -354,11 +364,11 @@ def _send_through_interrupt(send: Callable[[], Any], held: _HeldInterrupt) -> An
     object, and nothing reports it. So the request runs on a daemon worker
     and this thread waits. The first interrupt is parked in *held* for the
     caller to raise once it has recorded the outcome. A second one keeps the
-    wait but silences the outcome: aws's executor threads are still joined
-    as the process exits, so its request still completes - a delete still
-    sent, a retry still made - yet nothing more is printed (measured). A
-    third stops waiting. The request's own result or exception is returned
-    or raised here.
+    wait too: aws's executor threads are still joined as the process exits,
+    so its request still completes - a delete still sent, a retry still made
+    (measured) - and its outcome is still recorded here, where aws prints
+    nothing more. A third stops waiting. The request's own result or
+    exception is returned or raised here.
 
     Nothing on this thread takes a Python-level lock while interrupts may
     land: the worker is started from another thread, and the waits are
@@ -411,6 +421,7 @@ def _send_through_interrupt(send: Callable[[], Any], held: _HeldInterrupt) -> An
         if not _wait_set(begun, begun_wake, _SPAWN_GRACE):
             raise
         held.interrupt = interrupt
+    waited_past_second = False
     while True:
         try:
             _wait_set(settled, settled_wake)
@@ -418,8 +429,8 @@ def _send_through_interrupt(send: Callable[[], Any], held: _HeldInterrupt) -> An
         except KeyboardInterrupt as interrupt:
             if held.interrupt is None:
                 held.interrupt = interrupt
-            elif not held.silenced:
-                held.silenced = True
+            elif not waited_past_second:
+                waited_past_second = True
             else:
                 raise
     ok, value = outcome[0]
@@ -826,10 +837,11 @@ def _classify_transfer_route(
     dest_bucket)``: the providers are the S3 side(s) whose ``get_client()``
     drives s3transfer (``source_client_provider`` only on the s3s3 route) -
     handed back unresolved so each caller keeps its established effect order:
-    its destination-directory creation runs before ``get_client()`` resolves,
-    which *builds* a client only for a caller-constructed ``S3Storage``
-    without one (a ``resolve()``-made storage already carries a client built
-    at resolve time).
+    its own refusals (sync's directory bucket) run before ``get_client()``
+    resolves, which *builds* a client only for a caller-constructed
+    ``S3Storage`` without one (a ``resolve()``-made storage already carries a
+    client built at resolve time), and its destination-directory creation
+    runs last of the set-up, once every check has passed.
     The built-in routes assert the concrete ``LocalStorage`` / ``S3Storage``
     pair, because the engine reaches into ``S3Storage``'s client/bucket and
     ``LocalStorage``'s path directly; an open route pairs a capability-checked
@@ -1092,13 +1104,11 @@ class S3:
     Ctrl-C as process-fatal, so the unwind may abandon a scan's daemon
     prefetch worker instead of waiting out an in-flight listing page pull
     (the CLI's setting - aws dies immediately on Ctrl-C). Either way the
-    interrupt itself is re-raised, never converted or swallowed - with one
-    engine-imposed exception: pip s3transfer's CRT manager discards an
-    interrupt that lands in its transfer drain, so a CRT-engine run cut short
-    there raises `BatchError` with the cancelled items counted as failures
-    instead (design/crt.md section 6); the classic engine re-raises even
-    there. The posture scopes to ``KeyboardInterrupt`` alone - ``SystemExit``
-    and every other exception always get the full reclamation (``sys.exit()``
+    interrupt itself is re-raised, never converted or swallowed - on the CRT
+    engine too, whose manager would discard one landing in its transfer
+    drain (design/crt.md section 6). The posture scopes to
+    ``KeyboardInterrupt`` alone - ``SystemExit`` and every other exception
+    always get the full reclamation (``sys.exit()``
     requests an *orderly* termination). The posture reaches the scans through
     ``ScanOptions.reusable_after_interrupt``.
 
@@ -1650,19 +1660,6 @@ class S3:
         transfer_type, client_provider, source_provider, dest_bucket = _classify_transfer_route(
             plan, operation=operation
         )
-        # aws-cli's _validate_path_args only creates the dest dir when it does
-        # not already exist, testing and creating the path as typed -
-        # ensure_directory does both on the construction-time anchor
-        # (consistent with the plan if the process chdir'd since). An existing
-        # *file* written without a trailing separator counts as existing: it
-        # skips makedirs and fails per item like aws (rc 1) instead of
-        # crashing up front, and an empty listing transfers nothing and exits
-        # 0. (sync's guard is the same call, not gated on recursive.)
-        if recursive and isinstance(dest_storage, LocalStorage):
-            try:
-                dest_storage.ensure_directory()
-            except (OSError, ValueError) as exc:
-                raise translate_os_error(exc, operation=operation, key=None) from exc
         client = client_provider.get_client()
         source_client = source_provider.get_client() if source_provider is not None else None
         # The S3 listing source (s3local / s3s3 / s3open); None on the
@@ -1694,24 +1691,46 @@ class S3:
             crt_sign_requests=self._crt_sign_requests,
             session=self._session,
         )
-        # After the Transferrer: the gate's destination membership scan warns
-        # into the shared rollup (aws's reverse enumeration shares the result
-        # queue) and applies the run's filter, like any side's walk.
-        case_gate = producers.cp_case_gate(
-            plan,
-            recursive=recursive,
-            options=options,
-            transferrer=transferrer,
-            item_filter=item_filter,
-            operation=operation,
-            reusable_after_interrupt=self._reusable_after_interrupt,
-        )
+        # The case-conflict gate's mode is a set-up check on every route; the
+        # gate itself is built below, once the destination directory exists.
+        producers.case_conflict_mode(options, operation=operation)
         with transferrer:
             if not dryrun:
                 # Build the manager (registers client-event handlers) before the
                 # producers start their scan prefetch worker on this same client
-                # (Transferrer.prepare).
+                # (Transferrer.prepare). A CRT engine that cannot be built
+                # refuses the run here.
                 transferrer.prepare()
+            # The destination directory, created only once every set-up check
+            # has passed, so a refused run changes nothing (aws-cli creates it
+            # in its path validation, before the rest). aws-cli's
+            # _validate_path_args only creates the dest dir when it does not
+            # already exist, testing and creating the path as typed -
+            # ensure_directory does both on the construction-time anchor
+            # (consistent with the plan if the process chdir'd since). An
+            # existing *file* written without a trailing separator counts as
+            # existing: it skips makedirs and fails per item like aws (rc 1)
+            # instead of crashing up front, and an empty listing transfers
+            # nothing and exits 0. (sync's guard is the same call, not gated on
+            # recursive.)
+            if recursive and isinstance(dest_storage, LocalStorage):
+                try:
+                    dest_storage.ensure_directory()
+                except (OSError, ValueError) as exc:
+                    raise translate_os_error(exc, operation=operation, key=None) from exc
+            # After the Transferrer: the gate's destination membership scan
+            # warns into the shared rollup (aws's reverse enumeration shares
+            # the result queue) and applies the run's filter, like any side's
+            # walk.
+            case_gate = producers.cp_case_gate(
+                plan,
+                recursive=recursive,
+                options=options,
+                transferrer=transferrer,
+                item_filter=item_filter,
+                operation=operation,
+                reusable_after_interrupt=self._reusable_after_interrupt,
+            )
             if plan.paths_type == "opens3":
                 items = producers.open_upload_items(
                     plan,
@@ -2237,17 +2256,6 @@ class S3:
         transfer_type, client_provider, source_provider, dest_bucket = _classify_transfer_route(
             plan, operation="sync"
         )
-        # aws-cli creates the destination directory during validation - before
-        # any listing, so even an empty sync leaves it behind. The bare
-        # exists() test (not exist_ok=True) is deliberate: a destination that
-        # exists as a *file* - written without a trailing separator - passes
-        # here and fails per item instead ([Errno 20], rc 1). (cp's guard is
-        # the same call, gated on recursive.)
-        if isinstance(dest_storage, LocalStorage):
-            try:
-                dest_storage.ensure_directory()
-            except (OSError, ValueError) as exc:
-                raise translate_os_error(exc, operation="sync", key=None) from exc
         # An S3 Express directory bucket lists in unspecified order
         # (`ListObjectsV2` drops the lexicographic guarantee), which would feed
         # the sorted merge-join unsorted input - `delete_filter` could then
@@ -2255,7 +2263,8 @@ class S3:
         # merge would for any unsorted listing. aws-cli rejects
         # sync outright on either side
         # (`_validate_not_s3_express_bucket_for_sync`), after creating the
-        # local destination directory as above; so does the CLI layer, making
+        # local destination directory, which is created here only once the run
+        # is past every such check (below); so does the CLI layer, making
         # this the backstop for direct library callers. An access point of a
         # directory bucket (`--xa-s3`) lists the same keys in the same
         # unordered way (measured on real S3: 18 of 20 identical objects
@@ -2372,6 +2381,19 @@ class S3:
                 # starts on the manager's client (Transferrer.prepare).
                 transferrer.prepare()
             deletes.open(stack)
+            # The destination directory, created only once every set-up check
+            # has passed, so a refused run changes nothing; aws-cli creates it
+            # during its path validation, before the rest. Still before any
+            # listing, so even an empty sync leaves it behind, as on aws-cli.
+            # The bare exists() test (not exist_ok=True) is deliberate: a
+            # destination that exists as a *file* - written without a trailing
+            # separator - passes here and fails per item instead ([Errno 20],
+            # rc 1). (cp's guard is the same call, gated on recursive.)
+            if isinstance(dest_storage, LocalStorage):
+                try:
+                    dest_storage.ensure_directory()
+                except (OSError, ValueError) as exc:
+                    raise translate_os_error(exc, operation="sync", key=None) from exc
             src_entries = producers.sync_entries(
                 src_storage,
                 root=plan.src_root,
@@ -2728,19 +2750,19 @@ class S3:
             # exception: aws-cli's classic task loses it with no line at rc 0,
             # which is not copied (design/opresult.md).
             failure = request_failure(exc, operation="rm", bucket=storage.bucket, key=key)
-            if held.interrupt is None:
-                # A failure after a Ctrl-C is not recorded: on aws's transfer
-                # futures a completion wins over the cancel mark and a failure
-                # does not (measured: a 403 after the interrupt prints only
-                # the closing line).
-                _emit_result(
-                    on_result,
-                    info=info,
-                    storage=storage,
-                    outcome=OpOutcome.FAILED,
-                    error=failure,
-                    src=src,
-                )
+            # Recorded after a Ctrl-C too, before the interrupt is raised: the
+            # request was sent, and its answer is the key's outcome (aws's
+            # transfer futures let the cancel mark win over a failure and
+            # print only the closing line - measured on a 403 - which loses
+            # the error and is not copied).
+            _emit_result(
+                on_result,
+                info=info,
+                storage=storage,
+                outcome=OpOutcome.FAILED,
+                error=failure,
+                src=src,
+            )
             held.raise_if_held()
             _raise_if_cancelled(cancel_token, "rm")
             raise BatchError(
@@ -2755,15 +2777,14 @@ class S3:
         # ResponseMetadata) under extra_info["delete"], the same shape the batched
         # path reconstructs from a DeleteObjects entry.
         extra_info = {"delete": strip_response_metadata(response)} if capture_response else None
-        if not held.silenced:
-            _emit_result(
-                on_result,
-                info=info,
-                storage=storage,
-                outcome=OpOutcome.SUCCEEDED,
-                extra_info=extra_info,
-                src=src,
-            )
+        _emit_result(
+            on_result,
+            info=info,
+            storage=storage,
+            outcome=OpOutcome.SUCCEEDED,
+            extra_info=extra_info,
+            src=src,
+        )
         held.raise_if_held()
 
     # -- bucket / signing -------------------------------------------------

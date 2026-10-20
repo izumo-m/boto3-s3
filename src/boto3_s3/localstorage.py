@@ -688,9 +688,11 @@ class LocalFileGenerator:
 
         - it fails (``ENOENT`` and the rest): the ``triggers_warning`` battery
           runs on the path - normally ``File does not exist.``, rc 2 - and the
-          leaf is dropped, warned or not, like aws-cli's ``_safely_get_file_stats``
-          returning nothing. Without this the stale record was submitted and the
-          transfer failed to open it (rc 1). The complete view first tries the
+          leaf is dropped, like aws-cli's ``_safely_get_file_stats`` returning
+          nothing. A battery that finds nothing (the race healed since the
+          stat) warns with the stat's own error instead, where aws-cli drops
+          the leaf silently. Without this the stale record was submitted and
+          the transfer failed to open it (rc 1). The complete view first tries the
           link's own lstat (``_lstat_leaf``): a leaf that became a dangling
           link or a loop is kept as that lstat leaf, warned only when this
           walk follows links - ``classify_child``'s failed-follow rule, at
@@ -731,7 +733,7 @@ class LocalFileGenerator:
             return info
         try:
             st = os.stat(path)
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
             if options.enumerate_all_entries:
                 # The complete view's rule for a link whose follow fails
                 # (classify_child's): warn when this walk follows links, keep
@@ -742,9 +744,13 @@ class LocalFileGenerator:
                 if fallback is not None:
                     return fallback
             # aws-cli runs its battery on the path the stat failed on and skips
-            # the leaf either way (a battery that finds nothing wrong - the race
-            # healed between the two calls - still yields no file stats).
-            self.triggers_warning(path, notify)
+            # the leaf either way. A battery that finds nothing wrong - the race
+            # healed between the two calls - still leaves no file stats, so the
+            # leaf is skipped then too, but with the stat's own error as its
+            # warning: aws-cli drops a file that exists without a word.
+            if not self.triggers_warning(path, notify):
+                reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
+                notify(f"Skipping file {path}. {reason}.")
             return None
         if stat_module.S_ISDIR(st.st_mode):
             is_link = os.path.islink(path)

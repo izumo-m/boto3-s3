@@ -27,7 +27,8 @@ success, the same conditions failing, and an exit code with the same
 meaning**, bar the entries in section 2 that say outright that the run comes
 out differently. Those are a recursive delete whose listing dies part way or
 whose endpoint fails its batch requests, a Ctrl-C during deletes under the CRT
-engine, a delete answered `412`, a CRT download that cannot put its file in
+engine, a delete answered `412`, a transfer answered `412` other than
+`--no-overwrite`'s own write, a CRT download that cannot put its file in
 place, a `mv` between two spellings of one Outposts object, an S3 Express
 access point, a plain-HTTP endpoint named anywhere but `--endpoint-url` under
 the CRT engine, a FIPS pseudo-region under the CRT engine, a
@@ -211,6 +212,23 @@ that say outright that the run comes out differently, listed in section 1.
   `rb --force`, whose bucket removal then does not run). S3 itself never
   answers an unconditional delete this way; only an S3-compatible endpoint
   can.
+- **A transfer answered `412 PreconditionFailed` fails here, unless the
+  answer is to `--no-overwrite`'s own write.** The same `aws` rule covers
+  every request of a transfer. A multipart download reads each part on the
+  condition that the object still has the ETag it was listed with, and a
+  multipart copy copies each part on the same condition about its source, so
+  an object overwritten between the listing and the transfer is answered
+  `412`; so can the tag write that follows a multipart copy whose tag set is
+  too large for its create request, after which `aws` deletes the copied
+  object again. In each case `aws` prints no line for the item, does not count
+  it and, if nothing else failed, exits 0: the item leaves no file or object
+  behind, and a `mv` keeps its source. This command reports the item as failed
+  (`download failed:`, `copy failed:`, `move failed:`) and exits 1, with the
+  same files and objects left behind. `--no-overwrite`'s own write - a
+  `PutObject` or `CopyObject`, or the call completing a multipart upload or
+  copy - answered `412` is a silent skip on both tools, and any other request
+  answered that way is a failure here even under `--no-overwrite`. What `aws`
+  does is read from its source, not measured.
 - **`file://` and `fileb://` are refused where `aws` mishandles them.** Each
   of these exits 252 here, before anything is read or sent:
   - **A `fileb://` path argument** of `ls`, `rm`, `mb`, `rb`, `presign` or
@@ -319,17 +337,19 @@ that say outright that the run comes out differently, listed in section 1.
   classic engine does on both tools. Name the plain region with
   `use_fips_endpoint = true` and the two agree
   ([`../../design/crt.md`](../../design/crt.md) section 4).
-- **Ctrl-C during deletes under the CRT engine.** For transfers the two
-  agree: an interrupt landing in the CRT engine's transfer drain is swallowed
-  by the CRT manager on both tools, which print their per-item failure lines
-  and no closing line. For deletes `aws`'s CRT manager swallows it too and
-  goes on sending every per-key delete already queued, then ends with the
-  per-key lines — a request the interrupt cancelled fails with
-  `AWS_ERROR_S3_CANCELED` — and no closing line, exit code 1 (measured:
-  thirty keys, all deleted). This command's deletes
-  are batched — an accepted difference (above) — and stop at the interrupt as
-  on the classic engine: the
-  requests already out finish, no further one starts, and the run closes with
+- **Ctrl-C during deletes under the CRT engine.** `aws`'s CRT manager
+  swallows an interrupt landing in its drain. For transfers `aws` then prints
+  a failure line for each transfer cut short (`upload failed: …
+  AWS_ERROR_S3_CANCELED: Request successfully cancelled`) and no closing
+  line, while this command prints no line for those transfers and closes
+  with `cancelled: ctrl-c received`, as on the classic engine; both exit 1,
+  and the transfers cut short are the same. For deletes `aws`'s CRT manager
+  swallows it too and goes on sending every per-key delete already queued,
+  then ends with the per-key lines — a request the interrupt cancelled fails
+  with `AWS_ERROR_S3_CANCELED` — and no closing line, exit code 1 (measured:
+  thirty keys, all deleted). This command's deletes are batched — an accepted
+  difference (above) — and stop at the interrupt as on the classic engine:
+  the requests already out finish, no further one starts, and the run closes with
   `cancelled: ctrl-c received`, exit code 1 — so objects `aws` would still
   have deleted survive. Re-running the command deletes them. A single-key `rm`
   sends one request, unbatched, and the same rule holds: the request out

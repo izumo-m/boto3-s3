@@ -15,10 +15,12 @@ aws-cli's CreateMultipartUpload /
 UploadPart variants are ``s3transfer``'s internal concern - it splits the
 submit-time extra args itself.
 
-The grants shape is validated here, but the *call site* is the transfer
-submit path: aws-cli maps params per item inside its pipeline, so a bad
-``--grants`` surfaces as an in-flight fatal error (rc 1), never as a usage
-error - keep mapping lazy to preserve that.
+The grants shape is validated here. aws-cli maps params per item inside its
+pipeline, so a bad ``--grants`` surfaces there as an in-flight fatal error -
+after any deletes already sent, or not at all when nothing needs
+transferring. The operation layer instead refuses it before the run
+(`validate_grants`, a ``ValidationError`` like any other malformed argument),
+on every route; the per-item mapping keeps the same check.
 """
 
 from __future__ import annotations
@@ -157,6 +159,17 @@ def map_delete_object_params(options: TransferOptions) -> dict[str, Any]:
     return params
 
 
+def validate_grants(options: TransferOptions, operation: str) -> None:
+    """Refuse a malformed ``grants`` value before the run starts.
+
+    The same check the upload and copy mappers make per item
+    (`_set_grant_params`), run once over the options alone, so a bad grant
+    stops every route - a download's included, which maps no grants - before
+    anything is listed, sent or deleted.
+    """
+    _set_grant_params({}, options, operation)
+
+
 def _set_general_object_params(
     params: dict[str, Any], options: TransferOptions, operation: str
 ) -> None:
@@ -258,6 +271,7 @@ def _set_no_overwrite_param(params: dict[str, Any], options: TransferOptions) ->
         params["IfNoneMatch"] = "*"
 
 
-# Package-internal: the mappers are consumed by producers/transfer only and
-# carry no documented surface (design/imports.md).
+# Package-internal: the mappers are consumed by producers/transfer, and the
+# grants check by the operation layer (s3), only; they carry no documented
+# surface (design/imports.md).
 __all__: list[str] = []

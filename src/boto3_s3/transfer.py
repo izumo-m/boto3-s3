@@ -68,6 +68,7 @@ import logging
 import mimetypes
 import os
 import posixpath
+import sys
 import tempfile
 import threading
 from collections.abc import Callable, Generator, Mapping
@@ -232,13 +233,34 @@ class TransferItem:
     case_conflict_cleanup: Callable[[], None] | None = None
 
 
-def _is_precondition_failed(exc: BaseException) -> bool:
-    """A botocore ClientError carrying S3's conditional-write rejection."""
+# The writes ``no_overwrite`` makes conditional (``IfNoneMatch="*"``): a
+# single-part upload or copy, or a multipart one's completing call
+# (`_allow_if_none_match`).
+_CONDITIONAL_WRITE_OPERATIONS = frozenset({"PutObject", "CopyObject", "CompleteMultipartUpload"})
+
+
+def _is_conditional_write_rejection(exc: BaseException) -> bool:
+    """A botocore ClientError carrying S3's rejection of a conditional write.
+
+    A ``PreconditionFailed`` answer to one of the writes ``no_overwrite``
+    makes conditional. Every other request a transfer sends may meet a 412
+    too - s3transfer's ranged GETs carry ``IfMatch`` and its part copies
+    ``CopySourceIfMatch`` (the object changed since it was listed), and the
+    post-copy tag write can be answered that way - and each of those is a
+    failure. The operation comes from the error itself: botocore names it on
+    the classic engine, and pip s3transfer's CRT translation carries
+    awscrt's ``operation_name`` (an error naming none is not taken for the
+    conditional write).
+    """
     response: Any = getattr(exc, "response", None)
     try:
-        return bool(response["Error"]["Code"] == "PreconditionFailed")
+        code = response["Error"]["Code"]
     except (TypeError, KeyError):
         return False
+    return (
+        code == "PreconditionFailed"
+        and getattr(exc, "operation_name", None) in _CONDITIONAL_WRITE_OPERATIONS
+    )
 
 
 def _applied_size_hint(item: TransferItem) -> int | None:
@@ -317,20 +339,18 @@ def _is_cancellation(
     found there came from the caller's code too. Where the engine keeps no
     such status (``revoked`` is None: the CRT coordinator, which never
     produces either type itself, and a submit-time failure) the type cannot
-    tell an ordered cancel from a thrown one, and only this run's cancel
-    token having ordered one (``cancel_initiated``) makes it a revocation.
+    tell an ordered cancel from a thrown one, and only this run having
+    ordered one (``cancel_initiated``) makes it a revocation.
     The CRT data plane surfaces awscrt's ``AWS_ERROR_S3_CANCELED`` instead,
-    matched by the error's ``name`` without importing awscrt - but only when
-    this run's cancel token ordered the cancel (``cancel_initiated``), the
-    one revocation aws-cli has no counterpart for. Every other CRT
-    cancellation classifies as a failure, aws-cli's own rule (measured live:
-    its ``DoneResultSubscriber`` treats every non-``CancelledError`` as a
-    per-item failure, so a fatal or Ctrl-C folding its CRT manager prints a
-    failed line per in-flight transfer). The same rule keeps an interrupted
-    CRT run from reporting success when pip s3transfer's CRT coordinator
-    converts a drain-time ``KeyboardInterrupt`` into ``cancel()`` and
-    discards the interrupt - the item classified FAILED is then the only
-    evidence the run was cut short (design/crt.md section 6).
+    matched by the error's ``name`` without importing awscrt, and a
+    revocation under the same condition: the run ordered the cancel - its
+    cancel token, a fatal or a Ctrl-C folding the manager, or a drain-time
+    Ctrl-C pip s3transfer's CRT manager swallowed (`Transferrer`'s
+    ``_cancel_initiated``) - so an item revoked is ``CANCELLED`` on both
+    engines. aws-cli prints a failed line for each such CRT item instead
+    (measured: its ``DoneResultSubscriber`` treats every
+    non-``CancelledError`` as a per-item failure), which is not copied. A
+    CRT cancellation the run did not order stays a failure.
     """
     if isinstance(exc, (CancelledError, S3TransferCancelledError)):
         if revoked is None:
@@ -1146,18 +1166,20 @@ class Transferrer:
         # The immediate-cancel watcher, alive from the manager's construction
         # (`_get_manager`) until the shutdown is done (`__exit__`).
         self._watcher: threading.Thread | None = None
-        # True once this run's cancel token ordered accepted transfers
-        # cancelled - set by `__exit__` folding the manager under the token's
-        # own `CancelledError`, and by `_cancel_futures` when the drain-time
-        # watcher escalates. Read by the done callbacks to tell a
-        # token-ordered revocation (CANCELLED - the one cancel aws-cli has no
-        # counterpart for) from every other CRT cancellation - the fatal /
-        # interrupt shutdown's, or one nobody ordered (a swallowed
-        # interrupt's trace) - classified FAILED like aws-cli's
-        # (`_is_cancellation`). Monotonic False->True, always set before the
-        # cancel it describes is issued, so the callback that observes a
-        # cancel outcome observes the flag too.
+        # True once this run ordered accepted transfers cancelled - set by
+        # `__exit__` folding the manager on any exception (the token's own
+        # `CancelledError`, a fatal, a Ctrl-C), by `_cancel_futures` when the
+        # drain-time watcher escalates, and by `_keep_swallowed_interrupt` when
+        # pip s3transfer's CRT drain swallows a Ctrl-C. Read by the done
+        # callbacks to tell a revocation (CANCELLED) from a CRT cancellation
+        # nobody ordered (FAILED; `_is_cancellation`). Monotonic
+        # False->True, always set before the cancel it describes is issued,
+        # so the callback that observes a cancel outcome observes the flag
+        # too.
         self._cancel_initiated = False
+        # The Ctrl-C pip s3transfer's CRT drain swallowed, kept by
+        # `_keep_swallowed_interrupt` (once) for `__exit__` to re-raise.
+        self._swallowed_interrupt: KeyboardInterrupt | None = None
         # The first exception the run must hand back to the caller from a
         # place that cannot raise it there, kept by `_note_raise` for `submit`
         # / `__exit__` to re-raise: an interrupt upstream's serial executor
@@ -1215,17 +1237,14 @@ class Transferrer:
         (``FatalError(str(exc))``, Ctrl-C's plain ``CancelledError``), so a
         classic ``CANCELLED`` record names the fatal that revoked it. The CRT
         manager's cancel surfaces awscrt's ``AWS_ERROR_S3_CANCELED``, which
-        classifies as a per-item *failure* - aws-cli's measured behavior: a
-        fatal or Ctrl-C folding its CRT manager prints a failed line per
-        in-flight transfer and counts them failed; only a cancel ordered by
-        this run's cancel token, which aws-cli has no counterpart for,
-        classifies ``CANCELLED`` (`_is_cancellation`). A CRT cancellation
-        arriving on the clean drain - pip s3transfer's CRT manager converting
-        a drain-time ``KeyboardInterrupt`` into ``cancel()`` and discarding
-        the interrupt - is the same per-item failure, and the run raises
-        `BatchError` in place of the swallowed ``KeyboardInterrupt``
-        (design/crt.md section 6). The classic manager re-raises a drain-time
-        interrupt itself, so that lane never needs the distinction.
+        classifies ``CANCELLED`` too, the fold having marked the run's order
+        first (`_is_cancellation`; aws-cli prints a failed line per such
+        item, which is not copied). pip s3transfer's CRT manager converts a
+        drain-time ``KeyboardInterrupt`` into ``cancel()`` and discards the
+        interrupt; `_keep_swallowed_interrupt` catches it at that cancel, so
+        what it cancelled classifies ``CANCELLED`` and the interrupt is
+        re-raised here once the drain is over (design/crt.md section 6). The
+        classic manager re-raises a drain-time interrupt itself.
         """
         if self._manager is None:
             # No transfer ran, but a warning the walk reported from its
@@ -1245,18 +1264,12 @@ class Transferrer:
         watcher = self._watcher
         try:
             if cancel:
-                # A CancelledError with this run's token cancelled is the
-                # token's own order surfacing through the submission loop
-                # (s3._raise_if_cancelled), so the manager cancel it forces is
-                # token-ordered: mark it before it is issued, and the revoked
-                # items classify CANCELLED like the drain-time escalation's.
-                # A fatal or interrupt leaves the flag down - FAILED.
-                if (
-                    isinstance(exc, CancelledError)
-                    and self._cancel_token is not None
-                    and self._cancel_token.cancelled
-                ):
-                    self._cancel_initiated = True
+                # The manager cancel this fold forces - the token's own
+                # CancelledError surfacing through the submission loop
+                # (s3._raise_if_cancelled), a fatal, a Ctrl-C - is this run's
+                # order: mark it before it is issued, and the revoked items
+                # classify CANCELLED on the CRT engine as on the classic one.
+                self._cancel_initiated = True
                 self._manager.__exit__(type(exc), exc, None)
             else:
                 self._manager.shutdown()
@@ -1272,6 +1285,13 @@ class Transferrer:
                 # unregister with stragglers in flight than to leave the handlers
                 # feeding _store forever on a longer-lived client.
                 self._capture.unregister(self._client)
+        # A Ctrl-C the CRT drain swallowed reaches the caller as the classic
+        # manager's re-raise does: ahead of anything noted, and in place of
+        # the exception that folded the run when it landed in that fold's
+        # drain (the fold's own Ctrl-C is that exception, already on its way).
+        swallowed = self._swallowed_interrupt
+        if swallowed is not None and swallowed is not exc:
+            raise swallowed
         # An interrupt that became an item's outcome during the drain (or on
         # the last submit's worker), or a callback's exception noted there,
         # has no later `submit` to re-raise it.
@@ -1296,6 +1316,8 @@ class Transferrer:
         """Track a submitted future without losing a synchronous completion race."""
         if future is None:
             return
+        if not isinstance(self._manager, TransferManager):
+            self._guard_crt_cancel(future)
         with self._futures_lock:
             self._futures.add(future)
         # A non-threaded manager may finish before submit() returns and before
@@ -1306,6 +1328,53 @@ class Transferrer:
     def _forget_future(self, future: Any) -> None:
         with self._futures_lock:
             self._futures.discard(future)
+
+    def _guard_crt_cancel(self, future: Any) -> None:
+        """Catch the Ctrl-C pip s3transfer's CRT drain swallows, at its cancel.
+
+        The CRT manager's drain waits on each coordinator's ``result()``, and
+        a ``KeyboardInterrupt`` landing there is turned into that
+        coordinator's ``cancel()`` and then discarded - by the coordinator,
+        whose cancellation error replaces it, or by the manager's shutdown,
+        which cancels every transfer and drops it. Both issue the cancel from
+        inside their ``except KeyboardInterrupt`` block, so the coordinator's
+        ``cancel`` is wrapped here and reads the interrupt being handled
+        (``sys.exc_info``) before passing the call on: a cancel issued under
+        an interrupt hands it to `_keep_swallowed_interrupt`. A cancel issued
+        any other way passes through untouched. Which transfers are cancelled
+        stays the manager's decision. A coordinator without a ``cancel`` (not
+        the CRT shape) is left alone.
+        """
+        coordinator: Any = getattr(future, "_coordinator", None)
+        cancel = getattr(coordinator, "cancel", None)
+        if cancel is None:
+            return
+
+        def guarded_cancel() -> None:
+            handled = sys.exc_info()[1]
+            if isinstance(handled, KeyboardInterrupt):
+                self._keep_swallowed_interrupt(handled)
+            cancel()
+
+        coordinator.cancel = guarded_cancel
+
+    def _keep_swallowed_interrupt(self, interrupt: KeyboardInterrupt) -> None:
+        """Keep a Ctrl-C the CRT drain is about to swallow, before its cancel.
+
+        The cancel it guards is marked as the run's order
+        (``_cancel_initiated``, before the cancel is issued), so the transfer
+        it revokes records CANCELLED, and the interrupt is kept, the first
+        one only, for `__exit__` to re-raise once the drain is over. The
+        manager decides which transfers it cancels - the one whose wait the
+        interrupt landed in, or every one still running - and the rest finish
+        and report their real outcomes, as on aws. A fold under the caller's
+        own Ctrl-C comes through here too, with that interrupt, which
+        `__exit__` then leaves to propagate as it is.
+        """
+        self._cancel_initiated = True
+        with self._lock:
+            if self._swallowed_interrupt is None:
+                self._swallowed_interrupt = interrupt
 
     def _cancel_futures(self) -> None:
         self._cancel_initiated = True
@@ -1385,9 +1454,10 @@ class Transferrer:
     def dryrun(self, item: TransferItem) -> None:
         """Validate per-item request parameters, then report without an API call.
 
-        aws-cli still runs its request-parameter mapper for a dry run. This is
-        observable for options such as malformed `grants`, whose validation is
-        deliberately deferred until an upload or copy item reaches the pipeline.
+        aws-cli still runs its request-parameter mapper for a dry run. The
+        operation layer has already refused a malformed `grants`
+        (`requestparams.validate_grants`); the mapping here keeps the check
+        for a caller driving the `Transferrer` itself.
         """
         if self._transfer_type is TransferType.UPLOAD:
             requestparams.map_put_object_params(self._options, self._operation)
@@ -1415,9 +1485,10 @@ class Transferrer:
     def submit(self, item: TransferItem) -> None:
         """Queue one transfer (blocks when the manager queue is full).
 
-        Request-parameter mapping happens here, per item - so an invalid
-        ``grants`` shape surfaces as an in-flight error like aws (rc 1 via
-        the fatal-error path), never as an upfront usage error.
+        Request-parameter mapping happens here, per item, as on aws. The
+        operation layer refuses a malformed ``grants`` before the run
+        (`requestparams.validate_grants`); a caller driving the `Transferrer`
+        itself meets the mapping's own ``ValidationError`` here instead.
         """
         try:
             if self._transfer_type is TransferType.UPLOAD:
@@ -1434,7 +1505,7 @@ class Transferrer:
                     self._pending_raise = None
             # The item may carry a stream handle - _cp_stream's already-open
             # fileobj, or the open route's deferred reader/writer. A submit
-            # that raises before the manager accepted the work - the grants
+            # that raises before the manager accepted the work - a
             # ValidationError from param mapping, a manager-build failure -
             # means _CloseFileobj never runs, so release here (best-effort;
             # mirrors _CloseFileobj's failure branch, discard-preferring).
@@ -2103,15 +2174,15 @@ class Transferrer:
         ):
             # An accepted item revoked as a cancellation: classic s3transfer's
             # CancelledError shapes (a fatal elsewhere, classic Ctrl-C) or a
-            # CRT cancel this run's token ordered. CANCELLED, not FAILED -
-            # nothing is wrong with the item itself, and the run's outcome is
-            # the exception the operation raises. Deliberately richer than
-            # aws-cli, which drops cancelled items from output and counts;
-            # first_error stays reserved for real failures (BatchError's
-            # diagnostic sample). Every other CRT cancel - the fatal /
-            # interrupt shutdown's, or one nobody ordered (a swallowed
-            # interrupt's trace) - falls through to the failure branch below,
-            # aws-cli's own classification (`_is_cancellation`).
+            # CRT cancel this run ordered (its token, a fatal, a Ctrl-C).
+            # CANCELLED, not FAILED - nothing is wrong with the item itself,
+            # and the run's outcome is the exception the operation raises.
+            # Deliberately richer than aws-cli, which drops cancelled items
+            # from output and counts on its classic engine and fails them on
+            # its CRT one; first_error stays reserved for real failures
+            # (BatchError's diagnostic sample). A CRT cancel the run did not
+            # order falls through to the failure branch below
+            # (`_is_cancellation`).
             error = CancelledError(
                 str(exc) or "canceled",
                 operation=self._operation,
@@ -2125,10 +2196,12 @@ class Transferrer:
         # A failure without any response (a connection closed, a read timeout)
         # is FAILED like every other: aws-cli's completion handler loses it
         # with no line at rc 0, which is not copied (design/opresult.md).
-        if _is_precondition_failed(exc):
+        if self._options.get("no_overwrite") and _is_conditional_write_rejection(exc):
             # --no-overwrite's IfNoneMatch rejection: the object already
             # exists, which is the asked-for outcome - a silent skip, not a
-            # failure (aws-cli DoneResultSubscriber; rc stays 0).
+            # failure (aws-cli DoneResultSubscriber; rc stays 0). aws skips
+            # every PreconditionFailed whatever the request was; any other 412
+            # fails the item here (docs/cli/aws-differences.md).
             with self._lock:
                 self._skipped += 1
             self._emit(self._result(item, OpOutcome.SKIPPED))

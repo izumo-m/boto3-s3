@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import io
 import os
+import re
 import threading
 from collections.abc import Callable
 from types import SimpleNamespace
@@ -244,6 +245,57 @@ class TestUnknownTransferOption:
         with pytest.raises(ValidationError, match=r"Unknown transfer option\(s\): dry_run") as ei:
             method("src-path", "dest-path", dry_run=True)  # pyright: ignore[reportCallIssue]
         assert type(ei.value) is ValidationError
+
+
+class TestMalformedGrants:
+    """cp / mv / sync refuse a malformed ``grants`` before any work.
+
+    aws-cli finds it only as it maps the first upload or copy, after a sync's
+    deletes may have gone out, or never when nothing needs transferring; here
+    it is a bad argument, refused like one on every route (a download's
+    included, which maps no grants).
+    """
+
+    @pytest.mark.parametrize("op", ["cp", "mv", "sync"])
+    @pytest.mark.parametrize(
+        ("grant", "message"),
+        [
+            ("foo", "grants should be of the form permission=principal"),
+            ("bogus=id=x", "permission must be one of: read|readacl|writeacl|full"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("src", "dest"), [("local-dir", "s3://b/p/"), ("s3://b/p/", "local-dir")]
+    )
+    def test_raises_before_any_work(
+        self, op: str, grant: str, message: str, src: str, dest: str
+    ) -> None:
+        class NoClientS3(S3):
+            def client(self) -> Any:
+                raise AssertionError("client built before option validation")
+
+        method = getattr(NoClientS3(), op)
+        recursive = {} if op == "sync" else {"recursive": True}
+        with pytest.raises(ValidationError, match=re.escape(message)) as ei:
+            method(src, dest, grants=["read=id=ok", grant], **recursive)
+        assert type(ei.value) is ValidationError
+        assert ei.value.operation == op
+
+    def test_well_formed_grants_pass(self, tmp_path: Any) -> None:
+        # The check itself refuses nothing well formed: a dry run of a local
+        # upload with every permission spelled goes through to its record.
+        (tmp_path / "a.txt").write_bytes(b"x")
+        client, calls = make_recording_client([])
+        results: list[OpResult] = []
+        S3().cp(
+            str(tmp_path / "a.txt"),
+            S3Storage("s3://b/a.txt", client=client),
+            dryrun=True,
+            grants=["read=id=a", "full=id=b", "readacl=id=c", "writeacl=id=d"],
+            on_result=results.append,
+        )
+        assert calls == []
+        assert [result.outcome for result in results] == [OpOutcome.DRYRUN]
 
 
 class TestValidationOperationAttribution:

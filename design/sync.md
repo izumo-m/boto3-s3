@@ -250,8 +250,13 @@ mtime rule (full float precision; `delta = dest.mtime - src.mtime`):
   When src is a **file**, the dir-style walk warns `Skipping file <abspath>/.
   File does not exist.` (the formatted root carries a trailing separator, so
   `os.path.exists` is False) and gives rc 2 (not a hard error).
-- s3local: the dest dir is created **before scanning** (aws-cli does it at the
-  validation stage; the dir remains even for an empty sync). It is a
+- s3local: the dest dir is created **before scanning** (the dir remains even
+  for an empty sync), but only once every set-up check has passed - the
+  directory-bucket refusal below, the capability and `case_conflict` checks,
+  the engine gates and (outside a dry run) the engine build - so a run refused
+  before it starts changes nothing. aws-cli creates it at its validation stage,
+  ahead of its own later refusals (measured: a directory-bucket sync leaves the
+  directory behind), which is not copied. It is a
   bare exists check, not `exist_ok` - if the dest exists as a **file** (written
   without a trailing separator) it passes straight through, then each item
   fails with `[Errno 20]` and gives rc 1.
@@ -271,7 +276,7 @@ mtime rule (full float precision; `delta = dest.mtime - src.mtime`):
 - An S3 Express directory bucket (`--x-s3`) or one of its access points
   (`--xa-s3`) on either side is rejected with
   aws-cli's `Cannot use sync command with a directory bucket.`
-  (`ValidationError`), after the s3local dest-dir creation above and before any
+  (`ValidationError`), before the s3local dest-dir creation above and before any
   listing (a bare `s3://` argument's client is already built during
   resolution; only a caller-made `S3Storage` without a client has its client
   built after this check): directory buckets drop `ListObjectsV2`'s

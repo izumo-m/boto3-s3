@@ -133,11 +133,8 @@ Some details worth knowing:
 - The batch shape applies **regardless of item count** — a single failing item
   still ends in `BatchError`, reported as 1 of 1.
 - Cancelled items are never counted as failures, and a cancelled run raises
-  something else entirely (see [`results.md`](./results.md)). The CRT engine
-  is narrower: there only a `CancelToken` cancel yields cancelled items, so a
-  fatal error or a Ctrl-C that cuts a CRT run short reports its in-flight items
-  as `FAILED`, and a Ctrl-C the CRT manager swallows mid-drain ends the run in
-  `BatchError`.
+  something else entirely (see [`results.md`](./results.md)), on either
+  transfer engine.
 - `skipped` is informational. It counts skips the operation made — a `cp` or
   `mv` that `no_overwrite` stopped from replacing an existing object, an
   archived object passed over under `ignore_glacier_warnings` — but not items

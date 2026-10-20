@@ -257,14 +257,11 @@ carries its own `warning: ` prefix.
 
 `CANCELLED` — an accepted item revoked before it could complete, because a fatal
 error elsewhere in the run, an immediate cancellation, or Ctrl-C shut the engine
-down. On the CRT engine only a cancellation this run's `CancelToken` ordered
-reports `CANCELLED`: every other CRT cancellation reports `FAILED`, and a Ctrl-C
-the CRT manager swallows during its transfer drain ends the run in `BatchError`
-([`../../design/opresult.md`](../../design/opresult.md)). One case does not
-depend on the token: an item whose outcome the engine holds as an interrupt —
-a `KeyboardInterrupt` or `SystemExit` that landed in, or was raised by, code
-running for that item — reports `CANCELLED`, and that interrupt is then raised
-to the caller. An interrupt raised by a caller's stream is kept that way on
+down, on either transfer engine; a CRT cancellation the run did not order
+itself reports `FAILED` ([`../../design/opresult.md`](../../design/opresult.md)).
+An item whose outcome the engine holds as an interrupt — a `KeyboardInterrupt`
+or `SystemExit` that landed in, or was raised by, code running for that item —
+reports `CANCELLED`, and that interrupt is then raised to the caller. An interrupt raised by a caller's stream is kept that way on
 every route but a CRT upload, whose reader awscrt runs on its own thread: there
 the item is `FAILED`, and the interrupt is still raised to the caller. `error` is a
 [`CancelledError`](./exceptions.md#cancellederror) naming the cause where the

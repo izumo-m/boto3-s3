@@ -30,10 +30,8 @@ S3(session=None, *, endpoint_url=None, config=None,
   `True` (the default) re-raises `KeyboardInterrupt` only after every resource
   has been reclaimed, so the next operation still works. `False` treats Ctrl-C
   as fatal to the process and lets the unwind abandon an in-flight listing page.
-  Either way the interrupt is re-raised, never swallowed — with one
-  engine-imposed exception: pip s3transfer's CRT manager discards an interrupt
-  that lands in its transfer drain, so a CRT run cut short there raises
-  `BatchError` with the cancelled items counted as failures instead. Only
+  Either way the interrupt is re-raised, never swallowed — on the CRT engine
+  too, whose manager would discard one landing in its transfer drain. Only
   `KeyboardInterrupt` is affected — every other exception reclaims fully.
 - **`crt_allow_lockless`** — what an explicit
   `preferred_transfer_client="crt"` does when another process of this

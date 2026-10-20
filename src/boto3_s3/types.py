@@ -548,7 +548,7 @@ class TransferOptions(TypedDict, total=False):
     ``SSECustomerKey``: ``aws`` passes the CLI string through verbatim (only
     ``fileb://`` loads bytes). ``no_overwrite`` is the conditional write
     (``--no-overwrite``): ``IfNoneMatch="*"`` on uploads / copies (the server's
-    ``PreconditionFailed`` becomes a silent skip), and an existence check before
+    ``PreconditionFailed`` to that write becomes a silent skip), and an existence check before
     downloads to a *local* destination - a ``cp`` / ``mv`` download into a
     custom (open-route) backend has no existence probe and overwrites (the
     backend owns its key space; ``sync`` still skips destination-present pairs

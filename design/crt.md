@@ -566,28 +566,30 @@ error's details need not (checked by the e2e CRT lane - testing.md).
 - **Ctrl-C and fatals on the CRT lane**: pip s3transfer's CRT manager
   discards a drain-time `KeyboardInterrupt` - its coordinator converts the
   interrupt into `cancel()`, the cancellation error replaces it, and its
-  shutdown drops that too - where the classic manager re-raises it. aws is
-  built to survive that loss: its per-item subscribers classify every
+  shutdown drops that too - where the classic manager re-raises it. aws lives
+  with that loss: its per-item subscribers classify every
   non-`CancelledError` outcome as a failure, so a CRT run cut short - a
   drain-time Ctrl-C, a Ctrl-C in the submission window, a fatal folding the
   manager mid-run - prints `upload failed: ... AWS_ERROR_S3_CANCELED: Request
   successfully cancelled` per in-flight item at rc 1 (all three measured
   2026-08-01; aws's own classic lane prints `cancelled: ctrl-c received` or
   one `fatal error:` line instead - the two aws lanes differ). This library
-  takes the same rule at the same place: every CRT cancellation classifies
-  `FAILED` unless this run's `CancelToken` ordered it
-  (`Transferrer._cancel_initiated` - the one revocation aws has no
-  counterpart for, kept `CANCELLED`; "ordered" means the token's own
-  `CancelledError` forced the fold or its escalation issued the cancel -
-  design/opresult.md), so the CLI streams aws's per-item
-  lines and the classic lane is untouched. Two residuals: a library caller on the
-  swallowed-interrupt window gets `BatchError`, not the `KeyboardInterrupt`
-  ([`opresult.md`](./opresult.md)); and a submission-window Ctrl-C ends with
-  the CLI's `cancelled: ctrl-c received` line where aws ends with an empty
-  `fatal error:` line (its recorder renders the `KeyboardInterrupt`, whose
-  `str()` is empty, as an error result) - the per-item lines and rc 1 match,
-  and the closing line stays ours deliberately (decided 2026-08-01; what it
-  reports is an error detail, overview.md section 3).
+  follows its error rules instead (overview.md section 3: an interrupt
+  cancels the item and reaches the caller), the same on both engines: a CRT
+  cancellation the run ordered - its `CancelToken`, a fatal or a Ctrl-C
+  folding the manager - classifies `CANCELLED`
+  (`Transferrer._cancel_initiated`, marked before the cancel is issued), and
+  the swallowed drain-time interrupt is caught where the manager issues its
+  cancel: `Transferrer._guard_crt_cancel` wraps each CRT coordinator's
+  `cancel` and reads the interrupt being handled (`sys.exc_info`) there,
+  marks that cancel as the run's order, and `Transferrer.__exit__` re-raises
+  the interrupt once the drain is over. Which transfers the interrupt cancels
+  stays the manager's decision, as on aws (the one whose wait it landed in,
+  or every one still running); the rest finish with their real outcomes. A
+  CRT cancellation the run did not order stays `FAILED`. The CLI therefore
+  ends a CRT run cut short like a classic one - `cancelled: ctrl-c received`
+  or the fatal's line, without aws's per-item failed lines - at the same rc
+  1; what it reports there is an error detail (overview.md section 3).
 - **fio_options**: unavailable on any pip s3transfer
   ([`compatibility.md`](../docs/compatibility.md)), so the three keys are
   accepted and do nothing.

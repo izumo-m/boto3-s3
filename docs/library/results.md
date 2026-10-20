@@ -168,6 +168,4 @@ Nothing ever downgrades it.
 A run that a cancellation actually cut short **always ends by raising** — the
 triggering error, or `CancelledError`. It never ends with the partial-failure
 error described in [`errors.md`](./errors.md), and `CANCELLED` records are
-counted in neither. The one exception is the CRT engine's: a Ctrl-C its manager
-swallows during the transfer drain reports the cut-short items as `FAILED` and
-ends the run with that partial-failure error.
+counted in neither.

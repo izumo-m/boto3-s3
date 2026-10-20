@@ -77,12 +77,11 @@ read by presence rather than truthiness and are called out individually:
 or a copy. `grants` is a sequence of `permission=grantee` strings whose
 `permission` is one of `read`, `readacl`, `writeacl` or `full`, becoming
 `GrantRead` / `GrantReadACP` / `GrantWriteACP` / `GrantFullControl` on the same
-write. Both default to unset. `grants` is validated per item at submission
-rather than up front, matching the AWS CLI: a string with no `=`, or an
-unrecognized permission, raises `ValidationError` from inside the running
-operation — including under `dryrun`, which still runs the upload and copy
-mappers — so it propagates out of the call instead of being aggregated into
-[`BatchError`](./exceptions.md#batcherror).
+write. Both default to unset. `grants` is validated before the run, on every
+route (a download's included) and under `dryrun` too: a string with no `=`, or
+an unrecognized permission, raises `ValidationError` before anything is
+listed, sent or deleted. The AWS CLI finds it only as it maps the first
+upload or copy.
 
 `storage_class` is sent as `StorageClass` on an upload or copy write. When the
 key is unset no `StorageClass` parameter is sent at all, leaving the service to
@@ -182,8 +181,9 @@ value is rejected with [`ValidationError`](./exceptions.md#validationerror).
 the destination is left alone rather than overwritten. How that is enforced,
 and what it leaves behind, differs by route and operation. An upload or copy
 carries `IfNoneMatch: "*"` on its write (on `CompleteMultipartUpload` for a
-multipart write) and the server's `PreconditionFailed` becomes an
-`OpOutcome.SKIPPED` record, not a failure; a `cp` / `mv` download to a local
+multipart write) and the server's `PreconditionFailed` answer to that write
+becomes an `OpOutcome.SKIPPED` record, not a failure (the same answer to any
+other request of the transfer fails it); a `cp` / `mv` download to a local
 destination is guarded by an existence check before the transfer starts and
 reports the same skip. A download into a custom (open-route) backend has no
 existence probe and overwrites, since the backend owns its key space, while a
@@ -196,13 +196,14 @@ at the destination produces no record of any kind
 
 Raises, over and above what each operation raises on its own:
 
-- [`ValidationError`](./exceptions.md#validationerror) — an unknown key,
-  `no_overwrite` on a `cp` / `mv` download into a stream destination, and an
-  unrecognized `case_conflict` on any `cp` / `mv` / `sync` run whatever its
-  paths (all before any transfer starts, which is not before every side effect
-  — a recursive `cp` / `mv` or a `sync` creates its missing destination
-  directory first); a malformed `grants` entry (in flight); an unrecognized
-  `copy_props` or `annotation_copy_mode` on a copy (as the run is set up).
+- [`ValidationError`](./exceptions.md#validationerror) — an unknown key, a
+  malformed `grants` entry, `no_overwrite` on a `cp` / `mv` download into a
+  stream destination, and an unrecognized `case_conflict` on any `cp` / `mv` /
+  `sync` run whatever its paths; an unrecognized `copy_props` or
+  `annotation_copy_mode` on a copy (as the run is set up). All of them come
+  before any transfer starts and before the missing destination directory a
+  recursive `cp` / `mv` or a `sync` creates, so a refused run changes
+  nothing.
 - [`ConfigurationError`](./exceptions.md#configurationerror) — `no_overwrite`
   on an upload or copy whose SDK cannot express a conditional write, and
   `copy_props=CopyPropsMode.ALL` on an SDK without the annotations model

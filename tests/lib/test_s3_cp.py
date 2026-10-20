@@ -430,6 +430,38 @@ class TestUploadRoute:
         assert calls == []
         assert not dest.exists()
 
+    @pytest.mark.parametrize(
+        ("options", "config"),
+        [
+            pytest.param({"case_conflict": "bogus"}, _SYNC, id="case-conflict-mode"),
+            pytest.param(
+                {},
+                TransferConfig(preferred_transfer_client="crt", io_chunksize=1024 * 1024),
+                id="crt-engine-build",
+            ),
+        ],
+    )
+    def test_a_refused_run_leaves_no_destination_directory(
+        self, tmp_path: Path, options: dict[str, Any], config: TransferConfig
+    ) -> None:
+        # The recursive local-destination pre-create comes after every set-up
+        # check - the case-conflict mode, the engine build - so a refused run
+        # changes nothing (aws-cli creates the directory first).
+        if "crt" in str(config.preferred_transfer_client):
+            pytest.importorskip("awscrt")
+        dest = tmp_path / "fresh" / "nested"
+        client, calls = make_recording_client([])
+        with pytest.raises(ValidationError):
+            S3().cp(
+                S3Storage("s3://b/pre", client=client),
+                str(dest),
+                recursive=True,
+                transfer_config=config,
+                **options,
+            )
+        assert calls == []
+        assert not dest.exists()
+
     def test_graceful_cancel_from_result_drains_submitted_transfers(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

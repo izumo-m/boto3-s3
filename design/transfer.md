@@ -108,9 +108,11 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   `prepare()`: no manager is built (the s3transfer module itself is imported
   regardless, by boto3 when a client is built - [`imports.md`](./imports.md)).
   It does still run the upload/copy request-parameter mapper for each item
-  before reporting `DRYRUN`, matching aws-cli's deferred validation of options
-  such as malformed grants. Validation performed only by an actual SDK submit
-  remains skipped.
+  before reporting `DRYRUN`, as aws-cli does. A malformed grants never gets
+  that far: the operation layer refuses it before the run, on every route
+  (`requestparams.validate_grants`), where aws-cli finds it only in that
+  per-item mapping. Validation performed only by an actual SDK submit remains
+  skipped.
 - **Backpressure is delegated to s3transfer**: the bounded submission executor
   (`max_submission_queue_size`, default 1000) blocks the submit thread when it
   is full, and the S3 request executor is separately bounded
@@ -489,7 +491,12 @@ dest-existence check for download. We ported the same three faces:
   before rolling up the failure and drops it to **SKIPPED** (rc 0; aws-cli's
   `DoneResultSubscriber._on_failure` / `_is_precondition_failed`). When a
   multipart Complete hits a 412, s3transfer does an AbortMultipartUpload and then
-  the same skip.
+  the same skip. Only the conditional write's own 412 skips: `no_overwrite` set
+  and the error's operation PutObject, CopyObject or CompleteMultipartUpload
+  (`_is_conditional_write_rejection`). aws-cli skips every 412 whatever the
+  request; here a 412 to anything else - a ranged GET's `IfMatch`, an
+  UploadPartCopy's `CopySourceIfMatch`, the post-copy tag write - fails the
+  item (docs/cli/aws-differences.md).
 - **download**: at the enumeration stage, if `os.path.exists(dest)` then a silent
   skip (does not issue the request itself = the cp form of aws-cli's
   `_warn_if_file_exists_with_no_overwrite`).
@@ -622,7 +629,9 @@ dest-existence check for download. We ported the same three faces:
   leaf is emitted - after every earlier sibling's whole subtree has been read -
   and it decides three outcomes. Gone: the warning battery runs on the path and
   the leaf is dropped (rc 2) rather than submitted and failed at
-  open (rc 1). A directory by now: the record comes back promoted
+  open (rc 1); a battery that finds nothing wrong (the race healed between the
+  two calls) warns with the failed stat's own error, so the leaf is never
+  dropped silently, where aws-cli drops it without a word. A directory by now: the record comes back promoted
   (`promoted_directory`) and the walk descends it, so its children are
   transferred and `--dryrun` previews them - addressed by the **bare** name the
   leaf sorted under, since addressing with a trailing separator belongs to

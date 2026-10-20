@@ -373,13 +373,10 @@ hierarchy.
 
 A run that a cancellation actually cut short ends by raising — either the error
 that triggered the shutdown, or this class — and never with `BatchError`;
-cancelled items are not counted as failures. The CRT engine is the exception: a
-Ctrl-C its manager swallows during the transfer drain leaves the cut-short items
-counted as failures and ends the run in `BatchError` ([`s3.md`](./s3.md#s3)).
-The class also appears as `OpResult.error` on `CANCELLED` records without being
-raised, for accepted items revoked when the engine shut down: on the classic
-engine a fatal error elsewhere in the run, an immediate cancellation, or Ctrl-C;
-on the CRT engine only a cancellation this run's `CancelToken` ordered. The
+cancelled items are not counted as failures. The class also appears as
+`OpResult.error` on `CANCELLED` records without being raised, for accepted
+items revoked when the engine shut down: a fatal error elsewhere in the run,
+an immediate cancellation, or Ctrl-C, on either transfer engine. The
 cancellation modes and the resulting record shapes are in
 [`results.md`](./results.md) and
 [`../library/results.md`](../library/results.md).

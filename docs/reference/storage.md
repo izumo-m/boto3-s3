@@ -1498,9 +1498,10 @@ AWS CLI takes per name in its own descent loop. Returns the record to yield.
 
 A single `os.stat` on `path` decides three outcomes. It fails: the
 `triggers_warning` battery runs on the path — normally "File does not exist.",
-a warning and exit code 2 — and the leaf is dropped whether or not the battery
-found anything, so a stale record is never submitted for a transfer that would
-then fail to open it (the complete view first tries the link's own lstat: a
+a warning and exit code 2 — and the leaf is dropped; a battery that finds
+nothing (the race healed since the stat) warns with the failed stat's own
+error instead, so the leaf is never dropped silently. A stale record is never
+submitted for a transfer that would then fail to open it (the complete view first tries the link's own lstat: a
 leaf that became a dangling link or a loop is kept as that lstat leaf, warned
 only when links are followed — `classify_child`'s failed-follow rule, applied
 at the leaf's turn). It reports a directory: the returned record is the
