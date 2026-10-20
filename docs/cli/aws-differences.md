@@ -26,8 +26,8 @@ state and local files, the same `sync` decisions, the same result lines on
 success, the same conditions failing, and an exit code with the same
 meaning**, bar the entries in section 2 that say outright that the run comes
 out differently. Those are a recursive delete whose listing dies part way or
-whose endpoint fails its batch requests, a Ctrl-C during deletes under the CRT
-engine, a delete answered `412`, a transfer answered `412` other than
+whose endpoint fails its batch requests, a Ctrl-C under the CRT engine, a
+delete answered `412`, a transfer answered `412` other than
 `--no-overwrite`'s own write, a CRT download that cannot put its file in
 place, a `mv` between two spellings of one Outposts object, an S3 Express
 access point, a plain-HTTP endpoint named anywhere but `--endpoint-url` under
@@ -268,8 +268,9 @@ that say outright that the run comes out differently, listed in section 1.
   (measured). Here the stamp is kept as the instant it names (a zone-less one
   the local zone cannot place is read as UTC) and the run goes on. `ls`
   prints times in the local zone, as `aws` does, so the line of such an
-  object still stops the listing there, at exit code 255 on both tools. S3
-  itself never sends such a stamp.
+  object whose stamp carries a zone still stops the listing there, at exit
+  code 255 on both tools; a zone-less one is printed from the instant read
+  here. S3 itself never sends such a stamp.
 - **A malformed `--grants` is refused before the run.** A grant not of the
   form `permission=grantee`, or naming a permission other than `read`,
   `readacl`, `writeacl` and `full`, is exit code 252 here before anything is
@@ -320,7 +321,7 @@ that say outright that the run comes out differently, listed in section 1.
 - **Deletes go out in batches.** Up to a thousand keys go out per
   `DeleteObjects` request here, where `aws` sends one `DeleteObject` per key.
   Batching is a settled design, and the differences it causes — this entry's,
-  and the Ctrl-C during deletes under the CRT engine below — are accepted
+  and the Ctrl-C under the CRT engine below — are accepted
   rather than open: where a batch can cheaply be brought closer to `aws`'s
   per-key outcome it is, by sending keys again one by one. For a run that
   finishes enumerating, the objects removed and the exit code are the same (a
@@ -406,7 +407,7 @@ that say outright that the run comes out differently, listed in section 1.
   classic engine does on both tools. Name the plain region with
   `use_fips_endpoint = true` and the two agree
   ([`../../design/crt.md`](../../design/crt.md) section 4).
-- **Ctrl-C during deletes under the CRT engine.** `aws`'s CRT manager
+- **Ctrl-C under the CRT engine.** `aws`'s CRT manager
   swallows an interrupt landing in its drain. For transfers `aws` then prints
   a failure line for each transfer cut short (`upload failed: …
   AWS_ERROR_S3_CANCELED: Request successfully cancelled`) and no closing

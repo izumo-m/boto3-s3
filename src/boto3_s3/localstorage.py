@@ -1514,7 +1514,8 @@ class LocalStorage(Storage):
         generator warns "File does not exist." (rc 2); testing ``abspath``
         here refused it up front instead (rc 1). This asks the kernel, anchored
         at the construction-time working directory like `abspath`, so the
-        operations admit what aws-cli admits and the walk / `get_fileinfo`
+        operations admit what aws-cli admits (a recursive source is then
+        vetted as a walk root by the operation) and the walk / `get_fileinfo`
         then answer for the lexical form. Windows has no such gap - it folds
         ``..`` out of a path before the filesystem sees it, so the typed path
         is already the lexical one - and there ``aws.exe`` refuses that

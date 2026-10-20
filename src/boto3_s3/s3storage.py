@@ -636,9 +636,10 @@ def aware_stamp(mtime: datetime) -> datetime:
     Only whole seconds go through the float, the microseconds are put back
     exactly.
 
-    A naive stamp the local zone cannot place - within a zone offset of the
-    ends of ``datetime``'s range, or, on Windows, outside the span its
-    ``localtime`` covers - is read as UTC instead. aws-cli's own conversion
+    A naive stamp the local zone cannot place - near the ends of
+    ``datetime``'s range (any stamp on 0001-01-01, whose fold probe looks a
+    day earlier, and the last zone offset of 9999), or, on Windows, outside
+    the span its ``localtime`` covers - is read as UTC instead. aws-cli's own conversion
     dies there and ends the run; the stamp is a valid value all the same, so
     the run goes on (docs/cli/aws-differences.md). An aware stamp is never
     converted here, so no timestamp a response carries stops a run.

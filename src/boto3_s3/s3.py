@@ -826,7 +826,8 @@ def _check_local_source_exists(storage: LocalStorage, *, operation: str) -> None
     # construction-time cwd (so the check survives a chdir): what aws-cli's
     # os.path.exists on the raw path admits - including `..` through a
     # symlinked directory, which the lexical abspath would refuse - ours
-    # admits, and the generator then warns like aws-cli's. The message keeps
+    # admits (a single source; a recursive one is then vetted by
+    # `_check_local_source_root`), and the generator warns like aws-cli's. The message keeps
     # the raw form, like aws echoing the user-typed path.
     if not storage.exists():
         raise NotFoundError(
