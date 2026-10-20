@@ -44,7 +44,7 @@ if TYPE_CHECKING:
         TransportError,
         ValidationError,
     )
-    from boto3_s3.globsieve import GlobFilter, GlobPattern, PatternKind
+    from boto3_s3.globsieve import Exclude, GlobFilter, GlobPattern, Include, PatternKind
     from boto3_s3.iostorage import IOStorage, StdioStorage
     from boto3_s3.localstorage import (
         LocalFileGenerator,
@@ -117,12 +117,14 @@ __all__ = [
     "CopyPropsMode",
     "DestOnlyPair",
     "EtagComparison",
+    "Exclude",
     "FileFilter",
     "FileInfo",
     "FileKind",
     "GlobFilter",
     "GlobPattern",
     "IOStorage",
+    "Include",
     "InvalidConfigError",
     "InvalidValueError",
     "ListingCallback",
@@ -218,9 +220,11 @@ _EXPORT_HOMES: dict[str, str] = {
     "NotFoundError": "boto3_s3.exceptions",
     "TransportError": "boto3_s3.exceptions",
     "ValidationError": "boto3_s3.exceptions",
+    "Exclude": "boto3_s3.globsieve",
     "GlobFilter": "boto3_s3.globsieve",
     "GlobPattern": "boto3_s3.globsieve",
     "PatternKind": "boto3_s3.globsieve",
+    "Include": "boto3_s3.globsieve",
     "IOStorage": "boto3_s3.iostorage",
     "StdioStorage": "boto3_s3.iostorage",
     "LocalFileGenerator": "boto3_s3.localstorage",

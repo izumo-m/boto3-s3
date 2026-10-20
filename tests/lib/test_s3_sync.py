@@ -22,7 +22,7 @@ from typing import Any, cast
 import pytest
 from boto3.s3.transfer import TransferConfig
 
-from boto3_s3 import GlobFilter, crtsupport
+from boto3_s3 import Exclude, Include, crtsupport, globsieve
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3.comparator import ParallelFilter, SyncPair
 from boto3_s3.exceptions import (
@@ -355,7 +355,7 @@ class TestSyncUpload:
         assert keys == ["p/extra.log"]
 
     def test_delete_filter_narrows_by_name(self, tmp_path: Path) -> None:
-        # A GlobFilter narrows the delete lane by the orphan's compare key
+        # A compiled glob filter narrows the delete lane by the orphan's compare key
         # (relative), reusing rm's filter shape on the orphans.
         src = tmp_path / "src"
         src.mkdir()
@@ -363,7 +363,7 @@ class TestSyncUpload:
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            delete_filter=GlobFilter().exclude("*").include("*.log").compile(),
+            delete_filter=globsieve.compile([Exclude("*"), Include("*.log")]),
             transfer_config=_SERIAL,
         )
         keys = [entry["Key"] for entry in calls[1].params["Delete"]["Objects"]]
@@ -374,7 +374,7 @@ class TestSyncUpload:
         # visibility layer prunes the destination stream before pairing.
         src = tmp_path / "src"
         src.mkdir()
-        keep = GlobFilter().exclude("*.log").compile()
+        keep = globsieve.compile([Exclude("*.log")])
         client, calls = make_recording_client([listing(("p/extra.log", 2), ("p/extra.txt", 2)), {}])
         S3().sync(
             str(src),
@@ -655,7 +655,7 @@ class TestSyncUpload:
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            create_filter=GlobFilter().exclude("*").include("*.log").compile(),
+            create_filter=globsieve.compile([Exclude("*"), Include("*.log")]),
             transfer_config=_SERIAL,
         )
         assert ops(calls) == ["ListObjectsV2", "PutObject"]

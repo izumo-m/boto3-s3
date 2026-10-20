@@ -46,7 +46,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from boto3_s3 import GlobPattern, globsieve
-from boto3_s3.globsieve import Matcher, PatternKind
+from boto3_s3.globsieve import Exclude, GlobFilter, Include, PatternKind
 
 if TYPE_CHECKING:
     from boto3_s3 import S3Storage
@@ -155,13 +155,14 @@ class _CaseFoldMatcher:
     the path and the pattern; on Windows that lower-cases and unifies the two
     separators (``_windows_normcase``), so the filter is case-insensitive
     there and a ``\\`` in a key is a separator (overview.md section 3: case
-    sensitivity is matched to aws-cli per OS). The library matchers stay
-    byte-exact (the permissive building block); this CLI-layer wrapper folds
+    sensitivity is matched to aws-cli per OS). This CLI-layer wrapper folds
     the keys at match time while ``compile_filter`` folds the patterns at
-    compile time.
+    compile time, whenever ``os.name`` says Windows (which the tests
+    simulate). On a real Windows host the engine folds both again itself,
+    which changes nothing.
     """
 
-    def __init__(self, matcher: Matcher) -> None:
+    def __init__(self, matcher: GlobFilter) -> None:
         self._matcher = matcher
 
     def included(self, compare_key: str, full_key: str | None = None) -> bool:
@@ -439,11 +440,14 @@ def compile_filter(
     # matching stays byte-exact.
     if fold:
         patterns = [GlobPattern(p.kind, _fold_to_key_space(p.pattern)) for p in patterns]
-    matcher = globsieve.compile(patterns)
+    matcher = globsieve.compile(
+        Exclude(p.pattern) if p.kind is PatternKind.EXCLUDE else Include(p.pattern)
+        for p in patterns
+    )
     return _as_file_filter(_CaseFoldMatcher(matcher) if fold else matcher)
 
 
-def _as_file_filter(matcher: Matcher) -> FileFilter:
+def _as_file_filter(matcher: GlobFilter | _CaseFoldMatcher) -> FileFilter:
     """Wrap a compiled globsieve matcher as the ``FileFilter`` the operations consume.
 
     The delegation target of ``compile_filter``'s equivalence fast path: only
@@ -452,7 +456,7 @@ def _as_file_filter(matcher: Matcher) -> FileFilter:
     and a relative pattern matches the ``info.compare_key``
     that the backend's listing stamps on each entry (the ``scan_pages``
     contract; the base ``Storage.scan`` stamps only ``storage``). ``info.key`` is still passed as
-    the ``Matcher`` protocol's ``full_key`` (inert for relative-only matchers).
+    the full path (inert for relative-only rules).
     ``compare_key`` is always set in a filter context; ``None`` would mean the
     filter was misapplied, so fail loudly.
     """

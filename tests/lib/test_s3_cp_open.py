@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 import pytest
 from boto3.s3.transfer import TransferConfig
 
-from boto3_s3 import GlobFilter, producers
+from boto3_s3 import Exclude, Include, globsieve, producers
 from boto3_s3.exceptions import (
     BatchError,
     Boto3S3Error,
@@ -342,7 +342,7 @@ class TestOpenUploadRoute:
 
     def test_glob_filter_matches_compare_keys(self) -> None:
         src = _MemStorage({"keep.txt": b"x", "drop.bin": b"y"}, location="mem://data/")
-        keep = GlobFilter().exclude("*").include("*.txt").compile()
+        keep = globsieve.compile([Exclude("*"), Include("*.txt")])
         client, calls = make_recording_client([{}])
         S3().cp(
             src,
@@ -464,7 +464,7 @@ class TestOpenDownloadRoute:
         # never fetched, and the backend is never opened.
         store: dict[str, bytes] = {}
         dest = _MemStorage(store, location="mem://data/out.bin")
-        drop = GlobFilter().exclude("*").compile()
+        drop = globsieve.compile([Exclude("*")])
         client, calls = make_recording_client([head_response()])
         S3().cp(
             S3Storage("s3://b/d/a.txt", client=client), dest, filter=drop, transfer_config=_SYNC
@@ -480,7 +480,7 @@ class TestOpenDownloadRoute:
         # alone left every test green.
         store: dict[str, bytes] = {}
         dest = _MemStorage(store, location="mem://data/")
-        only_b = GlobFilter().exclude("*").include("b")
+        only_b = globsieve.compile([Exclude("*"), Include("b")])
         client, calls = make_recording_client([head_response()])
         S3().cp(S3Storage("s3://b/a//b", client=client), dest, filter=only_b, transfer_config=_SYNC)
         assert ops(calls) == ["HeadObject"]

@@ -1,17 +1,15 @@
 # Filters
 
 The `filter=` parameter of `cp` / `mv` / `rm` / `sync` takes a `FileFilter`, and
-`GlobFilter` / `GlobPattern` are the `aws s3`-style include/exclude
-implementation of one. The narrative treatment is
+`GlobFilter` — compiled from `Exclude` / `Include` rules — is the `aws s3`-style
+include/exclude implementation of one. The narrative treatment is
 [`../library/filters.md`](../library/filters.md); the engine's derivation from
 the AWS CLI is [`../../design/globsieve.md`](../../design/globsieve.md).
 
 `FileFilter` is importable from the package root and from `boto3_s3.types`.
-`GlobFilter`, `GlobPattern` and `PatternKind` are importable from the package
-root and from `boto3_s3.globsieve`; the rest of the engine — `compile`, the
-`Matcher` and `SetMatcher` protocols, the matcher classes,
-`compile_set_matcher` and `is_anchored` — is public under `boto3_s3.globsieve`
-only.
+`Exclude`, `Include`, `GlobFilter`, `GlobPattern` and `PatternKind` are
+importable from the package root and from `boto3_s3.globsieve`; `compile`,
+`normcase` and `is_anchored` are public under `boto3_s3.globsieve` only.
 
 ## FileFilter
 
@@ -103,10 +101,114 @@ root-anchored pattern, or any predicate reading side-specific data (`key`,
 `size`, `mtime`, `storage_class`, `storage`, the `LocalFileInfo` fields), can
 hide a key on one side only and leave the run a one-sided view of it.
 
+## Exclude
+
+An `--exclude` rule: an entry whose last matching pattern belongs to it is left
+out.
+
+```python
+class Exclude:
+    def __init__(self, *patterns: str) -> None: ...
+    patterns: tuple[str, ...]
+```
+
+`patterns` is the tuple given, in order. Each pattern is a rule of its own, at
+its own position in the list, and a rule with no pattern changes nothing. The
+value is frozen: two rules are equal when they are of one kind with the same
+patterns, and they hash and pickle.
+
+## Include
+
+An `--include` rule: an entry whose last matching pattern belongs to it is
+kept. Otherwise as [`Exclude`](#exclude).
+
+```python
+class Include:
+    def __init__(self, *patterns: str) -> None: ...
+    patterns: tuple[str, ...]
+```
+
+## GlobFilter
+
+An ordered list of [`Exclude`](#exclude) / [`Include`](#include) rules compiled
+into a `FileFilter` that decides like the AWS CLI's `--exclude` / `--include`.
+
+```python
+def compile(rules: Iterable[Exclude | Include]) -> GlobFilter: ...  # boto3_s3.globsieve
+
+class GlobFilter:
+    def __call__(self, info: FileInfo) -> bool: ...
+    def included(self, relative: str | None, full: str | None = None) -> bool: ...
+    @property
+    def rules(self) -> tuple[Exclude | Include, ...]: ...
+
+def normcase(text: str) -> str: ...  # boto3_s3.globsieve
+```
+
+```python
+from boto3_s3 import Exclude, Include, globsieve
+
+web = globsieve.compile([Exclude("*"), Include("*.html", "*.css")])
+s3.sync("./site", "s3://bkt/site", filter=web)
+s3.cp("./b", "s3://bkt/b/", recursive=True, filter=lambda f: web(f) and (f.size or 0) < 10**8)
+```
+
+`compile` splits and translates the patterns once, for the host's path rules
+(POSIX or Windows); a value that is not an `Exclude` or `Include` raises
+`ValidationError`, and an empty list keeps everything. The compiled filter is
+immutable: one instance serves any number of operations, both sides of a
+`sync` and every thread, and it pickles by its rules. It is accepted wherever a
+`FileFilter` is — `sync`'s `create_filter` and `delete_filter` lanes and
+`ScanOptions.filter` included — and can be called from a predicate of your
+own. `update_filter` and `pair_filter` take pairs, so wrap it there:
+`lambda pair: web(pair.src)`. `rules` is the list as given.
+
+**Decision order.** The patterns apply in the order given and the last one that
+matches decides; an entry no pattern matches is included. So `Exclude("*")`
+followed by includes is default-deny.
+
+**Pattern syntax.** `fnmatch` form: `*` matches any run of characters, `?`
+exactly one, and `[seq]` / `[!seq]` one character in or not in a set. `*` and
+`?` match `/` as well, there is no escape character, and the whole path must
+match — so `logs/*` covers everything under `logs/` at any depth.
+
+**What a pattern is matched against.** The AWS CLI joins each pattern onto its
+side's base directory with `os.path.join` and matches the entry's full path
+against the result. The filter reproduces that from three values of the entry:
+R, its path below that base, which is `info.compare_key`; F, the full path the
+AWS CLI matches — the `key` of a `LocalFileInfo` (the absolute path) or
+`bucket/key` for an `S3FileInfo` (the bucket read from its `storage`), and
+none for any other entry; and D, the drive or UNC share of F (Windows only,
+empty on the S3 side). A pattern the join appends to the base is matched
+against R, and one the join puts in place of the base against F:
+
+| Pattern | Matched |
+|---|---|
+| Relative: `*.txt`, `logs/*` | Against R |
+| POSIX `/data/*`; Windows `C:\data\*`, `\\server\share\*` | Against F |
+| Windows `\data\*` (a root without a drive) | D followed by the pattern, against F |
+| Windows `C:x` (a drive without a root) | Against R as `x` when the drive is D, in any case; otherwise as written, against F |
+
+So an absolute pattern never matches an S3 entry, whose `bucket/key` has no
+root, and a pattern rooted at the local side of a `sync` prunes that side
+only. On Windows a pattern whose drive part is a glob is matched as written:
+`*:*` matches every drive-letter path and every S3 key that holds a `:`. A
+bare `C:` on drive C: is the empty pattern. The base is matched literally,
+where the AWS CLI reads glob characters in it. An entry without F (a custom
+backend's, or an `S3FileInfo` without `storage`) is decided by the patterns
+matched against R alone, and one whose `compare_key` is `None` by those matched
+against F alone. `included(relative, full)` is the same decision on plain
+strings — `full` in either separator — with `None` for a value that is absent.
+
+**Case and separators.** As the AWS CLI's `fnmatch` does, both strings go
+through `normcase` first. On Linux and macOS that is the identity: matching is
+byte-exact and `\` is an ordinary character. On Windows it lower-cases with
+Windows' own table and turns `/` into `\`, so matching is case-insensitive and
+the two separators are one, in an S3 key as in a pattern.
+
 ## PatternKind
 
-Whether a [`GlobPattern`](#globpattern) includes or excludes the keys it
-matches.
+Whether a [`GlobPattern`](#globpattern) includes or excludes.
 
 ```python
 class PatternKind(Enum):
@@ -114,21 +216,10 @@ class PatternKind(Enum):
     EXCLUDE = "exclude"
 ```
 
-Two members and no others. `INCLUDE` keeps a matching key and `EXCLUDE` drops
-one, subject to the last-match-wins order [`GlobPattern`](#globpattern)
-describes — a rule of either kind decides only the keys it matches, and a key
-matched by no rule is included.
-
-It is a plain `Enum`, not a `str` subclass, so a member does not equal its own
-`"include"` / `"exclude"` value; comparison is against the member. Nothing in
-the library accepts one of those strings where a member is expected.
-
 ## GlobPattern
 
-One include/exclude rule: a kind and a pattern string. `GlobPattern` values are
-what `GlobFilter` accumulates and what `boto3_s3.globsieve.compile` consumes.
-The class is a frozen dataclass, so instances are hashable and compare by
-`(kind, pattern)`.
+One `--exclude` / `--include` option as the `boto3-s3` command parses it: a
+kind and a pattern string. A frozen dataclass, equal by `(kind, pattern)`.
 
 ```python
 @dataclass(frozen=True)
@@ -137,58 +228,6 @@ class GlobPattern:
     pattern: str
 ```
 
-`kind` is a [`PatternKind`](#patternkind) member — whether keys matching
-`pattern` are kept or dropped. `pattern` is the glob itself, in the form
-described below. Neither field is validated: any string is a legal pattern.
-
-**Decision order.** A list of rules is evaluated in the order given and the last
-rule that matches decides; a key matched by no rule is included. So
-`exclude("*")` followed by include rules is default-deny, and `include("*")`
-followed by exclude rules — or a list of exclude rules alone — is default-allow.
-`compile` recognizes a leading `GlobPattern.exclude("*")` / `include("*")` by
-value equality when it selects an internal matcher; that selection affects speed
-only, not the decision.
-
-**Pattern syntax.** Patterns are `fnmatch` form: `*` matches any run of
-characters, `?` matches exactly one character, and `[seq]` / `[!seq]` match one
-character in or not in a set. Both `*` and `?` match `/` as well, and the whole
-key must match — both ends are anchored — so `logs/*` covers everything under
-`logs/` at any depth, while `x.txt` matches only the key `x.txt` exactly.
-Matching is case-sensitive and byte-exact on every platform; the
-case-insensitive rule `aws s3` applies on Windows belongs to the `boto3-s3`
-command, not to this library.
-
-**Which key the pattern matches.** A relative pattern is matched against the
-entry's `compare_key`, whatever the path that stamped it: on an enumeration,
-relative to the directory being enumerated for a local entry and
-`Prefix`-relative for an S3 entry — the two sides of a `sync` share that one
-key space — and on the single-entry paths the form given under
-[`FileFilter`](#filefilter). A root-anchored pattern is matched against the
-entry's full `key` instead: the absolute filesystem path (with `/` separators)
-for a local entry, the object key for an S3 entry. That is what lets one filter
-prune the two sides of a `sync` asymmetrically — a pattern rooted at the local
-source matches there and not on the S3 side.
-
-**When a pattern is root-anchored.** The test is `os.path.isabs`, plus, on
-Windows, a single leading `/` or `\`. On Linux and macOS that means a leading
-`/` and nothing else; on Windows it also covers `C:/data/...` and UNC forms. A
-root-anchored pattern is joined onto the entry's full key before matching, which
-on Windows lends the entry's drive or UNC anchor to a driveless-absolute pattern
-(`/data/*` matches an entry keyed `C:/data/x`). Since an S3 object key normally
-carries no anchor, a root-anchored pattern matches no S3 entry — with two
-carve-outs: a key that literally begins with `/` genuinely is anchored and does
-match, and on Windows a key shaped like a drive path (`C:/...`) picks up a drive
-the same way a local path would, because the matcher sees only key strings.
-
-**Windows-only pattern rewrites.** The host separator is folded to `/` before
-matching, so `logs\*.txt` matches `logs/x.txt` on Windows; on Linux and macOS
-`\` stays a literal character. A drive-relative pattern (`C:foo` — a drive
-letter with no separator) is not root-anchored: its drive is stripped and the
-remainder is treated as a relative pattern. One residual follows from having no
-operation root at compile time: a drive-relative pattern naming a different
-drive than the source is folded to that same relative tail rather than kept
-drive-specific ([`../../design/globsieve.md`](../../design/globsieve.md)).
-
 ### include(pattern)
 
 Classmethod. Returns `GlobPattern(PatternKind.INCLUDE, pattern)`.
@@ -196,71 +235,3 @@ Classmethod. Returns `GlobPattern(PatternKind.INCLUDE, pattern)`.
 ### exclude(pattern)
 
 Classmethod. Returns `GlobPattern(PatternKind.EXCLUDE, pattern)`.
-
-## GlobFilter
-
-A chainable builder of `GlobPattern` rules that is itself a `FileFilter`:
-construct it, append rules, and pass it as `filter=`. It is sugar over
-`boto3_s3.globsieve.compile` — the same rules, the same decision order, and the
-same key-per-pattern rule described under [`GlobPattern`](#globpattern).
-
-```python
-class GlobFilter:
-    def __init__(self) -> None: ...
-    def exclude(self, *patterns: str) -> GlobFilter: ...
-    def include(self, *patterns: str) -> GlobFilter: ...
-    def compile(self) -> GlobFilter: ...
-    def __call__(self, info: FileInfo) -> bool: ...
-```
-
-```python
-from boto3_s3 import GlobFilter
-
-keep = GlobFilter().exclude("*").include("*.tar.gz").compile()
-s3.cp("./build", "s3://artifacts/", recursive=True, filter=keep)
-```
-
-A filter with no rules includes every entry. Because the rules are a list, the
-order of the `exclude` / `include` calls is the decision order, and a later call
-can override an earlier one for the same key.
-
-An instance is reusable across operations and across the two sides of a `sync`.
-Compilation is idempotent and the accumulated rules are read-only during
-matching, so concurrent first use from both sides is harmless; appending rules
-while an operation is running is not.
-
-A `GlobFilter` is also accepted wherever a `FileFilter` is — `sync`'s
-`create_filter` and `delete_filter` lanes included, where it receives the
-`FileInfo` of the one side that lane owns
-([`operations/sync.md`](./operations/sync.md)).
-
-### exclude(\*patterns)
-
-Appends one exclude rule per argument, in the order given, and returns `self`.
-Matching keys are dropped unless a later rule includes them. Calling it discards
-any previously compiled matcher, so rules appended after `compile` still take
-effect.
-
-### include(\*patterns)
-
-Appends one include rule per argument, in the order given, and returns `self`.
-Matching keys are kept unless a later rule excludes them. Like `exclude`, it
-discards any previously compiled matcher.
-
-### compile()
-
-Compiles the accumulated rules eagerly and returns `self`. It is optional: an
-uncompiled filter compiles itself on first use, and recompiles after a later
-`exclude` / `include`. Calling it is the recommended form for a filter that will
-be reused, so the cost is paid once. It does not freeze the filter — further
-rules may still be appended.
-
-### \_\_call\_\_(info)
-
-Applies the rules to `info` and returns whether the entry is included. A
-relative pattern is matched against `info.compare_key`; a root-anchored pattern
-against `info.key`. Compiles the rules first if they are not compiled yet.
-
-It relies on `info.compare_key`, which every backend's `scan_pages` and
-`get_fileinfo` stamp ([`storage.md`](./storage.md)); a hand-built `FileInfo`
-passed to it directly must set it.

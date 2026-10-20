@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 from boto3.s3.transfer import TransferConfig
 
-from boto3_s3 import GlobFilter
+from boto3_s3 import Exclude, globsieve
 from boto3_s3.exceptions import BatchError, ValidationError
 from boto3_s3.iostorage import IOStorage, StdioStorage
 from boto3_s3.s3 import S3
@@ -225,7 +225,7 @@ class TestUploadMove:
         (tmp_path / "keep.txt").write_bytes(b"k")
         (tmp_path / "skip.log").write_bytes(b"s")
         client, calls = make_recording_client([{}])
-        keep = GlobFilter().exclude("*.log").compile()
+        keep = globsieve.compile([Exclude("*.log")])
         S3().mv(
             str(tmp_path),
             S3Storage("s3://b/tree/", client=client),
@@ -312,7 +312,7 @@ class TestDownloadMove:
         # aws filters the single-object routes too: an excluded mv source
         # must not transfer - and, crucially, must not be deleted.
 
-        drop = GlobFilter().exclude("*").compile()
+        drop = globsieve.compile([Exclude("*")])
         client, calls = make_recording_client([head_response()])
         S3().mv(
             S3Storage("s3://b/d/a.txt", client=client),

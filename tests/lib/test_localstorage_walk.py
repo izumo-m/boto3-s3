@@ -20,8 +20,9 @@ from pathlib import Path
 
 import pytest
 
+from boto3_s3 import globsieve
 from boto3_s3.exceptions import NotFoundError, TransportError, ValidationError
-from boto3_s3.globsieve import GlobFilter
+from boto3_s3.globsieve import Exclude
 from boto3_s3.localstorage import (
     LocalFileGenerator,
     LocalStorage,
@@ -1506,11 +1507,11 @@ class TestEnumerateAllEntries:
         _make_tree(tmp_path, "a.txt")
         storage = LocalStorage(str(tmp_path))
 
-        drop_all = GlobFilter().exclude("*").compile()
+        drop_all = globsieve.compile([Exclude("*")])
         opts = LocalScanOptions(recursive=True, enumerate_all_entries=True, filter=drop_all)
         assert list(storage.scan(opts)) == []
 
-        drop_txt = GlobFilter().exclude("*.txt").compile()
+        drop_txt = globsieve.compile([Exclude("*.txt")])
         opts = LocalScanOptions(recursive=True, enumerate_all_entries=True, filter=drop_txt)
         assert [info.compare_key for info in storage.scan(opts)] == [""]
 
@@ -1547,11 +1548,11 @@ class TestEnumerateAllEntries:
         _make_tree(tmp_path, "a.txt")
         storage = LocalStorage(str(tmp_path))
 
-        drop_all = GlobFilter().exclude("*").compile()
+        drop_all = globsieve.compile([Exclude("*")])
         opts = LocalScanOptions(recursive=False, enumerate_all_entries=True, filter=drop_all)
         assert list(storage.scan(opts)) == []
 
-        drop_txt = GlobFilter().exclude("*.txt").compile()
+        drop_txt = globsieve.compile([Exclude("*.txt")])
         opts = LocalScanOptions(recursive=False, enumerate_all_entries=True, filter=drop_txt)
         assert [info.compare_key for info in storage.scan(opts)] == [""]
 

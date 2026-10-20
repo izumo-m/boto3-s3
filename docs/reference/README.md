@@ -32,8 +32,8 @@ their area but are not indexed here.
   the listing entry types, the callback aliases, and `CancelToken`.
 - [`exceptions.md`](./exceptions.md) — `Boto3S3Error` and its subclasses: what
   each one means, when it is raised, and what it carries.
-- [`filters.md`](./filters.md) — `FileFilter`, and the `GlobFilter` /
-  `GlobPattern` include/exclude implementation of one.
+- [`filters.md`](./filters.md) — `FileFilter`, and `GlobFilter`, the
+  `Exclude` / `Include` implementation of one.
 - [`comparator.md`](./comparator.md) — the `sync` merge-join, the pair shapes
   it emits, the update strategies, and the predicate combinators.
 - [`storage.md`](./storage.md) — the `Storage` contract, the capabilities that
@@ -70,6 +70,7 @@ that wraps it is documented on the same page.
 - [`cp`](./operations/cp.md#s3cp)
 - [`DestOnlyPair`](./comparator.md#destonlypair)
 - [`EtagComparison`](./comparator.md#etagcomparison)
+- [`Exclude`](./filters.md#exclude)
 - [`fast_parse_timestamp`](./misc.md#fast_parse_timestamp)
 - [`FileFilter`](./filters.md#filefilter)
 - [`FileInfo`](./results.md#fileinfo)
@@ -77,6 +78,7 @@ that wraps it is documented on the same page.
 - [`GlobFilter`](./filters.md#globfilter)
 - [`GlobPattern`](./filters.md#globpattern)
 - [`has_underlying_s3_path`](./misc.md#has_underlying_s3_path)
+- [`Include`](./filters.md#include)
 - [`InvalidConfigError`](./exceptions.md#invalidconfigerror)
 - [`InvalidValueError`](./exceptions.md#invalidvalueerror)
 - [`IOStorage`](./storage.md#iostorage)

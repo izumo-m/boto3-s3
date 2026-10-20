@@ -92,9 +92,9 @@ entirely, so it takes neither.
 equivalent of `--exclude` / `--include`:
 
 ```python
-from boto3_s3 import GlobFilter
+from boto3_s3 import Exclude, Include, globsieve
 
-only_html = GlobFilter().exclude("*").include("*.html").compile()
+only_html = globsieve.compile([Exclude("*"), Include("*.html")])
 s3.sync(src, dest, filter=only_html, delete_filter=True)
 ```
 

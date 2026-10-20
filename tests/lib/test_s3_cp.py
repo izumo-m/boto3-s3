@@ -23,7 +23,7 @@ import pytest
 from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError, ParamValidationError
 
-from boto3_s3 import GlobFilter, crtsupport, producers, transferplan
+from boto3_s3 import Exclude, Include, crtsupport, globsieve, producers, transferplan
 from boto3_s3.exceptions import (
     BatchError,
     CancelledError,
@@ -660,7 +660,7 @@ class TestFilters:
     def test_glob_filter_is_fed_compare_keys(self, tmp_path: Path) -> None:
         for name in ("keep.txt", "drop.bin"):
             (tmp_path / name).write_bytes(b"x")
-        keep = GlobFilter().exclude("*").include("*.txt").compile()
+        keep = globsieve.compile([Exclude("*"), Include("*.txt")])
         client, calls = make_recording_client([{}])
         S3().cp(
             str(tmp_path),
@@ -693,7 +693,7 @@ class TestFilters:
         # (its filter stage runs regardless of dir_op): the source is still
         # resolved (HeadObject, like aws's file generator) but an excluded
         # object transfers nothing - no GetObject, no local file, rc 0.
-        drop = GlobFilter().exclude("*").compile()
+        drop = globsieve.compile([Exclude("*")])
         client, calls = make_recording_client([head_response()])
         results: list[OpResult] = []
         S3().cp(
@@ -731,9 +731,10 @@ class TestFilters:
         # doubling a slash got the opposite verdict from aws-cli's, and from
         # the blind rm's. A mv then moved, and deleted, a source aws-cli
         # leaves alone.
-        glob = GlobFilter()
-        for pattern in patterns:
-            glob = glob.exclude(pattern[1:]) if pattern[0] == "-" else glob.include(pattern[1:])
+        glob = globsieve.compile(
+            Exclude(pattern[1:]) if pattern[0] == "-" else Include(pattern[1:])
+            for pattern in patterns
+        )
         client, calls = make_recording_client([head_response()])
         results: list[OpResult] = []
         getattr(S3(), operation)(
@@ -750,7 +751,7 @@ class TestFilters:
     def test_single_upload_is_filtered_too(self, tmp_path: Path) -> None:
         src = tmp_path / "k.txt"
         src.write_bytes(b"x")
-        drop = GlobFilter().exclude("*").compile()
+        drop = globsieve.compile([Exclude("*")])
         client, calls = make_recording_client([])
         S3().cp(str(src), S3Storage("s3://b/k.txt", client=client), filter=drop)
         assert calls == []

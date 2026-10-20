@@ -1,91 +1,517 @@
-"""Glob-pattern sieve - last-match-wins include/exclude pattern engine.
+r"""aws-cli's ``--exclude`` / ``--include`` matching, compiled into a ``FileFilter``.
 
-Semantics match aws-cli's ``--exclude`` / ``--include`` filters: patterns
-evaluated in order, the last pattern that matches decides include vs.
-exclude, and an unmatched key is included by default.
+The rules are ``Exclude(*patterns)`` and ``Include(*patterns)`` values, and
+``compile`` turns an ordered list of them into a ``GlobFilter``::
 
-Usage (``re``-style)::
+    from boto3_s3 import Exclude, Include, globsieve
 
-    from boto3_s3 import globsieve
+    web = globsieve.compile([Exclude("*"), Include("*.html", "*.css")])
+    s3.sync("./site", "s3://bkt/site", filter=web)
+    s3.cp("./b", "s3://bkt/b/", recursive=True, filter=lambda f: web(f) and f.size < 10**8)
 
-    m = globsieve.compile([
-        globsieve.GlobPattern.exclude("*"),
-        globsieve.GlobPattern.include("*.txt"),
-    ])
-    m.included("foo.txt")  # True
-    m.included("foo.log")  # False
+A ``GlobFilter`` decides like aws-cli's ``Filter``: the patterns apply in
+order, the last one that matches decides, and an entry that no pattern
+matches is included. A pattern is Python's ``fnmatch``: ``*`` and ``?`` match
+``/`` too, ``[seq]`` is a character class, there is no escape character, and
+the whole path must match.
 
-``GlobFilter`` is the ergonomic front end built on this engine - a
-chainable ``FileFilter`` (``GlobFilter().exclude("*").include("*.txt").compile()``)
-passed straight to ``S3.cp`` / ``mv`` / ``rm`` / ``sync`` as ``filter=``; it is
-sugar over the same ``compile``.
+aws joins every pattern onto its side's base (its ``rootdir``) with
+``os.path.join`` and matches the entry's full path against the result. The
+verdict depends on three values of the entry alone, so the compiled filter
+needs no base and works for every operation, on both sides of a ``sync`` and
+inside the caller's own predicate:
 
-Specialization happens at compile time. ``compile`` first detects
-the *macro shape* of the pattern list (default-deny + includes,
-default-allow + excludes, mixed) and picks one of the
-``Matcher`` implementations. Within each set, the patterns are
-partitioned by shape (literal, suffix, prefix, general fnmatch): a
-uniform set uses that shape's dedicated ``SetMatcher``, and a mixed
-set is folded into a ``CompositeSet`` that ORs one matcher per shape.
+- R, the entry's path below aws's base: its ``compare_key``. The library
+  stamps it so on every entry it hands to a filter.
+- F, the full path aws matches: a ``LocalFileInfo``'s ``key`` (the absolute
+  path), ``bucket/key`` for an ``S3FileInfo``, none for any other entry.
+- D, the drive or UNC share of F in its native spelling (Windows only; ``""``
+  on the S3 side).
 
-A relative pattern is matched against the whole of the entry's relative
-``compare_key`` (``fnmatch`` anchors both ends; its ``*`` spans ``/``, which
-is what lets the match cover everything after the root the way aws-cli's
-root-joined form does - the CLI layer delegates here only where that
-equivalence is provable, ``boto3_s3_cli.filters._needs_joined``). A root-anchored
-(absolute) pattern - ``--exclude /data/secret/*`` - is matched against the
-entry's ``full_key`` instead, anchored with ``os.path.join`` exactly like
-aws-cli joins each pattern onto the source / destination root; this is what
-makes the same filter prune the two ``sync`` sides per-side (a source-rooted
-absolute pattern matches the local source's full path but not the S3
-destination's anchorless key). See ``Anchored``.
+At compile time each pattern is split into drive, root and rest with a port
+of Python 3.14's ``ntpath.splitroot`` (the Python aws-cli bundles), so the
+result does not depend on the Python running here. Where the join keeps the
+base, the pattern is matched against R; where it drops the base, against F:
 
-This module is a self-contained, stdlib-only building block: everything in
-``__all__`` is public and reached by submodule path (``boto3_s3.globsieve``,
-as above); ``GlobFilter`` / ``GlobPattern`` / ``PatternKind`` are additionally
-re-exported at the package root. The matcher classes are public so a custom
-tool can assemble its own decision pipeline from the same parts ``compile``
-picks from; ``compile_set_matcher`` builds the shape-specialized
-``SetMatcher`` those classes consume, and ``is_anchored`` exposes
-the anchored/relative split.
+- relative (no drive, no root): against R. The base is taken literally,
+  where aws reads glob characters in it (a deliberate difference);
+- POSIX ``/x``, Windows ``C:\x`` and ``\\server\share\x``: against F;
+- Windows ``\x`` (a root without a drive): ``D + \x`` against F;
+- Windows ``C:x`` (a drive without a root): against R as ``x`` when the drive
+  is D, compared case-insensitively as ``ntpath.join`` compares; otherwise as
+  written against F (``*:*`` matches every drive-letter path and every S3 key
+  that holds a ``:``). A bare ``C:`` on drive C: is the empty pattern.
+
+aws matches both strings through ``normcase``: byte-exact on POSIX, where
+``\`` is an ordinary character; on Windows lower-cased by the operating
+system's own table and with ``/`` turned into ``\``, so the two separators are
+one, in an S3 key as in a pattern (``normcase``).
+
+The rules of one kind of match are compiled into one regular expression,
+latest rule first, so an entry costs one regex call (two when the list has a
+pattern matched against F), plus one ``normcase`` call per string on Windows.
+A ``GlobFilter`` is immutable once compiled, so one instance serves every
+thread of an operation and any number of operations.
+
+The module is stdlib-only apart from the pure ``boto3_s3.types``; everything
+in ``__all__`` is public, and ``Exclude`` / ``Include`` / ``GlobFilter`` are
+also exported from the package root. ``GlobPattern``, ``PatternKind`` and
+``is_anchored`` are the CLI's own records of its options, kept until the CLI
+moves to the rules above.
 """
 
 from __future__ import annotations
 
 import fnmatch
+import ntpath
 import os
 import re
-from collections.abc import Callable, Iterable, Sequence
+import sys
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
+
+from boto3_s3.exceptions import ValidationError
+from boto3_s3.types import LocalFileInfo, S3FileInfo
 
 if TYPE_CHECKING:
+    from boto3_s3.s3storage import S3Storage
     from boto3_s3.types import FileInfo
 
 __all__ = [
-    "AlwaysExclude",
-    "AlwaysInclude",
-    "Anchored",
-    "CompositeSet",
-    "ExcludeOnly",
+    "Exclude",
     "GlobFilter",
     "GlobPattern",
-    "IncludeOnly",
-    "LiteralSet",
-    "Matcher",
+    "Include",
     "PatternKind",
-    "PrefixSet",
-    "Sequential",
-    "SetMatcher",
-    "SuffixSet",
-    "UnionRegex",
     "compile",
-    "compile_set_matcher",
     "is_anchored",
+    "normcase",
 ]
 
-# ----- pattern definition --------------------------------------------------
+# The host model `compile` binds a filter to: Windows' path rules and fold, or
+# POSIX's. Read when a filter is compiled (and by `normcase` when called), so a
+# test can simulate the other family by replacing it.
+_WINDOWS: bool = os.name == "nt"
+
+
+# ----- rules ------------------------------------------------------------------
+
+
+@dataclass(frozen=True, init=False, repr=False)
+class _Rule:
+    """One ``--exclude`` or ``--include`` option: its patterns, in order.
+
+    ``patterns`` is the tuple the constructor was given. Each pattern is a rule
+    of its own, at its own position in the list; a rule with no pattern
+    changes nothing. Two values are equal when they are of one kind with the
+    same patterns; they are hashable.
+    """
+
+    patterns: tuple[str, ...]
+
+    def __init__(self, *patterns: str) -> None:
+        object.__setattr__(self, "patterns", patterns)
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({', '.join(map(repr, self.patterns))})"
+
+
+class Exclude(_Rule):
+    """``--exclude``: an entry the last matching pattern belongs to is left out."""
+
+
+class Include(_Rule):
+    """``--include``: an entry the last matching pattern belongs to is kept."""
+
+
+# ----- normcase -----------------------------------------------------------------
+
+
+if sys.platform == "win32":
+    import ctypes
+    import functools
+
+    @functools.lru_cache(maxsize=1)
+    def _lcmap_string_ex() -> Any:
+        """``kernel32.LCMapStringEx``, bound once (the binding costs more than the call)."""
+        function = ctypes.WinDLL("kernel32", use_last_error=True).LCMapStringEx
+        function.argtypes = [
+            ctypes.c_wchar_p,  # locale name
+            ctypes.c_uint32,  # flags
+            ctypes.c_wchar_p,  # source
+            ctypes.c_int,  # source length, in UTF-16 units
+            ctypes.c_wchar_p,  # destination
+            ctypes.c_int,  # destination size
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        function.restype = ctypes.c_int
+        return function
+
+    def _lcmap_lower(text: str) -> str:
+        """Windows' locale-invariant lower-casing (``LCMapStringEx``), through ctypes.
+
+        What ``ntpath.normcase`` calls from Python 3.12 on. The mapping is the
+        operating system's one-to-one table, not Unicode's full case mapping:
+        it leaves U+0130, the Kelvin sign and U+1E9E alone and has no final
+        sigma, where ``str.lower`` does otherwise (447 code points differ on
+        Windows 11, measured) - so only the call itself reproduces it, and it
+        equals ``ntpath.normcase`` on Python 3.14 for every code point. Being
+        one-to-one, it keeps the length (no code point changed it on the host
+        measured), so the destination is sized like the source and one call
+        does it; should a Windows table ever answer otherwise, the size is
+        asked for and the call repeated, the way CPython's own wrapper does.
+        """
+        if not text:
+            return text
+        lcmap = _lcmap_string_ex()
+        invariant_locale, lowercase = "", 0x100  # LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE
+        units = len(text.encode("utf-16-le", "surrogatepass")) // 2
+        size = units
+        buffer = ctypes.create_unicode_buffer(size)
+        written = lcmap(invariant_locale, lowercase, text, units, buffer, size, None, None, None)
+        if written <= 0 and ctypes.get_last_error() == 122:  # ERROR_INSUFFICIENT_BUFFER
+            size = lcmap(invariant_locale, lowercase, text, units, None, 0, None, None, None)
+            if size > 0:
+                buffer = ctypes.create_unicode_buffer(size)
+                written = lcmap(
+                    invariant_locale, lowercase, text, units, buffer, size, None, None, None
+                )
+        if written <= 0:
+            raise ctypes.WinError(ctypes.get_last_error())
+        return ctypes.wstring_at(buffer, written)
+
+
+def _windows_normcase(text: str) -> str:
+    r"""``ntpath.normcase`` as the Python aws-cli bundles runs it on Windows.
+
+    aws-cli's ``fnmatch.fnmatch`` puts the path and the pattern through
+    ``os.path.normcase`` before matching. On Windows that turns every ``/``
+    into ``\`` - so the two are one separator, in an S3 key that holds a
+    literal backslash as much as in a pattern - and lower-cases with Windows'
+    own locale-invariant mapping (``LCMapStringEx``), which differs from
+    ``str.lower`` for a few hundred code points. Measured against ``aws.exe``
+    2.36.40 by real deletion: ``rm --recursive --exclude "a/b"`` keeps the key
+    ``a\b``, and ``--exclude "k*"`` does not keep a key starting with the
+    Kelvin sign.
+
+    The stdlib function is that mapping from Python 3.12 on, the version
+    aws-cli ships; on a Windows host running 3.10 or 3.11 it still lower-cases
+    with ``str.lower``, so the system call is made directly there (a version
+    difference that changes which entries a normal run selects, so it is
+    matched; design/overview.md section 3). Drop that branch once the
+    supported floor reaches 3.12. Off Windows this is only reached by tests
+    that simulate the host, where ``ntpath.normcase`` falls back to
+    ``str.lower`` itself. The engine relies on the fold working character by
+    character, which the Windows table does.
+    """
+    if sys.platform == "win32" and sys.version_info < (3, 12):
+        text = text.replace("/", "\\")
+        # The two mappings part only outside ASCII, and str.lower is far
+        # cheaper than a system call per key.
+        return text.lower() if text.isascii() else _lcmap_lower(text)
+    return ntpath.normcase(text)
+
+
+def normcase(text: str) -> str:
+    r"""aws-cli's matching fold on this host: what its ``fnmatch`` does to both strings.
+
+    The identity on POSIX. On Windows, ``/`` becomes ``\`` and the text is
+    lower-cased with the operating system's locale-invariant table (see
+    ``_windows_normcase``). A ``GlobFilter`` applies it itself; it is public
+    for a caller that reasons about patterns and paths on its own, such as
+    deciding that no pattern can reach below a directory.
+    """
+    return _windows_normcase(text) if _WINDOWS else text
+
+
+# ----- splitroot ----------------------------------------------------------------
+
+
+def _splitroot(path: str) -> tuple[str, str, str]:
+    r"""Python 3.14's ``ntpath.splitroot``, ported so every host Python splits alike.
+
+    Splits into drive, root and the rest, keeping the input's spelling:
+    ``C:\x`` -> ``("C:", "\\", "x")``, ``C:x`` -> ``("C:", "", "x")``, ``\x``
+    -> ``("", "\\", "x")``, ``\\server\share\x`` -> ``("\\\\server\\share",
+    "\\", "x")``, and an incomplete UNC drive (``\\server``) is all drive.
+    Both separators are recognised. Python 3.10 and 3.11 split some of these
+    forms differently, and aws-cli joins patterns with the 3.14 rules.
+    """
+    normp = path.replace("/", "\\")
+    if normp[:1] == "\\":
+        if normp[1:2] == "\\":
+            # UNC drives, e.g. \\server\share or \\?\UNC\server\share; device
+            # drives, e.g. \\.\device or \\?\device.
+            start = 8 if normp[:8].upper() == "\\\\?\\UNC\\" else 2
+            index = normp.find("\\", start)
+            if index == -1:
+                return path, "", ""
+            index2 = normp.find("\\", index + 1)
+            if index2 == -1:
+                return path, "", ""
+            return path[:index2], path[index2 : index2 + 1], path[index2 + 1 :]
+        # A root without a drive, e.g. \Windows.
+        return "", path[:1], path[1:]
+    if normp[1:2] == ":":
+        if normp[2:3] == "\\":
+            # An absolute drive-letter path, e.g. X:\Windows.
+            return path[:2], path[2:3], path[3:]
+        # A drive-relative path, e.g. X:Windows.
+        return path[:2], "", path[2:]
+    return "", "", path
+
+
+# ----- compiled filter --------------------------------------------------------------
+
+
+# How a pattern joins onto a base (see the module docstring).
+_RELATIVE = 0  # against R
+_FULL = 1  # the join drops the base: against F
+_ROOTED = 2  # Windows `\x`: D + pattern, against F
+_DRIVE = 3  # Windows `C:x`: against R on drive C:, else as written against F
+
+
+class _Pattern(NamedTuple):
+    """One pattern of the rule list, classified at compile time.
+
+    ``position`` is its place in the flattened list (a later one wins),
+    ``include`` its rule's kind. ``text`` is the pattern ready to translate -
+    folded on Windows - for every form but ``_DRIVE``, which keeps its
+    ``drive`` and ``rest`` as written: how it joins depends on D.
+    """
+
+    position: int
+    include: bool
+    form: int
+    text: str
+    drive: str = ""
+    rest: str = ""
+
+
+_Match = Callable[[str], "re.Match[str] | None"]
+
+
+class _Plan(NamedTuple):
+    """The regexes a filter runs for entries on one drive D.
+
+    ``relative`` matches R and ``full`` matches F, each ``None`` when no rule
+    takes that form. Each is the alternation of its rules, latest first, and
+    every alternative ends in an empty marker group, so the match's
+    ``lastindex`` names the rule that decided; ``*_rules`` maps it to that
+    rule's ``(index, include)``. ``full_top`` is the latest full-path rule's
+    index (-1 when there is none): a relative match at a later index makes
+    the full-path regex unnecessary.
+    """
+
+    relative: _Match | None
+    relative_rules: dict[int | None, tuple[int, bool]]
+    full: _Match | None
+    full_rules: dict[int | None, tuple[int, bool]]
+    full_top: int
+
+
+# Distinct drives whose plans a filter keeps. An operation meets one or two
+# (each side's); a caller handing ``included`` paths from many UNC shares gets
+# the rest built per call.
+_PLAN_CACHE = 64
+
+
+def _union(
+    alternatives: list[tuple[int, bool, str]],
+) -> tuple[_Match | None, dict[int | None, tuple[int, bool]]]:
+    """Compile ``(index, include, regex)`` alternatives into one last-match-wins regex."""
+    if not alternatives:
+        return None, {}
+    regex = re.compile(
+        "|".join(f"(?:{body})(?P<r{index}>)" for index, _include, body in reversed(alternatives))
+    )
+    rules: dict[int | None, tuple[int, bool]] = {
+        regex.groupindex[f"r{index}"]: (index, include) for index, include, _ in alternatives
+    }
+    return regex.match, rules
+
+
+def _plan(patterns: tuple[_Pattern, ...], drive: str, fold: Callable[[str], str] | None) -> _Plan:
+    """Resolve the drive-dependent forms for entries on ``drive`` and compile the plan."""
+    relative: list[tuple[int, bool, str]] = []
+    full: list[tuple[int, bool, str]] = []
+    for p in patterns:
+        if p.form == _RELATIVE:
+            relative.append((p.position, p.include, fnmatch.translate(p.text)))
+        elif p.form == _FULL:
+            full.append((p.position, p.include, fnmatch.translate(p.text)))
+        else:
+            # Only Windows patterns reach here, so `fold` is the Windows fold.
+            assert fold is not None
+            if p.form == _ROOTED:
+                # ntpath.join keeps the base's drive (none on the S3 side) and
+                # takes the pattern's root and rest; the drive is the base's,
+                # matched literally.
+                full.append(
+                    (p.position, p.include, re.escape(fold(drive)) + fnmatch.translate(p.text))
+                )
+            elif p.drive.lower() == drive.lower():
+                # The same drive, as ntpath.join compares it: the pattern joins
+                # like a relative one. Written in another case, the joined path
+                # carries the pattern's spelling of the drive, which the fold
+                # makes D's own - or, where Windows' table and str.lower part,
+                # a prefix no entry under D has.
+                if fold(p.drive) == fold(drive):
+                    relative.append((p.position, p.include, fnmatch.translate(fold(p.rest))))
+            else:
+                # Another drive: the join ignores the base, adding a separator
+                # between a UNC drive and the rest.
+                sep = "\\" if p.rest and p.drive[-1] not in ":\\/" else ""
+                joined = p.drive + sep + p.rest
+                full.append((p.position, p.include, fnmatch.translate(fold(joined))))
+    relative_match, relative_rules = _union(relative)
+    full_match, full_rules = _union(full)
+    full_top = full[-1][0] if full else -1
+    return _Plan(relative_match, relative_rules, full_match, full_rules, full_top)
+
+
+class GlobFilter:
+    r"""A compiled ``--exclude`` / ``--include`` rule list; a ``FileFilter``.
+
+    Built by ``compile``. Calling it with a ``FileInfo`` returns whether the
+    entry is kept, deciding from its R, F and D as the module docstring
+    describes: R is ``compare_key``, F is the ``key`` of a ``LocalFileInfo``
+    or ``bucket/key`` of an ``S3FileInfo`` (read from its ``storage``), and
+    any other entry - or an ``S3FileInfo`` without a ``storage`` - has no F,
+    so only patterns matched against R apply to it. An entry whose
+    ``compare_key`` is ``None`` is matched by the full-path patterns alone.
+    Both values are what the library stamps on every entry it hands to a
+    filter; on an entry the caller builds, they are the caller's to stamp.
+
+    ``included(relative, full=None)`` is the same decision on plain strings:
+    ``relative`` is R and ``full`` is F (a local absolute path, in either
+    separator, or ``bucket/key``), ``None`` where there is none.
+
+    ``rules`` is the rule list as given to ``compile``. The filter is
+    immutable and safe to share between threads; it pickles by its rules (a
+    ``ProcessPoolExecutor`` worker recompiles it for the same host model).
+    """
+
+    __slots__ = ("_fold", "_patterns", "_plans", "_rules", "_static", "_uses_full", "_windows")
+
+    _fold: Callable[[str], str] | None
+    _patterns: tuple[_Pattern, ...]
+    _plans: dict[str, _Plan]
+    _rules: tuple[Exclude | Include, ...]
+    _static: _Plan | None
+    _uses_full: bool
+    _windows: bool
+
+    def __init__(self, rules: Iterable[Exclude | Include]) -> None:
+        self._setup(tuple(rules), _WINDOWS)
+
+    def _setup(self, rules: tuple[Exclude | Include, ...], windows: bool) -> None:
+        fold = _windows_normcase if windows else None
+        patterns: list[_Pattern] = []
+        for rule in rules:
+            # Fail inside the taxonomy rather than with an AttributeError (a
+            # bare string or an old GlobPattern is the likely mistake).
+            if not isinstance(rule, (Exclude, Include)):  # pyright: ignore[reportUnnecessaryIsInstance]
+                raise ValidationError(
+                    f"a glob rule must be Exclude or Include, got {type(rule).__name__}"
+                )
+            include = isinstance(rule, Include)
+            for pattern in rule.patterns:
+                index = len(patterns)
+                if fold is None:
+                    # posixpath.join drops the base exactly for a leading "/".
+                    form = _FULL if pattern.startswith("/") else _RELATIVE
+                    patterns.append(_Pattern(index, include, form, pattern))
+                    continue
+                drive, root, rest = _splitroot(pattern)
+                if not drive and not root:
+                    patterns.append(_Pattern(index, include, _RELATIVE, fold(pattern)))
+                elif drive and root:
+                    patterns.append(_Pattern(index, include, _FULL, fold(pattern)))
+                elif root:
+                    patterns.append(_Pattern(index, include, _ROOTED, fold(pattern)))
+                else:
+                    patterns.append(_Pattern(index, include, _DRIVE, "", drive, rest))
+        self._rules = rules
+        self._windows = windows
+        self._fold = fold
+        self._patterns = tuple(patterns)
+        self._uses_full = any(p.form != _RELATIVE for p in patterns)
+        # Without a drive-dependent form one plan serves every entry; with
+        # one, plans are built per drive on first sight (the S3 side's "" up
+        # front).
+        drive_dependent = any(p.form in (_ROOTED, _DRIVE) for p in patterns)
+        first = _plan(self._patterns, "", fold)
+        self._static = None if drive_dependent else first
+        self._plans = {"": first} if drive_dependent else {}
+
+    @property
+    def rules(self) -> tuple[Exclude | Include, ...]:
+        return self._rules
+
+    def __call__(self, info: FileInfo) -> bool:
+        full: str | None = None
+        if self._uses_full:
+            if isinstance(info, LocalFileInfo):
+                full = info.key
+            elif isinstance(info, S3FileInfo) and info.storage is not None:
+                full = f"{cast('S3Storage', info.storage).bucket}/{info.key}"
+        return self.included(info.compare_key, full)
+
+    def included(self, relative: str | None, full: str | None = None) -> bool:
+        """Whether an entry with path ``relative`` below the base and full path ``full`` is kept."""
+        plan = self._static
+        if plan is None:
+            drive = "" if full is None else _splitroot(full.replace("/", "\\"))[0]
+            plan = self._plans.get(drive)
+            if plan is None:
+                plan = _plan(self._patterns, drive, self._fold)
+                if len(self._plans) < _PLAN_CACHE:
+                    self._plans[drive] = plan
+        fold = self._fold
+        best = -1
+        verdict = True
+        if relative is not None and plan.relative is not None:
+            match = plan.relative(relative if fold is None else fold(relative))
+            if match is not None:
+                best, verdict = plan.relative_rules[match.lastindex]
+        if full is not None and plan.full is not None and plan.full_top > best:
+            match = plan.full(full if fold is None else fold(full))
+            if match is not None:
+                index, include = plan.full_rules[match.lastindex]
+                if index > best:
+                    verdict = include
+        return verdict
+
+    def __repr__(self) -> str:
+        return f"GlobFilter({list(self._rules)!r})"
+
+    def __reduce__(self) -> tuple[type[GlobFilter], tuple[object, ...], bool]:
+        # Rebuilt from its rules, then held to the host model it was compiled
+        # for (which differs from the unpickling host's only in a test).
+        return GlobFilter, (self._rules,), self._windows
+
+    def __setstate__(self, windows: bool) -> None:
+        if windows != self._windows:
+            self._setup(self._rules, windows)
+
+
+def compile(rules: Iterable[Exclude | Include]) -> GlobFilter:
+    """Compile an ordered list of ``Exclude`` / ``Include`` rules into a ``GlobFilter``.
+
+    The ``re.compile`` of this module: the patterns are split and translated
+    once, here, for this host's path rules (POSIX or Windows). A value that
+    is not an ``Exclude`` or ``Include`` raises ``ValidationError``. An empty
+    list compiles to a filter that keeps everything.
+    """
+    return GlobFilter(rules)
+
+
+# ----- the CLI's option records ---------------------------------------------------------
 
 
 class PatternKind(Enum):
@@ -97,12 +523,10 @@ class PatternKind(Enum):
 
 @dataclass(frozen=True)
 class GlobPattern:
-    """One include/exclude rule.
+    """One ``--exclude`` / ``--include`` option as the CLI parses it.
 
-    Use the ``include`` / ``exclude`` factories or build
-    directly. Equality is by ``(kind, pattern)`` - ``compile``
-    relies on this to recognize catch-all heads such as
-    ``GlobPattern.exclude("*")``.
+    Use the ``include`` / ``exclude`` factories or build directly. Equality is
+    by ``(kind, pattern)``.
     """
 
     kind: PatternKind
@@ -117,518 +541,14 @@ class GlobPattern:
         return cls(PatternKind.EXCLUDE, pattern)
 
 
-# ----- pattern classification ----------------------------------------------
-
-
 def is_anchored(pattern: str) -> bool:
-    """Whether a pattern is root-anchored (absolute) rather than relative.
+    """Whether a pattern is root-anchored (absolute) on this host.
 
-    aws-cli joins every pattern onto the operation root with ``os.path.join``,
-    which *drops* the root for an absolute right-hand side - so an absolute
-    pattern is matched against the entry's full path, a relative one effectively
-    against its relative tail (exactly, whenever the joined root is consumed
-    literally - the delegation condition the CLI checks). ``compile`` mirrors that split: anchored
-    patterns go to ``Anchored`` (matched against ``full_key``), the rest
-    keep the ``compare_key`` fast paths. Host-aware via ``os.path.isabs`` - on
-    POSIX only ``/foo`` qualifies, on Windows ``/foo`` / ``\\foo`` / ``C:/foo`` /
-    UNC do. Python 3.13 changed ``ntpath.isabs`` to reject a single leading
-    slash even though ``ntpath.join`` still replaces the root for that form, so
-    the explicit Windows check preserves the join semantics aws-cli uses. A
-    drive-relative ``C:foo`` is not anchored: ``compile`` instead strips its
-    drive and treats it as relative (see ``_strip_drive_relative``),
-    matching aws-cli's same-drive join.
+    aws-cli joins every pattern onto its base with ``os.path.join``, which
+    drops the base for an absolute right-hand side. Host-aware via
+    ``os.path.isabs``: on POSIX only ``/foo`` qualifies, on Windows ``/foo``,
+    ``\\foo``, ``C:/foo`` and UNC paths do (Python 3.13 changed
+    ``ntpath.isabs`` to reject a single leading slash, so that form is checked
+    explicitly). A drive-relative ``C:foo`` is not anchored.
     """
     return os.path.isabs(pattern) or (os.sep == "\\" and pattern.startswith(("/", "\\")))
-
-
-def _strip_drive_relative(pattern: str) -> str:
-    """Drop a Windows drive-relative prefix (``C:foo`` -> ``foo``) so it anchors to the root.
-
-    aws-cli joins each pattern onto the operation root with ``os.path.join``; on
-    Windows a *drive-relative* right-hand side sharing the root's drive merges as
-    a plain relative tail (``ntpath.join('C:\\root', 'C:foo') ==
-    'C:\\root\\foo'``). globsieve has no root at compile time, so it strips the
-    drive and treats the pattern as relative, so it matches the entry's
-    ``compare_key`` the same way aws-cli's join does. An absolute
-    ``C:/foo`` keeps its drive and routes to ``Anchored`` (untouched here); a
-    driveless pattern is returned unchanged. Windows-only: on POSIX
-    ``os.path.splitdrive`` finds no drive, so ``C:foo`` stays a literal filename
-    (the colon is a valid character), aws-cli-faithful there too. A drive-relative
-    pattern naming a *different* drive than the source root is folded to the same
-    relative tail rather than kept drive-specific (aws-cli would keep it and match
-    nothing) - a rare Windows-only corner the compile-time engine cannot
-    distinguish without the root's drive.
-    """
-    drive, rest = os.path.splitdrive(pattern)
-    if drive and not is_anchored(pattern):
-        return rest
-    return pattern
-
-
-def _normalize_sep(pattern: str) -> str:
-    """Fold the host path separator to ``/`` in a pattern (host-aware).
-
-    boto3-s3 matches in ``/``-folded key space (``compare_key`` / ``full_key``
-    are ``/``-separated on every OS), so a pattern's native separator must fold
-    to ``/`` too. This reproduces aws-cli's per-side normalization in
-    ``filters._match_pattern`` (local: ``pattern.replace('/', os.sep)`` matched
-    against native paths; S3: ``pattern.replace(os.sep, '/')``), collapsed to one
-    step because boto3-s3 already works in ``/`` space: on **Windows** ``\\``
-    becomes a separator (a filename never contains one there, so it is always a
-    separator), so ``--exclude "logs\\*.txt"`` matches ``logs/x.txt``; on
-    **POSIX** ``os.sep`` is already ``/`` so it is a no-op and ``\\`` stays a
-    literal (aws-cli-faithful there too).
-    """
-    return pattern if os.sep == "/" else pattern.replace(os.sep, "/")
-
-
-# ----- runtime protocols ---------------------------------------------------
-
-
-class Matcher(Protocol):
-    """Final include/exclude decision for an entry.
-
-    ``included(compare_key, full_key=None) -> bool``. A relative pattern matches
-    ``compare_key``; a root-anchored (absolute) pattern is
-    anchored against ``full_key`` (the entry's full path - see ``Anchored``).
-    Matchers built from relative-only pattern lists ignore ``full_key``.
-    """
-
-    def included(self, compare_key: str, full_key: str | None = None) -> bool: ...
-
-
-class SetMatcher(Protocol):
-    """Set-membership test for a uniformly-shaped pattern collection."""
-
-    def matches(self, key: str) -> bool: ...
-
-
-# ----- decision matchers ---------------------------------------------------
-
-
-class AlwaysInclude:
-    """No patterns - every key is included."""
-
-    def included(self, compare_key: str, full_key: str | None = None) -> bool:
-        return True
-
-
-class AlwaysExclude:
-    """Catch-all exclude with no includes - nothing is included."""
-
-    def included(self, compare_key: str, full_key: str | None = None) -> bool:
-        return False
-
-
-class IncludeOnly:
-    """Default-deny: include iff the compare key matches the wrapped set."""
-
-    def __init__(self, set_matcher: SetMatcher) -> None:
-        self.set_matcher = set_matcher
-
-    def included(self, compare_key: str, full_key: str | None = None) -> bool:
-        return self.set_matcher.matches(compare_key)
-
-
-class ExcludeOnly:
-    """Default-allow: include iff the compare key does NOT match the wrapped set."""
-
-    def __init__(self, set_matcher: SetMatcher) -> None:
-        self.set_matcher = set_matcher
-
-    def included(self, compare_key: str, full_key: str | None = None) -> bool:
-        return not self.set_matcher.matches(compare_key)
-
-
-class Sequential:
-    """Last-match-wins walk through ``(PatternKind, SetMatcher)`` pairs.
-
-    Default to include. Each pair is consulted in order against the
-    ``compare_key``; a hit overwrites the running decision. This is the
-    general-case fallback for mixed include/exclude orderings of
-    relative patterns (a list with a root-anchored pattern uses
-    ``Anchored`` instead).
-    """
-
-    def __init__(self, items: Iterable[tuple[PatternKind, SetMatcher]]) -> None:
-        self.items: tuple[tuple[PatternKind, SetMatcher], ...] = tuple(items)
-
-    def included(self, compare_key: str, full_key: str | None = None) -> bool:
-        included = True
-        for kind, sm in self.items:
-            if sm.matches(compare_key):
-                included = kind is PatternKind.INCLUDE
-        return included
-
-
-class Anchored:
-    """Last-match-wins when the pattern list contains a root-anchored pattern.
-
-    A relative pattern matches ``compare_key`` (like the other matchers, via its
-    precompiled ``SetMatcher``). A root-anchored
-    (absolute) pattern is anchored against the entry's ``full_key`` exactly the
-    way aws-cli joins each pattern onto the source root: ``os.path.join`` lends
-    the entry's drive / UNC anchor to a driveless-absolute pattern (``/data/*``
-    under ``C:\\data`` -> ``C:/data/*``), and the joined form is fnmatched against
-    ``full_key``. A normal S3 key carries no drive / anchor, so an anchored
-    pattern is inert against S3 entries by either route: a bare ``included``
-    call passes ``full_key=None`` (the anchored item is skipped);
-    ``GlobFilter`` passes the S3 key as ``full_key``, where the joined absolute
-    pattern fnmatches nothing - tracking aws-cli, whose s3 paths carry no
-    anchor. The exception is a key that literally begins with ``/``: its full
-    key genuinely is anchored, so an anchored pattern matches it. On Windows
-    a key shaped like a drive path (``C:/...``) is a second, inherent
-    exception: ``ntpath.join`` lends its drive exactly as it would a real
-    local path's - the matcher sees only key strings, so a drive-shaped S3
-    key is indistinguishable from a local anchor at this level.
-
-    Items are ``(PatternKind, anchored, payload)``: ``payload`` is the raw
-    pattern string when anchored, else a ``SetMatcher`` for ``compare_key``.
-    """
-
-    def __init__(self, items: Iterable[tuple[PatternKind, bool, SetMatcher | str]]) -> None:
-        self.items: tuple[tuple[PatternKind, bool, SetMatcher | str], ...] = tuple(items)
-
-    def included(self, compare_key: str, full_key: str | None = None) -> bool:
-        included = True
-        for kind, anchored, payload in self.items:
-            if anchored:
-                if full_key is None:
-                    continue
-                assert isinstance(payload, str)
-                rooted = os.path.join(full_key, payload).replace(os.sep, "/")
-                hit = fnmatch.fnmatchcase(full_key, rooted)
-            else:
-                assert not isinstance(payload, str)
-                hit = payload.matches(compare_key)
-            if hit:
-                included = kind is PatternKind.INCLUDE
-        return included
-
-
-# ----- set matchers --------------------------------------------------------
-
-
-class LiteralSet:
-    """Match keys equal to any of a fixed literal set."""
-
-    def __init__(self, paths: Iterable[str]) -> None:
-        self.paths: frozenset[str] = frozenset(paths)
-
-    def matches(self, key: str) -> bool:
-        return key in self.paths
-
-
-class SuffixSet:
-    """Match keys ending with any of a fixed suffix tuple.
-
-    ``str.endswith`` accepts a tuple in C, so N suffixes test in one
-    call.
-    """
-
-    def __init__(self, suffixes: Iterable[str]) -> None:
-        self.suffixes: tuple[str, ...] = tuple(suffixes)
-
-    def matches(self, key: str) -> bool:
-        return key.endswith(self.suffixes)
-
-
-class PrefixSet:
-    """Match keys starting with any of a fixed prefix tuple."""
-
-    def __init__(self, prefixes: Iterable[str]) -> None:
-        self.prefixes: tuple[str, ...] = tuple(prefixes)
-
-    def matches(self, key: str) -> bool:
-        return key.startswith(self.prefixes)
-
-
-class UnionRegex:
-    """Match keys against the union of fnmatch patterns.
-
-    Patterns are translated to regex via ``fnmatch.translate`` and
-    combined with alternation. ``fnmatch``'s ``*`` is greedy across
-    ``/`` (the whole key must still match - the translation anchors
-    both ends).
-    """
-
-    def __init__(self, patterns: Iterable[str]) -> None:
-        self.patterns: tuple[str, ...] = tuple(patterns)
-        # A union of zero patterns must never match, like the other empty-set
-        # matchers; joining zero alternatives would compile "" and match every
-        # key instead.
-        self._regex: re.Pattern[str] = re.compile(
-            "|".join(f"(?:{fnmatch.translate(p)})" for p in self.patterns) or r"(?!)"
-        )
-
-    def matches(self, key: str) -> bool:
-        return self._regex.match(key) is not None
-
-
-class CompositeSet:
-    """Union of shape-partitioned matchers, folded into one predicate.
-
-    A heterogeneous set (e.g. ``*.elc`` + ``elpa/*`` + a literal) has no
-    single uniform shape, but each *shape* still has a dedicated fast
-    test. ``compile`` partitions such a set into a literal frozenset,
-    a suffix tuple, a prefix tuple, and a leftover ``UnionRegex``,
-    and this matcher ORs them.
-
-    The OR is folded into one closure built at construction (and bound to
-    ``matches``) rather than a Python loop over sub-matcher objects: the
-    per-key cost is then a few C-level membership tests (``in`` /
-    ``str.startswith`` / ``str.endswith``, each consuming the whole tuple
-    in a single call) with no per-sub method dispatch - which is what lets
-    it beat the single ``UnionRegex`` it replaces. Prefixes are tested
-    first since directory excludes (``dir/*``) dominate real exclude lists,
-    so a matching key short-circuits soonest.
-
-    A closure does not pickle, so the instance pickles as its four pattern
-    groups and rebuilds the predicate on the other side (``__reduce__``) -
-    without that a compiled ``GlobFilter`` over a mixed list could not cross
-    into a ``ProcessPoolExecutor`` worker, where every other matcher can.
-    """
-
-    def __init__(
-        self,
-        literals: Iterable[str],
-        suffixes: Iterable[str],
-        prefixes: Iterable[str],
-        general: Sequence[str],
-    ) -> None:
-        lits = frozenset(literals)
-        sufs = tuple(suffixes)
-        prefs = tuple(prefixes)
-        general = tuple(general)
-        self._groups = (lits, sufs, prefs, general)
-        # Bind the folded predicate as an instance attribute (not a method):
-        # an instance-level callable is invoked directly, so the captured
-        # tuples/frozenset are read as closure cells rather than via
-        # ``self``-attribute lookups - measurably faster on the per-key path.
-        matches: Callable[[str], bool]
-        if general:
-            regex_matches = UnionRegex(general).matches
-            matches = lambda key: (  # noqa: E731
-                key.startswith(prefs) or key.endswith(sufs) or key in lits or regex_matches(key)
-            )
-        else:
-            matches = lambda key: (  # noqa: E731
-                key.startswith(prefs) or key.endswith(sufs) or key in lits
-            )
-        self.matches = matches
-
-    def __reduce__(self) -> tuple[type[CompositeSet], tuple[object, ...]]:
-        return type(self), self._groups
-
-
-class _NeverMatch:
-    """Empty set - never matches anything (internal)."""
-
-    def matches(self, key: str) -> bool:
-        return False
-
-
-# ----- compilation ---------------------------------------------------------
-
-
-def compile(patterns: Iterable[GlobPattern]) -> Matcher:
-    """Pick the fastest ``Matcher`` backend for the pattern list.
-
-    Macro shape detection:
-
-    - empty list -> ``AlwaysInclude``
-    - ``[exclude "*"]`` alone -> ``AlwaysExclude``
-    - ``[exclude "*", include..., include...]`` -> ``IncludeOnly``
-    - ``[include "*", exclude..., exclude...]`` -> ``ExcludeOnly``
-    - all-exclude (no leading catch-all needed) -> ``ExcludeOnly``
-    - mixed orderings -> ``Sequential``
-
-    Within each set, the uniformly-shaped patterns are further
-    specialized: literal-only sets use ``LiteralSet``, all-``*X``
-    sets use ``SuffixSet``, all-``X*`` sets use ``PrefixSet``,
-    and mixed shapes are folded into a ``CompositeSet`` (one matcher
-    per shape, OR-ed).
-
-    A list that contains a root-anchored (absolute) pattern bypasses the
-    macro-shape fast paths and uses ``Anchored``, which matches relative
-    patterns against the ``compare_key`` and anchored ones against the entry's
-    ``full_key`` (the per-side behavior aws-cli gets from joining each pattern
-    onto the source / destination root).
-    """
-    pats = tuple(patterns)
-    if not pats:
-        return AlwaysInclude()
-
-    # Fold the host separator to '/' once, up front: keys match in '/' space, so
-    # a Windows '\' in a pattern must become a separator (relative patterns as
-    # well as the anchored ones, which the Anchored matcher already folds), and
-    # drop a drive-relative drive (C:foo -> foo) so it anchors to the root the way
-    # aws-cli's join does. No-op on POSIX. See _normalize_sep / _strip_drive_relative.
-    if os.sep != "/":
-        pats = tuple(
-            GlobPattern(p.kind, _strip_drive_relative(_normalize_sep(p.pattern))) for p in pats
-        )
-
-    if any(is_anchored(p.pattern) for p in pats):
-        return Anchored(
-            (p.kind, True, p.pattern)
-            if is_anchored(p.pattern)
-            else (p.kind, False, compile_set_matcher((p.pattern,)))
-            for p in pats
-        )
-
-    head = pats[0]
-    rest = pats[1:]
-
-    is_catch_all_exclude = head == GlobPattern.exclude("*")
-    is_catch_all_include = head == GlobPattern.include("*")
-
-    if is_catch_all_exclude and not rest:
-        return AlwaysExclude()
-
-    if is_catch_all_exclude and all(p.kind is PatternKind.INCLUDE for p in rest):
-        return IncludeOnly(compile_set_matcher([p.pattern for p in rest]))
-
-    if is_catch_all_include and all(p.kind is PatternKind.EXCLUDE for p in rest):
-        return ExcludeOnly(compile_set_matcher([p.pattern for p in rest]))
-
-    if all(p.kind is PatternKind.EXCLUDE for p in pats):
-        return ExcludeOnly(compile_set_matcher([p.pattern for p in pats]))
-
-    return Sequential((p.kind, compile_set_matcher((p.pattern,))) for p in pats)
-
-
-def compile_set_matcher(patterns: Sequence[str]) -> SetMatcher:
-    """Pick the fastest ``SetMatcher`` for a pattern list.
-
-    Patterns are partitioned by shape (literal / ``*X`` suffix / ``X*``
-    prefix / general fnmatch). A set that is uniformly one shape uses that
-    shape's dedicated matcher (``LiteralSet`` / ``SuffixSet`` /
-    ``PrefixSet`` / ``UnionRegex``). A mixed set - the common
-    case for a real exclude list (``dir/*`` directory excludes alongside a
-    ``*.ext`` suffix and a couple of literals) - is folded into a
-    ``CompositeSet`` that ORs one matcher per present shape, which is
-    faster than collapsing everything into one regex. An empty list yields
-    a matcher that never matches. This is the companion of the public
-    decision classes: it builds the ``SetMatcher`` that
-    ``IncludeOnly`` / ``ExcludeOnly`` / ``Sequential``
-    consume.
-    """
-    literals: list[str] = []
-    suffixes: list[str] = []
-    prefixes: list[str] = []
-    general: list[str] = []
-    for p in patterns:
-        if _is_literal(p):
-            literals.append(p)
-        elif _is_pure_suffix(p):
-            suffixes.append(p[1:])
-        elif _is_pure_prefix(p):
-            prefixes.append(p[:-1])
-        else:
-            general.append(p)
-
-    present = [bucket for bucket in (literals, suffixes, prefixes, general) if bucket]
-    if not present:
-        return _NeverMatch()
-    if len(present) == 1:
-        if literals:
-            return LiteralSet(literals)
-        if suffixes:
-            return SuffixSet(suffixes)
-        if prefixes:
-            return PrefixSet(prefixes)
-        return UnionRegex(general)
-    return CompositeSet(literals, suffixes, prefixes, general)
-
-
-# ----- shape predicates ----------------------------------------------------
-
-
-_WILDCARDS = ("*", "?", "[")
-
-
-def _is_literal(pattern: str) -> bool:
-    return not any(c in pattern for c in _WILDCARDS)
-
-
-def _is_pure_suffix(pattern: str) -> bool:
-    """``*X`` with no other wildcards in X."""
-    if not pattern.startswith("*"):
-        return False
-    return not any(c in pattern[1:] for c in _WILDCARDS)
-
-
-def _is_pure_prefix(pattern: str) -> bool:
-    """``X*`` with no other wildcards in X."""
-    if not pattern.endswith("*"):
-        return False
-    return not any(c in pattern[:-1] for c in _WILDCARDS)
-
-
-# ----- ergonomic filter ----------------------------------------------------
-
-
-class GlobFilter:
-    """Fluent ``--exclude`` / ``--include`` builder; itself a ``FileFilter``.
-
-    The ergonomic front end for the engine above: accumulate ordered rules and
-    pass the result straight to ``S3.cp`` / ``mv`` / ``rm`` / ``sync`` as
-    ``filter=``. It is pure sugar over ``compile([GlobPattern...])`` - the same
-    last-match-wins semantics, the same compile-time specialization - exposed as
-    a chainable callable::
-
-        from boto3_s3 import GlobFilter
-
-        keep = GlobFilter().exclude("*").include("*.tar.gz").compile()
-        s3.cp("./build", "s3://artifacts/", recursive=True, filter=keep)
-
-    ``exclude`` / ``include`` each append one or more rules and return
-    ``self`` so calls chain; finish with ``compile``, which builds the
-    underlying matcher eagerly and returns ``self`` - the recommended form, so
-    the cost is paid once and the filter reuses cleanly across operations.
-    ``compile`` is not mandatory: an un-compiled filter compiles lazily on
-    first use and re-compiles after a later ``exclude`` / ``include`` (in
-    ``sync`` both sides may then race to compile, which is harmless - the
-    patterns are read-only and every compilation is equivalent).
-
-    As a ``FileFilter`` it is invoked with a ``FileInfo``:
-    a relative pattern matches its relative ``compare_key`` (which every scan
-    and ``get_fileinfo`` stamps; a hand-built entry must set it); a
-    root-anchored (absolute) pattern matches its ``key`` (the full path),
-    exactly like ``compile``.
-    Byte-exact (the permissive building block); host case-folding for
-    ``aws s3`` parity is the CLI layer's job.
-    """
-
-    __slots__ = ("_compiled", "_patterns")
-
-    def __init__(self) -> None:
-        self._patterns: list[GlobPattern] = []
-        self._compiled: Matcher | None = None
-
-    def exclude(self, *patterns: str) -> GlobFilter:
-        """Append exclude rules (matching keys are dropped) and return ``self``."""
-        self._patterns.extend(GlobPattern.exclude(p) for p in patterns)
-        self._compiled = None
-        return self
-
-    def include(self, *patterns: str) -> GlobFilter:
-        """Append include rules (matching keys are kept) and return ``self``."""
-        self._patterns.extend(GlobPattern.include(p) for p in patterns)
-        self._compiled = None
-        return self
-
-    def compile(self) -> GlobFilter:
-        """Eagerly compile the accumulated rules and return ``self`` (no freeze)."""
-        self._compiled = compile(self._patterns)
-        return self
-
-    def __call__(self, info: FileInfo) -> bool:
-        # compare_key is stamped by every scan and get_fileinfo (the storage
-        # protocol).
-        key = cast("str", info.compare_key)
-        compiled = self._compiled
-        if compiled is None:
-            compiled = self._compiled = compile(self._patterns)
-        return compiled.included(key, info.key)

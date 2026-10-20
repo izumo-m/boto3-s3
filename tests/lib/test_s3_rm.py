@@ -31,14 +31,16 @@ from boto3_s3 import (
     BatchError,
     CancelledError,
     CancelToken,
+    Exclude,
     FileInfo,
-    GlobFilter,
+    Include,
     NotFoundError,
     OpOutcome,
     OpResult,
     S3Storage,
     TransportError,
     ValidationError,
+    globsieve,
     rm_filter_root,
 )
 from tests.utils.fakes3 import client_error, crt_sender_factory
@@ -142,13 +144,15 @@ class TestRmSingleKey:
         # Under rm s3://b/a//b aws matches the entry as "/b" (the pattern is
         # os.path.join-ed onto root "a/"): --exclude b keeps it, and
         # --exclude '*' --include b drops it (pinned aws 2.36.40, dryrun).
-        kept = _rm("s3://b/a//b", _FakeS3Client(), dryrun=True, filter=GlobFilter().exclude("b"))
+        kept = _rm(
+            "s3://b/a//b", _FakeS3Client(), dryrun=True, filter=globsieve.compile([Exclude("b")])
+        )
         assert [(r.outcome, r.compare_key) for r in kept] == [(OpOutcome.DRYRUN, "/b")]
         dropped = _rm(
             "s3://b/a//b",
             _FakeS3Client(),
             dryrun=True,
-            filter=GlobFilter().exclude("*").include("b"),
+            filter=globsieve.compile([Exclude("*"), Include("b")]),
         )
         assert dropped == []
 
@@ -242,7 +246,7 @@ class TestRmSingleKey:
 
     def test_excluded_by_matcher_is_silent(self) -> None:
         client = _FakeS3Client()
-        keep = GlobFilter().exclude("*").compile()
+        keep = globsieve.compile([Exclude("*")])
         results = _rm("s3://b/data/a.txt", client, filter=keep)
         assert client.delete_object_calls == []
         assert results == []
@@ -250,7 +254,7 @@ class TestRmSingleKey:
     def test_matcher_sees_parent_relative_key(self) -> None:
         # Root of "data/a.txt" is "data/": the pattern matches the basename.
         client = _FakeS3Client()
-        keep = GlobFilter().exclude("a.*").compile()
+        keep = globsieve.compile([Exclude("a.*")])
         assert _rm("s3://b/data/a.txt", client, filter=keep) == []
         assert client.delete_object_calls == []
 
@@ -351,15 +355,15 @@ class TestRmRecursive:
 
     def test_matcher_sees_prefix_relative_key(self) -> None:
         client = _FakeS3Client([{"Contents": [_obj("data/a.txt"), _obj("data/sub/x")]}])
-        keep = GlobFilter().exclude("sub/*").compile()
+        keep = globsieve.compile([Exclude("sub/*")])
         results = _rm("s3://b/data/", client, recursive=True, filter=keep)
         assert [r.compare_key for r in results] == ["a.txt"]
 
     def test_interleaved_ordering_is_last_match_wins(self) -> None:
         client = _FakeS3Client([{"Contents": [_obj("p/a.txt"), _obj("p/b.bin")]}])
-        keep = GlobFilter().include("*.txt").exclude("*").compile()
+        keep = globsieve.compile([Include("*.txt"), Exclude("*")])
         assert _rm("s3://b/p/", client, recursive=True, filter=keep) == []
-        keep = GlobFilter().exclude("*").include("*.txt").compile()
+        keep = globsieve.compile([Exclude("*"), Include("*.txt")])
         results = _rm("s3://b/p/", client, recursive=True, filter=keep)
         assert [r.compare_key for r in results] == ["a.txt"]
 
