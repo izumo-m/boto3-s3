@@ -32,13 +32,12 @@ from boto3_s3.localstorage import LocalStorage, to_native_path
 from boto3_s3.s3storage import (
     S3Storage,
     attribute_failure,
-    # The one out-of-module caller of these three: the required-element read,
-    # the aware reading of a stamp and the local-zone band belong with the
-    # backend that reads S3 responses, while aws-cli runs the same reads on
-    # the single-object HEAD this module owns.
+    # The one out-of-module caller of these two: the required-element read
+    # and the aware reading of a stamp belong with the backend that reads S3
+    # responses, while aws-cli runs the same reads on the single-object HEAD
+    # this module owns.
     aware_stamp,
     read_required,
-    reject_unrepresentable_stamp,
     s3_request,
 )
 from boto3_s3.storage import Storage, StorageCapability
@@ -754,9 +753,7 @@ def head_single(
     ``Key "..." does not exist``); a copy source is headed with the
     copy-source SSE-C parameters. Like aws-cli's filegenerator, the HEAD
     carries ``ChecksumMode=ENABLED`` when the client resolves checksum
-    validation to ``when_supported`` (the botocore default), and the stamp the
-    response carries is rejected here when the local calendar cannot hold it,
-    aws-cli's conversion at the same slot.
+    validation to ``when_supported`` (the botocore default).
     """
     key = src_storage.key
     if transfer_type is TransferType.COPY:
@@ -807,20 +804,9 @@ def head_single(
     bucket = src_storage.bucket
     size: int = read_required(head, "ContentLength", operation=operation, bucket=bucket, key=key)
     mtime = aware_stamp(
-        read_required(head, "LastModified", operation=operation, bucket=bucket, key=key),
-        operation=operation,
-        bucket=bucket,
-        key=key,
+        read_required(head, "LastModified", operation=operation, bucket=bucket, key=key)
     )
     etag = head.get("ETag")
-    # aws-cli converts the HeadObject stamp to the local zone as the last thing
-    # `_list_single_object` does, so a stamp the local calendar cannot hold
-    # ends the run right here - before the transfer, and before a dryrun would
-    # have recorded it - instead of riding on. The listing routes run the same
-    # check inside the S3 backend; this route never passes through it, so it
-    # gets the check at aws's own slot. The value handed on stays UTC per the
-    # `FileInfo.mtime` contract - only the conversion's failure is wanted.
-    reject_unrepresentable_stamp(mtime, operation=operation, bucket=bucket, key=key)
     # A single (non-dir_op) source: the compare key is the key's basename,
     # matching transferplan.item_paths' single-item branch. storage stamps the
     # producing backend like every listing path, so src_info.storage agrees

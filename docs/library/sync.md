@@ -173,9 +173,11 @@ refused. See [`compatibility.md`](../compatibility.md).
   exists at that path, the run proceeds and then every item fails — or, when
   the path is written with a trailing separator, stops before anything is
   listed, the directory creation failing on the file.
-- **Uploading** from a path that does not exist raises. If the source is a file
-  rather than a directory, `sync` warns and completes with warnings rather than
-  failing — `sync` is a directory operation.
+- **Uploading** from a path that does not exist raises, and so does one the
+  walk cannot read as a directory — a file, a special file, an unreadable
+  directory, a symlink the `LocalStorage` does not follow — before anything
+  is listed or deleted: `sync` is a directory operation, and an empty source
+  would have its deletions empty the destination.
 - **Syncing an S3 location onto itself** does nothing and succeeds silently;
   there is no self-reference guard like `mv`'s.
 - **S3 Express directory buckets** are rejected on either side, and so are

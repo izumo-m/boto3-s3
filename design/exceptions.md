@@ -39,9 +39,9 @@ Boto3S3Error                # root. The supertype of all library errors. Inherit
 |   `-- InvalidValueError   # refinement: a value failing post-parse conversion (aws's bare int() -> its
 |                           #   general handler, rc 255 - not the rc-252 usage path)
 +-- TransportError          # network / local I/O failure (connection, timeout, OSError)
-+-- MalformedResponseError  # a response the tool cannot consume: an element aws-cli reads by subscript is missing,
-|                           #   or a LastModified the host's zone cannot represent (aws dies with the bare
-|                           #   KeyError / OverflowError; here its text is the message and it rides on __cause__)
++-- MalformedResponseError  # a response the tool cannot consume: an element aws-cli reads by subscript is missing
+|                           #   (aws dies with the bare KeyError; here its text is the message and it rides on
+|                           #   __cause__)
 +-- ConfigurationError      # credentials / region missing or unresolvable (aws's dedicated handlers, rc 253)
 |   `-- InvalidConfigError  # refinement: config present but invalid/unusable - aws-cli's InvalidConfigError
 |                           #   counterpart (bad [s3] value, unusable profile, partial credentials; rc 255)
@@ -73,8 +73,8 @@ class Boto3S3Error(Exception):
   last-resort clause) instead. `KeyboardInterrupt` / `SystemExit` always pass
   through - including one the caller's own code raises on a transfer's worker
   thread (an event handler registered on the client, a stream the transfer
-  reads or writes): the engine settles that item CANCELLED (FAILED for a CRT
-  upload's body, which awscrt reads) and re-raises the exception on the
+  reads or writes): the engine settles that item CANCELLED (a CRT upload's
+  body, which awscrt reads, included) and re-raises the exception on the
   operation's thread
   (`transfer._TaskGuard`, `transfer._GuardedReader`). Whatever `on_result`
   raises reaches the caller the same way, from whichever thread the record
@@ -171,7 +171,6 @@ taxonomy ([`storage.md`](./storage.md) section 2).
 | a transfer item's local file failing inside either engine - s3transfer's `OSError` (aws's message survives verbatim, e.g. `[Errno 21] Is a directory`), awscrt's `AWS_ERROR_NO_PERMISSION` / `AWS_ERROR_FILE_INVALID_PATH` / `AWS_ERROR_FILE_*_FAILURE` / `AWS_ERROR_NO_SPACE` (`transfer.Transferrer._local_failure`) | the local rows above, naming the file in `key` with no `bucket` |
 | a CRT engine network or server failure, by awscrt's error name (`s3storage.crt_error_name`: an `AwsCrtError`'s, or the `RuntimeError` `<code> (<name>): ...` a request awscrt refuses synchronously raises): `AWS_IO_SOCKET_*` / `AWS_IO_DNS_*` / `AWS_IO_TLS_*`, a closed connection, a first-byte timeout, S3's `SlowDown` / internal error the CRT client gave up retrying | `TransportError` |
 | a listing / bucket / single-object HEAD entry missing an element aws-cli reads by subscript (its bare `KeyError` naming the element - `s3storage.read_required`) | `MalformedResponseError` |
-| an S3 `LastModified` the host's local zone cannot represent (aws-cli's `astimezone` `OverflowError`, `date value out of range`; on Windows also the `OSError` `[Errno 22]` its `time.localtime` raises below the epoch and past the year 3000, measured against `aws.exe` - `s3storage.reject_unrepresentable_stamp`) | `MalformedResponseError` |
 | `NoCredentialsError` / `NoRegionError` | `ConfigurationError` |
 | `MissingDependencyException` from a request/signing path (awscrt absent where SigV4a is required - an MRAP target) | `ConfigurationError` |
 | `ProfileNotFound` / `PartialCredentialsError` / botocore's own `InvalidConfigError` family (the library translator's list; the CLI's client factory goes further and maps every other construction-time `BotoCoreError` here too, while the library's general translator keeps unlisted ones at the base) | `InvalidConfigError` |
@@ -192,10 +191,9 @@ section 2), reclaim their workers, and then raise `CancelledError`. Passing
 pending and in-flight futures. Synchronous external I/O already running cannot
 be killed safely and may still finish - such a completion reports its real
 outcome, while a revoked accepted item reports one `CANCELLED` record
-([`opresult.md`](./opresult.md), the `on_result` contract; a fatal error
-cancels the same way on the classic engine, while on the CRT engine only a
-`CancelToken` cancel yields `CANCELLED` and every other cancellation reports
-`FAILED`). Cancellation is monotonic and idempotent:
+([`opresult.md`](./opresult.md), the `on_result` contract; a fatal error or
+a Ctrl-C cancels the same way, on either transfer engine). Cancellation is
+monotonic and idempotent:
 an immediate request upgrades graceful cancellation, and later requests never
 downgrade it. `on_result` may call `cancel()`; it only changes token state and
 never shuts an engine down from the callback's worker thread.
@@ -271,10 +269,9 @@ class BatchError(Boto3S3Error):
 - `CANCELLED` records never reach a `BatchError`: a cancelling run ends by
   raising the fatal (or `CancelledError`) instead, and cancelled items are not
   failures - the engine's separate `cancelled` rollup counter carries them
-  ([`opresult.md`](./opresult.md), the `on_result` contract). The CRT engine
-  narrows this: only a `CancelToken` cancel reports `CANCELLED` there, every
-  other CRT cancellation is `FAILED`, and a drain-time Ctrl-C the CRT manager
-  swallows ends the run in `BatchError` ([`crt.md`](./crt.md) section 6).
+  ([`opresult.md`](./opresult.md), the `on_result` contract), on either
+  transfer engine: a drain-time Ctrl-C the CRT manager swallows is re-raised
+  ([`crt.md`](./crt.md) section 6).
 - `BatchError` is also a subtype of `Boto3S3Error`, so it is caught by
   `except Boto3S3Error`.
 - `cp` / `mv` / `sync` / `rm` follow the batch model regardless of the item

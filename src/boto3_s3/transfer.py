@@ -1644,7 +1644,8 @@ class Transferrer:
             subscribers.append(_CloseFileobj(item.src_fileobj))
         if self._is_move:
             subscribers.append(self._delete_source_subscriber(item))
-        subscribers.append(self._completion(item, counted))
+        completion = self._completion(item, counted)
+        subscribers.append(completion)
         subscribers.append(_ForgetFuture(self._forget_future))
         # Manager first: a stream run builds it (and the capture) at first submit.
         manager = self._get_manager()
@@ -1653,8 +1654,11 @@ class Transferrer:
             self._capture.expect(item.dest_bucket, item.dest_key)
         fileobj: Any = item.src_fileobj if item.src_fileobj is not None else item.src_path
         if item.src_fileobj is not None and not isinstance(manager, TransferManager):
-            # The CRT engine reads the body on an awscrt thread (`_GuardedReader`).
-            fileobj = _GuardedReader(item.src_fileobj, self._note_raise, self._caller_thread)
+            # The CRT engine reads the body on an awscrt thread (`_GuardedReader`);
+            # the completion reads back an interrupt the guard caught there.
+            guard = _GuardedReader(item.src_fileobj, self._note_raise, self._caller_thread)
+            completion.stream_guard = guard
+            fileobj = guard
         return self._accept(
             manager.upload,
             fileobj=fileobj,
@@ -2524,9 +2528,12 @@ class _GuardedReader:
     ``AWS_ERROR_UNKNOWN`` with the interrupt itself gone (measured). This view
     notes it for the calling thread (`Transferrer._note_raise`, re-raised by
     the next ``submit`` or ``__exit__``) and raises an ordinary exception in
-    its place, which awscrt turns into that request's failure. On the calling
-    thread itself (s3transfer positioning the body at submit) the exception
-    propagates unchanged. Every other attribute delegates to the stream.
+    its place, which awscrt turns into that request's failure; it also keeps
+    the interrupt (``interrupt``) for the item's completion, which records
+    the item CANCELLED as every interrupted item is (`_Completion`). On the
+    calling thread itself (s3transfer positioning the body at submit) the
+    exception propagates unchanged. Every other attribute delegates to the
+    stream.
     """
 
     _GUARDED = frozenset({"read", "read1", "readinto", "readinto1", "seek", "tell"})
@@ -2535,12 +2542,15 @@ class _GuardedReader:
         self._raw = raw
         self._note = note
         self._caller = caller
+        # The interrupt the stream raised on awscrt's thread, kept for the
+        # item's completion: awscrt reports only its own failure for the read.
+        self.interrupt: BaseException | None = None
 
     def __getattr__(self, name: str) -> Any:
         attr = getattr(self._raw, name)
         if name not in self._GUARDED or not callable(attr):
             return attr
-        note, caller = self._note, self._caller
+        guard, note, caller = self, self._note, self._caller
 
         def call(*args: Any, **kwargs: Any) -> Any:
             try:
@@ -2548,6 +2558,8 @@ class _GuardedReader:
             except BaseException as exc:
                 if isinstance(exc, Exception) or threading.get_ident() == caller:
                     raise
+                if guard.interrupt is None:
+                    guard.interrupt = exc
                 note(exc)
                 raise _StreamInterruptedError(str(exc) or repr(exc)) from exc
 
@@ -2939,6 +2951,8 @@ class _Completion:
         self._counted = counted
         self._hinted = hinted
         self._settled = False
+        # A CRT upload's stream guard (`_GuardedReader`), set at submit.
+        self.stream_guard: _GuardedReader | None = None
 
     def on_done(self, future: Any, **kwargs: Any) -> None:
         # Once per item: an interrupt escaping `on_result` on the serial
@@ -2950,6 +2964,13 @@ class _Completion:
         self._settled = True
         exc = _outcome(future)
         if exc is not None:
+            guard = self.stream_guard
+            if guard is not None and guard.interrupt is not None:
+                # The stream raised an interrupt on awscrt's thread, and awscrt
+                # failed the request with its own error in its place: the
+                # item's outcome is the interrupt, CANCELLED like every
+                # interrupted item (`Transferrer._record_failure`).
+                exc = guard.interrupt
             self._on_failure(self._item, exc, _future_revoked(future))
             return
         # Classic s3transfer resolves an unknown-size download's size on the

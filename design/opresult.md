@@ -174,8 +174,10 @@ callback raised on the future as it is. An upload's reader raising one is not
 stored that way: awscrt reads it on its own thread, where it would lose a
 `KeyboardInterrupt` in its own `AWS_ERROR_UNKNOWN` and never return from a
 `SystemExit`, so the body handed to it (`_GuardedReader`) notes the interrupt
-for the caller and raises an ordinary exception in its place - the item is
-`FAILED`, and the interrupt is re-raised to the caller. A classic threaded
+for the caller and raises an ordinary exception in its place; awscrt fails the
+request with its own error, and the item's completion reads the kept
+interrupt back as the outcome - the item is `CANCELLED`, and the interrupt is
+re-raised to the caller. A classic threaded
 download's sink raising one is settled on its IO worker (`_TaskGuard`): the
 item is `CANCELLED` and the interrupt re-raised.
 The classic engine settles every revoked item with s3transfer's

@@ -237,7 +237,8 @@ The observable order before any transfer: unrecognized `**options` keys are
 rejected; a `pair_filter` that conflicts with another argument is rejected;
 `src` and `dest` are resolved and validated; an already-cancelled
 `cancel_token` raises; the route is classified, which for an upload checks
-that the local source path exists; an S3 Express directory bucket or one of
+that the local source path exists and that the walk can read it as a
+directory; an S3 Express directory bucket or one of
 its access points on either side is rejected; a client
 is built for an S3 side that still has none; an open-route side is checked for
 the capabilities the route needs; an unrecognized `case_conflict` value is
@@ -247,19 +248,24 @@ destination directory is created. The destination directory is therefore
 created even by a run that transfers nothing, but not by one any of those
 checks rejects. The check is a bare existence test,
 so a destination that already exists as a file — written without a trailing
-separator — passes it and every item fails afterwards. The source check is a
-bare existence test too: a local source that
-is a file passes it, the directory-style walk then enumerates nothing and emits
-one `WARNED` record, and the run completes with warnings rather than raising.
+separator — passes it and every item fails afterwards. A local source the
+walk would skip as a directory root — a file, a special file, a directory it
+cannot read, a symbolic link the storage does not follow — raises
+[`NotFoundError`](../exceptions.md#notfounderror) (an unreadable directory
+[`AccessDeniedError`](../exceptions.md#accessdeniederror)) before anything is
+listed or deleted, where the AWS CLI runs on an empty source and a delete
+filter then deletes everything at the destination. The walker's own
+`should_ignore_file` decides, and a storage with `enumerate_all_entries=True`,
+whose walk vets no root, is not checked.
 
 Both local checks ask about the path as typed (`exists` and
 `ensure_directory` of [`LocalStorage`](../storage.md#localstorage)), as the AWS
 CLI's do, while the walk works on the absolutized form. The two can name
 different places when the path carries a `..` or a trailing separator
-([`storage.md`](../storage.md#localstorage) lists the cases), and there the
-outcome is the AWS CLI's, hazard included: with `..` after a symlinked
-directory, a source the kernel finds but the absolutized form does not is
-admitted, walked as missing (a warning, exit code 2 on the command) and so
+([`storage.md`](../storage.md#localstorage) lists the cases). With `..` after
+a symlinked directory, a source the kernel finds but the absolutized form does
+not passes the existence check and is then refused as a root the walk would
+skip, where the AWS CLI walks it as missing (a warning, exit code 2) and so
 contributes nothing — which under a delete filter means everything at the
 destination is deleted.
 

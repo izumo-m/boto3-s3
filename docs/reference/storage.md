@@ -881,15 +881,12 @@ loses the whole page instead: when the response echoes `EncodingType` (S3 and
 MinIO do), botocore URL-decodes every `Key` and `Prefix` of the page before
 handing it over, so an entry missing one fails there — the same class, element
 and cause, with none of that page's entries delivered, which is also where the
-AWS CLI's listing stops. A
-`LastModified` the host's local zone cannot represent raises the same class
-(`date value out of range`, the `OverflowError` on `__cause__`) at the same
-point, for the same reason — the AWS CLI converts every timestamp it reads to
-local time, so such an object ends the run there. Note the asymmetry with
-`LocalStorage`, which applies the same local-zone test to a file's mtime and
-*keeps* the file with a warning and `EPOCH_TIME`: that is the AWS CLI's own
-split between a local file it cannot represent and an S3 object it cannot
-represent.
+AWS CLI's listing stops. A `LastModified` the host's local zone cannot
+represent is listed with its UTC value, where the AWS CLI's conversion of
+every timestamp it reads to local time ends the run; a zone-less one the
+local zone cannot place is read as UTC. (`LocalStorage` applies a local-zone
+test to a file's mtime and keeps the file with a warning and `EPOCH_TIME`,
+as the AWS CLI does.)
 
 This is object listing only — the openable-entity enumeration `scan` promises.
 A recursive scan omits `Delimiter` and yields every object as a `FILE` entry; a
@@ -1013,11 +1010,10 @@ missing `ContentLength` or `LastModified` raises
 [`MalformedResponseError`](./exceptions.md#malformedresponseerror) naming the
 element — the AWS CLI's own reading of its single-object
 HEAD, and the single-entry counterpart of the `scan_pages` rule. A
-`LastModified` the host's local zone cannot represent raises the same class
-(`date value out of range`) instead of being returned, the same test
-`scan_pages` applies and at the point the AWS CLI applies it to its own
-single-object HEAD. This is the generic HEAD; the SSE-C-aware single-source
-HEAD lives in the transfer engine, which applies the test at the same point.
+`LastModified` the host's local zone cannot represent is returned with its
+UTC value, as `scan_pages` lists it. This is the generic HEAD; the
+SSE-C-aware single-source HEAD lives in the transfer engine, which reads the
+stamp the same way.
 
 ### get_file(path, \*, key="")
 
@@ -1697,7 +1693,10 @@ The path-based vetting used for the walk root, which has no directory entry to
 read: a silent skip for a symlink when symlinks are not followed (with a
 trailing separator stripped first so the link itself is tested), then the
 `triggers_warning` battery. Returns whether the path is to be skipped. The
-per-entry hot path uses `should_ignore_entry` instead.
+per-entry hot path uses `should_ignore_entry` instead. A `sync` or a recursive
+`cp` / `mv` asks it about the source root before the run as well, and refuses
+a root it would skip rather than walking an empty source
+([`operations/sync.md`](./operations/sync.md)).
 
 ### triggers_warning(path, notify)
 

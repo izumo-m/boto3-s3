@@ -22,10 +22,11 @@ from typing import Any, cast
 import pytest
 from boto3.s3.transfer import TransferConfig
 
-from boto3_s3 import GlobFilter
+from boto3_s3 import GlobFilter, crtsupport
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3.comparator import ParallelFilter, SyncPair
 from boto3_s3.exceptions import (
+    AccessDeniedError,
     BatchError,
     CancelledError,
     NotFoundError,
@@ -51,6 +52,31 @@ from tests.utils.host import skip_if_chmod_is_inert
 from tests.utils.recorder import make_recording_client, ops
 
 _SERIAL = TransferConfig(use_threads=False)
+
+
+def _refused_crt_engine(monkeypatch: pytest.MonkeyPatch) -> TransferConfig:
+    """A config selecting the CRT engine, whose build boto3 refuses.
+
+    The build is stubbed to raise boto3's ``InvalidCrtTransferConfigError``:
+    a real one would take the cross-process CRT lock (failing while another
+    process holds it) and leave this process holding the shared client. The
+    config is built here, not at import, since the SDK floor's
+    ``TransferConfig`` has no ``preferred_transfer_client``.
+    """
+    pytest.importorskip("awscrt")
+    from boto3 import exceptions as boto3_exceptions
+
+    refusal: Any = getattr(boto3_exceptions, "InvalidCrtTransferConfigError", None)
+    if refusal is None:
+        pytest.skip("boto3 before 1.42 has no InvalidCrtTransferConfigError")
+
+    def refuse(*_args: Any, **_kwargs: Any) -> Any:
+        raise refusal("The following transfer config options are invalid")
+
+    monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", refuse)
+    return TransferConfig(preferred_transfer_client="crt")
+
+
 # The case-conflict gate detects a "two S3 twins" conflict via its in-flight set,
 # which only holds while the first twin's download is still running - it needs a
 # threaded (non-blocking) submit running ahead of completions, as aws-cli's own
@@ -452,22 +478,61 @@ class TestSyncUpload:
         assert missing in str(excinfo.value)
         assert calls == []
 
-    def test_source_file_degrades_to_the_walk_warning(self, tmp_path: Path) -> None:
-        # `aws s3 sync ./file s3://...` treats the file as a
-        # directory root, warns that it does not exist and exits 2 - no hard
-        # failure.
+    def test_a_file_source_is_refused_before_anything_runs(self, tmp_path: Path) -> None:
+        # The walk would skip `file/` as missing: aws warns, runs on an empty
+        # source and exits 2 (its --delete then empties the destination).
+        # Here the run stops before it starts, like a missing source, and
+        # nothing is listed or deleted.
         src = _write(tmp_path, "afile.txt", b"xx")
-        client, calls = make_recording_client([listing()])
-        results: list[OpResult] = []
-        S3().sync(
-            str(src),
-            S3Storage("s3://bucket/p", client=client),
-            transfer_config=_SERIAL,
-            on_result=results.append,
-        )
-        assert ops(calls) == ["ListObjectsV2"]
-        assert [r.outcome for r in results] == [OpOutcome.WARNED]
-        assert str(src) in str(results[0].error)
+        client, calls = make_recording_client([])
+        with pytest.raises(NotFoundError, match="is not a directory") as excinfo:
+            S3().sync(str(src), S3Storage("s3://bucket/p", client=client), delete_filter=True)
+        assert excinfo.value.operation == "sync"
+        assert excinfo.value.__cause__ is None
+        assert calls == []
+
+    @pytest.mark.skipif(os.name == "nt", reason="a directory symlink needs privileges there")
+    def test_a_symlink_root_not_followed_is_refused(self, tmp_path: Path) -> None:
+        # Under follow_symlinks=False the walk skips a symlink root without a
+        # word: aws runs on an empty source and exits 0, its --delete
+        # emptying the destination. Refused here, not followed.
+        target = tmp_path / "real"
+        _write(target, "a.txt", b"xx")
+        link = tmp_path / "link"
+        link.symlink_to(target, target_is_directory=True)
+        client, calls = make_recording_client([])
+        with pytest.raises(NotFoundError, match="symbolic link"):
+            S3().sync(
+                LocalStorage(str(link), follow_symlinks=False),
+                S3Storage("s3://bucket/p", client=client),
+                delete_filter=True,
+            )
+        assert calls == []
+
+    @skip_if_chmod_is_inert
+    def test_an_unreadable_root_is_refused(self, tmp_path: Path) -> None:
+        src = tmp_path / "locked"
+        _write(src, "a.txt", b"xx")
+        src.chmod(0o000)
+        try:
+            client, calls = make_recording_client([])
+            with pytest.raises(AccessDeniedError, match="is not readable"):
+                S3().sync(str(src), S3Storage("s3://bucket/p", client=client), delete_filter=True)
+            assert calls == []
+        finally:
+            src.chmod(0o755)
+
+    def test_a_symlink_root_that_is_followed_is_walked(self, tmp_path: Path) -> None:
+        # The default follows the link: the target's files are the source.
+        if os.name == "nt":
+            pytest.skip("a directory symlink needs privileges there")
+        target = tmp_path / "real"
+        _write(target, "a.txt", b"xx")
+        link = tmp_path / "link"
+        link.symlink_to(target, target_is_directory=True)
+        client, calls = make_recording_client([listing(), {}])
+        S3().sync(str(link), S3Storage("s3://bucket/p", client=client), transfer_config=_SERIAL)
+        assert ops(calls) == ["ListObjectsV2", "PutObject"]
 
     @pytest.mark.parametrize("bucket", ["b--use1-az4--x-s3", "ap--use1-az4--xa-s3"])
     def test_directory_bucket_destination_is_rejected(self, tmp_path: Path, bucket: str) -> None:
@@ -807,13 +872,14 @@ class TestSyncDownload:
         assert not out.exists()
         assert calls == []
 
-    def test_a_refused_crt_engine_leaves_no_destination_directory(self, tmp_path: Path) -> None:
-        # The engine build is the last set-up check: a classic-only setting
-        # under the CRT engine is refused there, before the directory exists.
-        pytest.importorskip("awscrt")
+    def test_a_refused_crt_engine_leaves_no_destination_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The engine build is the last set-up check: boto3's refusal of the
+        # config there comes before the directory exists.
+        config = _refused_crt_engine(monkeypatch)
         out = tmp_path / "out"
         client, calls = make_recording_client([])
-        config = TransferConfig(preferred_transfer_client="crt", io_chunksize=1024 * 1024)
         with pytest.raises(ValidationError):
             S3().sync(S3Storage("s3://bucket/d", client=client), str(out), transfer_config=config)
         assert not out.exists()

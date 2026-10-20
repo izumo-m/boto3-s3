@@ -589,7 +589,10 @@ error's details need not (checked by the e2e CRT lane - testing.md).
   CRT cancellation the run did not order stays `FAILED`. The CLI therefore
   ends a CRT run cut short like a classic one - `cancelled: ctrl-c received`
   or the fatal's line, without aws's per-item failed lines - at the same rc
-  1; what it reports there is an error detail (overview.md section 3).
+  1; what it reports there is an error detail (overview.md section 3). A
+  drain-time interrupt that cancels nothing (the waited-on transfer, and every
+  other, already finished) still reaches the caller here, where aws, having
+  dropped it, exits 0 (docs/cli/aws-differences.md).
 - **fio_options**: unavailable on any pip s3transfer
   ([`compatibility.md`](../docs/compatibility.md)), so the three keys are
   accepted and do nothing.

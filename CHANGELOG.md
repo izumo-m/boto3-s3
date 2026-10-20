@@ -13,7 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - On an SDK too old for them, `mb`'s tags and `-an` bucket names and `ls`'s bucket filters now raise `ValidationError` (botocore's own parameter check) instead of `ConfigurationError`.
 - Removed `S3(crt_allow_absent_credentials=..., crt_region=...)` and `CLIENT_REGION` / `CrtRegion`: the CRT engine always takes the client's region and boto3's rule for a client without credentials, and `presign` raises `InvalidValueError` for an expiry the CRT signer refuses.
 - Failures `aws s3` loses or finds late are now reported: a `PreconditionFailed` to any request but `no_overwrite`'s own write fails the item, a single-key `rm` records a failed delete after Ctrl-C, a file whose stat failed and then recovered is warned about, a malformed `grants` is refused before the run, and a run refused before it starts no longer creates its destination directory.
-- On the CRT engine, items cut short by a fatal error or Ctrl-C are now `CANCELLED` as on the classic engine, and a Ctrl-C the CRT manager swallows during its drain is re-raised instead of ending in `BatchError`.
+- On the CRT engine, items cut short by a fatal error or Ctrl-C, or by an interrupt from an upload's stream, are now `CANCELLED` as on the classic engine, and a Ctrl-C the CRT manager swallows during its drain is re-raised instead of ending in `BatchError`.
+- A local source that cannot be walked as a directory (a file, an unreadable or special path, a symlink not followed) now stops a `sync` or recursive `cp` / `mv` before it starts instead of running on an empty source, a `LastModified` only a local-time conversion cannot hold no longer stops a run, and `requestparams.validate_grants` checks a grants value on its own.
 
 ## [0.12.0] - 2026-10-18
 

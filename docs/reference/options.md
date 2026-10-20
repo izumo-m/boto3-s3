@@ -81,7 +81,10 @@ write. Both default to unset. `grants` is validated before the run, on every
 route (a download's included) and under `dryrun` too: a string with no `=`, or
 an unrecognized permission, raises `ValidationError` before anything is
 listed, sent or deleted. The AWS CLI finds it only as it maps the first
-upload or copy.
+upload or copy. The same check is available on its own as
+`boto3_s3.requestparams.validate_grants(grants, *, operation)`, which raises
+that `ValidationError` naming `operation` and accepts `None` or an empty
+sequence as no grants.
 
 `storage_class` is sent as `StorageClass` on an upload or copy write. When the
 key is unset no `StorageClass` parameter is sent at all, leaving the service to

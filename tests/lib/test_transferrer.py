@@ -11,6 +11,7 @@ deterministic.
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import errno
 import io
 import os
@@ -2543,6 +2544,50 @@ class TestWorkerRaise:
         assert isinstance(body, transfer._GuardedReader)  # pyright: ignore[reportPrivateUsage]
         assert body._raw is stream  # pyright: ignore[reportPrivateUsage]
         assert path == str(src)  # a file is sent by path, not read through Python
+
+    def test_a_crt_stream_interrupt_cancels_the_item_and_reaches_the_caller(self) -> None:
+        # awscrt reads the body on its own thread and fails the request with
+        # its own error in place of what the read raised; the guard kept the
+        # interrupt, so the item is CANCELLED like every interrupted item and
+        # the interrupt is re-raised to the caller.
+        class _Interrupting:
+            def read(self, amount: int = -1) -> bytes:
+                raise KeyboardInterrupt
+
+        class _ReadingDrain(_CrtDrainManager):
+            def upload(self, **kwargs: Any) -> _FakeCrtFuture:
+                future = _FakeCrtFuture(_CrtCancelError("AWS_ERROR_UNKNOWN: Unknown error"))
+                self._accepted.append((future, list(kwargs["subscribers"])))
+                self.body = kwargs["fileobj"]
+                return future
+
+            def shutdown(self) -> None:
+                def read_then_settle() -> None:
+                    with contextlib.suppress(Exception):
+                        self.body.read(1)
+                    self._drain()
+
+                worker = threading.Thread(target=read_then_settle)
+                worker.start()
+                worker.join()
+
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        transferrer = Transferrer(TransferType.UPLOAD, client, on_result=results.append)
+        with pytest.raises(KeyboardInterrupt), transferrer:
+            transferrer._manager = _ReadingDrain()  # pyright: ignore[reportPrivateUsage]
+            transferrer.submit(
+                TransferItem(
+                    compare_key="-",
+                    size=None,
+                    src_fileobj=cast("Any", _Interrupting()),
+                    src_info=FileInfo(key="-"),
+                    dest_bucket="b",
+                    dest_key="k",
+                )
+            )
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+        assert (transferrer.failed, transferrer.cancelled) == (0, 1)
 
     def test_an_on_result_error_off_the_calling_thread_does_not_stall_the_crt_drain(
         self, tmp_path: Path

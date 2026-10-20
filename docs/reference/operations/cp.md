@@ -103,7 +103,10 @@ walk, or an S3 listing under the source key normalized to a `/`-terminated
 prefix — so `cp("s3://b/data", …, recursive=True)` lists under `data/` and
 does not reach `data-sibling.txt`. Zero-byte `/`-terminated folder markers are
 dropped from that listing, so they never transfer on this path. An enumeration
-that yields nothing transfers nothing and does not raise. A recursive transfer
+that yields nothing transfers nothing and does not raise. A local source the
+walk would skip as a directory root — a file, a special file, a directory it
+cannot read, a symbolic link the storage does not follow — is refused before
+the run instead (below), where the AWS CLI runs on an empty source. A recursive transfer
 into a local destination that does not exist creates that directory before
 enumerating, once every check before the run has passed, so a run refused
 before it starts leaves none; this pre-create is not gated on `dryrun`, so a
@@ -286,12 +289,16 @@ upload, the parent reference) are emitted inline on the calling thread
   matching the AWS CLI — see `BatchError` below.
 - [`NotFoundError`](../exceptions.md#notfounderror) — a local source path that
   does not exist, checked before any item work (the check asks the kernel
-  about the path as typed, like the AWS CLI's: a source typed through a
-  symlinked directory and `..` is admitted, and the walk or stat then warns
-  "File does not exist." for the lexical form, exit code 2, as the AWS CLI
-  does — on Windows, which folds `..` before the filesystem sees the path,
-  both refuse it as missing); a single S3 source whose `HeadObject` answers
-  404; a single custom-backend source `get_fileinfo` cannot resolve.
+  about the path as typed, like the AWS CLI's: a single source typed through a
+  symlinked directory and `..` is admitted, and the stat then warns "File
+  does not exist." for the lexical form, exit code 2, as the AWS CLI does —
+  on Windows, which folds `..` before the filesystem sees the path, both
+  refuse it as missing); under `recursive=True`, a local source the walk would
+  skip as a directory root (a file, a special file, a symbolic link the
+  storage does not follow, a path only the kernel finds), also before any
+  item work, with [`AccessDeniedError`](../exceptions.md#accessdeniederror)
+  for a directory it cannot read; a single S3 source whose `HeadObject`
+  answers 404; a single custom-backend source `get_fileinfo` cannot resolve.
 - [`ConfigurationError`](../exceptions.md#configurationerror), or its
   [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement —
   `no_overwrite` on an SDK without conditional writes, `copy_props=ALL` on

@@ -32,7 +32,6 @@ import os
 import re
 import secrets
 import stat as stat_module
-import sys
 from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import closing, contextmanager, suppress
 from datetime import datetime, timedelta, timezone
@@ -592,17 +591,6 @@ def s3_request(
 # The instant naive stamps are counted from (`aware_stamp`).
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
-# Years a listing timestamp can carry without its local-zone rendering being
-# able to leave datetime's range: everything strictly inside the first and the
-# last calendar year is more than a day from either end, further than any zone's
-# UTC offset. Only years 1 and 9999 need the real conversion (the local side
-# bands the same way in localstorage, there in epoch seconds).
-_LOCAL_CHECK_FREE_YEARS = range(datetime.min.year + 1, datetime.max.year)
-
-# Windows has no such quiet range: dateutil's DST probe goes through
-# time.localtime, which fails outright below the epoch there.
-_ALWAYS_CHECK_LOCAL_ZONE = sys.platform == "win32"
-
 
 def read_required(
     entry: Mapping[str, Any],
@@ -625,13 +613,7 @@ def read_required(
         raise MalformedResponseError(str(exc), operation=operation, bucket=bucket, key=key) from exc
 
 
-def aware_stamp(
-    mtime: datetime,
-    *,
-    operation: str | None = None,
-    bucket: str | None = None,
-    key: str | None = None,
-) -> datetime:
+def aware_stamp(mtime: datetime) -> datetime:
     """A response timestamp as the aware value ``FileInfo.mtime`` promises.
 
     Every form S3 itself sends carries a zone, and botocore parses it into an
@@ -654,69 +636,23 @@ def aware_stamp(
     Only whole seconds go through the float, the microseconds are put back
     exactly.
 
-    Where the conversion itself fails, aws-cli dies on it, and it is reported
-    the way `reject_unrepresentable_stamp` reports the aware case. That
-    includes a failure of a step whose answer is not otherwise needed:
-    aws-cli's Python places a naive value by solving for it on both sides of
-    a possible fold, and the second solution reads the local calendar a day
-    ahead. So a zone-less stamp in the last day of ``datetime``'s range
-    (``9999-12-31T00:00:00`` on) ends an aws-cli run in every zone, and on
-    Windows so does one within a day of where its ``localtime`` stops, as
-    well as any below the epoch (all measured). The same second call is made
-    here, for its exception alone.
+    A naive stamp the local zone cannot place - within a zone offset of the
+    ends of ``datetime``'s range, or, on Windows, outside the span its
+    ``localtime`` covers - is read as UTC instead. aws-cli's own conversion
+    dies there and ends the run; the stamp is a valid value all the same, so
+    the run goes on (docs/cli/aws-differences.md). An aware stamp is never
+    converted here, so no timestamp a response carries stops a run.
     """
     if mtime.utcoffset() is not None:
         return mtime
     try:
         whole = mtime.replace(microsecond=0)
         seconds = int(whole.timestamp())
-        whole.replace(fold=1).timestamp()  # the far side of a fold: a day ahead
         return _EPOCH + timedelta(seconds=seconds, microseconds=mtime.microsecond)
-    except (OverflowError, ValueError, OSError) as exc:
-        raise MalformedResponseError(str(exc), operation=operation, bucket=bucket, key=key) from exc
-
-
-def reject_unrepresentable_stamp(
-    mtime: datetime | None,
-    *,
-    operation: str | None = None,
-    bucket: str | None = None,
-    key: str | None = None,
-) -> None:
-    """Run aws-cli's local-zone conversion of an S3 timestamp for its failure alone.
-
-    aws-cli turns every timestamp an S3 response carries into
-    ``parse(...).astimezone(tzlocal())`` the moment it reads it - a listing entry
-    through ``_date_parser``, a single object through the filegenerator's
-    HeadObject branch - so a stamp the *local* calendar cannot hold (an offset
-    away from the end of ``datetime``'s range) aborts the whole run with
-    ``date value out of range`` instead of being listed or transferred. The value
-    kept here stays UTC per the ``FileInfo.mtime`` contract, so this runs the
-    conversion only for the exception it may raise, which surfaces as
-    `MalformedResponseError` (aws-cli's ``date value out of range`` as the
-    message, the ``OverflowError`` on ``__cause__``; on Windows, where the
-    conversion fails as an ``OSError`` instead - for every stamp below the
-    epoch too - that error and its message). dateutil's ``tzlocal`` is
-    rebuilt per call the way aws-cli does, so a process that changes ``TZ`` (and
-    calls ``time.tzset``) follows; the import is deferred because the whole
-    dateutil package costs about as much to import as boto3-s3 itself.
-
-    ``None`` (a response that carried no timestamp at all) has nothing to judge;
-    whether its absence is itself an error is the caller's question.
-    """
-    if mtime is None:
-        return
-    if not _ALWAYS_CHECK_LOCAL_ZONE and mtime.year in _LOCAL_CHECK_FREE_YEARS:
-        return
-    from dateutil.tz import tzlocal
-
-    try:
-        mtime.astimezone(tzlocal())
-    except (OverflowError, ValueError, OSError) as exc:
-        # OSError is Windows': the conversion goes through time.localtime,
-        # which fails outright there - below the epoch and past its own upper
-        # limit alike ([Errno 22]) - where POSIX raises OverflowError.
-        raise MalformedResponseError(str(exc), operation=operation, bucket=bucket, key=key) from exc
+    except (OverflowError, ValueError, OSError):
+        # OSError is Windows': its localtime fails outright below the epoch
+        # and past its own upper limit, where POSIX raises OverflowError.
+        return mtime.replace(tzinfo=timezone.utc)
 
 
 def _page_to_infos(
@@ -765,10 +701,7 @@ def _page_to_infos(
             )
     for obj in page.get("Contents", []):
         key: str = read_required(obj, "Key", bucket=bucket)
-        mtime = aware_stamp(
-            read_required(obj, "LastModified", bucket=bucket, key=key), bucket=bucket, key=key
-        )
-        reject_unrepresentable_stamp(mtime, bucket=bucket, key=key)
+        mtime = aware_stamp(read_required(obj, "LastModified", bucket=bucket, key=key))
         size: int = read_required(obj, "Size", bucket=bucket, key=key)
         etag = obj.get("ETag")
         owner = obj.get("Owner")
@@ -855,15 +788,11 @@ def _page_to_bucket_infos(page: ListBucketsOutputTypeDef, storage: Storage) -> I
     bucket entry missing one stops the listing at that bucket with
     `MalformedResponseError` naming the element - the buckets ahead of it are
     already delivered, this being a generator its caller yields straight
-    through. The date is made aware like any other stamp (`aware_stamp`) but
-    needs no local-zone check here: nothing but the ``ls`` rendering consumes
-    it, and that conversion is aws-cli's own (``output.format_entry``).
+    through. The date is made aware like any other stamp (`aware_stamp`).
     """
     for entry in page.get("Buckets", []):
         name_hint = entry.get("Name")
-        creation = aware_stamp(
-            read_required(entry, "CreationDate", bucket=name_hint), bucket=name_hint
-        )
+        creation = aware_stamp(read_required(entry, "CreationDate", bucket=name_hint))
         name: str = read_required(entry, "Name", bucket=name_hint)
         yield S3FileInfo(
             key=name,
@@ -1650,15 +1579,9 @@ class S3Storage(Storage):
         # of an entry with the value unset.
         size: int = read_required(head, "ContentLength", bucket=self._bucket, key=target_key)
         mtime = aware_stamp(
-            read_required(head, "LastModified", bucket=self._bucket, key=target_key),
-            bucket=self._bucket,
-            key=target_key,
+            read_required(head, "LastModified", bucket=self._bucket, key=target_key)
         )
         etag = head.get("ETag")
-        # aws-cli converts the HeadObject stamp to the local zone as it reads the
-        # response (filegenerator's single-object branch), so an unrepresentable
-        # one kills the run there rather than downstream.
-        reject_unrepresentable_stamp(mtime, bucket=self._bucket, key=target_key)
         return S3FileInfo(
             key=target_key,
             size=size,
@@ -1732,13 +1655,8 @@ class S3Storage(Storage):
         # closing(): the body holds its HTTP connection until it is released,
         # whether the download finished or a local failure abandoned it.
         with closing(cast("BinaryIO", response["Body"])) as body:
-            # The stamp is read before a byte is written: a response whose
-            # stamp cannot be read fails the call with the destination still
-            # as it was, not after the file has been replaced.
             stamp: datetime | None = response.get("LastModified")
-            mtime = stamp and aware_stamp(
-                stamp, operation=_GET_FILE_OPERATION, bucket=self._bucket, key=target_key
-            )
+            mtime = stamp and aware_stamp(stamp)
             self._write_body_atomically(body, dest, key=target_key)
         etag = response.get("ETag")
         return S3FileInfo(

@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 from collections.abc import Generator, Iterator
-from datetime import datetime, timedelta, timezone, tzinfo
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -860,102 +860,44 @@ def _stamped(key: str, mtime: datetime) -> dict[str, Any]:
 
 @_needs_tzset
 class TestListingTimestampRepresentability:
-    """A stamp the local zone cannot hold kills the run, the way it does in aws-cli.
+    """A stamp only aws-cli's local-zone conversion cannot hold is kept.
 
     aws-cli puts every timestamp an S3 response carries through
     ``parse(...).astimezone(tzlocal())`` as it reads the response, so a stamp
-    within the zone's offset of the end of ``datetime``'s range raises
-    ``date value out of range`` there rather than being listed or transferred -
-    measured against the pinned aws through a 127.0.0.1 fake: ``fatal error: date
-    value out of range`` at rc 1 for cp / sync, ``[ERROR]`` at rc 255 for ``ls``.
-    Here it is ``MalformedResponseError`` carrying that text and the
-    ``OverflowError`` on ``__cause__``.
-    Which stamps qualify depends on the zone, so each case pins one; the value
-    kept on the entry stays UTC per the ``FileInfo.mtime`` contract.
+    within the zone's offset of the end of ``datetime``'s range ends its run
+    (``fatal error: date value out of range``, measured). The UTC value is
+    valid all the same: here the entry is listed with it, in any zone, and
+    the run goes on (docs/cli/aws-differences.md).
     """
 
-    def test_a_far_future_stamp_is_rejected_east_of_utc(self) -> None:
-        pages = [{"Contents": [_obj("prefix/a.txt"), _stamped("prefix/far.txt", _FAR_FUTURE)]}]
-        with _local_zone("Asia/Tokyo"):
-            storage, _ = _storage(pages)
-            keys = _keys_until_raise(
-                storage.scan(S3ScanOptions(recursive=True)), MalformedResponseError
-            )
-        assert keys == ["prefix/a.txt"]
-
-    def test_the_same_stamp_is_kept_where_the_zone_can_hold_it(self) -> None:
-        pages = [{"Contents": [_stamped("prefix/far.txt", _FAR_FUTURE)]}]
-        with _local_zone("UTC"):
+    @pytest.mark.parametrize("zone", ["UTC", "Asia/Tokyo", "America/New_York"])
+    @pytest.mark.parametrize("stamp", [_FAR_FUTURE, _FAR_PAST], ids=["far-future", "far-past"])
+    def test_a_stamp_at_either_end_of_the_range_is_listed(self, zone: str, stamp: datetime) -> None:
+        pages = [{"Contents": [_obj("prefix/a.txt"), _stamped("prefix/far.txt", stamp)]}]
+        with _local_zone(zone):
             storage, _ = _storage(pages)
             results = list(storage.scan(S3ScanOptions(recursive=True)))
-        assert [r.mtime for r in results] == [_FAR_FUTURE]  # unchanged, and still UTC
+        assert [r.key for r in results] == ["prefix/a.txt", "prefix/far.txt"]
+        assert results[1].mtime == stamp  # unchanged, and still UTC
 
-    def test_a_far_past_stamp_is_rejected_west_of_utc(self) -> None:
-        pages = [{"Contents": [_stamped("prefix/old.txt", _FAR_PAST)]}]
-        with _local_zone("America/New_York"):
-            storage, _ = _storage(pages)
-            with pytest.raises(MalformedResponseError, match="date value out of range") as excinfo:
-                list(storage.scan(S3ScanOptions(recursive=True)))
-        assert isinstance(excinfo.value.__cause__, OverflowError)
-        assert (excinfo.value.bucket, excinfo.value.key) == (storage.bucket, "prefix/old.txt")
-
-    def test_the_far_past_stamp_is_kept_east_of_utc(self) -> None:
-        pages = [{"Contents": [_stamped("prefix/old.txt", _FAR_PAST)]}]
-        with _local_zone("Asia/Tokyo"):
-            storage, _ = _storage(pages)
-            results = list(storage.scan(S3ScanOptions(recursive=True)))
-        assert [r.mtime for r in results] == [_FAR_PAST]
-
-    def test_a_head_response_carries_the_same_rejection(self) -> None:
-        # aws-cli converts the single-object HeadObject stamp the same way
-        # (filegenerator's `_list_single_object`).
+    def test_a_head_response_keeps_it_too(self) -> None:
         head = {"ContentLength": 5, "LastModified": _FAR_FUTURE}
         with _local_zone("Asia/Tokyo"):
             storage, _ = _storage([], head_response=head)
-            with pytest.raises(MalformedResponseError, match="date value out of range"):
-                storage.get_fileinfo("a.txt")
+            info = storage.get_fileinfo("a.txt")
+        assert info is not None and info.mtime == _FAR_FUTURE
 
-    @pytest.mark.skipif(sys.platform == "win32", reason="Windows has no check-free range")
     def test_an_ordinary_stamp_costs_no_local_zone_work(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # This runs once per listed object, so away from the ends of the range -
-        # where the zone cannot change the verdict - it must not touch dateutil.
+        # This runs once per listed object: an aware stamp is never converted.
         def _forbidden() -> None:
-            raise AssertionError("the local zone was consulted for an ordinary stamp")
+            raise AssertionError("the local zone was consulted for an aware stamp")
 
         monkeypatch.setattr("dateutil.tz.tzlocal", _forbidden)
         with _local_zone("Asia/Tokyo"):
             storage, _ = _storage([{"Contents": [_obj("prefix/a.txt")]}])
             assert [r.key for r in storage.scan(S3ScanOptions(recursive=True))] == ["prefix/a.txt"]
-
-    def test_the_windows_shape_of_the_failure_is_translated_too(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # On Windows the conversion goes through time.localtime, which fails
-        # with OSError [Errno 22] - not OverflowError - for a stamp below the
-        # epoch or past its own limit. Only the POSIX pair was caught, so the
-        # OSError left the library bare (measured on a Windows host; aws.exe
-        # dies on the same error with the same line).
-        class _WindowsLocalZone(tzinfo):
-            def utcoffset(self, dt: datetime | None) -> timedelta:
-                raise OSError(errno.EINVAL, "Invalid argument")
-
-        monkeypatch.setattr("dateutil.tz.tzlocal", _WindowsLocalZone)
-        monkeypatch.setattr(s3storage, "_ALWAYS_CHECK_LOCAL_ZONE", True)
-        with pytest.raises(MalformedResponseError) as exc_info:
-            s3storage.reject_unrepresentable_stamp(
-                datetime(1960, 1, 1, tzinfo=timezone.utc), bucket="b", key="k"
-            )
-        error = exc_info.value
-        assert str(error) == "[Errno 22] Invalid argument"
-        assert isinstance(error.__cause__, OSError)
-        assert (error.bucket, error.key) == ("b", "k")
-
-    @pytest.mark.skipif(sys.platform != "win32", reason="the Windows localtime limits")
-    def test_a_stamp_below_the_epoch_is_malformed_on_windows(self) -> None:
-        with pytest.raises(MalformedResponseError):
-            s3storage.reject_unrepresentable_stamp(datetime(1960, 1, 1, tzinfo=timezone.utc))
 
 
 class TestZonelessStamp:
@@ -1011,43 +953,22 @@ class TestZonelessStamp:
             precise.replace(microsecond=0).timestamp()
         )
 
-    def test_the_last_day_of_the_range_is_malformed(self) -> None:
+    @_needs_tzset
+    @pytest.mark.parametrize("zone", ["UTC", "Asia/Tokyo", "America/New_York"])
+    def test_the_last_day_of_the_range_is_kept(self, zone: str) -> None:
         # aws-cli's Python places a naive value by solving for it on both
         # sides of a possible fold, and the second solution reads the local
         # calendar a day ahead - so a zone-less stamp from 9999-12-31T00:00:00
-        # on ends its run (measured under UTC, Asia/Tokyo and
-        # America/New_York: `ls` at rc 255 from that second on, rc 0 one
-        # microsecond before).
-        pages = [{"Contents": [_stamped("prefix/far.txt", datetime(9999, 12, 31, 0, 0, 0))]}]
-        storage, _ = _storage(pages)
-        with pytest.raises(MalformedResponseError):
-            list(storage.scan(S3ScanOptions(recursive=True)))
-
-    @_needs_tzset
-    @pytest.mark.parametrize("zone", ["UTC", "Asia/Tokyo", "America/New_York"])
-    def test_the_last_day_is_malformed_whatever_the_zone(self, zone: str) -> None:
-        # East of UTC and at UTC the stamp's own instant is in range; only the
-        # day-ahead step leaves it. The error is the one that step raises, the
-        # year running out, as it is for aws-cli.
-        pages = [{"Contents": [_stamped("prefix/far.txt", datetime(9999, 12, 31, 0, 0, 0))]}]
+        # on ends its run in every zone (measured: `ls` at rc 255). Only that
+        # step fails; the stamp's own local reading is kept here.
+        stamp = datetime(9999, 12, 31, 0, 0, 0)
+        pages = [{"Contents": [_stamped("prefix/far.txt", stamp)]}]
         with _local_zone(zone):
             storage, _ = _storage(pages)
-            with pytest.raises(MalformedResponseError) as exc_info:
-                list(storage.scan(S3ScanOptions(recursive=True)))
-        if sys.platform == "linux":
-            # The step's own error (glibc reads the calendar a day ahead and
-            # CPython then refuses the year); another libc may fail the read
-            # itself, so only the kind of outcome is held elsewhere.
-            assert isinstance(exc_info.value.__cause__, ValueError)
-            assert "10000" in str(exc_info.value)
-
-    @pytest.mark.skipif(sys.platform == "win32", reason="Windows' localtime ends at the year 3000")
-    def test_the_microsecond_before_the_last_day_is_kept(self) -> None:
-        stamp = datetime(9999, 12, 30, 23, 59, 59, 999999)
-        storage, _ = _storage([{"Contents": [_stamped("prefix/far.txt", stamp)]}])
-        with _local_zone("UTC"):
             [entry] = storage.scan(S3ScanOptions(recursive=True))
-        assert entry.mtime == stamp.replace(tzinfo=timezone.utc)
+            expected = stamp.timestamp()
+        assert entry.mtime is not None and entry.mtime.utcoffset() == timedelta(0)
+        assert entry.mtime.timestamp() == expected
 
     def test_a_bucket_creation_date_gets_the_same_reading(self) -> None:
         pages = [{"Buckets": [{"Name": "alpha", "CreationDate": self._NAIVE}]}]
@@ -1058,16 +979,29 @@ class TestZonelessStamp:
         assert bucket.mtime.timestamp() == self._NAIVE.timestamp()
 
     @_needs_tzset
-    def test_a_zoneless_stamp_the_conversion_cannot_hold_is_malformed(self) -> None:
-        # The reading itself can fail at the edge of datetime's range; aws-cli
-        # dies on the same conversion.
+    def test_a_zoneless_stamp_the_local_zone_cannot_place_is_read_as_utc(self) -> None:
+        # The local reading itself fails at the edge of datetime's range,
+        # where aws-cli dies on the same conversion; here the stamp is read
+        # as UTC and the run goes on.
         pages = [{"Contents": [_stamped("prefix/far.txt", datetime(1, 1, 1))]}]
         with _local_zone("Asia/Tokyo"):
             storage, _ = _storage(pages)
-            with pytest.raises(MalformedResponseError) as exc_info:
-                list(storage.scan(S3ScanOptions(recursive=True)))
-        assert (exc_info.value.bucket, exc_info.value.key) == ("bucket", "prefix/far.txt")
-        assert isinstance(exc_info.value.__cause__, (OverflowError, ValueError, OSError))
+            [entry] = storage.scan(S3ScanOptions(recursive=True))
+        assert entry.mtime == datetime(1, 1, 1, tzinfo=timezone.utc)
+
+    def test_a_reading_the_host_refuses_is_read_as_utc(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Windows' shape of the same failure: its localtime raises OSError
+        # [Errno 22] below the epoch and past the year 3000.
+        def _refuse(self: datetime) -> float:
+            raise OSError(errno.EINVAL, "Invalid argument")
+
+        class _Naive(datetime):
+            timestamp = _refuse  # pyright: ignore[reportAssignmentType]
+
+        naive = _Naive(1960, 1, 1)
+        assert s3storage.aware_stamp(naive) == datetime(1960, 1, 1, tzinfo=timezone.utc)
 
 
 class TestScanErrorMapping:
@@ -1941,22 +1875,15 @@ class TestGetFile:
         assert info.mtime.utcoffset() == timedelta(0)
         assert info.mtime.timestamp() == naive.timestamp()
 
-    def test_a_stamp_that_cannot_be_read_fails_before_the_file_is_touched(
-        self, tmp_path: Path
-    ) -> None:
-        # The stamp is judged before a byte is written: the call fails with the
-        # destination as it was, and names its operation like every other
-        # get_file failure.
+    def test_a_stamp_the_local_zone_cannot_place_is_read_as_utc(self, tmp_path: Path) -> None:
+        # A zone-less stamp with no local reading in range is read as UTC,
+        # as the listing reads it; the object is written all the same.
         dest = tmp_path / "f"
-        dest.write_bytes(b"what was there")
-        unreadable = datetime(1, 1, 1, 12, 0, 0)  # zone-less, no local reading in range
+        unreadable = datetime(1, 1, 1, 12, 0, 0)
         client, _ = make_recording_client([dict(_get_response(b"new", LastModified=unreadable))])
-        with pytest.raises(MalformedResponseError) as exc_info:
-            S3Storage("s3://bucket/prefix/", client=client).get_file(dest, key="f")
-        error = exc_info.value
-        assert (error.operation, error.bucket, error.key) == ("get_file", "bucket", "prefix/f")
-        assert dest.read_bytes() == b"what was there"
-        assert sorted(p.name for p in tmp_path.iterdir()) == ["f"]  # no temp file left
+        info = S3Storage("s3://bucket/prefix/", client=client).get_file(dest, key="f")
+        assert info.mtime == unreadable.replace(tzinfo=timezone.utc)
+        assert dest.read_bytes() == b"new"
 
     @pytest.mark.parametrize(
         ("url", "key", "expected"),

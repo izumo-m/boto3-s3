@@ -247,9 +247,18 @@ mtime rule (full float precision; `delta = dest.mtime - src.mtime`):
 ## 6. Per-route pre-behavior
 
 - locals3: src missing -> `The user-provided path <raw> does not exist.` (255).
-  When src is a **file**, the dir-style walk warns `Skipping file <abspath>/.
-  File does not exist.` (the formatted root carries a trailing separator, so
-  `os.path.exists` is False) and gives rc 2 (not a hard error).
+  A src the walk's root vetting would skip (`s3._check_local_source_root`,
+  the walker's own `should_ignore_file`) is refused the same way before
+  anything runs (`NotFoundError`, an unreadable directory `AccessDeniedError`;
+  255): a **file** (the formatted root carries a trailing separator, so
+  `os.path.exists` is False), a special file, an unreadable directory, a
+  symlink under `follow_symlinks=False`, a path only the kernel finds (`..`
+  after a symlinked directory). aws-cli skips such a root - `Skipping file
+  <abspath>/. File does not exist.` and rc 2 for a file, nothing and rc 0 for
+  the symlink (measured on 2.36.40 under `--dryrun`) - and runs on an empty
+  source, so `--delete` then deletes every destination object; that is not
+  copied (docs/cli/aws-differences.md). The complete view
+  (`enumerate_all_entries`) vets no root and is not checked.
 - s3local: the dest dir is created **before scanning** (the dir remains even
   for an empty sync), but only once every set-up check has passed - the
   directory-bucket refusal below, the capability and `case_conflict` checks,

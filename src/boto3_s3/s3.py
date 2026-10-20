@@ -61,6 +61,7 @@ from boto3_s3.comparator import (
 )
 from boto3_s3.deleter import S3Deleter, crt_delete_sender
 from boto3_s3.exceptions import (
+    AccessDeniedError,
     BatchError,
     Boto3S3Error,
     CancelledError,
@@ -70,7 +71,12 @@ from boto3_s3.exceptions import (
     ValidationError,
 )
 from boto3_s3.iostorage import IOStorage
-from boto3_s3.localstorage import LocalStorage, to_native_path, translate_os_error
+from boto3_s3.localstorage import (
+    LocalStorage,
+    is_readable,
+    to_native_path,
+    translate_os_error,
+)
 from boto3_s3.s3storage import (
     CA_BUNDLE_ENVIRONMENT_VETTED,
     S3Storage,
@@ -154,7 +160,7 @@ def _validate_transfer_options(options: TransferOptions, *, operation: str) -> N
         raise ValidationError(
             f"Unknown transfer option(s): {', '.join(unknown)}", operation=operation
         )
-    requestparams.validate_grants(options, operation)
+    requestparams.validate_grants(options.get("grants"), operation=operation)
 
 
 @contextmanager
@@ -366,9 +372,9 @@ def _send_through_interrupt(send: Callable[[], Any], held: _HeldInterrupt) -> An
     caller to raise once it has recorded the outcome. A second one keeps the
     wait too: aws's executor threads are still joined as the process exits,
     so its request still completes - a delete still sent, a retry still made
-    (measured) - and its outcome is still recorded here, where aws prints
-    nothing more. A third stops waiting. The request's own result or
-    exception is returned or raised here.
+    (measured) - and its result still comes back to the caller to record,
+    where aws prints nothing more. A third stops waiting. The request's own
+    result or exception is returned or raised here.
 
     Nothing on this thread takes a Python-level lock while interrupts may
     land: the worker is started from another thread, and the waits are
@@ -828,6 +834,61 @@ def _check_local_source_exists(storage: LocalStorage, *, operation: str) -> None
         )
 
 
+def _check_local_source_root(storage: LocalStorage, *, operation: str) -> None:
+    """Refuse a directory source whose root the walk would skip, before the run.
+
+    A recursive ``cp`` / ``mv`` or a ``sync`` walks a local source as a
+    directory, and the walk vets its root first (aws-cli's
+    ``should_ignore_file`` on the root with a trailing separator): a file
+    (``file/`` does not exist), a special or unreadable path, or a symlink
+    under ``follow_symlinks=False``. aws-cli skips such a root - with a
+    warning, or silently for the symlink - and runs on an empty source, so a
+    ``sync`` with deletes then empties the destination (measured on aws
+    2.36.40 under ``--dryrun``: a file source warns and exits 2, a symlink
+    root exits 0). Here the run stops before it starts instead, like a missing
+    source (`_check_local_source_exists`), and nothing is listed, sent or
+    deleted. The walker's own ``should_ignore_file`` decides, so a custom
+    walker's rule holds here as in its walk; the complete view
+    (``enumerate_all_entries``) vets no root and is left to its walk. The
+    error names why: ``AccessDeniedError`` for an unreadable directory,
+    ``NotFoundError`` otherwise (the CLI's 255 either way).
+    """
+    options = storage.default_scan_options()
+    if options.enumerate_all_entries:
+        return
+    reasons: list[str] = []
+    if not storage.walker.should_ignore_file(
+        storage.abspath + os.sep, follow_symlinks=options.follow_symlinks, notify=reasons.append
+    ):
+        return
+    path = storage.abspath
+    typed = storage.path
+    if not options.follow_symlinks and os.path.islink(path):
+        raise NotFoundError(
+            f"The user-provided path {typed} is a symbolic link, which is not followed.",
+            operation=operation,
+        )
+    if not os.path.lexists(path):
+        # The kernel found the path as typed (`_check_local_source_exists`),
+        # the walk's absolutized form names nothing: a `..` after a symlinked
+        # directory.
+        raise NotFoundError(
+            f"The user-provided path {typed} does not exist as {path}.", operation=operation
+        )
+    if not os.path.isdir(path):
+        raise NotFoundError(
+            f"The user-provided path {typed} is not a directory.", operation=operation
+        )
+    if not is_readable(path, True):
+        raise AccessDeniedError(
+            f"The user-provided path {typed} is not readable.", operation=operation
+        )
+    detail = " ".join(reasons) if reasons else "The walk skips it."
+    raise NotFoundError(
+        f"The user-provided path {typed} cannot be walked. {detail}", operation=operation
+    )
+
+
 def _classify_transfer_route(
     plan: transferplan.TransferPlan, *, operation: str
 ) -> tuple[TransferType, S3Storage, S3Storage | None, str]:
@@ -846,7 +907,9 @@ def _classify_transfer_route(
     pair, because the engine reaches into ``S3Storage``'s client/bucket and
     ``LocalStorage``'s path directly; an open route pairs a capability-checked
     custom backend with S3. The missing-local-source check runs here
-    (identical in cp/mv and sync); the destination-directory creation does
+    (identical in cp/mv and sync), and for a directory source (a recursive
+    cp / mv, a sync) the check of the root the walk would skip
+    (`_check_local_source_root`); the destination-directory creation does
     not - the same `LocalStorage.ensure_directory` call, but gated on
     ``recursive`` for cp / mv and unconditional for sync, so it stays with
     the callers.
@@ -856,6 +919,8 @@ def _classify_transfer_route(
     if plan.paths_type == "locals3":
         assert isinstance(src_storage, LocalStorage) and isinstance(dest_storage, S3Storage)
         _check_local_source_exists(src_storage, operation=operation)
+        if plan.dir_op:
+            _check_local_source_root(src_storage, operation=operation)
         return TransferType.UPLOAD, dest_storage, None, dest_storage.bucket
     if plan.paths_type == "s3local":
         assert isinstance(src_storage, S3Storage) and isinstance(dest_storage, LocalStorage)

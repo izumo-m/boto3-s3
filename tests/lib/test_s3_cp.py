@@ -23,7 +23,7 @@ import pytest
 from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError, ParamValidationError
 
-from boto3_s3 import GlobFilter, producers, transferplan
+from boto3_s3 import GlobFilter, crtsupport, producers, transferplan
 from boto3_s3.exceptions import (
     BatchError,
     Boto3S3Error,
@@ -57,6 +57,31 @@ from tests.utils.host import is_case_insensitive, skip_if_chmod_is_inert
 from tests.utils.recorder import ApiCall, make_recording_client, ops
 
 _SYNC = TransferConfig(use_threads=False)
+
+
+def _refused_crt_engine(monkeypatch: pytest.MonkeyPatch) -> TransferConfig:
+    """A config selecting the CRT engine, whose build boto3 refuses.
+
+    The build is stubbed to raise boto3's ``InvalidCrtTransferConfigError``:
+    a real one would take the cross-process CRT lock (failing while another
+    process holds it) and leave this process holding the shared client. The
+    config is built here, not at import, since the SDK floor's
+    ``TransferConfig`` has no ``preferred_transfer_client``.
+    """
+    pytest.importorskip("awscrt")
+    from boto3 import exceptions as boto3_exceptions
+
+    refusal: Any = getattr(boto3_exceptions, "InvalidCrtTransferConfigError", None)
+    if refusal is None:
+        pytest.skip("boto3 before 1.42 has no InvalidCrtTransferConfigError")
+
+    def refuse(*_args: Any, **_kwargs: Any) -> Any:
+        raise refusal("The following transfer config options are invalid")
+
+    monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", refuse)
+    return TransferConfig(preferred_transfer_client="crt")
+
+
 # The case-conflict gate detects a "two S3 twins in one listing" conflict via its
 # in-flight set, which only holds while the first twin's download is still
 # running. That needs a non-blocking (threaded) submit so the gate runs ahead of
@@ -107,6 +132,45 @@ class TestUploadRoute:
         assert results[0].outcome is OpOutcome.SUCCEEDED
         assert results[0].src == str(src)
         assert results[0].dest == "s3://bucket/up/a.txt"
+
+    @pytest.mark.parametrize("op", ["cp", "mv"])
+    def test_a_recursive_file_source_is_refused_before_anything_runs(
+        self, tmp_path: Path, op: str
+    ) -> None:
+        # A recursive source is walked as a directory, and the walk skips a
+        # file root (aws warns and exits 2 with nothing done); here the run
+        # stops before it starts, like a missing source.
+        src = tmp_path / "a.txt"
+        src.write_bytes(b"x")
+        client, calls = make_recording_client([])
+        with pytest.raises(NotFoundError, match="is not a directory") as excinfo:
+            getattr(S3(), op)(str(src), S3Storage("s3://bucket/up/", client=client), recursive=True)
+        assert excinfo.value.operation == op
+        assert calls == []
+        assert src.exists()
+
+    @pytest.mark.skipif(
+        os.name == "nt", reason="Windows folds `..` before the filesystem sees the path"
+    )
+    def test_a_recursive_source_only_the_kernel_finds_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `lsub/../d` is sub/d to the kernel, which admits it, and <cwd>/d to
+        # the walk, which finds nothing there: aws warns "File does not
+        # exist." and exits 2. Refused here before the run.
+        (tmp_path / "sub" / "other").mkdir(parents=True)
+        (tmp_path / "sub" / "d").mkdir()
+        (tmp_path / "sub" / "d" / "x").write_bytes(b"x")
+        (tmp_path / "lsub").symlink_to(tmp_path / "sub" / "other")
+        monkeypatch.chdir(tmp_path)
+        client, calls = make_recording_client([])
+        with pytest.raises(NotFoundError, match="does not exist as"):
+            S3().cp(
+                LocalStorage("lsub/../d"),
+                S3Storage("s3://bucket/up/", client=client),
+                recursive=True,
+            )
+        assert calls == []
 
     def test_relative_source_survives_a_chdir_after_construction(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -430,25 +494,19 @@ class TestUploadRoute:
         assert calls == []
         assert not dest.exists()
 
-    @pytest.mark.parametrize(
-        ("options", "config"),
-        [
-            pytest.param({"case_conflict": "bogus"}, _SYNC, id="case-conflict-mode"),
-            pytest.param(
-                {},
-                TransferConfig(preferred_transfer_client="crt", io_chunksize=1024 * 1024),
-                id="crt-engine-build",
-            ),
-        ],
-    )
+    @pytest.mark.parametrize("refusal", ["case-conflict-mode", "crt-engine-build"])
     def test_a_refused_run_leaves_no_destination_directory(
-        self, tmp_path: Path, options: dict[str, Any], config: TransferConfig
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refusal: str
     ) -> None:
         # The recursive local-destination pre-create comes after every set-up
         # check - the case-conflict mode, the engine build - so a refused run
         # changes nothing (aws-cli creates the directory first).
-        if "crt" in str(config.preferred_transfer_client):
-            pytest.importorskip("awscrt")
+        options: dict[str, Any] = {}
+        config = _SYNC
+        if refusal == "case-conflict-mode":
+            options["case_conflict"] = "bogus"
+        else:
+            config = _refused_crt_engine(monkeypatch)
         dest = tmp_path / "fresh" / "nested"
         client, calls = make_recording_client([])
         with pytest.raises(ValidationError):

@@ -37,7 +37,11 @@ alias file, a `cli_history` directory `aws` cannot create, the modification
 time a download stamps in some local zones (and the `sync` runs that follow
 from it), a transfer or delete whose request dies
 without any response, a multipart copy whose tag write and its cleanup both
-fail, a help page that cannot be written, a
+fail, a local source that cannot be walked as a directory, a path with no
+bucket, a timestamp only `aws`'s local-time conversion cannot hold, a
+malformed `--grants`, a file whose size and time could not be read and then
+could, the destination directory of a refused run, a help page or an `mb` /
+`rb` success line that cannot be written, a
 `file://` or `fileb://` reference `aws` mishandles, and the `PYTHON*`
 environment variables. A difference of that kind anywhere else is a
 bug worth reporting; an error report's wording, or which of two mistakes it
@@ -198,10 +202,17 @@ that say outright that the run comes out differently, listed in section 1.
   values and their meanings are the same, the typography is not. `--debug`
   traces come from the installed boto3/botocore rather than aws's bundled copy,
   and credentials appearing in them are masked here — `aws` prints them in
-  full. A help page that cannot be written ends differently as well: `aws`
-  hands its page to a pager process and exits 0 whatever becomes of it, while
-  this command writes the page itself, so `help > /dev/full`, or a reader that
-  closes at once, is exit code 255 here, with the write error.
+  full.
+- **Output that cannot be written.** `aws` hands a help page to a pager
+  process and exits 0 whatever becomes of it, while this command writes the
+  page itself, so `help > /dev/full`, or a reader that closes at once, is
+  exit code 255 here, with the write error. `mb` and `rb` print their success
+  line inside the same catch as the request on `aws`, so a bucket created or
+  removed is reported as `make_bucket failed:` / `remove_bucket failed:` at
+  exit code 1 when that line cannot be written; here the bucket is done and
+  the lost line follows the rule every command follows
+  ([`exit-codes.md`](./exit-codes.md)): exit code 255 with the write error,
+  or 0 with stdout closed (`1>&-`).
 - **A delete answered `412 PreconditionFailed` fails here.** `aws` turns a
   `PreconditionFailed` answer into a silent skip whatever the request was - a
   rule meant for `--no-overwrite`'s conditional writes - so a `DeleteObject`
@@ -229,6 +240,64 @@ that say outright that the run comes out differently, listed in section 1.
   copy - answered `412` is a silent skip on both tools, and any other request
   answered that way is a failure here even under `--no-overwrite`. What `aws`
   does is read from its source, not measured.
+- **A local source that cannot be walked as a directory stops the run
+  here.** A `sync` or a recursive `cp` / `mv` reads its local source as a
+  directory. When the source is a file, a special file, a directory it cannot
+  read, a symbolic link under `--no-follow-symlinks`, or a path found only
+  through a `..` after a symbolic link, `aws` skips it and runs on an empty
+  source - with a `Skipping file ...` warning and exit code 2, or, for the
+  symbolic link, silently at 0 (measured on `aws` 2.36.40 under `--dryrun`) -
+  so `sync --delete` goes on to delete every object under the destination
+  prefix. This command refuses such a source before anything is listed, sent
+  or deleted, as it refuses a missing one: exit code 255 with the reason.
+- **A path with no bucket is refused here.** `s3:///key` or a bare `s3://`
+  given to `cp`, `mv`, `sync`, `rm`, `mb` or `rb` is exit code 252 before
+  any request (`presign` and `website` refused it already; `ls` lists the
+  buckets for both, as `aws` does). `aws` carries it into the run: an upload
+  fails each file with a line of its own at exit code 1, a `--dryrun` `cp`
+  or `rm` prints its success line and exits 0, a lookup or listing ends in a
+  fatal error at 1, `mb` and `rb` report their failure at 1, and `rb
+  --force` runs its deletion first and exits 255.
+- **A timestamp only `aws`'s local-time conversion cannot hold does not stop
+  the run here.** `aws` converts every `LastModified` it reads to local time,
+  so an object stamped within the local zone's offset of the year 1 or 9999
+  (on Windows also before 1970 or after about 3001), or a zone-less stamp
+  from an endpoint in the last day of 9999, ends its run where the listing or
+  the single-object HEAD reads it - `fatal error: date value out of range`,
+  exit code 1 - and nothing after it is transferred, compared or deleted
+  (measured). Here the stamp is kept as the instant it names (a zone-less one
+  the local zone cannot place is read as UTC) and the run goes on. `ls`
+  prints times in the local zone, as `aws` does, so the line of such an
+  object still stops the listing there, at exit code 255 on both tools. S3
+  itself never sends such a stamp.
+- **A malformed `--grants` is refused before the run.** A grant not of the
+  form `permission=grantee`, or naming a permission other than `read`,
+  `readacl`, `writeacl` and `full`, is exit code 252 here before anything is
+  listed, sent or deleted, on every route. `aws` finds it only as it maps the
+  first upload or copy: the run stops there at exit code 1, after any deletes
+  a `sync` has already sent. A run with nothing to upload or copy never maps
+  it and succeeds at 0 - a download, which ignores the write-side options
+  (`cp s3://b/k f --grants foo`, and a `mv` or `sync` download alike), or a
+  `sync` with nothing to transfer, whose `--delete` deletions all go out -
+  where this command does nothing.
+- **A file whose size and time could not be read and then could is warned
+  about here.** A local walk reads each file's size and time again just
+  before handing it on. When that read fails and the file is back by the time
+  the failure is examined (it was being replaced, say), `aws` skips the file
+  without a line and exits 0; this command skips it too, with a `Skipping
+  file ...` warning naming the error, and exits 2.
+- **A refused run leaves no destination directory.** `aws` creates the
+  missing local destination directory of a recursive `cp` / `mv` or a `sync`
+  while it checks the paths, ahead of its other checks, so a run it then
+  refuses - a `sync` with a directory bucket, a misused SSE-C option - leaves
+  an empty directory behind (measured). This command creates it only once
+  every check has passed; a run that starts creates it as `aws` does, empty
+  listing or not.
+- **A single-key `rm` reports a delete that failed after Ctrl-C.** A Ctrl-C
+  while the one `DeleteObject` is out waits for its answer on both tools.
+  When the answer is a failure, `aws` prints only its closing line (measured
+  on a 403); this command prints `delete failed: s3://...` first. The exit
+  code, 1, and the object are the same.
 - **`file://` and `fileb://` are refused where `aws` mishandles them.** Each
   of these exits 252 here, before anything is read or sent:
   - **A `fileb://` path argument** of `ls`, `rm`, `mb`, `rb`, `presign` or
@@ -343,7 +412,10 @@ that say outright that the run comes out differently, listed in section 1.
   AWS_ERROR_S3_CANCELED: Request successfully cancelled`) and no closing
   line, while this command prints no line for those transfers and closes
   with `cancelled: ctrl-c received`, as on the classic engine; both exit 1,
-  and the transfers cut short are the same. For deletes `aws`'s CRT manager
+  and the same transfers are cut short. An interrupt that cuts nothing short
+  (the transfer it waited on, and every other, had already finished) leaves
+  `aws` exiting 0 as if uninterrupted, while this command still reports it
+  and does not exit 0. For deletes `aws`'s CRT manager
   swallows it too and goes on sending every per-key delete already queued,
   then ends with the per-key lines — a request the interrupt cancelled fails
   with `AWS_ERROR_S3_CANCELED` — and no closing line, exit code 1 (measured:
@@ -523,7 +595,9 @@ uniform. These are rejected outright on the wrong route:
 Every other direction-specific option is accepted anywhere and simply has no
 effect off its route. The write-side options in particular — `--acl`,
 `--storage-class`, the content headers, `--metadata`, `--grants`, the SSE
-family — are silently ignored on a download rather than rejected.
+family — are silently ignored on a download rather than rejected, with one
+exception: a malformed `--grants` is refused (252) on every route, a download
+included (section 2).
 
 ## 5. Filtering on Windows
 

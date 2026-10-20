@@ -532,9 +532,8 @@ spanning both would file a broken stream as a local failure.
 - no `HeadObject`, and no `ContentType` / MIME guessing on upload — guessing an
   upload's type from its name is the transfer lanes' aws-cli behavior
   (`guess_mime_type`), not this lane's.
-- no local mtime stamping after a download, and no `reject_unrepresentable_stamp`
-  guard: both exist so the transfer lanes match aws, and here the caller holds
-  the returned `S3FileInfo` and decides.
+- no local mtime stamping after a download: it exists so the transfer lanes
+  match aws, and here the caller holds the returned `S3FileInfo` and decides.
 - **`cp` / `mv` / `sync` do not use them**, so compatibility with aws-cli is
   untouched: the transfer engine, its gates (glacier, `--no-overwrite`,
   case-conflict) and the CLI do not depend on them.

@@ -550,23 +550,19 @@ dest-existence check for download. We ported the same three faces:
   (`Transferrer.warner`, a `Warner`), the same sink the engine's own warnings use
   (aws-cli's wording) - so the walk reports a warning without reaching into the
   transfer engine.
-- **an S3-side timestamp the local calendar cannot hold ends the run** - the
-  mirror image of that last walk warning, and deliberately not a warning.
-  aws-cli converts every timestamp an S3 response carries to the local zone the
-  moment it reads it (a listing entry through `BucketLister`'s date parser, a
-  single object as the last thing `_list_single_object` does), so a
-  `LastModified` that leaves `datetime`'s range once the local offset is added
-  fails right there with `date value out of range` and nothing is transferred -
-  where a *local* mtime it cannot represent is warned away and stamped with the
-  epoch instead. `s3storage.reject_unrepresentable_stamp` runs that exact
-  conversion for its exception alone, at both of aws-cli's points: the listing
-  conversion inside the S3 backend, and `producers.head_single` for the
-  single-object HEAD route. The value carried on stays UTC per the
-  `FileInfo.mtime` contract, and the conversion runs only for the years that
-  can reach either end (years 1 and 9999 on POSIX, every year on Windows, the
-  same banding the local side uses); every other year skips it. A single blind
-  delete is exempt because aws issues no HeadObject for it - `rm s3://bkt/key`
-  stays rc 0 on both tools.
+- **an S3-side timestamp the local calendar cannot hold is kept** - unlike
+  aws-cli. aws-cli converts every timestamp an S3 response carries to the
+  local zone the moment it reads it (a listing entry through `BucketLister`'s
+  date parser, a single object as the last thing `_list_single_object` does),
+  so a `LastModified` that leaves `datetime`'s range once the local offset is
+  added (years 1 and 9999, within the zone's offset; on Windows also before
+  1970 and after about 3001, where its `localtime` stops) ends its run with
+  `date value out of range` and nothing is transferred. The UTC value is
+  valid, and only that conversion fails, so the value is carried on as it
+  came, per the `FileInfo.mtime` contract, and the transfer, the `sync`
+  comparison and the deletes go on (docs/cli/aws-differences.md). The CLI's
+  `ls` still renders such a stamp in local time, as aws-cli does, so that
+  rendering can still fail there.
 - **an S3-side timestamp with no zone is local time.** S3 always sends a zone;
   an S3-compatible endpoint that leaves it off (`2025-01-01T00:00:00`) makes
   botocore return a naive `datetime`, and aws-cli's same `astimezone(tzlocal())`
@@ -575,16 +571,16 @@ dest-existence check for download. We ported the same three faces:
   `get_fileinfo`, bucket creation dates) and keeps it as aware UTC, so the
   `FileInfo.mtime` contract holds and sync's size-and-time judgment compares
   the instant aws-cli compares (measured against aws-cli under `TZ=UTC`,
-  `TZ=Asia/Tokyo` and `TZ=America/New_York`). A stamp whose local reading
-  fails is a `MalformedResponseError`, as aws-cli dies on the same
-  conversion. That includes aws-cli's own second step: its Python places a
-  naive value by solving for it on both sides of a possible fold, the second
-  solution reading the local calendar a day ahead, so a zone-less stamp in the
-  last day of `datetime`'s range (`9999-12-31T00:00:00` on) ends an aws-cli
-  run in every zone, and on Windows so does one within a day of where
-  `localtime` stops; the same second call is made here for its failure alone.
-  The instant is taken through `timestamp()`, which places a wall-clock time
-  the zone skips where aws-cli's Python places it on every host version.
+  `TZ=Asia/Tokyo` and `TZ=America/New_York`). A stamp the local zone cannot
+  place - at the edges of `datetime`'s range, or outside what Windows'
+  `localtime` covers - is read as UTC instead, where aws-cli dies on the
+  conversion; so is aws-cli's own second step, which is not made here: its
+  Python places a naive value by solving for it on both sides of a possible
+  fold, the second solution reading the local calendar a day ahead, so a
+  zone-less stamp in the last day of `datetime`'s range
+  (`9999-12-31T00:00:00` on) ends an aws-cli run in every zone. The instant
+  is taken through `timestamp()`, which places a wall-clock time the zone
+  skips where aws-cli's Python places it on every host version.
 - **a single-object HEAD missing `ContentLength` or `LastModified` ends the
   run** the same way: aws-cli's `_list_single_object` reads those two by
   subscript (`ContentLength` first) and `ETag` with a default, so

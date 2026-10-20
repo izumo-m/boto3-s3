@@ -121,10 +121,9 @@ the library's own code, that is: what botocore raises from inside a request is
 the request failing, reported as above, with `AssertionError` alone left
 untranslated there too (bar the CRT signer's refusal of a non-positive
 `expires_in` in `presign`, an `InvalidValueError`). `KeyboardInterrupt` and `SystemExit` always propagate. A response the service
-returned incomplete, or a timestamp the host cannot represent, is inside it:
-[`MalformedResponseError`](#malformedresponseerror) carries the `KeyError` /
-`OverflowError` the AWS CLI dies with on `__cause__` and its text as the
-message. Selecting the CRT engine
+returned incomplete is inside it:
+[`MalformedResponseError`](#malformedresponseerror) carries the `KeyError`
+the AWS CLI dies with on `__cause__` and its text as the message. Selecting the CRT engine
 explicitly with `TransferConfig.preferred_transfer_client="crt"` while awscrt
 is absent (or older than boto3's minimum) propagates botocore's `MissingDependencyException`, matching what
 boto3 does — that pass-through is scoped to engine selection, and the same
@@ -255,13 +254,13 @@ exact rules are under `scan_pages`, `list_buckets` and
 [`S3PathResolver`](./misc.md#s3pathresolver) reads are listed there), a copy's
 source `GetObjectTagging` reply missing `TagSet` or a tag's `Key` / `Value`, or
 its source annotation listing or `GetObjectAnnotation` reply missing
-`AnnotationName` / `AnnotationPayload` (attributed to the source) — and a
-`LastModified` the
-host's local zone cannot represent (years 1 and 9999, within the zone's offset
-of `datetime`'s range; on Windows also every timestamp before 1970 or past the
-year 3000, which its local-time conversion refuses), which the CLI's
-conversion of every S3 timestamp to local time rejects. A truncating proxy or
-a partial S3 implementation is the usual source of the first kind. An element
+`AnnotationName` / `AnnotationPayload` (attributed to the source). A
+truncating proxy or a partial S3 implementation is the usual source. A
+`LastModified` the host's local zone cannot represent (years 1 and 9999,
+within the zone's offset of `datetime`'s range; on Windows also every
+timestamp before 1970 or past about the year 3000), where the AWS CLI's
+conversion of every S3 timestamp to local time dies, is not this class: the
+UTC value is kept and the run goes on. An element
 that is present but unreadable — a
 `LastModified` that is no timestamp, a `Size` that is no integer — is not this
 class: botocore's own parser fails on it before the library reads anything,
@@ -271,9 +270,8 @@ parser's `ValueError`.
 The run stops where the CLI's stops: the entries ahead of the bad one are
 already delivered — an `ls` has reported them, a transfer has submitted them —
 and nothing after it is read. The message is the `KeyError`'s `str()`, which
-is the element name in quotes (`'LastModified'`), or `date value out of range` (on Windows,
-`[Errno 22] Invalid argument` for the timestamps only it refuses); that
-original exception is on `__cause__`. `bucket` and `key` name the entry when the
+is the element name in quotes (`'LastModified'`); that original exception is
+on `__cause__`. `bucket` and `key` name the entry when the
 response carried them (an entry missing `Key` names only its bucket; a bucket
 entry puts its name in `bucket`), and `operation` names the operation that
 was reading the response and is left unset on a storage-level call, like
