@@ -59,6 +59,28 @@ class TestUsageErrors:
         assert "checksum-algorithm" in capsys.readouterr().err
 
     @pytest.mark.parametrize(
+        "paths",
+        [["src", "s3://b/up"], ["s3://b/cs", "s3://b/cd"]],
+        ids=["upload", "copy"],
+    )
+    def test_a_malformed_grant_is_refused_before_the_run(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        paths: list[str],
+    ) -> None:
+        # Before any listing, --dryrun or not: aws finds it only as it maps
+        # the first upload or copy, a fatal error at rc 1 (and rc 0 when
+        # nothing needs transferring).
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "a.txt").write_bytes(b"x")
+        rc = cli.main(["sync", *paths, "--grants", "invalid", "--dryrun"], ctx=built_client_ctx())
+        assert rc == 252
+        assert "--grants" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
         "argv",
         [
             ["sync", "s3://mybucket--use1-az4--x-s3/p", "s3://plain/p"],
@@ -113,6 +135,28 @@ class TestGeneralErrors:
         dest = afile / "sub"
         rc = cli.main(["sync", "s3://b/pre", str(dest)], ctx=built_client_ctx())
         assert rc == 255
+
+    def test_a_refused_run_leaves_no_destination_directory(self, tmp_path: Path) -> None:
+        # aws creates the destination in the middle of its validation and
+        # leaves it behind when a later check refuses the run (here an SSE-C
+        # pairing a download cannot use); it is created only once every check
+        # has passed.
+        dest = tmp_path / "out"
+        rc = cli.main(
+            ["sync", "s3://b/pre", str(dest), "--sse-c-copy-source", "AES256"],
+            ctx=built_client_ctx(),
+        )
+        assert rc == 252
+        assert not dest.exists()
+
+    @pytest.mark.parametrize("bucket", ["b--use1-az4--x-s3", "ap--use1-az4--xa-s3"])
+    def test_a_directory_bucket_refusal_leaves_no_destination_directory(
+        self, tmp_path: Path, bucket: str
+    ) -> None:
+        dest = tmp_path / "out"
+        rc = cli.main(["sync", f"s3://{bucket}/pre", str(dest)], ctx=built_client_ctx())
+        assert rc == 252
+        assert not dest.exists()
 
 
 class TestOutputShapes:

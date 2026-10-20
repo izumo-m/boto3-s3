@@ -210,13 +210,6 @@ class TransferPrinter:
         # Set by finish(): the callbacks then drop records instead of feeding
         # a queue whose consumer is gone (see finish for the deadlock chain).
         self._finished = False
-        # Set by the first CANCELLED record (under the lock). aws's
-        # ResultProcessor disables every handler once it has processed the
-        # first error result - the CtrlCResult / fatal ErrorResult a cancelled
-        # classic future mints, which is what a CANCELLED record is - and only
-        # drains the queue after it: nothing later is printed or counted, a
-        # success that completed (an mv's source already deleted) included.
-        self._stopped = False
         # printer-thread-only state (no lock: one thread owns them), except
         # _output_dead: set by finish() on a second Ctrl-C to stop the output
         self._progress_length = 0
@@ -313,8 +306,6 @@ class TransferPrinter:
         """Update thread-safe byte/file totals and enqueue a throttled meter snapshot."""
         snapshot: _ProgressSnapshot | None = None
         with self._lock:
-            if self._stopped:
-                return
             if self._start is None:
                 # aws anchors the transfer-speed denominator at the first queued
                 # result, not at construction (results.py _record_queued_result);
@@ -375,11 +366,6 @@ class TransferPrinter:
         """Reconcile terminal counters and enqueue the result shape aws-cli prints."""
         record: _ResultRecord | None = None
         with self._lock:
-            if self._stopped and result.outcome is not OpOutcome.NOTICE:
-                # aws's processor has disabled its handlers (`_stopped`). A
-                # NOTICE never went through them: aws writes those straight
-                # to stderr.
-                return
             if result.outcome is OpOutcome.NOTICE:
                 # Display-only advisory text (the case-conflict messages):
                 # aws prints these straight to stderr, bypassing both its
@@ -422,8 +408,6 @@ class TransferPrinter:
                     self.failed += 1
                 elif result.outcome is OpOutcome.WARNED:
                     self.warned += 1
-                elif result.outcome is OpOutcome.CANCELLED:
-                    self._stopped = True
                 if not self._quiet and self._prints(result.outcome):
                     record = _ResultRecord(
                         result.outcome,

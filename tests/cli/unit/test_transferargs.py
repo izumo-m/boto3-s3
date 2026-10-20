@@ -231,7 +231,8 @@ class TestParamfile:
 class TestGrantsParamfile:
     """A lone --grants file:// / fileb:// is refused unread (aws loads it and
     parses the text character by character - a bug not copied); a longer
-    list or a prefix-less value stays a list."""
+    list or a prefix-less value stays a list, and every grant must have the
+    permission=grantee shape with a known permission."""
 
     @pytest.mark.parametrize("prefix", ["file://", "fileb://"])
     def test_single_element_paramfile_is_refused(self, prefix: str, tmp_path: Path) -> None:
@@ -247,13 +248,28 @@ class TestGrantsParamfile:
         assert args.grants == ["read=id=CANONICAL"]
 
     def test_multi_element_list_is_never_unwrapped(self, tmp_path: Path) -> None:
-        # aws only unwraps a length-1 list, so a second element (even a file://)
-        # keeps the whole thing a verbatim list.
+        # aws only unwraps a length-1 list, so a second element keeps the
+        # whole thing a verbatim list - a file:// there included, which is
+        # then a literal grant: refused for its shape, its file never read.
         p = tmp_path / "g.txt"
         p.write_text("read=id=CANONICAL")
-        args = argparse.Namespace(grants=["read=id=X", f"file://{p}"])
+        args = argparse.Namespace(grants=["read=id=X", "full=id=Y"])
         transferargs._resolve_grants(args, operation="cp")
-        assert args.grants == ["read=id=X", f"file://{p}"]
+        assert args.grants == ["read=id=X", "full=id=Y"]
+        args = argparse.Namespace(grants=["read=id=X", f"file://{p}"])
+        with pytest.raises(ValidationError, match="permission=grantee"):
+            transferargs._resolve_grants(args, operation="cp")
+
+    @pytest.mark.parametrize(
+        ("grant", "match"),
+        [("foo", "permission=grantee"), ("", "permission=grantee"), ("write=id=X", "'write'")],
+        ids=["no-equals", "empty", "unknown-permission"],
+    )
+    def test_a_malformed_grant_is_a_usage_error(self, grant: str, match: str) -> None:
+        args = argparse.Namespace(grants=["read=id=X", grant])
+        with pytest.raises(ValidationError, match=match) as excinfo:
+            transferargs._resolve_grants(args, operation="cp")
+        assert excinfo.value.operation == "cp"
 
     def test_none_is_untouched(self) -> None:
         args = argparse.Namespace(grants=None)

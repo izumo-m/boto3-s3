@@ -83,10 +83,6 @@ class MvCommand(Command):
             # bare RuntimeError -> rc 255). NotFoundError without a ClientError
             # cause maps to the same rc 255.
             raise NotFoundError(f"The user-provided path {src} does not exist.", operation="mv")
-        if args.recursive and paths_type == "s3local":
-            # The dir_op half of aws's _validate_path_args: the s3local
-            # destination is created during validation (pre-pipeline rc 255).
-            transferargs.create_local_dest_dir(dest, operation="mv")
         transferargs.validate_sse_c_pairing(args, paths_type, operation="mv")
 
         s3 = head.s3
@@ -121,6 +117,10 @@ class MvCommand(Command):
                 client, paths_type, transfer_config
             ),
         )
+        if args.recursive and paths_type == "s3local":
+            # The dir_op half of aws's _validate_path_args, once every check
+            # above has passed (transferargs.create_local_dest_dir).
+            transferargs.create_local_dest_dir(dest, operation="mv")
         printer = transferargs.build_printer(args, progress_frequency)
 
         def run_mv() -> None:

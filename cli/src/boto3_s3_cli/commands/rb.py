@@ -46,10 +46,13 @@ class RbCommand(Command):
         ``main``; an empty bucket name is rc 1, like a delete_bucket failure.
         ``--force`` runs a full ``rm --recursive`` first; a failure there is
         rc 255 (aws raises RuntimeError into the general handler) and the
-        bucket delete is not attempted. Every failure from delete_bucket
-        onwards is rc 1 with one ``remove_bucket failed:`` line - aws's local
-        catch spans the success line too, so an unwritable stdout is an rb
-        failure rather than the dispatcher's 255. A client-construction
+        bucket delete is not attempted. Every failure of delete_bucket is rc
+        1 with one ``remove_bucket failed:`` line. The success line is past
+        that catch: the bucket is gone by then, so a stdout that cannot take
+        the line is lost output (rc 255 with the error, like every command's),
+        and a process without a stdout (``1>&-``) keeps rc 0 - where aws's
+        catch spans the line and reports the removed bucket as an rb failure.
+        A client-construction
         failure (a bad ``--profile``, partial credentials, an empty region)
         reaches main's exit-code mapping (config -> 253, other botocore -> 255).
         """
@@ -96,16 +99,15 @@ class RbCommand(Command):
             # 'delete failed:' lines, or one fatal-error line).
             raise InvalidValueError(_FORCE_FAILED, operation="rb")
 
-        # aws's RbCommand wraps the delete *and* its success line in one local
-        # `except Exception`, so a stdout that cannot take the line is reported
-        # as an rb failure like any other rather than reaching the dispatcher.
         try:
             s3.rb(storage)
-            output.uni_write(sys.stdout, output.format_remove_bucket(storage.bucket) + "\n")
-            return 0
         except Exception as exc:
             sys.stderr.write(output.format_remove_bucket_failed(target, exc) + "\n")
             return 1
+        # The bucket is gone from here, so the line is outside the failure
+        # catch (aws's spans it, reporting a removed bucket as failed).
+        output.write_result_line(output.format_remove_bucket(storage.bucket))
+        return 0
 
     @staticmethod
     def _force_rm(target: str, args: argparse.Namespace, ctx: Context, s3: S3) -> int:

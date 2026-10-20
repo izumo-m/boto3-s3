@@ -308,8 +308,9 @@ def resolve_paramfile_values(args: argparse.Namespace, *, operation: str) -> tup
     The ``file://`` / ``fileb://`` paramfile expansion (a bad reference is
     252) and, for the two ``integer`` options, the bare ``int()`` coercion
     (255): the SSE-C key blob, ``--sse-kms-key-id``, the copy-source blob,
-    the refusal of a ``--grants`` paramfile, the free-string text block, then
-    ``--progress-frequency`` and ``--page-size`` (paramfile then coercion).
+    the ``--grants`` check (a lone paramfile, a malformed grant: 252), the
+    free-string text block, then ``--progress-frequency`` and ``--page-size``
+    (paramfile then coercion).
     Returns the two coerced integers. ``--metadata`` (a map) and cp's
     ``--expected-size`` are resolved by ``classify_paths`` (``resolve_metadata_option`` /
     ``expand_option_paramfile``). ``build_transfer_options`` consumes the
@@ -341,28 +342,55 @@ def resolve_paramfile_values(args: argparse.Namespace, *, operation: str) -> tup
     return page_size, progress_frequency
 
 
+# The permissions a ``--grants`` value may name (``<permission>=<grantee>``).
+_GRANT_PERMISSIONS = ("read", "readacl", "writeacl", "full")
+
+
 def _resolve_grants(args: argparse.Namespace, *, operation: str) -> None:
-    """Refuse a lone ``--grants`` paramfile reference (252).
+    """Refuse a lone ``--grants`` paramfile reference, and a malformed grant (252).
 
     aws unwraps a one-element list before its paramfile hook, so ``--grants
     file://g`` loads the file and its grant parser then walks the text
     character by character (bytes int by int) - an aws bug this CLI does not
     copy (docs/cli/aws-differences.md section 2). The reference is refused
     without being read. A multi-element ``--grants`` or a prefix-less value
-    stays the list argparse produced; a ``file://`` element there is a literal
-    grant on aws too, refused by the grant check in flight.
+    stays the list argparse produced, a ``file://`` element there a literal
+    grant as on aws.
+
+    Each grant must then be ``<permission>=<grantee>`` with a known
+    permission, checked here, before the run, on every route: a malformed
+    value is a command-line error. aws checks it only as it maps the first
+    upload or copy - an in-flight fatal error after any deletes already sent,
+    rc 0 when nothing needs transferring, never on a download. The library
+    refuses the same shapes before its runs for its own callers; this is the
+    CLI's argument check, which reports them as usage errors.
     """
     grants: object = args.grants
-    if isinstance(grants, list):
-        items = cast("list[object]", grants)
-        if (
-            len(items) == 1
-            and isinstance(items[0], str)
-            and items[0].startswith(("file://", "fileb://"))
-        ):
+    if not isinstance(grants, list):
+        return
+    items = cast("list[object]", grants)
+    if (
+        len(items) == 1
+        and isinstance(items[0], str)
+        and items[0].startswith(("file://", "fileb://"))
+    ):
+        raise ValidationError(
+            "Error parsing parameter '--grants': a file:// or fileb:// reference "
+            "is not supported; give each grant as an argument",
+            operation=operation,
+        )
+    for grant in items:
+        permission, separator, _grantee = str(grant).partition("=")
+        if not separator:
             raise ValidationError(
-                "Error parsing parameter '--grants': a file:// or fileb:// reference "
-                "is not supported; give each grant as an argument",
+                f"Error parsing parameter '--grants': {grant!r} is not of the form "
+                "permission=grantee",
+                operation=operation,
+            )
+        if permission not in _GRANT_PERMISSIONS:
+            raise ValidationError(
+                f"Error parsing parameter '--grants': {permission!r} is not a permission "
+                f"(one of: {'|'.join(_GRANT_PERMISSIONS)})",
                 operation=operation,
             )
 
@@ -494,14 +522,16 @@ def normalize_s3_path(path: str) -> str:
 def create_local_dest_dir(dest: str, *, operation: str) -> None:
     """Pre-create the ``s3local`` destination directory (aws's ``_validate_path_args``).
 
-    aws creates the destination during validation whenever the operation is a
-    ``dir_op`` (``cp``/``mv`` ``--recursive`` and every ``sync``) - before the
-    pipeline - so a creation failure is its pre-pipeline rc 255, not the
-    pipeline's rc 1. Pre-creating it outside ``finish_transfer``'s catch keeps
-    that shape (the library still ensures the dir for direct callers; this
-    makes it a no-op there). The bare ``exists`` test then bare ``makedirs``
-    mirror aws exactly; every ``translate_os_error`` category maps to the
-    same rc 255.
+    aws creates the destination whenever the operation is a ``dir_op``
+    (``cp``/``mv`` ``--recursive`` and every ``sync``) - before the pipeline,
+    so it is there even when nothing transfers, and a creation failure is the
+    pre-pipeline rc 255, not the pipeline's rc 1. Pre-creating it outside
+    ``finish_transfer``'s catch keeps that shape (the library still ensures
+    the dir for direct callers; this makes it a no-op there). The commands
+    call it after every check of their own, where aws creates it in the middle
+    of its validation: a run refused before it starts leaves nothing behind.
+    The bare ``exists`` test then bare ``makedirs`` mirror aws; every
+    ``translate_os_error`` category maps to the same rc 255.
     """
     if not os.path.exists(dest):
         try:

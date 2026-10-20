@@ -216,32 +216,31 @@ class TestResultLines:
         assert (captured.out, captured.err) == ("", "")
         assert printer.failed == 0
 
-    def test_nothing_after_the_first_cancelled_record_is_printed_or_counted(
+    def test_records_after_a_cancelled_one_still_print_and_count(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws's ResultProcessor disables its handlers once it has processed
-        # the first error result (the CtrlCResult / fatal ErrorResult a
-        # cancelled future mints) and only drains the queue after it - which
-        # is how an interrupted `mv` there can delete a source whose `move:`
-        # line never prints. The case-conflict notices bypass the processor
-        # on aws, so they still print.
-        with TransferPrinter() as printer:
-            printer.on_result(
-                _result(OpOutcome.SUCCEEDED, key="a", src="s3://b/a", dest="s3://c/a")
-            )
+        # aws's ResultProcessor goes silent after the first error result, so
+        # a failure settling after the cancel there is never shown. Every
+        # outcome is reported here: a failure line keeps its cause, and a
+        # success that completed (an mv whose source is gone) keeps its line.
+        with TransferPrinter(progress=False) as printer:
             printer.on_result(_result(OpOutcome.CANCELLED, key="b", error=RuntimeError("ctrl-c")))
             printer.on_result(
                 _result(OpOutcome.SUCCEEDED, key="c", src="s3://b/c", dest="s3://c/c")
             )
-            printer.on_result(_result(OpOutcome.FAILED, key="d", error=RuntimeError("boom")))
-            printer.on_result(_result(OpOutcome.WARNED, key="e", error=RuntimeError("warned")))
-            printer.on_progress(_progress("f", 5, 10))
-            printer.on_result(_result(OpOutcome.NOTICE, key="g", error=RuntimeError("notice")))
+            printer.on_result(
+                _result(
+                    OpOutcome.FAILED,
+                    key="d",
+                    src="s3://b/d",
+                    dest="s3://c/d",
+                    error=RuntimeError("boom"),
+                )
+            )
         captured = capsys.readouterr()
-        assert captured.out == "upload: s3://b/a to s3://c/a\n"
-        assert captured.err == "notice\n"
-        assert (printer.failed, printer.warned) == (0, 0)
-        assert "f" not in printer._inflight  # pyright: ignore[reportPrivateUsage]
+        assert captured.out == "upload: s3://b/c to s3://c/c\n"
+        assert captured.err == "upload failed: s3://b/d to s3://c/d boom\n"
+        assert printer.failed == 1
 
     def test_cancelled_backfills_untransferred_remainder(self) -> None:
         # A queued-then-cancelled transfer closes its meter share like a

@@ -776,14 +776,15 @@ class TestOptionValueResolution:
         rc = cli.main(["cp", self._MISSING, "s3://b/k", "--metadata", f"a@=fileb://{blob}"])
         assert rc == 252
 
-    def test_metadata_shorthand_paramfile_load_failure_is_255(
+    def test_metadata_shorthand_paramfile_load_failure_is_252(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # The counterpart of the whole-value case below: inside the shorthand,
-        # aws calls get_paramfile itself, so a load failure reaches its general
-        # handler - rc 255, for either prefix. Measured on the pinned aws-cli.
+        # Like the whole-value case below: a file named on the command line
+        # that cannot be read is 252 wherever it is named, for either prefix.
+        # (aws's shorthand parser loads it outside the handler that names the
+        # option, so there it reaches the general handler at 255.)
         for ref in ("file:///no/x", "fileb:///no/x"):
-            assert cli.main(["cp", self._MISSING, "s3://b/k", "--metadata", f"a@={ref}"]) == 255
+            assert cli.main(["cp", self._MISSING, "s3://b/k", "--metadata", f"a@={ref}"]) == 252
             assert ref in capsys.readouterr().err
 
     def test_whole_value_metadata_fileb_missing_is_252(self) -> None:

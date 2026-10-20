@@ -90,19 +90,11 @@ class TestBadCodec:
 
 
 class TestErrorShape:
-    """Which exception a load failure becomes - aws's two paths.
+    """A load failure is reported as the parse error of the argument naming it.
 
-    aws raises ``ResourceLoadingError`` inside ``get_paramfile`` and catches it
-    only in the ``load-cli-arg`` handler it registers for *named* arguments, so
-    the same missing file is a bare rc-255 report or the named argument's rc-252
-    parse error depending on the caller (both measured on the pinned aws-cli via
-    ``--metadata k@=file:///no/x`` and ``--metadata file:///no/x``).
+    Every caller loads inside `named_argument`, so a missing file is rc 252
+    wherever it is named (aws's shorthand ``@=`` alone reports it at 255).
     """
-
-    def test_unwrapped_load_failure_is_the_general_error(self, tmp_path: Path) -> None:
-        with pytest.raises(paramfile.ParamfileLoadError) as excinfo:
-            paramfile.get_paramfile(f"file://{tmp_path}/no-such-file", operation="cp")
-        assert str(excinfo.value).startswith("Unable to load paramfile file://")
 
     def test_named_argument_wraps_it_as_the_parse_error(self, tmp_path: Path) -> None:
         with pytest.raises(ValidationError) as excinfo:

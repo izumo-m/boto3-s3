@@ -25,8 +25,8 @@ def _parse(value: str) -> dict[str, str]:
 
 
 def _assert_parse_error(text: str) -> None:
-    """A syntax error: rc 252's ValidationError naming the option, not the
-    255 load failure (`InvalidValueError`)."""
+    """A syntax error: rc 252's ValidationError naming the option, not a
+    255 `InvalidValueError`."""
     with pytest.raises(ValidationError) as excinfo:
         _parse(text)
     assert not isinstance(excinfo.value, InvalidValueError)
@@ -181,16 +181,17 @@ class TestAtEqualsParamfile:
             "text, not the bytes of a fileb:// file"
         )
 
-    def test_missing_paramfile_is_the_general_error(self, tmp_path: Path) -> None:
-        # aws's shorthand parser calls get_paramfile directly, outside the
-        # load-cli-arg handler that names the option, so the failure reaches its
-        # general handler: rc 255 with the bare message, not the parser's 252
-        # (measured: `--metadata k@=file:///no/x`).
-        with pytest.raises(InvalidValueError) as excinfo:
+    def test_missing_paramfile_is_the_options_parse_error(self, tmp_path: Path) -> None:
+        # A file named on the command line that cannot be read is a usage
+        # error naming the option (252), as for any other argument - aws's
+        # shorthand parser alone loads it outside that handler (255 there).
+        with pytest.raises(ValidationError) as excinfo:
             _parse(f"a@=file://{tmp_path}/no-such-file")
+        assert not isinstance(excinfo.value, InvalidValueError)
+        assert str(excinfo.value).startswith("Error parsing parameter '--metadata': ")
         assert f"file://{tmp_path}/no-such-file" in str(excinfo.value)
 
-    def test_undecodable_paramfile_is_the_general_error(
+    def test_undecodable_paramfile_is_the_options_parse_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         ref = tmp_path / "val.bin"
@@ -198,8 +199,9 @@ class TestAtEqualsParamfile:
         # Pin the decode to UTF-8 (aws's compat_open knob): the locale default
         # elsewhere may be a codec that decodes any byte (cp1252 on Windows).
         monkeypatch.setenv("AWS_CLI_FILE_ENCODING", "utf-8")
-        with pytest.raises(InvalidValueError) as excinfo:
+        with pytest.raises(ValidationError) as excinfo:
             _parse(f"a@=file://{ref}")
+        assert not isinstance(excinfo.value, InvalidValueError)
         assert str(ref) in str(excinfo.value)
 
     def test_at_without_equals_is_a_parse_error(self) -> None:

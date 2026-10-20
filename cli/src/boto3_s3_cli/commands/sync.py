@@ -68,16 +68,11 @@ class SyncCommand(Command):
             )
         paths_type = head.paths_type  # "locals3" | "s3local" | "s3s3" here
         transferargs.validate_checksum_paths_type(args, paths_type, operation="sync")
-        # aws-cli's _validate_path_args (one function) does BOTH the missing-source
-        # check and the s3local dest-dir creation.
         if src_type == "local" and not os.path.exists(src):
-            # Missing local source: aws's bare RuntimeError -> rc 255
-            # (NotFoundError without a ClientError cause maps the same).
+            # Missing local source (aws-cli's _validate_path_args): aws's bare
+            # RuntimeError -> rc 255 (NotFoundError without a ClientError
+            # cause maps the same).
             raise NotFoundError(f"The user-provided path {src} does not exist.", operation="sync")
-        if dest_type == "local":
-            # aws creates the s3local destination during validation (before
-            # run): a creation failure is the pre-pipeline rc 255.
-            transferargs.create_local_dest_dir(dest, operation="sync")
         transferargs.validate_sse_c_pairing(args, paths_type, operation="sync")
         if any(
             transferargs.is_s3express_path(path) or transferargs.is_s3express_accesspoint_path(path)
@@ -133,6 +128,10 @@ class SyncCommand(Command):
                 client, paths_type, transfer_config
             ),
         )
+        if dest_type == "local":
+            # The s3local destination aws's _validate_path_args creates, once
+            # every check above has passed (transferargs.create_local_dest_dir).
+            transferargs.create_local_dest_dir(dest, operation="sync")
         printer = transferargs.build_printer(args, progress_frequency)
 
         def run_sync() -> None:

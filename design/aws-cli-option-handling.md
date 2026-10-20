@@ -166,17 +166,18 @@ mishandles them - aws bugs this CLI does not copy
   or sends no grant at all for an empty file. With more than one `--grants`
   value nothing is loaded on either tool.
 
-The `key@=...` shorthand form splits the same two outcomes differently, because
-the load happens one level down. aws wraps a paramfile failure into the
-`Error parsing parameter '<name>'` form only in the `load-cli-arg` handler it
-registers for *named* arguments; its shorthand parser calls the loader itself,
-so a reference it cannot load - missing, or binary through the text `file://` -
-skips that wrapping and reaches the general handler as **rc 255 with the bare
-`Unable to load paramfile ...` line**, naming no option. A `fileb://` one
+The `key@=...` shorthand form reports the same way: a reference it cannot
+load - missing, or binary through the text `file://` - is the option's
+`Error parsing parameter '<name>'` usage error (rc 252), and a `fileb://` one
 that *does* load is refused for being bytes, a map value being text (rc 252).
-`boto3-s3-cli` keeps that split by scoping
-its wrapper the same way (`paramfile.named_argument`, entered by the option and
-positional resolution and skipped by `shorthand.py`).
+aws wraps a paramfile failure into that form only in the `load-cli-arg`
+handler it registers for *named* arguments, and its shorthand parser calls the
+loader itself, so there the load failure reaches the general handler as rc 255
+with the bare `Unable to load paramfile ...` line. That is its call path, not
+a meaning: a file named on the command line that cannot be read is a
+command-line error wherever it is named, so `shorthand.py` loads inside the
+option's `paramfile.named_argument` scope too (an exit code in an error path,
+not recorded as a difference - overview.md section 3).
 
 aws's grammar also builds lists (`k=a,b`, `k=[a,b]`) and nested maps
 (`k={a=b}`) and arms the operator inside them; a map of strings holds
@@ -236,7 +237,10 @@ covers the write-side request options on a download - `--acl`,
 `--storage-class`, the content headers, `--metadata`, the SSE family,
 `--grants` - because the `GetObject` mapping emits only SSE-C / request-payer /
 checksum-mode: either the corresponding S3 request parameter is never emitted,
-or the route-specific logic just does not run. aws-cli applies the shared transfer arguments
+or the route-specific logic just does not run. Ignoring an option is not
+accepting a malformed one, though: a `--grants` value that is not
+`<permission>=<grantee>` with a known permission is refused (252) on a
+download too, where aws never parses it. aws-cli applies the shared transfer arguments
 uniformly and acts only on the route-relevant ones. `boto3-s3` does the same:
 the internal snake->PascalCase translation only emits the parameters that are
 valid for the chosen direction.

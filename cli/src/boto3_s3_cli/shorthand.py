@@ -19,8 +19,8 @@ aws's grammar also builds lists (``k=a,b``, ``k=[a,b]``) and nested maps
 rejects them with botocore's type report. Here they are rejected while
 parsing, as is a ``fileb://`` value loaded through ``@=``. Every rejection is
 an ``Error parsing parameter '<name>'`` usage error (rc 252 via
-``ValidationError``), except a failure to *load* an ``@=`` paramfile, which
-leaves this module unwrapped and exits 255 (`paramfile.named_argument`).
+``ValidationError``), a failure to *load* an ``@=`` paramfile included
+(`paramfile.named_argument`), like a paramfile named by any other argument.
 """
 
 from __future__ import annotations
@@ -75,15 +75,20 @@ def parse_map_option(value: str, *, name: str, operation: str) -> dict[str, str]
     whose values are all strings is accepted. Everything else is parsed with
     `_Parser`; a value loaded as bytes through ``@=fileb://`` is then refused,
     since a map value must be text. Every refusal is the ``Error parsing
-    parameter '<name>'`` usage error (rc 252 via ``ValidationError``). A
-    paramfile the ``@=`` operator cannot *load* is not this function's error
-    at all - see `_Parser._resolve`.
+    parameter '<name>'`` usage error (rc 252 via ``ValidationError``), a
+    paramfile the ``@=`` operator cannot *load* included. aws reports that
+    one load failure at 255 instead - its shorthand parser calls
+    ``get_paramfile`` outside the handler that names the argument - an
+    accident of its call path that is not copied: a file named on the
+    command line that cannot be read is a command-line error wherever it is
+    named.
     """
     text = value.strip()
     if text.startswith(("{", "[")):
         return _parse_json_map(value, name=name, operation=operation)
     try:
-        parsed = _Parser(value, operation=operation).parse()
+        with paramfile.named_argument(name, operation=operation):
+            parsed = _Parser(value, operation=operation).parse()
     except _ShorthandParseError as exc:
         raise ValidationError(
             f"Error parsing parameter '{name}': {exc}", operation=operation
@@ -267,11 +272,8 @@ class _Parser:
     def _resolve(self, value: str) -> str | bytes:
         """aws's ``_resolve_paramfiles``: load the value when ``@=`` armed the pair.
 
-        Outside `paramfile.named_argument` on purpose: aws's shorthand parser
-        calls `get_paramfile` itself, so a load failure here is not the
-        option's parse error but a bare `ResourceLoadingError` reaching its
-        general handler - rc 255 without the ParamValidation envelope
-        (measured: ``--metadata k@=file:///no/x``).
+        A load failure is reported as the option's parse error by
+        `parse_map_option`'s `paramfile.named_argument` scope.
         """
         if not self._resolve_paramfiles:
             return value

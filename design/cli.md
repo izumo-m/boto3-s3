@@ -220,7 +220,7 @@ solidified design is added here.
 | `filters.py` | The order-preserving action for `--exclude` / `--include` + `FileFilter` construction. `compile_filter` is the aws `create_filter` + `Filter` equivalent: each side's already-built Storage contributes a base (aws's `rootdir`: `bucket/key`, or the absolutized local path; the parent for a single-file operation), every pattern is joined onto both bases with `os.path.join`, and the joined forms are fnmatched against each entry's full path, last match winning - glob characters in the base and cross-side application included, exactly like aws. When that is provably equivalent to matching the pattern against `FileInfo.compare_key` (plain bases, relative patterns, no nested s3<->s3 pair), it delegates to the specialized globsieve engine |
 | `progress.py` | `TransferPrinter`: aws-compatible rendering of transfer result lines / progress (section 5.7-5.9. Worker-thread callbacks only count (the rc inputs) and enqueue slim records; a dedicated printer thread renders in queue order - aws's `ResultProcessor` shape, but with a **bounded** queue (aws-cli-option-handling.md section 6). The verb is `TransferType.value` - mv is `move` on every path. A record with no `dest` is rendered with a single endpoint - sync's `delete:` lines) |
 | `shorthand.py` | Parsing of map-type option values (`--metadata k=v,...` / JSON form / the `@=` paramfile operator). The grammar is aws's, cut down to scalar values: it accepts exactly what aws accepts, and refuses while parsing the lists and nested maps aws parses and then rejects, as well as bytes from `@=fileb://`. Every refusal is the parser's `Error parsing parameter '<name>'` (252). A `{`- or `[`-led value is read as JSON, and only an object of strings is accepted |
-| `paramfile.py` | aws's local paramfile loaders (`file://` text, `fileb://` binary; the `get_paramfile` counterpart) shared by the option resolution and the shorthand `@=` operator. A load failure is a `ParamfileLoadError`, whose exit code the caller decides: `named_argument` (aws's `load-cli-arg` handler) turns it into the named argument's rc-252 parse error, and the shorthand's `@=` stays outside it for aws's bare rc 255 |
+| `paramfile.py` | aws's local paramfile loaders (`file://` text, `fileb://` binary; the `get_paramfile` counterpart) shared by the option resolution and the shorthand `@=` operator. A load failure is a `ParamfileLoadError`, which every caller - the shorthand's `@=` included - turns into the named argument's rc-252 parse error through `named_argument` (aws's `load-cli-arg` handler; aws's shorthand alone skips it and ends at 255) |
 | `output.py` | `aws s3`-compatible output formatting (`ls` listing lines, `rm` delete lines. Kept as pure functions; not turned into a class) |
 | `usage.py` | The single home of the usage / error strings shared across subcommands (`single_uri_usage` / `two_path_usage` / `invalid_bucket_name_message`); commands interpolate only their own name or value |
 
@@ -743,12 +743,13 @@ Output: stdout `make_bucket: <bucket>` (the bucket name only) / stderr
 `make_bucket failed: <path> <msg>` (the original path argument). **Any error
 after the operation begins is uniformly rc 1** (both `BucketAlreadyOwnedByYou`
 and a credential error at request time. aws locally catches every exception from
-create_bucket - section 6). aws's catch spans the success line's `uni_print`
-too, so a stdout that cannot take `make_bucket: <bucket>` - closed, full, a
-closed pipe - is one more mb failure: `make_bucket failed: <path> <msg>` at
-rc 1, not the dispatcher's 255. `MbCommand.run` therefore puts the line inside
-the same `except Exception` as `s3.mb`; the bucket exists either way
-(measured). `mb s3://` / `mb s3:///k` is rc 1 by the equivalent of
+create_bucket - section 6). The success line is outside that catch: the
+bucket exists once `s3.mb` returns, so a stdout that cannot take
+`make_bucket: <bucket>` (full, a closed pipe) is lost output - the write error
+at rc 255, as for every command (section 6) - and a process started without
+a stdout (`1>&-`) writes nothing and keeps rc 0 (`output.write_result_line`).
+aws's catch spans the line's `uni_print`, so there it is one more mb failure
+(`make_bucket failed:`, rc 1, measured) for a bucket that was created. `mb s3://` / `mb s3:///k` is rc 1 by the equivalent of
 client-side validation for `Bucket=""` (the same leading branch as rm).
 
 ### 5.4 `rb`
@@ -767,10 +768,10 @@ Output: stdout `remove_bucket: <bucket>` / stderr `remove_bucket failed: <path>
 <msg>`. A delete_bucket failure (`BucketNotEmpty` / `NoSuchBucket` / the
 `Bucket=""` of `rb s3://` / `rb s3:///k`) is uniformly **rc 1**, reusing the same
 `usage.invalid_bucket_name_message()` wording and `format_remove_bucket_failed`
-wrapper as `mb` / `rm`'s equivalent empty-bucket check. An unwritable success
-line is rc 1 as well: aws's local catch spans its `uni_print` exactly as mb's
-does (section 5.3), so `RbCommand.run` keeps the line inside the same
-`except Exception` and the bucket is gone either way. With `--force` the
+wrapper as `mb` / `rm`'s equivalent empty-bucket check. The success line is
+outside that catch, as mb's is (section 5.3): the bucket is gone by then, so
+a line stdout cannot take is lost output (rc 255) rather than an rb failure,
+and no stdout at all keeps rc 0. With `--force` the
 empty-bucket case never reaches that line: aws has no empty-bucket
 short-circuit, so the inner rm runs first and its (inevitable) failure aborts
 at **rc 255** via the `--force` row above, before delete_bucket is attempted.
@@ -890,9 +891,11 @@ which one is reported is not matched ([`overview.md`](./overview.md) section
    builds fine on S3's global endpoint.
 4. **The rest of the path validation** - aws's `add_paths`: streaming, mv's
    onto-itself guard and resolver, the checksum / SSE-C pairings, the
-   missing local source, the `s3local` destination pre-create, sync's
-   directory-bucket rejection. Which of these a command runs is recorded
-   with its command.
+   missing local source, sync's directory-bucket rejection. Which of these a
+   command runs is recorded with its command. aws's `_validate_path_args`
+   also creates the `s3local` destination here; this CLI creates it after
+   step 5, once every check has passed, so a refused run leaves nothing
+   behind.
 5. **The `[s3]` runtime config and the transfer manager** - aws's
    `_get_transfer_manager`: `transferargs.resolve_transfer_config` (an invalid
    `[s3]` value is 255) then `transferargs.materialize_transfer_engine`, which
@@ -1019,7 +1022,9 @@ several fail, which one is reported is not matched): **the direct-option
 paramfile loads and the two integer coercions**
 (`resolve_paramfile_values`, `commands/transferargs.py`: the `--sse-c-key`
 blob, `--sse-kms-key-id`, the `--sse-c-copy-source-key` blob, `--grants` (a
-lone `file://` / `fileb://` refused, 252), the free-string text block,
+lone `file://` / `fileb://` refused, and every grant checked for the
+`<permission>=<grantee>` shape and a known permission, on every route: 252),
+the free-string text block,
 `--progress-frequency`, then `--page-size`; a load is 252, a bad `int()` is
 255) -> **`--metadata` resolution (a whole-value `fileb://` refused 252,
 paramfile load 252, shorthand parse 252)** -> cp's **`--expected-size`
@@ -1033,13 +1038,16 @@ type** (`--checksum-algorithm` is locals3 / s3s3, `--checksum-mode` is s3local
 only. `Expected <param> parameter to be used with one of following path formats:
 ...` 252 - shared with mv) -> **a nonexistent single local
 src (255**, equivalent to aws's bare RuntimeError.
-`-` is excluded) -> **the
-s3local `--recursive` destination-directory pre-create (255** on an OSError -
-the dir_op half of the same `_validate_path_args`; sync shares it,
-unconditionally) -> the SSE-C pair (252) -> the `[s3]` runtime config (255) and
+`-` is excluded) -> the SSE-C pair (252) -> the `[s3]` runtime config (255) and
 the transfer-manager construction (255 on a CRT client the region cannot build)
 -> the `--case-conflict` Express branch (252; taken for an access point of a
-directory bucket too, which aws's `--x-s3` test misses) -> `S3().cp(...)`.
+directory bucket too, which aws's `--x-s3` test misses) -> **the s3local
+`--recursive` destination-directory pre-create (255** on an OSError - the
+dir_op half of aws's `_validate_path_args`; sync shares it, unconditionally)
+-> `S3().cp(...)`. The pre-create comes last, once every check has passed, so
+a refused run leaves no directory behind; aws creates it in the middle of its
+validation (right after the missing-source check) and leaves it there when a
+later check refuses the run.
 **`finish_transfer` - wrapping the `--expected-size` conversion and `S3().cp`
 - is the in-pipeline boundary**: `BatchError` -> 1 (the `... failed:`
 lines have already been emitted by on_result), a `KeyboardInterrupt` -> one
@@ -1052,10 +1060,11 @@ printer thread writes every queued line, so `TransferPrinter.finish` holds
 the interrupt until the lines are out and then lets it reach the
 dispatcher, whatever the run ended with). Any other library exception ->
 a single `fatal error:` line + 1 (a single s3 src's HeadObject 404 = `Key "..."
-does not exist`, a listing error, a malformed `--grants`, a non-integer
-`--expected-size`, an absent stdin, and case-conflict `error` are also here;
-malformed `--grants` remains fatal under `--dryrun` because aws-cli maps each
-dry-run item's request parameters), a
+does not exist`, a listing error, a non-integer `--expected-size`, an absent
+stdin, and case-conflict `error` are also here; a malformed `--grants`, which
+aws reports here as it maps the first upload or copy - not at all on a
+download or a run with nothing to transfer - is refused before the run
+instead, 252), a
 normal return is **2** if the warned count > 0, else 0.
 
 **Output** (`TransferPrinter`, aws-cli `ResultPrinter` shape): success
@@ -1064,16 +1073,15 @@ relative to cwd = aws-cli `relative_path`, the s3 side is `s3://...`), a `(dryru
 prefix, failure `<transfer_type> failed: <src> to <dest> <err>` (stderr), warning `warning:
 <body>` (stderr, the body assembled by the library with aws-cli wording). A
 CANCELLED record (an item revoked by a fatal elsewhere or a Ctrl-C -
-opresult.md) prints **nothing**, and **nothing after it prints or counts
-either** except the NOTICE advisories: aws's `ResultProcessor` disables
-every handler once it has processed the first error result - the
-`CtrlCResult` / fatal `ErrorResult` a cancelled classic future mints, which is
-what a CANCELLED record is - and only drains the queue after it, so the run
-shows its single closing line and none of the results queued behind it (a
-fatal mid-listing prints zero per-item lines for the cancelled set, and an
-interrupted `mv` can delete sources whose `move:` lines never print - nine
-in each of four measured runs). NOTICE lines bypass that processor on aws
-(written straight to stderr) and keep printing. Progress
+opresult.md) prints **nothing** (a fatal mid-listing prints zero per-item
+lines for the cancelled set, as on aws), while every other record still
+prints and counts after it: a failure that settles after the cancel keeps
+its line and its cause, and a success that completed - an interrupted `mv`
+whose source is already deleted - keeps its `move:` line. aws's
+`ResultProcessor` disables every handler once it has processed the first
+error result, so there those lines never print (an interrupted `mv` lost nine
+`move:` lines in each of four measured runs); a failure is reported here
+whatever happened around it (overview.md section 3). Progress
 is `Completed <done>/<total> (<speed>/s) with <n> file(s) remaining`, overwritten
 with `\r` (**no isatty gate** = mixed into a pipe too, as in aws. Goldens mask
 it). The suppression matrix is the same shape as rm: `--quiet` = no printer at
@@ -1205,11 +1213,8 @@ all of that):
 4. Checksum path type 252 (the cp / mv-shared `validate_checksum_paths_type` -
    aws-cli `_validate_path_args` applies to sync too)
 5. A nonexistent locals3 src -> 255 (aws-cli `_validate_path_args`)
-6. The local destination-directory pre-create for a download (255 on an
-   OSError - the same `_validate_path_args` half as cp's dir_op pre-create,
-   run unconditionally for a local dest)
-7. SSE-C pair 252
-8. **An S3 Express directory bucket or one of its access points on either
+6. SSE-C pair 252
+7. **An S3 Express directory bucket or one of its access points on either
    side is 252** (`Cannot use sync command with a directory bucket.` - aws-cli
    `_validate_not_s3_express_bucket_for_sync`. The `--x-s3` suffix decision =
    `transferargs.is_s3express_path`, plus `is_s3express_accesspoint_path` for
@@ -1217,10 +1222,15 @@ all of that):
    loses objects to `--delete` - a deliberate difference (user decision
    2026-10-15, docs/cli/aws-differences.md). A **local** dir of the same name
    passes)
-9. case-conflict resolution (treated as `recursive=True` - sync has no flag)
-10. options conversion (`no_overwrite` is passed through in options; `S3.sync`
+8. case-conflict resolution (treated as `recursive=True` - sync has no flag)
+9. options conversion (`no_overwrite` is passed through in options; `S3.sync`
    reads it as the write-guard and strips it before the engine - sync does not
    attach IfNoneMatch. sync.md section 3)
+10. The local destination-directory pre-create for a download (255 on an
+   OSError - the same `_validate_path_args` half as cp's dir_op pre-create,
+   run unconditionally for a local dest), after every check above: aws
+   creates it at step 5's position and leaves it behind when a later check
+   refuses the run
 
 **The filter is compiled once**: the `--exclude` / `--include` sequence is turned
 into a single `FileFilter` with both sides' bases (`filters.py`: aws joins every
@@ -1280,8 +1290,8 @@ Python's own recipe for a broken pipe), where the exit's flush lands
 harmlessly. A run that already failed keeps its code, its failure reported (a
 `download failed:` line, `ls`'s `[Errno 32] Broken pipe` at 255). A run that
 succeeded (0, or 2 with warnings only) but whose stdout output was lost - the
-result lines of a transfer or a delete the printer could not get out - exits
-255 with the cause (`boto3-s3: [ERROR]: [Errno 28] No space left on device`):
+result lines of a transfer or a delete the printer could not get out, or the
+success line of `mb` / `rb` (section 5.3) - exits 255 with the cause (`boto3-s3: [ERROR]: [Errno 28] No space left on device`):
 the output asked for was lost, a local I/O failure rather than a success. A
 help page is written by `_print_help`, not argparse's `print_help`, which from
 Python 3.11 swallows the write's `OSError` (a page larger than the buffer would

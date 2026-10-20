@@ -68,11 +68,14 @@ class MbCommand(Command):
 
         Exit-code shape (aws-cli MbCommand): usage errors - a non-``s3://``
         path, an S3 Express (``--x-s3``) bucket, a rejected ARN form - exit
-        252 via ``main``; every failure from the create onwards is rc 1 with
-        one ``make_bucket failed:`` line (aws catches every create_bucket
-        exception locally, even request-time credential errors, and its catch
-        spans the success line too - an unwritable stdout is an mb failure, not
-        the dispatcher's 255). The key part
+        252 via ``main``; every failure of the create is rc 1 with one
+        ``make_bucket failed:`` line (aws catches every create_bucket
+        exception locally, even request-time credential errors). The success
+        line is past that catch: the bucket exists by then, so a stdout that
+        cannot take the line is lost output (rc 255 with the error, like every
+        command's), and a process without a stdout (``1>&-``) keeps rc 0 -
+        where aws's catch spans the line and reports the created bucket as an
+        mb failure. The key part
         of the path is silently dropped, exactly like aws. A client-construction
         failure (a bad ``--profile``, partial credentials, an empty region)
         reaches main's exit-code mapping (config -> 253, other botocore -> 255).
@@ -108,13 +111,12 @@ class MbCommand(Command):
             # caught here where a naive partition on the first "/" would miss it.
             raise ValidationError("Cannot use mb command with a directory bucket.", operation="mb")
         tags = [(key, value) for key, value in args.tags] if args.tags else None
-        # aws's MbCommand wraps the create *and* its success line in one local
-        # `except Exception`, so a stdout that cannot take the line is reported
-        # as an mb failure like any other rather than reaching the dispatcher.
         try:
             s3.mb(storage, tags=tags)
-            output.uni_write(sys.stdout, output.format_make_bucket(storage.bucket) + "\n")
-            return 0
         except Exception as exc:
             sys.stderr.write(output.format_make_bucket_failed(target, exc) + "\n")
             return 1
+        # The bucket exists from here, so the line is outside the failure
+        # catch (aws's spans it, reporting a created bucket as failed).
+        output.write_result_line(output.format_make_bucket(storage.bucket))
+        return 0

@@ -168,6 +168,23 @@ class TestUsageErrors:
         assert cli.main(["cp", str(src), f"s3://{arn}/k"], ctx=ctx) == 252
         assert calls == []
 
+    @pytest.mark.parametrize("direction", ["upload", "download"])
+    def test_a_malformed_grant_is_refused_before_the_run(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], direction: str
+    ) -> None:
+        # A usage error on every route: aws finds it only as it maps the
+        # first upload or copy (an in-flight fatal error, rc 1), and never on
+        # a download, which maps no grants.
+        local = tmp_path / "a.txt"
+        local.write_bytes(b"x")
+        paths = [str(local), "s3://b/k"] if direction == "upload" else ["s3://b/k", str(local)]
+        ctx, calls = _recording_ctx([])
+        rc = cli.main(["cp", *paths, "--grants", "foo"], ctx=ctx)
+        err = capsys.readouterr().err
+        assert rc == 252
+        assert "--grants" in err
+        assert calls == []
+
 
 class TestGeneralErrors:
     def test_page_size_non_integer_is_255(self) -> None:
@@ -289,19 +306,6 @@ class TestPipelineErrors:
         assert rc == 1
         assert captured.err.startswith("fatal error: ")
         assert "Invalid bucket name" in captured.err
-
-    def test_bad_grants_shape_is_a_fatal_error(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        src = tmp_path / "a.txt"
-        src.write_bytes(b"x")
-        ctx, calls = _recording_ctx([])
-        rc = cli.main(["cp", str(src), "s3://b/k", "--grants", "foo"], ctx=ctx)
-        err = capsys.readouterr().err
-        assert rc == 1
-        assert err.startswith("fatal error: ")
-        assert "grants" in err
-        assert calls == []
 
 
 class TestWarnings:
@@ -975,9 +979,13 @@ class TestCaseConflict:
 
 
 class TestS3ExpressCaseConflict:
-    def test_skip_is_rejected(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_skip_is_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         # The rejection fires before any request: the recording client must
-        # stay uncalled.
+        # stay uncalled, and the destination directory is not created (aws
+        # creates it before this check and leaves it behind).
+        monkeypatch.chdir(tmp_path)
         ctx, calls = _recording_ctx([])
         rc = cli.main(
             [
@@ -993,6 +1001,7 @@ class TestS3ExpressCaseConflict:
         assert rc == 252
         assert "skip" in capsys.readouterr().err
         assert calls == []
+        assert not (tmp_path / "out").exists()
 
     def test_warn_emits_the_standing_warning(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

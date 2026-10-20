@@ -12,15 +12,15 @@ parser's ``@=`` operator (``shorthand.py``), and the plain-option expansions
 presign ``--expires-in``). A bad ``AWS_CLI_FILE_ENCODING`` raises
 ``LookupError`` into the general handler (255), as in aws.
 
-A read failure is a `ParamfileLoadError` naming no argument, and which exit
-code it becomes depends on the caller - aws's own split.
-aws registers a ``load-cli-arg`` handler (``URIArgumentHandler``) that catches
-its ``ResourceLoadingError`` and re-raises it as the named argument's
-``ParamError`` (rc 252), so every *named* argument's load reports that way; its
-shorthand parser instead calls ``get_paramfile`` directly, letting the failure
-reach the general handler bare (rc 255). `named_argument` is that handler
-boundary: callers resolving a named argument enter it, and the shorthand's
-``@=`` operator (``shorthand.py``) deliberately does not.
+A read failure is a `ParamfileLoadError` naming no argument; every caller
+loads inside `named_argument`, which reports it as the argument's parse error
+(rc 252) - the port of aws's ``load-cli-arg`` handler (``URIArgumentHandler``),
+which re-raises its ``ResourceLoadingError`` as the named argument's
+``ParamError``. aws's shorthand parser alone calls ``get_paramfile`` outside
+that handler, so its ``@=`` load failure reaches the general handler bare
+(rc 255); here the shorthand's ``@=`` (``shorthand.py``) loads inside the
+option's scope too, so a file named on the command line that cannot be read
+is 252 wherever it is named (docs/cli/exit-codes.md).
 """
 
 from __future__ import annotations
@@ -39,9 +39,8 @@ if TYPE_CHECKING:
 class ParamfileLoadError(InvalidValueError):
     """A paramfile reference that could not be loaded (aws's ``ResourceLoadingError``).
 
-    The message names no argument. Left
-    unhandled it is the general handler's rc 255; `named_argument` converts it
-    into the rc-252 ``Error parsing parameter '<name>'`` form.
+    The message names no argument: `named_argument`, around every load,
+    converts it into the rc-252 ``Error parsing parameter '<name>'`` form.
     """
 
 

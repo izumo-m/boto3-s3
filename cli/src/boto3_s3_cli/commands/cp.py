@@ -27,8 +27,8 @@ class CpCommand(Command):
         """Copy and return an ``aws s3 cp``-style exit code.
 
         Exit-code shape (design/cli.md section 5.7/6): pre-pipeline errors
-        keep their class - paramfile / blob loads, ``--metadata`` parsing,
-        path types, the ``--endpoint-url`` scheme,
+        keep their class - paramfile / blob loads, ``--metadata`` parsing, a
+        malformed ``--grants``, path types, the ``--endpoint-url`` scheme,
         the checksum/path-format pairing,
         SSE-C pairing,
         streaming with ``--recursive`` (either side) or a streaming
@@ -41,9 +41,9 @@ class CpCommand(Command):
         without them; the first request fails)
         (``AssertionError`` excepted - an internal bug, re-raised):
         per-item failures stream ``<kind> failed:`` lines, anything that
-        kills the run (a listing error, the single-source 404, a bad
-        ``--grants`` shape, a non-integer ``--expected-size``, a missing
-        stdin) prints one ``fatal error:`` line - all suppressed by
+        kills the run (a listing error, the single-source 404, a
+        non-integer ``--expected-size``, a missing stdin) prints one
+        ``fatal error:`` line - all suppressed by
         ``--quiet`` with the exit codes kept - and a warnings-only run
         exits 2. The boundary is ``finish_transfer``'s run span: the
         ``S3().cp`` call plus the ``--expected-size`` integer conversion
@@ -74,11 +74,6 @@ class CpCommand(Command):
             # RuntimeError -> rc 255); '-' is a stream, not a path. NotFoundError
             # without a ClientError cause maps to the same rc 255.
             raise NotFoundError(f"The user-provided path {src} does not exist.", operation="cp")
-        if args.recursive and paths_type == "s3local":
-            # The dir_op half of aws's _validate_path_args: the s3local
-            # destination is created during validation, so a creation
-            # failure is aws's pre-pipeline rc 255, not the pipeline's rc 1.
-            transferargs.create_local_dest_dir(dest, operation="cp")
         transferargs.validate_sse_c_pairing(args, paths_type, operation="cp")
 
         s3 = head.s3
@@ -138,6 +133,10 @@ class CpCommand(Command):
                 client, paths_type, transfer_config
             ),
         )
+        if args.recursive and paths_type == "s3local":
+            # The dir_op half of aws's _validate_path_args, once every check
+            # above has passed (transferargs.create_local_dest_dir).
+            transferargs.create_local_dest_dir(dest, operation="cp")
         # Streams force the errors-only printer (aws-cli is_stream rule):
         # a streaming download owns stdout for the object bytes.
         printer = transferargs.build_printer(args, progress_frequency, only_show_errors=is_stream)

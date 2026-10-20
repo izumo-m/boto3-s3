@@ -8,6 +8,7 @@ the operation starts is rc 1 with one ``make_bucket failed:`` line, never 254
 
 from __future__ import annotations
 
+import io
 import sys
 from typing import Any
 
@@ -161,18 +162,31 @@ class TestPostStartErrors:
         assert result.stderr.startswith("make_bucket failed: s3://b ")
         assert "BucketAlreadyOwnedByYou" in result.stderr
 
-    def test_an_unwritable_success_line_is_rc_1(
+    def test_a_success_line_stdout_cannot_take_is_lost_output(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws's local catch spans the success line, so failing to write it is
-        # just another mb failure. Measured on the pinned aws with a closed
-        # stdout (`aws s3 mb s3://b 1>&-`, where sys.stdout is None): rc 1
-        # with a make_bucket failed line, where reaching the dispatcher would
-        # give 255.
+        # The bucket was created, so it is not reported as an mb failure (aws's
+        # catch spans the line and does: rc 1, `make_bucket failed:`); the
+        # lost line is reported as lost output, 255.
+        class _FullStdout(io.StringIO):
+            def write(self, text: str) -> int:
+                raise OSError(28, "No space left on device")
+
+        client, calls = make_recording_client([{}])
+        monkeypatch.setattr(sys, "stdout", _FullStdout())
+        rc = cli.main(["mb", "s3://b"], ctx=client_ctx(client))
+        assert rc == 255
+        assert capsys.readouterr().err == "boto3-s3: [ERROR]: [Errno 28] No space left on device\n"
+        assert [c.operation for c in calls] == ["CreateBucket"]
+
+    def test_a_run_without_a_stdout_keeps_its_code(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # `1>&-` leaves sys.stdout None: nothing to write the line to, and the
+        # code is the work's.
         client, calls = make_recording_client([{}])
         monkeypatch.setattr(sys, "stdout", None)
         rc = cli.main(["mb", "s3://b"], ctx=client_ctx(client))
-        assert rc == 1
-        assert capsys.readouterr().err.startswith("make_bucket failed: s3://b ")
-        # The bucket exists all the same - only the report was lost, like aws.
+        assert rc == 0
+        assert capsys.readouterr().err == ""
         assert [c.operation for c in calls] == ["CreateBucket"]

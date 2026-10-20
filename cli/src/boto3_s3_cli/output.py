@@ -10,6 +10,7 @@ no real total reaches.
 
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING
 
 from dateutil.tz import tzlocal
@@ -41,6 +42,20 @@ def uni_write(stream: TextIO, text: str) -> None:
         encoding = getattr(stream, "encoding", None) or "ascii"
         stream.write(text.encode(encoding, "replace").decode(encoding))
     stream.flush()
+
+
+def write_result_line(line: str) -> None:
+    """Write a finished command's one result line to stdout (``mb`` / ``rb``).
+
+    The work is done when this runs, so a stdout that cannot take the line
+    raises its write error for the dispatcher to report as lost output (rc
+    255), and a process without a stdout (``1>&-``, ``sys.stdout`` None)
+    writes nothing and keeps the work's code - the rule
+    ``cli._settle_std_streams`` applies to every command's output.
+    """
+    stream = sys.stdout
+    if stream is not None:
+        uni_write(stream, line + "\n")
 
 
 _DATE_WIDTH = 19

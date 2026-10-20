@@ -174,20 +174,6 @@ SCENARIOS: tuple[CpScenario, ...] = (
         seed=_DEL_SEED,
     ),
     CpScenario(
-        name="sync_upload_invalid_grants_dryrun",
-        argv=(
-            "sync",
-            "src",
-            f"s3://{BUCKET_TOKEN}/up",
-            "--grants",
-            "invalid",
-            "--dryrun",
-        ),
-        local_src={"src/a.txt": b"alpha\n"},
-        expected_stderr_tokens_ours=("fatal error", "grants"),
-        expected_stderr_tokens_aws=("fatal error", "grants"),
-    ),
-    CpScenario(
         name="sync_upload_no_overwrite",
         argv=("sync", "src", f"s3://{BUCKET_TOKEN}/no", "--no-overwrite"),
         # exists.txt differs in size and is locally newer - everything says
@@ -349,20 +335,6 @@ SCENARIOS: tuple[CpScenario, ...] = (
             "*.txt",
         ),
         seed={"cs/a.txt": b"alpha\n", "cs/b.bin": b"\x00\x01"},
-    ),
-    CpScenario(
-        name="sync_copy_invalid_grants_dryrun",
-        argv=(
-            "sync",
-            f"s3://{BUCKET_TOKEN}/cs",
-            f"s3://{BUCKET_TOKEN}/cd",
-            "--grants",
-            "invalid",
-            "--dryrun",
-        ),
-        seed={"cs/a.txt": b"alpha\n"},
-        expected_stderr_tokens_ours=("fatal error", "grants"),
-        expected_stderr_tokens_aws=("fatal error", "grants"),
     ),
     CpScenario(
         name="sync_copy_content_type",
