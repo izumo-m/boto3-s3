@@ -250,8 +250,8 @@ class S3ScanOptions(ScanOptions):
 
     ``page_size`` / ``request_payer`` / ``fetch_owner`` are not validated here:
     like aws-cli, they pass through to the service, which decides (``page_size=0``
-    lists nothing, negative values fail with ``InvalidArgument`` - the exit-code
-    charter requires reproducing both). The default ``None`` sends no
+    lists nothing, negative values fail with ``InvalidArgument``, as on
+    aws-cli). The default ``None`` sends no
     ``MaxKeys`` at all, exactly like aws-cli's unset ``--page-size`` (the
     server pages at its own default, 1000). ``fetch_owner`` sends
     ``FetchOwner=True`` to populate ``S3FileInfo.owner``.

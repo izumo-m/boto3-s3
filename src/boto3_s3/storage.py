@@ -491,8 +491,8 @@ class Storage(abc.ABC):
         """Run any deferred strict validation on this location (no-op by default).
 
         Construction is permissive (a building block); an operation - or the CLI
-        at its parity point - calls this to reject a malformed location loudly
-        before use. ``S3Storage`` overrides it with the aws-cli-parity checks
+        where its command checks the location - calls this to reject a malformed
+        location loudly before use. ``S3Storage`` overrides it with aws-cli's checks
         (unsupported ARN forms, a key with no bucket); built-ins that need none
         keep this no-op. Idempotent.
         """

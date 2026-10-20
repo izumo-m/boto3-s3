@@ -247,7 +247,7 @@ def add_page_size_argument(parser: argparse.ArgumentParser) -> None:
     """Register ``--page-size`` (shared by ls / rm and the transfer family).
 
     Not range-validated: aws-cli passes any int through and lets the server
-    decide, and the exit-code charter requires matching the resulting codes
+    decide, and the run's outcome follows from that answer
     (0 lists nothing - ls's empty listing exits 1, rm and the transfers 0;
     a negative value is the server's
     InvalidArgument -> rc 254 from ls, but rc 1 from rm and the transfer

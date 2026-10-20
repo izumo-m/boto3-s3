@@ -51,7 +51,7 @@ def validate_query(args: argparse.Namespace) -> None:
     expression deep enough to exhaust the interpreter's stack (2000 leading
     ``!``) is its ParamValidation report too, carrying the ``RecursionError``'s
     own text - measured. Narrowing this to ``JMESPathError`` would let that
-    escape as a traceback with rc 1, which the exit-code charter forbids.
+    escape as a traceback with rc 1, which the error rules forbid.
     """
     value = getattr(args, "query", None)
     if value is None:

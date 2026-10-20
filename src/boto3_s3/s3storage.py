@@ -207,8 +207,8 @@ S3_CODE_CATEGORIES: dict[str, type[Boto3S3Error]] = {
 
 
 # Resource types the S3 data plane cannot serve through these operations;
-# ``aws s3`` rejects them at parse time (ParamValidation -> rc 252) and the
-# exit-code charter (design/overview.md section 3) has us reject them the same way.
+# ``aws s3`` rejects them at parse time (ParamValidation -> rc 252), so the run
+# stops before it starts here too (design/overview.md section 3).
 _S3_OBJECT_LAMBDA_ARN_RE = re.compile(
     r"^(?P<bucket>arn:(aws).*:s3-object-lambda:[a-z\-0-9]+:[0-9]{12}:"
     r"accesspoint[/:][a-zA-Z0-9\-]{1,63})[/:]?(?P<key>.*)$"
@@ -1324,9 +1324,9 @@ class S3Storage(Storage):
         and Outposts *bucket* ARNs (s3api / s3control territory; aws's uniform
         parse-time 252), and a key with
         no bucket (``"s3:///k"`` - aws's handling of that form varies per
-        command, so the CLI invokes this only where its command's parity point
-        wants the rejection). The library calls this before an operation and
-        the CLI at its parity-correct point, so a malformed location fails loud
+        command, so the CLI invokes this only where its command refuses that
+        form). The library calls this before an operation and the CLI where
+        its command checks the location, so a malformed location fails loud
         instead of reaching the API as a cryptic botocore error. Idempotent.
 
         The rejections carry what identifies the offending location: the whole
