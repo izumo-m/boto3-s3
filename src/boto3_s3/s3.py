@@ -2193,8 +2193,11 @@ class S3:
           sync neither transfers nor deletes them. Because pruning is
           symmetric, an excluded key is invisible on *both* sides and is thus
           neither transferred nor deleted (aws's "files excluded by filters
-          are excluded from deletion"); visibility is never one-sided, so it
-          cannot manufacture a phantom new/delete pair. Per-lane narrowing
+          are excluded from deletion"). The exception is a side whose
+          relative path the filter sees with a leading ``/`` (a local side
+          rooted at a filesystem root, a Windows S3 base ending in a backslash,
+          as on aws): a name-led relative pattern then hides a key on the
+          other side only, which can leave it to ``delete_filter``. Per-lane narrowing
           belongs in the pair layer below (``create_filter`` / ``update_filter``
           / ``delete_filter``).
         - **Pair decisions** - the surviving streams are merge-joined by

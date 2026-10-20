@@ -152,7 +152,7 @@ and the record is handed on unchanged.
 
 | Route | R shown to the filter |
 |---|---|
-| Recursive local walk (`cp` / `mv` source, both `sync` local sides, the case-conflict gate's destination pre-walk) | the path below the walked directory, `abspath(path)` - the record's own, except for a filesystem root (`/`, `D:\`, `\\srv\share\`): aws walks from `abspath` plus a separator, so its F reads `//bin/x` (as the record's `key` does) while its base `abspath(path)` already ends in one, and the view adds a leading `/` (`producers.local_walk_filter`) |
+| Recursive local walk (`cp` / `mv` source, the `sync` local side (source or destination), the case-conflict gate's destination pre-walk) | the path below the walked directory, `abspath(path)` - the record's own, except for a filesystem root (`/`, `D:\`, `\\srv\share\`): aws walks from `abspath` plus a separator, so its F reads `//bin/x` (as the record's `key` does) while its base `abspath(path)` already ends in one, and the view adds a leading `/` (`producers.local_walk_filter`) |
 | Recursive S3 listing (`cp` / `mv` / `sync` S3 sides, `rm --recursive`) | the key below the `/`-normalized `Prefix` - the record's own, except on Windows for a key typed ending in `\`: aws's `ntpath.join` takes that backslash for a separator and joins the patterns flush, so the view adds a leading `/` (`producers.s3_listing_filter`) |
 | Single S3 object (`cp` / `mv` source, `rm`'s blind delete) | the key below `single_object_filter_root` (aws's parent; `a//b` is `/b`, and on Windows `a\/b` is `/b`) - a view on `cp` / `mv` (`_filter_single_s3_source`), the stamped record on `rm` |
 | Single local source (`cp` / `mv` upload) | a view (`_filter_single_local_source`): `key` is aws's `local_format` path (`/`-separated, a trailing `/` for a directory or a path typed with one), `compare_key` the part below `abspath(dirname(path as typed))` - `d` is `d/`; `d/`, `.` and `../` are `""`; a bare `..` lies outside and gets `None`, so only full-path patterns apply |
@@ -194,7 +194,10 @@ warnings aws would. The single-object routes apply it inline on the calling
 thread. `ls` takes no filter.
 
 **`sync`** prunes each side's listing with the one filter before pairing (its
-visibility layer). A relative pattern prunes both sides alike; an absolute one
+visibility layer). A relative pattern prunes both sides alike, except where a
+side's R carries the leading `/` of the table above (a local side at a
+filesystem root, a Windows S3 base ending in `\`): there a name-led pattern
+prunes the other side only, as on aws; an absolute one
 matches each side's own F, so a pattern rooted at the local source prunes
 that side only and leaves the destination visible to `--delete`. A
 destination entry pruned here is invisible to `--delete` (aws: files excluded

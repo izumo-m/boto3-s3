@@ -78,7 +78,9 @@ enumeration, before pairing. It is a `FileFilter`
 `compare_key` is stamped by the producing scan; `None` (the default) keeps
 everything. A predicate that reads only the compare key prunes the two sides
 identically, so an entry it excludes is invisible on both sides and is
-therefore neither transferred nor deleted; a predicate that reads side-specific
+therefore neither transferred nor deleted (a compiled `GlobFilter` too, except
+for a local side rooted at a filesystem root, whose entries it matches with a
+leading `/`, as `aws s3` does; see [`../filters.md`](../filters.md)); a predicate that reads side-specific
 state prunes per side instead — notably a `GlobFilter` whose pattern is
 root-anchored, which matches the entry's full path rather than its compare
 key.

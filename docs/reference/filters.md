@@ -108,7 +108,12 @@ filter hides is therefore invisible to the run and cannot be deleted by
 `delete_filter`. The two sides receive the same predicate, not necessarily the
 same answer: when the decision rests on `compare_key` alone — a relative glob
 pattern, the common case — the two sides share one key space, so an excluded
-key is absent from both sides and can be neither transferred nor deleted. A
+key is absent from both sides and can be neither transferred nor deleted.
+A local side rooted at a filesystem root (`/`, `D:\`, `\\srv\share\`) is the
+exception, as on aws: its entries are matched with a leading `/`, so a name-led
+relative pattern (`bin/*`) prunes the other side only, while a `*`-led one
+(`*bin/*`) reaches both. The same holds on Windows for an S3 base typed
+ending in `\`. A
 root-anchored pattern, or any predicate reading side-specific data (`key`,
 `size`, `mtime`, `storage_class`, `storage`, the `LocalFileInfo` fields), can
 hide a key on one side only and leave the run a one-sided view of it.

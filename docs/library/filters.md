@@ -54,7 +54,9 @@ A pattern the join takes in place of the root — `/data/*` on Linux and macOS;
 full path instead: the absolute path of a local entry, `bucket/key` of an S3
 one. Such a pattern never matches an S3 entry, so one rooted at the local
 source of a `sync` prunes that side only; relative patterns are symmetric
-across sides. On Windows a drive-relative `C:foo` is relative for entries on
+across sides, except where a local side is rooted at a filesystem root (`/`,
+`D:\`), whose entries are matched with a leading `/` as on `aws s3`, so
+`bin/*` then prunes the other side only. On Windows a drive-relative `C:foo` is relative for entries on
 drive C: and is matched as written against the full path of every other
 entry, so on Windows `*:*` matches every drive-letter path, every S3 key that
 holds a `:`, and every key under an access point or Outposts ARN (whose

@@ -32,7 +32,10 @@ dest listing -- filter (visibility) --+        |
   for local entries, `Prefix`-relative for S3 entries), so it
   prunes the source and destination identically (symmetric); an entry excluded
   this way is "nonexistent" on **both** sides and is thus protected from
-  `--delete` (aws's "files excluded by filters are excluded from deletion"). A
+  `--delete` (aws's "files excluded by filters are excluded from deletion"),
+  except where a side's relative path carries a leading `/` (a local side at a
+  filesystem root, a Windows S3 base ending in `\`; design/globsieve.md
+  section 5): there a name-led pattern prunes the other side only, as on aws. A
   **root-anchored** (absolute) pattern instead matches each side's full path, so
   it prunes **per-side** - the same per-side roots aws gets from joining the
   pattern onto `src_rootdir` / `dst_rootdir` (an absolute pattern matching only
