@@ -569,8 +569,15 @@ dest-existence check for download. We ported the same three faces:
   `FileInfo.mtime` contract holds and sync's size-and-time judgment compares
   the instant aws-cli compares (measured against aws-cli under `TZ=UTC`,
   `TZ=Asia/Tokyo` and `TZ=America/New_York`). A stamp whose local reading
-  fails (one at the edge of `datetime`'s range) is a
-  `MalformedResponseError`, as aws-cli dies on the same conversion.
+  fails is a `MalformedResponseError`, as aws-cli dies on the same
+  conversion. That includes aws-cli's own second step: its Python places a
+  naive value by solving for it on both sides of a possible fold, the second
+  solution reading the local calendar a day ahead, so a zone-less stamp in the
+  last day of `datetime`'s range (`9999-12-31T00:00:00` on) ends an aws-cli
+  run in every zone, and on Windows so does one within a day of where
+  `localtime` stops; the same second call is made here for its failure alone.
+  The instant is taken through `timestamp()`, which places a wall-clock time
+  the zone skips where aws-cli's Python places it on every host version.
 - **a single-object HEAD missing `ContentLength` or `LastModified` ends the
   run** the same way: aws-cli's `_list_single_object` reads those two by
   subscript (`ContentLength` first) and `ETag` with a default, so

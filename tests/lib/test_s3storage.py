@@ -1011,6 +1011,44 @@ class TestZonelessStamp:
             precise.replace(microsecond=0).timestamp()
         )
 
+    def test_the_last_day_of_the_range_is_malformed(self) -> None:
+        # aws-cli's Python places a naive value by solving for it on both
+        # sides of a possible fold, and the second solution reads the local
+        # calendar a day ahead - so a zone-less stamp from 9999-12-31T00:00:00
+        # on ends its run (measured under UTC, Asia/Tokyo and
+        # America/New_York: `ls` at rc 255 from that second on, rc 0 one
+        # microsecond before).
+        pages = [{"Contents": [_stamped("prefix/far.txt", datetime(9999, 12, 31, 0, 0, 0))]}]
+        storage, _ = _storage(pages)
+        with pytest.raises(MalformedResponseError):
+            list(storage.scan(S3ScanOptions(recursive=True)))
+
+    @_needs_tzset
+    @pytest.mark.parametrize("zone", ["UTC", "Asia/Tokyo", "America/New_York"])
+    def test_the_last_day_is_malformed_whatever_the_zone(self, zone: str) -> None:
+        # East of UTC and at UTC the stamp's own instant is in range; only the
+        # day-ahead step leaves it. The error is the one that step raises, the
+        # year running out, as it is for aws-cli.
+        pages = [{"Contents": [_stamped("prefix/far.txt", datetime(9999, 12, 31, 0, 0, 0))]}]
+        with _local_zone(zone):
+            storage, _ = _storage(pages)
+            with pytest.raises(MalformedResponseError) as exc_info:
+                list(storage.scan(S3ScanOptions(recursive=True)))
+        if sys.platform == "linux":
+            # The step's own error (glibc reads the calendar a day ahead and
+            # CPython then refuses the year); another libc may fail the read
+            # itself, so only the kind of outcome is held elsewhere.
+            assert isinstance(exc_info.value.__cause__, ValueError)
+            assert "10000" in str(exc_info.value)
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Windows' localtime ends at the year 3000")
+    def test_the_microsecond_before_the_last_day_is_kept(self) -> None:
+        stamp = datetime(9999, 12, 30, 23, 59, 59, 999999)
+        storage, _ = _storage([{"Contents": [_stamped("prefix/far.txt", stamp)]}])
+        with _local_zone("UTC"):
+            [entry] = storage.scan(S3ScanOptions(recursive=True))
+        assert entry.mtime == stamp.replace(tzinfo=timezone.utc)
+
     def test_a_bucket_creation_date_gets_the_same_reading(self) -> None:
         pages = [{"Buckets": [{"Name": "alpha", "CreationDate": self._NAIVE}]}]
         storage, _ = _storage(pages, url="s3://")
