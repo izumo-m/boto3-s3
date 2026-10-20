@@ -95,14 +95,15 @@ maintaining high functional compatibility.
   also runs on SDKs as old as the floor and on every supported Python
   (section 2). A behavior that differs only because of such a
   version difference is not matched: it is neither a bug nor a deviation to
-  write down, and the library does not compensate for it. The CLI has one
-  exception: where aws-cli's bundled botocore or Python differs from the one
-  this project runs on in a way that changes a normal run's outcome (the
-  request sent, its endpoint and signature, the profile used, the retries
-  made, the arguments accepted), the CLI matches aws-cli; a difference that
-  shows only in an error or in an unusual environment is not compensated
-  there either. The rules for errors below
-  still hold on every supported version.
+  write down, and nothing compensates for it. There is one exception: where
+  aws-cli's bundled botocore, s3transfer or Python differs from the one this
+  project runs on in a way that changes a normal run's outcome (the request
+  sent, its endpoint, signature and headers, the objects selected, the
+  profile used, the retries made, the arguments accepted), the library and
+  the CLI match aws-cli, each where the difference reaches it; a difference
+  that shows only in an error or in an unusual environment is not
+  compensated. The rules for errors below still hold on every supported
+  version.
 - **Security before compatibility**: where matching aws-cli would expose a
   secret or silently turn a protection off, the library and the CLI do not
   match it. For example, credentials are masked in debug logs
