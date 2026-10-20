@@ -82,8 +82,9 @@ def crt_default_algorithm() -> str | None:
     the classic manager's ``_add_operation_defaults`` is gated on
     ``when_supported`` - so a ``when_required`` CRT upload still trails a
     CRC64NVME on aws (measured on the wire, single-part and multipart) where
-    pip s3transfer's CRT module would trail its own CRC32. None only where
-    botocore cannot compute it, which a working CRT engine rules out."""
+    pip s3transfer's CRT module would trail its own CRC32. None where
+    botocore cannot compute it: no awscrt, or `BOTO_DISABLE_CRT` hiding it
+    from botocore (the CRT engine still runs then, and trails CRC32)."""
     return _computable_default()
 
 

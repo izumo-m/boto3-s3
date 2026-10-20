@@ -1,8 +1,8 @@
 # Configuration
 
 Where credentials, region and transfer tuning come from — the `~/.aws` files and
-the environment. All of it resolves exactly as it does for `aws s3`, so an
-environment already set up for `aws` needs no changes.
+the environment. It resolves as it does for `aws s3`, so an environment
+already set up for `aws` needs no changes.
 
 For what an individual option does, run `boto3-s3 <subcommand> help`.
 

@@ -211,7 +211,7 @@ solidified design is added here.
 |---|---|
 | `cli.py` | Two-stage dispatch (the aws-clidriver lazy-command-table shape): the globals pass consumes the globals off the full argv, the command scan matches its remainder against `_COMMAND_TABLE` (the registry: name -> module, class, help - no command module imported), stage 2 imports the matched module, builds its real parser and runs it. Wires `--debug`, maps exceptions to exit codes; the full `build_parser()` builds the whole surface for tests |
 | `globalargs.py` | Common option definitions (the parent; the aws-cli `globalargs.py` counterpart) |
-| `clientfactory.py` | `build_client(args) -> S3Client` (the connection/authentication layer, section 4) + `build_service_client(service, args, *, region=None)` (the s3control / sts client used by mv's path validation, section 5.8). Both open their botocore session through `_open_botocore_session` (the profile / `api_versions` / retry / timeout / credential-cache alignment of section 4) and create their client through `_create_client`, the single seam that carries aws's retry-mode vocabulary and installs the CONNECT pin - a seam rather than `_open_botocore_session` because `build_client` may be handed a session built elsewhere. |
+| `clientfactory.py` | `build_client(args) -> S3Client` (the connection/authentication layer, section 4) + `build_service_client(service, args, *, region=None)` (the s3control / sts client used by mv's path validation, section 5.8). Both open their botocore session through `_open_botocore_session` (the profile / retry / timeout / credential-cache alignment of section 4) and create their client through `_create_client`, the single seam that installs the CONNECT pin - a seam rather than `_open_botocore_session` because `build_client` may be handed a session built elsewhere. |
 | `proxytunnel.py` | The CONNECT request the official aws distribution sends (section 2): a copy of CPython 3.12+'s tunnel opener, installed onto urllib3's `HTTPConnection` by `clientfactory._create_client` on the host interpreters whose own opener still writes `CONNECT ... HTTP/1.0` with no `Host`. Every precondition - no urllib3, no opener to read, an opener that already writes aws's shape - declines quietly, so it is a no-op on 3.12+ and idempotent |
 | `checksumdefault.py` | aws's default request checksum (`CRC64NVME`, its bundled botocore's `DEFAULT_CHECKSUM_ALGORITHM`) reproduced on the CLI side: `default_algorithm(client)` feeds an upload run's `TransferOptions` (section 5.7, `--checksum-algorithm`), and `register(client)` - attached by `build_client` - stamps it at `provide-client-params.s3.*` on every other request whose operation names a `ChecksumAlgorithm` member, exactly where botocore would stamp its own (under `when_required`, only the checksum-required operations). Only where botocore can compute CRC64NVME. The library keeps botocore's default |
 | `commands/base.py` | The `Command` ABC + `Context` (the injection point for runtime dependencies, section 3.1) |
@@ -229,13 +229,12 @@ public surfaces (the two-layer export contract of
 [`imports.md`](./imports.md) section 2) - the package root's lazy re-export
 (`boto3_s3.__all__`) and
 the documented submodule surfaces (each module's `__all__`: the `transferplan`
-planner, `transfer`'s engine pair + the `--no-overwrite` floor probe,
+planner,
 `globsieve`, `localstorage.translate_os_error`, `awsconfig`'s shared size
 core, `awsclicompare`, `crtsupport`, `masking`'s `SecretMaskingFilter`, and
 `pathresolver`'s pin stand-down probes `is_mrap_path` / `is_outpost_path` /
 `is_outpost_alias_path` / `is_s3express_path` / `is_s3express_accesspoint_path`,
-and `s3storage`'s `s3express_unsupported_reason` and the
-`CA_BUNDLE_ENVIRONMENT_VETTED` mark).
+and `s3storage`'s `CA_BUNDLE_ENVIRONMENT_VETTED` mark).
 What the in-repo CLI needs, any other application built on the library needs
 too (the library is the product, overview.md section 1), so a CLI dependency
 is met by *publishing* the symbol, never by importing a private one. Enforced
@@ -480,9 +479,11 @@ numbers in the bold item labels below are that document's.
      `X-Amz-Region-Set` (measured; recorded for the reader in
      [`compatibility.md`](../docs/compatibility.md) section 2).
      `BOTO_DISABLE_CRT`, the installed botocore's switch that hides an
-     installed awscrt from it, puts an installation that has the extra in the
-     same state; aws's bundled botocore has no such switch, and the CLI leaves
-     the variable to botocore (an unusual environment, overview.md section 3).
+     installed awscrt from it, puts botocore's signer and checksums in the
+     same state (the CRT transfer engine, which imports awscrt directly, still
+     runs, without the CRC64NVME default); aws's bundled botocore has no such
+     switch, and the CLI leaves the variable to botocore (an unusual
+     environment, overview.md section 3).
   5. **profile env precedence** - aws v2 resolves the active profile as
      `--profile` > `AWS_PROFILE` > `AWS_DEFAULT_PROFILE` > `default` (its bundled
      botocore lists the env vars as `['AWS_PROFILE', 'AWS_DEFAULT_PROFILE']`),

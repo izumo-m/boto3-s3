@@ -381,8 +381,8 @@ def _allow_if_none_match() -> None:
 # IfNoneMatch reached the S3 write ops only in later botocore - PutObject and
 # CompleteMultipartUpload in 1.35.2, CopyObject in 1.40.61 (each the first
 # release whose S3 model carries the member, read from the published wheels).
-# Below those, --no-overwrite is rejected up front (here for the library, and
-# in the CLI for rc 252) instead of failing deep in botocore with an opaque
+# Below those, --no-overwrite is rejected up front, before any request,
+# instead of failing deep in botocore with an opaque
 # "Unknown parameter in input: IfNoneMatch". Drop this gate once the botocore
 # floor reaches them.
 _CONDITIONAL_WRITE_MIN_BOTOCORE = {"upload": "1.35.2", "copy": "1.40.61"}
@@ -1041,7 +1041,7 @@ class Transferrer:
         self._transfer_config = transfer_config
         self._options: TransferOptions = options if options is not None else TransferOptions()
         self._operation = operation
-        # Library-side --no-overwrite gate (the CLI rejects earlier with rc 252):
+        # The --no-overwrite gate (the CLI reports it on a fatal error: line):
         # only uploads/copies carry IfNoneMatch, and an old botocore lacks it.
         if self._options.get("no_overwrite") and transfer_type in (
             TransferType.UPLOAD,
