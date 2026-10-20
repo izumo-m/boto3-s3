@@ -312,13 +312,14 @@ class TestMainExitCodes:
         # argparse's print_help swallows the write's OSError from Python 3.11,
         # and a page larger than the buffer goes straight to the descriptor,
         # so the page would be lost at rc 0; written by the CLI, the error is
-        # reported once, at 255.
+        # reported once, at 255. Nothing is left to flush afterwards: the
+        # write went straight to the descriptor.
         class _FullStdout:
             def write(self, text: str) -> int:
                 raise OSError(errno.ENOSPC, "No space left on device")
 
             def flush(self) -> None:
-                raise OSError(errno.ENOSPC, "No space left on device")
+                pass
 
         monkeypatch.setattr(sys, "stdout", _FullStdout())
         assert cli.main(argv) == 255

@@ -322,7 +322,7 @@ upload, the parent reference) are emitted inline on the calling thread
   stream on each write, so the run starts and the item fails inside the
   transfer, with `'NoneType' object has no attribute 'write'` as the sampled
   failure's message and the operation, bucket and key of the object stamped on
-  it as usual.
+  it as usual. An empty object writes nothing, so it succeeds.
 - [`CancelledError`](../exceptions.md#cancellederror) — the run was cancelled
   through `cancel_token`. It supersedes `BatchError`.
 - Anything `filter` itself raises. A predicate's exception surfaces on the

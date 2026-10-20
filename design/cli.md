@@ -981,7 +981,8 @@ streaming downloads`). An absent stdin is an in-pipeline fatal (`fatal error:
 stdin is required for this operation, but is not available.`, rc 1). An absent
 stdout has no counterpart check, aws guarding stdin only, so it fails the one
 item instead: `download failed: s3://b/k to - 'NoneType' object has no
-attribute 'write'`, rc 1 either way (transfer.md section 6). A stdout that
+attribute 'write'`, rc 1 either way, while an empty object writes nothing and
+succeeds (transfer.md section 6). A stdout that
 cannot take the bytes - full, or a reader that left the pipe (`cp s3://b/k - |
 head -c1` on an object larger than the pipe holds) - fails the item the same
 way, whether a write or the flush as the item settles meets it:
@@ -1324,7 +1325,9 @@ result lines of a transfer or a delete the printer could not get out - exits
 the output asked for was lost, a local I/O failure rather than a success. A
 help page is written by `_print_help`, not argparse's `print_help`, which from
 Python 3.11 swallows the write's `OSError` (a page larger than the buffer would
-be lost at 0); a page stdout refuses reaches `main`'s backstop at 255 instead.
+be lost at 0); a page stdout refuses ends at 255 either way - through `main`'s
+backstop when the write itself fails, through the final flush when the page
+was buffered.
 A Ctrl-C during the final flush ends at 130 with both streams pointed at the
 null device, so the exit's flush does not wait on the same reader again. A stdout that is
 `None` (closed before the process started, `1>&-`) takes nothing and is left
