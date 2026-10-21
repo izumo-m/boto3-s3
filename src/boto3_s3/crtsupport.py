@@ -334,11 +334,10 @@ def create_crt_transfer_manager(
     ``Config.s3`` shape.
 
     ``allow_lockless`` opts out of the lock half of the fallback, for an
-    **explicit** ``'crt'`` preference only: aws-cli's factory acquires the
-    cross-process lock best-effort and builds the CRT client regardless, so
-    a construction-time failure (a bad CA bundle) surfaces under contention
-    exactly as it does without it, where boto3 - and the default here -
-    silently selects classic and hides it. An
+    **explicit** ``'crt'`` preference only: aws-cli documents that preference
+    as the way to run the CRT client in concurrent processes, and its factory
+    builds the CRT client whether or not it got the lock, where boto3 - and
+    the default here - silently selects classic. An
     ``'auto'`` preference keeps the lock requirement under this opt-in too:
     that is aws-cli's own ``auto``, which resolves classic when another
     process holds the lock (design/crt.md section 6).
@@ -590,8 +589,8 @@ def _initialize(
         # Another process of this application holds the CRT client; classic.
         # Under the `allow_lockless` opt-in an *explicit* 'crt' preference
         # builds on regardless (aws-cli's factory ignores its own acquisition
-        # result), so construction-time failures surface under contention too;
-        # 'auto' keeps the lock requirement, aws-cli's own auto resolution.
+        # result); 'auto' keeps the lock requirement, aws-cli's own auto
+        # resolution.
         return None, None
 
     region = client.meta.region_name

@@ -1182,9 +1182,9 @@ class S3:
     **explicit** ``'crt'`` preference. ``False`` (the default) is
     boto3's rule: another process of this application holding the CRT slot
     silently selects the classic engine. ``True`` is aws-cli's: its factory
-    acquires the lock best-effort and builds the CRT client regardless, so a
-    construction-time failure surfaces under contention exactly as it does
-    without it. An ``'auto'`` preference respects the lock either way -
+    builds the CRT client regardless, as aws-cli documents an explicit
+    ``'crt'`` for processes that run at the same time. An ``'auto'``
+    preference respects the lock either way -
     aws-cli's own ``auto`` resolution. Only the CLI distribution sets it
     (design/crt.md section 6).
 

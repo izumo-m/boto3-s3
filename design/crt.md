@@ -454,13 +454,14 @@ config variable). The two agree except in two cases:
 
 ### Building without the cross-process lock
 
-aws-cli's factory acquires the cross-process CRT lock best-effort: under an
-explicit `crt` preference it builds the CRT client whether or not the
-acquisition succeeded, so every construction-time failure (a bad
-`--ca-bundle`) surfaces under contention exactly as it does without it. boto3 instead answers a held lock with the silent classic
-fallback - which would also swallow those failures and, on a dryrun, report
-success where aws exits 255 (measured 2026-08-01). Same split as the signing
-posture above: the library keeps boto3's rule and the CLI opts out through
+aws-cli documents an explicit `crt` preference as the way to make
+concurrently running processes use the CRT client (its `s3` config topic,
+`preferred_transfer_client`), and its factory builds the CRT client whether
+or not it got the cross-process lock (a lock it does get still marks the slot
+for `auto` runs). Clients built side by side only compete for throughput:
+output and exit codes are those of a run that holds the lock (measured
+2026-08-01). boto3 instead answers a held lock with the silent classic
+fallback. Same split as the signing posture above: the library keeps boto3's rule and the CLI opts out through
 `S3(crt_allow_lockless=True)` (`clientfactory.build_s3`), threaded to
 `create_crt_transfer_manager(allow_lockless=...)`. The opt-in is scoped to an
 explicit `'crt'` preference - `auto` resolves classic under contention on aws
@@ -555,13 +556,11 @@ error's details need not (checked by the e2e CRT lane - testing.md).
   pin 0.19.17, one below it), and the awscrt the extra brings before boto3
   1.40.12 dials the standard port only, so a custom-port endpoint is refused
   there (docs/compatibility.md records both).
-- **Explicit crt x lock contention**: aws forces the CRT construction; boto3 -
-  and the library default - silently falls back to classic. When the
-  construction succeeds the two are indistinguishable in output and rc
-  (proven; only throughput differs), but a construction-time failure surfaces
-  only on aws's path - the fallback would run classic and, on a dryrun, exit 0
-  where aws exits 255 (measured 2026-08-01, a held lock plus a bad
-  `--ca-bundle`). The CLI therefore opts into aws's posture with
+- **Explicit crt x lock contention**: aws forces the CRT construction, as its
+  documentation promises for concurrently running processes; boto3 - and the
+  library default - silently falls back to classic. The two are
+  indistinguishable in output and rc (proven; only the engine and so the
+  throughput differ). The CLI keeps aws's promise with
   `S3(crt_allow_lockless=True)` (section 4, "Building without the
   cross-process lock"); library callers keep boto3's fallback by default.
 - **Ctrl-C and fatals on the CRT lane**: pip s3transfer's CRT manager

@@ -37,9 +37,8 @@ S3(session=None, *, endpoint_url=None, config=None,
   `preferred_transfer_client="crt"` does when another process of this
   application already holds the cross-process CRT slot. `False` (the default)
   silently selects the classic engine, boto3's rule; `True` builds the CRT
-  client regardless, which is what `aws s3` does — so a construction-time
-  failure surfaces under contention too. `"auto"` respects the lock either
-  way. Only reproducing aws's behavior needs it.
+  client regardless, which is what `aws s3` does for processes that run at
+  the same time. `"auto"` respects the lock either way. Only reproducing aws's behavior needs it.
 - **`crt_sign_requests`** — whether the CRT transfer engine signs its
   requests. `None` (the default) derives the answer from the built client,
   boto3's rule. An explicit `False` builds the CRT client with no credentials

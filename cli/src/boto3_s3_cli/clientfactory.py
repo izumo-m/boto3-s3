@@ -520,13 +520,12 @@ def build_s3(args: argparse.Namespace) -> S3:
     # CRT lane's explicit-endpoint pin (design/crt.md) - without it, an
     # --endpoint-url under an AWS domain (a VPC interface endpoint) would be
     # dropped by the host heuristic and the CRT would re-resolve to public S3.
-    # crt_allow_lockless=True: aws-cli's factory acquires the cross-process
-    # CRT lock best-effort and, under an explicit 'crt' preference, builds the
-    # CRT client regardless - so its construction-time failures (a bad CA
-    # bundle) surface under contention too, where the library default
-    # silently selects classic and would report success. An
-    # 'auto' preference respects the lock on both tools (design/crt.md
-    # section 6).
+    # crt_allow_lockless=True: aws documents an explicit 'crt' preference as
+    # the way to make concurrently running processes use the CRT client, and
+    # its factory builds the CRT client whether or not it got the
+    # cross-process lock (a lock it does get still marks the slot for 'auto'
+    # runs). An 'auto' preference respects the lock on both tools
+    # (design/crt.md section 6).
     # crt_sign_requests: aws-cli's CRT factory attaches a credentials provider
     # on its own `sign_request` parameter - `--no-sign-request` and nothing
     # else - so the per-client Config(signature_version='s3v4') that
