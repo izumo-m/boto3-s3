@@ -1283,7 +1283,7 @@ class Transferrer:
                 # The finally covers shutdown itself raising (s3transfer re-raises
                 # a KeyboardInterrupt arriving during its drain wait): better to
                 # unregister with stragglers in flight than to leave the handlers
-                # feeding _store forever on a longer-lived client.
+                # feeding its stores forever on a longer-lived client.
                 self._capture.unregister(self._client)
         # A Ctrl-C the CRT drain swallowed reaches the caller as the classic
         # manager's re-raise does: ahead of anything noted, and in place of
@@ -3461,18 +3461,6 @@ def _allow_inline_mpu_tagging() -> None:
         pass
 
 
-def _mpu_inline_tagging_supported() -> bool:
-    """Whether s3transfer forwards an inline ``Tagging`` header to
-    CreateMultipartUpload.
-
-    `_allow_inline_mpu_tagging` makes this hold on every supported s3transfer
-    at manager build; the probe stays as a guard so a future upstream that
-    reshapes the table degrades to the post-copy PutObjectTagging fallback
-    instead of silently dropping the header.
-    """
-    return "Tagging" not in CopySubmissionTask.CREATE_MULTIPART_ARGS_BLACKLIST
-
-
 class _SetTags:
     """Carry source tags into a multipart copy (aws subscriber port).
 
@@ -3480,9 +3468,8 @@ class _SetTags:
     copies read GetObjectTagging from the source and either inline the
     percent-encoded set in the ``Tagging`` header on CreateMultipartUpload
     (<= ~2 KiB - `_allow_inline_mpu_tagging` keeps the header off upstream's
-    create blacklist, like aws-cli's bundled table; the
-    `_mpu_inline_tagging_supported` probe guards the alignment) or apply it
-    with a post-copy PutObjectTagging - rolling the destination object back
+    create blacklist, like aws-cli's bundled table) or apply it with a
+    post-copy PutObjectTagging - rolling the destination object back
     with a delete when that tagging write fails, then surfacing the tagging
     failure on the transfer future. A rollback delete that fails too leaves
     the destination in place without its tags, and the item still fails with
@@ -3532,7 +3519,7 @@ class _SetTags:
             f"{quote(tag['Key'], safe='')}={quote(tag['Value'], safe='')}" for tag in tag_set
         )
         fits_inline = len(header.encode("utf-8")) <= _MAX_TAGGING_HEADER_SIZE
-        if fits_inline and _mpu_inline_tagging_supported():
+        if fits_inline:
             extra_args["Tagging"] = header
         else:
             future.meta.user_context[_POST_TAGGING_KEY] = tag_set

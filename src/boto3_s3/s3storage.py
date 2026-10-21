@@ -34,7 +34,7 @@ import secrets
 import stat as stat_module
 from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import closing, contextmanager, suppress
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from importlib.metadata import version
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
@@ -598,10 +598,6 @@ def s3_request(
         raise request_failure(exc, operation=operation, bucket=bucket, key=key) from exc
 
 
-# The instant naive stamps are counted from (`aware_stamp`).
-_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
-
-
 def read_required(
     entry: Mapping[str, Any],
     element: str,
@@ -636,30 +632,18 @@ def aware_stamp(mtime: datetime) -> datetime:
     reading here, converted to UTC: the instant aws-cli compares, stamps a
     download with and prints.
 
-    The instant is taken through ``timestamp()`` rather than ``astimezone()``.
-    The two agree except for a wall-clock time the local zone skips (the gap
-    a daylight-saving change, or any other change of offset, jumps over),
-    which ``astimezone()`` places earlier by the gap's length before Python
-    3.12 than from it; ``timestamp()`` gives the 3.12 reading on every
-    version, and aws-cli runs on a later one (measured under
-    ``TZ=America/New_York``: ``2025-03-09T02:30:00`` is 07:30Z for aws-cli).
-    Only whole seconds go through the float, the microseconds are put back
-    exactly.
-
     A naive stamp the local zone cannot place - near the ends of
-    ``datetime``'s range (any stamp on 0001-01-01, whose fold probe looks a
-    day earlier, and the last zone offset of 9999), or, on Windows, outside
-    the span its ``localtime`` covers - is read as UTC instead. aws-cli's own conversion
-    dies there and ends the run; the stamp is a valid value all the same, so
-    the run goes on (docs/cli/aws-differences.md). An aware stamp is never
-    converted here, so no timestamp a response carries stops a run.
+    ``datetime``'s range (the first and last day, depending on the zone and
+    the Python version), or, on Windows, outside the span its ``localtime``
+    covers - is read as UTC instead. aws-cli's own conversion dies there and
+    ends the run; the stamp is a valid value all the same, so the run goes on
+    (docs/cli/aws-differences.md). An aware stamp is never converted here, so
+    no timestamp a response carries stops a run.
     """
     if mtime.utcoffset() is not None:
         return mtime
     try:
-        whole = mtime.replace(microsecond=0)
-        seconds = int(whole.timestamp())
-        return _EPOCH + timedelta(seconds=seconds, microseconds=mtime.microsecond)
+        return mtime.astimezone(timezone.utc)
     except (OverflowError, ValueError, OSError):
         # OSError is Windows': its localtime fails outright below the epoch
         # and past its own upper limit, where POSIX raises OverflowError.
@@ -1021,7 +1005,8 @@ class S3Storage(Storage):
         is returned unchanged (never sliced blindly). For raw strings only (the
         CLI's pre-resolve inputs and ``S3PathResolver`` outputs); with an
         ``S3Storage`` at hand, ``normalized_uri`` derives the same form from
-        the held state, and ``format`` the scheme-less root.
+        the held state (the service root aside, which it reads as ``s3:///``),
+        and ``format`` the scheme-less root.
         """
         if not path.startswith(_S3_SCHEME):
             return path
@@ -1068,9 +1053,9 @@ class S3Storage(Storage):
         The instance form of ``normalize_s3_uri`` (aws-cli's
         ``_normalize_s3_trailing_slash``), derived from the held state with no
         string round-trip: a keyless bucket reads as the bucket root
-        ``s3://bucket/``, and the service root keeps the spelling it was given
-        (``s3://`` or ``s3:///``), which aws-cli leaves alone. The form aws
-        validates and prints - ``mv``'s same-path error shows it.
+        ``s3://bucket/``, and the service root as ``s3:///`` however it was
+        typed. The form aws validates and prints - ``mv``'s same-path error
+        shows it.
         """
         return _S3_SCHEME + self._normalized_path()
 
@@ -1080,17 +1065,12 @@ class S3Storage(Storage):
         What aws-cli's ``_normalize_s3_trailing_slash`` leaves after the scheme
         is stripped, rebuilt from ``bucket`` / ``key`` and the separator that
         stood between them (``_key_sep``): a keyless location gains the
-        trailing ``/`` that makes it the bucket root, anything with a key is
-        the plain join. The bare service root has no join to fall out of, and
-        its two spellings stay apart the way aws-cli's scheme strip leaves
-        them - ``s3://`` is ``""``, ``s3:///`` is ``"/"`` - so the raw URI
-        decides there (tested on the scheme-less rest, because ``"s3://"``
-        itself ends in a slash). An access point name the pattern cuts short
-        (``accesspoint/my_ap`` - the name stops at ``my``) has no separator,
-        so it comes back as typed, the way aws-cli prints it.
+        trailing ``/`` that makes it the bucket root (the service root, with
+        neither, is ``"/"``), anything with a key is the plain join. An access
+        point name the pattern cuts short (``accesspoint/my_ap`` - the name
+        stops at ``my``) has no separator, so it comes back as typed, the way
+        aws-cli prints it.
         """
-        if not self._bucket and not self._key:
-            return "/" if self._uri[len(_S3_SCHEME) :].endswith("/") else ""
         path = f"{self._bucket}{self._key_sep}{self._key}"
         if not self._key and not path.endswith("/"):
             path += "/"
@@ -1101,8 +1081,8 @@ class S3Storage(Storage):
 
         aws-cli's ``CommandParameters._same_path`` over the two
         keyless-normalized URIs (``normalized_uri``), plus the one case that
-        string rule misses. For two locations in a bucket the comparison is
-        made on the held ``bucket`` / ``key``: the buckets must match (with
+        string rule misses. Past the string rule the comparison is made on
+        the held ``bucket`` / ``key``: the buckets must match (with
         equal buckets the URI prefix is inert), and the keys are compared
         with the ``same_path`` rule anchored at ``/`` - the ``same_key``
         anchoring, which preserves ``os.path.join`` / ``basename``'s host
@@ -1115,16 +1095,9 @@ class S3Storage(Storage):
         (``accesspoint/my_ap`` against ``accesspoint/my/_ap``) - which aws-cli
         takes for two objects and lets the move
         proceed onto itself; here it is refused like any other self-move.
-
-        A location without a bucket has no object to protect, only a message
-        to get right, so there aws-cli's string rule alone decides: ``s3://``
-        and ``s3:///`` are different strings, and the run goes on to fail on
-        the empty bucket name as aws-cli's does.
         """
         if S3Storage.same_path(self.normalized_uri(), dest.normalized_uri()):
             return True
-        if not self._bucket or not dest._bucket:
-            return False
         return self._bucket == dest._bucket and S3Storage.same_path(
             f"/{self._key}", f"/{dest._key}"
         )
@@ -1207,11 +1180,10 @@ class S3Storage(Storage):
         instead of a re-parsed URI string: the scheme-less ``bucket/key`` root
         with the keyless-bucket normalization applied (aws-cli's
         ``_normalize_s3_trailing_slash``: ``s3://bucket`` reads as the bucket
-        root ``bucket/``) - ``_normalized_path``, which also keeps the two
-        spellings of the bare service root apart (``s3://`` formats to ``""``,
-        no source name; ``s3:///`` to ``"/"``, the source name is taken).
-        A ``dir_op`` root is ``/``-terminated and takes the source's name;
-        otherwise only an explicit trailing ``/`` does.
+        root ``bucket/``) - ``_normalized_path``, which formats the bare
+        service root as ``"/"``. A ``dir_op`` root is ``/``-terminated and
+        takes the source's name; otherwise only an explicit trailing ``/``
+        does.
         """
         path = self._normalized_path()
         if dir_op:
@@ -1226,12 +1198,11 @@ class S3Storage(Storage):
 
         Deferred from construction (``Storage.validate``): S3 Object Lambda
         and Outposts *bucket* ARNs (s3api / s3control territory; aws's uniform
-        parse-time 252), and a key with
-        no bucket (``"s3:///k"`` - aws's handling of that form varies per
-        command, so the CLI invokes this only where its command refuses that
-        form). The library calls this before an operation and the CLI where
-        its command checks the location, so a malformed location fails loud
-        instead of reaching the API as a cryptic botocore error. Idempotent.
+        parse-time 252), and a key with no bucket (``"s3:///k"``; the CLI
+        handles a bucket-less path itself before calling this). The library
+        calls this before an operation and the CLI where its command checks
+        the location, so a malformed location fails loud instead of reaching
+        the API as a cryptic botocore error. Idempotent.
 
         The rejections carry what identifies the offending location: the whole
         ARN for the two ARN forms - taken from the match here, not from
@@ -1343,9 +1314,9 @@ class S3Storage(Storage):
         with botocore's ``Invalid bucket name`` ParamValidation - matching
         ``aws s3 cp/rm/sync s3://``.
 
-        ``options.filter`` is applied here (``Storage.scan_pages``'s contract):
-        the raw ``ListObjectsV2`` pages are sieved client-side with
-        ``sieve_pages`` before they are yielded. This is the
+        ``options.filter`` is applied here (this backend declares
+        ``scan_pages_filters``): the raw ``ListObjectsV2`` pages are sieved
+        client-side with ``sieve_pages`` before they are yielded. This is the
         override seam: subclass and filter / enrich each page, then
         ``super().scan_pages(options)``; the work runs on ``Storage.scan``'s
         prefetch worker so it overlaps consumption. Fetch-time botocore errors are

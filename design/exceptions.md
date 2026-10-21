@@ -79,15 +79,17 @@ class Boto3S3Error(Exception):
   (`transfer._TaskGuard`, `transfer._GuardedReader`). Whatever `on_result`
   raises reaches the caller the same way, from whichever thread the record
   settled on (`Transferrer._deliver`).
-- **Intentional pass-through exception**: using
-  `TransferConfig.preferred_transfer_client="crt"` while awscrt is absent (or
-  older than boto3's minimum) passes
-  through the same `botocore.exceptions.MissingDependencyException` as boto3 does.
-  This is a deliberate exception to the boundary conversion of section 1, kept to
-  stay boto3-faithful ([`crt.md`](./crt.md) section 3 / section 6). The CLI
-  distribution maps this situation to a `ConfigurationError` (rc 253) ahead of
-  time to prevent a traceback (the decision tree of crt.md section 4), so this
-  library exception never passes through the CLI. The pass-through is scoped to
+- **Intentional pass-through exception**: an explicit
+  `preferred_transfer_client="crt"` while awscrt is absent (or older than
+  boto3's minimum) is a `ConfigurationError` (rc 253 in the CLI) wherever the
+  library resolves the config (`S3.resolve_transfer_config`, the decision tree
+  of crt.md section 4), which every `cp` / `mv` / `sync` / `rm` and the CLI do.
+  A config the library has not resolved - a plain boto3 `TransferConfig`, or
+  one handed to `Transferrer` directly - is selected with boto3's rule and
+  passes through the same `botocore.exceptions.MissingDependencyException` as
+  boto3 does. This is a deliberate exception to the boundary conversion of
+  section 1, kept to stay boto3-faithful ([`crt.md`](./crt.md) section 3 /
+  section 6). The pass-through is scoped to
   that engine-selection path: the same exception surfacing inside a translated
   S3 call - SigV4a signing for an MRAP target without awscrt, say - converts to
   the plain `ConfigurationError` like the section 3 table's other environment

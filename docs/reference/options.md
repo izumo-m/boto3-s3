@@ -256,9 +256,10 @@ passing `None` is exactly equivalent to omitting the argument and lets the base
 class supply its own default across every supported boto3. The resulting
 defaults match `aws s3`: an 8 MiB multipart threshold, 8 MiB parts, a
 concurrency of 10, and a 1000-deep download IO queue. That last one is the sole
-default that leaves boto3's own value (100): it caps the read parts buffered
-for the disk writer, so boto3's figure would give a slow disk a tenth of
-`aws s3`'s readahead. Pass `max_io_queue=100` for boto3's ceiling — a plain
+default that leaves boto3's own value (100), set through the `DEFAULTS` table
+boto3 resolves its defaults from (a boto3 that predates the table keeps its
+100): it caps the read parts buffered for the disk writer, so boto3's figure
+would give a slow disk a tenth of `aws s3`'s readahead. Pass `max_io_queue=100` for boto3's ceiling — a plain
 `boto3.s3.transfer.TransferConfig` keeps it, as it keeps all of boto3's
 defaults. (Not under an explicit `preferred_transfer_client="crt"`: an
 explicitly-set `max_io_queue` is a classic-only option there and fails
@@ -312,9 +313,13 @@ s3transfer refuses when an item is handed to it — a `checksum_algorithm` outsi
 the set awscrt computes — is the same `ValidationError`, carrying the engine's
 `ValueError`. Requesting `"crt"`
 explicitly without a usable awscrt — absent or older than the version the CRT
-path needs — or on an s3transfer that lacks the CRT surface propagates
-botocore's `MissingDependencyException`, which stays outside the
-`Boto3S3Error` hierarchy by design ([`exceptions.md`](./exceptions.md)).
+path needs — or on an s3transfer that lacks the CRT surface is a
+[`ConfigurationError`](./exceptions.md#configurationerror) when the config is
+resolved (`S3.resolve_transfer_config`, which the operations call); a config
+used without that resolution — a plain boto3 one, or one handed to
+`Transferrer` directly — propagates botocore's `MissingDependencyException`
+instead, which stays outside the `Boto3S3Error` hierarchy by design
+([`exceptions.md`](./exceptions.md)).
 
 ## ScanOptions
 

@@ -105,9 +105,10 @@ class StorageCapability(Flag):
     Storage kind implements the operation at all - **not** *permission* (whether a
     particular target is writable / reachable right now); a denied write or a
     missing object stays an execution-time error (an S3 ``403``, a local
-    ``EACCES`` / ``ENOENT``), reported per item like aws-cli - the one
-    aws-parity pre-screen is the transfer commands' missing-local-source
-    check, which runs before items flow.
+    ``EACCES`` / ``ENOENT``), reported per item like aws-cli - the exceptions
+    are the transfer commands' checks of a local source (a missing one, or a
+    directory source whose root the walk would skip), which run before items
+    flow.
 
     The members mirror the methods one-to-one, because support genuinely differs
     per kind (``S3Storage`` reads via ``open("rb")`` but does not write via
@@ -310,13 +311,14 @@ class Storage(abc.ABC):
         it (calling ``super().scan_pages(options)``) to filter or enrich entries a
         page at a time - the work then runs on the prefetch worker, so the
         customized stream keeps the page-ahead overlap, cheaper than
-        re-implementing ``scan``. **Apply ``options.filter`` here** and return
-        already-filtered pages: whatever this producer omits is simply absent
-        downstream (its ``sync`` effect is side-specific - the visibility layer in
-        ``ScanOptions.filter`` / design/globsieve.md). A backend that cannot push the
-        predicate to its source wraps its raw pages with ``sieve_pages``; one
-        that can (e.g. a REST listing) translates ``options.filter`` into a
-        server-side query instead.
+        re-implementing ``scan``. A backend that declares ``scan_pages_filters``
+        applies ``options.filter`` here and returns already-filtered pages:
+        whatever this producer omits is simply absent downstream (its ``sync``
+        effect is side-specific - the visibility layer in ``ScanOptions.filter``
+        / design/globsieve.md). Such a backend either wraps its raw pages with
+        ``sieve_pages`` or (e.g. a REST listing) translates ``options.filter``
+        into a server-side query; one that does not declare it leaves the
+        filter to ``scan``.
 
         ``options.recursive`` normally walks every transferable entry beneath the
         prefix (all ``FILE`` kind, no directory grouping); a backend-specific

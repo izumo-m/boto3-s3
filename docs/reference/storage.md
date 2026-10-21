@@ -183,11 +183,11 @@ backend implements and the point to override — including by calling
 `super().scan_pages(options)` and transforming its pages, which keeps the
 page-ahead overlap that re-implementing `scan` would lose.
 
-`options.filter` must be applied here, and the pages returned already filtered:
-whatever this producer omits is simply absent downstream. A backend that cannot
-push the predicate to its source wraps its raw pages with
-`boto3_s3.storage.sieve_pages`; one that can translates the predicate into a
-server-side query instead.
+A backend that declares `scan_pages_filters` applies `options.filter` here and
+returns the pages already filtered: whatever this producer omits is simply
+absent downstream. It either wraps its raw pages with
+`boto3_s3.storage.sieve_pages` or translates the predicate into a server-side
+query. A backend that does not declare it leaves the filter to `scan`.
 
 `options.recursive` normally walks every transferable entry beneath the
 location, all of `FileKind.FILE` with no directory grouping; a backend-specific
@@ -702,8 +702,7 @@ does not share, since `resolve` must still route a bare `bucket/key` to local.
 The stored text is split once into `bucket` and `key`, which are the properties
 every operation reads and from which `as_text`, `normalized_uri`,
 `same_path_as` and `format` are derived — together with the one character the
-split found between them, and, for the bare service root, its spelling
-(below). So `uri` is the input as accepted, scheme filled in, while `as_text()`
+split found between them (below). So `uri` is the input as accepted, scheme filled in, while `as_text()`
 is the canonical rebuilt token; they differ when the input carried a trailing
 slash on a keyless bucket or on the service root. An Outposts access point ARN
 whose key follows a `:` rather than a `/` — a spelling the AWS CLI's pattern
@@ -763,17 +762,14 @@ work and its access point warning.
 ### same_path_as(dest)
 
 The instance form of `same_path`: `True` when `same_path` holds over the two
-`normalized_uri()` strings, or when the two storages name a bucket, the buckets
-are equal **and** their keys satisfy the `same_path` rule anchored at `/` (with
-equal buckets the URI prefix is inert, and the `/`-anchoring preserves
-`os.path`'s semantics exactly). The two agree except for one object spelled two
+`normalized_uri()` strings, or when the buckets are equal **and** their keys
+satisfy the `same_path` rule anchored at `/` (with equal buckets the URI prefix
+is inert, and the `/`-anchoring preserves `os.path`'s semantics exactly). The two agree except for one object spelled two
 ways — an Outposts access point key set off with `:` on one side and `/` on the
 other, or typed straight after an access point name the pattern cuts short
 (`accesspoint/my_ap` on one side, `accesspoint/my/_ap` on the other) — which the
 AWS CLI's string comparison takes for two objects, letting the move run onto
-itself; here it is a self-move like any other. Two locations
-without a bucket are compared as strings only, so `s3://` and `s3:///` are
-different, as they are to the AWS CLI.
+itself; here it is a self-move like any other.
 
 ### split_bucket_key(path) / strip_scheme(path) / normalize_s3_uri(path)
 
@@ -792,13 +788,14 @@ CLI's whole bucket/key splitter, which is how `same_key` uses it.
 kept: `s3://bucket`, including a keyless access point ARN, reads as the bucket
 root `s3://bucket/`. A bare `s3://` is returned as is, and so is any string
 that does not start with `s3://`. It is for raw strings; with an instance at
-hand, `normalized_uri` derives the same form from held state.
+hand, `normalized_uri` derives the same form from held state, except that it
+reads the service root as `s3:///` however it was typed.
 
 ### normalized_uri()
 
 The keyless-normalized `s3://` URI derived from the held state with no string
-round-trip: a keyless bucket reads as `s3://bucket/`, and the bare service root
-keeps the spelling it was given, `s3://` or `s3:///`. It equals
+round-trip: a keyless bucket reads as `s3://bucket/`, and the bare service root,
+`s3://` or `s3:///`, as `s3:///`. Past the service root it equals
 `normalize_s3_uri(uri)`: the separator between the bucket and the key is the
 one the location was typed with — `/`, `:` after an Outposts access point, or
 none where the AWS CLI's pattern cuts an access point name short
@@ -813,11 +810,9 @@ echoing the constructor input, so a keyless location normalizes to a slashless
 
 `format` returns the scheme-less `bucket/key` as the root — `normalized_uri()`
 without its scheme — with the same keyless-bucket normalization (`s3://bucket`
-formats as `bucket/`); only the bare service root formats empty — or as `/`,
-taking the source's name, when spelled `s3:///`, the one case where the stored
-text rather than the held bucket and key decides. A `dir_op` root is `/`-terminated and
-`use_src_name` is `True`; otherwise `use_src_name` is whether the root already
-ends in `/`, and a `dir_op` on the service root formats it as `/`.
+formats as `bucket/`, and the bare service root as `/`). A `dir_op` root is
+`/`-terminated and `use_src_name` is `True`; otherwise `use_src_name` is
+whether the root already ends in `/`.
 
 ### validate()
 
@@ -1628,10 +1623,7 @@ the natural per-entry override point, and the owner of the single stat.
 
 Symlinks are decided first, on a free type test: with symlinks not followed,
 the complete view returns the link's own lstat leaf and the normal view skips
-it — silently when `os.path.islink` agrees, and otherwise through the full-path
-warning battery, which is where the AWS CLI's lstat-based test lands in a
-directory that grants no search permission ("File does not exist."). Then
-`entry_stat_result` is taken once. A `None` stat warns; the
+it silently. Then `entry_stat_result` is taken once. A `None` stat warns; the
 complete view falls back to the link's lstat and the normal view skips. A stat
 that itself reports a symlink — which only an lstat-style override produces —
 is its own vetting-free leaf. Otherwise the normal view vets the entry through

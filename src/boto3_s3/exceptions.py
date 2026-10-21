@@ -14,8 +14,10 @@ class Boto3S3Error(Exception):
     operation failures. Outside the hierarchy, deliberately (design/exceptions.md
     section 2): programming bugs (``TypeError`` / ``AssertionError``) pass
     through on the synchronous paths, ``KeyboardInterrupt`` / ``SystemExit``
-    always pass through, and the explicit-CRT engine selection passes
-    botocore's ``MissingDependencyException`` through boto3-faithfully. Direct
+    always pass through, and the explicit-CRT engine selection from a config
+    the library has not resolved (a plain boto3 ``TransferConfig``, or one
+    handed to ``Transferrer`` directly) passes botocore's
+    ``MissingDependencyException`` through boto3-faithfully. Direct
     instances appear only where no classification exists: the error
     translators' last-resort fallbacks (``s3storage.translate_boto_error``,
     the deleter's per-key unknown-code and unconfirmed-deletion entries, the
@@ -86,12 +88,12 @@ class ConfigurationError(Boto3S3Error):
     Raised plainly for the failures aws gives dedicated handlers (rc 253):
     unresolvable credentials / region - and for an environment lacking a
     required capability (an SDK floor shortfall; awscrt absence on the paths
-    that translate it, e.g. an MRAP target's SigV4a signing or the CLI's
-    ``[s3]`` crt decision - the library's explicit-CRT engine selection
-    instead passes botocore's ``MissingDependencyException`` through,
-    boto3-faithfully; design/exceptions.md section 2). A configuration
-    that is *present but invalid* is the ``InvalidConfigError``
-    refinement below.
+    that translate it, e.g. an MRAP target's SigV4a signing or an explicit
+    ``crt`` in a config the library resolves (``S3.resolve_transfer_config``),
+    where an unresolved config's explicit-CRT engine selection instead passes
+    botocore's ``MissingDependencyException`` through, boto3-faithfully;
+    design/exceptions.md section 2). A configuration that is *present but
+    invalid* is the ``InvalidConfigError`` refinement below.
     """
 
 

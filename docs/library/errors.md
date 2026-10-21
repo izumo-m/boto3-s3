@@ -15,8 +15,8 @@ except Boto3S3Error as exc:
 
 Catching the root catches every failure the library reports as its own. The
 deliberate exceptions — programming errors, `KeyboardInterrupt` / `SystemExit`,
-and botocore's `MissingDependencyException` when the CRT engine is requested
-explicitly without a usable awscrt — are listed under
+and botocore's `MissingDependencyException` when a plain boto3 `TransferConfig`
+requests the CRT engine explicitly without a usable awscrt — are listed under
 [`Boto3S3Error`](../reference/exceptions.md#boto3s3error).
 
 ## 1. The hierarchy

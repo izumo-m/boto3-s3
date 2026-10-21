@@ -82,29 +82,12 @@ _MAX_IO_QUEUE = 1000
 # even classic with no awscrt), so probe the base signature once and, when
 # absent, keep the value as a plain attribute instead - the engine reads it via
 # getattr (transfer.py). On the floor the s3transfer (0.6.2) has no CRT surface,
-# so 'auto' falls to classic while an explicit 'crt' is rejected by crtsupport
-# (not silently downgraded). Drop this shim once the boto3 floor is raised
-# past 1.33.
+# so 'auto' falls to classic while an explicit 'crt' is refused
+# (`resolve_transfer_client`), not silently downgraded. Drop this shim once the
+# boto3 floor is raised past 1.33.
 _BASE_ACCEPTS_PREFERRED_TRANSFER_CLIENT = (
     "preferred_transfer_client" in inspect.signature(Boto3TransferConfig.__init__).parameters
 )
-
-# Back-compat (floor boto3 1.28): the ``DEFAULTS`` table the class below
-# overrides arrived with the ``UNSET_DEFAULT`` sentinel machinery (~1.42, the
-# boto3 that lets ``[s3]`` tuning reach the CRT manager - compatibility.md) -
-# well after the ctor grew ``preferred_transfer_client`` (the shim above).
-# Every DEFAULTS-less boto3 carries concrete ctor defaults instead, so there
-# the value has to be forwarded explicitly. That is safe across the whole
-# band, the CRT-capable releases without the table (~1.33 - ~1.41; verified
-# on 1.34.162) included, because the explicit-'crt' validation that would
-# read a forwarded value as an explicitly-set classic-only option is itself
-# gated on the sentinel (`create_crt_transfer_manager` submits a config to it
-# only when the config carries ``UNSET_DEFAULT``). On a modern boto3 that
-# validation runs, which is why the table is the only way there. Drop this
-# shim only once the floor passes the table's arrival (~1.42): dropping it at
-# the shim above's boundary would put the base 100 back on every DEFAULTS-less
-# boto3.
-_BASE_HAS_DEFAULTS = hasattr(Boto3TransferConfig, "DEFAULTS")
 
 
 class TransferConfig(Boto3TransferConfig):
@@ -121,7 +104,8 @@ class TransferConfig(Boto3TransferConfig):
     # the default without making the value look caller-supplied, and a
     # default-constructed config still passes the explicit-'crt' validation
     # that rejects classic-only options. Both spellings are listed because
-    # boto3 keeps its alias and the s3transfer name in step.
+    # boto3 keeps its alias and the s3transfer name in step. A boto3 that
+    # predates the table keeps its own 100.
     DEFAULTS: dict[str, Any] = {  # noqa: RUF012 - ClassVar: boto3 declares it plainly
         **getattr(Boto3TransferConfig, "DEFAULTS", {}),
         "max_io_queue": _MAX_IO_QUEUE,
@@ -168,10 +152,6 @@ class TransferConfig(Boto3TransferConfig):
             )
             if value is not None
         }
-        if not _BASE_HAS_DEFAULTS and max_io_queue is None:
-            # Floor boto3: no DEFAULTS table to override, so the base ctor's own
-            # 100 would win. Forward the library default as if it were given.
-            base_kwargs["max_io_queue"] = _MAX_IO_QUEUE
         if _BASE_ACCEPTS_PREFERRED_TRANSFER_CLIENT and preferred_transfer_client is not None:
             # Same only-when-set rule as the loop above: an omitted value lets
             # the base ctor supply its own default ("auto" / its UNSET

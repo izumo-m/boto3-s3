@@ -953,23 +953,6 @@ class TestZonelessStamp:
             precise.replace(microsecond=0).timestamp()
         )
 
-    @_needs_tzset
-    @pytest.mark.parametrize("zone", ["UTC", "Asia/Tokyo", "America/New_York"])
-    def test_the_last_day_of_the_range_is_kept(self, zone: str) -> None:
-        # aws-cli's Python places a naive value by solving for it on both
-        # sides of a possible fold, and the second solution reads the local
-        # calendar a day ahead - so a zone-less stamp from 9999-12-31T00:00:00
-        # on ends its run in every zone (measured: `ls` at rc 255). Only that
-        # step fails; the stamp's own local reading is kept here.
-        stamp = datetime(9999, 12, 31, 0, 0, 0)
-        pages = [{"Contents": [_stamped("prefix/far.txt", stamp)]}]
-        with _local_zone(zone):
-            storage, _ = _storage(pages)
-            [entry] = storage.scan(S3ScanOptions(recursive=True))
-            expected = stamp.timestamp()
-        assert entry.mtime is not None and entry.mtime.utcoffset() == timedelta(0)
-        assert entry.mtime.timestamp() == expected
-
     def test_a_bucket_creation_date_gets_the_same_reading(self) -> None:
         pages = [{"Buckets": [{"Name": "alpha", "CreationDate": self._NAIVE}]}]
         storage, _ = _storage(pages, url="s3://")
@@ -994,11 +977,11 @@ class TestZonelessStamp:
     ) -> None:
         # Windows' shape of the same failure: its localtime raises OSError
         # [Errno 22] below the epoch and past the year 3000.
-        def _refuse(self: datetime) -> float:
+        def _refuse(self: datetime, tz: object = None) -> datetime:
             raise OSError(errno.EINVAL, "Invalid argument")
 
         class _Naive(datetime):
-            timestamp = _refuse  # pyright: ignore[reportAssignmentType]
+            astimezone = _refuse  # pyright: ignore[reportAssignmentType]
 
         naive = _Naive(1960, 1, 1)
         assert s3storage.aware_stamp(naive) == datetime(1960, 1, 1, tzinfo=timezone.utc)

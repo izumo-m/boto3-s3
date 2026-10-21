@@ -1098,13 +1098,10 @@ class LocalFileGenerator:
         ``entry_stat_result`` **once** and threads that one value through the
         rest (so nothing below re-stats or re-checks for ``None``). Symlinks are
         decided first on a free ``d_type`` test: no-follow returns an lstat leaf
-        only in the complete view and otherwise skips it - silently when
-        ``os.path.islink`` agrees, else through the full-path battery, the way
-        aws-cli's lstat-based test lands where the directory grants no search
-        permission. A followed stat that
-        comes back ``None`` warns; the complete view then falls back to the link's
-        lstat (whose own timestamp warning still goes out), while the normal
-        view skips it. A stat that
+        only in the complete view and otherwise skips it silently. A followed
+        stat that comes back ``None`` warns; the complete view then falls back
+        to the link's lstat (whose own timestamp warning still goes out), while
+        the normal view skips it. A stat that
         says ``S_IFLNK`` (only an lstat-style override produces one) is its own
         vetting-free leaf, like ``symlink_child``; then
         the normal view's ``should_ignore_entry`` vets that valid stat, and the kind is keyed on
@@ -1119,17 +1116,7 @@ class LocalFileGenerator:
             if options.enumerate_all_entries and not options.follow_symlinks:
                 return self.symlink_child(entry, full, notify=notify)
             if not options.follow_symlinks:
-                if os.path.islink(full):
-                    return None
-                # The entry's type says symlink, but aws-cli's own test - an
-                # lstat by full path - fails here (the directory grants no
-                # search permission, or the entry raced away), so aws-cli takes
-                # it for a non-link and vets it by full path: normally "File
-                # does not exist.", a warning and rc 2 rather than the silent
-                # skip. Only when the battery finds nothing wrong does the entry
-                # go on to be classified.
-                if self.triggers_warning(full, notify):
-                    return None
+                return None
         st = self.entry_stat_result(entry)
         if st is None:
             notify(f"Skipping file {full}. File does not exist.")
@@ -1522,9 +1509,8 @@ class LocalStorage(Storage):
         for the lexical ``abspath`` form. The two differ once ``..`` follows a
         symlinked directory: ``lsub/../x`` is ``sub/x`` to the kernel and
         ``<cwd>/x`` to ``abspath``. aws-cli admits such a source and its
-        generator warns "File does not exist." (rc 2); testing ``abspath``
-        here refused it up front instead (rc 1). This asks the kernel, anchored
-        at the construction-time working directory like `abspath`, so the
+        generator warns "File does not exist." (rc 2). This asks the kernel,
+        anchored at the construction-time working directory like `abspath`, so the
         operations admit what aws-cli admits (a recursive source is then
         vetted as a walk root by the operation) and the walk / `get_fileinfo`
         then answer for the lexical form. Windows has no such gap - it folds

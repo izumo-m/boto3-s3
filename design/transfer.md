@@ -338,11 +338,8 @@ chain:
   manager build** (`_allow_inline_mpu_tagging`): aws-cli's bundled table never
   blacklisted
   the plain header, so the small-tag set rides CreateMultipartUpload there -
-  atomic, and failing at create (source kept) where tagging is denied. The
-  `_mpu_inline_tagging_supported` probe guards the alignment: a future
-  upstream that reshapes the table degrades to the post-copy PutObjectTagging
-  fallback instead of silently dropping the header. Two more spots cover paths
-  the chain does not own:
+  atomic, and failing at create (source kept) where tagging is denied. Two
+  more spots cover paths the chain does not own:
   **a multipart-bound explicit COPY directive is flipped to REPLACE in the
   request parameters** (`Transferrer._submit_copy`): an explicit
   `--metadata-directive COPY` disables the whole chain, and with it the
@@ -574,13 +571,7 @@ dest-existence check for download. We ported the same three faces:
   `TZ=Asia/Tokyo` and `TZ=America/New_York`). A stamp the local zone cannot
   place - at the edges of `datetime`'s range, or outside what Windows'
   `localtime` covers - is read as UTC instead, where aws-cli dies on the
-  conversion; so is aws-cli's own second step, which is not made here: its
-  Python places a naive value by solving for it on both sides of a possible
-  fold, the second solution reading the local calendar a day ahead, so a
-  zone-less stamp in the last day of `datetime`'s range
-  (`9999-12-31T00:00:00` on) ends an aws-cli run in every zone. The instant
-  is taken through `timestamp()`, which places a wall-clock time the zone
-  skips where aws-cli's Python places it on every host version.
+  conversion.
 - **a single-object HEAD missing `ContentLength` or `LastModified` ends the
   run** the same way: aws-cli's `_list_single_object` reads those two by
   subscript (`ContentLength` first) and `ETag` with a default, so

@@ -204,8 +204,9 @@ def is_optimized_for_system() -> bool:
     """awscrt's host-optimization probe; ``False`` without a usable awscrt.
 
     The aws-cli auto-resolution gate (aws-cli's ``TransferManagerFactory``): a
-    host the CRT is tuned for. Separate from ``should_use_crt`` so the
-    CLI can port the aws-cli decision tree primitive-by-primitive.
+    host the CRT is tuned for. Separate from ``should_use_crt`` so
+    ``transferconfig.resolve_transfer_client`` can port the aws-cli decision
+    tree primitive-by-primitive.
     """
     if not has_minimum_crt_version():
         return False
@@ -218,7 +219,7 @@ def acquire_process_lock() -> bool:
     """Claim this process's CRT slot; ``False`` if another process holds it.
 
     The lock is process-global in ``s3transfer`` (stored and reused), so the
-    CLI's auto-resolution claim and the library's later
+    claim ``transferconfig.resolve_transfer_client`` makes and the later
     ``create_crt_transfer_manager`` acquisition return the same lock.
     """
     from s3transfer.crt import acquire_crt_s3_process_lock

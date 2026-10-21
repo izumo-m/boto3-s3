@@ -171,18 +171,6 @@ class TestS3Format:
         # "bucket/" even without dir_op, so the dest takes the source's name.
         assert S3Storage("s3://bucket").format(dir_op=False) == ("bucket/", True)
 
-    def test_bare_service_root_stays_empty(self) -> None:
-        assert S3Storage("s3://").format(dir_op=False) == ("", False)
-
-    def test_service_root_spellings_differ_by_their_trailing_slash(self) -> None:
-        # "s3://" and "s3:///" both hold an empty bucket and key, but aws
-        # reaches s3_format with the scheme merely stripped, so the second
-        # still ends in "/" and takes the source's name: `cp a.txt s3:///`
-        # prints ".. to s3:///a.txt" while `cp a.txt s3://` prints ".. to
-        # s3://" (aws 2.36.40). Only the raw URI can tell them apart here.
-        assert S3Storage("s3:///").format(dir_op=False) == ("/", True)
-        assert S3Storage("s3://").format(dir_op=False) == ("", False)
-
     def test_both_service_roots_are_slash_rooted_under_dir_op(self) -> None:
         assert S3Storage("s3:///").format(dir_op=True) == ("/", True)
         assert S3Storage("s3://").format(dir_op=True) == ("/", True)
@@ -248,10 +236,6 @@ class TestPlanTransfer:
         plan = plan_transfer("s3://a/x/", "s3://b/y", recursive=True)
         assert plan.paths_type == "s3s3"
         assert (plan.src_root, plan.dest_root) == ("a/x/", "b/y/")
-
-    def test_bare_service_root_stays_empty(self, tmp_path: Path) -> None:
-        plan = plan_transfer("s3://", str(tmp_path), recursive=False)
-        assert plan.src_root == ""
 
     def test_keyless_accesspoint_arn_is_bucket_root(self, tmp_path: Path) -> None:
         src = tmp_path / "a.txt"
@@ -472,10 +456,6 @@ class TestMvSamePathGuards:
         assert same_key("s3://b1/d/k.txt", "s3://b2/d/")
 
     # The full URI matrix the string rule covers, for the equivalence pin below.
-    # The bucket-less spellings ride it too: aws-cli keeps `s3://` and `s3:///`
-    # apart (its trailing-slash pass leaves both alone), so
-    # `mv s3:// s3:///` is not a self-move there and dies on the empty bucket
-    # name instead (measured against the pinned aws 2.36.40, offline).
     _URIS = (
         "s3://b/k.txt",
         "s3://b/d/a.txt",
@@ -485,8 +465,6 @@ class TestMvSamePathGuards:
         "s3://b",
         "s3://other/k.txt",
         "s3://other/d/",
-        "s3://",
-        "s3:///",
         "s3:///k.txt",
         "s3:///-",
     )

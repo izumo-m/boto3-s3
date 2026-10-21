@@ -124,9 +124,12 @@ untranslated there too (bar the CRT signer's refusal of a non-positive
 returned incomplete is inside it:
 [`MalformedResponseError`](#malformedresponseerror) carries the `KeyError`
 the AWS CLI dies with on `__cause__` and its text as the message. Selecting the CRT engine
-explicitly with `TransferConfig.preferred_transfer_client="crt"` while awscrt
-is absent (or older than boto3's minimum) propagates botocore's `MissingDependencyException`, matching what
-boto3 does — that pass-through is scoped to engine selection, and the same
+explicitly with `preferred_transfer_client="crt"` while awscrt is absent (or
+older than boto3's minimum) is a [`ConfigurationError`](#configurationerror)
+when the library resolves the config (`S3.resolve_transfer_config`, which
+every `cp` / `mv` / `sync` / `rm` calls); a plain boto3 `TransferConfig`, used
+as it is, propagates botocore's `MissingDependencyException` instead, matching
+what boto3 does — that pass-through is scoped to engine selection, and the same
 exception surfacing inside a translated S3 call becomes a `ConfigurationError`.
 
 An exception raised by a custom `Storage` backend that is not already a
@@ -303,8 +306,9 @@ Adds no attributes and no constructor of its own. `except ConfigurationError`
 also catches `InvalidConfigError`.
 
 Note the engine-selection carve-out described under `Boto3S3Error`: requesting
-the CRT engine explicitly without a usable awscrt installed propagates botocore's
-`MissingDependencyException` rather than this class.
+the CRT engine explicitly in a plain boto3 `TransferConfig` without a usable
+awscrt installed propagates botocore's `MissingDependencyException` rather than
+this class.
 
 ## InvalidConfigError
 

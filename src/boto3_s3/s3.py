@@ -214,19 +214,14 @@ def _attributed_entries(entries: Iterable[_T], operation: str) -> Iterator[_T]:
         yield entry
 
 
-def _validate_storage(storage: Storage, *, operation: str, s3express: bool = True) -> None:
+def _validate_storage(storage: Storage, *, operation: str) -> None:
     """Run ``Storage.validate`` and attribute its failure to ``operation``.
 
-    Then, unless ``s3express`` is false, the SDK-floor gate for S3 Express
-    (`_require_s3express_support`). An operation with a check of its own that
-    every SDK version would fail - ``sync`` on a directory bucket, a
-    ``presign`` with no key - passes false and runs the gate after that check,
-    so the refusal never recommends an upgrade that could not help.
+    Then the SDK-floor gate for S3 Express (`_require_s3express_support`).
     """
     with _attributed_to(operation):
         storage.validate()
-    if s3express:
-        _require_s3express_support(storage, operation=operation)
+    _require_s3express_support(storage, operation=operation)
 
 
 def _require_s3express_support(storage: Storage, *, operation: str) -> None:
@@ -1519,9 +1514,7 @@ class S3:
                     break
         _raise_if_cancelled(cancel_token, "ls")
 
-    def _resolve_s3_target(
-        self, target: Location, *, operation: str, s3express: bool = True
-    ) -> S3Storage:
+    def _resolve_s3_target(self, target: Location, *, operation: str) -> S3Storage:
         """Resolve the single ``Location`` of an S3-only op to a validated ``S3Storage``.
 
         The shared seam of ``ls`` / ``rm`` / ``mb`` / ``rb`` / ``presign`` /
@@ -1535,7 +1528,7 @@ class S3:
         ``S3``'s `client`. Construction is permissive (non-raising), so the strict
         aws-cli checks (unsupported ARN forms, a key without a bucket) run via
         ``validate`` before the op uses the storage, followed by the S3 Express
-        floor gate unless ``s3express`` is false (`_validate_storage`).
+        floor gate (`_validate_storage`).
         """
         if isinstance(target, S3Storage):
             storage = target
@@ -1548,7 +1541,7 @@ class S3:
                     operation=operation,
                 )
             storage = S3Storage(target, client=self.client())
-        _validate_storage(storage, operation=operation, s3express=s3express)
+        _validate_storage(storage, operation=operation)
         return storage
 
     # -- byte transfer ----------------------------------------------------
@@ -2315,9 +2308,8 @@ class S3:
             )
         src_storage = self.resolve(src)
         dest_storage = self.resolve(dest)
-        # The S3 Express floor gate waits for the directory-bucket refusal below.
-        _validate_storage(src_storage, operation="sync", s3express=False)
-        _validate_storage(dest_storage, operation="sync", s3express=False)
+        _validate_storage(src_storage, operation="sync")
+        _validate_storage(dest_storage, operation="sync")
         transfer_config = self._run_transfer_config(
             transfer_config, src_storage, dest_storage, operation="sync"
         )
@@ -2354,8 +2346,6 @@ class S3:
                 raise ValidationError(
                     "Cannot use sync command with a directory bucket.", operation="sync"
                 )
-        for side_storage in (src_storage, dest_storage):
-            _require_s3express_support(side_storage, operation="sync")
         client = client_provider.get_client()
         source_client = source_provider.get_client() if source_provider is not None else None
         # A custom side must support sorted enumeration (the merge-join) plus the
@@ -2649,18 +2639,10 @@ class S3:
         with _attributed_to("rm"):
             config = self.resolve_transfer_config(transfer_config)
         _raise_if_cancelled(cancel_token, "rm")
-        if not storage.bucket and (recursive or not storage.key):
+        if not storage.bucket:
             # rm has no bucket-listing mode (scan is object listing only), so a
-            # bucketless enumerating target cannot resolve to anything to
-            # delete. aws sends Bucket="" to the listing and fails botocore's
-            # client-side validation (rc 1, dryrun included); reject up front
-            # the same way - a deterministic library-level check that does not
-            # depend on the client validating. The blind single delete (a key,
-            # not recursive - only reachable through a custom storage whose
-            # validate allows the form) is deliberately NOT checked: aws only
-            # fails it at submit time, so a dryrun records it at rc 0 and a
-            # live run fails per-key through the same client validation
-            # (measured shapes).
+            # bucketless target cannot resolve to anything to delete; reject it
+            # up front, without depending on the client validating.
             raise ValidationError('Invalid bucket name "": rm requires a bucket', operation="rm")
         root = rm_filter_root(storage.key, recursive=recursive)
 
@@ -2990,11 +2972,7 @@ class S3:
         """
         if method not in ("get_object", "put_object"):
             raise ValidationError(f"Invalid method value: {method!r}", operation="presign")
-        storage = self._resolve_s3_target(target, operation="presign", s3express=False)
-        # A keyless target fails botocore's own validation at every version;
-        # only one it would sign meets the S3 Express floor gate.
-        if storage.key:
-            _require_s3express_support(storage, operation="presign")
+        storage = self._resolve_s3_target(target, operation="presign")
         client = storage.get_client()
         operation = "GetObject" if method == "get_object" else "PutObject"
         try:

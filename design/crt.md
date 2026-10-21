@@ -11,32 +11,33 @@ s3transfer source.
 ## 1. The two-layer split of responsibilities
 
 The decision of whether to use the CRT engine is split across **two layers,
-library and CLI**.
+both in the library**.
 
 ```
-library layer = boto3-faithful
-  Transferrer resolves TransferConfig.preferred_transfer_client
-  ('auto' | 'classic' | 'crt') with the same semantics as boto3.
-  The decision machinery lives in crtsupport.py.
+config resolution = aws-cli-faithful (transferconfig.py)
+  S3.resolve_transfer_config reads [s3] preferred_transfer_client (the
+  caller's TransferConfig wins) and settles it to 'classic' / 'crt' via
+  the aws-cli TransferManagerFactory decision tree. Every cp / mv / sync /
+  rm runs it, and the CLI calls the same method.
 
-CLI layer = aws-cli-faithful
-  Reads [s3] preferred_transfer_client, settles it to 'classic' / 'crt'
-  via the aws-cli TransferManagerFactory decision tree, then hands it to
-  the library.
+engine seam = boto3-faithful (Transferrer, crtsupport.py)
+  A config that arrives unresolved - a plain boto3 TransferConfig, or one
+  handed to Transferrer directly - has its preferred_transfer_client
+  ('auto' | 'classic' | 'crt') read with the same semantics as boto3.
 ```
 
-- **The library has no decision tree of its own.** It only interprets
-  `preferred_transfer_client` with the same rules as boto3's
-  `create_transfer_manager` (section 3). An application that uses the library directly
-  can select CRT with the same feel as boto3, e.g.
-  `TransferConfig(preferred_transfer_client="crt")`.
-- **The CLI ports aws-cli's decision tree** (section 4). The CLI reads the `[s3]`
-  config, applies the unconditional classic for `s3s3`, and applies the
-  `is_optimized_for_system` + process-lock decision for `auto`, then places the
-  resolved, settled value on `TransferConfig.preferred_transfer_client` and
-  hands it to the library. Settling `auto` rather than passing it through is so
-  that it does not duplicate the library's boto3-style `auto` decision, and so
-  that the CLI owns the degradation when awscrt is absent (section 6).
+- **The library ports aws-cli's decision tree** (section 4,
+  `resolve_transfer_client`). It applies the unconditional classic for
+  `s3s3` and the `is_optimized_for_system` + process-lock decision for
+  `auto`, then places the settled value on
+  `TransferConfig.preferred_transfer_client`. Settling `auto` rather than
+  passing it through keeps the engine seam's boto3-style `auto` decision from
+  running a second time, and makes the resolution own the degradation when
+  awscrt is absent (section 6). The CLI has no decision of its own.
+- **The engine seam interprets an unresolved config with boto3's rules**
+  (section 3, boto3's `create_transfer_manager`), so a plain boto3
+  `TransferConfig(preferred_transfer_client="crt")` selects CRT with the same
+  feel as boto3.
 
 **The process lock name is `'boto3-s3'` for both the library and the CLI.** The
 s3transfer lock is an arbitration to keep multiple processes of the same
@@ -46,8 +47,8 @@ return code, so it has no bearing on compatibility. Namespacing it by one's own
 product name is the convention of both. s3transfer stores the lock in a module
 global created once on the first `acquire_crt_s3_process_lock` and returns that
 stored object on every later call (the `name` argument is consulted only at
-first creation, not re-checked). So the lock the CLI acquires when resolving
-`auto` comes back as the same object from the library's re-acquisition call
+first creation, not re-checked). So the lock the resolution acquires for
+`auto` comes back as the same object from the engine's re-acquisition call
 regardless of the name passed, and the two-stage acquisition reconciles
 naturally.
 
@@ -56,7 +57,7 @@ naturally.
 | module | role |
 |---|---|
 | `transferconfig.py` | `TransferConfig` = a subclass of boto3's `TransferConfig`. Adds the CRT tuning fields that boto3 lacks (`target_bandwidth` / `should_stream` / `disk_throughput` / `direct_io`) plus the classic multipart-copy's `annotation_temp_dir` (transfer.md section 4), and records which settings the caller gave. A plain boto3 config is also accepted (`crtsupport.py` reads the CRT fields via `getattr` with a default of None, so a plain boto3 config works too). Also the port of aws-cli's own `transferconfig.py`: `RuntimeConfig`, reading `[s3]`, the decision tree (`resolve_transfer_client`) and the effective config (`resolve_transfer_config`) - section 4. |
-| `crtsupport.py` | A faithful port of boto3's `boto3/crt.py` plus improvements. `should_use_crt` (whether to attempt CRT given `preferred`), `create_crt_transfer_manager` (the process-singleton CRT client + serializer, lock, compatibility check), `create_crt_request_sender` (the same engine as a sender of single requests, for the deletes - section 6), `is_optimized_for_system` / `acquire_process_lock` (the building blocks for the CLI decision tree). It does not pull in awscrt / s3transfer.crt at import time. |
+| `crtsupport.py` | A faithful port of boto3's `boto3/crt.py` plus improvements. `should_use_crt` (whether to attempt CRT given `preferred`), `create_crt_transfer_manager` (the process-singleton CRT client + serializer, lock, compatibility check), `create_crt_request_sender` (the same engine as a sender of single requests, for the deletes - section 6), `is_optimized_for_system` / `acquire_process_lock` (the building blocks for `resolve_transfer_client`'s decision tree). It does not pull in awscrt / s3transfer.crt at import time. |
 | `crtrequest.py` | `CrtRequestSender`: one botocore-serialized S3 request through the engine's CRT client, for the operation `CRTTransferManager` has no route for (the deleter's `DeleteObjects`) and, so one route reads every delete's answer, for the single-key `DeleteObject`s too (section 6). Also free of awscrt at import time. |
 | `Transferrer._get_manager` in `transfer.py` | The engine seam. COPY is unconditionally classic, and `capture_response=True` forces classic before any config is read (transfer.md section 2). Otherwise it reads `preferred_transfer_client`, attempts CRT (classic fallback if None), and the rest takes the conventional classic path. |
 
@@ -393,7 +394,7 @@ changes for a library caller.
 The alternatives considered were both worse. Building the CRT manager on the
 CLI side - a port of aws-cli's `_create_crt_transfer_manager` - would duplicate
 the whole of `_initialize` (serializer, `verify`, part size, fio options) and
-contradict section 1, where the CLI resolves the engine and the library builds
+contradict section 1, where the library both resolves the engine and builds
 it. Carrying the posture on `TransferConfig` would reach the same code with no
 plumbing, but that class is transfer *tuning*, and a compatibility posture
 does not belong in it. `S3` already declares one such posture

@@ -183,9 +183,11 @@ Raises:
   credentials as its item's failure instead (`BatchError` below). A selected
   CRT engine that cannot be built — a CA bundle it cannot read or use — is an
   `InvalidConfigError`, raised where the engine is built (above).
-- botocore's `MissingDependencyException` — `preferred_transfer_client="crt"`
-  requested explicitly without a usable awscrt, raised where the engine would
-  be built, as a transfer raises it ([`../options.md`](../options.md)).
+- botocore's `MissingDependencyException` — a plain boto3 `TransferConfig`
+  requesting `preferred_transfer_client="crt"` explicitly without a usable
+  awscrt, raised where the engine would be built, as a transfer raises it
+  ([`../options.md`](../options.md)). The library's own `TransferConfig`
+  gets a `ConfigurationError` instead, as the run resolves it.
 - The listing's own rejection, translated to its category and propagated
   untouched: `NoSuchBucket` becomes
   [`NotFoundError`](../exceptions.md#notfounderror), a denied `ListBucket`

@@ -45,20 +45,12 @@ class TestSdkFloorCompat:
             "multipart_threshold",
             "multipart_chunksize",
             "num_download_attempts",
+            "max_io_queue",
             "io_chunksize",
             "use_threads",
             "max_bandwidth",
         ):
             assert omitted not in captured, f"{omitted} must be omitted, not forwarded as None"
-        # The moved download IO queue depth is the one exception: on a modern
-        # boto3 it rides the overridden DEFAULTS table and stays omitted; the
-        # floor has no table (the base ctor's own 100 would win), so there the
-        # ctor forwards the concrete library default in its place - a real
-        # value on both paths, never None.
-        if hasattr(Boto3TransferConfig, "DEFAULTS"):
-            assert "max_io_queue" not in captured
-        else:
-            assert captured.get("max_io_queue") == 1000
 
 
 class TestReExport:
@@ -118,6 +110,8 @@ class TestDownloadIoQueueDepth:
         # s3transfer defaults the download IO queue to 1000 and aws-cli runs
         # there (no [s3] key maps to it); boto3 alone dials it to 100, which
         # would give a slow disk a tenth of aws's readahead.
+        if not hasattr(Boto3TransferConfig, "DEFAULTS"):
+            pytest.skip("installed boto3 predates the DEFAULTS table the default rides")
         config = TransferConfig()
         assert config.max_io_queue_size == 1000
         assert config.max_io_queue == 1000
