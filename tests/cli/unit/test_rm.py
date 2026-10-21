@@ -156,12 +156,13 @@ class TestDeletePrinterEncoding:
 
         stream = _AsciiStream()
         monkeypatch.setattr(sys, "stdout", stream)
-        printer = _DeletePrinter(bucket="b", quiet=False, only_show_errors=False)
+        printer = _DeletePrinter(quiet=False, only_show_errors=False)
         printer(
             OpResult(
                 transfer_type=TransferType.DELETE,
                 compare_key="名前.txt",
                 outcome=OpOutcome.SUCCEEDED,
+                src="s3://b/名前.txt",
             )
         )
         assert stream.getvalue() == "delete: s3://b/??.txt\n"
@@ -185,8 +186,12 @@ class TestDeletePrinterWriteFailures:
         # failure line) gets the same treatment in aws's result thread.
         monkeypatch.setattr(sys, "stdout", None)
         monkeypatch.setattr(sys, "stderr", None)
-        printer = _DeletePrinter(bucket="b", quiet=False, only_show_errors=False)
-        printer(OpResult(transfer_type=TransferType.DELETE, compare_key="k", outcome=outcome))
+        printer = _DeletePrinter(quiet=False, only_show_errors=False)
+        printer(
+            OpResult(
+                transfer_type=TransferType.DELETE, compare_key="k", outcome=outcome, src="s3://b/k"
+            )
+        )
 
     def test_an_unwritable_stdout_keeps_the_run_at_rc_0(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

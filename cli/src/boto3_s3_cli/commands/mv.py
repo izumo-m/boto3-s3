@@ -116,7 +116,6 @@ class MvCommand(Command):
         options = transferargs.build_transfer_options(
             args,
             case_conflict,
-            operation="mv",
             default_checksum_algorithm=transferargs.default_upload_checksum(
                 client, paths_type, transfer_config
             ),

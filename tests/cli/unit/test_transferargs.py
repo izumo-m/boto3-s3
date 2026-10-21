@@ -199,19 +199,13 @@ class TestParamfile:
             )
 
     def test_fileb_on_a_string_option_is_a_param_validation(self, tmp_path: Path) -> None:
-        # aws loads the fileb:// bytes and botocore rejects them for a
-        # string-typed parameter (rc 252; measured against the pinned aws-cli).
+        # No bytes can be a string value: refused unread (rc 252, as aws's
+        # botocore type check ends).
         p = tmp_path / "ct.bin"
         p.write_bytes(b"hi\n")
         with pytest.raises(ValidationError) as excinfo:
             transferargs.resolve_text_paramfile(f"fileb://{p}", "--content-type", operation="cp")
         assert not isinstance(excinfo.value, InvalidValueError)
-
-    def test_missing_fileb_on_a_string_option_is_the_load_252(self) -> None:
-        with pytest.raises(ValidationError, match="Unable to load paramfile"):
-            transferargs.resolve_text_paramfile(
-                "fileb:///nonexistent/boto3_s3_xyz", "--content-type", operation="cp"
-            )
 
 
 class TestGrantsParamfile:

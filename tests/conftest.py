@@ -107,9 +107,7 @@ def _moto_isolation(monkeypatch: pytest.MonkeyPatch, _classic_aws_config: Path) 
     )
     # AWS_DEFAULT_PROFILE leaks as surely as AWS_PROFILE: it is the second link
     # of the same chain, so a developer exporting it would name a profile the
-    # fixture config does not declare - which silently strips the
-    # ParamValidation envelope off every CLI error report (design/cli.md
-    # section 6) as well as steering the session.
+    # fixture config does not declare and steer the session.
     # The CA bundle variables steer every client too, and an empty one is
     # refused outright (`s3storage.reject_empty_ca_bundle`).
     for leak in (

@@ -43,6 +43,7 @@ from boto3_s3_cli.commands.base import (
     expand_integer_paramfile,
     expand_option_paramfile,
     parse_integer_option,
+    refuse_binary_paramfile,
     refuse_bucketless,
 )
 from boto3_s3_cli.output import uni_write
@@ -78,17 +79,15 @@ _STORAGE_CLASS_CHOICES = [
     "GLACIER_IR",
 ]
 
-# The contiguous run of free-string transfer options that take aws's paramfile
-# resolution, in aws's ``TRANSFER_ARGS`` registration order (subcommands.py):
-# ``website-redirect`` through ``source-region``. Each is a string-typed
-# server parameter, so a ``file://`` reference sends the file text and a
-# ``fileb://`` one is rejected (bytes for a string parameter, 252 -
-# ``resolve_text_paramfile``). The choices-validated options (acl /
-# storage_class / sse / ... ) can't carry such a value (argparse rejects it as
-# an invalid choice first); ``sse-kms-key-id`` and ``grants`` sit earlier in
-# the registration order (resolved individually in ``resolve_paramfile_values``);
-# ``metadata`` is a map, resolved after the integer coercions.
+# The free-string transfer options that take aws's paramfile resolution
+# (``resolve_text_paramfile``). Each is a string-typed server parameter, so a
+# ``file://`` reference sends the file text and a ``fileb://`` one is refused
+# (252). The choices-validated options (acl / storage_class / sse / ... ) can't
+# carry such a value (argparse rejects it as an invalid choice first);
+# ``grants`` is resolved on its own (``_resolve_grants``), and ``metadata`` is
+# a map, resolved after the integer coercions.
 _PARAMFILE_TEXT_OPTIONS: tuple[str, ...] = (
+    "sse_kms_key_id",
     "website_redirect",
     "content_type",
     "cache_control",
@@ -98,13 +97,6 @@ _PARAMFILE_TEXT_OPTIONS: tuple[str, ...] = (
     "expires",
     "source_region",
 )
-
-# aws-cli's _raise_if_paths_type_incorrect_for_param's usage rendering.
-_EXPECTED_USAGE_MAP = {
-    "locals3": "<LocalPath> <S3Uri>",
-    "s3s3": "<S3Uri> <S3Uri>",
-    "s3local": "<S3Uri> <LocalPath>",
-}
 
 
 def add_transfer_arguments(
@@ -310,10 +302,10 @@ def resolve_paramfile_values(args: argparse.Namespace, *, operation: str) -> tup
 
     The ``file://`` / ``fileb://`` paramfile expansion (a bad reference is
     252) and, for the two ``integer`` options, the bare ``int()`` coercion
-    (255): the SSE-C key blob, ``--sse-kms-key-id``, the copy-source blob,
-    the ``--grants`` check (a lone paramfile, a malformed grant: 252), the
-    free-string text block, then ``--progress-frequency`` and ``--page-size``
-    (paramfile then coercion).
+    (255): the SSE-C key blob, the copy-source blob, the ``--grants`` check
+    (a lone paramfile, a malformed grant: 252), the free-string text block,
+    then ``--progress-frequency`` and ``--page-size`` (paramfile then
+    coercion).
     Returns the two coerced integers. ``--metadata`` (a map) and cp's
     ``--expected-size`` are resolved by ``classify_paths`` (``resolve_metadata_option`` /
     ``expand_option_paramfile``). ``build_transfer_options`` consumes the
@@ -321,10 +313,6 @@ def resolve_paramfile_values(args: argparse.Namespace, *, operation: str) -> tup
     """
     if args.sse_c_key is not None:
         args.sse_c_key = blob_value(args.sse_c_key, "--sse-c-key", operation=operation)
-    if args.sse_kms_key_id is not None:
-        args.sse_kms_key_id = resolve_text_paramfile(
-            args.sse_kms_key_id, "--sse-kms-key-id", operation=operation
-        )
     if args.sse_c_copy_source_key is not None:
         args.sse_c_copy_source_key = blob_value(
             args.sse_c_copy_source_key, "--sse-c-copy-source-key", operation=operation
@@ -404,18 +392,13 @@ def resolve_metadata_option(args: argparse.Namespace, *, operation: str) -> None
     """Resolve ``--metadata`` in place: paramfile, then the shorthand parse.
 
     A ``file://`` whole-value reference loads the map text (252 on a missing
-    file). A ``fileb://`` one is refused at 252 without being read: aws loads
-    the bytes and then crashes in its shorthand parser (rc 255), and no bytes
-    can be a map (docs/cli/aws-differences.md section 2).
+    file). A ``fileb://`` one is refused at 252 without being read
+    (``resolve_text_paramfile``): aws loads the bytes and then crashes in its
+    shorthand parser (rc 255), and no bytes can be a map
+    (docs/cli/aws-differences.md section 2).
     """
     if args.metadata is None:
         return
-    if args.metadata.startswith("fileb://"):
-        raise ValidationError(
-            "Error parsing parameter '--metadata': a fileb:// reference is not "
-            "supported; use file:// to read the map from a file",
-            operation=operation,
-        )
     metadata_value = resolve_text_paramfile(args.metadata, "--metadata", operation=operation)
     args.metadata = shorthand.parse_map_option(
         metadata_value, name="--metadata", operation=operation
@@ -458,9 +441,9 @@ def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) ->
     resolve_metadata_option(args, operation=operation)
     # cp-only (``--expected-size``); a no-op where the attribute is absent.
     # A *string*-typed option in aws (no cli_type_name, unlike --page-size),
-    # so a readable fileb:// is rejected with botocore's bytes 252 at parse -
-    # measured: aws 252 where the integer helper would run int(b'5') and
-    # proceed. The stream route's int() coercion still runs at submit time.
+    # so a fileb:// is refused (252) where the integer helper would run
+    # int(b'5') and proceed. The stream route's int() coercion still runs at
+    # submit time.
     expand_option_paramfile(args, "expected_size", operation=operation)
     src, dest = args.paths
     src_type = identify_type(src)
@@ -585,18 +568,11 @@ def validate_checksum_paths_type(
     """
     if getattr(args, "checksum_algorithm", None) and paths_type not in ("locals3", "s3s3"):
         raise ValidationError(
-            "Expected checksum-algorithm parameter to be used with one of following "
-            f"path formats: {_EXPECTED_USAGE_MAP['locals3']}, {_EXPECTED_USAGE_MAP['s3s3']}. "
-            f"Instead, received {_EXPECTED_USAGE_MAP[paths_type]}.",
+            "--checksum-algorithm applies only to an upload or an S3-to-S3 copy",
             operation=operation,
         )
     if getattr(args, "checksum_mode", None) and paths_type != "s3local":
-        raise ValidationError(
-            "Expected checksum-mode parameter to be used with one of following "
-            f"path formats: {_EXPECTED_USAGE_MAP['s3local']}. "
-            f"Instead, received {_EXPECTED_USAGE_MAP[paths_type]}.",
-            operation=operation,
-        )
+        raise ValidationError("--checksum-mode applies only to a download", operation=operation)
 
 
 def validate_sse_c_pairing(args: argparse.Namespace, paths_type: str, *, operation: str) -> None:
@@ -706,7 +682,6 @@ def build_transfer_options(
     args: argparse.Namespace,
     case_conflict: CaseConflictMode,
     *,
-    operation: str,
     default_checksum_algorithm: str | None = None,
 ) -> TransferOptions:
     """Translate parsed flags into the library's ``TransferOptions``.
@@ -771,23 +746,13 @@ def resolve_text_paramfile(value: str, name: str, *, operation: str) -> str:
 
     aws-cli registers a global URI paramfile handler on every ``aws s3`` arg, so
     ``--content-type file://ct.txt`` (etc.) sends the *file contents*. A value
-    without a paramfile prefix passes through verbatim. A ``fileb://`` reference
-    loads bytes, which botocore then rejects for a string-typed parameter at
-    parse time (measured: rc 252) - a missing file is still
-    the load 252.
+    without a paramfile prefix passes through verbatim. A ``fileb://``
+    reference is refused unread (252, ``refuse_binary_paramfile``).
     """
     if value.startswith("file://"):
         with paramfile.named_argument(name, operation=operation):
             return paramfile.read_text_paramfile(value, operation=operation)
-    if value.startswith("fileb://"):
-        with paramfile.named_argument(name, operation=operation):
-            loaded = paramfile.read_binary_paramfile(value, operation=operation)
-        raise ValidationError(
-            "Parameter validation failed:\n"
-            f"Invalid type for parameter input, value: {loaded!r}, "
-            "type: <class 'bytes'>, valid types: <class 'str'>",
-            operation=operation,
-        )
+    refuse_binary_paramfile(value, name, operation=operation)
     return value
 
 

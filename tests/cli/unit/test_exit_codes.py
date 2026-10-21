@@ -267,7 +267,7 @@ class TestMainExitCodes:
         # The `ls | head` shape: ls has a line to print and the reader is gone,
         # so ``uni_write(sys.stdout, ...)`` raises. The library does not
         # translate it (``s3_errors`` catches only ClientError / BotoCoreError),
-        # so it escapes the command and lands on _dispatch's general backstop,
+        # so it escapes the command and lands on _run_command's general backstop,
         # reported with its cause at 255. The final flush then fails as well;
         # the run keeps its 255 and reports nothing twice.
         class _DeadPipe:
@@ -340,7 +340,7 @@ class TestMainExitCodes:
     ) -> None:
         # aws's InterruptExceptionHandler: Ctrl-C is a bare newline on stdout
         # and rc 130 (128+SIGINT), never a traceback (measured on the pinned aws-cli).
-        # KeyboardInterrupt is a BaseException, so it passes _dispatch's
+        # KeyboardInterrupt is a BaseException, so it passes _run_command's
         # handlers and reaches main's backstop.
         class _InterruptClient:
             def get_paginator(self, name: str) -> Any:
@@ -755,8 +755,9 @@ class TestOptionValueResolution:
     def test_expected_size_readable_fileb_is_a_param_validation_252(self, tmp_path: Path) -> None:
         # --expected-size is a string-model option in aws (no cli_type_name),
         # NOT part of the integer-family expansion: a readable fileb:// is
-        # botocore's bytes rejection at parse time (252), where the integer
-        # helper would run int(b'5') and proceed. Measured.
+        # refused like on any string option (252; aws's botocore type check
+        # ends the same), where the integer helper would run int(b'5') and
+        # proceed.
         blob = tmp_path / "size.bin"
         blob.write_bytes(b"5")
         rc = cli.main(["cp", "-", "s3://b/k", "--expected-size", f"fileb://{blob}"])
@@ -788,7 +789,8 @@ class TestOptionValueResolution:
             assert ref in capsys.readouterr().err
 
     def test_whole_value_metadata_fileb_missing_is_252(self) -> None:
-        # A whole-value --metadata fileb:// load failure is the paramfile 252.
+        # A whole-value --metadata fileb:// is refused unread (252), so a
+        # missing file is the same 252.
         rc = cli.main(["cp", self._MISSING, "s3://b/k", "--metadata", "fileb:///no/x"])
         assert rc == 252
 
@@ -833,8 +835,8 @@ class TestOptionValueResolution:
         assert "Error parsing parameter '--grants'" in capsys.readouterr().err
 
     def test_free_string_option_fileb_is_a_param_validation_252(self, tmp_path: Path) -> None:
-        # A fileb:// on a string-typed option loads bytes, which botocore
-        # rejects for a string parameter (252), not a transfer. Measured.
+        # A fileb:// on a string-typed option is refused unread (252; aws's
+        # botocore type check ends the same), not a transfer.
         blob = tmp_path / "ct.bin"
         blob.write_bytes(b"hi")
         rc = cli.main(

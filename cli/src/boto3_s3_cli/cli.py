@@ -102,18 +102,13 @@ _NEGATIVE_NUMBER_RE = re.compile(r"-\.?\d")
 _OUTPUT_ENCODING_ENV_VAR = "AWS_CLI_OUTPUT_ENCODING"
 
 
-def _write_error(message: object, *, rc: int | None = None) -> None:
+def _write_error(message: object) -> None:
     """Write one CLI error report to stderr.
 
-    A usage error (rc 252) carries the ``An error occurred
-    (ParamValidation):`` envelope; every other report is the message alone (an
-    rc-254 ``ClientError`` already names its code in its own text). Stripping
-    keeps a message that ends with a newline from surfacing as a trailing
-    blank line.
+    Stripping keeps a message that ends with a newline from surfacing as a
+    trailing blank line.
     """
     detail = str(message).strip()
-    if rc == _PARAM_VALIDATION_ERROR_RC:
-        detail = f"An error occurred (ParamValidation): {detail}"
     sys.stderr.write(f"boto3-s3: [ERROR]: {detail}".rstrip() + "\n")
 
 
@@ -196,7 +191,7 @@ class _ParamValidationArgumentParser(argparse.ArgumentParser):
         return super()._match_argument(action, arg_strings_pattern)
 
     def error(self, message: str) -> NoReturn:
-        _write_error(message, rc=_PARAM_VALIDATION_ERROR_RC)
+        _write_error(message)
         self.exit(2)
 
 
@@ -486,7 +481,7 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
         # steps, where an exception no step claims must still not surface as
         # a traceback.
         rc = _exit_code_for_unexpected(exc)
-        _write_error(exc, rc=rc)
+        _write_error(exc)
     try:
         return _settle_std_streams(rc)
     except KeyboardInterrupt:
@@ -518,7 +513,7 @@ def _settle_std_streams(rc: int) -> int:
     if failure is not None and rc in (0, 2):
         rc = _GENERAL_ERROR_RC
         with contextlib.suppress(Exception):
-            _write_error(failure, rc=rc)
+            _write_error(failure)
     _flush_or_discard(sys.stderr)
     return rc
 
@@ -618,8 +613,7 @@ def _dispatch(argv: list[str], ctx: Context) -> int:
             "".encode(output_encoding)
         except LookupError:
             _write_error(
-                f"Unknown codec `{output_encoding}` specified for {_OUTPUT_ENCODING_ENV_VAR}.",
-                rc=_GENERAL_ERROR_RC,
+                f"Unknown codec `{output_encoding}` specified for {_OUTPUT_ENCODING_ENV_VAR}."
             )
             return _GENERAL_ERROR_RC
     return _resolve_command(tokens, head, ctx)
@@ -667,7 +661,7 @@ def _resolve_command(tokens: list[str], head: argparse.Namespace, ctx: Context) 
             if leftovers
             else "the following arguments are required: <subcommand>"
         )
-        _write_error(message, rc=_PARAM_VALIDATION_ERROR_RC)
+        _write_error(message)
         return _PARAM_VALIDATION_ERROR_RC
     name = tokens[index]
     # aws's subcommand extraction (SubCommandArgParser._remove_subcommand):
@@ -679,8 +673,7 @@ def _resolve_command(tokens: list[str], head: argparse.Namespace, ctx: Context) 
     if name not in _COMMAND_TABLE:
         _write_error(
             f"argument <subcommand>: invalid choice: {name!r}"
-            f" (choose from {', '.join(_COMMAND_TABLE)})",
-            rc=_PARAM_VALIDATION_ERROR_RC,
+            f" (choose from {', '.join(_COMMAND_TABLE)})"
         )
         return _PARAM_VALIDATION_ERROR_RC
     return _run_command(name, stage2_tokens, head, ctx)
@@ -712,7 +705,7 @@ def _run_command(
     if extras:
         # What the leaf parse could not place (exercised by the ported
         # test_errors_out_with_extra_arguments).
-        _write_error(_unknown_options_message(extras), rc=_PARAM_VALIDATION_ERROR_RC)
+        _write_error(_unknown_options_message(extras))
         return _PARAM_VALIDATION_ERROR_RC
 
     if getattr(args, "debug", False):
@@ -725,7 +718,7 @@ def _run_command(
         return command.run(args, ctx)
     except Boto3S3Error as exc:
         rc = exit_code_for(exc)
-        _write_error(exc, rc=rc)
+        _write_error(exc)
         return rc
     except AssertionError:
         # An AssertionError is an internal-invariant violation (a bug), not a
@@ -745,5 +738,5 @@ def _run_command(
         # they still propagate - a Ctrl-C reaches main's aws-shaped backstop
         # (a bare newline + rc 130, no traceback).
         rc = _exit_code_for_unexpected(exc)
-        _write_error(exc, rc=rc)
+        _write_error(exc)
         return rc

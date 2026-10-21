@@ -85,8 +85,7 @@ matches that.
 `--cli-error-format` selects how aws-cli renders an error report. Error
 reports are not a compatibility target ([`overview.md`](./overview.md)
 section 3), so `boto3-s3-cli` accepts the flag and ignores it: its reports
-keep one form whatever the value (a parameter-validation failure reads
-`An error occurred (ParamValidation): <message>`).
+keep one form whatever the value.
 
 `--cli-binary-format base64` (the default) base64-decodes only the parameters
 the *API operation model* declares as a `blob` shape:
@@ -122,10 +121,9 @@ so are the free-value options `--bucket-name-prefix`
 covers the free-string transfer options (`--content-type`,
 `--website-redirect`, `--cache-control`, `--content-disposition`,
 `--content-encoding`, `--content-language`, `--expires`, `--source-region`,
-`--sse-kms-key-id`, and `--expected-size` - a plain string in aws's table, so
-a readable `fileb://` is rejected with the bytes 252 while its `int()` runs
-only on the stream route at submit), the string-typed integer options
-(`--page-size` / `--progress-frequency` / `--expires-in`, expanded before
+`--sse-kms-key-id`, and `--expected-size` - a plain string in aws's table,
+whose `int()` runs only on the stream route at submit), the string-typed
+integer options (`--page-size` / `--progress-frequency` / `--expires-in`, expanded before
 their `int()` coercions - cli.md section 5.7), and `--metadata` (resolved
 after both integer coercions, before its shorthand parse; the shorthand also
 accepts aws's `key@=file://...` operator). The choices-validated options
@@ -139,12 +137,12 @@ the positional's `paths`/`path` or the option's `--flag` form).
 `fileb://` is not a free pass-through wherever it is accepted, though: only
 the two SSE-C key blobs (`--sse-c-key`, `--sse-c-copy-source-key`) take the
 loaded *bytes* verbatim into the request (a `string`-shaped request parameter
-untouched, as above). Every other free-string option in the list above
-still runs a
-`fileb://` value through the same string-typed parameter check aws applies:
-`--content-type fileb://x` loads the bytes and then fails botocore's
-client-side check for a `string`-typed parameter (`Invalid type for
-parameter ...`, rc 252) rather than passing them through unchanged.
+untouched, as above), and the string-typed integer options feed them to
+`int()`. A `fileb://` on any other single-string argument in the list above
+is refused at 252 without reading the file (`base.refuse_binary_paramfile`):
+no bytes can be a string value. On a free-string option aws reaches the same
+252 after loading the bytes (botocore's client-side check for a
+`string`-typed parameter); the uses it mishandles are below.
 
 Four paramfile uses are refused at 252 without reading the file, because aws
 mishandles them - aws bugs this CLI does not copy

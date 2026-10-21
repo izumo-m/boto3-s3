@@ -10,8 +10,8 @@ the caller named none; s3transfer copies the same constant into an upload's
 arguments (its ``set_default_checksum_algorithm``), and aws's bundled
 s3transfer has ``CRC64NVME`` written into its CRT module where pip's has
 ``CRC32``. So ``aws s3 cp`` leaves CRC64NVME full-object checksums on what it
-uploads and sends CRC64NVME on a delete or a bucket put, and the same
-commands here left CRC32 (docs/cli/aws-differences.md used to record it).
+uploads and sends CRC64NVME on a delete or a bucket put, where a client left
+to pip botocore's default would send CRC32.
 
 The CLI reproduces aws's value in two places, both on the CLI side - the
 library keeps boto3's defaults (design/crt.md section 1):

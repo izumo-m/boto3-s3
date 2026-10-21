@@ -47,11 +47,7 @@ def validate_query(args: argparse.Namespace) -> None:
     and it is loaded only when ``--query`` is actually present.
 
     Every failure of the compile is that 252, not just the ``JMESPathError``
-    family: aws's ``_resolve_query`` catches bare ``Exception``, so an
-    expression deep enough to exhaust the interpreter's stack (2000 leading
-    ``!``) is its ParamValidation report too, carrying the ``RecursionError``'s
-    own text - measured. Narrowing this to ``JMESPathError`` would let that
-    escape as a traceback with rc 1, which the error rules forbid.
+    family, as aws's ``_resolve_query`` catches bare ``Exception``.
     """
     value = getattr(args, "query", None)
     if value is None:

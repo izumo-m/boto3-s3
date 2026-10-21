@@ -186,7 +186,6 @@ class TestResultLines:
         captured = capsys.readouterr()
         assert captured.out == ""
         assert captured.err == "upload failed: s3://b/a.txt to s3://b/copy.txt boom\n"
-        assert printer.failed == 1
 
     def test_warning_line_prints_the_body_verbatim(
         self, capsys: pytest.CaptureFixture[str]
@@ -204,19 +203,16 @@ class TestResultLines:
         captured = capsys.readouterr()
         assert (captured.out, captured.err) == ("", "")
 
-    def test_cancelled_is_silent_and_not_counted_failed(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_cancelled_is_silent(self, capsys: pytest.CaptureFixture[str]) -> None:
         # aws surfaces only the run's single fatal line for a cancellation
         # (measured live: a fatal mid-listing prints zero per-item lines for
-        # the cancelled set, and its recorder never counts them as failures).
+        # the cancelled set).
         with TransferPrinter() as printer:
             printer.on_result(_result(OpOutcome.CANCELLED, error=RuntimeError("fatal elsewhere")))
         captured = capsys.readouterr()
         assert (captured.out, captured.err) == ("", "")
-        assert printer.failed == 0
 
-    def test_records_after_a_cancelled_one_still_print_and_count(
+    def test_records_after_a_cancelled_one_still_print(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # aws's ResultProcessor goes silent after the first error result, so
@@ -240,7 +236,6 @@ class TestResultLines:
         captured = capsys.readouterr()
         assert captured.out == "upload: s3://b/c to s3://c/c\n"
         assert captured.err == "upload failed: s3://b/d to s3://c/d boom\n"
-        assert printer.failed == 1
 
     def test_cancelled_backfills_untransferred_remainder(self) -> None:
         # A queued-then-cancelled transfer closes its meter share like a
@@ -266,7 +261,7 @@ class TestSuppression:
             printer.on_progress(_progress("a.txt", 10, 10))
         captured = capsys.readouterr()
         assert (captured.out, captured.err) == ("", "")
-        assert (printer.failed, printer.warned) == (1, 1)
+        assert printer.warned == 1
 
     def test_only_show_errors_keeps_dryrun_failures_and_warnings(
         self, capsys: pytest.CaptureFixture[str]
@@ -417,28 +412,6 @@ class TestCarriageReturnProtocol:
         assert "(0 Bytes/s)" in first
         assert "(1.0 KiB/s)" in second
 
-    def test_dryrun_lines_keep_the_meter_width(
-        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # aws's _print_dry_run pads to the meter's width but does not reset it
-        # (only success / failure / warning printers do), so every dryrun line
-        # in a row blots the meter out. Latent today - a dryrun run paints no
-        # meter - but pinned at the printer so the widths cannot drift.
-        clock = iter([0.0, 1.0])
-        monkeypatch.setattr("boto3_s3_cli.progress.time.monotonic", lambda: next(clock))
-        with TransferPrinter() as printer:
-            printer.on_progress(_progress("a", 0, 4096))  # queued
-            printer.on_progress(_progress("a", 2048, 4096))
-            printer.on_result(_result(OpOutcome.DRYRUN, key="b", src="s3://b/b", dest=None))
-            printer.on_result(_result(OpOutcome.DRYRUN, key="c", src="s3://b/c", dest=None))
-            printer.on_result(_result(OpOutcome.SUCCEEDED, key="a", src="s3://b/a", dest=None))
-        meter, rest = capsys.readouterr().out.split("\r", 1)
-        first, second, result_line = rest.split("\n")[:3]
-        assert first.startswith("(dryrun)") and len(first) == len(meter)
-        assert second.startswith("(dryrun)") and len(second) == len(meter)
-        # The result line still blots the meter width out (and resets it).
-        assert len(result_line) == len(meter)
-
     def test_notice_prints_raw_and_leaves_the_meter_width(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -588,7 +561,7 @@ class TestPrinterThread:
             printer.on_result(_result(OpOutcome.FAILED, error=RuntimeError("boom")))
             printer.on_result(_result(OpOutcome.SUCCEEDED))
         assert "failed:" in capsys.readouterr().err
-        assert (printer.failed, printer.warned) == (1, 0)
+        assert printer.warned == 0
         assert printer._queue.qsize() == 0  # pyright: ignore[reportPrivateUsage]
 
     def test_a_dead_stderr_keeps_the_success_lines(

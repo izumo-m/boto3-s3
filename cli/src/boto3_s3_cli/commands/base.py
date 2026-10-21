@@ -94,8 +94,8 @@ class Context:
         not build a second session - a ``credential_process`` helper would run
         twice, an MFA / assume-role flow would prompt twice, and the object
         deletes could then run under a different identity than the final
-        ``DeleteBucket``. Every other dependency (factories, transfer config,
-        prompter) carries over unchanged.
+        ``DeleteBucket``. Every other dependency (factories, transfer config)
+        carries over unchanged.
         """
         clone = Context(
             client_factory=self.client_factory if self._client_factory_injected else None,
@@ -156,34 +156,43 @@ def parse_integer_option(value: object, *, operation: str) -> int | None:
         raise InvalidValueError(str(exc), operation=operation) from exc
 
 
+def refuse_binary_paramfile(value: str, name: str, *, operation: str) -> None:
+    """Refuse a ``fileb://`` reference on a string-typed argument (252), unread.
+
+    No bytes can be a string value: aws loads them and then refuses them (an
+    option, through botocore's type check) or mishandles them (a path
+    positional, a whole ``--metadata`` value; docs/cli/aws-differences.md
+    section 2). Here the prefix is refused before the file is read. *name* is
+    the argument name the report carries.
+    """
+    if value.startswith("fileb://"):
+        raise ValidationError(
+            f"Error parsing parameter '{name}': a fileb:// reference is not supported, "
+            "as the value cannot be bytes; use file:// to read it from a file",
+            operation=operation,
+        )
+
+
 def _expand_string_paramfile(
     args: argparse.Namespace, dest: str, *, name: str, operation: str
 ) -> None:
     """Load a paramfile reference on a string-typed ``args.<dest>`` in place.
 
     Shared body of the string option and positional helpers below. aws expands
-    both prefixes at parse time, so a missing reference is the load 252; a
-    ``file://`` yields text, while a ``fileb://`` yields bytes that botocore
-    then rejects for a string parameter with its own 252 (measured against the
-    pinned aws-cli: ``value: b'...', valid types: <class 'str'>``). A value without a
-    prefix (or a non-string, e.g. an integer default) is untouched. *name* is
-    the argument name aws reports in the load failure.
+    references at parse time, so a missing ``file://`` reference is the load
+    252; a ``file://`` yields text, and a ``fileb://`` is refused unread
+    (`refuse_binary_paramfile`). A value without a prefix (or a non-string,
+    e.g. an integer default) is untouched. *name* is the argument name aws
+    reports in the load failure.
     """
     value = getattr(args, dest, None)
     if not isinstance(value, str):
         return
+    refuse_binary_paramfile(value, name, operation=operation)
     with paramfile.named_argument(name, operation=operation):
         loaded = paramfile.get_paramfile(value, operation=operation)
-    if loaded is None:
-        return
-    if isinstance(loaded, bytes):
-        raise ValidationError(
-            "Parameter validation failed:\n"
-            f"Invalid type for parameter input, value: {loaded!r}, "
-            "type: <class 'bytes'>, valid types: <class 'str'>",
-            operation=operation,
-        )
-    setattr(args, dest, loaded)
+    if loaded is not None:
+        setattr(args, dest, loaded)
 
 
 def expand_option_paramfile(args: argparse.Namespace, option: str, *, operation: str) -> None:
@@ -226,20 +235,12 @@ def expand_positional_paramfile(
 
     A ``file://`` reference loads the path as text (a missing or undecodable
     file is the load 252). A ``fileb://`` one is refused at 252 without being
-    read: aws loads the bytes into the path, and each command then mishandles
-    them its own way - a crash on ls and website, a delete of the decoded path
-    on rm - an aws bug this CLI does not copy (docs/cli/aws-differences.md
-    section 2). *name* is the argument name the report carries.
+    read (`refuse_binary_paramfile`): aws loads the bytes into the path, and
+    each command then mishandles them its own way - a crash on ls and
+    website, a delete of the decoded path on rm - an aws bug this CLI does
+    not copy (docs/cli/aws-differences.md section 2). *name* is the argument
+    name the report carries.
     """
-    value = getattr(args, dest, None)
-    if not isinstance(value, str):
-        return
-    if value.startswith("fileb://"):
-        raise ValidationError(
-            f"Error parsing parameter '{name}': a fileb:// reference cannot be a path; "
-            "use file:// to read the path from a file",
-            operation=operation,
-        )
     _expand_string_paramfile(args, dest, name=name, operation=operation)
 
 

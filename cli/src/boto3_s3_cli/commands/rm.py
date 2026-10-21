@@ -49,8 +49,7 @@ class _DeletePrinter:
     outcome alone.
     """
 
-    def __init__(self, *, bucket: str, quiet: bool, only_show_errors: bool) -> None:
-        self._bucket = bucket
+    def __init__(self, *, quiet: bool, only_show_errors: bool) -> None:
         self._quiet = quiet
         self._only_show_errors = only_show_errors
 
@@ -66,15 +65,9 @@ class _DeletePrinter:
         # The line names the object the way the record's `src` does: the
         # listed entry as s3://bucket/key, the single-key target as it was
         # written - an Outposts access point's `<arn>:key` keeps its colon,
-        # like aws-cli's line. A record without one (not produced by rm
-        # itself) is spelled from its full key: a delete record's compare_key
-        # is the operation-relative form (design/opresult.md), and the listed
-        # entry rides on src_info.
+        # like aws-cli's line. Every delete record sets it (design/opresult.md).
         location = result.src
-        if location is None:
-            info = result.src_info
-            key = info.key if info is not None else result.compare_key
-            location = f"s3://{self._bucket}/{key}"
+        assert location is not None
         if result.outcome is OpOutcome.FAILED:
             sys.stderr.write(output.format_delete_failed(location, result.error) + "\n")
         elif result.outcome is OpOutcome.DRYRUN:
@@ -133,7 +126,7 @@ class RmCommand(Command):
         prints one ``fatal error:`` line - all suppressed by ``--quiet``
         with the exit codes kept. Nothing maps to 254 here. Ahead of all of
         that sit the client build and the ``[s3]`` runtime config, whose
-        failures stop the run at 255.
+        failures stop the run before it starts (253 or 255 by kind).
         """
         expand_positional_paramfile(args, "paths", name="paths", operation="rm")
         expand_integer_paramfile(args, "page_size", operation="rm")
@@ -161,9 +154,7 @@ class RmCommand(Command):
         storage = transferargs.build_s3_storage(target, client=client, page_size=page_size)
 
         item_filter = filters.compile_filter(args.filters)
-        printer = _DeletePrinter(
-            bucket=storage.bucket, quiet=args.quiet, only_show_errors=args.only_show_errors
-        )
+        printer = _DeletePrinter(quiet=args.quiet, only_show_errors=args.only_show_errors)
         try:
             s3.rm(
                 storage,

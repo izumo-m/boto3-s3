@@ -56,8 +56,7 @@ no meter padding, and the meter's width survives them (aws writes them
 straight to stderr, bypassing its printers; design/cli.md) - while the
 ``warned`` counter
 still feeds the exit code (rc 2; a failure's rc 1 comes from the library's
-``BatchError``, so ``failed`` is observational only, kept exact all the
-same); ``--only-show-errors`` drops successes
+``BatchError``); ``--only-show-errors`` drops successes
 and progress but keeps dryrun lines; ``--no-progress`` drops only progress.
 ``--progress-frequency N`` throttles progress repaints to one per N seconds;
 0 (the default) applies the ``_MIN_REPAINT_INTERVAL`` floor, which also
@@ -177,10 +176,8 @@ class TransferPrinter:
         self._multiline = multiline
         self._lock = threading.Lock()
         # Counted even when fully silenced (--quiet), on the worker side, so
-        # the exit code never depends on the printer thread. Only warned feeds
-        # the rc (finish_transfer's rc 2); a failure's rc 1 comes through the
-        # library's BatchError, so failed is observational only.
-        self.failed = 0
+        # the exit code never depends on the printer thread (finish_transfer's
+        # rc 2); a failure's rc 1 comes through the library's BatchError.
         self.warned = 0
         # progress bookkeeping (worker side, under the lock)
         self._start: float | None = None
@@ -404,9 +401,7 @@ class TransferPrinter:
                     # skip (download no-overwrite) never entered _inflight, so the
                     # pop returns None and it is left untouched.
                     self._skipped_files += 1
-                if result.outcome is OpOutcome.FAILED:
-                    self.failed += 1
-                elif result.outcome is OpOutcome.WARNED:
+                if result.outcome is OpOutcome.WARNED:
                     self.warned += 1
                 if not self._quiet and self._prints(result.outcome):
                     record = _ResultRecord(
@@ -460,8 +455,8 @@ class TransferPrinter:
                 # aws's ResultProcessor goes on past each handler's failure -
                 # stdout dying must not silence the failure lines stderr can
                 # still take, nor a dead stderr the success lines. The rc
-                # inputs live on the worker side and are unaffected;
-                # cli._dispatch's general backstop covers the process-level
+                # inputs live on the worker side and are unaffected; cli's
+                # backstop (`_run_command` / `main`) covers the process-level
                 # contract (report + 255) for a write failure that does escape
                 # a command. An unencodable key is not a dead stream:
                 # _uni_write handles UnicodeEncodeError inline, so it never
@@ -486,11 +481,7 @@ class TransferPrinter:
         if record.outcome is OpOutcome.SUCCEEDED:
             self._write_line(sys.stdout, f"{record.verb}: {location}")
         elif record.outcome is OpOutcome.DRYRUN:
-            # aws's _print_dry_run pads to the meter's width without resetting
-            # it (only success / failure / warning printers reset), so every
-            # dryrun line in a row blots the meter out. Latent today - a
-            # dryrun run paints no meter - but kept aligned at the printer.
-            self._write_line(sys.stdout, f"(dryrun) {record.verb}: {location}", reset=False)
+            self._write_line(sys.stdout, f"(dryrun) {record.verb}: {location}")
         elif record.outcome is OpOutcome.FAILED:
             self._write_line(sys.stderr, f"{record.verb} failed: {location} {record.error}")
         elif record.outcome is OpOutcome.WARNED:
@@ -528,10 +519,9 @@ class TransferPrinter:
             self._progress_length = len(padded)
             self._uni_write(sys.stdout, padded + "\r")
 
-    def _write_line(self, stream: TextIO, text: str, *, reset: bool = True) -> None:
+    def _write_line(self, stream: TextIO, text: str) -> None:
         padded = text.ljust(self._progress_length)
-        if reset:
-            self._progress_length = 0
+        self._progress_length = 0
         self._uni_write(stream, padded + "\n")
 
     def _clear_residual_progress(self) -> None:

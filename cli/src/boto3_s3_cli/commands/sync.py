@@ -55,7 +55,7 @@ class SyncCommand(Command):
         unreadable directory, a symlink under ``--no-follow-symlinks``),
         exit 255; the
         ``--exclude`` / ``--include`` patterns compile once and apply to both
-        sides (rootless anchoring; design/sync.md section 1).
+        sides (design/sync.md section 1).
         """
         head = transferargs.classify_paths(args, ctx, operation="sync")
         page_size, progress_frequency = head.page_size, head.progress_frequency
@@ -125,7 +125,6 @@ class SyncCommand(Command):
         options = transferargs.build_transfer_options(
             args,
             case_conflict,
-            operation="sync",
             default_checksum_algorithm=transferargs.default_upload_checksum(
                 client, paths_type, transfer_config
             ),

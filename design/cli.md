@@ -202,8 +202,7 @@ solidified design is added here.
   endpoint:` at rc 255 where aws rejects it at parse time (252), and an
   endpoint from the environment or the config such as `1http://...` is not
   refused when the client is built (aws: 255); each request then fails
-  against it. The library still pins two such wordings at its ports of aws's
-  code (`transfer._DirectoryCreator`, `transfer._set_file_utime`).
+  against it.
 
 ## 3. Module layout
 
@@ -1041,10 +1040,11 @@ The checks of `run()`, in the order the code makes them (aws's stages; when
 several fail, which one is reported is not matched): **the direct-option
 paramfile loads and the two integer coercions**
 (`resolve_paramfile_values`, `commands/transferargs.py`: the `--sse-c-key`
-blob, `--sse-kms-key-id`, the `--sse-c-copy-source-key` blob, `--grants` (a
+blob, the `--sse-c-copy-source-key` blob, `--grants` (a
 lone `file://` / `fileb://` refused, and every grant checked for the
 `<permission>=<grantee>` shape and a known permission, on every route: 252),
-the free-string text block,
+the free-string text block (`--sse-kms-key-id` among them, a `fileb://`
+refused unread),
 `--progress-frequency`, then `--page-size`; a load is 252, a bad `int()` is
 255) -> **`--metadata` resolution (a whole-value `fileb://` refused 252,
 paramfile load 252, shorthand parse 252)** -> cp's **`--expected-size`
@@ -1058,8 +1058,7 @@ configuration is 255, section 6; an absent region and missing credentials
 are no construction failure, the latter fail the first request) ->
 streaming constraints (252) -> **checksum path
 type** (`--checksum-algorithm` is locals3 / s3s3, `--checksum-mode` is s3local
-only. `Expected <param> parameter to be used with one of following path formats:
-...` 252 - shared with mv) -> **a nonexistent single local
+only, 252 - shared with mv) -> **a nonexistent single local
 src (255**, equivalent to aws's bare RuntimeError.
 `-` is excluded) -> **a `--recursive` local source whose root the walk would
 skip (255**, `transferargs.refuse_unwalkable_source`: a file, a special or
@@ -1067,7 +1066,7 @@ unreadable path, a symlink under `--no-follow-symlinks` - the library's
 walker decides; aws skips the root, with a warning or in silence, and runs on
 an empty source, which a `sync --delete` turns into emptying the destination)
 -> the SSE-C pair (252) -> the `[s3]` runtime config (255) and
-the transfer-manager construction (255 on a CRT client the region cannot build)
+the transfer-manager construction (253 on a CRT client the region cannot build)
 -> the `--case-conflict` Express branch (252; taken for an access point of a
 directory bucket too, which aws's `--x-s3` test misses) -> **the s3local
 `--recursive` destination-directory pre-create (255** on an OSError - the
@@ -1192,8 +1191,7 @@ construction in section 5.7):
    appears even under `--quiet` - outside the printer).
 
 Checksum path-type validation (`--checksum-algorithm` is locals3 / s3s3,
-`--checksum-mode` is s3local only. `Expected <param> parameter to be used with one
-of following path formats: ...` 252) is shared by cp / mv (`transferargs.py`).
+`--checksum-mode` is s3local only, 252) is shared by cp / mv (`transferargs.py`).
 
 **The source deletion** is the engine's job, not the CLI's (transfer.md section 11): for
 each successful item, an upload deletes the source through its `Storage.delete`
@@ -1311,7 +1309,7 @@ reviewed with it.
 | 252 | A usage error (an unknown option = `Unknown options: ...`, an invalid choice / value), a client-side `ValidationError` | `PARAM_VALIDATION_ERROR_RC` |
 | 253 | `ConfigurationError` (credentials / region unresolved; an absent awscrt x the `[s3] preferred_transfer_client=crt` degradation section 8 or an MRAP target's SigV4a section 4 item 4, which aws cannot reach), plus an unknown `cli_timestamp_format`, checked when a command opens its session (below) | `CONFIGURATION_ERROR_RC`, from its `NoCredentialsErrorHandler` / `NoRegionErrorHandler` / `ConfigurationErrorHandler` - three of its four rc-253 handlers, the `PagerErrorHandler` being the one with no counterpart here (below) |
 | 254 | A server-side error (a `Boto3S3Error` whose `__cause__` is a botocore `ClientError`) | `CLIENT_ERROR_RC` |
-| 255 | Any other general error (including `TransportError`, a `NotFoundError` with no `ClientError` cause such as a missing local source, the refining `InvalidValueError` / `InvalidConfigError` (below), an unparseable config / credentials file, an unknown `cli_binary_format` or an IMDS setting botocore refuses - each found when a command opens its session (below) - and any otherwise-uncaught exception via `_dispatch`'s backstop - a `BrokenPipeError` from the `ls \| head` pipeline included, since aws has no special case for it either), **a failure of the rm stage of `rb --force`** (section 5.4), **a run that succeeded (0, or 2 with warnings only) but whose stdout output could not be flushed at the end** (below) | `GENERAL_ERROR_RC` |
+| 255 | Any other general error (including `TransportError`, a `NotFoundError` with no `ClientError` cause such as a missing local source, the refining `InvalidValueError` / `InvalidConfigError` (below), an unparseable config / credentials file, an unknown `cli_binary_format` or an IMDS setting botocore refuses - each found when a command opens its session (below) - and any otherwise-uncaught exception via the backstop in `_run_command` / `main` - a `BrokenPipeError` from the `ls \| head` pipeline included, since aws has no special case for it either), **a failure of the rm stage of `rb --force`** (section 5.4), **a run that succeeded (0, or 2 with warnings only) but whose stdout output could not be flushed at the end** (below) | `GENERAL_ERROR_RC` |
 
 **The code `main` returns is the one the process ends with.** Bytes a
 standard stream refused - a full disk, a reader that left the pipe - stay in
@@ -1346,10 +1344,8 @@ the **refining subclasses are checked before their parents**: aws routes a
 post-parse value failure (`InvalidValueError`) or a bad / unusable config
 (`InvalidConfigError`) through its general handler, so both are 255 - not the
 252 / 253 of plain `ValidationError` / `ConfigurationError`
-([`exceptions.md`](./exceptions.md) section 2). A 252 report reads
-`An error occurred (ParamValidation): <message>` - argparse failures, unknown
-options and plain `ValidationError` alike - and every other report is the
-message alone, whatever `--cli-error-format` says
+([`exceptions.md`](./exceptions.md) section 2). Every report is the message
+alone, whatever `--cli-error-format` says
 ([`aws-cli-option-handling.md`](./aws-cli-option-handling.md) section 2.1).
 Inside the transfer pipeline a credential-less run is rc 1: a per-item
 `upload failed:` line when it lands on an object (cp / mv / a keyed rm), a
@@ -1440,7 +1436,7 @@ other `BotoCoreError` -> `InvalidConfigError` = 255 (aws's
 no handler for either, so both are 255, not 253. A schemeless
 `--endpoint-url` is rejected as a usage error (252) when the client is
 built. As a final
-backstop, `_dispatch` maps any non-`Boto3S3Error` exception that still escapes a
+backstop, `_run_command` maps any non-`Boto3S3Error` exception that still escapes a
 command to the same chain (credential/region 253, `ClientError` 254, else 255),
 so no path crashes with a traceback + rc 1 - except an `AssertionError`, which
 the backstop deliberately re-raises (a broken invariant crashes loudly). It

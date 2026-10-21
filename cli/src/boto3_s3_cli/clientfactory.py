@@ -34,8 +34,7 @@ if TYPE_CHECKING:
 
 
 class _RegionUnresolved(enum.Enum):
-    """The type behind `_UNRESOLVED` (the sentinel shape `boto3_s3.crtsupport`
-    uses for its own region posture: a single-member enum, so a type checker
+    """The type behind `_UNRESOLVED` (a single-member enum, so a type checker
     narrows ``str | None | Literal[...]`` on an identity test)."""
 
     TOKEN = "unresolved"
@@ -345,12 +344,7 @@ def _inject_credential_cache(session: BotocoreSession) -> None:
     (an unwritable directory over a writable entry) failed here, one aws
     cannot (a read-only entry) succeeded here, and the entry's mode changed
     (measured) - by building that cache from the same class.
-
-    The ``sso`` provider is fetched separately, under aws's
-    ``UnknownCredentialError`` guard for a botocore whose chain has no such
-    provider.
     """
-    from botocore.exceptions import UnknownCredentialError
     from botocore.tokens import SSOTokenProvider
 
     cache = _credential_cache_class()
@@ -363,10 +357,7 @@ def _inject_credential_cache(session: BotocoreSession) -> None:
     chain = session.get_component("credential_provider")
     chain.get_provider("assume-role").cache = cache(cache_dir)
     chain.get_provider("assume-role-with-web-identity").cache = cache(cache_dir)
-    try:
-        chain.get_provider("sso").cache = cache(cache_dir)
-    except UnknownCredentialError:
-        return
+    chain.get_provider("sso").cache = cache(cache_dir)
 
 
 def _serialize_cache_entry(value: Any) -> Any:
@@ -471,7 +462,6 @@ def build_session(args: argparse.Namespace) -> Boto3Session:
 
     try:
         botocore_session = _open_botocore_session(args)
-        botocore_session.get_scoped_config()
         botocore_session.get_component("response_parser_factory").set_parser_defaults(
             timestamp_parser=fast_parse_timestamp
         )
@@ -560,7 +550,7 @@ def build_s3(args: argparse.Namespace) -> S3:
 def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | None:
     """The region to build a client in: the *explicit* value, else the chain.
 
-    The *explicit* value is ``--region`` (an alias's included) - and it wins
+    The *explicit* value is ``--region`` - and it wins
     whenever it was supplied at all, the empty string included. aws's s3
     commands hand ``parsed_globals.region`` straight to ``create_client``, so
     ``--region ""`` reaches the S3 client as itself and fails construction
