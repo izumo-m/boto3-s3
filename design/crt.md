@@ -636,8 +636,8 @@ error's details need not (checked by the e2e CRT lane - testing.md).
   `S3.client()`'s clients carry `CA_BUNDLE_ENVIRONMENT_VETTED` (their own
   value answers for the environment), and so do the CLI's, which skip that guess
   since `clientfactory._check_every_client` already checks every client
-  their sessions build at aws's own point (static credentials beside a valid
-  `--ca-bundle` complete, as on aws).
+  their sessions build at aws's own point, so each run is refused or completes
+  as aws's does.
 - **Process-pinned singleton**: the region / credentials / endpoint of the first
   client to reach the CRT path monopolize the in-process CRT, and an incompatible
   second connection falls back to classic (identical behavior to boto3).

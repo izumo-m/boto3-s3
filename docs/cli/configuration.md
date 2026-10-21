@@ -38,12 +38,10 @@ whichever Python this command runs.
 A CA bundle that resolves to an empty or whitespace-only value — `--ca-bundle
 ''`, `AWS_CA_BUNDLE=`, `REQUESTS_CA_BUNDLE=`, or a profile `ca_bundle` key left
 blank — is a configuration error, not a quiet request to skip verification,
-wherever a client would use it: exit code 255 when the command's own client
-would, a failed item when a client built later for the credentials (an
-assumed role, SSO) would. A valid `--ca-bundle` beside an empty
-`AWS_CA_BUNDLE` with static credentials runs as usual. `aws` refuses it the
-same way, on whichever `boto3` you have installed. Pass `--no-verify-ssl` when turning verification off is what you
-mean.
+wherever a client would use it, including the clients built later for
+credentials (an assumed role, SSO). `aws` refuses it the same way, on
+whichever `boto3` you have installed. Pass `--no-verify-ssl` when turning
+verification off is what you mean.
 
 On top of those, the command reads `AWS_REGION`, `AWS_DEFAULT_REGION`,
 `AWS_PROFILE`, `AWS_DEFAULT_PROFILE`, `AWS_CONFIG_FILE`, `AWS_RETRY_MODE`,
