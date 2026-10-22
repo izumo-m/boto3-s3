@@ -54,6 +54,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import urlsplit
 
@@ -110,38 +111,72 @@ _crt_s3_client: _CrtS3Client | None = None
 _crt_serializer: Any | None = None
 
 
+@dataclass(frozen=True)
+class _Pins:
+    """What the CRT client and the shared serializer bake in at creation.
+
+    None of it can be swapped per request, so a later client rides the
+    singleton only when its own pins are equal (`_is_compatible_request`);
+    otherwise it falls back to classic rather than transfer under the first
+    client's settings - silently reusing the first client's ``verify`` would
+    flip TLS verification behind the caller's back. Each facet is compared
+    as botocore resolves it, not as the caller spelled it:
+
+    - ``region``: the client's ``region_name``, boto3's own pin.
+    - ``endpoint``: the endpoint the CRT wiring dials (`_resolve_endpoint`)
+      in `_endpoint_key`'s form.
+    - ``verify``: `_derive_verify`'s form (``None`` / ``False`` / a CA path).
+    - ``config_shape``: `_serializer_config_shape`'s tuple, the ``Config``
+      facets the shared serializer bakes in (the ``s3`` dict, the fips /
+      dualstack endpoint flags).
+
+    The signing mode and the credentials are not pins of this kind: the
+    singleton's ``cred_wrapper`` records the mode, and the credentials half
+    of the check compares the identity.
+    """
+
+    region: str | None
+    endpoint: tuple[str, str, str] | None
+    verify: Any
+    config_shape: tuple[tuple[tuple[str, Any], ...], bool, bool]
+
+    @classmethod
+    def of(cls, client: S3Client, endpoint: str | None) -> _Pins:
+        """``client``'s pins under the caller's explicit ``endpoint``."""
+        return cls(
+            region=client.meta.region_name,
+            endpoint=_endpoint_key(_resolve_endpoint(client, endpoint)),
+            verify=_derive_verify(client),
+            config_shape=_serializer_config_shape(client),
+        )
+
+
 class _CrtS3Client:
     """The held CRT client plus the identity it was created for.
 
     Mirrors boto3's ``CRTS3Client``: the CRT client can only sign for one
     region/credentials (and, in our wiring, one endpoint, signing mode, TLS
-    ``verify`` setting, and serializer-relevant ``Config.s3`` shape), so the
-    tuple is pinned to reject incompatible later clients. ``verify`` and
-    ``s3_config`` are baked into the CRT client / the shared request
-    serializer at creation and cannot be swapped per request, so a later
-    client differing in either must fall back to classic - silently reusing
-    the first client's ``verify`` would flip TLS verification behind the
-    caller's back.
+    ``verify`` setting, and serializer-relevant ``Config`` shape), so these
+    are pinned to reject incompatible later clients: ``pins`` (`_Pins`)
+    holds what the CRT client and the shared serializer bake in, and
+    ``cred_wrapper`` / ``credentials`` the signing mode and the identity.
     """
 
     def __init__(
         self,
+        *,
         crt_client: Any,
         process_lock: Any,
-        region: str | None,
-        endpoint_url: str | None,
+        pins: _Pins,
         credentials: Any | None,
         cred_wrapper: Any | None,
-        verify: Any,
-        s3_config: Any,
         serializer_args: tuple[Any, dict[str, Any]] = (None, {}),
     ) -> None:
         self.crt_client = crt_client
         # None = built under the lockless opt-in; `_get_crt_s3_client`
         # upgrades it in place once a lock-respecting request re-acquires.
         self.process_lock = process_lock
-        self.region = region
-        self.endpoint_url = endpoint_url
+        self.pins = pins
         # The botocore credentials object the delegate below wraps (None when
         # the client signs nothing, or resolved none): the identity
         # `_is_compatible_request` recognizes by object, before any resolving.
@@ -150,10 +185,6 @@ class _CrtS3Client:
         # unsigned, or the caller declared `sign_requests=False`), which is
         # also the signing mode `_is_compatible_request` pins on.
         self.cred_wrapper = cred_wrapper
-        self.verify = verify  # _derive_verify's form: None / False / CA path
-        # _serializer_config_shape's tuple: the Config facets the shared
-        # serializer bakes in (the `s3` dict, fips / dualstack endpoint flags).
-        self.s3_config = s3_config
         # The botocore session and client arguments the shared serializer was
         # built from, for `request_sender` to address requests the same way.
         self.serializer_args = serializer_args
@@ -387,11 +418,9 @@ def create_crt_transfer_manager(
     crt_s3_client = _get_crt_s3_client(
         client, config, endpoint, session, allow_lockless, sign_requests
     )
-    if not _is_compatible_request(client, crt_s3_client, endpoint, sign_requests=sign_requests):
-        return None
-    if crt_s3_client is None:
-        # Unreachable: `_is_compatible_request` refuses a None singleton, so
-        # the branch above already returned; the `if` narrows the type.
+    if crt_s3_client is None or not _is_compatible_request(
+        client, crt_s3_client, endpoint, sign_requests=sign_requests
+    ):
         return None
     from s3transfer.crt import CRTTransferManager
 
@@ -633,15 +662,12 @@ def _initialize(
     credentials = _client_credentials(client) if cred_wrapper is not None else None
     crt_client = create_s3_crt_client(**create_kwargs)
     return serializer, _CrtS3Client(
-        crt_client,
-        lock,
-        region,
-        endpoint_url,
-        credentials,
-        cred_wrapper,
-        create_kwargs["verify"],
-        _serializer_config_shape(client),
-        (botocore_session, serializer_kwargs),
+        crt_client=crt_client,
+        process_lock=lock,
+        pins=_Pins.of(client, endpoint),
+        credentials=credentials,
+        cred_wrapper=cred_wrapper,
+        serializer_args=(botocore_session, serializer_kwargs),
     )
 
 
@@ -774,7 +800,7 @@ def _is_compatible_request(
     sign_requests: bool | None = None,
 ) -> bool:
     """boto3's ``is_crt_compatible_request`` plus the endpoint / signing /
-    TLS-``verify`` / Config-shape pins.
+    TLS-``verify`` / Config-shape pins (`_Pins` holds all but the signing mode).
 
     The last two go beyond boto3's own check (region + credentials): the
     singleton CRT client holds the first client's ``verify`` and the shared
@@ -807,17 +833,7 @@ def _is_compatible_request(
     live upload). The resolution a value comparison performs raises whatever
     botocore raises; the engine seams classify it (`transfer.crt_engine_errors`).
     """
-    if crt_s3_client is None:
-        return False
-    if client.meta.region_name != crt_s3_client.region:
-        return False
-    if _endpoint_key(_resolve_endpoint(client, endpoint)) != _endpoint_key(
-        crt_s3_client.endpoint_url
-    ):
-        return False
-    if _derive_verify(client) != crt_s3_client.verify:
-        return False
-    if _serializer_config_shape(client) != crt_s3_client.s3_config:
+    if crt_s3_client is None or _Pins.of(client, endpoint) != crt_s3_client.pins:
         return False
     if not _signs_requests(client, sign_requests):
         return crt_s3_client.cred_wrapper is None

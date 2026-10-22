@@ -67,7 +67,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from boto3_s3.comparator import READ_CHUNK, ContentComparison
+from boto3_s3.comparator import READ_CHUNK, ContentComparison, hash_part
 
 if TYPE_CHECKING:
     from typing import BinaryIO
@@ -373,7 +373,7 @@ def _can_compute(algorithm: str, size: int | None, pure_max_size: int | None) ->
     """
     if algorithm in ("crc32", "sha1", "sha256"):
         return True
-    if algorithm not in ("crc32c", "crc64nvme"):
+    if algorithm not in _CRT_CRCS:
         return False
     if _crc_has_awscrt(algorithm):
         return True
@@ -410,13 +410,7 @@ def _composite_b64(fh: BinaryIO, algorithm: str, part_sizes: tuple[int, ...]) ->
     for size in part_sizes:
         part = _new_hasher(algorithm)
         assert part is not None
-        remaining = size
-        while remaining > 0:
-            block = fh.read(min(READ_CHUNK, remaining))
-            if not block:
-                break
-            part.update(block)
-            remaining -= len(block)
+        hash_part(fh, part, size)
         combined += part.digest()
     if fh.read(1):
         return None
@@ -449,26 +443,20 @@ def _new_hasher(algorithm: str) -> Any | None:
         return _IntCrc(zlib.crc32, 4)
     if algorithm in ("sha1", "sha256"):
         return hashlib.new(algorithm)
-    if algorithm in ("crc32c", "crc64nvme"):
+    if algorithm in _CRT_CRCS:
         return _IntCrc(*_crc_backend(algorithm))
     return None
 
 
-_CRC_PARAMS = {
-    "crc32c": (_POLY_CRC32C, _MASK32, 4),
-    "crc64nvme": (_POLY_CRC64NVME, _MASK64, 8),
-}
-
-
 def _crc_backend(name: str) -> tuple[Callable[[bytes, int], int], int]:
     """The (update, width) for ``crc32c`` / ``crc64nvme``: awscrt if present, else pure."""
-    width = _CRC_PARAMS[name][2]
+    width, pure = _CRT_CRCS[name]
     crt = _awscrt_checksums()
     if crt is not None:
         fn = getattr(crt, name, None)
         if fn is not None:
             return fn, width
-    return _PURE_CRC[name], width
+    return pure, width
 
 
 @functools.lru_cache(maxsize=1)
@@ -555,9 +543,12 @@ def _pure_crc64nvme(chunk: bytes, prev: int = 0) -> int:
     return c ^ _MASK64
 
 
-_PURE_CRC: dict[str, Callable[[bytes, int], int]] = {
-    "crc32c": _pure_crc32c,
-    "crc64nvme": _pure_crc64nvme,
+# The CRCs awscrt computes when it is installed and the bundled pure-Python
+# code above computes otherwise (the slow fallback `pure_max_size` caps):
+# name -> (digest width in bytes, pure-Python fallback).
+_CRT_CRCS: dict[str, tuple[int, Callable[[bytes, int], int]]] = {
+    "crc32c": (4, _pure_crc32c),
+    "crc64nvme": (8, _pure_crc64nvme),
 }
 
 

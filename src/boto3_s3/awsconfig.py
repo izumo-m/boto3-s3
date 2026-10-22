@@ -77,11 +77,12 @@ __all__ = ["SIZE_SUFFIX", "AwsConfig", "ConfigSection", "split_size_suffix"]
 
 # aws-cli's human_readable_to_int suffix table (1024-based: "MB" == "MiB").
 # Reading a value written for `aws s3` must yield the same byte count. This is
-# the ONE home of the table and the suffix rule: aws-cli's
-# human_readable_to_int (boto3_s3.transferconfig) shares them, while each
-# consumer keeps its own boundary guard and error wording - _parse_size below
-# is deliberately hardened where the port stays aws-faithful (bare-"mb" edge
-# included).
+# the ONE home of the table, the suffix rule and the size parser itself
+# (human_readable_to_int below): the `[s3]` runtime config
+# (boto3_s3.transferconfig) and this reader's getters both read a size with
+# it, each wording its own error. They must agree: etagcompare recomputes a
+# multipart ETag at the `[s3] multipart_chunksize` it reads here, the part
+# size the engine took from the same key through the runtime config.
 SIZE_SUFFIX = {
     "kb": 1024,
     "mb": 1024**2,
@@ -99,12 +100,27 @@ def split_size_suffix(value: str) -> tuple[str, str]:
 
     Returns ``(lowered, suffix)``: the suffix is the trailing three characters
     for an ``ib`` spelling (``"mib"``), else the trailing two (``"mb"``). No
-    validation happens here - each caller checks the suffix against
-    ``SIZE_SUFFIX`` under its own boundary guard.
+    validation happens here - the caller checks the suffix against
+    ``SIZE_SUFFIX`` (`human_readable_to_int` does).
     """
     lowered = value.lower()
     suffix = lowered[-3:] if lowered.endswith("ib") else lowered[-2:]
     return lowered, suffix
+
+
+def human_readable_to_int(value: str) -> int:
+    """Convert a human readable size (``"10MB"``) to bytes (aws-cli's function).
+
+    Without a recognized suffix the value must be an integer string.
+    """
+    value, suffix = split_size_suffix(value)
+    has_size_identifier = len(value) >= 2 and suffix in SIZE_SUFFIX
+    try:
+        if not has_size_identifier:
+            return int(value)
+        return int(value[: -len(suffix)]) * SIZE_SUFFIX[suffix]
+    except ValueError:
+        raise InvalidConfigError(f"Invalid size value: {value}") from None
 
 
 # Sentinel for "key absent" - distinct from a present value (which is always a
@@ -389,18 +405,12 @@ def _not_a(key: str, value: str, expected: str) -> str:
 def _parse_size(value: str, key: str) -> int:
     """Bytes from a human-readable size (``"16MB"`` -> ``16 * 1024**2``).
 
-    1024-based, matching aws-cli's ``human_readable_to_int`` (``MB`` == ``MiB``).
-    A bare integer string passes through; anything else raises.
+    aws-cli's ``human_readable_to_int`` (1024-based, ``MB`` == ``MiB``; a bare
+    integer string passes through), its failure worded as this reader's.
     """
-    lowered, suffix = split_size_suffix(value)
-    if len(lowered) > len(suffix) and suffix in SIZE_SUFFIX:
-        try:
-            return int(lowered[: -len(suffix)]) * SIZE_SUFFIX[suffix]
-        except ValueError:
-            raise InvalidConfigError(_not_a(key, value, "a size")) from None
     try:
-        return int(lowered)
-    except ValueError:
+        return human_readable_to_int(value)
+    except InvalidConfigError:
         raise InvalidConfigError(_not_a(key, value, "a size")) from None
 
 

@@ -56,7 +56,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from boto3.s3.transfer import TransferConfig as Boto3TransferConfig
 
 from boto3_s3 import crtsupport
-from boto3_s3.awsconfig import SIZE_SUFFIX, split_size_suffix
+from boto3_s3.awsconfig import human_readable_to_int
 from boto3_s3.exceptions import ConfigurationError, InvalidConfigError
 
 if TYPE_CHECKING:
@@ -89,6 +89,10 @@ _MAX_IO_QUEUE = 1000
 _BASE_ACCEPTS_PREFERRED_TRANSFER_CLIENT = (
     "preferred_transfer_client" in inspect.signature(Boto3TransferConfig.__init__).parameters
 )
+
+# The constructor settings boto3's base class does not take: the library's own
+# extras (module docstring), kept as plain attributes.
+_LIBRARY_SETTINGS = frozenset({"target_bandwidth", "annotation_temp_dir"})
 
 
 class TransferConfig(Boto3TransferConfig):
@@ -129,14 +133,9 @@ class TransferConfig(Boto3TransferConfig):
         annotation_temp_dir: str | os.PathLike[str] | None = None,
     ) -> None:
         """Forward classic values and retain library settings across SDK versions."""
-        # Forward each base parameter only when set, letting the base ctor supply
-        # its own default. On a DEFAULTS-less boto3 (1.28 - ~1.41) the base
-        # signature carries concrete defaults; forwarding None would overwrite them and
-        # reach s3transfer as None - a TypeError on the first size comparison, and
-        # use_threads=None silently disables threading. On a modern boto3 an
-        # omitted arg resolves to the same UNSET_DEFAULT sentinel a forwarded None
-        # would, so behavior is identical there.
-        base_kwargs: dict[str, object] = {
+        # Which settings the caller gave, so `resolve_transfer_config` fills
+        # only the others from ``[s3]``.
+        given: dict[str, object] = {
             name: value
             for name, value in (
                 ("multipart_threshold", multipart_threshold),
@@ -147,32 +146,32 @@ class TransferConfig(Boto3TransferConfig):
                 ("io_chunksize", io_chunksize),
                 ("use_threads", use_threads),
                 ("max_bandwidth", max_bandwidth),
+                ("preferred_transfer_client", preferred_transfer_client),
+                ("target_bandwidth", target_bandwidth),
+                ("annotation_temp_dir", annotation_temp_dir),
             )
             if value is not None
         }
-        if _BASE_ACCEPTS_PREFERRED_TRANSFER_CLIENT and preferred_transfer_client is not None:
-            # Same only-when-set rule as the loop above: an omitted value lets
-            # the base ctor supply its own default ("auto" / its UNSET
-            # sentinel), so reading config.preferred_transfer_client sees the
-            # base's semantics, not a None the base never chose.
-            base_kwargs["preferred_transfer_client"] = preferred_transfer_client
-        # Which settings the caller gave, so `resolve_transfer_config` fills
-        # only the others from ``[s3]``.
-        given = {
-            "multipart_threshold": multipart_threshold,
-            "max_concurrency": max_concurrency,
-            "multipart_chunksize": multipart_chunksize,
-            "num_download_attempts": num_download_attempts,
-            "max_io_queue": max_io_queue,
-            "io_chunksize": io_chunksize,
-            "use_threads": use_threads,
-            "max_bandwidth": max_bandwidth,
-            "preferred_transfer_client": preferred_transfer_client,
-            "target_bandwidth": target_bandwidth,
-            "annotation_temp_dir": annotation_temp_dir,
+        # Forward each base parameter only when set, letting the base ctor supply
+        # its own default. On a DEFAULTS-less boto3 (1.28 - ~1.41) the base
+        # signature carries concrete defaults; forwarding None would overwrite them and
+        # reach s3transfer as None - a TypeError on the first size comparison, and
+        # use_threads=None silently disables threading. On a modern boto3 an
+        # omitted arg resolves to the same UNSET_DEFAULT sentinel a forwarded None
+        # would, so behavior is identical there. An omitted
+        # preferred_transfer_client likewise gets the base ctor's own default
+        # ("auto" / its UNSET sentinel), so reading
+        # config.preferred_transfer_client sees the base's semantics, not a None
+        # the base never chose.
+        base_kwargs = {
+            name: value for name, value in given.items() if name not in _LIBRARY_SETTINGS
         }
+        if not _BASE_ACCEPTS_PREFERRED_TRANSFER_CLIENT:
+            # A base without the parameter (floor boto3): it becomes a plain
+            # attribute below.
+            base_kwargs.pop("preferred_transfer_client", None)
         super().__init__(**base_kwargs)  # pyright: ignore[reportArgumentType]
-        self._given = {name: value for name, value in given.items() if value is not None}
+        self._given = given
         self._resolved = False
         if not _BASE_ACCEPTS_PREFERRED_TRANSFER_CLIENT:
             # Floor boto3 has no such field; keep it readable via getattr.
@@ -222,22 +221,6 @@ _MAX_IN_MEMORY_CHUNKS = 6
 # S3's minimum part size, which is also the threshold aws-c-s3 falls back to
 # when a request carries none: ``max(part size, 5 MiB)``. aws-cli sends none.
 _CRT_MIN_UPLOAD_PART_SIZE = 5 * 1024 * 1024
-
-
-def human_readable_to_int(value: str) -> int:
-    """Convert a human readable size (``"10MB"``) to bytes (aws-cli's function).
-
-    Without a recognized suffix the value must be an integer string. The
-    suffix table and split rule are `boto3_s3.awsconfig`'s.
-    """
-    value, suffix = split_size_suffix(value)
-    has_size_identifier = len(value) >= 2 and suffix in SIZE_SUFFIX
-    try:
-        if not has_size_identifier:
-            return int(value)
-        return int(value[: -len(suffix)]) * SIZE_SUFFIX[suffix]
-    except ValueError:
-        raise InvalidConfigError(f"Invalid size value: {value}") from None
 
 
 class RuntimeConfig:

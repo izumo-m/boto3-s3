@@ -56,7 +56,8 @@ dest listing -- filter (visibility) --+        |
 
 | module | role |
 |---|---|
-| `comparator.py` | `Comparator` (pure pairing: merge-joins two key-ascending streams and emits every *entry* as one `MergedPair` shape - `SrcOnlyPair` / `SyncPair` / `DestOnlyPair`, telling by type which sides hold it; makes no decision), the pair types, `PairFilter` (the update judgment) and `MergedPairFilter` (one judgment for all three shapes, section 11), `compare_size_time` (the internal aws-compatible default, a function reading `pair.transfer_type`), `all_of` / `any_of` (visibility combinators). No SDK import |
+| `comparator.py` | `Comparator` (pure pairing: merge-joins two key-ascending streams and emits every *entry* as one `MergedPair` shape - `SrcOnlyPair` / `SyncPair` / `DestOnlyPair`, telling by type which sides hold it; makes no decision), the pair types, `PairFilter` (the update judgment) and `MergedPairFilter` (one judgment for all three shapes, section 11), `all_of` / `any_of` (visibility combinators). No SDK import |
+| `awsclicompare.py` | `AwsCliComparison`, the aws-compatible size + last-modified default (aws-cli's sync strategies plus `compare_time`, reading `pair.transfer_type`). No SDK import |
 | `S3.sync` in `s3.py` | orchestration: route classification -> pre-validation (src missing 255 / dest dir creation) -> build both-side entry streams (visibility applied) -> pairing -> copy decision -> item builder + gate shared with cp -> `Transferrer` submit; delete decision -> delete lane. The rollup is a `BatchError` combining transfer + delete |
 | `_SyncDeletes` in `s3.py` | delete lane: an S3 dest uses `S3Deleter` (batch, lazily created on the first submit), a local or custom dest uses a synchronous `Storage.delete(info)` on the calling thread (`LocalStorage.delete` is an `os.remove`, the shape of aws-cli's `LocalDeleteRequestSubmitter`). dryrun emits only a DRYRUN record. Emits with a display endpoint (`s3://bucket/key` / native path) on the `OpResult` |
 
@@ -181,8 +182,7 @@ s3.sync(src, dest,
 `update_filter=None` is `AwsCliComparison()` (`from boto3_s3 import
 AwsCliComparison`, equally reachable as
 `boto3_s3.awsclicompare.AwsCliComparison` - a standalone building block like
-the section 8-9 content strategies), the public form of the internal
-`compare_size_time(pair, *, size_only=False, exact_timestamps=False)` (direction from
+the section 8-9 content strategies; the direction comes from
 `pair.transfer_type`); tune it with `AwsCliComparison(size_only=...)` /
 `(exact_timestamps=...)`. `no_overwrite` is not part of it - it is the orthogonal
 write-guard the sync loop applies first (section 3). A key missing at the
@@ -393,7 +393,7 @@ s3.sync(src, dest, update_filter=ChecksumComparison())
 ```
 
 It is a **replacement** strategy, not composed with the size + time default.
-Composing it via `any_of(compare_size_time, ChecksumComparison(...))` would be wrong:
+Composing it via `any_of(AwsCliComparison(), ChecksumComparison(...))` would be wrong:
 `any_of` copies when *either* rule says copy, so it still copies every object
 size + mtime alone would copy - including a same-content object whose only
 change is its mtime - and reaches the content check only on the subset size +

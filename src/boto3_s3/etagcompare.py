@@ -71,7 +71,7 @@ import hashlib
 import os
 from typing import TYPE_CHECKING
 
-from boto3_s3.comparator import READ_CHUNK, ContentComparison
+from boto3_s3.comparator import READ_CHUNK, ContentComparison, hash_part
 from boto3_s3.exceptions import InvalidConfigError, ValidationError
 from boto3_s3.types import S3FileInfo
 
@@ -363,16 +363,7 @@ def _multipart_etag_at(fh: BinaryIO, *, chunk_size: int) -> str:
     parts = 0
     while True:
         part = hashlib.md5()
-        remaining = chunk_size
-        read_any = False
-        while remaining > 0:
-            block = fh.read(min(READ_CHUNK, remaining))
-            if not block:
-                break
-            read_any = True
-            part.update(block)
-            remaining -= len(block)
-        if not read_any:
+        if not hash_part(fh, part, chunk_size):
             break
         part_digests += part.digest()
         parts += 1

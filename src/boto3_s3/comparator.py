@@ -18,9 +18,10 @@ copy or delete. This module is layer two's material:
 - A ``PairFilter`` is the **update** judgment: a predicate over the
   both-sides ``SyncPair`` where ``True`` re-copies the source over the
   destination. It
-  is what ``S3.sync(update_filter=...)`` selects - the size+time default, a
-  content strategy (``EtagComparison`` / ``ChecksumComparison``), or a caller's
-  own. A ``SyncPair`` carries both sides by construction, so the filter reads
+  is what ``S3.sync(update_filter=...)`` selects - the size+time default
+  (``AwsCliComparison``, aws-cli's stock judgment), a content strategy
+  (``EtagComparison`` / ``ChecksumComparison``), or a caller's own. A
+  ``SyncPair`` carries both sides by construction, so the filter reads
   ``pair.src`` / ``pair.dest`` directly; the new (``SrcOnlyPair``) lane is
   governed by ``create_filter`` and the delete (``DestOnlyPair``) lane by
   ``delete_filter``, each a ``FileFilter`` over the one side it has.
@@ -28,12 +29,6 @@ copy or delete. This module is layer two's material:
   what ``S3.sync(pair_filter=...)`` takes in place of the three lane filters,
   so an application needing one view of every decision (a journal, a
   confirmation flow, statistics) writes one function rather than wiring three.
-- ``compare_size_time`` is that size+time default (aws-cli's stock
-  judgment, with the ``size_only`` / ``exact_timestamps`` tuners). It is not a
-  re-exported building block (kept out of ``__all__``); it is the judgment
-  behind ``AwsCliComparison``, the form ``S3.sync``
-  selects for ``update_filter=None``. The direction is read from
-  ``pair.transfer_type``.
 - ``ContentComparison`` is the shared template of the content
   strategies (``EtagComparison`` / ``ChecksumComparison``): the decision
   skeleton every content comparison runs before its leaf digest work - the
@@ -51,7 +46,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from boto3_s3.exceptions import Boto3S3Error
 from boto3_s3.types import FileInfo, S3FileInfo, TransferType
@@ -276,54 +271,26 @@ class Comparator:
             dest = next(dest_iter, None)
 
 
-def compare_size_time(
-    pair: SyncPair, *, size_only: bool = False, exact_timestamps: bool = False
-) -> bool:
-    """``S3.sync``'s internal default judgment (aws-cli size + last-modified).
-
-    Not a public building block: it implements
-    ``AwsCliComparison``, which ``S3.sync`` selects
-    for ``update_filter=None``.
-    The transfer direction comes from ``pair.transfer_type`` (the time rule is
-    direction-asymmetric). For each pair:
-
-    - ``size_only``: copy iff the sizes differ (aws-cli's ``SizeOnlySync``).
-      Ignored when ``exact_timestamps`` is also set: the flags fill the same
-      aws-cli strategy slot and its override order makes ``exact_timestamps``
-      win,
-    - otherwise copy iff the sizes differ *or* last-modified does not rule
-      the copy out (aws-cli's ``SizeAndLastModifiedSync``): an upload/copy is
-      redundant when the destination is at least as new as the source, a
-      download when the destination is at least as old. ``exact_timestamps``
-      tightens the download rule to require exactly equal times (aws-cli's
-      ``ExactTimestampsSync``; uploads/copies are unaffected).
-
-    The ``no_overwrite`` write-guard is orthogonal and lives in the ``S3.sync``
-    loop, not here, so it composes with any ``update_filter=`` strategy. Comparisons
-    run at full ``timedelta`` precision (aws-cli's ``total_seconds``). A missing
-    ``size`` or ``mtime`` on either side counts as a difference - aws-cli never
-    faces one (its listings always carry both), so leaning toward copying is the
-    permissive reading.
-    """
-    src, dest = pair.src, pair.dest
-    same_size = src.size is not None and src.size == dest.size
-    if size_only and not exact_timestamps:
-        return not same_size
-    return not same_size or not _times_match(src, dest, pair.transfer_type, exact_timestamps)
-
-
-def _times_match(src: FileInfo, dest: FileInfo, transfer_type: TransferType, exact: bool) -> bool:
-    """aws-cli's ``compare_time``: True when last-modified makes the copy redundant."""
-    if src.mtime is None or dest.mtime is None:
-        return False
-    delta = (dest.mtime - src.mtime).total_seconds()
-    if transfer_type is TransferType.DOWNLOAD:
-        return delta == 0 if exact else delta <= 0
-    return delta >= 0
-
-
 # Content strategies' streaming read granularity, bounding memory use.
 READ_CHUNK = 1024 * 1024
+
+
+def hash_part(fh: BinaryIO, hasher: Any, size: int) -> int:
+    """Feed the next ``size`` bytes of ``fh`` (fewer at its end) to ``hasher``.
+
+    One part of a content strategy's multipart digest (the multipart ETag, the
+    ``COMPOSITE`` checksum), read in ``READ_CHUNK`` blocks into
+    ``hasher.update``. Returns how many bytes it read, ``0`` at the end of the
+    stream. ``OSError`` from a read propagates.
+    """
+    remaining = size
+    while remaining > 0:
+        block = fh.read(min(READ_CHUNK, remaining))
+        if not block:
+            break
+        hasher.update(block)
+        remaining -= len(block)
+    return size - remaining
 
 
 class ContentComparison:

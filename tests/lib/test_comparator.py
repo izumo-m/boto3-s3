@@ -5,7 +5,7 @@ Ports the aws-cli semantics into the split design (pure pairing +
 test_comparator.py`` becomes the ``Comparator`` pairing matrix (their
 strategy-call assertions become filter-application cases), and the
 ``syncstrategy`` unit tests (``test_base`` / ``test_sizeonly`` /
-``test_exacttimestamps``) become the ``compare_size_time`` matrix -
+``test_exacttimestamps``) become the ``AwsCliComparison`` matrix -
 including the aws-cli's direction asymmetry: a same-size download syncs
 only when the *local* side is newer, which ``exact_timestamps`` tightens
 to exact equality. (``no_overwrite`` is an orthogonal ``S3.sync``
@@ -14,9 +14,9 @@ write-guard, exercised in ``test_s3_sync``.)
 
 from __future__ import annotations
 
-import functools
 from datetime import datetime, timedelta, timezone
 
+from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3.comparator import (
     Comparator,
     DestOnlyPair,
@@ -25,7 +25,6 @@ from boto3_s3.comparator import (
     SyncPair,
     all_of,
     any_of,
-    compare_size_time,
 )
 from boto3_s3.types import FileInfo, TransferType
 
@@ -127,8 +126,8 @@ class TestComparatorPairing:
 
 
 def _both(transfer_type: TransferType, src: FileInfo, dest: FileInfo, **flags: bool) -> bool:
-    return compare_size_time(
-        SyncPair(compare_key=src.key, transfer_type=transfer_type, src=src, dest=dest), **flags
+    return AwsCliComparison(**flags)(
+        SyncPair(compare_key=src.key, transfer_type=transfer_type, src=src, dest=dest)
     )
 
 
@@ -160,7 +159,7 @@ class TestCompareSizeTime:
 
     Only both-sides pairs exist here: aws-cli's ``MissingFileSync`` slot (a key
     with no destination) is the create lane's territory - a ``SrcOnlyPair`` by
-    type, which ``compare_size_time`` never sees.
+    type, which ``AwsCliComparison`` never sees.
     """
 
     # -- size + last-modified (the default judgment) -----------------------
@@ -273,7 +272,7 @@ def _json_only(pair: SyncPair) -> bool:
 
 class TestCombinators:
     def test_all_of_requires_every_predicate(self) -> None:
-        copy_changed = functools.partial(compare_size_time, size_only=False, exact_timestamps=False)
+        copy_changed = AwsCliComparison(size_only=False, exact_timestamps=False)
         combined = all_of(_json_only, copy_changed)
 
         def grown(key: str) -> SyncPair:
@@ -289,7 +288,7 @@ class TestCombinators:
     def test_any_of_passes_on_first_hit(self) -> None:
         # A visibility-style override composed with the size+time default:
         # one extra rule forces certain keys through.
-        base = functools.partial(compare_size_time, size_only=False, exact_timestamps=False)
+        base = AwsCliComparison(size_only=False, exact_timestamps=False)
         combined = any_of(_json_only, base)
         up_to_date = SyncPair(
             compare_key="a.json", transfer_type=_KIND, src=_info("a.json"), dest=_info("a.json")
