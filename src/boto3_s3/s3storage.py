@@ -688,8 +688,8 @@ def _page_to_bucket_infos(page: ListBucketsOutputTypeDef, storage: Storage) -> I
 def object_info(storage: S3Storage, key: str, head: Mapping[str, Any]) -> S3FileInfo:
     """A single S3 object's entry from its HEAD-shaped response (no I/O).
 
-    ``Storage.get_fileinfo``'s entry, and the one every single-object route
-    builds alike: the full ``key``, ``ContentLength`` as ``size``,
+    ``Storage.get_fileinfo``'s entry, and the one a single-object transfer
+    route builds alike from its HeadObject: the full ``key``, ``ContentLength`` as ``size``,
     ``LastModified`` as ``mtime``, the ETag as the response carried it, the
     storage class, and ``head`` itself kept on the entry. The size and the
     time are read by subscript, as aws-cli's ``_list_single_object`` reads
@@ -1509,9 +1509,16 @@ class S3Storage(Storage):
         # whether the download finished or a local failure abandoned it.
         with closing(cast("BinaryIO", response["Body"])) as body:
             self._write_body_atomically(body, dest, key=target_key)
-        # The response minus its body and transport metadata keeps its own
-        # ContentLength / LastModified / ETag / StorageClass.
-        return object_info(self, target_key, strip_response_metadata(response, drop_body=True))
+        return S3FileInfo(
+            key=target_key,
+            size=response.get("ContentLength"),
+            mtime=response.get("LastModified"),
+            etag=response.get("ETag"),
+            storage_class=response.get("StorageClass"),
+            head=strip_response_metadata(response, drop_body=True),
+            compare_key=target_key.rsplit("/", 1)[-1],
+            storage=self,
+        )
 
     def put_file(self, path: str | os.PathLike[str], *, key: str = "") -> S3FileInfo:
         """Upload the local file ``path`` to one object with a single ``PutObject``.
