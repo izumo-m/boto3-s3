@@ -89,7 +89,11 @@ class TestInvalidTimestampFormat:
     def test_it_fails_the_run(self, config: Path, capsys: pytest.CaptureFixture[str]) -> None:
         config.write_text("[default]\ncli_timestamp_format = bogus\n")
         assert cli.main(_PRESIGN) == 253
-        assert "cli_timestamp_format" in capsys.readouterr().err
+        # aws's own report, through its Configuration handler's envelope.
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (Configuration): Unknown "
+            'cli_timestamp_format value: bogus, valid values are "wire" or "iso8601"\n'
+        )
 
     @pytest.mark.parametrize("value", ["wire", "iso8601", "  wire  "])
     def test_the_accepted_values_change_nothing(

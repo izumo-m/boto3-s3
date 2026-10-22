@@ -148,7 +148,9 @@ listing timestamps of `ls` are rendered the same way either way, as they are
 under `aws s3`.
 
 What it does do is stop every subcommand when the value is neither: exit code
-253, as under `aws`. `help` and `--version` do not read the config files, so
+253 and `aws`'s report, `An error occurred (Configuration): Unknown
+cli_timestamp_format value: <value>, valid values are "wire" or "iso8601"`.
+`help` and `--version` do not read the config files, so
 they still work under such a value; `aws` checks it as its session comes up
 and fails them too. `cli_binary_format` is checked the same way: a value other
 than `base64` or `raw-in-base64-out` stops every subcommand with exit code

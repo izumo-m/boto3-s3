@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 
 # These exception names do not themselves import the AWS SDK.
 from boto3_s3 import ConfigurationError, InvalidConfigError, InvalidValueError, ValidationError
-from boto3_s3_cli import checksumdefault
+from boto3_s3_cli import checksumdefault, s3errormsg
 from boto3_s3_cli.globalargs import PROFILE_ENV_VARS
 
 if TYPE_CHECKING:
@@ -134,6 +134,15 @@ _TIMESTAMP_FORMATS = ("wire", "iso8601")
 _BINARY_FORMATS = ("base64", "raw-in-base64-out")
 
 
+class UnknownTimestampFormatError(ConfigurationError):
+    """An unknown ``cli_timestamp_format`` in the selected profile (rc 253).
+
+    aws raises its own ``ConfigurationError`` for it, the one failure on this
+    surface its ``ConfigurationErrorHandler`` reports, so the report carries
+    that handler's ``Configuration`` code (`cli._configuration_report`).
+    """
+
+
 def _reject_unknown_cli_formats(session: BotocoreSession, args: argparse.Namespace) -> None:
     """Stop on a ``cli_timestamp_format`` / ``cli_binary_format`` aws refuses.
 
@@ -153,7 +162,7 @@ def _reject_unknown_cli_formats(session: BotocoreSession, args: argparse.Namespa
     scoped = session.get_scoped_config()
     timestamp_format = scoped.get("cli_timestamp_format")
     if timestamp_format is not None and timestamp_format not in _TIMESTAMP_FORMATS:
-        raise ConfigurationError(
+        raise UnknownTimestampFormatError(
             f"Unknown cli_timestamp_format value: {timestamp_format}, "
             'valid values are "wire" or "iso8601"'
         )
@@ -487,7 +496,8 @@ def build_s3(args: argparse.Namespace) -> S3:
     ``aws-global`` pseudo-region and the CRT would sign every request for it.
     The check sits at the engine's construction slot
     (`S3.materialize_crt_engine`, which every transfer command and ``rm``
-    call there) and reports botocore's own missing-region error, rc 253.
+    call there) and raises botocore's own missing-region error, kept as the
+    cause so the report is aws's ``NoRegion`` one, rc 253.
     """
     from boto3_s3 import S3
 
@@ -509,7 +519,8 @@ def build_s3(args: argparse.Namespace) -> S3:
                 if crtsupport.selects_crt(self.resolve_transfer_config(transfer_config)):
                     from botocore.exceptions import NoRegionError
 
-                    raise ConfigurationError(str(NoRegionError()))
+                    cause = NoRegionError()
+                    raise ConfigurationError(str(cause)) from cause
             super().materialize_crt_engine(client, transfer_config=transfer_config)
 
     # reusable_after_interrupt=False: Ctrl-C is process-fatal in the CLI, so an
@@ -913,7 +924,8 @@ def build_client(
     ``--endpoint-url`` and the timeouts map to client kwargs / a botocore
     ``Config``; ``--no-verify-ssl`` and ``--ca-bundle`` head
     the ``verify`` chain (`_resolve_verify`, always resolved to an explicit
-    value so both transfer engines trust the same roots). The client is
+    value so both transfer engines trust the same roots). Every client also
+    carries aws's S3 error-message rewriter (`s3errormsg`). The client is
     handed to the library through ``S3Storage`` - the library never rebuilds
     connection settings itself.
 
@@ -1020,6 +1032,7 @@ def build_client(
             verify=_resolve_verify(args, botocore_session),
             config=Config(**overrides),
         )
+        s3errormsg.register(client)
         checksumdefault.register(client)
         return client
     except (NoCredentialsError, NoRegionError) as exc:

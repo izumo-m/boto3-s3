@@ -41,6 +41,17 @@ from boto3_s3_cli.commands.base import Context
 from tests.utils.fakes3 import MTIME, client_error
 from tests.utils.harness import built_client_ctx, unused_ctx
 
+# The top-level usage block every parse error closes with: aws's own under the
+# program-name mapping, with its `<command> <subcommand>` level collapsed onto
+# our single one (cli._TOP_LEVEL_USAGE).
+_USAGE_BLOCK = (
+    "usage: boto3-s3 [options] <subcommand> [parameters]\n"
+    "To see help text, you can run:\n"
+    "\n"
+    "  boto3-s3 help\n"
+    "  boto3-s3 <subcommand> help\n"
+)
+
 
 def _with_cause(exc: Boto3S3Error, cause: BaseException) -> Boto3S3Error:
     exc.__cause__ = cause
@@ -173,6 +184,7 @@ class TestMainExitCodes:
         rc = cli.main(["ls", "--extra-argument-foo", "s3://bucket/p/"])
         err = capsys.readouterr().err
         assert rc == 252
+        assert "An error occurred (ParamValidation):" in err
         assert "Unknown options" in err
         assert "--extra-argument-foo" in err
 
@@ -189,6 +201,7 @@ class TestMainExitCodes:
         rc = cli.main(["sync", ".", "s3://bucket/p/", "--checksum-algorithm", "INVALID"])
         err = capsys.readouterr().err
         assert rc == 252
+        assert "An error occurred (ParamValidation):" in err
         assert "--checksum-algorithm" in err
         assert "INVALID" in err
 
@@ -435,25 +448,43 @@ class TestGlobalResolutionFailures:
 
 
 class TestUnresolvedConfigReports:
-    """Credentials or a region that cannot be resolved stop the run at rc 253.
+    """Credentials or a region that cannot be resolved stop the run at rc 253
+    with aws's envelope and hint.
 
-    aws's two dedicated handlers are the only rc-253 failures it reaches on
-    this surface; every other botocore failure is its general rc 255.
+    Measured against the pinned aws-cli with an isolated HOME and no
+    credentials configured. The leading blank line aws prints before each
+    report, and the program name, are class-1 rules of the parity
+    normalization (design/testing.md section 9). The hint keeps naming the
+    `aws` tool because those are the words aws writes and both tools read the
+    same config files (docs/cli/aws-differences.md). Every other botocore
+    failure is aws's general rc 255.
     """
 
-    def test_no_credentials_is_253(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # The whole real path: botocore raises inside the listing and the
-        # library translates it, keeping the botocore error as __cause__.
+    def test_no_credentials_is_enveloped_with_the_login_hint(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The whole real path: botocore raises inside the listing, the library
+        # translates it and keeps the botocore error as __cause__, and that
+        # cause is what names the code.
         ctx = Context(client_factory=lambda _args: _RaisingClient(NoCredentialsError()))  # pyright: ignore[reportArgumentType]
         assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 253
-        assert "credentials" in capsys.readouterr().err
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (NoCredentials): Unable to locate "
+            'credentials. You can configure credentials by running "aws login".\n'
+        )
 
-    def test_no_region_is_253(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_no_region_is_enveloped_with_the_configure_hint(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         # What raises it in production is a region-less s3control build (mv's
-        # path resolution, pinned in test_clientfactory.py).
+        # path resolution, pinned in test_clientfactory.py) or the CRT region
+        # stop - the seam differs, the rendering does not.
         ctx = Context(client_factory=lambda _args: _RaisingClient(NoRegionError()))  # pyright: ignore[reportArgumentType]
         assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 253
-        assert "region" in capsys.readouterr().err
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (NoRegion): You must specify a region."
+            ' You can also configure your region by running "aws configure".\n'
+        )
 
     def test_partial_credentials_is_255(self, capsys: pytest.CaptureFixture[str]) -> None:
         # aws has no handler for it -> its general one: rc 255 (measured with
@@ -467,16 +498,78 @@ class TestUnresolvedConfigReports:
         assert "AWS_SECRET_ACCESS_KEY" in capsys.readouterr().err
 
 
-class TestParseErrorReports:
-    """Parse failures are usage errors (rc 252) that name what was rejected.
+class TestTopLevelErrorText:
+    """The subcommand-decision and globals-parse reports, byte for byte.
 
-    The wording is argparse's own, not aws's; what is pinned is the code, the
-    rejected token, and which token the classification blames.
+    Every assertion here is the pinned aws-cli's own stderr under one fixed
+    mapping: ``aws [options] s3`` -> ``boto3-s3 [options]``, aws's
+    ``<command> <subcommand>`` hierarchy collapsed onto our single level (this
+    command *is* ``aws s3``), and the ``aws:`` prefix renamed. aws opens each
+    report with a blank line; ours does not, as on every other error path.
     """
 
-    def test_invalid_subcommand_is_named(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_no_arguments_reports_too_few_arguments(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's bare missing-subcommand error: the usage line with no help
+        # blurb, and a second line whose prefix is part of the message.
+        assert cli.main([]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "usage: boto3-s3 [options] <subcommand> [parameters]\n"
+            "boto3-s3: [ERROR]: too few arguments\n"
+        )
+
+    def test_a_bare_dash_dash_reports_too_few_arguments(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The marker is consumed, so nothing is left to report as unknown.
+        assert cli.main(["--"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "usage: boto3-s3 [options] <subcommand> [parameters]\n"
+            "boto3-s3: [ERROR]: too few arguments\n"
+        )
+
+    def test_invalid_subcommand_reports_the_usage_block(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws names the positional after its dest, so the report says a bare
+        # `subcommand` even though the help page displays `<subcommand>`. The
+        # message carries a newline of its own, which is the second blank line.
         assert cli.main(["foobar"]) == 252
-        assert "invalid choice: 'foobar'" in capsys.readouterr().err
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument subcommand: Found invalid choice 'foobar'\n"
+            f"\n\n{_USAGE_BLOCK}"
+        )
+
+    def test_invalid_subcommand_suggests_close_matches(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws offers the close matches of its command table (difflib, cutoff
+        # 0.8) between the message and the block.
+        assert cli.main(["lss"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument subcommand: Found invalid choice 'lss'\n"
+            "\nMaybe you meant:\n"
+            "\n  * ls\n"
+            f"\n{_USAGE_BLOCK}"
+        )
+
+    def test_invalid_subcommand_suggestions_keep_aws_similarity_cutoff(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's cutoff is 0.8: `web` is too far from `website` to be offered
+        # (measured - aws prints no suggestion for it either), so a looser
+        # cutoff here would add a block aws does not print.
+        assert cli.main(["web"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument subcommand: Found invalid choice 'web'\n"
+            f"\n\n{_USAGE_BLOCK}"
+        )
 
     def test_an_option_form_subcommand_behind_dash_dash_is_blamed_by_name(
         self, capsys: pytest.CaptureFixture[str]
@@ -485,14 +578,39 @@ class TestParseErrorReports:
         # and is rejected as one (aws: `s3 --region us-east-1 -- --bogus`).
         # The report must blame that name, not read it back as an option.
         assert cli.main(["--region", "us-east-1", "--", "--bogus"]) == 252
-        assert "invalid choice: '--bogus'" in capsys.readouterr().err
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument subcommand: Found invalid choice '--bogus'\n"
+            f"\n\n{_USAGE_BLOCK}"
+        )
         # The marker itself is just as much a name once it is behind one.
         assert cli.main(["--", "--", "--bogus"]) == 252
-        assert "invalid choice: '--bogus'" in capsys.readouterr().err
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument subcommand: Found invalid choice '--bogus'\n"
+            f"\n\n{_USAGE_BLOCK}"
+        )
 
-    def test_missing_global_value_is_named(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_trailing_options_do_not_change_the_subcommand_report(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert cli.main(["foobar", "--nope"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument subcommand: Found invalid choice 'foobar'\n"
+            f"\n\n{_USAGE_BLOCK}"
+        )
+
+    def test_missing_global_value_reports_the_usage_block(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # No trailing newline on this message, so a single blank line.
         assert cli.main(["ls", "--region"]) == 252
-        assert "argument --region: expected one argument" in capsys.readouterr().err
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument --region: expected one argument\n"
+            f"\n{_USAGE_BLOCK}"
+        )
 
     def test_a_protected_profile_token_is_an_unknown_option(
         self, capsys: pytest.CaptureFixture[str]
@@ -500,9 +618,66 @@ class TestParseErrorReports:
         # Behind `--` the token is data, so the dispatch reports it as an
         # unknown option (measured on aws).
         assert cli.main(["--", "--profile"]) == 252
-        err = capsys.readouterr().err
-        assert "Unknown options" in err
-        assert "--profile" in err
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): Unknown options: --profile\n"
+        )
+
+    def test_unknown_options_carry_no_usage_block(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # aws reports unknown options from its command layers, which raise a
+        # plain message - the block belongs to the parsers only.
+        assert cli.main(["--bogus"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): Unknown options: --bogus\n"
+        )
+        assert cli.main(["ls", "--nope"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): Unknown options: --nope\n"
+        )
+
+
+class TestSubcommandParseErrorText:
+    """A subcommand's own parse failures, byte for byte.
+
+    aws hands the same usage string to its leaf parser as to its main and
+    service ones, so a leaf failure closes with the identical guidance block
+    rather than the command's generated option list. Every assertion is the
+    pinned aws-cli's own stderr under this file's fixed mapping.
+    """
+
+    def test_missing_option_value_closes_with_the_usage_block(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert cli.main(["ls", "--page-size"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument --page-size: expected one argument\n"
+            f"\n{_USAGE_BLOCK}"
+        )
+
+    def test_missing_positional_closes_with_the_usage_block(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert cli.main(["cp"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "the following arguments are required: paths\n"
+            f"\n{_USAGE_BLOCK}"
+        )
+
+    def test_invalid_choice_suggestions_precede_the_usage_block(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws's own order for this value: STANDARD_IA then STANDARD. The blank
+        # lines are the message elements' own trailing newlines.
+        assert cli.main(["cp", "--storage-class", "STANDARD_I", "s3://b/k", "s3://b2/"]) == 252
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "argument --storage-class: Found invalid choice 'STANDARD_I'\n"
+            "\nMaybe you meant:\n"
+            "\n  * STANDARD_IA\n"
+            "  * STANDARD\n"
+            f"\n{_USAGE_BLOCK}"
+        )
 
     @pytest.mark.parametrize("option", ["--storage-class", "--acl"])
     def test_an_unmarked_option_still_rejects_a_dash_led_value(
@@ -513,7 +688,11 @@ class TestParseErrorReports:
         # without a count, so the token stays an option there and the value is
         # missing (measured per option).
         assert cli.main(["cp", option, "--exclude", "x", "s3://a/", "s3://b/"]) == 252
-        assert f"argument {option}: expected one argument" in capsys.readouterr().err
+        assert capsys.readouterr().err == (
+            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            f"argument {option}: expected one argument\n"
+            f"\n{_USAGE_BLOCK}"
+        )
 
 
 class TestCountedOptionTokens:
@@ -568,7 +747,7 @@ class TestCountedOptionTokens:
         # `--` is argparse's positional marker, not a token: aws reports the
         # missing value here, so the hook must leave that classification be.
         assert cli.main(["sync", "--exclude", "--", "a", "b"]) == 252
-        assert "argument --exclude: expected one argument" in capsys.readouterr().err
+        assert "argument --exclude: expected 1 argument" in capsys.readouterr().err
 
     @pytest.mark.parametrize(
         "argv",
@@ -643,9 +822,9 @@ class TestNegativeNumberClassification:
     consumes such a token as the following option's value. The parser pins
     3.14's pattern on every supported Python; without the pin our 3.10 floor
     would report the value as missing. Every ``main`` outcome below is the
-    pinned aws-cli's own (the wording of a usage error is argparse's); the two
-    structural tests at the end assert no output, pinning where the matcher is
-    installed and the gate that would take it out of play.
+    pinned aws-cli's own; the two structural tests at the end assert no
+    output, pinning where the matcher is installed and the gate that would
+    take it out of play.
     """
 
     @pytest.mark.parametrize("value", ["-1x", "-.5x", "-1x2"])
@@ -653,7 +832,9 @@ class TestNegativeNumberClassification:
         self, value: str, capsys: pytest.CaptureFixture[str]
     ) -> None:
         assert cli.main(["cp", "--storage-class", value, "s3://a/k", "s3://b/k"]) == 252
-        assert f"invalid choice: '{value}'" in capsys.readouterr().err
+        assert (
+            f"argument --storage-class: Found invalid choice '{value}'" in capsys.readouterr().err
+        )
 
     def test_an_int_option_takes_it_and_fails_the_conversion(
         self, capsys: pytest.CaptureFixture[str]
@@ -678,7 +859,9 @@ class TestNegativeNumberClassification:
         self, value: str, capsys: pytest.CaptureFixture[str]
     ) -> None:
         assert cli.main(["cp", "--storage-class", value, "s3://a/k", "s3://b/k"]) == 252
-        assert f"argument --storage-class: invalid choice: '{value}'" in capsys.readouterr().err
+        assert (
+            f"argument --storage-class: Found invalid choice '{value}'" in capsys.readouterr().err
+        )
 
     @pytest.mark.parametrize("value", ["-1", "-1x"])
     def test_the_subcommand_scan_classifies_it_the_same_way(
@@ -688,7 +871,7 @@ class TestNegativeNumberClassification:
         # token names the (invalid) subcommand rather than being walked past
         # as an option - which is what `-x` does in the test below.
         assert cli.main([value, "s3://a/"]) == 252
-        assert f"invalid choice: '{value}'" in capsys.readouterr().err
+        assert f"argument subcommand: Found invalid choice '{value}'" in capsys.readouterr().err
 
     def test_a_dash_led_non_number_is_skipped_by_the_scan(
         self, capsys: pytest.CaptureFixture[str]
@@ -697,7 +880,7 @@ class TestNegativeNumberClassification:
         # `-x` is option-like, so the scan walks past it and the *next* token
         # is what names the (invalid) subcommand.
         assert cli.main(["-x", "s3://a/"]) == 252
-        assert "invalid choice: 's3://a/'" in capsys.readouterr().err
+        assert "argument subcommand: Found invalid choice 's3://a/'" in capsys.readouterr().err
 
     def test_it_reaches_a_positional_too(self, capsys: pytest.CaptureFixture[str]) -> None:
         # Taken as the local source path, which does not exist.
@@ -720,7 +903,7 @@ class TestNegativeNumberClassification:
         # And the top-level globals pass, whose own choice-bearing option
         # rejects the consumed token the same way a subcommand's does.
         assert cli.main(["--output", "-1x", "ls", "s3://a/"], ctx=unused_ctx()) == 252
-        assert "argument --output: invalid choice: '-1x'" in capsys.readouterr().err
+        assert "argument --output: Found invalid choice '-1x'" in capsys.readouterr().err
 
     def test_the_pattern_is_the_pinned_one(self) -> None:
         assert cli._NEGATIVE_NUMBER_RE.match("-1x")
@@ -1083,7 +1266,7 @@ class TestTopLevelGlobalsStripping:
         # (the marker is kept when consumed globals precede it, so the help
         # token is a protected positional, not the help-token rule).
         assert cli.main(["--region", "us-east-2", "--", "help"]) == 252
-        assert "invalid choice: 'help'" in capsys.readouterr().err
+        assert "Found invalid choice 'help'" in capsys.readouterr().err
 
 
 class TestClosedStandardStreams:

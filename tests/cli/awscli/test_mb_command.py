@@ -38,9 +38,9 @@ Adaptation rules (on top of the rm port's - see
   honoring ``args.region``, so the aws-cli argv stays verbatim and
   ``client.meta.region_name`` drives the LocationConstraint logic.
 - ``test_tags_with_three_arguments_fails`` expects ``ParamValidation`` in
-  stderr; with argparse the stray third token lands in ``parse_known_args``
-  extras -> ``Unknown options: ExtraArg``. The rc (252) is the contract,
-  the message is not (design/cli.md section 6).
+  stderr, the envelope of the report; the port checks the report itself,
+  ``Unknown options: ExtraArg``, which the stray third token produces from
+  ``parse_known_args``'s extras.
 """
 
 from __future__ import annotations
@@ -203,8 +203,8 @@ class TestMBCommand:
         _assert_params(calls, {"Bucket": "my-regular-bucket"})
 
     def test_tags_with_three_arguments_fails(self) -> None:
-        # aws-cli asserts 'ParamValidation' in stderr; our parser surfaces the
-        # stray token as "Unknown options" (module docstring). rc matches.
+        # aws-cli asserts 'ParamValidation' in stderr, the envelope of the
+        # "Unknown options" report checked here (module docstring).
         result, calls = _run_cmd(
             [{}], ["mb", "s3://bucket", "--tags", "Key1", "Value1", "ExtraArg"]
         )

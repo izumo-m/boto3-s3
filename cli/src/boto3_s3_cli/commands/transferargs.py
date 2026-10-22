@@ -98,6 +98,13 @@ _PARAMFILE_TEXT_OPTIONS: tuple[str, ...] = (
     "source_region",
 )
 
+# aws-cli's _raise_if_paths_type_incorrect_for_param's usage rendering.
+_EXPECTED_USAGE_MAP = {
+    "locals3": "<LocalPath> <S3Uri>",
+    "s3s3": "<S3Uri> <S3Uri>",
+    "s3local": "<S3Uri> <LocalPath>",
+}
+
 
 def add_transfer_arguments(
     parser: argparse.ArgumentParser,
@@ -110,7 +117,7 @@ def add_transfer_arguments(
     extras all three carry). ``--expected-size`` is cp-only (mv and sync
     reject streams); ``--recursive`` is cp/mv-only (sync is inherently
     recursive, and aws rejects the flag as an unknown option there)."""
-    parser.add_argument("paths", nargs=2, metavar="<path>", help="source and destination location")
+    parser.add_argument("paths", nargs=2, help="source and destination location")
     parser.add_argument(
         "--dryrun",
         action="store_true",
@@ -568,11 +575,18 @@ def validate_checksum_paths_type(
     """
     if getattr(args, "checksum_algorithm", None) and paths_type not in ("locals3", "s3s3"):
         raise ValidationError(
-            "--checksum-algorithm applies only to an upload or an S3-to-S3 copy",
+            "Expected checksum-algorithm parameter to be used with one of following "
+            f"path formats: {_EXPECTED_USAGE_MAP['locals3']}, {_EXPECTED_USAGE_MAP['s3s3']}. "
+            f"Instead, received {_EXPECTED_USAGE_MAP[paths_type]}.",
             operation=operation,
         )
     if getattr(args, "checksum_mode", None) and paths_type != "s3local":
-        raise ValidationError("--checksum-mode applies only to a download", operation=operation)
+        raise ValidationError(
+            "Expected checksum-mode parameter to be used with one of following "
+            f"path formats: {_EXPECTED_USAGE_MAP['s3local']}. "
+            f"Instead, received {_EXPECTED_USAGE_MAP[paths_type]}.",
+            operation=operation,
+        )
 
 
 def validate_sse_c_pairing(args: argparse.Namespace, paths_type: str, *, operation: str) -> None:

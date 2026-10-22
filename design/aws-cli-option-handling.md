@@ -82,10 +82,13 @@ and prints its `upload:` / `download:` / progress lines unconditionally.
 `aws s3 ... --color on` therefore produces no color, and `boto3-s3-cli`
 matches that.
 
-`--cli-error-format` selects how aws-cli renders an error report. Error
-reports are not a compatibility target ([`overview.md`](./overview.md)
-section 3), so `boto3-s3-cli` accepts the flag and ignores it: its reports
-keep one form whatever the value.
+`--cli-error-format` selects how aws-cli renders an error report: `enhanced`,
+the default, envelopes the reports of its dedicated handlers as `An error
+occurred (<code>): <message>`, `legacy` drops the envelope, and `json`,
+`yaml`, `text` and `table` re-render the report. `boto3-s3-cli` accepts the
+flag and ignores it, as it ignores `AWS_CLI_ERROR_FORMAT` and the profile key
+`cli_error_format`: its reports keep the default form whatever the value
+([`cli.md`](./cli.md) section 6).
 
 `--cli-binary-format base64` (the default) base64-decodes only the parameters
 the *API operation model* declares as a `blob` shape:
@@ -279,9 +282,10 @@ conditions a successful run writes what `aws s3` writes, after the
 normalization of the output comparison criterion ([`testing.md`](./testing.md)
 section 9). A difference there that survives the normalization is a functional
 difference - a bug, or one of the deliberate deviations recorded below. In an
-error report aws's output is a reference rather than a target: a difference in
-an error's details (its wording, which of two mistakes is reported, the order
-of the reports) is neither a bug nor a deviation.
+error report, a message aws-cli's own code writes is a target as well,
+unless its text is inappropriate or makes no sense; an error's other details
+(which of two mistakes is reported, the order of the reports, the text
+botocore, Python or S3 writes) are neither a bug nor a deviation.
 
 The program name and the command hierarchy are **class 1** of that
 normalization rather than an exemption from it. The root tokens `aws` /

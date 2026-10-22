@@ -57,7 +57,7 @@ class MbCommand(Command):
 
     def configure(self, parser: argparse.ArgumentParser) -> None:
         """Add the ``mb``-specific arguments to its subparser."""
-        parser.add_argument("path", metavar="<S3Uri>", help="the bucket to create")
+        parser.add_argument("path", help="the bucket to create")
         # Repeatable KEY VALUE pairs, duplicates passed through for the server
         # to reject (aws-cli TAGS arg: action append, nargs 2).
         parser.add_argument(
@@ -90,7 +90,7 @@ class MbCommand(Command):
         target: str = args.path
         if not target.startswith("s3://"):
             # aws mb: S3 paths only -> rc 252.
-            raise ValidationError(usage.single_uri_usage("mb"), operation="mb")
+            raise ValidationError(usage.bare_single_uri_usage(), operation="mb")
 
         # A path that names no bucket (`s3://`, `s3:///k`) is a usage error
         # (252), where aws sends Bucket="" and reports an mb failure (rc 1).

@@ -18,7 +18,7 @@ class WebsiteCommand(Command):
 
     def configure(self, parser: argparse.ArgumentParser) -> None:
         """Add the ``website``-specific arguments to its subparser."""
-        parser.add_argument("paths", metavar="<S3Uri>", help="the bucket to configure")
+        parser.add_argument("paths", help="the bucket to configure")
         parser.add_argument(
             "--index-document",
             metavar="<suffix>",

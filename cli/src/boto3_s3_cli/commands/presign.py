@@ -24,7 +24,7 @@ class PresignCommand(Command):
 
     def configure(self, parser: argparse.ArgumentParser) -> None:
         """Add the ``presign``-specific arguments to its subparser."""
-        parser.add_argument("path", metavar="<S3Uri>", help="the object to sign a URL for")
+        parser.add_argument("path", help="the object to sign a URL for")
         # No type=int: a non-integer must exit 255 like aws's bare int()
         # conversion (parse_integer_option, commands/base.py). Not
         # range-validated either: aws signs any value (0 / negative / over

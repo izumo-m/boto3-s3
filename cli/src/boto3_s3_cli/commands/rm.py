@@ -87,7 +87,7 @@ class RmCommand(Command):
 
     def configure(self, parser: argparse.ArgumentParser) -> None:
         """Add the ``rm``-specific arguments to its subparser."""
-        parser.add_argument("paths", metavar="<S3Uri>", help="the object or prefix to delete")
+        parser.add_argument("paths", help="the object or prefix to delete")
         parser.add_argument(
             "--dryrun",
             action="store_true",
@@ -121,8 +121,7 @@ class RmCommand(Command):
         per-key failures
         print ``delete failed:`` lines, a Ctrl-C prints one ``cancelled:
         ctrl-c received`` line, anything else that kills the run (the
-        listing rejecting the bucket or the page size, botocore validation, a
-        listing entry the response left incomplete)
+        listing rejecting the bucket or the page size, botocore validation)
         prints one ``fatal error:`` line - all suppressed by ``--quiet``
         with the exit codes kept. Nothing maps to 254 here. Ahead of all of
         that sit the client build and the ``[s3]`` runtime config, whose
@@ -189,10 +188,7 @@ class RmCommand(Command):
             # Everything the operation raises is one `fatal error:` line at
             # rc 1, by position rather than by type: aws's rm runs inside the
             # same `CommandResultRecorder` cp/mv/sync do, which turns whatever
-            # escapes the pipeline into an ErrorResult. So a listing entry the
-            # response left incomplete - `MalformedResponseError` here, a bare
-            # KeyError on aws-cli - reports as `fatal error: 'LastModified'` at
-            # rc 1, measured, rather than reaching the dispatcher's 255.
+            # escapes the pipeline into an ErrorResult.
             # `SystemExit` is a BaseException and still passes, like there.
             if not args.quiet:
                 sys.stderr.write(f"fatal error: {exc}\n")

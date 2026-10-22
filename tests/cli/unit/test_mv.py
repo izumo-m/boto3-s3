@@ -136,7 +136,11 @@ class TestUsageErrors:
             ctx=built_client_ctx(),
         )
         assert rc == 252
-        assert "checksum-algorithm" in capsys.readouterr().err
+        assert (
+            "Expected checksum-algorithm parameter to be used with one of following "
+            "path formats: <LocalPath> <S3Uri>, <S3Uri> <S3Uri>. "
+            "Instead, received <S3Uri> <LocalPath>." in capsys.readouterr().err
+        )
 
     def test_expected_size_is_not_an_mv_option(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = cli.main(

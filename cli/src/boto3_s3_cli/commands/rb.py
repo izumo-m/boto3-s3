@@ -36,7 +36,7 @@ class RbCommand(Command):
 
     def configure(self, parser: argparse.ArgumentParser) -> None:
         """Add the ``rb``-specific arguments to its subparser."""
-        parser.add_argument("path", metavar="<S3Uri>", help="the bucket to delete")
+        parser.add_argument("path", help="the bucket to delete")
         parser.add_argument(
             "--force",
             action="store_true",
@@ -65,7 +65,7 @@ class RbCommand(Command):
         target: str = args.path
         if not target.startswith("s3://"):
             # aws rb: S3 paths only -> rc 252.
-            raise ValidationError(usage.single_uri_usage("rb"), operation="rb")
+            raise ValidationError(usage.bare_single_uri_usage(), operation="rb")
 
         # A path that names no bucket (`s3://`, `s3:///k`) is a usage error
         # (252), --force or not: aws sends Bucket="" and reports an rb failure

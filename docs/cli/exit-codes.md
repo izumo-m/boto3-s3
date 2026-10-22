@@ -74,7 +74,10 @@ An unknown option, an invalid choice or value, a path that is not a usable S3
 URI (one that names no bucket, `s3://` or `s3:///key`, included - `ls`
 aside, where `s3://` lists the buckets), or an option that does not apply to
 the direction being run (for example `--checksum-algorithm` on a download).
-No transfer request was sent.
+No transfer request was sent. The report takes `aws`'s form,
+`boto3-s3: [ERROR]: An error occurred (ParamValidation): <message>`, and a
+command line the parser rejects closes it with the usage line and the help
+commands to run.
 
 ### 253 — the environment cannot supply what is needed
 
@@ -104,6 +107,19 @@ An unusable `cli_timestamp_format` in the profile lands here too: every
 subcommand stops on it. `help` and `--version` do not read the config files,
 so they still work, where `aws` fails them as well
 ([`configuration.md`](./configuration.md)).
+
+Unresolved credentials, an unresolved region and an unusable
+`cli_timestamp_format` are reported as `aws` reports them (the region one
+also where a CRT run stops on it before starting, which `aws` reports with
+an empty message at 255) — `An error
+occurred (NoCredentials): Unable to locate credentials. You can configure
+credentials by running "aws login".`, its `NoRegion` counterpart pointing at
+`aws configure`, and `An error occurred (Configuration): Unknown
+cli_timestamp_format value: ...`. The hints name `aws` because they are
+`aws`'s own words and both tools read the same config files; see
+[`aws-differences.md`](./aws-differences.md). The dependency failures above
+are not something `aws` can report, so they carry no `An error occurred`
+part.
 
 Once a `cp` / `mv` / `sync` / `rm` run has started, a credential
 failure is exit code 1 instead: a per-item

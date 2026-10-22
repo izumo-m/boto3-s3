@@ -211,7 +211,7 @@ class TestCrtEngineConstructionSlot:
     below use a CA bundle awscrt cannot parse (its ``RuntimeError``), which the
     library reports as an ``InvalidConfigError`` - rc 255, aws's general
     handler. And with no region resolved, the CLI stops a CRT run at the same
-    slot without building anything (rc 253, botocore's missing-region report).
+    slot without building anything (rc 253, aws's missing-region report).
 
     awscrt is faked here (the suite must run without it, and a real CRT client
     would hold the host-wide process lock for the rest of the session).
@@ -291,7 +291,12 @@ class TestCrtEngineConstructionSlot:
         source.write_bytes(b"x")
         resolved = [token.format(file=source, dir=tmp_path) for token in argv]
         result = run_cli_in_process(resolved, ctx=Context())
-        expected = (253, "", f"boto3-s3: [ERROR]: {NoRegionError()}\n")
+        expected = (
+            253,
+            "",
+            f"boto3-s3: [ERROR]: An error occurred (NoRegion): {NoRegionError()}"
+            ' You can also configure your region by running "aws configure".\n',
+        )
         assert (result.rc, result.stdout, result.stderr) == expected, resolved
         assert crt_constructions == [], resolved
 

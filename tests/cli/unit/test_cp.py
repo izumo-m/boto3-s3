@@ -798,7 +798,11 @@ class TestChecksumOptions:
             ctx=built_client_ctx(),
         )
         assert rc == 252
-        assert "checksum-algorithm" in capsys.readouterr().err
+        assert (
+            "Expected checksum-algorithm parameter to be used with one of following "
+            "path formats: <LocalPath> <S3Uri>, <S3Uri> <S3Uri>. "
+            "Instead, received <S3Uri> <LocalPath>." in capsys.readouterr().err
+        )
 
     def test_checksum_mode_rejects_uploads(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -810,7 +814,11 @@ class TestChecksumOptions:
             ctx=built_client_ctx(),
         )
         assert rc == 252
-        assert "checksum-mode" in capsys.readouterr().err
+        assert (
+            "Expected checksum-mode parameter to be used with one of following "
+            "path formats: <S3Uri> <LocalPath>. "
+            "Instead, received <LocalPath> <S3Uri>." in capsys.readouterr().err
+        )
 
     def test_checksum_algorithm_allows_streaming_uploads(self) -> None:
         # `cp - s3://b/k` is locals3 for the pairing check (the aws-cli

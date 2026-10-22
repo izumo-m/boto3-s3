@@ -519,8 +519,9 @@ error's details need not (checked by the e2e CRT lane - testing.md).
   (overview.md section 3); the measurement and
   the mechanism stay in section 3.
 - **CRT configured x no resolvable region**: aligned in outcome - the run
-  stops before it starts, `rm` and `--dryrun` included - with botocore's
-  missing-region report at rc 253 where aws prints an empty report at rc 255
+  stops before it starts, `rm` and `--dryrun` included - with the
+  missing-region report aws's NoRegion handler writes, at rc 253, where aws
+  prints an empty report at rc 255
   (section 4, "Where the CRT region comes from").
 - **awscrt absent x explicit crt**: an area that cannot arise because aws bundles
   awscrt. Our awscrt is an opt-in extra (`boto3-s3-cli[crt]` ->

@@ -797,9 +797,11 @@ on where it is (overview.md section 3):
   default resolution is to align with aws-cli; taking the difference
   deliberately is allowed, but then it is recorded in
   [`aws-differences.md`](../docs/cli/aws-differences.md).
-- In an error report - a failure's wording, which of two mistakes is
-  reported, the order of the reports - it is an **error detail**: a test may
-  pin it, but a difference from aws there is neither a bug nor recorded.
+- In an error report, a message aws-cli's own code writes is matched like
+  normal output, unless aws-cli's text is inappropriate. Which of two
+  mistakes is reported, the order of the reports and the text the SDK,
+  Python or S3 writes are **error details**: a test may pin them, but a
+  difference from aws there is neither a bug nor recorded.
 - A difference that comes only from an SDK or Python version difference (an
   older SDK, pip botocore / s3transfer where aws-cli bundles its own copies,
   or a Python other than the one aws-cli bundles) is neither a bug nor
@@ -819,7 +821,7 @@ its mechanism allows:
 - the **unit tier** is where stderr is compared as bytes, its expectations
   being what the pinned `aws` was measured writing - which is also where the
   ad-hoc A/B measurements that settle a behavior question during development
-  end up. For an error report such a pin records a choice, not a
+  end up. For an error detail such a pin records a choice, not a
   requirement (above).
 
 The differential applies the same normalizers the goldens do (section 3's

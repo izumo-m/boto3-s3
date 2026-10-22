@@ -87,7 +87,9 @@ class TestUsageErrors:
     def test_no_scheme_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = cli.main(["rb", "bucket"], ctx=client_ctx(None))
         assert rc == 252
-        assert "Invalid argument type" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "<S3Uri>\nError: Invalid argument type" in err
+        assert "usage:" not in err  # rb raises aws's bare form, like mb
 
     @pytest.mark.parametrize("argv", [["rb", "s3://b/key"], ["rb", "s3://b/key", "--force"]])
     def test_key_part_is_252(self, argv: list[str], capsys: pytest.CaptureFixture[str]) -> None:

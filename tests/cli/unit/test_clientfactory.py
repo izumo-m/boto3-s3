@@ -22,7 +22,7 @@ from boto3_s3 import (
     InvalidValueError,
     ValidationError,
 )
-from boto3_s3_cli import clientfactory, globalargs
+from boto3_s3_cli import clientfactory, globalargs, s3errormsg
 from boto3_s3_cli.cli import exit_code_for
 from boto3_s3_cli.commands import transferargs
 
@@ -1668,6 +1668,32 @@ class TestDefaultsMode:
         section = provider.provide()
         assert section["addressing_style"] == "path"
         assert section["us_east_1_regional_endpoint"] == "regional"
+
+
+class TestS3ErrorMsgRegistration:
+    def test_every_built_client_rewrites_the_three_s3_messages(self) -> None:
+        # aws hangs its s3errormsg handler off `after-call.s3` for the whole
+        # session, so the rewrite reaches every operation; emitting the event
+        # the way botocore does pins both the key and the wiring.
+        client = clientfactory.build_client(_parse(["--region", "us-east-1"]))
+        parsed: dict[str, Any] = {
+            "Error": {
+                "Code": "PermanentRedirect",
+                "Message": "Please send all future requests to this endpoint.",
+                "Endpoint": "bkt.s3.eu-west-1.amazonaws.com",
+            }
+        }
+        client.meta.events.emit(
+            "after-call.s3.ListObjectsV2",
+            http_response=None,
+            parsed=parsed,
+            model=None,
+            context={},
+        )
+        assert parsed["Error"]["Message"] == (
+            "Please send all future requests to this endpoint: "
+            "bkt.s3.eu-west-1.amazonaws.com\n" + s3errormsg.REGION_ERROR_MSG
+        )
 
 
 class TestChecksumDefaultRegistration:

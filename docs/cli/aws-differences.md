@@ -6,11 +6,13 @@ or created, the same `sync` decisions, the same meaning for every option, and
 on a successful run the same result lines. This file records where a run does
 not come out that way — the deliberate deviations (batched deletes,
 protections this command keeps on, `aws` bugs it does not copy) and the other
-differences a run can show. It does not record a difference in an error's
-details — its wording, which of two simultaneous mistakes is reported, the
-order of the reports — nor one that comes only from the installed botocore /
-s3transfer or the Python this command runs on differing from the copies
-aws-cli bundles; neither is a bug
+differences a run can show. A warning or error message that `aws`'s own code
+writes reads the same here, except where `aws`'s text is wrong or misleading
+and this command words it plainly. This file does not record a difference in an
+error's other details — which of two simultaneous mistakes is reported, the
+order of the reports, the text botocore, Python or S3 writes — nor one that
+comes only from the installed botocore / s3transfer or the Python this
+command runs on differing from the copies aws-cli bundles; neither is a bug
 ([`../../design/overview.md`](../../design/overview.md) section 3).
 
 For what each option does, run `boto3-s3 <subcommand> help`; every option is an
@@ -46,18 +48,29 @@ could, the destination directory of a refused run, a help page or an `mb` /
 `rb` success line that cannot be written, a
 `file://` or `fileb://` reference `aws` mishandles, and the `PYTHON*`
 environment variables. A difference of that kind anywhere else is a
-bug worth reporting; an error report's wording, or which of two mistakes it
-names, is not.
+bug worth reporting; which of two mistakes an error report names, or text
+botocore, Python or S3 wrote, is not.
 
-**Do not parse the console output.** Not because it differs on a successful
-run: result lines are aws's own. That is exactly what makes
-parsing fragile: the wording is aws's to change, and it does change from one
-`aws` release to the next. Five of section 2's entries cover the text that
-differs on purpose — the progress display, help pages and `--debug` traces,
-the `--dryrun` line of a directory copied without `--recursive`, the
-`--version` line, and the history warning `aws` writes and this command has
-not. Error reports are not held to aws's wording at all. And the ordering of
-concurrent output is not reproducible on either tool (below).
+**Do not parse the console output.** Not because the wording differs:
+result lines, warnings and the error messages `aws`'s own code writes are
+aws's own (a few that `aws` words wrongly or misleadingly aside), with this command's name substituted for `aws` — the error prefix
+is `boto3-s3: [ERROR]:`, and usage lines and the help commands a usage error
+suggests read `boto3-s3 <subcommand>` where aws's read `aws s3 <subcommand>`
+(or `aws <command> <subcommand>`). The advice a message gives keeps naming the
+`aws` commands aws names: a missing-credentials report ends `You can
+configure credentials by running "aws login".`, a missing-region one points at
+`aws configure`, and the region advice `aws` adds to some of S3's messages at
+`aws s3api get-bucket-location`. This command has none of them, but both tools
+read the same config and credentials files, so following the advice fixes the
+run either way. That is exactly what makes parsing fragile: the wording is aws's
+to change, and it does change from one `aws` release to the next. Five of
+section 2's entries cover the text that differs on purpose — the progress
+display, help pages and `--debug` traces, the `--dryrun` line of a directory
+copied without `--recursive`, the `--version` line, and the history warning
+`aws` writes and this command has not. Text that botocore, Python or S3
+writes is reported as they write it, so it can read differently where their
+versions differ from the ones `aws` bundles. And the ordering of concurrent
+output is not reproducible on either tool (below).
 
 **Ordering**, as promised above: with concurrent transfers, result lines — and
 `delete:` lines against transfer lines — interleave freely, on either tool.
@@ -277,16 +290,13 @@ that say outright that the run comes out differently, listed in section 1.
 - **A timestamp only `aws`'s local-time conversion cannot hold does not stop
   the run here.** `aws` converts every `LastModified` it reads to local time,
   so an object stamped within the local zone's offset of the year 1 or 9999
-  (on Windows also before 1970 or after about 3001), or a zone-less stamp
-  from an endpoint in the last day of 9999, ends its run where the listing or
-  the single-object HEAD reads it - `fatal error: date value out of range`,
-  exit code 1 - and nothing after it is transferred, compared or deleted
-  (measured). Here the stamp is kept as the instant it names (a zone-less one
-  the local zone cannot place is read as UTC) and the run goes on. `ls`
-  prints times in the local zone, as `aws` does, so the line of such an
-  object whose stamp carries a zone still stops the listing there, at exit
-  code 255 on both tools; a zone-less one is printed from the instant read
-  here. S3 itself never sends such a stamp.
+  (on Windows also before 1970 or after about 3001) ends its run where the
+  listing or the single-object HEAD reads it - `fatal error: date value out
+  of range`, exit code 1 - and nothing after it is transferred, compared or
+  deleted (measured). Here the stamp is kept as the instant it names and the
+  run goes on. `ls` prints times in the local zone, as `aws` does, so the
+  line of such an object still stops the listing there, at exit code 255 on
+  both tools. S3 itself never sends such a stamp.
 - **A malformed `--grants` is refused before the run.** A grant not of the
   form `permission=grantee`, or naming a permission other than `read`,
   `readacl`, `writeacl` and `full`, is exit code 252 here before anything is
@@ -608,6 +618,12 @@ and have no effect — the help page groups them under `recognized but ignored`.
 Where an option has a fixed choice list the value is still validated, so an
 invalid one is still an error, and `--query` is still compiled as a JMESPath
 expression and rejected if malformed.
+
+`--cli-error-format` is the one of them that changes `aws`'s output: under
+`legacy` `aws` drops the `An error occurred (<code>):` part of an error
+report, and under `json`, `yaml`, `text` and `table` it re-renders the report.
+Here every report keeps `aws`'s default form whatever the option,
+`AWS_CLI_ERROR_FORMAT` or the profile key `cli_error_format` says.
 
 ## 4. Options limited by one direction
 

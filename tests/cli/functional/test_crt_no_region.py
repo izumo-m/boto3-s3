@@ -6,8 +6,8 @@ instead give the *botocore* client the ``aws-global`` pseudo-region, which the
 CRT client would sign every request for. The CLI stops a CRT run with no
 resolved region at the engine's construction slot - before any request, so
 every transfer command reports it, ``--dryrun`` and ``--quiet`` included, and
-so does ``rm``, whose deletes ride the engine - with botocore's missing-region
-report at rc 253.
+so does ``rm``, whose deletes ride the engine - with aws's missing-region
+report (its ``NoRegion`` envelope and hint) at rc 253.
 
 The runs need a real subprocess, with no ``AWS_*`` variable of the host's or
 the root conftest's: the region chain is what is under test. They contact
@@ -35,7 +35,10 @@ if not crtsupport.has_crt_s3transfer():
 
 _BUCKET = "boto3-s3-crt-noregion"
 _RUN_CLI = "import sys; from boto3_s3_cli.cli import main; sys.exit(main())"
-_NO_REGION_REPORT = f"boto3-s3: [ERROR]: {NoRegionError()}\n"
+_NO_REGION_REPORT = (
+    f"boto3-s3: [ERROR]: An error occurred (NoRegion): {NoRegionError()}"
+    ' You can also configure your region by running "aws configure".\n'
+)
 
 
 def _run_cli(
