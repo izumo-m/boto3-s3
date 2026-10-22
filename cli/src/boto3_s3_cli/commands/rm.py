@@ -68,6 +68,9 @@ class _DeletePrinter:
         # like aws-cli's line. Every delete record sets it (design/opresult.md).
         location = result.src
         assert location is not None
+        if result.outcome is OpOutcome.CANCELLED:
+            # A delete a Ctrl-C cut short has no line: its outcome is unknown.
+            return
         if result.outcome is OpOutcome.FAILED:
             sys.stderr.write(output.format_delete_failed(location, result.error) + "\n")
         elif result.outcome is OpOutcome.DRYRUN:

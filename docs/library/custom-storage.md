@@ -51,6 +51,13 @@ globs match and that `sync` pairs the two sides on. **Your `scan_pages` must
 stamp `compare_key` on every entry it yields, and no two entries of one listing
 may share one.** Nothing downstream checks either or makes up for it.
 
+`key` is your backend's own address of the entry, never a URL that names your
+backend: do not put a scheme such as `s3://` or `http://` in front of it. Which
+backend an entry belongs to is its `storage`, not its key. The address itself
+may hold any characters — an S3 key can contain `://`, and a Windows path reads
+`C:/...` — so nothing inspects a key for a scheme; keeping it out is up to your
+code.
+
 ### Filtering
 
 By default `scan()` applies `options.filter` itself, to what `scan_pages`

@@ -244,9 +244,6 @@ class TransferConfig(boto3.s3.transfer.TransferConfig):
         preferred_transfer_client: str | None = None,
         *,
         target_bandwidth: int | None = None,
-        should_stream: bool | None = None,
-        disk_throughput: int | None = None,
-        direct_io: bool | None = None,
         annotation_temp_dir: str | os.PathLike[str] | None = None,
     ) -> None: ...
 ```
@@ -285,17 +282,17 @@ requires is in [`../compatibility.md`](../compatibility.md); the engine
 resolution itself is specified in
 [`../../design/transfer.md`](../../design/transfer.md) section 2.
 
-The five extras are plain attributes rather than participants in the base
+The two extras are plain attributes rather than participants in the base
 class's default-sentinel machinery, and each defaults to `None`.
 
 `target_bandwidth` is the target throughput for the CRT engine in bytes per
 second, becoming the CRT client's `target_throughput`. It does not cap the
 classic engine — `max_bandwidth` is that engine's limit.
 
-`should_stream`, `disk_throughput` and `direct_io` are aws-cli's CRT file-I/O
-settings (`disk_throughput` in bytes per second). They are accepted and
-stored, but have no effect: no released s3transfer takes the file-I/O options
-that carry them ([`../compatibility.md`](../compatibility.md)).
+aws-cli's CRT file-I/O settings (`should_stream`, `disk_throughput`,
+`direct_io`) have no field here: no released s3transfer takes the file-I/O
+options that carry them. In the `[s3]` section they are accepted and validated
+and have no effect ([`../compatibility.md`](../compatibility.md)).
 
 `annotation_temp_dir` is the directory used by
 `AnnotationCopyMode.PRELOAD_TEMPFILE`; `None` delegates to the operating
@@ -303,8 +300,8 @@ system's standard temporary-directory selection. The classic multipart-copy
 path reads it whenever `copy_props=ALL` staging is set up, and uses it only
 under `PRELOAD_TEMPFILE`.
 
-All five are ignored by the classic engine except `annotation_temp_dir`, which
-is a classic-path setting. An auto-selected CRT engine ignores the base
+`target_bandwidth` is ignored by the classic engine; `annotation_temp_dir` is
+a classic-path setting. An auto-selected CRT engine ignores the base
 classic-only knobs; requesting `preferred_transfer_client="crt"` explicitly
 while any of them is set is rejected when the CRT manager is built, surfacing
 as [`ValidationError`](./exceptions.md#validationerror) that carries boto3's

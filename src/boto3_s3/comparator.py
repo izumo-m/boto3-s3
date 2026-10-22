@@ -365,9 +365,9 @@ class ContentComparison:
         if src_is_s3 and dest_is_s3:
             return self._copy_differs(src, dest)
         if dest_is_s3 and not src_is_s3:  # upload-shaped: src is the readable side
-            return self._readable_remote_differ(src, dest, pair.transfer_type)
+            return self._readable_remote_differ(src, dest)
         if src_is_s3 and not dest_is_s3:  # download-shaped: dest is the readable side
-            return self._readable_remote_differ(dest, src, pair.transfer_type)
+            return self._readable_remote_differ(dest, src)
         # Neither side is an S3 object: no stored digest to compare against -> copy.
         return True
 
@@ -375,18 +375,12 @@ class ContentComparison:
         """s3-to-s3: whether the two S3 sides' stored digests disagree."""
         raise NotImplementedError
 
-    def _readable_remote_differ(
-        self,
-        readable: FileInfo,
-        remote: FileInfo,
-        transfer_type: TransferType,
-    ) -> bool:
+    def _readable_remote_differ(self, readable: FileInfo, remote: FileInfo) -> bool:
         """Whether the readable side's content differs from the S3 ``remote`` side.
 
         The readable side is read through its own backend (`_read_readable`) -
-        any backend, not just a local file. ``transfer_type`` tells which
-        endpoint ``remote`` belongs to (UPLOAD -> the destination, DOWNLOAD ->
-        the source) for a strategy that must reach that endpoint's client.
+        any backend, not just a local file - and a strategy that queries the S3
+        side reaches it through ``remote.storage``.
         """
         raise NotImplementedError
 

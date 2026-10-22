@@ -51,8 +51,11 @@ class FileInfo:
     cross-backend merge/sort key: two ``Storage.scan`` streams
     ordered by ``key`` can be merge-joined (the basis of ``sync``) once each side
     is expressed as ``compare_key``, so every backend must emit ``/``-separated
-    keys regardless of host OS. ``size`` (bytes) and ``mtime`` (tz-aware UTC) are
-    populated for ``FILE`` entries and may be ``None`` for directories /
+    keys regardless of host OS. It is the backend's own address of the entry,
+    never a URL naming the backend (no ``s3://`` or other scheme in front):
+    ``storage`` says which backend it belongs to. ``size`` (bytes) and ``mtime``
+    (tz-aware UTC) are populated for ``FILE`` entries and may be ``None`` for
+    directories /
     prefixes; ``BUCKET`` entries carry the bucket's ``CreationDate`` as ``mtime``
     (``size`` stays ``None``). Producers enforce these invariants - the field
     types alone do not.

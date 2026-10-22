@@ -42,7 +42,8 @@ without any response, a multipart copy whose tag write and its cleanup both
 fail, a local source that cannot be walked as a directory, a path with no
 bucket, a filtered path holding glob characters, `--exclude` / `--include`
 between nested S3 prefixes or across sides on Windows (below), a timestamp
-only `aws`'s local-time conversion cannot hold, a
+(an object's or a local file's) only `aws`'s local-time conversion cannot
+hold, a
 malformed `--grants`, a file whose size and time could not be read and then
 could, the destination directory of a refused run, a help page or an `mb` /
 `rb` success line that cannot be written, a
@@ -297,6 +298,19 @@ that say outright that the run comes out differently, listed in section 1.
   run goes on. `ls` prints times in the local zone, as `aws` does, so the
   line of such an object still stops the listing there, at exit code 255 on
   both tools. S3 itself never sends such a stamp.
+- **A local file time only `aws`'s local-time conversion cannot hold is
+  read as it is here.** `aws` reads each local file's modification time in
+  the local zone. Where that fails but UTC does not - within the zone's offset
+  of the year 1 or 9999, say, or on Windows a time just after 1970-01-01
+  00:00 UTC in some zones (measured under `TZ=EST5EDT`: `0` fails, `3600`
+  does not) - it warns `File has an invalid timestamp. Passing epoch time as
+  timestamp.`, takes the file as stamped 1970-01-01 and exits 2. Here the
+  time is the instant it names, with no warning, and the run exits 0; an
+  upload `sync` then sends a file stamped near 9999 again on every run, as it
+  does any file stamped in the future, where `aws`'s 1970 stamp leaves it
+  be. A time UTC cannot hold either - outside the years 1 to 9999, or on
+  Windows from about half a day before 1970 back or after about 3001 - gets
+  the warning and the 1970 stamp on both tools.
 - **A malformed `--grants` is refused before the run.** A grant not of the
   form `permission=grantee`, or naming a permission other than `read`,
   `readacl`, `writeacl` and `full`, is exit code 252 here before anything is
@@ -320,11 +334,11 @@ that say outright that the run comes out differently, listed in section 1.
   an empty directory behind (measured). This command creates it only once
   every check has passed; a run that starts creates it as `aws` does, empty
   listing or not.
-- **A single-key `rm` reports a delete that failed after Ctrl-C.** A Ctrl-C
-  while the one `DeleteObject` is out waits for its answer on both tools.
-  When the answer is a failure, `aws` prints only its closing line (measured
-  on a 403); this command prints `delete failed: s3://...` first. The exit
-  code, 1, and the object are the same.
+- **A Ctrl-C during a single-key `rm` prints no `delete:` line.** `aws`
+  waits for its one `DeleteObject` and prints its `delete:` line before the
+  closing line; this command stops at once and prints only `cancelled: ctrl-c
+  received`. The exit code is 1 either way, and the request already out may
+  delete the object on both tools.
 - **`file://` and `fileb://` are refused where `aws` mishandles them.** Each
   of these exits 252 here, before anything is read or sent:
   - **A `fileb://` path argument** of `ls`, `rm`, `mb`, `rb`, `presign` or
@@ -451,10 +465,10 @@ that say outright that the run comes out differently, listed in section 1.
   the requests already out finish, no further one starts, and the run closes with
   `cancelled: ctrl-c received`, exit code 1 — so objects `aws` would still
   have deleted survive. Re-running the command deletes them. A single-key `rm`
-  sends one request, unbatched, and the same rule holds: the request out
-  finishes and is reported (`delete: s3://…`) before that closing line, where
-  `aws` cancels it and reports `delete failed: s3://… AWS_ERROR_S3_CANCELED:
-  Request successfully cancelled` with no closing line, exit code 1 on both.
+  sends one request, unbatched, and stops at the interrupt too: it prints no
+  line for that request, only the closing line, where `aws` cancels it and
+  reports `delete failed: s3://… AWS_ERROR_S3_CANCELED: Request successfully
+  cancelled` with no closing line, exit code 1 on both.
 - **A CRT download that writes no file fails here.** Under
   `preferred_transfer_client = crt`, a download whose file cannot be put in
   place - a name longer than the filesystem allows, a directory already

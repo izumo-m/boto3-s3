@@ -80,7 +80,7 @@ if TYPE_CHECKING:
 
     from boto3_s3.exceptions import Boto3S3Error
     from boto3_s3.s3 import S3
-    from boto3_s3.types import FileInfo, TransferType
+    from boto3_s3.types import FileInfo
 
 # Default multipart part size: boto3 `TransferConfig.multipart_chunksize`.
 DEFAULT_PART_SIZE = 8 * 1024 * 1024
@@ -266,13 +266,7 @@ class EtagComparison(ContentComparison):
         # Both sides are S3 listings: the stored ETags are directly comparable.
         return _etag_differs(_s3_etag(src), _s3_etag(dest))
 
-    def _readable_remote_differ(
-        self,
-        readable: FileInfo,
-        remote: FileInfo,
-        transfer_type: TransferType,
-    ) -> bool:
-        del transfer_type  # the listing ETag travels on the entry; no endpoint needed
+    def _readable_remote_differ(self, readable: FileInfo, remote: FileInfo) -> bool:
         remote_etag = _s3_etag(remote)
         if not remote_etag:
             return True

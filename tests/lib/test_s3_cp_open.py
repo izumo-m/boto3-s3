@@ -242,9 +242,9 @@ class TestOpenUploadRoute:
         )
         assert [call.params["Key"] for call in calls] == ["tree/a.txt", "tree/sub/b.txt"]
 
-    def test_upload_guesses_content_type_from_the_entry_key(self) -> None:
+    def test_upload_guesses_content_type_from_the_entry_compare_key(self) -> None:
         # Open-route uploads are shaped like local ones (design/transfer.md
-        # section 12): the default guess reads the entry's key, so a custom
+        # section 12): the default guess reads the entry's compare_key, so a custom
         # backend's .jpg lands as image/jpeg without the backend doing
         # anything. Only a true stream (no filename) skips the guess.
         src = _MemStorage({"img/photo.jpg": b"x"}, location="mem://data/")

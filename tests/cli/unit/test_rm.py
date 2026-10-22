@@ -343,6 +343,17 @@ class TestExitCodeShape:
         assert result.rc == 1
         assert result.stderr == "cancelled: ctrl-c received\n"
 
+    def test_ctrl_c_during_the_single_delete_prints_no_delete_line(self) -> None:
+        # The interrupted delete's outcome is unknown, so its CANCELLED record
+        # has no line (docs/cli/aws-differences.md).
+        class _InterruptDeleteClient:
+            def delete_object(self, **_kwargs: Any) -> Any:
+                raise KeyboardInterrupt
+
+        result = run_cli_in_process(["rm", "s3://b/k"], ctx=client_ctx(_InterruptDeleteClient()))
+        assert (result.rc, result.stdout) == (1, "")
+        assert result.stderr == "cancelled: ctrl-c received\n"
+
     def test_object_lambda_arn_stays_usage_error(self) -> None:
         # S3Storage.validate() ARN rejections must reach main's 252 mapping, not
         # be swallowed into rm's rc-1 fatal path.

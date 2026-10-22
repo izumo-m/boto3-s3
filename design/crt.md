@@ -56,7 +56,7 @@ naturally.
 
 | module | role |
 |---|---|
-| `transferconfig.py` | `TransferConfig` = a subclass of boto3's `TransferConfig`. Adds the CRT tuning fields that boto3 lacks (`target_bandwidth` / `should_stream` / `disk_throughput` / `direct_io`) plus the classic multipart-copy's `annotation_temp_dir` (transfer.md section 4), and records which settings the caller gave. A plain boto3 config is also accepted (`crtsupport.py` reads the CRT fields via `getattr` with a default of None, so a plain boto3 config works too). Also the port of aws-cli's own `transferconfig.py`: `RuntimeConfig`, reading `[s3]`, the decision tree (`resolve_transfer_client`) and the effective config (`resolve_transfer_config`) - section 4. |
+| `transferconfig.py` | `TransferConfig` = a subclass of boto3's `TransferConfig`. Adds the CRT tuning field that boto3 lacks (`target_bandwidth`) plus the classic multipart-copy's `annotation_temp_dir` (transfer.md section 4), and records which settings the caller gave. A plain boto3 config is also accepted (`crtsupport.py` reads `target_bandwidth` via `getattr` with a default of None, so a plain boto3 config works too). Also the port of aws-cli's own `transferconfig.py`: `RuntimeConfig`, reading `[s3]`, the decision tree (`resolve_transfer_client`) and the effective config (`resolve_transfer_config`) - section 4. |
 | `crtsupport.py` | A faithful port of boto3's `boto3/crt.py` plus improvements. `should_use_crt` (whether to attempt CRT given `preferred`), `create_crt_transfer_manager` (the process-singleton CRT client + serializer, lock, compatibility check), `create_crt_request_sender` (the same engine as a sender of single requests, for the deletes - section 6), `is_optimized_for_system` / `acquire_process_lock` (the building blocks for `resolve_transfer_client`'s decision tree). It does not pull in awscrt / s3transfer.crt at import time. |
 | `crtrequest.py` | `CrtRequestSender`: one botocore-serialized S3 request through the engine's CRT client, for the operation `CRTTransferManager` has no route for (the deleter's `DeleteObjects`) and, so one route reads every delete's answer, for the single-key `DeleteObject`s too (section 6). Also free of awscrt at import time. |
 | `Transferrer._get_manager` in `transfer.py` | The engine seam. COPY is unconditionally classic, and `capture_response=True` forces classic before any config is read (transfer.md section 2). Otherwise it reads `preferred_transfer_client`, attempts CRT (classic fallback if None), and the rest takes the conventional classic path. |
@@ -300,9 +300,9 @@ keys).
   bundled s3transfer's own default, which no `[s3]` key maps to - where boto3's
   class alone would have dialed the same default down to 100.
 - **Resolved to crt**: only the keys the CRT client actually reads
-  (`multipart_chunksize` / `target_bandwidth` / `should_stream` /
-  `disk_throughput` / `direct_io` = those that aws-cli `_create_crt_client`
-  references), plus one derived pin: an explicit `[s3]` `multipart_chunksize`
+  (`multipart_chunksize` / `target_bandwidth`; aws-cli's `_create_crt_client`
+  also reads the fio family, which has no field here - below), plus one
+  derived pin: an explicit `[s3]` `multipart_chunksize`
   the caller did not override is also
   passed as the ctor's `multipart_threshold`, raised to S3's 5 MiB minimum part
   size. aws sends no per-request threshold on the CRT lane and aws-c-s3 falls
@@ -595,8 +595,9 @@ error's details need not (checked by the e2e CRT lane - testing.md).
   other, already finished) still reaches the caller here, where aws, having
   dropped it, exits 0 (docs/cli/aws-differences.md).
 - **fio_options**: unavailable on any pip s3transfer
-  ([`compatibility.md`](../docs/compatibility.md)), so the three keys are
-  accepted and do nothing.
+  ([`compatibility.md`](../docs/compatibility.md)), so the three `[s3]` keys
+  are accepted and validated and do nothing, and `TransferConfig` has no field
+  for them.
 - **TransferConfig on old s3transfer**: below s3transfer 0.16.0 the config
   cannot reach `CRTTransferManager` and is dropped with boto3's own warning
   (`configured values will be ignored`), boto3-faithfully; the CRT client itself

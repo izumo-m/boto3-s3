@@ -17,9 +17,6 @@ aws-cli parity facts asserted here:
 from __future__ import annotations
 
 import datetime as dt
-import subprocess
-import sys
-import threading
 from typing import Any
 
 import pytest
@@ -27,7 +24,6 @@ from botocore.exceptions import ClientError, ConnectionClosedError
 
 from boto3_s3 import (
     S3,
-    AccessDeniedError,
     BatchError,
     CancelledError,
     CancelToken,
@@ -45,7 +41,6 @@ from boto3_s3 import (
     rm_filter_root,
 )
 from tests.utils.fakes3 import client_error, crt_sender_factory
-from tests.utils.interrupts import interrupt_main_in, skip_without_pthread_kill
 
 _MTIME = dt.datetime(2026, 1, 2, tzinfo=dt.timezone.utc)
 
@@ -377,6 +372,22 @@ class TestRmCancellation:
         assert [r.outcome for r in results] == [OpOutcome.FAILED]
         assert len(client.delete_object_calls) == 1
 
+    def test_an_interrupt_during_the_single_delete_cancels_the_item(self) -> None:
+        # The interrupt leaves at once, as on every route: the item is
+        # CANCELLED and the interrupt reaches the caller.
+        class _InterruptedClient(_FakeS3Client):
+            def delete_object(self, **kwargs: Any) -> dict[str, Any]:
+                super().delete_object(**kwargs)
+                raise KeyboardInterrupt
+
+        client = _InterruptedClient()
+        results: list[OpResult] = []
+        with pytest.raises(KeyboardInterrupt):
+            S3().rm(S3Storage("s3://b/k", client=client), on_result=results.append)
+        assert client.delete_object_calls == [{"Bucket": "b", "Key": "k"}]
+        assert [(r.compare_key, r.outcome) for r in results] == [("k", OpOutcome.CANCELLED)]
+        assert isinstance(results[0].error, CancelledError)
+
     def test_dryrun_raises_on_cancelled_token_with_empty_listing(self) -> None:
         client = _FakeS3Client([{"Contents": []}])
         storage = S3Storage("s3://b/k/", client=client)
@@ -486,181 +497,6 @@ class TestRmRecursive:
         assert (exc_info.value.succeeded, exc_info.value.failed) == (1, 1)
         outcomes = {r.compare_key: r.outcome for r in results}
         assert outcomes == {"a": OpOutcome.FAILED, "b": OpOutcome.SUCCEEDED}
-
-
-@skip_without_pthread_kill
-class TestRmSingleKeyInterrupted:
-    """aws's single delete rides a transfer-manager worker that a Ctrl-C waits
-    for, so the in-flight delete is still reported (measured: ``delete:
-    s3://b/k`` before the closing line)."""
-
-    def test_a_ctrl_c_waits_for_the_delete_and_records_it(self) -> None:
-        class _InterruptedClient(_FakeS3Client):
-            def delete_object(self, **kwargs: Any) -> dict[str, Any]:
-                interrupt_main_in("_send_through_interrupt")
-                return super().delete_object(**kwargs)
-
-        client = _InterruptedClient()
-        results: list[OpResult] = []
-        with pytest.raises(KeyboardInterrupt):
-            S3().rm(S3Storage("s3://b/k", client=client), on_result=results.append)
-        assert client.delete_object_calls == [{"Bucket": "b", "Key": "k"}]
-        assert [(r.compare_key, r.outcome) for r in results] == [("k", OpOutcome.SUCCEEDED)]
-
-    def test_a_delete_failing_after_the_interrupt_is_recorded(self) -> None:
-        # aws's transfer futures let the cancel mark win over a failure and
-        # print only the closing line (measured on a 403); the refused delete
-        # is still this key's outcome here, recorded before the interrupt.
-        class _InterruptedClient(_FakeS3Client):
-            def delete_object(self, **kwargs: Any) -> dict[str, Any]:
-                interrupt_main_in("_send_through_interrupt")
-                return super().delete_object(**kwargs)
-
-        client = _InterruptedClient(
-            delete_object_error=client_error("AccessDenied", 403, "DeleteObject")
-        )
-        results: list[OpResult] = []
-        with pytest.raises(KeyboardInterrupt):
-            S3().rm(S3Storage("s3://b/k", client=client), on_result=results.append)
-        assert [(r.compare_key, r.outcome) for r in results] == [("k", OpOutcome.FAILED)]
-        assert isinstance(results[0].error, AccessDeniedError)
-
-    def test_a_second_ctrl_c_still_waits_and_records(self) -> None:
-        # aws's executor threads are joined as it exits, so its request still
-        # completes after a second Ctrl-C (measured); the outcome is recorded.
-        class _InterruptedTwice(_FakeS3Client):
-            def delete_object(self, **kwargs: Any) -> dict[str, Any]:
-                interrupt_main_in("_send_through_interrupt")
-                interrupt_main_in("_send_through_interrupt")
-                return super().delete_object(**kwargs)
-
-        client = _InterruptedTwice()
-        results: list[OpResult] = []
-        with pytest.raises(KeyboardInterrupt):
-            S3().rm(S3Storage("s3://b/k", client=client), on_result=results.append)
-        assert client.delete_object_calls == [{"Bucket": "b", "Key": "k"}]
-        assert [(r.compare_key, r.outcome) for r in results] == [("k", OpOutcome.SUCCEEDED)]
-
-    def test_a_third_ctrl_c_stops_waiting(self) -> None:
-        release = threading.Event()
-
-        class _StallingClient(_FakeS3Client):
-            def delete_object(self, **kwargs: Any) -> dict[str, Any]:
-                for _ in range(3):
-                    interrupt_main_in("_send_through_interrupt")
-                release.wait(10)
-                return super().delete_object(**kwargs)
-
-        results: list[OpResult] = []
-        try:
-            with pytest.raises(KeyboardInterrupt):
-                S3().rm(S3Storage("s3://b/k", client=_StallingClient()), on_result=results.append)
-            assert results == []
-        finally:
-            release.set()
-
-    @staticmethod
-    def _interrupt_the_spawn(monkeypatch: pytest.MonkeyPatch, *, spawn: bool) -> None:
-        """Raise a KeyboardInterrupt at the worker's spawn - the one C call an
-        interrupt lands before or after - before it runs or once it has."""
-        import _thread
-
-        real = _thread.start_new_thread
-
-        def start_new_thread(function: Any, args: Any) -> int:
-            if spawn:
-                real(function, args)
-            raise KeyboardInterrupt
-
-        monkeypatch.setattr(_thread, "start_new_thread", start_new_thread)
-
-    def test_an_interrupt_before_the_worker_exists_goes_on(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # No thread yet, so no request to wait for: the interrupt is not held.
-        from boto3_s3 import s3 as s3_module
-
-        monkeypatch.setattr(s3_module, "_SPAWN_GRACE", 0.2)
-        self._interrupt_the_spawn(monkeypatch, spawn=False)
-        client = _FakeS3Client()
-        results: list[OpResult] = []
-        with pytest.raises(KeyboardInterrupt):
-            S3().rm(S3Storage("s3://b/k", client=client), on_result=results.append)
-        assert client.delete_object_calls == []
-        assert results == []
-
-    def test_an_interrupt_once_the_worker_runs_is_held(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        self._interrupt_the_spawn(monkeypatch, spawn=True)
-        client = _FakeS3Client()
-        results: list[OpResult] = []
-        with pytest.raises(KeyboardInterrupt):
-            S3().rm(S3Storage("s3://b/k", client=client), on_result=results.append)
-        assert client.delete_object_calls == [{"Bucket": "b", "Key": "k"}]
-        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED]
-
-    def test_a_worker_that_cannot_start_fails_the_delete(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        real_start = threading.Thread.start
-
-        def start(self: threading.Thread) -> None:
-            if self.name == "boto3-s3-rm-single":
-                raise RuntimeError("can't start new thread")
-            real_start(self)
-
-        monkeypatch.setattr(threading.Thread, "start", start)
-        client = _FakeS3Client()
-        results: list[OpResult] = []
-        with pytest.raises(BatchError):
-            S3().rm(S3Storage("s3://b/k", client=client), on_result=results.append)
-        assert client.delete_object_calls == []
-        assert [r.outcome for r in results] == [OpOutcome.FAILED]
-
-    @pytest.mark.skipif(sys.version_info < (3, 14), reason="thread_inherit_context is 3.14+")
-    def test_the_worker_inherits_the_callers_context_when_threads_do(self) -> None:
-        # Under -X thread_inherit_context=1 (the free-threaded build's default)
-        # a thread starts with its starter's contextvars; the rm worker is
-        # started from a throwaway thread, so it must be handed the caller's.
-        code = (
-            "import contextvars\n"
-            "from boto3_s3 import S3, S3Storage\n"
-            "from tests.lib.test_s3_rm import _FakeS3Client\n"
-            "var = contextvars.ContextVar('v', default='<unset>')\n"
-            "seen = []\n"
-            "class Client(_FakeS3Client):\n"
-            "    def delete_object(self, **kwargs):\n"
-            "        seen.append(var.get())\n"
-            "        return super().delete_object(**kwargs)\n"
-            "var.set('caller')\n"
-            "S3().rm(S3Storage('s3://b/k', client=Client()))\n"
-            "print(seen)\n"
-        )
-        done = subprocess.run(
-            [sys.executable, "-X", "thread_inherit_context=1", "-c", code],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-        assert done.returncode == 0, done.stderr
-        assert done.stdout.strip() == "['caller']"
-
-    def test_the_worker_is_a_named_thread(self) -> None:
-        # Not a bare _thread thread: a current_thread() call in it (logging's
-        # thread name) would leave a Dummy thread in threading.enumerate() on
-        # Python 3.10 to 3.12.
-        names: list[str] = []
-
-        class _NamingClient(_FakeS3Client):
-            def delete_object(self, **kwargs: Any) -> dict[str, Any]:
-                names.append(threading.current_thread().name)
-                return super().delete_object(**kwargs)
-
-        S3().rm(S3Storage("s3://b/k", client=_NamingClient()))
-        assert names == ["boto3-s3-rm-single"]
-        assert not any(t.name.startswith("Dummy") for t in threading.enumerate())
 
 
 class TestRmBucketRootSweep:

@@ -1,7 +1,7 @@
 """Unit tests for ``boto3_s3.checksumcompare``: the native-checksum PairFilter.
 
-Pins ``ChecksumComparison``'s construction (the resolved-endpoint injection, the
-``check_size`` / ``pure_max_size`` knobs), the GetObjectAttributes read + parse
+Pins ``ChecksumComparison``'s construction (the ``check_size`` /
+``pure_max_size`` knobs), the GetObjectAttributes read + parse
 (FULL_OBJECT whole-file and COMPOSITE part-boundary reconstruction, pagination),
 the s3->s3 stored-checksum comparison, the size pre-check, the indeterminate ->
 copy rules (no checksum / unknown algo / ClientError), and the local checksum
@@ -31,7 +31,7 @@ import io
 import zlib
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, BinaryIO, ClassVar, Literal
+from typing import Any, BinaryIO, ClassVar, Literal, cast
 
 import pytest
 from typing_extensions import override
@@ -122,14 +122,6 @@ class _FakeStorage:
         return self._client
 
 
-class _FakeS3:
-    def __init__(self, mapping: dict[str, Any]) -> None:
-        self.mapping = mapping
-
-    def resolve(self, loc: str) -> Any:
-        return self.mapping[loc]
-
-
 def _full(algorithm: str, value: str) -> dict[str, Any]:
     return {"Checksum": {_KEY_OF[algorithm]: value, "ChecksumType": "FULL_OBJECT"}}
 
@@ -159,14 +151,33 @@ def _composite_resp(
     return respond
 
 
-def _upload_filter(client: _FakeClient, *, key: str = "obj", **kw: Any) -> ChecksumComparison:
-    s3 = _FakeS3({"local": "LOCAL", f"s3://b/{key}": _FakeStorage("b", client)})
-    return ChecksumComparison(s3, "local", f"s3://b/{key}", **kw)  # pyright: ignore[reportArgumentType]
+def _deciding_on(
+    compare: ChecksumComparison,
+    *,
+    src: _FakeClient | None = None,
+    dest: _FakeClient | None = None,
+) -> Callable[[SyncPair], bool]:
+    """``compare`` over pairs whose S3 entries reach these clients.
+
+    The strategy takes each S3 side's client from the entry's ``storage``,
+    which a listing stamps; the entries here are built bare, so it is set here.
+    """
+
+    def decide(pair: SyncPair) -> bool:
+        for info, client in ((pair.src, src), (pair.dest, dest)):
+            if client is not None:
+                info.storage = cast("Any", _FakeStorage("b", client))
+        return compare(pair)
+
+    return decide
 
 
-def _download_filter(client: _FakeClient, *, key: str = "obj", **kw: Any) -> ChecksumComparison:
-    s3 = _FakeS3({f"s3://b/{key}": _FakeStorage("b", client), "local": "LOCAL"})
-    return ChecksumComparison(s3, f"s3://b/{key}", "local", **kw)  # pyright: ignore[reportArgumentType]
+def _upload_filter(client: _FakeClient, **kw: Any) -> Callable[[SyncPair], bool]:
+    return _deciding_on(ChecksumComparison(**kw), dest=client)
+
+
+def _download_filter(client: _FakeClient, **kw: Any) -> Callable[[SyncPair], bool]:
+    return _deciding_on(ChecksumComparison(**kw), src=client)
 
 
 def _write(tmp_path: Path, data: bytes = _DATA, name: str = "f") -> Path:
@@ -186,50 +197,14 @@ def _pair(transfer_type: TransferType, *, src: FileInfo, dest: FileInfo) -> Sync
 
 class TestConstruction:
     def test_defaults(self) -> None:
-        f = _upload_filter(_FakeClient({}))
+        f = ChecksumComparison()
         assert f.check_size is True
         assert f.pure_max_size is None
 
     def test_knobs(self) -> None:
-        f = _upload_filter(_FakeClient({}), check_size=False, pure_max_size=1024)
+        f = ChecksumComparison(check_size=False, pure_max_size=1024)
         assert f.check_size is False
         assert f.pure_max_size == 1024
-
-    def test_resolves_both_sides(self) -> None:
-        # Both locations are resolved once at construction (the endpoint injection).
-        resolved: list[str] = []
-
-        class _S3:
-            def resolve(self, loc: str) -> Any:
-                resolved.append(loc)
-                return "LOCAL" if loc == "local" else _FakeStorage("b", _FakeClient({}))
-
-        ChecksumComparison(_S3(), "local", "s3://b/obj")  # pyright: ignore[reportArgumentType]
-        assert resolved == ["local", "s3://b/obj"]
-
-    def test_s3_side_clients_built_at_construction(self) -> None:
-        # The decides may run on a ParallelFilter pool, where a lazy first
-        # get_client() would race boto3's non-thread-safe client construction:
-        # both S3 sides' clients are built (memoized) on the constructing thread.
-        from boto3_s3.s3storage import S3Storage
-
-        calls: list[str] = []
-
-        class _Counting(S3Storage):
-            def get_client(self) -> Any:
-                calls.append(self.bucket)
-                return _FakeClient({})
-
-        class _S3:
-            def resolve(self, loc: Any) -> Any:
-                return loc
-
-        ChecksumComparison(
-            _S3(),  # pyright: ignore[reportArgumentType]
-            _Counting("s3://a/p"),
-            _Counting("s3://b/q"),
-        )
-        assert calls == ["a", "b"]
 
 
 # -- size pre-check ------------------------------------------------------------
@@ -437,13 +412,11 @@ class TestCompositeForms:
 
 class TestCopyDirect:
     def _copy(self, src_resp: Any, dest_resp: Any, **kw: Any) -> Callable[[SyncPair], bool]:
-        s3 = _FakeS3(
-            {
-                "s3://b/src": _FakeStorage("b", _FakeClient({"src": src_resp})),
-                "s3://b/dest": _FakeStorage("b", _FakeClient({"dest": dest_resp})),
-            }
+        return _deciding_on(
+            ChecksumComparison(**kw),
+            src=_FakeClient({"src": src_resp}),
+            dest=_FakeClient({"dest": dest_resp}),
         )
-        return ChecksumComparison(s3, "s3://b/src", "s3://b/dest", **kw)  # pyright: ignore[reportArgumentType]
 
     def _pair(self, **kw: Any) -> SyncPair:
         return SyncPair(
@@ -490,8 +463,7 @@ class TestCopyDirect:
         dest = _FakeClient(
             {"dest": _composite_resp("sha256", "ZZZ-3", [10, 10, 10], truncated_at=2)}
         )
-        s3 = _FakeS3({"s3://b/src": _FakeStorage("b", src), "s3://b/dest": _FakeStorage("b", dest)})
-        f = ChecksumComparison(s3, "s3://b/src", "s3://b/dest")  # pyright: ignore[reportArgumentType]
+        f = _deciding_on(ChecksumComparison(), src=src, dest=dest)
         pair = SyncPair(
             compare_key="k", transfer_type=TransferType.COPY, src=_s3("src"), dest=_s3("dest")
         )

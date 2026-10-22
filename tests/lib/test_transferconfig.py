@@ -156,21 +156,10 @@ class TestCrtExtras:
     def test_extras_default_to_none(self) -> None:
         config = TransferConfig()
         assert config.target_bandwidth is None
-        assert config.should_stream is None
-        assert config.disk_throughput is None
-        assert config.direct_io is None
 
     def test_extras_are_keyword_only(self) -> None:
-        config = TransferConfig(
-            target_bandwidth=100_000_000,
-            should_stream=False,
-            disk_throughput=1_000_000_000,
-            direct_io=True,
-        )
+        config = TransferConfig(target_bandwidth=100_000_000)
         assert config.target_bandwidth == 100_000_000
-        assert config.should_stream is False
-        assert config.disk_throughput == 1_000_000_000
-        assert config.direct_io is True
         # The extras sit past the `*` barrier: nine positional slots fill the
         # base params through preferred_transfer_client, so a tenth positional
         # (target_bandwidth) has no slot and raises rather than being accepted.
@@ -182,7 +171,6 @@ class TestCrtExtras:
         # boto3 TransferConfig keeps working wherever a config is accepted.
         plain = Boto3TransferConfig()
         assert getattr(plain, "target_bandwidth", None) is None
-        assert getattr(plain, "direct_io", None) is None
 
 
 class TestAnnotationTempDir:

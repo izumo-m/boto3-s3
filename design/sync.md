@@ -389,7 +389,7 @@ the package root and equally reachable by submodule path:
 from boto3_s3.checksumcompare import ChecksumComparison
 
 # decide every both-sides pair by content (mtime is not consulted):
-s3.sync(src, dest, update_filter=ChecksumComparison(s3, src, dest))
+s3.sync(src, dest, update_filter=ChecksumComparison())
 ```
 
 It is a **replacement** strategy, not composed with the size + time default.
@@ -445,12 +445,13 @@ strategy in `ParallelFilter` (section 10) to run those concurrently.
   no `awscrt`, a `crc32c` / `crc64nvme` object reads as indeterminate (copy)
   rather than being hashed (an unknown size counts as above the cap - the
   bound is hard). `None` (default) never caps.
-- **Endpoint injection.** `ChecksumComparison(s3, src, dest)` resolves the S3 side(s)
-  for their client + bucket from the same `src` / `dest` passed to `sync`
-  (`bucket` is not on a `FileInfo`); pass `S3Storage` instances for a
-  cross-account s3->s3 sync, exactly as `sync` does. The upload / download hash
-  runs on sync's calling thread unless the strategy is wrapped in
-  `ParallelFilter` (section 10).
+- **The S3 side's endpoint.** Each S3 entry's `storage` is the `S3Storage` its
+  side was listed through, and its client + bucket are what
+  `GetObjectAttributes` uses, so a cross-account s3->s3 sync reaches each side
+  with that side's own client and the constructor takes no endpoint. Each
+  listing has built its client before the first pair, so no client is built on
+  a `ParallelFilter` worker. The upload / download hash runs on sync's calling
+  thread unless the strategy is wrapped in `ParallelFilter` (section 10).
 
 ## 10. Parallelizing a lane's decision (`ParallelFilter`, opt-in)
 
@@ -469,7 +470,7 @@ from boto3_s3.comparator import ParallelFilter
 
 with ThreadPoolExecutor(16, thread_name_prefix="sync-cmp") as pool:
     s3.sync(src, dest,
-        update_filter=ParallelFilter(ChecksumComparison(s3, src, dest), executor=pool),
+        update_filter=ParallelFilter(ChecksumComparison(), executor=pool),
         delete_filter=ParallelFilter(is_expired, executor=pool))   # one pool, both lanes
 ```
 

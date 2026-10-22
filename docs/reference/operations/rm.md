@@ -128,9 +128,10 @@ is the `rm_filter_root`-relative key described above, `src` is the
 `s3://bucket/key` display form, and `src_info` / `src_storage` carry the entry
 and the target storage; the `dest_*` fields are unset and `bytes_transferred`
 is `0` — `rm` moves no bytes and takes no `on_progress`. The outcomes it emits
-are `SUCCEEDED`, `FAILED` and `DRYRUN`: an entry `filter` rejected produces no
-record, entries abandoned by a cancellation produce no record, and `rm` emits
-no `CANCELLED`, `WARNED`, `SKIPPED` or `NOTICE` records at all. Records for
+are `SUCCEEDED`, `FAILED` and `DRYRUN`, and `CANCELLED` for a blind single
+key an interrupt cut short (below): an entry `filter` rejected produces no
+record, entries the batched path abandons on a cancellation produce no record,
+and `rm` emits no `WARNED`, `SKIPPED` or `NOTICE` records at all. Records for
 batched deletes arrive on the deleter's worker thread, in submission order
 within a batch; the blind single-key path and every dry-run record are emitted
 inline on the calling thread. The callback must be fast and must not raise.
@@ -148,12 +149,10 @@ itself. Either mode ends by raising
 reclaimed. On the blind single-key path the token is polled after the record
 is emitted, the `FAILED` record included, so a cancel from that callback
 raises `CancelledError` in place of the `BatchError` the failure would
-otherwise become. A Ctrl-C while that single request is out does not abandon
-it: `rm` waits for the answer, emits its record - `SUCCEEDED` if the delete
-went through, as `aws s3 rm` still reports a delete it had sent, and
-`FAILED` if it failed, which `aws s3 rm` does not report - and then raises
-the `KeyboardInterrupt`. A second Ctrl-C still lets the request finish and
-its record be emitted; a third stops the wait.
+otherwise become. A Ctrl-C (or another interrupt) while that single request
+is out leaves at once: the key's record is `CANCELLED`, its `error` a
+`CancelledError`, and the interrupt reaches the caller. The server may still
+carry out the delete.
 
 `capture_response=True` attaches the delete response to a successful
 record's `extra_info` under the key `"delete"`, with `ResponseMetadata`

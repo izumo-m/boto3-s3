@@ -21,13 +21,9 @@ SDK-free (design/imports.md).
 
 from __future__ import annotations
 
-import _thread
-import contextvars
 import functools
 import inspect
 import os
-import sys
-import threading
 import time
 from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import Executor, Future
@@ -302,146 +298,6 @@ def _emit_result(
 def _raise_if_cancelled(cancel_token: CancelToken | None, operation: str) -> None:
     if cancel_token is not None and cancel_token.cancelled:
         raise CancelledError(f"{operation} was cancelled", operation=operation)
-
-
-class _HeldInterrupt:
-    """The Ctrl-C `_send_through_interrupt` held back until its request settled.
-
-    ``interrupt`` is the first, raised once the outcome is recorded.
-    """
-
-    def __init__(self) -> None:
-        self.interrupt: KeyboardInterrupt | None = None
-
-    def raise_if_held(self) -> None:
-        if self.interrupt is not None:
-            raise self.interrupt
-
-
-# How long an interrupt landing in the worker's start waits to learn whether
-# the worker was spawned (a spawned thread runs within a moment).
-_SPAWN_GRACE = 1.0
-
-# The longest a `_wait_set` waits between two looks for a Ctrl-C's handler.
-_WAKE_SLICE = 0.1
-
-
-def _waker() -> _thread.LockType:
-    """A raw lock taken by its creator, for the setter of an event to release."""
-    wake = _thread.allocate_lock()
-    wake.acquire()
-    return wake
-
-
-def _wait_set(event: threading.Event, wake: _thread.LockType, timeout: float | None = None) -> bool:
-    """Wait for *event*, woken by *wake* - the setter releases it after setting.
-
-    Not ``Event.wait``: that goes through a Python-level ``Condition``, and a
-    ``KeyboardInterrupt`` landing between its lock steps leaves the lock held
-    - the setter then blocks for good - or released twice (``RuntimeError:
-    release unlocked lock``); a wait that holds Ctrl-Cs and goes on waiting
-    keeps reopening that window. A raw lock's timed acquire is one C call,
-    so an interrupt leaves no half-taken lock; it returns as soon as the
-    setter releases, and the slice lets a Ctrl-C's handler run on Windows
-    before Python 3.14, which does not interrupt an untimed lock wait. The
-    event's flag, not the acquire's result, says whether it is set. False on
-    *timeout*.
-    """
-    deadline = None if timeout is None else time.monotonic() + timeout
-    while not event.is_set():
-        slice_ = _WAKE_SLICE
-        if deadline is not None:
-            slice_ = min(slice_, deadline - time.monotonic())
-            if slice_ <= 0:
-                return False
-        wake.acquire(timeout=slice_)
-    return True
-
-
-def _send_through_interrupt(send: Callable[[], Any], held: _HeldInterrupt) -> Any:
-    """Run one request to its end on a worker, waiting for it through a Ctrl-C.
-
-    aws sends a single rm's DeleteObject on its transfer manager's worker; a
-    Ctrl-C reaches the main thread, whose manager shutdown waits for that
-    request before the run ends, so the delete's own line is still printed
-    (measured: ``delete: s3://b/k``, then the closing line). Sent inline,
-    the request would be abandoned mid-flight - the server still deletes the
-    object, and nothing reports it. So the request runs on a daemon worker
-    and this thread waits. The first interrupt is parked in *held* for the
-    caller to raise once it has recorded the outcome. A second one keeps the
-    wait too: aws's executor threads are still joined as the process exits,
-    so its request still completes - a delete still sent, a retry still made
-    (measured) - and its result still comes back to the caller to record,
-    where aws prints nothing more. A third stops waiting. The request's own
-    result or exception is returned or raised here.
-
-    Nothing on this thread takes a Python-level lock while interrupts may
-    land: the worker is started from another thread, and the waits are
-    `_wait_set`'s - never ``Thread.join`` (on Python 3.10 to 3.12 a join
-    interrupted while the thread runs marks it finished, and every later
-    join returns at once) nor ``Event.wait``.
-    """
-    outcome: list[tuple[bool, Any]] = []
-    begun, begun_wake = threading.Event(), _waker()
-    settled, settled_wake = threading.Event(), _waker()
-
-    def run() -> None:
-        begun.set()
-        begun_wake.release()
-        try:
-            outcome.append((True, send()))
-        except BaseException as exc:  # handed to the waiting thread
-            outcome.append((False, exc))
-        finally:
-            settled.set()
-            settled_wake.release()
-
-    # Built outside the try: an interrupt landing here leaves no request.
-    context: dict[str, Any] = {}
-    if getattr(sys.flags, "thread_inherit_context", False):
-        # Python 3.14's Thread.start copies its caller's contextvars under
-        # this flag (the free-threaded build's default). The starter below is
-        # not the caller, so the caller's context is taken here.
-        context["context"] = contextvars.copy_context()
-    worker = threading.Thread(target=run, name="boto3-s3-rm-single", daemon=True, **context)
-
-    def start_worker() -> None:
-        try:
-            worker.start()
-        except BaseException as exc:  # no worker: the failure is the request's
-            outcome.append((False, exc))
-            settled.set()
-            settled_wake.release()
-
-    try:
-        # Started from a throwaway low-level thread: Thread.start takes
-        # threading's limbo lock and waits on a Condition, Python-level lock
-        # steps an interrupt landing on this thread could leave half-taken.
-        # The spawn is one C call, so an interrupt lands before it or after.
-        _thread.start_new_thread(start_worker, ())
-    except KeyboardInterrupt as interrupt:
-        # After the spawn the request is on its way and is waited for like
-        # one interrupted below; before it there is no request, and the
-        # interrupt goes on.
-        if not _wait_set(begun, begun_wake, _SPAWN_GRACE):
-            raise
-        held.interrupt = interrupt
-    waited_past_second = False
-    while True:
-        try:
-            _wait_set(settled, settled_wake)
-            break
-        except KeyboardInterrupt as interrupt:
-            if held.interrupt is None:
-                held.interrupt = interrupt
-            elif not waited_past_second:
-                waited_past_second = True
-            else:
-                raise
-    ok, value = outcome[0]
-    if ok:
-        return value
-    raise value
 
 
 @contextmanager
@@ -1729,9 +1585,7 @@ class S3:
             transfer_type,
             client,
             source_client=source_client,
-            # The run's two resolved sides, carried onto each result; src_storage
-            # is also mv's upload-source delete handle (consulted only on the
-            # upload route - a download/copy S3 source is removed via DeleteObject).
+            # The run's two resolved sides, carried onto each result.
             src_storage=src_storage,
             dest_storage=dest_storage,
             transfer_config=transfer_config,
@@ -2493,14 +2347,12 @@ class S3:
                 src_entries.close()
 
             stack.push(_close_scans)
-            src_bucket = src_storage.bucket if isinstance(src_storage, S3Storage) else ""
 
             def submit_copy(pair: SrcOnlyPair | SyncPair) -> None:
                 item = producers.sync_transfer_item(
                     plan,
                     pair,
                     transfer_type=transfer_type,
-                    src_bucket=src_bucket,
                     dest_bucket=dest_bucket,
                     transferrer=transferrer,
                     options=options,
@@ -2778,20 +2630,15 @@ class S3:
         # cannot be built is not this key failing to delete.
         crt = crt_delete_sender(client, transfer_config, operation="rm", **self._crt_postures())
 
-        def send() -> Any:
-            if crt is None:
-                return storage.delete(info, request_payer=request_payer)
-            params: dict[str, Any] = {"Bucket": storage.bucket, "Key": key}
-            if request_payer is not None:
-                params["RequestPayer"] = request_payer
-            with s3_request(operation="rm", bucket=storage.bucket, key=key):
-                return crt.call("DeleteObject", params)
-
-        # A Ctrl-C while the request is out waits for it and is raised once
-        # its outcome is recorded, as aws's run reports the in-flight delete.
-        held = _HeldInterrupt()
         try:
-            response = _send_through_interrupt(send, held)
+            if crt is None:
+                response = storage.delete(info, request_payer=request_payer)
+            else:
+                params: dict[str, Any] = {"Bucket": storage.bucket, "Key": key}
+                if request_payer is not None:
+                    params["RequestPayer"] = request_payer
+                with s3_request(operation="rm", bucket=storage.bucket, key=key):
+                    response = crt.call("DeleteObject", params)
         except AssertionError:
             raise  # a test double's guard or an invariant, never a request outcome
         except Exception as exc:
@@ -2805,11 +2652,6 @@ class S3:
             # exception: aws-cli's classic task loses it with no line at rc 0,
             # which is not copied (design/opresult.md).
             failure = request_failure(exc, operation="rm", bucket=storage.bucket, key=key)
-            # Recorded after a Ctrl-C too, before the interrupt is raised: the
-            # request was sent, and its answer is the key's outcome (aws's
-            # transfer futures let the cancel mark win over a failure and
-            # print only the closing line - measured on a 403 - which loses
-            # the error and is not copied).
             _emit_result(
                 on_result,
                 info=info,
@@ -2818,7 +2660,6 @@ class S3:
                 error=failure,
                 src=src,
             )
-            held.raise_if_held()
             _raise_if_cancelled(cancel_token, "rm")
             raise BatchError(
                 "1 of 1 deletes failed",
@@ -2828,6 +2669,23 @@ class S3:
                 skipped=0,
                 operation="rm",
             ) from failure
+        except BaseException as exc:
+            # An interrupt (Ctrl-C, a request to exit) leaves at once: the item
+            # is CANCELLED, as an interrupted transfer item is, and the
+            # interrupt reaches the caller. The request may still complete on
+            # the server; aws waits for it and prints its line, which is not
+            # copied (docs/cli/aws-differences.md).
+            _emit_result(
+                on_result,
+                info=info,
+                storage=storage,
+                outcome=OpOutcome.CANCELLED,
+                error=CancelledError(
+                    str(exc) or repr(exc), operation="rm", bucket=storage.bucket, key=key
+                ),
+                src=src,
+            )
+            raise
         # capture_response surfaces the DeleteObject response (minus
         # ResponseMetadata) under extra_info["delete"], the same shape the batched
         # path reconstructs from a DeleteObjects entry.
@@ -2840,7 +2698,6 @@ class S3:
             extra_info=extra_info,
             src=src,
         )
-        held.raise_if_held()
 
     # -- bucket / signing -------------------------------------------------
 

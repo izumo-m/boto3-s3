@@ -58,16 +58,13 @@ predicate rejects is not transferred, so its source is not removed either.
 ### The delete step
 
 The source is deleted only after that item's own transfer has succeeded, and
-never before. How the removal is issued follows the route:
+never before. It is removed through the `Storage.delete` of the backend its
+listing entry came from (`src_info.storage`), addressed by that entry:
 
-- an upload's source — a local file, or an entry in a custom backend — is
-  removed through that backend's own `Storage.delete`, addressed by the source
-  listing entry;
-- a download's S3 source is removed with one `DeleteObject` per object, on the
-  transfer's client;
-- an S3-to-S3 copy's source is removed with one `DeleteObject` per object, on
-  the source side's client, so a two-account move deletes with the credentials
-  that read.
+- an upload's source is a local file, or an entry in a custom backend;
+- a download's or an S3-to-S3 copy's source is an S3 object, removed with one
+  `DeleteObject` ([`S3Storage.delete`](../storage.md#s3storage)) on the source
+  side's client, so a two-account move deletes with the credentials that read.
 
 `request_payer` rides the delete call like every other request. Deletions are
 issued one object at a time; `mv` does not batch them the way `rm` and `sync`'s

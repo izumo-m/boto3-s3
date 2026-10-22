@@ -12,7 +12,6 @@ deliberate absence of a directory check (aws fails later at open - rc 1
 from __future__ import annotations
 
 import os
-import re
 import stat
 from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
@@ -201,11 +200,7 @@ class TestWalkWarnings:
             # rather than pruning silently.
             assert warnings
             return
-        # Named by the cycle link the descent died on: the named path ends in
-        # the link, where every path inside the cycle passes through it.
         _assert_warned(warnings, ("does not exist",))
-        sep = re.escape(os.sep)
-        assert re.search(rf"{sep}up(?!{sep})", warnings[0]), warnings
 
     def test_symlink_leaf_at_the_cycle_boundary_warns_like_aws(self, tmp_path: Path) -> None:
         # A cycle whose boundary directory still holds a *symlink* file leaf: the
@@ -213,11 +208,11 @@ class TestWalkWarnings:
         # re-anchored), so a dir-relative probe admits it - but the leaf's full path
         # crosses SYMLOOP_MAX and the transfer's full-path open would ELOOP (rc 1).
         # aws-cli stats every entry by full path, so it warn-skips the leaf (rc 2).
-        # The walk must match: every admitted entry
-        # resolves by full path, and the boundary link is warned away rather than
-        # admitted to fail at open (a regular-file leaf, unlike this one, never
-        # diverges - its full path resolves the same ancestor chain the directory
-        # open already survived, so only a symlink leaf needs this fallback).
+        # The walk must match: the leaf's full-path re-stat at its turn
+        # (restat_leaf) fails, so every admitted entry resolves by full path and
+        # the boundary link is warned away rather than admitted to fail at open
+        # (a regular-file leaf, unlike this one, never diverges - its full path
+        # resolves the same ancestor chain the directory open already survived).
         _make_tree(tmp_path, "keep.txt")
         (tmp_path / "link").symlink_to(tmp_path / "keep.txt")  # a symlink file leaf
         (tmp_path / "loop").symlink_to(tmp_path)  # a directory cycle
@@ -257,57 +252,6 @@ class TestWalkWarnings:
         infos = list(LocalStorage(str(tmp_path)).walk_local(on_warning=warnings.append))
         assert [info.mtime for info in infos] == [datetime(1970, 1, 1, tzinfo=timezone.utc)]
         _assert_warned(warnings, ("invalid timestamp",))
-
-
-class TestFullPathBoundaryProbe:
-    """The fd-relative fast walk re-vets a file leaf by full path near the OS
-    limits (`crosses_full_path_boundary`). PATH_MAX is a byte limit, so the
-    length floor counts bytes: a multibyte path must reach the probe at a few
-    hundred characters (a 1024-byte PATH_MAX host would otherwise admit a
-    leaf that aws-cli's full-path stat warn-skips)."""
-
-    @pytest.mark.skipif(
-        os.name == "nt",
-        reason="targets the POSIX dir_fd fast path; Windows length limits "
-        "depend on the LongPathsEnabled policy",
-    )
-    def test_length_floor_counts_bytes_not_characters(self, tmp_path: Path) -> None:
-        recorded: list[str] = []
-
-        class _Recording(LocalFileGenerator):
-            def triggers_warning(self, path: str, notify: Callable[[str], None]) -> bool:
-                recorded.append(path)
-                return super().triggers_warning(path, notify)
-
-        # A leaf whose full path is >= 1000 bytes but far below 1000
-        # characters (CJK components: 3 bytes per character in UTF-8). The
-        # tree must land just past the floor, not overshoot by a whole
-        # component: macOS caps a full path at 1024 bytes, so an overshot
-        # tree fails at mkdir before the walk ever runs.
-        component = "あ" * 80  # 80 characters, 240 bytes
-        leaf_bytes = len(os.fsencode(os.sep + "f.txt"))
-        parent = tmp_path
-        while (pad := 1000 - leaf_bytes - 1 - len(os.fsencode(str(parent)))) > 240:
-            parent = parent / component
-        # A zero pad still needs a final component; 3 extra bytes stay far
-        # under the 1024-byte cap.
-        parent = parent / (("あ" * (pad // 3) + "x" * (pad % 3)) or "xxx")
-        parent.mkdir(parents=True)
-        (parent / "f.txt").write_bytes(b"x")
-        (tmp_path / "short.txt").write_bytes(b"x")
-        full = str(parent / "f.txt")
-        assert len(full) < 1000 and 1000 <= len(os.fsencode(full)) < 1024
-
-        storage = LocalStorage(str(tmp_path), walker=_Recording())
-        keys = [i.compare_key or "" for i in storage.scan(LocalScanOptions(recursive=True))]
-        # This host's PATH_MAX sits above the floor, so the full-path battery
-        # finds nothing wrong and the leaf stays in the scan set; the point is
-        # that the byte-measured floor consulted it at all.
-        assert any(key.endswith("f.txt") for key in keys)
-        assert full in recorded
-        # An ordinary short leaf stays off the probe (fsencode never runs on
-        # the hot path, and the battery is never consulted for it).
-        assert str(tmp_path / "short.txt") not in recorded
 
 
 class _MutateAtFinalize(LocalFileGenerator):
@@ -1185,10 +1129,9 @@ class TestWalkIsCustomizable:
                 strip: int,
                 options: LocalScanOptions,
                 notify: Callable[[str], None],
-                sym_depth: int = 0,
             ) -> list[WalkChild]:
                 children = super().scan_children(
-                    dir_path, strip=strip, options=options, notify=notify, sym_depth=sym_depth
+                    dir_path, strip=strip, options=options, notify=notify
                 )
                 # An injected child stamps its own compare_key (info.key[strip:]).
                 key = (dir_path + "_synthetic").replace(os.sep, "/")
@@ -1229,9 +1172,7 @@ class TestWalkIsCustomizable:
     def test_walk_dir_override_prunes_a_subtree(self, tmp_path: Path) -> None:
         # walk_dir is the public recursion seam: override it and return early for
         # a directory to prune its subtree, calling super() for the rest. It
-        # recurses via self.walk_dir, so the override applies at every level; the
-        # followed-symlink depth counter is threaded through unchanged (an app that
-        # wants its own depth logic re-implements the loop).
+        # recurses via self.walk_dir, so the override applies at every level.
         _make_tree(tmp_path, "a.txt", "keep/b.txt", "skip/c.txt", "keep/skip/d.txt")
 
         class _PruneSkip(LocalFileGenerator):
@@ -1243,7 +1184,6 @@ class TestWalkIsCustomizable:
                 strip: int,
                 notify: Callable[[str], None],
                 detector: LoopDetector | None,
-                sym_depth: int = 0,
             ) -> Iterator[list[LocalFileInfo]]:
                 if os.path.basename(dir_path.rstrip(os.sep)) == "skip":
                     return  # do not descend into any 'skip' directory
@@ -1253,7 +1193,6 @@ class TestWalkIsCustomizable:
                     strip=strip,
                     notify=notify,
                     detector=detector,
-                    sym_depth=sym_depth,
                 )
 
         keys = [

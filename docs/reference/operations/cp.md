@@ -231,16 +231,17 @@ The outcomes `cp` emits:
   outside the destination directory, an upload above the S3 single-object size
   limit (warned, then attempted anyway), and a download that transferred but
   could not stamp the source's modification time — which produces a `WARNED`
-  record beside its `SUCCEEDED` one. A warning record is message-only: `error`
-  carries the text, the two `*_storage` fields are set, and `src` / `dest` /
-  `src_info` are not. Its `compare_key` follows its origin: the engine's own
-  per-item warnings (the archived source, the oversize upload, the parent
-  reference, the failed mtime stamp) carry the item's key, while one raised by
-  a source walk, by the single-object source resolution or by the
-  `case_conflict` destination walk carries `""`.
+  record beside its `SUCCEEDED` one. A warning record carries its text on
+  `error`, the two `*_storage` fields, and no `src` / `dest`. What else it
+  carries follows its origin: the engine's own per-item warnings (the archived
+  source, the oversize upload, the parent reference, the failed mtime stamp)
+  carry the item's source entry as `src_info` and its `compare_key`, while one
+  raised by a source walk, by the single-object source resolution or by the
+  `case_conflict` destination walk carries no `src_info` and `""`.
 - `NOTICE` — the `case_conflict` advisories under `CaseConflictMode.SKIP` and
-  `CaseConflictMode.WARN`. Display-only, counted nowhere, and it may precede
-  the same item's real outcome.
+  `CaseConflictMode.WARN`, carrying the item's `src_info` and `compare_key`.
+  Display-only, counted nowhere, and it may precede the same item's real
+  outcome.
 - `DRYRUN` — under `dryrun=True`, one per item that reached the submit step.
 - `CANCELLED` — an accepted item revoked before it could complete, by an
   immediate cancellation, a fatal error elsewhere in the run, or `Ctrl-C`, on

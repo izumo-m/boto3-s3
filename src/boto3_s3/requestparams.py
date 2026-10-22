@@ -155,7 +155,7 @@ def map_put_object_annotation_params(options: TransferOptions) -> dict[str, Any]
 
 
 def map_delete_object_params(options: TransferOptions) -> dict[str, Any]:
-    """API params for the copy-props rollback delete (and mv's source delete)."""
+    """API params for the copy-props rollback delete."""
     params: dict[str, Any] = {}
     _set_request_payer_param(params, options)
     return params

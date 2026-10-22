@@ -50,6 +50,7 @@ from boto3_s3.exceptions import (
     ValidationError,
 )
 from boto3_s3.localstorage import LocalStorage
+from boto3_s3.s3storage import S3Storage
 from boto3_s3.transfer import (
     TransferItem,
     Transferrer,
@@ -65,6 +66,7 @@ from boto3_s3.types import (
     FileInfo,
     OpOutcome,
     OpResult,
+    S3FileInfo,
     TransferOptions,
     TransferProgress,
     TransferType,
@@ -128,6 +130,23 @@ class _OpenSink(io.BytesIO):
         pass
 
 
+def _listed_source(item: TransferItem, kind: TransferType, client: Any) -> None:
+    """Give ``item`` the source entry a producer stamps on a listed item.
+
+    ``mv`` deletes its source through ``src_info.storage``: the local file
+    system on an upload, the source bucket on ``client`` otherwise.
+    """
+    if kind is TransferType.UPLOAD:
+        assert item.src_path is not None
+        if item.src_info is None:
+            item.src_info = FileInfo(key=item.src_path.replace(os.sep, "/"))
+        if item.src_info.storage is None:
+            item.src_info.storage = LocalStorage(".")
+    elif item.src_info is None:
+        storage = S3Storage(f"s3://{item.src_bucket}", client=client)
+        item.src_info = S3FileInfo(key=cast("str", item.src_key), storage=storage)
+
+
 def _run(
     kind: TransferType,
     items: list[TransferItem],
@@ -144,20 +163,16 @@ def _run(
     source_calls: list[ApiCall] = []
     if source_responses is not None:
         source_client, source_calls = make_recording_client(source_responses)
-    # Mirror the orchestration: an mv upload deletes its source through the
-    # source storage's Storage.delete(info), so wire both like production does.
-    src_storage: LocalStorage | None = None
-    if is_move and kind is TransferType.UPLOAD:
-        src_storage = LocalStorage(".")
+    # Mirror the orchestration: an mv deletes its source through the source
+    # entry's own Storage.delete(info), so stamp the entry like a producer does.
+    if is_move:
         for it in items:
-            if it.src_info is None and it.src_path is not None:
-                it.src_info = FileInfo(key=it.src_path.replace(os.sep, "/"))
+            _listed_source(it, kind, source_client or client)
     results: list[OpResult] = []
     transferrer = Transferrer(
         kind,
         client,
         source_client=source_client,
-        src_storage=src_storage,
         dest_storage=dest_storage,
         transfer_config=config,
         options=options,
@@ -1307,12 +1322,16 @@ class TestNonTransferOutcomes:
     def test_warn_and_skip_count_into_the_rollup(self) -> None:
         client, _ = make_recording_client([])
         results: list[OpResult] = []
+        info = FileInfo(key="d/k", compare_key="k")
         with Transferrer(TransferType.DOWNLOAD, client, on_result=results.append) as transferrer:
-            transferrer.warn("Skipping file s3://b/k. Object is of storage class GLACIER.", key="k")
+            transferrer.warn(
+                "Skipping file s3://b/d/k. Object is of storage class GLACIER.", info=info
+            )
             transferrer.skip(TransferItem(compare_key="k2"))
         assert (transferrer.warned, transferrer.skipped) == (1, 1)
         assert [result.outcome for result in results] == [OpOutcome.WARNED, OpOutcome.SKIPPED]
         assert results[0].transfer_type is TransferType.DOWNLOAD
+        assert (results[0].compare_key, results[0].src_info) == ("k", info)
 
     def test_warner_sink_is_exposed_and_counts_into_the_rollup(self) -> None:
         # A backend walk's ScanOptions.on_warning targets transferrer.warner.warn
@@ -1321,7 +1340,7 @@ class TestNonTransferOutcomes:
         client, _ = make_recording_client([])
         results: list[OpResult] = []
         with Transferrer(TransferType.UPLOAD, client, on_result=results.append) as transferrer:
-            transferrer.warner.warn("Skipping file /tmp/x. File does not exist.", key="x")
+            transferrer.warner.warn("Skipping file /tmp/x. File does not exist.")
         assert transferrer.warned == 1
         assert [result.outcome for result in results] == [OpOutcome.WARNED]
         assert results[0].transfer_type is TransferType.UPLOAD
@@ -1903,13 +1922,10 @@ class TestSerialExecutorInterrupt:
         on_result: Callable[[OpResult], None],
     ) -> tuple[list[ApiCall], Transferrer]:
         client, calls = make_recording_client(responses)
+        if is_move:
+            _listed_source(item, kind, client)
         transferrer = Transferrer(
-            kind,
-            client,
-            src_storage=LocalStorage(".") if kind is TransferType.UPLOAD else None,
-            transfer_config=_SYNC_CONFIG,
-            is_move=is_move,
-            on_result=on_result,
+            kind, client, transfer_config=_SYNC_CONFIG, is_move=is_move, on_result=on_result
         )
         with pytest.raises(KeyboardInterrupt), transferrer:
             transferrer.submit(item)
@@ -2043,6 +2059,7 @@ class TestSerialExecutorInterrupt:
             dest_bucket="dest-b",
             dest_key="cp/a.bin",
         )
+        _listed_source(item, TransferType.COPY, source_client)
         with pytest.raises(KeyboardInterrupt), transferrer:
             transferrer.submit(item)
         return calls, source_calls, transferrer
@@ -2362,11 +2379,11 @@ class TestWorkerRaise:
     ) -> None:
         item = self._upload_item(tmp_path)
         client, calls = make_recording_client([raised])
+        _listed_source(item, TransferType.UPLOAD, client)
         results: list[OpResult] = []
         transferrer = Transferrer(
             TransferType.UPLOAD,
             client,
-            src_storage=LocalStorage("."),
             transfer_config=TransferConfig(),
             is_move=True,
             on_result=results.append,
@@ -2745,6 +2762,7 @@ class TestCrtDownloadRenameFailure:
             dest_path=str(dest),
         )
         client, calls = make_recording_client([])
+        _listed_source(item, TransferType.DOWNLOAD, client)
         results: list[OpResult] = []
         with Transferrer(
             TransferType.DOWNLOAD, client, is_move=is_move, on_result=results.append
@@ -3007,6 +3025,7 @@ class TestFailureWithoutAResponse:
         )
         dead = ConnectionClosedError(endpoint_url="http://h/")
         client, calls = make_recording_client([dead])
+        _listed_source(item, TransferType.DOWNLOAD, client)
         results: list[OpResult] = []
         with Transferrer(
             TransferType.DOWNLOAD, client, is_move=True, on_result=results.append
@@ -3255,7 +3274,7 @@ class TestMove:
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
         assert all(result.transfer_type is TransferType.MOVE for result in results)
 
-    def test_download_move_deletes_on_the_managers_client(self, tmp_path: Path) -> None:
+    def test_download_move_deletes_through_the_source_entry(self, tmp_path: Path) -> None:
         item = self._download_item(tmp_path)
         calls, _, results, transferrer = _run(
             TransferType.DOWNLOAD, [item], [self._get_object_response(), {}], is_move=True
@@ -3281,6 +3300,7 @@ class TestMove:
         client, calls = make_recording_client([self._get_object_response(), {}])
         seen_at_release: list[list[str]] = []
         item = self._download_item(tmp_path)
+        _listed_source(item, TransferType.DOWNLOAD, client)
         item.case_conflict_cleanup = lambda: seen_at_release.append(ops(calls))
         transferrer = Transferrer(TransferType.DOWNLOAD, client, is_move=True)
         with transferrer:
@@ -3290,7 +3310,7 @@ class TestMove:
         assert seen_at_release == [["GetObject", "DeleteObject"]]
         assert transferrer.succeeded == 1
 
-    def test_copy_move_deletes_on_the_source_client(self) -> None:
+    def test_copy_move_deletes_through_the_source_entry(self) -> None:
         item = TransferItem(
             compare_key="a.bin",
             size=7,
@@ -3496,7 +3516,7 @@ class TestMove:
             TransferType.UPLOAD, client, is_move=True, on_result=results.append
         ) as transferrer:
             transferrer.dryrun(item)
-            transferrer.warn("Skipping file a. probe", key="a")
+            transferrer.warn("Skipping file a. probe")
             transferrer.skip(TransferItem(compare_key="a2"))
         assert calls == []
         assert [result.outcome for result in results] == [
@@ -4321,17 +4341,9 @@ class TestResponseCaptureExpectGate:
 class TestPublicSurface:
     def test_all_matches_the_documented_surface(self) -> None:
         # The module is a documented submodule-path surface (design/transfer.md):
-        # the engine pair, the Warner protocol its `warner` seam returns, and
-        # the SDK-floor probes (--no-overwrite, section 7; copy_props=ALL,
-        # section 4). A symbol added or dropped must be a deliberate
-        # __all__ / docs decision.
-        assert set(transfer.__all__) == {
-            "TransferItem",
-            "Transferrer",
-            "Warner",
-            "annotations_copy_unsupported_reason",
-            "conditional_write_unsupported_reason",
-        }
+        # the engine pair and the Warner protocol its `warner` seam returns. A
+        # symbol added or dropped must be a deliberate __all__ / docs decision.
+        assert set(transfer.__all__) == {"TransferItem", "Transferrer", "Warner"}
         for name in transfer.__all__:
             assert hasattr(transfer, name), name
 

@@ -7,20 +7,17 @@ boto3's own semantics (``transfer.py`` / ``crtsupport.py``; design in
 ``design/crt.md``); the constructor forwards it to the base class when that boto3
 accepts it and otherwise keeps it as a plain attribute (the floor boto3 lacks
 the field - see the signature probe below). The subclass adds the CRT tuning
-knobs aws-cli keeps in its `[s3]` runtime config plus annotation staging:
+knob aws-cli keeps in its `[s3]` runtime config plus annotation staging:
 
 - ``target_bandwidth`` - target throughput for the CRT engine in bytes per
   second (aws-cli ``target_bandwidth``; becomes the CRT client's
   ``target_throughput``). The classic engine's cap stays ``max_bandwidth``.
-- ``should_stream`` / ``disk_throughput`` / ``direct_io`` - aws-cli's CRT
-  file-I/O options. They are accepted and have no effect: the pip
-  ``s3transfer`` CRT client has no ``fio_options`` parameter to take them.
 - `annotation_temp_dir` - directory for
   `AnnotationCopyMode.PRELOAD_TEMPFILE`; `None` delegates to the operating
   system's standard temporary-directory selection.
 
 The extras are plain attributes (not part of the base `DEFAULTS` sentinel
-machinery) and default to `None`. The CRT tuning fields are ignored by the
+machinery) and default to `None`. ``target_bandwidth`` is ignored by the
 classic engine; `annotation_temp_dir` is consulted by the classic
 multipart-copy path whenever `copy_props=ALL` staging is set up, but used
 (as the tempfile location) only under `PRELOAD_TEMPFILE`. A plain
@@ -42,6 +39,10 @@ config a run uses. Each setting comes from the first of: a value the caller
 passed to `TransferConfig`, the ``[s3]`` section, aws-cli's default. A plain
 ``boto3.s3.transfer.TransferConfig`` counts as the caller's in every value,
 since not every boto3 can tell its defaults apart, and is used as it is.
+aws-cli's CRT file-I/O keys (``should_stream`` / ``disk_throughput`` /
+``direct_io``) are validated and have no effect: the pip ``s3transfer`` CRT
+client has no ``fio_options`` parameter to take them, so `TransferConfig` has
+no field for them.
 """
 
 from __future__ import annotations
@@ -125,9 +126,6 @@ class TransferConfig(Boto3TransferConfig):
         preferred_transfer_client: str | None = None,
         *,
         target_bandwidth: int | None = None,
-        should_stream: bool | None = None,
-        disk_throughput: int | None = None,
-        direct_io: bool | None = None,
         annotation_temp_dir: str | os.PathLike[str] | None = None,
     ) -> None:
         """Forward classic values and retain library settings across SDK versions."""
@@ -171,9 +169,6 @@ class TransferConfig(Boto3TransferConfig):
             "max_bandwidth": max_bandwidth,
             "preferred_transfer_client": preferred_transfer_client,
             "target_bandwidth": target_bandwidth,
-            "should_stream": should_stream,
-            "disk_throughput": disk_throughput,
-            "direct_io": direct_io,
             "annotation_temp_dir": annotation_temp_dir,
         }
         super().__init__(**base_kwargs)  # pyright: ignore[reportArgumentType]
@@ -185,9 +180,6 @@ class TransferConfig(Boto3TransferConfig):
                 "auto" if preferred_transfer_client is None else preferred_transfer_client
             )
         self.target_bandwidth = target_bandwidth
-        self.should_stream = should_stream
-        self.disk_throughput = disk_throughput
-        self.direct_io = direct_io
         self.annotation_temp_dir = annotation_temp_dir
 
 
@@ -207,7 +199,8 @@ DEFAULTS: dict[str, Any] = {
 }
 
 # ``[s3]`` key -> `TransferConfig` constructor parameter. ``max_queue_size``
-# has none (s3transfer's ``max_request_queue_size``, applied as an attribute).
+# has none (s3transfer's ``max_request_queue_size``, applied as an attribute),
+# nor do the CRT file-I/O keys, which nothing takes (module docstring).
 _CTOR_KEYS = {
     "multipart_threshold": "multipart_threshold",
     "multipart_chunksize": "multipart_chunksize",
@@ -215,18 +208,13 @@ _CTOR_KEYS = {
     "max_bandwidth": "max_bandwidth",
     "io_chunksize": "io_chunksize",
     "target_bandwidth": "target_bandwidth",
-    "should_stream": "should_stream",
-    "disk_throughput": "disk_throughput",
-    "direct_io": "direct_io",
 }
 
-# The ``[s3]`` keys aws-cli's CRT client consumes (its factory's
-# ``_create_crt_client``); every other key is classic-only and aws-cli ignores
+# The `_CTOR_KEYS` aws-cli's CRT client consumes (its factory's
+# ``_create_crt_client``); every other one is classic-only and aws-cli ignores
 # it under CRT. Passing one on would also trip boto3's explicit-'crt'
 # validation, which rejects ``io_chunksize`` / ``max_bandwidth`` there.
-_CRT_CONSUMED_KEYS = frozenset(
-    {"multipart_chunksize", "target_bandwidth", "should_stream", "disk_throughput", "direct_io"}
-)
+_CRT_CONSUMED_KEYS = frozenset({"multipart_chunksize", "target_bandwidth"})
 
 # aws-cli's transfer manager factory pins this on every classic manager.
 _MAX_IN_MEMORY_CHUNKS = 6
@@ -549,9 +537,6 @@ _SETTINGS = {
     "max_bandwidth": None,
     "preferred_transfer_client": None,
     "target_bandwidth": None,
-    "should_stream": None,
-    "disk_throughput": None,
-    "direct_io": None,
     "annotation_temp_dir": None,
 }
 

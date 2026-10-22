@@ -15,10 +15,10 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
 | `transferplan.py` | The transfer planner: the aws-cli `fileformat.py` counterpart (`plan_transfer` = `FileFormat.format` / `TransferPlan`, plus `find_dest_path_comp_key` as `item_paths`/`dest_for`). Sits above the backends and routes by concrete type (isinstance against `S3Storage`/`LocalStorage`); each side formats *itself* through the polymorphic `Storage.format` (`S3Storage` = aws's `s3_format` from the held bucket/key, `LocalStorage` = aws's `local_format` from the held abspath/raw form, the base = the open-route rule) and carries its own separator (`Storage.sep`). The per-backend string grammars also live on the backends (`S3Storage.split_bucket_key` and friends, `LocalStorage.relative_path`); `identify_type` (string classification) is the CLI's. The CLI and the library derive paths and key naming from the **same code** |
 | `producers.py` | The per-info item builders and gates cp / mv / sync share: `TransferPlan` + listing entries -> `TransferItem`s, with the aws-cli item gates applied on the way (case-conflict, glacier, parent-reference, oversize; the open-route capability checks). Plain functions over the plan and the entry - no `S3` instance state - called by the orchestrator as `producers.upload_items(...)` etc. Kept out of `transfer.py` so the engine stays blind to `transferplan` (its backend knowledge stays narrow: the `LocalStorage` `isinstance` for the fsync barrier, section 11) |
 | `requestparams.py` | Pure-function port of `TransferOptions` (snake_case) -> S3 API parameters (PascalCase) (aws-cli `RequestParamsMapper`). The format validation of grants is also done here |
-| `mimetable.py` | Generated data: CPython 3.14's built-in `mimetypes` tables, the ones the official `aws` distribution guesses an upload's `ContentType` from (it is frozen against that interpreter). `transfer.py` builds its own `mimetypes.MimeTypes` from them - plus the same live overlays `mimetypes.init` applies, the Windows registry and the existing `knownfiles` - so the guess is the shipped distribution's on every supported interpreter instead of the running one's (3.10 knows no `.php`, 3.15 re-types `.texinfo`), the same pin the CLI applies to argparse behaviour that moved between releases ([`cli.md`](./cli.md) section 2). The algorithm is pinned with the tables: `_guess_content_type` ports 3.14's `guess_type` (a scheme-like prefix takes the URL branch and a `posixpath` split, a file path is split with the host's `os.path` after its drive is removed), because a host interpreter before 3.13 split every name with `posixpath` - on Windows `C:\d\.json` then kept `.json` as its extension and went up as `application/json` where aws, to whose `ntpath` the name is all extension, sends it untyped (measured 2026-10-06, 8 of 12 names under Python 3.10). An overlay that exists but cannot be read fails the item the guess was for (aws guesses inside s3transfer's queued subscriber, so its `[Errno 13]` is that item's `upload failed:` and the run - a sync's deletes included - goes on), never the run |
+| `mimetable.py` | Generated data: CPython 3.14's built-in `mimetypes` tables, the ones the official `aws` distribution guesses an upload's `ContentType` from (it is frozen against that interpreter). `transfer.py` builds its own `mimetypes.MimeTypes` from them - plus the same live overlays `mimetypes.init` applies, the Windows registry and the existing `knownfiles` - so the guess is the shipped distribution's on every supported interpreter instead of the running one's (3.10 knows no `.php`, 3.15 re-types `.texinfo`), the same pin the CLI applies to argparse behaviour that moved between releases ([`cli.md`](./cli.md) section 2). The algorithm is pinned with the tables: `_guess_content_type` ports 3.14's `guess_file_type` (the name is split with the host's `os.path` after its drive is removed; aws guesses on an absolute local path, which never takes `guess_type`'s URL branch, so every name - an open-route `compare_key` included - is a file name), because a host interpreter before 3.13 split every name with `posixpath` - on Windows `C:\d\.json` then kept `.json` as its extension and went up as `application/json` where aws, to whose `ntpath` the name is all extension, sends it untyped (measured 2026-10-06, 8 of 12 names under Python 3.10). An overlay that exists but cannot be read fails the item the guess was for (aws guesses inside s3transfer's queued subscriber, so its `[Errno 13]` is that item's `upload failed:` and the run - a sync's deletes included - goes on), never the run |
 | `localstorage.py` | `LocalStorage` (the `Storage` ABC for a local path) plus `LocalFileGenerator`, the customizable directory walk it composes (boto3-s3's aws-cli `FileGenerator`). `LocalFileGenerator.list_files` reproduces aws-cli `FileGenerator.list_files` behavior (byte-order walk, warning rules) on an `os.scandir` engine - `d_type` types entries syscall-free and, where the platform allows (`have_dir_fd`), the directory is scanned through its fd so per-entry stats are dir-relative (`fstatat`; Windows falls back to path-based scandir). An app customizes it by subclassing `LocalFileGenerator` (public `list_files` / `should_ignore_file` / `entry_stat_result` / `scan_children` / `classify_child` / `stat_info` / `restat_leaf` / `finalize_children` / `normalize_sort` seams, aws-cli names where a counterpart exists) and injecting via `LocalStorage(path, walker=...)`; the walk's source-config (`follow_symlinks` / `detect_symlink_loops` / `enumerate_all_entries`) is set on the same constructor; complete enumeration includes every metadata-readable native entry before filtering, and `LoopDetector` guards symlink cycles |
 | `transfer.py` | `Transferrer`: the transfer engine proper that drives the classic / CRT transfer manager (the subject of this document). With `is_move` it deletes the source and reports MOVE (section 11). Engine selection is in section 2 / [`crt.md`](./crt.md) |
-| `transferconfig.py` | The public `TransferConfig` = a subclass of boto3's that adds the CRT tuning fields and `annotation_temp_dir` ([`crt.md`](./crt.md) section 2) |
+| `transferconfig.py` | The public `TransferConfig` = a subclass of boto3's that adds the CRT tuning field `target_bandwidth` and `annotation_temp_dir` ([`crt.md`](./crt.md) section 2) |
 | `crtsupport.py` | CRT engine resolution (a faithful port of boto3 `boto3/crt.py` plus refinements). `should_use_crt` / `create_crt_transfer_manager` / lock, and `create_crt_request_sender` for the deletes on the same engine (`crtrequest.py`). The design is in [`crt.md`](./crt.md) |
 | `pathresolver.py` | A port of aws's `S3PathResolver` (resolves access point ARN / alias / MRAP to the real bucket; the s3control / sts client is injected). The building block for `mv --validate-same-s3-paths` (cli.md section 5.8) |
 | `comparator.py` | sync's pairing and the building blocks for its decisions (`Comparator` / the `MergedPair` pair shapes / `PairFilter` / `compare_size_time` / combinators). The design is in [`sync.md`](./sync.md) |
@@ -44,7 +44,7 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   creation ourselves in order to control subscriber wiring, lazy creation, and
   the IfNoneMatch patch.
 - The public type is `TransferConfig` from `transferconfig.py`
-  (a subclass of boto3's that adds the CRT tuning fields and
+  (a subclass of boto3's that adds the CRT tuning field `target_bandwidth` and
   `annotation_temp_dir`; the defaults are the same as aws-cli - 8 MiB
   threshold / 8 MiB chunk / concurrency 10). As in boto3, classic maps
   `use_threads=False` to `NonThreadedExecutor` (a determinization lever for
@@ -317,8 +317,8 @@ chain:
 
   `copy_props=ALL` on an SDK without the annotations model is refused
   at `Transferrer` construction
-  with a `ConfigurationError` (the CLI's one `fatal error:` line, rc 1); the probe behind that gate is
-  public: **`annotations_copy_unsupported_reason(client)`** returns the
+  with a `ConfigurationError` (the CLI's one `fatal error:` line, rc 1); the probe behind that gate,
+  `annotations_copy_unsupported_reason(client)`, returns the
   rejection wording (naming botocore >= 1.43.31 as the hint) or `None`,
   introspecting the model directly, version-agnostic; the installed
   s3transfer does not enter into it, the writes being this library's own. The gate only runs when `metadata_directive` is unset -
@@ -517,15 +517,13 @@ dest-existence check for download. We ported the same three faces:
   pairing, since boto3 1.35.2+ pins s3transfer 0.10.x while its botocore
   already models the param. `Transferrer` rejects `no_overwrite` at
   construction with a `ConfigurationError` instead of failing deep in botocore
-  with an opaque "Unknown parameter in input". The probe behind that gate is
-  public:
-  **`conditional_write_unsupported_reason(client, is_copy=...)`** returns the
+  with an opaque "Unknown parameter in input". The probe behind that gate,
+  `conditional_write_unsupported_reason(client, is_copy=...)`, returns the
   rejection wording (naming the minimum botocore / s3transfer as a hint) or
   `None` when supported - it introspects the client's model and s3transfer's
-  table directly, version-agnostic. A
-  compatible tool can call it *before* the pipeline; the library's own check
-  stops the run before any request (the CLI reports it on a `fatal error:`
-  line, rc 1); aws itself never gates here because it bundles a current SDK. Download
+  table directly, version-agnostic. The check stops the run before any
+  request (the CLI reports it on a `fatal error:` line, rc 1); aws itself
+  never gates here because it bundles a current SDK. Download
   and `sync` never send `IfNoneMatch`, so they stay usable on an old botocore.
 
 ## 8. The semantics of gates and warnings
@@ -564,6 +562,16 @@ dest-existence check for download. We ported the same three faces:
   comparison and the deletes go on (docs/cli/aws-differences.md). The CLI's
   `ls` still renders such a stamp in local time, as aws-cli does, so that
   rendering can still fail there.
+- **a local mtime the local calendar cannot hold is read in UTC** - unlike
+  aws-cli, which reads a file's mtime as `datetime.fromtimestamp(st_mtime,
+  tzlocal())` and, where that fails, warns `File has an invalid timestamp.
+  Passing epoch time as timestamp.` and takes the file as of 1970. The walk
+  (`localstorage._size_mtime`) converts to UTC only, so the warning and
+  `EPOCH_TIME` are left for an mtime UTC cannot hold either (outside
+  `datetime`'s range; on Windows from about half a day before 1970 back or
+  after about 3001), and one
+  only the local zone cannot hold is carried on with its UTC value
+  (docs/cli/aws-differences.md).
 - **symlink-loop guard** (`detect_symlink_loops`, a **library extension**, default
   off so `cp` / `mv` / `sync` match aws - `aws s3` has no such option):
   off, a symlink cycle descends until the kernel's `ELOOP` / path-length
@@ -612,18 +620,18 @@ dest-existence check for download. We ported the same three faces:
   complete no-follow view, or an lstat-style `entry_stat_result` override) is
   returned untouched, so a link stays that walker's own leaf; and a walker whose
   children are not live filesystem paths overrides the seam to `return info`.
-- **fd-relative walk boundary fallback**: the fast walk vets each entry through
-  the owning directory's fd (`fstatat`/`openat`, `localstorage.py`'s
+- **fd-relative walk and the full-path limits**: the fast walk vets each entry
+  through the owning directory's fd (`fstatat`/`openat`, `localstorage.py`'s
   `have_dir_fd` path), which re-anchors resolution one level at a time and so
   hides what aws-cli's own full-path `stat` would trip on - an ancestor
-  symlink chain crossing `SYMLOOP_MAX`, or a path crossing `PATH_MAX` - and can
-  admit a child the transfer then fails to open (rc 1) where aws warn-skips it
-  at enumeration (rc 2). Only near either boundary
-  (`sym_depth` for a symlink child, the full path's length for any child - both
-  floors sit well below the real OS limits, so an ordinary walk never reaches
-  them) does the walk re-run the full-path warning battery
-  (`LocalFileGenerator.crosses_full_path_boundary`) and drop a child it would
-  warn away, so the two agree. Directories take that probe too.
+  symlink chain crossing `SYMLOOP_MAX`, or a path crossing `PATH_MAX`. Each
+  entry is addressed by full path once more before it is used - a leaf by its
+  re-stat at its turn (`restat_leaf`, above), a directory by its own open at
+  its descent (`scan_children`) - and the warning battery that follows a
+  failure there drops it, so such an entry is warn-skipped (rc 2) as aws-cli
+  skips it rather than admitted to fail at open (rc 1). Only when the warning
+  is sent differs from aws-cli, which warns at the parent's listing: the leaf
+  warns at its turn and the directory at its descent.
   On Windows (`have_dir_fd` false) the walk
   addresses entries by full path, but the scandir-cached stat still hides an
   over-`MAX_PATH` length on a host without long-path support
@@ -632,16 +640,11 @@ dest-existence check for download. We ported the same three faces:
   entry is reported as missing rather than unreadable - the same skip set and
   rc 2 as `aws.exe` (verified against the pinned aws-cli). The same re-check
   reports an entry that races away between its stat and the probe as missing,
-  on every platform. Two known residuals: `sym_depth` counts one
-  hop per *followed symlinked directory* descended, not the actual number of
-  links the kernel resolves for a chain of nested symlinks in one hop, so it
-  can undercount relative to the real `SYMLOOP_MAX` counter in an adversarial,
-  deeply-chained layout (the floor's margin below the OS limit is what keeps
-  this from mattering in practice); and on Windows there is no `ELOOP`, so
-  only the path-length boundary applies (confirmed by
-  `test_symlink_cycle_descent_warns_like_aws` / `..._at_the_cycle_boundary_...`
-  in `tests/lib/test_localstorage_walk.py`, which pin the warn-not-admit
-  behavior without depending on the exact host-dependent depth).
+  on every platform. On Windows there is no `ELOOP`, so only the path-length
+  limit applies (`test_symlink_cycle_descent_warns_like_aws` /
+  `..._at_the_cycle_boundary_...` in `tests/lib/test_localstorage_walk.py`
+  pin the warn-not-admit behavior without depending on the exact
+  host-dependent depth).
 - **case-conflict gate** (`case_conflict`, **S3->local recursive download only**,
   fires when mode != `ignore`; aws-cli's `_modify_instructions_for_case_conflicts`
   applies on a non-S3-Express source, and its S3 Express branch - reject
@@ -816,13 +819,15 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
   relabeling, every record of result / progress / warning / dryrun calls itself
   `move`.
 - **The `_DeleteSource` subscriber** (the position in section 3): performs the deletion
-  only when the future succeeded. An upload removes the source through its
-  `Storage.delete(info)` (keyed by `TransferItem.src_info`); `LocalStorage.delete`
-  maps the OS error to the library taxonomy, keeping the OS error's message
-  (`move failed: ... [Errno 13] Permission denied: '<abs>'`); download is
-  a per-object DeleteObject against the manager's client, and copy against the
-  **source-side client** (RequestPayer is passed through via
-  `map_delete_object_params`). **A deletion failure flips the already-settled
+  only when the future succeeded. Every route removes the source through the
+  backend its listing entry came from, `src_info.storage.delete(src_info)`
+  (keyed by `TransferItem.src_info`): `LocalStorage.delete` maps the OS error
+  to the library taxonomy, keeping the OS error's message (`move failed: ...
+  [Errno 13] Permission denied: '<abs>'`); a download or copy source is one
+  DeleteObject through `S3Storage.delete` on the source bucket's own client
+  (the manager's client on a download, the source-side client on a copy),
+  with `RequestPayer` passed through, and fails with the source's bucket and
+  key. **A deletion failure flips the already-settled
   future to failed with `set_exception`** (s3transfer accepts an override after
   done - isomorphic to aws-cli's `DeleteSourceSubscriber`), and `_Completion`
   aggregates it as `move failed` (rc 1). The bytes have already arrived.
@@ -905,10 +910,11 @@ and has no `aws s3` counterpart to compare with.
   adopted source name when the custom destination is `/`-terminated or
   `dir_op`.
 - **upload shaping**: an `opens3` upload is shaped like a local one - the
-  default ContentType guess reads the entry's key (its filename; the
-  destination key for a single `""` source), and the >`5 GiB x 10000` oversize
-  pre-warning fires too. Only a true stream (section 6) has no filename and
-  skips the guess.
+  default ContentType guess reads the entry's `compare_key` as a file name
+  (the name the S3 key derives from: the basename `get_fileinfo` stamps for a
+  single source; the destination key when that is `""`), and the >`5 GiB x
+  10000` oversize pre-warning fires too. Only a true stream (section 6) has no
+  filename and skips the guess.
 - **enumeration / single source**: `opens3` enumerates a recursive source
   through `Storage.scan` and resolves a single source through
   `Storage.get_fileinfo`. An unresolvable single source raises `The user-provided
@@ -958,10 +964,9 @@ and has no `aws s3` counterpart to compare with.
   run leaves the backend untouched.
 - **mv** (section 11): every upload deletes its source through that source's own
   `Storage.delete(info)` after each successful upload - the source listing entry
-  rides on `TransferItem.src_info` (its `info.key` locates the object), and
-  `Transferrer`'s `src_storage` carries the source `Storage` (local or custom
-  backend). `s3open`'s source is S3, deleted with `DeleteObject` like any
-  download `mv`. Data-safe in both: `_CloseFileobj` is
+  rides on `TransferItem.src_info` (its `info.key` locates the object, its
+  `storage` is the backend). `s3open`'s source is S3, deleted with
+  `DeleteObject` like any download `mv`. Data-safe in both: `_CloseFileobj` is
   ordered **before** `_DeleteSource` (section 3), so a failed transfer - or a
   failed writer `close` (flush) - leaves the source in place.
 - **sync** ([`sync.md`](./sync.md)): the comparator is a sorted merge-join, so a

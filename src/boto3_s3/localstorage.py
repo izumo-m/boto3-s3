@@ -109,7 +109,6 @@ from __future__ import annotations
 
 import os
 import stat as stat_module
-import sys
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, ClassVar, Literal, NamedTuple, cast
@@ -154,22 +153,6 @@ def _warn_unrepresentable_mtime(info: LocalFileInfo, notify: Callable[[str], Non
         and _size_mtime(st)[1] is None
     ):
         notify(_INVALID_TIMESTAMP)
-
-
-# Boundary thresholds for the full-path fallback (see
-# LocalFileGenerator.crosses_full_path_boundary). The fast walk vets each entry
-# through the owning directory's fd (fstatat / openat), which re-anchors resolution
-# and so hides the ancestor symlink chain / long-path length that aws-cli's full-path
-# stat would trip on (ELOOP / ENAMETOOLONG). Near either OS limit a dir_fd-relative
-# probe can therefore admit a child the transfer then fails to open (rc 1) where
-# aws warn-skips it (rc 2). These floors gate a full-path re-vetting so the two
-# agree; they sit well below the common OS limits (SYMLOOP_MAX ~32-40, PATH_MAX
-# 1024-4096) so a normal walk never crosses them, and correctness rests on the
-# actual full-path probe, not the exact floor. The length floor counts bytes
-# (os.fsencode), because PATH_MAX is a byte limit and a multibyte path reaches
-# a 1024-byte PATH_MAX at a few hundred characters.
-_SYMLINK_DEPTH_PROBE = 20
-_PATH_LEN_PROBE = 1000
 
 
 def to_native_path(key: str) -> str:
@@ -244,55 +227,19 @@ def _is_readable_child(name: str, full: str, dir_fd: int | None, *, is_dir: bool
     return True
 
 
-def _local_zone_representable(ts: float) -> bool:
-    """Whether aws-cli's local-zone rendering of ``ts`` succeeds.
-
-    aws-cli derives a file's mtime as ``datetime.fromtimestamp(st_mtime,
-    tzlocal())`` and treats any failure as an invalid timestamp, so what counts
-    as representable is the *local* calendar's range - UTC's, shifted by the
-    zone's offset. dateutil's ``tzlocal`` is rebuilt per call the way aws-cli
-    does, so a process that changes ``TZ`` (and calls ``time.tzset``) follows;
-    the import is deferred because the whole dateutil package costs about as
-    much to import as boto3-s3 itself. dateutil ships with botocore, so it is
-    always installed.
-    """
-    from dateutil.tz import tzlocal
-
-    try:
-        datetime.fromtimestamp(ts, tzlocal())
-    except (ValueError, OSError, OverflowError):
-        return False
-    return True
-
-
-# datetime.min / datetime.max as epoch seconds, pulled in by two days - more
-# than any zone's UTC offset, so the local and UTC renderings of a timestamp
-# strictly between them either both succeed or both fail.
-_LOCAL_CHECK_FREE_LOW = -62135596800 + 172800
-_LOCAL_CHECK_FREE_HIGH = 253402300800 - 172800
-
-# Windows has no such quiet range: dateutil's DST probe goes through
-# time.localtime, which fails outright below the epoch there.
-_ALWAYS_CHECK_LOCAL_ZONE = sys.platform == "win32"
-
-
 def _size_mtime(st: os.stat_result) -> tuple[int, datetime | None]:
     """Size and tz-aware UTC mtime from a stat result (the shared derivation).
 
-    An unrepresentable timestamp returns ``None`` for mtime - the caller's cue
-    for the epoch fallback. Whether it is representable is decided the way
-    aws-cli decides it, in the host's local zone (``_local_zone_representable``);
-    the value itself is kept in UTC per the ``FileInfo.mtime`` contract. The two
-    zones only disagree near the ends of ``datetime``'s range, so outside those
-    bands the local rendering is skipped - this runs once per walked file.
+    An mtime UTC cannot hold (outside ``datetime``'s range, or outside the
+    platform's ``gmtime`` - on Windows from about half a day before 1970 back,
+    or after about 3001) returns
+    ``None`` for mtime - the caller's cue for the epoch fallback. aws-cli
+    renders the mtime in the host's local zone and falls back wherever that
+    fails; one only the local zone cannot hold is read as its UTC value here,
+    per the ``FileInfo.mtime`` contract (docs/cli/aws-differences.md).
     """
-    ts = st.st_mtime
     try:
-        if (
-            _ALWAYS_CHECK_LOCAL_ZONE or not _LOCAL_CHECK_FREE_LOW <= ts <= _LOCAL_CHECK_FREE_HIGH
-        ) and not _local_zone_representable(ts):
-            return st.st_size, None
-        mtime: datetime | None = datetime.fromtimestamp(ts, tz=timezone.utc)
+        mtime: datetime | None = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc)
     except (ValueError, OSError, OverflowError):
         mtime = None
     return st.st_size, mtime
@@ -549,7 +496,6 @@ class LocalFileGenerator:
         strip: int,
         notify: Callable[[str], None],
         detector: LoopDetector | None,
-        sym_depth: int = 0,
     ) -> Iterator[list[LocalFileInfo]]:
         """Recursively yield the files under ``dir_path`` as byte-order pages (an override seam).
 
@@ -580,18 +526,13 @@ class LocalFileGenerator:
         of it in the complete view) instead of submitted as a file, and a leaf
         that is still a leaf is emitted with the ``size`` / ``mtime`` it has at
         that moment - all on the bare name the leaf sorted under.
-
-        ``sym_depth`` is the number of followed symlinks on the path from the walk
-        root down to ``dir_path`` (each descent into a symlinked directory adds
-        one); it is threaded to ``scan_children`` so a leaf near the OS
-        symlink-loop limit is re-vetted by full path (see there).
         """
         run: list[LocalFileInfo] = []
         # One join per directory rather than per child: dir_path is an absolute
         # directory path, so a child's path is this prefix plus its sort name.
         prefix = dir_path if dir_path.endswith(os.sep) else dir_path + os.sep
         for sort_name, info, loop_key in self.scan_children(
-            dir_path, strip=strip, options=options, notify=notify, sym_depth=sym_depth
+            dir_path, strip=strip, options=options, notify=notify
         ):
             # sort_name carries the trailing os.sep for a sub-directory (the sort
             # suffix) and is the bare name for a leaf, so this path is spelled the
@@ -636,10 +577,6 @@ class LocalFileGenerator:
             if run:
                 yield run
                 run = []
-            # A followed symlink component lengthens the ancestor chain the kernel
-            # re-resolves for every full path under sub - tracked so scan_children
-            # can full-path-vet leaves near the symlink-loop limit.
-            child_depth = sym_depth + (1 if info.is_symlink else 0)
             if detector is not None:
                 if detector.is_cycle_key(loop_key):
                     notify(f"Skipping file {sub.rstrip(os.sep)}. Symbolic link loop detected.")
@@ -651,7 +588,6 @@ class LocalFileGenerator:
                         strip=strip,
                         notify=notify,
                         detector=detector,
-                        sym_depth=child_depth,
                     )
                 finally:
                     detector.leave()
@@ -662,7 +598,6 @@ class LocalFileGenerator:
                     strip=strip,
                     notify=notify,
                     detector=detector,
-                    sym_depth=child_depth,
                 )
         if run:
             yield run
@@ -902,7 +837,6 @@ class LocalFileGenerator:
         strip: int,
         options: LocalScanOptions,
         notify: Callable[[str], None],
-        sym_depth: int = 0,
     ) -> list[WalkChild]:
         """Return one directory's vetted children as final `WalkChild` entries.
 
@@ -926,12 +860,7 @@ class LocalFileGenerator:
         first strips the separator and tests the name itself, as aws-cli's
         ``should_ignore_file`` does at the top of each descent: a directory
         that became a symlink is skipped silently rather than followed, and
-        the battery names the stripped path. ``sym_depth`` (the
-        number of followed symlinks from the walk root down to ``dir_path``) lets
-        a child near the symlink-loop / path-length limit be re-vetted by full
-        path (``crosses_full_path_boundary``), so it warn-skips like aws-cli
-        rather than being admitted to fail at transfer-open or at its own
-        descent.
+        the battery names the stripped path.
 
         The fast path scans through the directory's own fd where the platform
         allows (``have_dir_fd``), so each entry's stat and readability probe
@@ -985,13 +914,14 @@ class LocalFileGenerator:
             # instead of failing the run. If the probes
             # see nothing wrong (e.g. fd exhaustion resolved by the probe's
             # close), re-raise like aws-cli's ``listdir`` would - never prune
-            # silently. The deterministic full-path limits this fd-relative walk
-            # hides (``ELOOP`` / an over-long path) are caught one level up
-            # instead, at vetting time, by ``crosses_full_path_boundary``. Scoped
-            # to the
-            # open/scandir establishment only - a per-entry OSError (from a race
-            # mid-scan or an override's classify_child) propagates rather than
-            # dropping the directory.
+            # silently. This open is by full path, so a directory past the
+            # kernel's symlink-loop or path-length limit - which the parent's
+            # fd-relative vetting cannot see - is warned here as aws-cli's
+            # full-path re-test warns it (a leaf past it, by ``restat_leaf``'s
+            # full-path stat at its turn). Scoped to the open/scandir
+            # establishment only - a per-entry OSError (from a race mid-scan or
+            # an override's classify_child) propagates rather than dropping the
+            # directory.
             if dir_fd is not None:
                 os.close(dir_fd)
             if not self.triggers_warning(probe, notify):
@@ -1004,10 +934,6 @@ class LocalFileGenerator:
                     child = self.classify_child(entry, full, dir_fd, options=options, notify=notify)
                     if child is None:
                         continue
-                    if not options.enumerate_all_entries and self.crosses_full_path_boundary(
-                        child.info, full, sym_depth=sym_depth, notify=notify
-                    ):
-                        continue
                     children.append(child)
         finally:
             if dir_fd is not None:
@@ -1015,41 +941,6 @@ class LocalFileGenerator:
         for child in children:
             child.info.compare_key = child.info.key[strip:]
         return self.finalize_children(children)
-
-    def crosses_full_path_boundary(
-        self,
-        info: LocalFileInfo,
-        full: str,
-        *,
-        sym_depth: int,
-        notify: Callable[[str], None],
-    ) -> bool:
-        """Whether a vetted child must be dropped as aws-cli's full-path stat would.
-
-        The fast walk vets each entry through the owning directory's fd
-        (``fstatat`` / ``openat``), which re-anchors resolution: it resolves a
-        child's own symlink relative to the already-open directory, hiding the
-        ancestor symlink chain, and it addresses the entry by its short name,
-        hiding the full-path length. aws-cli instead stats every entry by full
-        path, so a child whose full-path resolution crosses ``SYMLOOP_MAX`` (an
-        ancestor chain plus the child's own link) or ``PATH_MAX`` fails there -
-        ``os.path.exists`` is ``False``, its warn-skip counts toward rc 2 - while
-        the fd-relative probe admits it and the transfer then fails to open it
-        (rc 1). Near either limit (``sym_depth`` for a symlink child, the full
-        path's byte length for any child - the floors sit well below the OS
-        limits, so a normal walk never reaches this probe) re-run the full-path
-        warning battery
-        (``triggers_warning``); a child it warns away is dropped here so the two
-        agree. Directories take the same probe as file leaves.
-        """
-        # PATH_MAX is a byte limit, so the length floor is measured in bytes
-        # (a multibyte path crosses a 1024-byte PATH_MAX at a few hundred
-        # characters); the character pre-check (UTF-8 spends at most 4 bytes
-        # per character) keeps fsencode off the per-entry hot path.
-        near_boundary = (
-            len(full) >= _PATH_LEN_PROBE // 4 and len(os.fsencode(full)) >= _PATH_LEN_PROBE
-        ) or (info.is_symlink and sym_depth >= _SYMLINK_DEPTH_PROBE)
-        return near_boundary and self.triggers_warning(full, notify)
 
     def entry_stat_result(self, entry: os.DirEntry[str]) -> os.stat_result | None:
         """The single stat snapshot for one entry (an override seam), or ``None``.
@@ -1241,8 +1132,8 @@ class LocalFileGenerator:
         """Warn-and-skip checks on a *path* (aws-cli's ``triggers_warning``).
 
         Path-based: the root vetting (``should_ignore_file``), a directory
-        whose scandir establishment failed, and the near-symlink-boundary
-        re-vet. The per-entry hot path checks the same
+        whose scandir establishment failed, and a leaf whose re-stat at its
+        turn failed (``restat_leaf``). The per-entry hot path checks the same
         conditions from the ``DirEntry``'s cached stat in
         ``should_ignore_entry``; a mid-scan race (``entry_stat_result`` ->
         ``None``) is warned in ``classify_child`` directly.

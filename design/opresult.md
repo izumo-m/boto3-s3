@@ -54,19 +54,19 @@ Each `FileInfo` also carries its producing backend as `FileInfo.storage`, so
 wherever `src_info` / `dest_info` is present it agrees with `src_storage` /
 `dest_storage` (the same backend). The separate `src_storage` / `dest_storage`
 fields are kept because they are populated even where the entry is absent - a
-`cp` / `mv` destination, and every warning / notice.
+`cp` / `mv` destination, and a warning that belongs to no item.
 
 ## Which operation populates which field
 
 | field | cp / mv | sync (copy) | rm / sync (delete) | warning · notice |
 |---|---|---|---|---|
 | `transfer_type` | upload / download / copy (mv → `move`) | upload / download / copy | `delete` | the run's verb |
-| `compare_key` | the transfer's compare key | the transfer's compare key | the operation-relative compare key (full object key: `src_info.key`) | the compare key, often `""` |
-| `outcome` | SUCCEEDED / FAILED / SKIPPED / DRYRUN / CANCELLED | same | SUCCEEDED / FAILED / DRYRUN | WARNED / NOTICE |
+| `compare_key` | the transfer's compare key | the transfer's compare key | the operation-relative compare key (full object key: `src_info.key`) | the entry's compare key; `""` for a walk warning |
+| `outcome` | SUCCEEDED / FAILED / SKIPPED / DRYRUN / CANCELLED | same | SUCCEEDED / FAILED / DRYRUN (`rm`'s single key: also CANCELLED) | WARNED / NOTICE |
 | `src` / `dest` | both | both | `src` only | — / — |
 | `bytes_transferred` | bytes (SUCCEEDED; else 0) | bytes (SUCCEEDED; else 0) | 0 | 0 |
-| `error` | on FAILED / CANCELLED | on FAILED / CANCELLED | on FAILED | the message body |
-| `src_info` | the source entry | the source entry | the removed object | — |
+| `error` | on FAILED / CANCELLED | on FAILED / CANCELLED | on FAILED / CANCELLED | the message body |
+| `src_info` | the source entry | the source entry | the removed object | the item's source entry; — for a walk warning |
 | `dest_info` | — | update: the pre-existing dest / new: — | — | — |
 | `src_storage` | source side | source side | the deleted-from side (`rm`: the target bucket; `sync --delete`: the run's dest) | run's source side |
 | `dest_storage` | dest side | dest side | — | run's dest side |
@@ -91,9 +91,7 @@ immediate cancellation stopped before its request started, and a key of a
 started batch due a request of its own - XML-incompatible, a re-send of a
 transient per-key failure, any key of a batch request that failed as a
 whole - that an abandoned run had not sent yet ([`deleter.md`](./deleter.md)
-sections 2-3). `rm` never emits `CANCELLED`: its blind single-key delete
-records the outcome of its request under a held Ctrl-C too (below).
-Three pre-submission gates carve out
+sections 2-3). Three pre-submission gates carve out
 the other direction: each consumes the item it blocks with an advisory instead
 of an outcome, so that item never reaches the operation layer and gets no
 terminal record - a glacier-blocked source without `ignore_glacier_warnings`
@@ -138,16 +136,12 @@ transfer items like this:
 - work never accepted (a graceful cancel stops the submission loop before the
   next item) produces no record.
 
-`rm`'s blind single-key delete (one request, no engine) keeps the same rule
-for a Ctrl-C: aws sends it on a transfer-manager worker whose shutdown waits
-for it, so the request runs on a worker here too and the interrupt is held
-until it settles - the delete's outcome, a failure included, is recorded,
-then the `KeyboardInterrupt` is raised. aws records a failure there no more:
-on its transfer futures a completion wins over the cancel mark and a failure
-does not, so a delete refused after the interrupt prints only the closing
-line - an error lost, which is not copied. A second Ctrl-C keeps the wait
-and the record (aws's executor threads are joined as it exits, so its
-request still completes, unreported there); a third stops the wait.
+`rm`'s blind single-key delete (one request, no engine) sends its request on
+the calling thread. An interrupt landing while it is out leaves at once: the
+item is `CANCELLED` and the interrupt is raised to the caller, as for an item
+abandoned mid-flight. aws sends it on a transfer-manager worker whose shutdown
+waits for it and prints its line; that wait is not copied
+([`aws-differences.md`](../docs/cli/aws-differences.md)).
 
 On the CRT engine, a revocation surfaces as awscrt's `AWS_ERROR_S3_CANCELED`
 rather than s3transfer's `CancelledError`, and it reports `CANCELLED` (with

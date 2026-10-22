@@ -84,6 +84,15 @@ built-in keeps the built-in route whatever `scheme` says, and any other
 ([`./results.md`](./results.md)); `LocalStorage` overrides it with the host
 `os.sep`.
 
+`FileInfo.key` is this backend's own address of the entry — an S3 object key,
+an absolute local path, or whatever addresses the entry in a custom backend —
+and never a URL that names the backend: no scheme such as `s3://` or
+`http://` is put in front of the address. Which backend an entry
+belongs to is its `FileInfo.storage`. The address itself may hold any
+characters, so an S3 key that contains `://` and a Windows path `C:/...` are
+keys like any other. For a custom backend this is a contract on its own code:
+documented, and not checked.
+
 `capabilities` is the class-level flag set of transfer operations this storage
 *kind* implements. The default declares nothing, so a subclass that forgets it
 is refused every gated route rather than admitted by accident. A subclass may
@@ -865,9 +874,9 @@ Yields one `list[S3FileInfo]` per `ListObjectsV2` page. Requires an
 
 A `LastModified` the host's local zone cannot represent is listed with its UTC
 value, where the AWS CLI's conversion of every timestamp it reads to local
-time ends the run. (`LocalStorage` applies a local-zone
-test to a file's mtime and keeps the file with a warning and `EPOCH_TIME`,
-as the AWS CLI does.)
+time ends the run. (`LocalStorage` reads a file's mtime in UTC the same way;
+only an mtime UTC cannot represent either keeps the file with a warning and
+`EPOCH_TIME`, as the AWS CLI does.)
 
 This is object listing only — the openable-entity enumeration `scan` promises.
 A recursive scan omits `Delimiter` and yields every object as a `FILE` entry; a
@@ -951,9 +960,10 @@ rm`'s single-key path. The object is `info.key`, a full bucket key.
 `Storage.delete` signature.
 
 Returns the `DeleteObject` response. `rm`'s blind single-key path surfaces it
-under `extra_info["delete"]` when `capture_response` is set; `mv` and the
-batched `rm` / `sync` lanes issue their own delete calls rather than this
-method.
+under `extra_info["delete"]` when `capture_response` is set. `mv`'s source
+delete goes through this method too, its response captured the same way. The
+batched `rm` / `sync` lanes, `rm`'s single key on the CRT engine and the
+copy-props rollback send their own deletes.
 
 ### get_fileinfo(key="", \*, on_warning=None)
 
@@ -1272,7 +1282,6 @@ class LocalFileGenerator:
         strip: int,
         notify: Callable[[str], None],
         detector: LoopDetector | None,
-        sym_depth: int = 0,
     ) -> Iterator[list[LocalFileInfo]]: ...
     def restat_leaf(
         self,
@@ -1303,16 +1312,7 @@ class LocalFileGenerator:
         strip: int,
         options: LocalScanOptions,
         notify: Callable[[str], None],
-        sym_depth: int = 0,
     ) -> list[WalkChild]: ...
-    def crosses_full_path_boundary(
-        self,
-        info: LocalFileInfo,
-        full: str,
-        *,
-        sym_depth: int,
-        notify: Callable[[str], None],
-    ) -> bool: ...
     def entry_stat_result(
         self, entry: os.DirEntry[str]
     ) -> os.stat_result | None: ...
@@ -1369,10 +1369,11 @@ rather than an `os.name` test, so any platform missing the APIs degrades
 correctly; it is true on POSIX and false on Windows, whose directory scan
 returns entry attributes inline instead. `dir_open_flags` are the flags for the
 one `open()` that turns a directory path into that descriptor. `EPOCH_TIME` is
-the timestamp stamped on a file whose mtime cannot be represented — which the
-host's local zone decides, the same range the AWS CLI tests, so a timestamp
-close enough to `datetime`'s ends for the zone's offset to matter falls back
-here exactly when it falls back there.
+the timestamp stamped on a file whose mtime UTC cannot represent — outside
+`datetime`'s range, or on Windows from about half a day before 1970 back or
+after about 3001. The AWS CLI
+tests the mtime in the host's local zone instead, so an mtime within the
+zone's offset of those limits falls back there and keeps its UTC value here.
 
 **The override seams, finest first.** Extend at the smallest layer that fits:
 `should_ignore_entry` (one entry's vetting), `entry_stat_result` (the one stat
@@ -1428,7 +1429,7 @@ itself is vetted with `should_ignore_file`; its children per entry in
 a cycle requires a followed link; without both, no `LoopDetector` is built and
 the walk pays no per-directory stat for it.
 
-### walk_dir(dir_path, options, \*, strip, notify, detector, sym_depth=0)
+### walk_dir(dir_path, options, \*, strip, notify, detector)
 
 The depth-first recursion behind `list_file_pages`, and the seam for changing
 how the tree is descended. Each directory's `scan_children` is read and sorted
@@ -1449,9 +1450,6 @@ directory passed to `list_file_pages` and stays constant across the recursion;
 `scan_children` uses it to stamp `compare_key`. `notify` is the warning sink.
 `detector`, when present, guards symlink cycles: a sub-directory whose identity
 matches an ancestor is skipped with a `Symbolic link loop detected` warning.
-`sym_depth` is the number of followed symlinks between the walk root and
-`dir_path`, threaded down so a leaf near the OS symlink limit can be re-vetted
-by full path.
 
 Override it and return early for a directory to prune its subtree, or
 re-implement the loop to cap depth — preserving the depth-first byte order
@@ -1512,7 +1510,7 @@ scanned path is the scan's sole leaf. `stat_result` is the followed stat, or
 the lstat selected when symlinks are not followed or a follow failed, and
 `is_symlink` reflects the scanned path itself.
 
-### scan_children(dir_path, \*, strip, options, notify, sym_depth=0)
+### scan_children(dir_path, \*, strip, options, notify)
 
 Returns one directory's vetted children as final `WalkChild` entries — the
 enumeration layer, and the seam for changing *how* a directory is read.
@@ -1538,28 +1536,17 @@ descent: a directory that became a symlink is skipped silently rather than
 followed. If that battery finds
 nothing wrong, the `OSError` propagates instead of pruning silently. That
 handling is scoped to establishing the scan; a per-entry `OSError` raised
-mid-scan propagates. The deterministic full-path limits — a symlink cycle
-stopped by the kernel, an over-long path — are caught one level up instead, by
-`crosses_full_path_boundary`.
-
-`sym_depth` lets any child near the symlink-loop or path-length limit be
-re-vetted by full path, so it warn-skips the way the AWS CLI's full-path stat
-would rather than being admitted and failing at transfer time.
+mid-scan propagates. The directory-relative vetting cannot see the full-path
+limits — a symlink cycle stopped by the kernel, an over-long path — so a child
+past one is admitted here; the full-path open of its own descent, or a leaf's
+re-stat at its turn (`restat_leaf`), then fails and warn-skips it, as the AWS
+CLI's full-path stat would, rather than letting it fail at transfer time. A
+one-level scan, which has no descent and no re-stat, yields such a child as it
+is.
 
 An override should reuse `classify_child`, `dir_child` and `normalize_sort`
 rather than reproducing the sort key and directory-info shape, and must stamp
 `compare_key` on any child it injects.
-
-### crosses_full_path_boundary(info, full, \*, sym_depth, notify)
-
-Whether a vetted child must be dropped because a full-path stat would have
-rejected it. The fast walk vets each entry through the owning directory's
-descriptor, which re-anchors resolution and so hides both the ancestor symlink
-chain and the full path's length; near either OS limit this re-runs the
-full-path warning battery so the two agree. A directory takes the same probe as
-a file. `scan_children` consults this only in the
-normal view — under `enumerate_all_entries` the vetting is bypassed and this
-probe with it.
 
 ### entry_stat_result(entry)
 
@@ -1694,8 +1681,8 @@ still warns "not readable".
 
 Builds one file entry's `LocalFileInfo` from the stat `classify_child` already
 took, at scan time. It never fails: the race case was handled upstream, and an
-mtime the host's local zone cannot represent — the AWS CLI's own test, as
-above — keeps the file and stamps `EPOCH_TIME`. The warning for it is sent from
+mtime UTC cannot represent, as above, keeps the file and stamps
+`EPOCH_TIME`. The warning for it is sent from
 here only for a link's own stat, which no re-stat follows; a regular file's
 record is stamped silently and warns at its turn (`restat_leaf`), or from the
 scan when a one-level scan keeps this record. The info carries `st` as

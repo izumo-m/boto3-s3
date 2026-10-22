@@ -108,12 +108,13 @@ _WAKE_SLICE = 0.1
 def _wait_set(event: threading.Event, wake: _thread.LockType) -> None:
     """Wait for *event*, woken by *wake* - the setter releases it after setting.
 
-    The same wait as the library's single rm (``boto3_s3.s3``, whose
-    docstring has the reasons): no ``Event.wait`` - its Python-level
-    ``Condition`` can be left half-taken by an interrupt - but a raw lock's
-    timed acquire, one C call that returns as soon as the setter releases
-    and lets a Ctrl-C's handler run between slices on Windows before Python
-    3.14. The event's flag says whether it is set.
+    No ``Event.wait``: its Python-level ``Condition`` can be left half-taken
+    by an interrupt landing between its lock steps (the setter then blocks
+    for good), and a wait that holds Ctrl-Cs and goes on waiting keeps
+    reopening that window. A raw lock's timed acquire is one C call that
+    returns as soon as the setter releases, and lets a Ctrl-C's handler run
+    between slices on Windows before Python 3.14. The event's flag says
+    whether it is set.
     """
     while not event.is_set():
         wake.acquire(timeout=_WAKE_SLICE)

@@ -22,12 +22,12 @@ pages only when a many-part COMPOSITE ``ObjectParts`` listing truncates).
 This is a standalone, opt-in building block: it lives in its own module and is
 reachable either from the package root (``from boto3_s3 import ChecksumComparison``)
 or by submodule path (``from boto3_s3.checksumcompare import ChecksumComparison``).
-It imports no AWS SDK module at import time; the SDK touches - the boto3 client (via
-``s3.resolve``), ``botocore``'s ``ClientError``, and the optional ``awscrt`` fast
-checksums - are all deferred into the construct / compute paths.
+It imports no AWS SDK module at import time; the SDK touches - the boto3 client (from
+the S3 entry's ``storage``), ``botocore``'s ``ClientError``, and the optional
+``awscrt`` fast checksums - are all deferred into the compute paths.
 
 It is a replacement ``update_filter=`` strategy, not composed with the default:
-``S3.sync(update_filter=ChecksumComparison(s3, src, dest))`` decides every update pair by content.
+``S3.sync(update_filter=ChecksumComparison())`` decides every update pair by content.
 That catches what the size + mtime default misses (notably the download
 asymmetry: a same-size object updated only on the S3 source is never pulled
 down by the default), at the price of a GetObjectAttributes + readable-side
@@ -68,13 +68,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from boto3_s3.comparator import READ_CHUNK, ContentComparison
-from boto3_s3.types import TransferType
 
 if TYPE_CHECKING:
     from typing import BinaryIO
 
-    from boto3_s3.s3 import S3
-    from boto3_s3.storage import Location
     from boto3_s3.types import FileInfo
 
 # GetObjectAttributes ``Checksum.<key>`` -> our algorithm name. An object carries
@@ -118,11 +115,10 @@ class ChecksumComparison(ContentComparison):
     (copy), so it never skips on an indeterminate comparison. It is a replacement
     ``update_filter=`` strategy, selected instead of the size+time default.
 
-    The S3 client and bucket for each S3 side are taken by resolving ``src`` /
-    ``dest`` against ``s3`` (``s3.resolve`` - the same values passed to
-    ``s3.sync``); pass ``S3Storage`` instances for a cross-account s3-to-s3 sync,
-    exactly as ``sync`` does. ``bucket`` is not on a ``FileInfo``, which is why
-    the endpoint is injected explicitly here rather than read from the pair.
+    The S3 client and bucket for each S3 side come from that entry's
+    ``storage`` - the ``S3Storage`` its listing ran through, so a cross-account
+    s3-to-s3 sync reaches each side with that side's own client. A hand-built
+    pair must set ``storage`` on each S3 entry.
 
     When ``check_size`` is true (the default) a pair whose two sides have
     known, differing sizes is treated as differing (copy) before any
@@ -136,57 +132,25 @@ class ChecksumComparison(ContentComparison):
     without ``awscrt``.
     """
 
-    __slots__ = ("_dest_storage", "_request_payer", "_src_storage", "check_size", "pure_max_size")
+    __slots__ = ("_request_payer", "check_size", "pure_max_size")
 
     check_size: bool
     pure_max_size: int | None
-    # The SDK boundary: ``s3.resolve`` returns a ``Storage`` whose S3 side carries
-    # ``.bucket`` / ``.get_client()``. Held as ``Any`` so this module needs no
-    # ``S3Storage`` import (which would drag ``botocore`` at import time); the
-    # route (``pair.transfer_type``) tells which side is the S3 one.
-    _src_storage: Any
-    _dest_storage: Any
     _request_payer: str | None
 
     def __init__(
         self,
-        s3: S3,
-        src: Location,
-        dest: Location,
         *,
         check_size: bool = True,
         pure_max_size: int | None = None,
         request_payer: str | None = None,
     ) -> None:
-        # Construct-path SDK touch (the module import stays SDK-free).
-        from boto3_s3.s3storage import S3Storage
-
-        self._src_storage = s3.resolve(src)
-        self._dest_storage = s3.resolve(dest)
-        # Build each S3 side's client now (get_client memoizes): the decides
-        # may run on a ParallelFilter pool, and a lazy first build there would
-        # race boto3's non-thread-safe client construction (design/s3.md). An
-        # eager build here is what keeps the strategy's documented
-        # thread-safety true for S3Storage sides passed without a client.
-        for side in (self._src_storage, self._dest_storage):
-            if isinstance(side, S3Storage):
-                side.get_client()
         self.check_size = check_size
         self.pure_max_size = pure_max_size
         self._request_payer = request_payer
 
-    def _readable_remote_differ(
-        self,
-        readable: FileInfo,
-        remote: FileInfo,
-        transfer_type: TransferType,
-    ) -> bool:
-        # The remote (S3) entry belongs to the endpoint the direction names; its
-        # storage carries the client/bucket GetObjectAttributes needs.
-        s3_storage = (
-            self._dest_storage if transfer_type is TransferType.UPLOAD else self._src_storage
-        )
-        remote_checksum = self._remote_checksum(s3_storage, remote.key)
+    def _readable_remote_differ(self, readable: FileInfo, remote: FileInfo) -> bool:
+        remote_checksum = self._remote_checksum(remote)
         if remote_checksum is None:
             return True
         if not _can_compute(remote_checksum.algorithm, readable.size, self.pure_max_size):
@@ -219,8 +183,8 @@ class ChecksumComparison(ContentComparison):
         whole, a CRC64NVME one, or a COMPOSITE one copied with its algorithm and
         part layout compares equal to its copy (docs/reference/comparator.md).
         """
-        a = self._remote_checksum(self._src_storage, src.key, need_parts=False)
-        b = self._remote_checksum(self._dest_storage, dest.key, need_parts=False)
+        a = self._remote_checksum(src, need_parts=False)
+        b = self._remote_checksum(dest, need_parts=False)
         if a is None or b is None or a.algorithm != b.algorithm or a.composite != b.composite:
             return True
         if None not in (a.part_count, b.part_count) and a.part_count != b.part_count:
@@ -228,12 +192,17 @@ class ChecksumComparison(ContentComparison):
         return a.value != b.value
 
     def _remote_checksum(
-        self, storage: Any, key: str, *, need_parts: bool = True
+        self, info: FileInfo, *, need_parts: bool = True
     ) -> _RemoteChecksum | None:
+        # The SDK boundary: an S3 entry's storage is the S3Storage its listing
+        # ran through, carrying ``.bucket`` / ``.get_client()``. Read as ``Any``
+        # so this module needs no ``S3Storage`` import (which would drag
+        # ``botocore`` at import time).
+        storage: Any = info.storage
         return _fetch_remote(
             storage.get_client(),
             storage.bucket,
-            key,
+            info.key,
             request_payer=self._request_payer,
             need_parts=need_parts,
         )

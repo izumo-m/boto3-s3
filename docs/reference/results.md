@@ -153,14 +153,18 @@ operation has one endpoint. Advisory records set neither.
 transfer's source, or the object a delete removes. `dest_info` is populated only
 by `sync`, where it is the pre-existing destination object the decision compared
 against; `cp` and `mv` never list the destination, so it stays `None` for them.
-A streaming `cp` lists nothing, so both are `None`. Advisory records carry
-neither, and a glacier `SKIPPED` record carries `src_info` but no `dest` or
+A streaming `cp` lists nothing, so both are `None`. A `WARNED` or `NOTICE`
+record about an item carries that item's source entry as `src_info` — the
+glacier and parent-directory gates, a source over S3's upload size limit, the
+case-conflict notices, a failed mtime stamp — while one that belongs to no
+item, such as a directory-walk warning, carries none; neither carries
+`dest_info`. A glacier `SKIPPED` record carries `src_info` but no `dest` or
 `dest_info` — its gate runs before the destination is derived.
 
 `src_storage` and `dest_storage` are the run's two sides as `Storage` backends
 ([`storage.md`](./storage.md)). They are populated where the corresponding entry
-is absent as well — a `cp` / `mv` destination, a streaming side, and every
-warning and notice — which is why they exist beside `FileInfo.storage`. Where
+is absent as well — a `cp` / `mv` destination, a streaming side, and a warning
+that belongs to no item — which is why they exist beside `FileInfo.storage`. Where
 `src_info` or `dest_info` is present, its `storage` is the same backend as the
 matching field here. A delete record puts the deleted-from side on `src_storage`
 (for `rm` the target bucket, for `sync`'s delete lane the run's destination) and
@@ -370,7 +374,9 @@ name, or — on a `LocalFileInfo` — the absolute filesystem path with `os.sep`
 normalized to `/`. It is never a relative path and never carries the platform
 separator, so entries from two backends share one sort order; that is what lets
 `sync` merge-join two scans. Any backend must emit `/`-separated keys regardless
-of host OS.
+of host OS. It is the backend's own address of the entry, never a URL naming the
+backend (no `s3://` or other scheme in front); which backend the entry belongs
+to is `storage` ([`storage.md`](./storage.md#storage)).
 
 `kind` says what the entry is; see [`FileKind`](#filekind).
 

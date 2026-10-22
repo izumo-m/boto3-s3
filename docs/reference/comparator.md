@@ -528,9 +528,6 @@ the two content strategies is
 class ChecksumComparison:
     def __init__(
         self,
-        s3: S3,
-        src: Location,
-        dest: Location,
         *,
         check_size: bool = True,
         pure_max_size: int | None = None,
@@ -540,20 +537,14 @@ class ChecksumComparison:
     def __call__(self, pair: SyncPair) -> bool: ...
 ```
 
-`s3`, `src` and `dest` are required and positional: pass the same three values
-the `sync` call gets. Each location is resolved through
-[`S3.resolve`](./s3.md#resolveloc), so a subclass that overrides `resolve`
-reaches this strategy too, and a cross-account s3-to-s3 sync works by passing
-the same two [`S3Storage`](./storage.md#s3storage) objects here that are passed
-to `sync`. The endpoint cannot be read off a pair — a `FileInfo` carries no
-bucket — which is why it is injected explicitly.
-
-The constructor also builds the client of each resolved side that is an
-`S3Storage`, rather than leaving it to the first decision. The decisions may
-run on a [`ParallelFilter`](#parallelfilter) pool, where a first client build
-would race boto3's client construction; building here is what makes the
-strategy safe to wrap. It also means a client-build failure surfaces on the
-constructing thread.
+Each S3 side's `GetObjectAttributes` goes to the bucket and client of that
+entry's `storage`: the [`S3Storage`](./storage.md#s3storage) the side was
+listed through, so a cross-account s3-to-s3 sync reaches each side with that
+side's own client. Inside `sync` each side's listing has built its client
+before any pair is decided, so the decisions may run on a
+[`ParallelFilter`](#parallelfilter) pool. A pair built by hand sets `storage`
+on each `S3FileInfo` side to its `S3Storage`; on a pool, that storage's client
+must already be built (`get_client`, which takes no lock).
 
 `check_size`, `True` by default, behaves as it does for
 [`EtagComparison`](#etagcomparison): differing known sizes are treated as
@@ -598,9 +589,7 @@ runs first.
   readable side's bytes are read through its `storage`
   ([`./storage.md`](./storage.md)) and hashed with the same algorithm —
   whole-file for a `FULL_OBJECT` checksum, part by part at the sizes
-  `GetObjectAttributes` reported for a `COMPOSITE` one. Which endpoint the
-  fetch addresses is taken from `pair.transfer_type`: the `dest` location for
-  `UPLOAD`, the `src` location for anything else.
+  `GetObjectAttributes` reported for a `COMPOSITE` one.
 - neither side `S3FileInfo`: the pair is copied.
 
 A `COMPOSITE` checksum is recognized by the response's `ChecksumType` or by a
@@ -630,12 +619,6 @@ pagination. A per-object rejection never aborts the run.
 Checksum computation is `zlib` for `crc32` and `hashlib` for `sha1` / `sha256`.
 `crc32c` and `crc64nvme` use `awscrt` when it is installed and a bundled
 pure-Python implementation otherwise, which is what `pure_max_size` bounds.
-
-Raises, from the constructor: whatever `S3.resolve` and the client build raise
-for a profile, a region, an `endpoint_url` or partial credentials that do not
-resolve — [`InvalidConfigError`](./exceptions.md#invalidconfigerror) or the
-[`Boto3S3Error`](./exceptions.md#boto3s3error) base — plus the `TypeError`
-`os.fspath` raises for an argument that is not a `Location`.
 
 Raises, from a call: a `BotoCoreError` from `GetObjectAttributes` — absent
 credentials, an unreachable endpoint, a read timeout — is not a per-object

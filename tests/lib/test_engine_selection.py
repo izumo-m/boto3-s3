@@ -231,10 +231,11 @@ class TestBuildTransferConfig:
         assert config.max_io_queue_size == 1000
 
     def test_crt_tuning_fields_pass_through(self) -> None:
+        # A CRT file-I/O key is accepted and goes nowhere (no field takes it).
         scoped = {"target_bandwidth": "100MB/s", "direct_io": "true"}
         config = _build(scoped, "crt")
         assert config.target_bandwidth == 100 * _MIB
-        assert config.direct_io is True
+        assert not hasattr(config, "direct_io")
 
     def test_crt_drops_classic_only_keys_that_would_trip_validation(self) -> None:
         # aws-cli ignores io_chunksize / max_bandwidth under CRT; placing them

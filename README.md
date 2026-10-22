@@ -143,7 +143,7 @@ timestamp — either against S3's ETag or against the checksum S3 already stores
 ```python
 from boto3_s3.checksumcompare import ChecksumComparison
 
-s3.sync(src, dest, update_filter=ChecksumComparison(s3, src, dest))
+s3.sync(src, dest, update_filter=ChecksumComparison())
 ```
 
 Because it runs in-process, results come back as objects rather than console

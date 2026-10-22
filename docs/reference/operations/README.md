@@ -48,10 +48,7 @@ Four consequences are the operations' own:
   rejects, is stated on each operation's page.
 - The three transfer operations are the only callers of `resolve`, so a
   subclass that overrides it to add a scheme reaches them and none of the other
-  six. Outside the operations,
-  [`ChecksumComparison`](../comparator.md#checksumcomparison) also resolves the
-  two locations it is constructed with through the `S3` it is given, so the
-  override reaches that strategy too.
+  six.
 - The six S3-only operations reject a `Storage` that is not an `S3Storage` with
   `ValidationError` ([`../exceptions.md`](../exceptions.md)), since none of the
   library's `Storage` classes implements `__fspath__`. A custom backend

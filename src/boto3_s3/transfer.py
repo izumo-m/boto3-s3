@@ -29,7 +29,7 @@ Engine choices (parity-driven):
   and unconditionally classic for a copy run - the CRT manager has no copy,
   the same rule boto3 and aws-cli apply to s3->s3. The public
   ``transfer_config`` type is ``boto3_s3.transferconfig.TransferConfig``
-  (boto3's subclass plus CRT tuning fields; defaults match aws-cli: 8 MiB
+  (boto3's subclass plus a CRT tuning field; defaults match aws-cli: 8 MiB
   threshold/chunk, 10-way concurrency, a 1000-deep download IO queue), and
   classic honors
   ``use_threads=False`` the way boto3 does - via the ``NonThreadedExecutor``
@@ -67,7 +67,6 @@ import functools
 import logging
 import mimetypes
 import os
-import posixpath
 import sys
 import tempfile
 import threading
@@ -77,7 +76,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib.metadata import version
 from typing import TYPE_CHECKING, Any
-from urllib.parse import quote, urlparse
+from urllib.parse import quote
 
 from botocore.exceptions import BotoCoreError, ClientError
 from s3transfer.compat import seekable
@@ -101,6 +100,7 @@ from boto3_s3.exceptions import (
 )
 from boto3_s3.localstorage import LocalStorage, translate_os_error
 from boto3_s3.s3storage import (
+    S3Storage,
     attribute_failure,
     client_build_error,
     crt_error_name,
@@ -205,9 +205,10 @@ class TransferItem:
     src_key: str | None = None
     src_path: str | None = None
     # The source listing entry, set by every listing-driven route (upload,
-    # download, copy, and their open-route variants); ``mv`` unlinks an upload
-    # source through its logical ``/``-key, distinct from ``src_path`` (the path
-    # s3transfer reads). None only on the stream routes, which list nothing.
+    # download, copy, and their open-route variants); ``mv`` deletes the source
+    # through it (``src_info.storage.delete(src_info)``, addressed by its own
+    # ``key``, distinct from ``src_path``, the path s3transfer reads). None only
+    # on the stream routes, which list nothing.
     src_info: FileInfo | None = None
     # The destination listing entry, set only by ``sync`` (the pair's ``dest``):
     # the pre-existing object an update overwrites, or None for a new key. cp /
@@ -640,12 +641,12 @@ def _guess_content_type(path: str) -> str | None:
     """The ``Content-Type`` aws guesses for *path*: CPython 3.14's ``guess_type``.
 
     The tables are frozen (`_mime_types`) and so is the algorithm, a port of
-    3.14's ``MimeTypes.guess_type`` / ``guess_file_type``: a name with a
-    scheme-like prefix of two or more characters takes the URL branch (a
-    ``data:`` URL is read for its media type, anything else is split with
-    ``posixpath`` after ``urlparse`` dropped its query and fragment), every
-    other name is a file path, split with the host's ``os.path`` after its
-    drive is removed. The interpreter aws-cli bundles runs exactly that,
+    3.14's ``MimeTypes.guess_file_type``: the name is a file path, split with
+    the host's ``os.path`` after its drive is removed. aws guesses on an
+    absolute local path, which never takes ``guess_type``'s URL branch (a
+    scheme-like prefix of two or more characters), so only the file branch is
+    ported, and an open-route name (a custom source's ``compare_key``) is read
+    as a file name too. The interpreter aws-cli bundles runs exactly that,
     while a host interpreter before 3.13 split every name with
     ``posixpath``, so on Windows ``C:\\d\\.json`` kept ``.json`` as its
     extension and went up as ``application/json`` where aws sends the name
@@ -663,49 +664,24 @@ def _guess_content_type(path: str) -> str | None:
     later item retries and fails the same way, as aws's does.
     """
     try:
-        db = _mime_types()
-        parts = urlparse(path)
-        if parts.scheme and len(parts.scheme) > 1:
-            if parts.scheme == "data":
-                return _data_url_type(parts.path)
-            return _guess_file_type(db, parts.path, posixpath.splitext)
-        return _guess_file_type(db, os.path.splitdrive(path)[1], os.path.splitext)
+        return _guess_file_type(_mime_types(), os.path.splitdrive(path)[1])
     except UnicodeDecodeError:
         return None
 
 
-def _guess_file_type(
-    db: mimetypes.MimeTypes, path: str, splitext: Callable[[str], tuple[str, str]]
-) -> str | None:
+def _guess_file_type(db: mimetypes.MimeTypes, path: str) -> str | None:
     """CPython 3.14's ``MimeTypes._guess_file_type``, strict, the type alone.
 
     Multi-suffix aliases (``.tgz`` -> ``.tar.gz``) are looked up without
     regard to case, an encoding suffix (``.gz``) is peeled case-sensitively,
     and the type is looked up by the lowercased extension that remains.
     """
-    base, ext = splitext(path)
+    base, ext = os.path.splitext(path)
     while (ext_lower := ext.lower()) in db.suffix_map:
-        base, ext = splitext(base + db.suffix_map[ext_lower])
+        base, ext = os.path.splitext(base + db.suffix_map[ext_lower])
     if ext in db.encodings_map:
-        base, ext = splitext(base)
+        base, ext = os.path.splitext(base)
     return db.types_map[True].get(ext.lower())
-
-
-def _data_url_type(url: str) -> str | None:
-    """CPython 3.14's ``data:`` branch of ``guess_type`` over the URL's path.
-
-    ``data:[<mediatype>][;base64],<data>``: the media type before the first
-    ``;`` or ``,``, ``text/plain`` when it is absent or carries a parameter
-    with no type, and no answer at all when there is no ``,``.
-    """
-    comma = url.find(",")
-    if comma < 0:
-        return None
-    semi = url.find(";", 0, comma)
-    media_type = url[:semi] if semi >= 0 else url[:comma]
-    if "=" in media_type or "/" not in media_type:
-        return "text/plain"
-    return media_type
 
 
 def _crt_config_error_type() -> type[Exception] | None:
@@ -970,21 +946,34 @@ class Warner:
     def warned(self) -> int:
         return self._warned
 
-    def warn(self, body: str, *, key: str = "") -> None:
-        """Record a warning (aws-cli message body, no ``warning: `` prefix)."""
+    def warn(self, body: str, *, info: FileInfo | None = None) -> None:
+        """Record a warning (aws-cli message body, no ``warning: `` prefix).
+
+        ``info`` is the source entry the warning is about, when there is one
+        (a walk's ``on_warning`` names none): the record carries it as
+        ``src_info`` and takes its ``compare_key``.
+        """
         with self._lock:
             self._warned += 1
         if self._on_result is not None:
             self._on_result(
                 OpResult(
                     transfer_type=self._transfer_type,
-                    compare_key=key,
+                    compare_key=_advisory_key(info),
                     outcome=OpOutcome.WARNED,
                     error=Boto3S3Error(body, operation=self._operation),
+                    src_info=info,
                     src_storage=self._src_storage,
                     dest_storage=self._dest_storage,
                 )
             )
+
+
+def _advisory_key(info: FileInfo | None) -> str:
+    """An advisory record's ``compare_key``: its entry's, or ``""`` without one."""
+    if info is None or info.compare_key is None:
+        return ""
+    return info.compare_key
 
 
 class Transferrer:
@@ -1014,17 +1003,16 @@ class Transferrer:
     s3transfer's own size probe. ``src_storage`` / ``dest_storage`` are the run's
     two resolved side ``Storage`` objects (``plan.src`` / ``plan.dest``), retained
     so a completion can resolve or report either endpoint alongside its listing
-    entries. ``src_storage`` doubles as ``mv``'s upload-source delete handle: an
-    upload source - a local file or a custom backend - is removed through its
-    ``Storage.delete``, while a download / copy S3 source is removed with a
-    DeleteObject instead (so the handle is consulted only on the upload route).
+    entries.
 
     ``is_move`` turns the run into ``mv``: every record reports
     ``TransferType.MOVE`` while ``transfer_type`` keeps routing the bytes (aws-cli
     ``operation_name`` vs ``transfer_type='move'``), and each successful
-    transfer deletes its source - ``Storage.delete`` for an upload (local or
-    custom backend), a per-object DeleteObject on the owning side's client
-    otherwise.
+    transfer deletes its source through the backend its listing entry came
+    from, ``item.src_info.storage.delete(item.src_info)`` - a local file or a
+    custom backend's entry on an upload, a DeleteObject on the source bucket's
+    client otherwise - so every ``mv`` item carries ``src_info`` with its
+    ``storage``.
     """
 
     def __init__(
@@ -1058,9 +1046,7 @@ class Transferrer:
         self._client = client
         self._source_client = source_client if source_client is not None else client
         # The run's two resolved side Storages (plan.src / plan.dest), retained so
-        # a completion can surface them with the listing entries; _src_storage is
-        # also mv's upload-source delete handle (consulted only on the upload
-        # route - a download / copy S3 source is removed with a DeleteObject).
+        # a completion can surface them with the listing entries.
         self._src_storage = src_storage
         self._dest_storage = dest_storage
         self._transfer_config = transfer_config
@@ -1421,15 +1407,15 @@ class Transferrer:
 
     # -- non-transfer outcomes ----------------------------------------------
 
-    def warn(self, body: str, *, key: str = "") -> None:
+    def warn(self, body: str, *, info: FileInfo | None = None) -> None:
         """Record a warning through the shared sink (``warner``).
 
         A transfer that succeeds but fails its mtime stamp produces both a
         SUCCEEDED and a WARNED record, and ``warned > 0`` alone maps to exit code
         2 (aws rc model). This engine's own warnings go here; a backend walk
-        reports directly through ``warner``.
+        reports directly through ``warner``. ``info`` is as for `Warner.warn`.
         """
-        self._warner.warn(body, key=key)
+        self._warner.warn(body, info=info)
 
     def skip(self, item: TransferItem) -> None:
         """Record a silent, non-warning skip (no exit-code effect)."""
@@ -1437,20 +1423,22 @@ class Transferrer:
             self._skipped += 1
         self._emit(self._result(item, OpOutcome.SKIPPED))
 
-    def notice(self, body: str, *, key: str = "") -> None:
+    def notice(self, body: str, *, info: FileInfo | None = None) -> None:
         """Emit display-only advisory text (no counts, no exit-code effect).
 
         aws prints the case-conflict messages straight to stderr, bypassing
         its result recorder - they look like warnings but never count as
         them. The full text (its ``warning: `` prefix included) rides on
-        ``OpResult.error``.
+        ``OpResult.error``; ``info`` is the source entry, carried as
+        ``src_info`` with its ``compare_key``.
         """
         self._emit(
             OpResult(
                 transfer_type=self._result_transfer_type,
-                compare_key=key,
+                compare_key=_advisory_key(info),
                 outcome=OpOutcome.NOTICE,
                 error=Boto3S3Error(body, operation=self._operation),
+                src_info=info,
                 src_storage=self._src_storage,
                 dest_storage=self._dest_storage,
             )
@@ -1617,28 +1605,27 @@ class Transferrer:
         if self._options.get("guess_mime_type", True) and "ContentType" not in extra_args:
             name = item.src_path or ""
             if not name and item.src_info is not None:
-                # An open-route item has no local path but its entry does have a
-                # filename: guess from the source key (the destination key for a
-                # single "" source - same basename). A stream item carries no
+                # An open-route item has no local path: guess from its
+                # compare_key, the name its S3 key derives from (the basename
+                # for a single source), or from the destination key when a
+                # single source's entry names nothing. A stream item carries no
                 # src_info and stays guess-free (no filename, aws parity) - its
                 # empty name never opens the store below, so an overlay the
                 # host cannot read is no concern of a stream upload, exactly as
                 # aws's stream submitter, which attaches no guessing subscriber.
-                name = item.src_info.key or item.dest_key or ""
+                name = item.compare_key or item.dest_key or ""
         if name:
             try:
                 guessed = _guess_content_type(name)
-            except (OSError, ValueError) as exc:
+            except OSError as exc:
                 # A host overlay the guess reads failed to load (a mime.types
-                # that exists but cannot be read, say), or urlparse refused
-                # the name (an unmatched `[` after a scheme-like prefix). aws
-                # guesses inside s3transfer's queued subscriber, so either
-                # error fails that item - `upload failed: ... [Errno 13]
-                # Permission denied: '/etc/mime.types'` - and the run goes
-                # on, a sync's deletes included; raised here it ended the run
-                # as one fatal error. Nothing was submitted, so the item's
-                # fileobj is released the way a submit-time failure releases
-                # it.
+                # that exists but cannot be read, say). aws guesses inside
+                # s3transfer's queued subscriber, so the error fails that
+                # item - `upload failed: ... [Errno 13] Permission denied:
+                # '/etc/mime.types'` - and the run goes on, a sync's deletes
+                # included; raised here it ended the run as one fatal error.
+                # Nothing was submitted, so the item's fileobj is released the
+                # way a submit-time failure releases it.
                 self._close_item_fileobjs(item)
                 self._record_failure(item, exc)
                 return None
@@ -1849,37 +1836,26 @@ class Transferrer:
     def _delete_source_subscriber(self, item: TransferItem) -> _DeleteSource:
         """The per-item source deletion for ``mv`` (aws-cli DeleteSource* trio).
 
-        An upload source - a local file or a custom (open-route) backend object -
-        is removed through its own ``Storage.delete(info)``, keyed by the source
-        listing entry (``src_info``); the delete maps the OS / backend error into
-        the library taxonomy, preserving the message aws prints (``move failed:
-        ... [Errno 13] ...``). S3 sources get a single DeleteObject - on the
-        manager's client for downloads, the source-side client for copies - with
-        ``RequestPayer`` forwarded like every other request.
+        The source is removed through its own backend's ``Storage.delete(info)``,
+        keyed by the source listing entry (``src_info``, whose ``storage`` is
+        the backend it came from): a local file or a custom (open-route)
+        backend object on an upload, a single DeleteObject on the source
+        bucket's client for a download or a copy, with ``RequestPayer``
+        forwarded like every other request. Each delete raises in the library
+        taxonomy with the source's own key - an OS error keeps the message aws
+        prints (``move failed: ... [Errno 13] ...``) - so the record never
+        attributes it to the destination that copied fine.
         """
-        if self._transfer_type is TransferType.UPLOAD:
-            src_storage = self._src_storage
-            info = item.src_info
-            assert src_storage is not None and info is not None
-            return _DeleteSource(lambda: src_storage.delete(info), capture=self._capture_response)
-        client: Any = (
-            self._client if self._transfer_type is TransferType.DOWNLOAD else self._source_client
-        )
-        bucket = item.src_bucket
-        key = item.src_key
-        params = requestparams.map_delete_object_params(self._options)
-
-        def delete_s3_source() -> Any:
-            # Pre-translate to the taxonomy carrying the *source* bucket/key, as
-            # S3Storage.delete and the upload path's Storage.delete already do -
-            # whatever the request raised, botocore's family or not.
-            # Otherwise _record_failure re-tags the raw exception with the copy
-            # destination (dest_bucket/dest_key), mis-attributing a source-delete
-            # failure to the object that copied fine.
-            with s3_request(operation=self._operation, bucket=bucket, key=key):
-                return client.delete_object(Bucket=bucket, Key=key, **params)
-
-        return _DeleteSource(delete_s3_source, capture=self._capture_response)
+        info = item.src_info
+        assert info is not None and info.storage is not None
+        storage = info.storage
+        if isinstance(storage, S3Storage):
+            request_payer = self._options.get("request_payer") or None
+            return _DeleteSource(
+                lambda: storage.delete(info, request_payer=request_payer),
+                capture=self._capture_response,
+            )
+        return _DeleteSource(lambda: storage.delete(info), capture=self._capture_response)
 
     def _copy_props_subscribers(self, item: TransferItem) -> tuple[list[Any], Any]:
         """Translate the selected copy-props mode into ordered request subscribers."""
@@ -2304,7 +2280,7 @@ class Transferrer:
             self.warn(
                 f"Skipping file {item.dest_path}. Successfully Downloaded {item.dest_path} "
                 f"but was unable to update the last modified time. {exc}",
-                key=item.compare_key,
+                info=item.src_info,
             )
 
 
@@ -3613,6 +3589,4 @@ __all__ = [
     "TransferItem",
     "Transferrer",
     "Warner",
-    "annotations_copy_unsupported_reason",
-    "conditional_write_unsupported_reason",
 ]

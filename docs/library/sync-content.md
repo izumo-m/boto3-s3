@@ -67,7 +67,7 @@ section 5.
 ## 3. `ChecksumComparison`
 
 ```python
-s3.sync(src, dest, update_filter=ChecksumComparison(s3, src, dest))
+s3.sync(src, dest, update_filter=ChecksumComparison())
 ```
 
 It asks S3 for the checksum it already stores and recomputes the same algorithm
@@ -77,9 +77,9 @@ for multipart objects the exact part boundaries come back from S3 — nothing is
 guessed. An SSE-C object is the exception: reading its checksum needs the
 customer key, which the strategy never sends, so it is copied every run.
 
-Pass the same `src` and `dest` you passed to `sync`. It needs them to reach each
-S3 side's client and bucket, which a `FileInfo` alone does not carry. For a
-cross-account S3-to-S3 sync, pass the same `S3Storage` objects.
+Each S3 side is reached through the `S3Storage` that side was listed through,
+so a cross-account S3-to-S3 sync needs nothing more than the two `S3Storage`
+objects passed to `sync`.
 
 **Cost.** One `GetObjectAttributes` per object consulted — the S3 side on upload
 and download, both sides on S3-to-S3 — plus the local hash. Section 4 makes
@@ -118,7 +118,7 @@ from boto3_s3 import ParallelFilter
 with ThreadPoolExecutor(16, thread_name_prefix="sync-cmp") as pool:
     s3.sync(
         src, dest,
-        update_filter=ParallelFilter(ChecksumComparison(s3, src, dest), executor=pool),
+        update_filter=ParallelFilter(ChecksumComparison(), executor=pool),
         delete_filter=ParallelFilter(is_expired, executor=pool),
     )
 ```

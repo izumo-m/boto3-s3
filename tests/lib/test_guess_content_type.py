@@ -81,11 +81,11 @@ class _NtPathOs:
 class TestAlgorithmPin:
     """The guess runs CPython 3.14's algorithm whatever interpreter hosts it.
 
-    aws's bundled 3.14 splits a file path with the host's ``os.path`` and only
-    a scheme-prefixed name with ``posixpath``; interpreters before 3.13 split
-    every name with ``posixpath``, so on Windows a name that is all extension
-    (``C:\\d\\.json``) kept ``.json`` and went up typed where aws sends it
-    untyped (measured against aws.exe under Python 3.10, 8 of 12 names).
+    aws's bundled 3.14 splits a file path with the host's ``os.path``;
+    interpreters before 3.13 split every name with ``posixpath``, so on
+    Windows a name that is all extension (``C:\\d\\.json``) kept ``.json``
+    and went up typed where aws sends it untyped (measured against aws.exe
+    under Python 3.10, 8 of 12 names).
     """
 
     @pytest.fixture(autouse=True)
@@ -119,17 +119,11 @@ class TestAlgorithmPin:
     @pytest.mark.parametrize(
         ("name", "expected"),
         [
-            # A scheme-like prefix: the URL branch, split with posixpath.
+            # A scheme-like prefix is part of the file name: there is no URL branch.
             ("notes:a.txt", "text/plain"),
-            ("http://h/p.png?x=1", "image/png"),
-            ("http://h/p.png#frag", "image/png"),
-            # One character is a drive letter, not a scheme: the file branch.
+            ("http://h/p.png?x=1", None),
+            # One character is a drive letter, removed before the split.
             ("c:a.txt", "text/plain"),
-            # data: URLs answer their media type.
-            ("data:image/png;base64,xx", "image/png"),
-            ("data:text/plain;charset=utf-8,abc", "text/plain"),
-            ("data:,abc", "text/plain"),
-            ("data:nocomma", None),
             # Plain paths, extension case, aliases and encodings.
             ("/tmp/a.b/c", None),
             ("f.JPG", "image/jpeg"),
@@ -141,46 +135,10 @@ class TestAlgorithmPin:
             ("", None),
         ],
     )
-    def test_the_url_and_path_branches(self, name: str, expected: str | None) -> None:
+    def test_the_file_branch(self, name: str, expected: str | None) -> None:
         assert _guess_content_type(name) == expected
 
-    def test_a_name_urlparse_refuses_fails_the_item(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # 3.14's guess_type parses the name as a URL first, and urlparse
-        # refuses an unmatched bracket after a scheme-like prefix with
-        # ValueError. A local path never starts that way, but an open-route
-        # key can; inside aws's queued subscriber that is the item's failure,
-        # so it is here too, not the run's.
-        from boto3_s3 import S3, BatchError, OpResult, S3Storage
-        from boto3_s3.transferconfig import TransferConfig
-        from tests.utils.recorder import make_recording_client
-
-        with pytest.raises(ValueError):
-            _guess_content_type("scheme://[unmatched/a.txt")
-        refused = ValueError("Invalid IPv6 URL")
-        monkeypatch.setattr(
-            transfer, "_guess_content_type", lambda _name: (_ for _ in ()).throw(refused)
-        )
-        src = tmp_path / "src"
-        src.mkdir()
-        (src / "a.txt").write_text("a")
-        client, _ = make_recording_client([])
-        results: list[OpResult] = []
-        with pytest.raises(BatchError):
-            S3().cp(
-                str(src),
-                S3Storage("s3://b/p/", client=client),
-                recursive=True,
-                transfer_config=TransferConfig(use_threads=False),
-                on_result=results.append,
-            )
-        assert len(results) == 1 and results[0].error is not None
-        assert str(results[0].error) == "Invalid IPv6 URL"
-
-    @pytest.mark.skipif(
-        sys.version_info < (3, 13), reason="the host's guess_type is the older algorithm"
-    )
+    @pytest.mark.skipif(sys.version_info < (3, 13), reason="guess_file_type is new in 3.13")
     @pytest.mark.parametrize(
         "name",
         [
@@ -206,8 +164,10 @@ class TestAlgorithmPin:
         ],
     )
     def test_matches_the_host_interpreter_from_3_13(self, name: str) -> None:
-        # From 3.13 the stdlib runs the same algorithm, so it is the oracle.
-        assert _guess_content_type(name) == transfer._mime_types().guess_type(name)[0]
+        # From 3.13 the stdlib's guess_file_type runs the same algorithm, so it
+        # is the oracle.
+        db: Any = transfer._mime_types()
+        assert _guess_content_type(name) == db.guess_file_type(name)[0]
 
 
 class TestUnreadableOverlay:

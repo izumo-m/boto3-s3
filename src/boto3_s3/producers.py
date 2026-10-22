@@ -187,7 +187,12 @@ def _warn_absent_local_source(src: Storage, transferrer: Transferrer) -> None:
         transferrer.warner.warn(f"Skipping file {path}. File does not exist.")
 
 
-def _s3_source_display(plan: transferplan.TransferPlan, src_bucket: str, info: FileInfo) -> str:
+def _source_bucket(info: FileInfo) -> str:
+    """The bucket of an S3 source entry: that of the ``S3Storage`` it was listed from."""
+    return cast("S3Storage", info.storage).bucket
+
+
+def _s3_source_display(plan: transferplan.TransferPlan, info: FileInfo) -> str:
     """The ``s3://`` string a download / copy item reports as its source.
 
     aws-cli's two shapes: a listed entry is ``bucket/key`` joined with ``/``
@@ -197,7 +202,7 @@ def _s3_source_display(plan: transferplan.TransferPlan, src_bucket: str, info: F
     the bucket by something other than ``/`` (``S3Storage.format``).
     """
     if plan.dir_op:
-        return f"s3://{src_bucket}/{info.key}"
+        return f"s3://{_source_bucket(info)}/{info.key}"
     return f"s3://{plan.src_root}"
 
 
@@ -289,7 +294,7 @@ def _glacier_gate(
             )
         )
     else:
-        transferrer.warner.warn(_glacier_warning(src_display, transfer_type), key=compare_key)
+        transferrer.warner.warn(_glacier_warning(src_display, transfer_type), info=info)
     return True
 
 
@@ -385,7 +390,7 @@ class CaseConflictGate:
             transferrer.notice(
                 f"warning: Skipping {src} -> {dest} because a file whose name "
                 "differs only by case either exists or is being downloaded.",
-                key=item.compare_key,
+                info=item.src_info,
             )
             return True
         if self._mode is CaseConflictMode.WARN:
@@ -396,7 +401,7 @@ class CaseConflictGate:
                 "filesystems and may result in overwriting existing files or "
                 "race conditions between concurrent downloads. For more "
                 f"information, see {self._DOC_URI}.",
-                key=item.compare_key,
+                info=item.src_info,
             )
             return self._admit(item, lowered)
         # A precondition violation (the destination filesystem cannot hold
@@ -474,7 +479,7 @@ def upload_item_from_info(
         transferrer.warner.warn(
             f"File {LocalStorage.relative_path(native)} exceeds s3 upload limit of "
             f"{_MAX_UPLOAD_SIZE_TEXT}.",
-            key=compare_key,
+            info=info,
         )
     return TransferItem(
         compare_key=compare_key,
@@ -548,21 +553,11 @@ def s3_source_items(
     for info in infos:
         if transfer_type is TransferType.DOWNLOAD:
             item = download_item_from_info(
-                plan,
-                info,
-                src_bucket=src_bucket,
-                transferrer=transferrer,
-                options=options,
-                case_gate=case_gate,
+                plan, info, transferrer=transferrer, options=options, case_gate=case_gate
             )
         else:
             item = copy_item_from_info(
-                plan,
-                info,
-                src_bucket=src_bucket,
-                dest_bucket=dest_bucket,
-                transferrer=transferrer,
-                options=options,
+                plan, info, dest_bucket=dest_bucket, transferrer=transferrer, options=options
             )
         if item is not None:
             yield item
@@ -685,7 +680,6 @@ def download_item_from_info(
     plan: transferplan.TransferPlan,
     info: FileInfo,
     *,
-    src_bucket: str,
     transferrer: Transferrer,
     options: TransferOptions,
     case_gate: CaseConflictGate | None,
@@ -694,7 +688,7 @@ def download_item_from_info(
     consumed it (the gate emits its own warn/skip/notice record)."""
     compare_key = _compare_key(info)
     dest = transferplan.dest_for(plan, compare_key)
-    src_display = _s3_source_display(plan, src_bucket, info)
+    src_display = _s3_source_display(plan, info)
     is_s3_info = isinstance(info, S3FileInfo)
     item = TransferItem(
         compare_key=compare_key,
@@ -702,7 +696,7 @@ def download_item_from_info(
         etag=info.etag if is_s3_info else None,
         mtime=info.mtime,
         head=info.head if is_s3_info else None,
-        src_bucket=src_bucket,
+        src_bucket=_source_bucket(info),
         src_key=info.key,
         src_info=info,
         dest_path=dest,
@@ -729,7 +723,7 @@ def download_item_from_info(
     if os.path.normpath("." + os.sep + compare_key).startswith(".." + os.sep):
         transferrer.warner.warn(
             f"Skipping file {compare_key}. File references a parent directory.",
-            key=compare_key,
+            info=info,
         )
         return None
     if options.get("no_overwrite") and os.path.exists(dest):
@@ -744,7 +738,6 @@ def copy_item_from_info(
     plan: transferplan.TransferPlan,
     info: FileInfo,
     *,
-    src_bucket: str,
     dest_bucket: str,
     transferrer: Transferrer,
     options: TransferOptions,
@@ -753,7 +746,7 @@ def copy_item_from_info(
     glacier gate consumed it."""
     compare_key = _compare_key(info)
     dest = transferplan.dest_for(plan, compare_key)
-    src_display = _s3_source_display(plan, src_bucket, info)
+    src_display = _s3_source_display(plan, info)
     is_s3_info = isinstance(info, S3FileInfo)
     if _glacier_gate(
         info,
@@ -770,7 +763,7 @@ def copy_item_from_info(
         etag=info.etag if is_s3_info else None,
         mtime=info.mtime,
         head=info.head if is_s3_info else None,
-        src_bucket=src_bucket,
+        src_bucket=_source_bucket(info),
         src_key=info.key,
         src_info=info,
         dest_bucket=dest_bucket,
@@ -1132,7 +1125,7 @@ def open_upload_item(
         transferrer.warner.warn(
             f"File {open_side_display(plan.src, open_key)} exceeds s3 upload limit of "
             f"{_MAX_UPLOAD_SIZE_TEXT}.",
-            key=compare_key,
+            info=info,
         )
     return TransferItem(
         compare_key=compare_key,
@@ -1220,12 +1213,7 @@ def open_download_items(
             infos = _filter_single_s3_source(infos, item_filter)
     for info in infos:
         item = open_download_item(
-            plan,
-            info,
-            src_bucket=src_bucket,
-            transferrer=transferrer,
-            options=options,
-            dryrun=dryrun,
+            plan, info, transferrer=transferrer, options=options, dryrun=dryrun
         )
         if item is not None:
             yield item
@@ -1235,7 +1223,6 @@ def open_download_item(
     plan: transferplan.TransferPlan,
     info: FileInfo,
     *,
-    src_bucket: str,
     transferrer: Transferrer,
     options: TransferOptions,
     dryrun: bool,
@@ -1250,7 +1237,7 @@ def open_download_item(
     """
     compare_key = _compare_key(info)
     open_key = transferplan.dest_for(plan, compare_key)
-    src_display = _s3_source_display(plan, src_bucket, info)
+    src_display = _s3_source_display(plan, info)
     is_s3_info = isinstance(info, S3FileInfo)
     if _glacier_gate(
         info,
@@ -1267,7 +1254,7 @@ def open_download_item(
         etag=info.etag if is_s3_info else None,
         mtime=info.mtime,
         head=info.head if is_s3_info else None,
-        src_bucket=src_bucket,
+        src_bucket=_source_bucket(info),
         src_key=info.key,
         src_info=info,
         dest_fileobj=None if dryrun else _DeferredWriter(plan.dest, open_key, info.size),
@@ -1441,7 +1428,6 @@ def sync_transfer_item(
     pair: SrcOnlyPair | SyncPair,
     *,
     transfer_type: TransferType,
-    src_bucket: str,
     dest_bucket: str,
     transferrer: Transferrer,
     options: TransferOptions,
@@ -1461,12 +1447,7 @@ def sync_transfer_item(
         )
     elif plan.paths_type == "s3open":
         item = open_download_item(
-            plan,
-            info,
-            src_bucket=src_bucket,
-            transferrer=transferrer,
-            options=options,
-            dryrun=dryrun,
+            plan, info, transferrer=transferrer, options=options, dryrun=dryrun
         )
     elif transfer_type is TransferType.UPLOAD:
         item = upload_item_from_info(plan, info, dest_bucket=dest_bucket, transferrer=transferrer)
@@ -1476,21 +1457,11 @@ def sync_transfer_item(
         # never conflicts.
         gate = case_gate if isinstance(pair, SrcOnlyPair) else None
         item = download_item_from_info(
-            plan,
-            info,
-            src_bucket=src_bucket,
-            transferrer=transferrer,
-            options=options,
-            case_gate=gate,
+            plan, info, transferrer=transferrer, options=options, case_gate=gate
         )
     else:
         item = copy_item_from_info(
-            plan,
-            info,
-            src_bucket=src_bucket,
-            dest_bucket=dest_bucket,
-            transferrer=transferrer,
-            options=options,
+            plan, info, dest_bucket=dest_bucket, transferrer=transferrer, options=options
         )
     # Stamp the comparison's destination entry (None for a new key) so a
     # completion can report both sides of the sync pair. A gate that consumed

@@ -1349,15 +1349,16 @@ class S3Storage(Storage):
         is an S3-specific knob added on top of the cross-backend
         ``Storage.delete`` signature. Returns the ``DeleteObject`` response, which
         ``rm``'s blind single-key path surfaces under ``extra_info["delete"]`` for
-        ``capture_response`` (``mv`` and the batched ``rm`` / ``sync`` lanes issue
-        their own delete calls, not this method).
+        ``capture_response``; ``mv``'s source delete uses it too. The batched
+        ``rm`` / ``sync`` lanes, ``rm``'s single key on the CRT engine and the
+        copy-props rollback send their own deletes.
         """
         kwargs: dict[str, Any] = {"Bucket": self._bucket, "Key": info.key}
         if request_payer is not None:
             kwargs["RequestPayer"] = request_payer
-        # operation=None, like open: rm's single-key path, a sync's orphan
-        # removal and an mv's source delete all reach this, and each stamps
-        # its own name on the way out (attribute_failure).
+        # operation=None, like open: rm's single-key path and an mv's source
+        # delete both reach this, and each stamps its own name on the way out
+        # (attribute_failure).
         with s3_request(operation=None, bucket=self._bucket, key=info.key):
             return self.get_client().delete_object(**kwargs)
 
