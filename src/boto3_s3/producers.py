@@ -29,12 +29,8 @@ from boto3_s3 import requestparams, transferplan
 from boto3_s3.comparator import SrcOnlyPair, SyncPair
 from boto3_s3.exceptions import Boto3S3Error, NotFoundError, ValidationError
 from boto3_s3.localstorage import LocalStorage, to_native_path
-from boto3_s3.s3storage import (
-    S3Storage,
-    attribute_failure,
-    object_info,
-    s3_request,
-)
+from boto3_s3.s3storage import S3Storage, object_info
+from boto3_s3.sdkerrors import attribute_failure, s3_request
 from boto3_s3.storage import Storage, StorageCapability
 from boto3_s3.transfer import TransferItem, Transferrer, option_mode
 from boto3_s3.types import (

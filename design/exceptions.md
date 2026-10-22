@@ -124,7 +124,7 @@ listings - whose raise sites leave it unset because the storage cannot know
 which operation is using it (the object listing backs `ls` / `rm` / `cp` /
 `mv` / `sync` alike, so a name stamped there would mislabel four of them); an
 operation making the same call stamps its own name, since only the operation
-layer knows it (the single rule `s3storage.attribute_failure` applies for
+layer knows it (the single rule `sdkerrors.attribute_failure` applies for
 every capture, so a `DeleteObject` denied under `rm` reads `"rm"` on the blind
 single-key path and the batched path alike, and each operation wraps the pull
 of its enumeration, so a listing failure reads the name of the run that was
@@ -168,7 +168,7 @@ taxonomy ([`storage.md`](./storage.md) section 2).
 | a local path the OS calls refuse before the filesystem is asked (an embedded NUL's `ValueError`, a lone surrogate's `UnicodeEncodeError`) | `ValidationError` |
 | connection failure / timeout / a body ending short of its `Content-Length` (botocore's `IncompleteReadError` under urllib3 1.x, a broken stream under urllib3 2; both measured, 1.x at the SDK floor and on a current SDK; on the classic engine's download, s3transfer retries the read and raises `RetriesExceededError`, "Max Retries Exceeded", once its attempts run out); a local-I/O `OSError` caught on boto3-s3's own paths (incl. a failed `makedirs`) | `TransportError` |
 | a transfer item's local file failing inside either engine - s3transfer's `OSError` (aws's message survives verbatim, e.g. `[Errno 21] Is a directory`), awscrt's `AWS_ERROR_NO_PERMISSION` / `AWS_ERROR_FILE_INVALID_PATH` / `AWS_ERROR_FILE_*_FAILURE` / `AWS_ERROR_NO_SPACE` (`transfer.Transferrer._local_failure`) | the local rows above, naming the file in `key` with no `bucket` |
-| a CRT engine network or server failure, by awscrt's error name (`s3storage.crt_error_name`: an `AwsCrtError`'s, or the `RuntimeError` `<code> (<name>): ...` a request awscrt refuses synchronously raises): `AWS_IO_SOCKET_*` / `AWS_IO_DNS_*` / `AWS_IO_TLS_*`, a closed connection, a first-byte timeout, S3's `SlowDown` / internal error the CRT client gave up retrying | `TransportError` |
+| a CRT engine network or server failure, by awscrt's error name (`sdkerrors.crt_error_name`: an `AwsCrtError`'s, or the `RuntimeError` `<code> (<name>): ...` a request awscrt refuses synchronously raises): `AWS_IO_SOCKET_*` / `AWS_IO_DNS_*` / `AWS_IO_TLS_*`, a closed connection, a first-byte timeout, S3's `SlowDown` / internal error the CRT client gave up retrying | `TransportError` |
 | `NoCredentialsError` / `NoRegionError` | `ConfigurationError` |
 | `MissingDependencyException` from a request/signing path (awscrt absent where SigV4a is required - an MRAP target) | `ConfigurationError` |
 | `ProfileNotFound` / `PartialCredentialsError` / botocore's own `InvalidConfigError` family (the library translator's list; the CLI's client factory goes further and maps every other construction-time `BotoCoreError` here too, while the library's general translator keeps unlisted ones at the base) | `InvalidConfigError` |
@@ -198,7 +198,7 @@ never shuts an engine down from the callback's worker thread.
 
 Local `OSError`s are converted by one shared translator
 (`localstorage.translate_os_error`, the local mirror of
-`s3storage.translate_boto_error`; the transfer engine hands it the `OSError`s
+`sdkerrors.translate_boto_error`; the transfer engine hands it the `OSError`s
 of an item's local file): `FileNotFoundError` -> `NotFoundError`,
 `PermissionError` -> `AccessDeniedError`, everything else -> `TransportError`,
 and a path the OS calls refuse (`ValueError`) -> `ValidationError`.
@@ -212,7 +212,7 @@ warning envelope. The category the re-wording built is therefore never
 observable.
 
 An S3 `ClientError` code is matched first against `S3_CODE_CATEGORIES`
-(`s3storage.py`); a code not in the table falls back to HTTP-status widening:
+(`sdkerrors.py`); a code not in the table falls back to HTTP-status widening:
 403 -> `AccessDeniedError`, 404 -> `NotFoundError`, 5xx -> `TransportError`,
 other 4xx -> `ValidationError`, otherwise the base `Boto3S3Error`. The error
 *translation* creates a direct base instance in only three places:
@@ -224,9 +224,9 @@ other 4xx -> `ValidationError`, otherwise the base `Boto3S3Error`. The error
   provider's: a missing `credential_process` executable or web identity token
   file - not the object's absence, so never `NotFoundError`), and whatever
   else a request raised from inside botocore outside botocore's own family
-  (`s3storage.request_failure`). Every request point applies
+  (`sdkerrors.request_failure`). Every request point applies
   it - the per-item captures, the single-call operations, and the storage's
-  own requests through `s3storage.s3_request` (the listing page by page, the
+  own requests through `sdkerrors.s3_request` (the listing page by page, the
   single-object HEAD, `open` / `delete` / `get_file` / `put_file`) - so a
   failed request is a family error whatever botocore died of, with
   `AssertionError` alone passing through. The capture wraps the request
@@ -338,7 +338,7 @@ class BatchError(Boto3S3Error):
   request raised from inside botocore (a refreshing `credential_process`
   whose program is gone) as the base `Boto3S3Error` carrying the original on
   `__cause__` - the same capture as a per-item failure
-  (`s3storage.request_failure`), with `AssertionError` alone passing through.
+  (`sdkerrors.request_failure`), with `AssertionError` alone passing through.
   Note that an error before item
   processing begins - such as a failure of the enumeration (scan) itself, or
   `cp`'s missing-source check - **propagates as the category exception**, the

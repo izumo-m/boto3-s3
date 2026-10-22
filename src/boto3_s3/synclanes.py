@@ -34,7 +34,8 @@ from boto3_s3.comparator import (
 from boto3_s3.deleter import S3Deleter, delete_record
 from boto3_s3.exceptions import Boto3S3Error, CancelledError, ValidationError
 from boto3_s3.localstorage import LocalStorage, to_native_path
-from boto3_s3.s3storage import S3Storage, request_failure
+from boto3_s3.s3storage import S3Storage
+from boto3_s3.sdkerrors import request_failure
 from boto3_s3.storage import Storage
 from boto3_s3.types import (
     CancelMode,

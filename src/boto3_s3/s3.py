@@ -70,13 +70,15 @@ from boto3_s3.localstorage import (
 from boto3_s3.s3storage import (
     CA_BUNDLE_ENVIRONMENT_VETTED,
     S3Storage,
+    reject_empty_ca_bundle,
+    s3express_unsupported_reason,
+)
+from boto3_s3.sdkerrors import (
     attribute_failure,
     client_build_error,
-    reject_empty_ca_bundle,
     request_failure,
     s3_errors,
     s3_request,
-    s3express_unsupported_reason,
 )
 from boto3_s3.storage import Location, Storage
 from boto3_s3.synclanes import (

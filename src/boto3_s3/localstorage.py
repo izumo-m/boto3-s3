@@ -1410,7 +1410,7 @@ def translate_os_error(
     message: str | None = None,
 ) -> Boto3S3Error:
     """Map an ``OSError`` to the library taxonomy (the local mirror of
-    ``s3storage.translate_boto_error``): missing path -> ``NotFoundError``,
+    ``sdkerrors.translate_boto_error``): missing path -> ``NotFoundError``,
     permission -> ``AccessDeniedError``, everything else -> ``TransportError``.
     A ``ValueError`` is a path the OS calls refuse before asking the
     filesystem - an embedded NUL, a lone surrogate the filesystem encoding

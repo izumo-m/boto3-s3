@@ -247,7 +247,7 @@ def _fetch_remote(
     """
     from botocore.exceptions import BotoCoreError, ClientError
 
-    from boto3_s3.s3storage import translate_boto_error
+    from boto3_s3.sdkerrors import translate_boto_error
 
     extra: dict[str, Any] = {"RequestPayer": request_payer} if request_payer else {}
     try:
@@ -306,13 +306,13 @@ def _get_object_attributes(client: Any, **kwargs: Any) -> Any:
     is gone (``FileNotFoundError``) - is this request failing all the same,
     and becomes the base ``Boto3S3Error`` with the original as
     ``__cause__``, the shape every other request point gives it
-    (`s3storage.request_failure`). ``AssertionError`` passes: an invariant or
+    (`sdkerrors.request_failure`). ``AssertionError`` passes: an invariant or
     a test double's guard, never a request outcome.
     """
     from botocore.exceptions import BotoCoreError, ClientError
 
     from boto3_s3.exceptions import Boto3S3Error
-    from boto3_s3.s3storage import request_failure
+    from boto3_s3.sdkerrors import request_failure
 
     try:
         return client.get_object_attributes(**kwargs)

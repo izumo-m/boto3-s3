@@ -53,12 +53,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 from boto3_s3 import crtsupport
 from boto3_s3.exceptions import Boto3S3Error, TransportError, ValidationError
-from boto3_s3.s3storage import (
-    S3_CODE_CATEGORIES,
-    S3Storage,
-    request_failure,
-    s3_errors,
-)
+from boto3_s3.s3storage import S3Storage
+from boto3_s3.sdkerrors import S3_CODE_CATEGORIES, request_failure, s3_errors
 from boto3_s3.types import (
     CancelMode,
     CancelToken,

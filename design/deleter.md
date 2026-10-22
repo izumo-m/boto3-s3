@@ -159,7 +159,7 @@ versioned bucket) cannot be mapped back to submission order.
 
 - **per-key failure** (an `Errors[]` entry): the `Code` is translated into the
   taxonomy. The mapping table is **shared** with the request-level path
-  (`s3storage.S3_CODE_CATEGORIES`; both paths produce the same classification).
+  (`sdkerrors.S3_CODE_CATEGORIES`; both paths produce the same classification).
 
   | Code | Exception |
   |---|---|
@@ -220,7 +220,7 @@ versioned bucket) cannot be mapped back to submission order.
   request's keys go out again on their own (above), and a `DeleteObject`'s
   key is recorded as failed - as a plain `Boto3S3Error` whose message is the exception's
   `str()` and whose `__cause__` is the exception
-  (`s3storage.request_failure`, which `S3.rm`'s blind single-key delete
+  (`sdkerrors.request_failure`, which `S3.rm`'s blind single-key delete
   applies too). This is aws-cli's shape: its per-key `DeleteObject` runs as an
   s3transfer task, which records whatever the request raises as that key's
   failure, so the CLI's line reads `delete failed: s3://b/k 'Credentials'` on

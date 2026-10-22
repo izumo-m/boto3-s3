@@ -287,7 +287,8 @@ class S3PathResolver:
 
     def __init__(self, *, s3control_client: Any, sts_client: Any) -> None:
         # Deferred import: keeps this module SDK-free at import time.
-        from boto3_s3.s3storage import reject_empty_ca_bundle, s3_errors
+        from boto3_s3.s3storage import reject_empty_ca_bundle
+        from boto3_s3.sdkerrors import s3_errors
 
         with s3_errors(operation="mv"):
             reject_empty_ca_bundle(s3control_client, check_environment=True)
@@ -391,7 +392,7 @@ class S3PathResolver:
     def _request() -> Any:
         """Report whatever one s3control / sts request raised as a ``Boto3S3Error``.
 
-        `s3storage.s3_request`, keeping ``__cause__``: aws lets the raw
+        `sdkerrors.s3_request`, keeping ``__cause__``: aws lets the raw
         ClientError escape to its generic 254 handler (a failing
         GetCallerIdentity exits 254), and anything else botocore raises inside
         the request - a refreshing ``credential_process`` whose program is
@@ -402,7 +403,7 @@ class S3PathResolver:
         import time (the path split already lazily loads ``s3storage`` the
         same way, so by resolution time it is warm).
         """
-        from boto3_s3.s3storage import s3_request
+        from boto3_s3.sdkerrors import s3_request
 
         return s3_request(operation="mv")
 

@@ -54,6 +54,7 @@ from boto3_s3 import (
     TransportError,
     ValidationError,
     s3storage,
+    sdkerrors,
 )
 from boto3_s3.storage import sieve_pages
 from tests.utils.fakes3 import MTIME, client_error, listing
@@ -1016,7 +1017,7 @@ class TestTranslateEngineFailures:
         ],
     )
     def test_a_crt_network_or_server_failure_is_transport(self, exc: BaseException) -> None:
-        error = s3storage.translate_boto_error(exc, operation="cp", bucket="b", key="k")
+        error = sdkerrors.translate_boto_error(exc, operation="cp", bucket="b", key="k")
         assert type(error) is TransportError
         assert str(error) == str(exc)
         assert (error.bucket, error.key) == ("b", "k")
@@ -1036,18 +1037,18 @@ class TestTranslateEngineFailures:
         ],
     )
     def test_everything_else_stays_at_the_base(self, exc: BaseException) -> None:
-        error = s3storage.translate_boto_error(exc, operation="cp", bucket="b", key="k")
+        error = sdkerrors.translate_boto_error(exc, operation="cp", bucket="b", key="k")
         assert type(error) is Boto3S3Error
         assert str(error) == str(exc)
 
     def test_crt_error_name_reads_both_shapes(self) -> None:
-        assert s3storage.crt_error_name(_FakeCrtError("AWS_ERROR_NO_SPACE")) == "AWS_ERROR_NO_SPACE"
+        assert sdkerrors.crt_error_name(_FakeCrtError("AWS_ERROR_NO_SPACE")) == "AWS_ERROR_NO_SPACE"
         assert (
-            s3storage.crt_error_name(RuntimeError("43 (AWS_ERROR_NO_PERMISSION): text"))
+            sdkerrors.crt_error_name(RuntimeError("43 (AWS_ERROR_NO_PERMISSION): text"))
             == "AWS_ERROR_NO_PERMISSION"
         )
-        assert s3storage.crt_error_name(RuntimeError("plain")) is None
-        assert s3storage.crt_error_name(ImportError("x", name="mod")) is None
+        assert sdkerrors.crt_error_name(RuntimeError("plain")) is None
+        assert sdkerrors.crt_error_name(ImportError("x", name="mod")) is None
 
     def test_a_request_s_os_error_is_not_an_absence(self) -> None:
         # A HeadObject that dies on a credential provider's FileNotFoundError

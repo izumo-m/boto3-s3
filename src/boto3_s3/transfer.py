@@ -101,12 +101,11 @@ from boto3_s3.exceptions import (
     ValidationError,
 )
 from boto3_s3.localstorage import LocalStorage, name_files_as_text, translate_os_error
-from boto3_s3.s3storage import (
-    S3Storage,
+from boto3_s3.s3storage import S3Storage, request_pages
+from boto3_s3.sdkerrors import (
     attribute_failure,
     client_build_error,
     crt_error_name,
-    request_pages,
     s3_errors,
     s3_request,
     translate_boto_error,

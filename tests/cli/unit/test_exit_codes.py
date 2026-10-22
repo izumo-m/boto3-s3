@@ -129,7 +129,7 @@ class _RaisingClient:
     The real paginator's ``paginate()`` only builds the iterator; the failure
     surfaces on the first page fetch, so the fake raises from ``next()``,
     not from ``paginate()`` itself. Any botocore error works, so the library's
-    own translation (``s3storage.s3_errors``) runs for real.
+    own translation (``sdkerrors.s3_errors``) runs for real.
     """
 
     def __init__(self, error: BaseException) -> None:

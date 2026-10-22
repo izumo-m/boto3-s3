@@ -152,7 +152,7 @@ def _configuration_report(exc: BaseException) -> tuple[str, str] | None:
     implement.
 
     The botocore pair is identified by the exception the library or the client
-    builders keep as `__cause__` (`s3storage.s3_errors`, `clientfactory`), or
+    builders keep as `__cause__` (`sdkerrors.s3_errors`, `clientfactory`), or
     by the exception itself where one escaped untranslated, never by matching
     the message text. Returns `None` for every other rc-253 failure: those
     are this CLI's own (an absent awscrt, an SDK floor shortfall), aws cannot
@@ -543,7 +543,7 @@ def exit_code_for(exc: Boto3S3Error) -> int:
     """Map a library error to the aws-cli v2 exit code (design/cli.md section 6).
 
     Server-rejected calls carry the botocore ``ClientError`` as ``__cause__``
-    (``boto3_s3.s3storage.s3_errors``) and exit 254 like aws-cli regardless of
+    (``boto3_s3.sdkerrors.s3_errors``) and exit 254 like aws-cli regardless of
     the library category - aws-cli treats every error that reached the server
     as a client error, even ones our taxonomy files under ``ValidationError``.
     ``InvalidValueError`` / ``InvalidConfigError`` refine their parents back to

@@ -19,7 +19,7 @@ class Boto3S3Error(Exception):
     handed to ``Transferrer`` directly) passes botocore's
     ``MissingDependencyException`` through boto3-faithfully. Direct
     instances appear only where no classification exists: the error
-    translators' last-resort fallbacks (``s3storage.translate_boto_error``,
+    translators' last-resort fallbacks (``sdkerrors.translate_boto_error``,
     the deleter's per-key unknown-code entries, the transfer engine's
     unclassified task exceptions) and the message envelope on
     WARNED / NOTICE ``OpResult`` records.
