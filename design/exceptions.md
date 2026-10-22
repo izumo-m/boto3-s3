@@ -237,7 +237,7 @@ other 4xx -> `ValidationError`, otherwise the base `Boto3S3Error`. The error
 
 Two kinds of direct-base site remain outside the translation: the security
 guards' failures (section 3.1), and the message envelope on WARNED / NOTICE
-`OpResult` records (`Warner.warn` / `Transferrer.notice` in `transfer.py` -
+`OpResult` records (`Warner.warn` / `Warner.notice` in `transfer.py` -
 section 1).
 
 ### 3.1 Responses outside S3's API

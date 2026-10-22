@@ -357,8 +357,9 @@ chain:
   s3transfer caller's *default* multipart-copy behavior in the same process,
   where the two surviving patches stay inert until a caller passes the
   affected argument. The multipart decision is predicted with upstream's own
-  comparison (`size >= multipart_threshold`, the annotation gate's pattern); a
-  copy whose size was never provided skips the flip - upstream then sizes it
+  comparison (`size >= multipart_threshold`, the prediction the copy-props
+  subscribers share); a copy whose size was never provided skips the flip -
+  upstream then sizes it
   with its HeadObject probe and applies its own preservation, a path aws-cli
   cannot produce (it always provides the size).
   s3transfer 0.19's own
@@ -652,7 +653,8 @@ dest-existence check for download. We ported the same three faces:
   `stat` / `open` / `unlink` / `makedirs`) and in the engine (`transfer.py`'s
   `_os_form`: the path handed to s3transfer or the CRT for an upload or a
   download, the parent-directory creation, the mtime stamp, the fsync;
-  `_name_files_as_text` turns the names an `OSError` reports back into text).
+  `name_files_as_text`, shared with `localstorage.py`, turns the names an
+  `OSError` reports back into text).
   Items, results and warnings carry the text. The walk runs on the OS form, so
   its override seams keep plain `os` semantics, and `scan_children` turns each
   child's name and key into text before the sort, so the stream is in the

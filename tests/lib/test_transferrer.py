@@ -1324,7 +1324,7 @@ class TestNonTransferOutcomes:
         results: list[OpResult] = []
         info = FileInfo(key="d/k", compare_key="k")
         with Transferrer(TransferType.DOWNLOAD, client, on_result=results.append) as transferrer:
-            transferrer.warn(
+            transferrer.warner.warn(
                 "Skipping file s3://b/d/k. Object is of storage class GLACIER.", info=info
             )
             transferrer.skip(TransferItem(compare_key="k2"))
@@ -3516,7 +3516,7 @@ class TestMove:
             TransferType.UPLOAD, client, is_move=True, on_result=results.append
         ) as transferrer:
             transferrer.dryrun(item)
-            transferrer.warn("Skipping file a. probe")
+            transferrer.warner.warn("Skipping file a. probe")
             transferrer.skip(TransferItem(compare_key="a2"))
         assert calls == []
         assert [result.outcome for result in results] == [
