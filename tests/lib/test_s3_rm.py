@@ -651,7 +651,7 @@ class TestCrtEngine:
         )
         ((sender, _, kwargs),) = built
         assert [op for op, _ in sender.calls] == ["DeleteObjects"]
-        assert kwargs["crt_allow_lockless"] is True
+        assert kwargs["crt"].allow_lockless is True
         assert kwargs["operation"] == "rm"
 
     def test_a_rehearsal_builds_no_engine(self, built: list[Any]) -> None:

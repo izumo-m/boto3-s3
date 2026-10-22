@@ -761,7 +761,7 @@ class TestCrtSignRequestsPosture:
         s3 = S3() if declared is None else S3(crt_sign_requests=declared)
         with pytest.raises(_StopTransferError):
             self._run(s3, tmp_path, route)
-        assert _captured_transferrer_kwargs["crt_sign_requests"] is declared
+        assert _captured_transferrer_kwargs["crt"].sign_requests is declared
 
 
 class TestMaterializeCrtEngine:

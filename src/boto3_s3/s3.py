@@ -612,8 +612,12 @@ class S3:
         self._config = config
         self._transfer_config = transfer_config
         self._reusable_after_interrupt = reusable_after_interrupt
-        self._crt_allow_lockless = crt_allow_lockless
-        self._crt_sign_requests = crt_sign_requests
+        self._crt = crtsupport.CrtPostures(
+            endpoint=endpoint_url,
+            session=session,
+            allow_lockless=crt_allow_lockless,
+            sign_requests=crt_sign_requests,
+        )
         # Checked here, as LocalStorage checks it: an unknown codec fails the
         # construction rather than the first local path resolved.
         if filename_encoding is not None:
@@ -750,14 +754,7 @@ class S3:
         with crt_engine_errors(operation=None):
             # A client the caller hands over (`reject_empty_ca_bundle`).
             reject_empty_ca_bundle(client, check_environment=True)
-            crtsupport.materialize_crt_engine(
-                client,
-                config,
-                endpoint=crtsupport.caller_endpoint(client, self._endpoint_url),
-                session=self._session,
-                allow_lockless=self._crt_allow_lockless,
-                sign_requests=self._crt_sign_requests,
-            )
+            crtsupport.materialize_crt_engine(client, config, **self._crt.engine_arguments(client))
 
     def _run_transfer_config(
         self,
@@ -771,15 +768,6 @@ class S3:
         copy = isinstance(src_storage, S3Storage) and isinstance(dest_storage, S3Storage)
         with _attributed_to(operation):
             return self.resolve_transfer_config(transfer_config, copy=copy)
-
-    def _crt_postures(self) -> dict[str, Any]:
-        """This instance's CRT engine postures, as `S3Deleter` takes them."""
-        return {
-            "session": self._session,
-            "crt_endpoint": self._endpoint_url,
-            "crt_allow_lockless": self._crt_allow_lockless,
-            "crt_sign_requests": self._crt_sign_requests,
-        }
 
     def resolve(self, loc: Location) -> Storage:
         """Resolve a ``Location`` to a ``Storage`` (the URL-interpretation seam).
@@ -1145,10 +1133,7 @@ class S3:
             on_result=on_result,
             cancel_token=cancel_token,
             capture_response=capture_response,
-            crt_endpoint=self._endpoint_url,
-            crt_allow_lockless=self._crt_allow_lockless,
-            crt_sign_requests=self._crt_sign_requests,
-            session=self._session,
+            crt=self._crt,
         )
         # The case-conflict gate's mode is a set-up check on every route; the
         # gate itself is built below, once the destination directory exists.
@@ -1379,10 +1364,7 @@ class S3:
             on_result=on_result,
             cancel_token=cancel_token,
             capture_response=capture_response,
-            crt_endpoint=self._endpoint_url,
-            crt_allow_lockless=self._crt_allow_lockless,
-            crt_sign_requests=self._crt_sign_requests,
-            session=self._session,
+            crt=self._crt,
         )
         with transferrer:
             if dryrun:
@@ -1751,10 +1733,7 @@ class S3:
             on_result=on_result,
             cancel_token=cancel_token,
             capture_response=capture_response,
-            crt_endpoint=self._endpoint_url,
-            crt_allow_lockless=self._crt_allow_lockless,
-            crt_sign_requests=self._crt_sign_requests,
-            session=self._session,
+            crt=self._crt,
         )
         deletes = SyncDeletes(
             dest_storage,
@@ -1771,7 +1750,7 @@ class S3:
                 if transfer_type is TransferType.COPY
                 else transfer_config
             ),
-            crt_postures=self._crt_postures(),
+            crt=self._crt,
         )
         with ExitStack() as stack:
             stack.enter_context(transferrer)
@@ -2016,7 +1995,10 @@ class S3:
             operation="rm",
             capture_response=capture_response,
             transfer_config=config,
-            **self._crt_postures(),
+            session=self._crt.session,
+            crt_endpoint=self._crt.endpoint,
+            crt_allow_lockless=self._crt.allow_lockless,
+            crt_sign_requests=self._crt.sign_requests,
         ) as deleter:
             # cancel_token on the scan too (like ls): the prefetch producer
             # stops between page pulls instead of fetching pages nobody reads.
@@ -2103,7 +2085,7 @@ class S3:
         client = storage.get_client()
         # Built ahead of the request for the same reason: an engine that
         # cannot be built is not this key failing to delete.
-        crt = crt_delete_sender(client, transfer_config, operation="rm", **self._crt_postures())
+        crt = crt_delete_sender(client, transfer_config, operation="rm", crt=self._crt)
 
         try:
             if crt is None:

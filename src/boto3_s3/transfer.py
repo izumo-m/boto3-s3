@@ -131,7 +131,6 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from boto3.s3.transfer import TransferConfig
-    from boto3.session import Session
     from mypy_boto3_s3 import S3Client
 
     from boto3_s3.storage import Storage
@@ -1103,10 +1102,7 @@ class Transferrer:
         on_result: ResultCallback | None = None,
         cancel_token: CancelToken | None = None,
         capture_response: bool = False,
-        crt_endpoint: str | None = None,
-        crt_allow_lockless: bool = False,
-        crt_sign_requests: bool | None = None,
-        session: Session | None = None,
+        crt: crtsupport.CrtPostures | None = None,
     ) -> None:
         if transfer_type not in (TransferType.UPLOAD, TransferType.DOWNLOAD, TransferType.COPY):
             raise ValidationError(
@@ -1184,24 +1180,9 @@ class Transferrer:
         self._on_result = on_result
         self._cancel_token = cancel_token
         self._capture_response = capture_response
-        # The caller's explicit endpoint (the CLI's --endpoint-url), threaded to
-        # the CRT engine so it pins a custom endpoint the host heuristic would
-        # miss (a VPC interface endpoint under an AWS domain); None = heuristic.
-        self._crt_endpoint = crt_endpoint
-        # aws-cli's posture on cross-process lock contention under an explicit
-        # 'crt' preference: build the CRT client without the lock. False =
-        # boto3's classic fallback (crtsupport.create_crt_transfer_manager).
-        self._crt_allow_lockless = crt_allow_lockless
-        # The caller's CRT signing declaration, aws-cli's sign_request. None =
-        # derive it from the client, boto3's rule; a declared False is what
-        # keeps --no-sign-request anonymous on the CRT lane even when
-        # --sse aws:kms restores signing on the botocore client.
-        self._crt_sign_requests = crt_sign_requests
-        # The caller's boto3 session (S3.session), threaded to the CRT engine
-        # so its request serializer reuses the warm session instead of paying
-        # a fresh one per process (crtsupport._botocore_session); None = the
-        # default-session/fresh fallback there.
-        self._session = session
+        # The caller's CRT engine postures (`S3`'s, documented on
+        # crtsupport.create_crt_transfer_manager); the default is boto3's rules.
+        self._crt = crt if crt is not None else crtsupport.CrtPostures()
         self._manager: Any = None
         self._capture: _ResponseCapture | None = None
         self._lock = threading.Lock()
@@ -1975,9 +1956,9 @@ class Transferrer:
         ``preferred_transfer_client`` is read with boto3's defaults (no config
         = ``'auto'``); a copy run is unconditionally classic - the CRT manager
         has no copy, the same rule boto3 and aws-cli apply to s3->s3.
-        ``crt_allow_lockless`` and ``crt_sign_requests`` are the caller-declared
-        posture departures from boto3's rules available here, and apply only
-        when the caller asks for them.
+        The lock and signing postures in ``crt`` are the caller-declared
+        departures from boto3's rules available here, and apply only when the
+        caller asks for them.
         """
         if self._transfer_type is TransferType.COPY:
             return None
@@ -1994,21 +1975,16 @@ class Transferrer:
         # The copy tables are inert for CRT (it has no copy path) but keeping
         # one alignment site means the classic fallback never sees them unpatched.
         _allow_inline_mpu_tagging()
-        # The run's client is the route-selected one (an S3Storage may carry its
-        # own), so the S3-level endpoint pin only applies to the client it built.
-        endpoint = crtsupport.caller_endpoint(self._client, self._crt_endpoint)
         # Every construction failure is classified at this seam
         # (`crt_engine_errors`): design/exceptions.md carves out exactly one
         # pass-through (MissingDependencyException, raised by selects_crt
         # above), and none of these is it.
         with crt_engine_errors(self._operation):
+            # The run's client is the route-selected one (an S3Storage may
+            # carry its own), so the S3-level endpoint pin only applies to the
+            # client it built (`CrtPostures.engine_arguments`).
             return crtsupport.create_crt_transfer_manager(
-                self._client,
-                self._transfer_config,
-                endpoint=endpoint,
-                session=self._session,
-                allow_lockless=self._crt_allow_lockless,
-                sign_requests=self._crt_sign_requests,
+                self._client, self._transfer_config, **self._crt.engine_arguments(self._client)
             )
 
     def _create_classic_manager(self) -> Any:

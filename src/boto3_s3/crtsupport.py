@@ -55,7 +55,7 @@ import logging
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, TypedDict
 from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
@@ -348,6 +348,43 @@ def selects_crt(config: Any | None) -> bool:
     return should_use_crt(str(preferred))
 
 
+class _EngineArguments(TypedDict):
+    """`create_crt_transfer_manager`'s posture keywords, as `CrtPostures` fills them."""
+
+    endpoint: str | None
+    session: Session | None
+    allow_lockless: bool
+    sign_requests: bool | None
+
+
+@dataclass(frozen=True)
+class CrtPostures:
+    """A caller's CRT engine postures, carried as one value.
+
+    ``S3`` builds one from its own arguments and hands it to the transfer
+    engine (``Transferrer``) and the deletes (`crt_delete_sender`, sync's
+    delete lane); ``S3Deleter`` builds one from its public keywords. Each
+    field is the keyword of the same name that `create_crt_transfer_manager`
+    documents, except ``endpoint``, which is the caller's explicit endpoint
+    before `caller_endpoint` keeps it for the client built from it - applied
+    by `engine_arguments`, so no holder can pin it onto another client.
+    """
+
+    endpoint: str | None = None
+    session: Session | None = None
+    allow_lockless: bool = False
+    sign_requests: bool | None = None
+
+    def engine_arguments(self, client: S3Client) -> _EngineArguments:
+        """The keywords this module's engine builders take, for a run on ``client``."""
+        return {
+            "endpoint": caller_endpoint(client, self.endpoint),
+            "session": self.session,
+            "allow_lockless": self.allow_lockless,
+            "sign_requests": self.sign_requests,
+        }
+
+
 def create_crt_transfer_manager(
     client: S3Client,
     config: Any | None,
@@ -416,7 +453,14 @@ def create_crt_transfer_manager(
 
         config = TransferConfig()
     crt_s3_client = _get_crt_s3_client(
-        client, config, endpoint, session, allow_lockless, sign_requests
+        client,
+        config,
+        CrtPostures(
+            endpoint=endpoint,
+            session=session,
+            allow_lockless=allow_lockless,
+            sign_requests=sign_requests,
+        ),
     )
     if crt_s3_client is None or not _is_compatible_request(
         client, crt_s3_client, endpoint, sign_requests=sign_requests
@@ -540,22 +584,17 @@ def caller_endpoint(client: S3Client, endpoint: str | None) -> str | None:
 
 
 def _get_crt_s3_client(
-    client: S3Client,
-    config: Any | None,
-    endpoint: str | None,
-    session: Session | None,
-    allow_lockless: bool,
-    sign_requests: bool | None,
+    client: S3Client, config: Any | None, postures: CrtPostures
 ) -> _CrtS3Client | None:
     global _crt_s3_client, _crt_serializer
     with _CREATION_LOCK:
         if _crt_s3_client is None:
-            serializer, crt_s3_client = _initialize(
-                client, config, endpoint, session, allow_lockless, sign_requests
-            )
+            serializer, crt_s3_client = _initialize(client, config, postures)
             _crt_serializer = serializer
             _crt_s3_client = crt_s3_client
-        elif _crt_s3_client.process_lock is None and not (allow_lockless and _prefers_crt(config)):
+        elif _crt_s3_client.process_lock is None and not (
+            postures.allow_lockless and _prefers_crt(config)
+        ):
             # A singleton built under the lockless opt-in holds no lock, and
             # the opt-in is scoped to explicit-'crt' requests (design/crt.md
             # section 6) - a lock-respecting request keeps aws's own lock
@@ -597,12 +636,7 @@ def _botocore_session(session: Session | None) -> Any:
 
 
 def _initialize(
-    client: S3Client,
-    config: Any | None,
-    endpoint: str | None,
-    session: Session | None,
-    allow_lockless: bool,
-    sign_requests: bool | None,
+    client: S3Client, config: Any | None, postures: CrtPostures
 ) -> tuple[Any, _CrtS3Client] | tuple[None, None]:
     """Acquire the process lock and construct the shared CRT serializer and client."""
     from s3transfer.crt import (
@@ -614,7 +648,7 @@ def _initialize(
     # Annotated Any: s3transfer types the return as the lock object, but the
     # documented contract is "None when another process holds it".
     lock: Any = acquire_crt_s3_process_lock(PROCESS_LOCK_NAME)
-    if lock is None and not (allow_lockless and _prefers_crt(config)):
+    if lock is None and not (postures.allow_lockless and _prefers_crt(config)):
         # Another process of this application holds the CRT client; classic.
         # Under the `allow_lockless` opt-in an *explicit* 'crt' preference
         # builds on regardless (aws-cli's factory ignores its own acquisition
@@ -623,7 +657,7 @@ def _initialize(
         return None, None
 
     region = client.meta.region_name
-    endpoint_url = _resolve_endpoint(client, endpoint)
+    endpoint_url = _resolve_endpoint(client, postures.endpoint)
     # The caller's client Config rides into the serializer's nested botocore
     # client (the serializer merges signature_version=UNSIGNED on top). Without
     # it, a None endpoint re-resolves under *stock botocore's* defaults, which
@@ -635,7 +669,7 @@ def _initialize(
     # accelerate/dualstack settings carry over for the same reason - pinned,
     # so the serializer's own session cannot fill in what the client's left
     # out (`_serializer_config`).
-    botocore_session = _botocore_session(session)
+    botocore_session = _botocore_session(postures.session)
     serializer_kwargs: dict[str, Any] = {
         "region_name": region,
         "endpoint_url": endpoint_url,
@@ -654,7 +688,7 @@ def _initialize(
         "part_size": _explicit_chunksize(config),
         "target_throughput": getattr(config, "target_bandwidth", None),
     }
-    cred_wrapper = _credentials_wrapper(client, sign_requests)
+    cred_wrapper = _credentials_wrapper(client, postures.sign_requests)
     if cred_wrapper is not None:
         create_kwargs["crt_credentials_provider"] = cred_wrapper.to_crt_credentials_provider()
     # The object the wrapper holds, kept beside it for the identity
@@ -664,7 +698,7 @@ def _initialize(
     return serializer, _CrtS3Client(
         crt_client=crt_client,
         process_lock=lock,
-        pins=_Pins.of(client, endpoint),
+        pins=_Pins.of(client, postures.endpoint),
         credentials=credentials,
         cred_wrapper=cred_wrapper,
         serializer_args=(botocore_session, serializer_kwargs),

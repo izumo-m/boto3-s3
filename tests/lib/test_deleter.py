@@ -1280,10 +1280,9 @@ class TestCrtRoute:
         assert config is _crt()
         assert kwargs == {
             "operation": "rm",
-            "session": session,
-            "crt_endpoint": "http://e",
-            "crt_allow_lockless": True,
-            "crt_sign_requests": False,
+            "crt": crtsupport.CrtPostures(
+                endpoint="http://e", session=session, allow_lockless=True, sign_requests=False
+            ),
         }
 
     def test_a_rehearsal_builds_no_engine(self, built: list[Any]) -> None:
@@ -1300,7 +1299,12 @@ class TestCrtDeleteSender:
 
         monkeypatch.setattr(crtsupport, "create_crt_request_sender", refuse)
         config = TransferConfig(preferred_transfer_client="classic")
-        assert crt_delete_sender(cast("Any", object()), config, operation="rm") is None
+        assert (
+            crt_delete_sender(
+                cast("Any", object()), config, operation="rm", crt=crtsupport.CrtPostures()
+            )
+            is None
+        )
 
     def test_a_crt_selection_builds_it_with_the_postures(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1320,10 +1324,9 @@ class TestCrtDeleteSender:
             cast("Any", client),
             _crt(),
             operation="rm",
-            session=session,
-            crt_endpoint="http://e",
-            crt_allow_lockless=True,
-            crt_sign_requests=True,
+            crt=crtsupport.CrtPostures(
+                endpoint="http://e", session=session, allow_lockless=True, sign_requests=True
+            ),
         )
         assert got is sender
         assert calls == [
@@ -1350,7 +1353,12 @@ class TestCrtDeleteSender:
             lambda _client, _config, **kwargs: endpoints.append(kwargs["endpoint"]),
         )
         client = SimpleNamespace(meta=SimpleNamespace(endpoint_url="http://other"))
-        crt_delete_sender(cast("Any", client), _crt(), operation="rm", crt_endpoint="http://e")
+        crt_delete_sender(
+            cast("Any", client),
+            _crt(),
+            operation="rm",
+            crt=crtsupport.CrtPostures(endpoint="http://e"),
+        )
         assert endpoints == [None]
 
     def test_an_explicit_crt_without_awscrt_raises_like_a_transfer(
@@ -1363,7 +1371,9 @@ class TestCrtDeleteSender:
 
         monkeypatch.setattr(crtsupport, "should_use_crt", missing)
         with pytest.raises(MissingDependencyException):
-            crt_delete_sender(cast("Any", object()), _crt(), operation="rm")
+            crt_delete_sender(
+                cast("Any", object()), _crt(), operation="rm", crt=crtsupport.CrtPostures()
+            )
 
     def test_a_construction_failure_is_classified_like_a_transfers(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1377,7 +1387,9 @@ class TestCrtDeleteSender:
         monkeypatch.setattr(crtsupport, "create_crt_request_sender", unreadable)
         client = SimpleNamespace(meta=SimpleNamespace(endpoint_url=None))
         with pytest.raises(InvalidConfigError) as exc_info:
-            crt_delete_sender(cast("Any", client), _crt(), operation="rm")
+            crt_delete_sender(
+                cast("Any", client), _crt(), operation="rm", crt=crtsupport.CrtPostures()
+            )
         assert exc_info.value.operation == "rm"
 
 

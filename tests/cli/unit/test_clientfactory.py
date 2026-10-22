@@ -86,7 +86,7 @@ class TestBuildClient:
         # too, where the library default would silently run classic and, on a
         # dryrun, report success (design/crt.md section 6).
         s3 = clientfactory.build_s3(_parse([]))
-        assert s3._crt_allow_lockless is True  # pyright: ignore[reportPrivateUsage]
+        assert s3._crt.allow_lockless is True  # pyright: ignore[reportPrivateUsage]
 
     @pytest.fixture
     def crt_builds(self, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
@@ -1310,7 +1310,7 @@ class TestNoSignRequestPosture:
         # the multipart trio, download HEAD/GET, mv, sync, stream) and the run
         # uploads at rc 0 with no credentials at all.
         s3 = clientfactory.build_s3(_parse_transfer(argv))
-        assert s3._crt_sign_requests is expected  # pyright: ignore[reportPrivateUsage]
+        assert s3._crt.sign_requests is expected  # pyright: ignore[reportPrivateUsage]
 
     def test_a_signed_run_is_untouched_by_the_kms_case(self, _broken_role_profile: None) -> None:
         # Without --no-sign-request the SigV4 pin was always there; --sse

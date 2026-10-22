@@ -123,10 +123,7 @@ def crt_delete_sender(
     transfer_config: TransferConfig | None,
     *,
     operation: str,
-    session: Session | None = None,
-    crt_endpoint: str | None = None,
-    crt_allow_lockless: bool = False,
-    crt_sign_requests: bool | None = None,
+    crt: crtsupport.CrtPostures,
 ) -> CrtRequestSender | None:
     """The CRT client a run's deletes ride, or ``None`` for botocore.
 
@@ -153,12 +150,7 @@ def crt_delete_sender(
 
     with crt_engine_errors(operation):
         return crtsupport.create_crt_request_sender(
-            client,
-            transfer_config,
-            endpoint=crtsupport.caller_endpoint(client, crt_endpoint),
-            session=session,
-            allow_lockless=crt_allow_lockless,
-            sign_requests=crt_sign_requests,
+            client, transfer_config, **crt.engine_arguments(client)
         )
 
 
@@ -344,10 +336,12 @@ class S3Deleter:
                 self._client,
                 transfer_config,
                 operation=operation,
-                session=session,
-                crt_endpoint=crt_endpoint,
-                crt_allow_lockless=crt_allow_lockless,
-                crt_sign_requests=crt_sign_requests,
+                crt=crtsupport.CrtPostures(
+                    endpoint=crt_endpoint,
+                    session=session,
+                    allow_lockless=crt_allow_lockless,
+                    sign_requests=crt_sign_requests,
+                ),
             )
         )
         # A transient per-key failure is re-sent unless the client's own

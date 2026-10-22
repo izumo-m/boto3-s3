@@ -3981,7 +3981,7 @@ class TestEngineSelection:
             TransferType.UPLOAD,
             client,
             transfer_config=TransferConfig(preferred_transfer_client="crt"),
-            crt_endpoint=vpce,
+            crt=crtsupport.CrtPostures(endpoint=vpce),
         )
         transferrer._get_manager()
         assert seen == [vpce]
@@ -4016,7 +4016,7 @@ class TestEngineSelection:
             TransferType.UPLOAD,
             client,
             transfer_config=TransferConfig(preferred_transfer_client="crt"),
-            crt_endpoint="https://endpoint-a.example.com",
+            crt=crtsupport.CrtPostures(endpoint="https://endpoint-a.example.com"),
         )
         transferrer._get_manager()
         assert seen == [None]
@@ -4045,7 +4045,7 @@ class TestEngineSelection:
             TransferType.UPLOAD,
             client,
             transfer_config=TransferConfig(preferred_transfer_client="crt"),
-            session=caller_session,  # pyright: ignore[reportArgumentType]
+            crt=crtsupport.CrtPostures(session=caller_session),  # pyright: ignore[reportArgumentType]
         )
         transferrer._get_manager()
         assert seen == [caller_session]
@@ -4077,12 +4077,11 @@ class TestEngineSelection:
 
         monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", fake_create)
         client, _ = make_recording_client([])
-        kwargs: dict[str, Any] = {} if declaration is None else {"crt_sign_requests": declaration}
         transferrer = Transferrer(
             TransferType.UPLOAD,
             client,
             transfer_config=TransferConfig(preferred_transfer_client="crt"),
-            **kwargs,
+            crt=crtsupport.CrtPostures(sign_requests=declaration),
         )
         transferrer._get_manager()
         assert seen == [declaration]

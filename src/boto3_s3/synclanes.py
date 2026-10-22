@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
-from boto3_s3 import producers
+from boto3_s3 import crtsupport, producers
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3.comparator import (
     DestOnlyPair,
@@ -479,13 +479,13 @@ class SyncDeletes:
         cancel_token: CancelToken | None,
         capture_response: bool = False,
         transfer_config: TransferConfig | None = None,
-        crt_postures: Mapping[str, Any] | None = None,
+        crt: crtsupport.CrtPostures | None = None,
     ) -> None:
         self._dest = dest_storage
         # What the deleter's client is chosen by (S3Deleter): the run's
         # TransferConfig and the S3 instance's CRT postures.
         self._transfer_config = transfer_config
-        self._crt_postures: Mapping[str, Any] = crt_postures or {}
+        self._crt = crt if crt is not None else crtsupport.CrtPostures()
         self._request_payer = request_payer
         self._dryrun = dryrun
         self._on_result = on_result
@@ -537,7 +537,10 @@ class SyncDeletes:
                         operation="sync",
                         capture_response=self._capture_response,
                         transfer_config=self._transfer_config,
-                        **self._crt_postures,
+                        session=self._crt.session,
+                        crt_endpoint=self._crt.endpoint,
+                        crt_allow_lockless=self._crt.allow_lockless,
+                        crt_sign_requests=self._crt.sign_requests,
                     )
                 )
             self._deleter.submit(info)

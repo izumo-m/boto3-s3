@@ -1584,7 +1584,7 @@ class TestDeletesOnTheCrtEngine:
         ((sender, _, kwargs),) = built
         # The dead batch, then the key on its own (test_deleter pins why).
         assert [op for op, _ in sender.calls] == ["DeleteObjects", "DeleteObject"]
-        assert kwargs["crt_allow_lockless"] is True
+        assert kwargs["crt"].allow_lockless is True
         assert ops(calls) == ["ListObjectsV2", "DeleteObjects", "DeleteObject"]
         assert [r.outcome for r in results] == [OpOutcome.FAILED]
         assert results[0].error is not None

@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed `TransferConfig`'s `should_stream` / `disk_throughput` / `direct_io` (they had no effect; the `[s3]` keys are still accepted), the walk's `crosses_full_path_boundary` and `sym_depth`, and `boto3_s3.transfer`'s two SDK-floor probes from its exports.
 - `S3` and `LocalStorage` take a `filename_encoding` that fixes how local file names turn into keys and back on Linux and macOS, whatever Python's own default (`None` keeps it); `LocalStorage.os_path` / `text_path` convert a path between the two forms.
 - `s3_errors` and `translate_boto_error` moved from `boto3_s3.s3storage` to the new `boto3_s3.sdkerrors`.
+- `Transferrer` takes the CRT engine settings as one `crt=` value in place of `session`, `crt_endpoint`, `crt_allow_lockless` and `crt_sign_requests`.
 
 ## [0.12.0] - 2026-10-18
 

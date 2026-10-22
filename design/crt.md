@@ -122,7 +122,7 @@ config=None read as `'auto'` - with the same rules as boto3.
   - region = `client.meta.region_name`
   - endpoint = the caller's explicit endpoint when one is threaded in, else the
     host heuristic. The CLI passes its `--endpoint-url` down (`S3(endpoint_url=)`
-    -> `Transferrer(crt_endpoint=)` -> `create_crt_transfer_manager(endpoint=)`),
+    -> `Transferrer(crt=)`'s `CrtPostures.endpoint` -> `create_crt_transfer_manager(endpoint=)`),
     and that value is honored verbatim - matching aws-cli, whose CRT serializer
     is handed `params['endpoint_url']` as-is, so a custom endpoint that sits
     under an AWS domain (a VPC interface endpoint, a directly-named FIPS /
@@ -179,7 +179,7 @@ config=None read as `'auto'` - with the same rules as boto3.
     presence already does, so the compatibility pin rejects a later request
     declaring the other mode (classic fallback, never a wrong-mode transfer)
   - serializer session = the caller's session (`S3(session=)` ->
-    `Transferrer(session=)` -> `create_crt_transfer_manager(session=)`), falling
+    `Transferrer(crt=)`'s `CrtPostures.session` -> `create_crt_transfer_manager(session=)`), falling
     back to boto3's default session when one exists, then to a fresh botocore
     session. Matches aws-cli, which hands its live CLI session to
     `BotocoreCRTRequestSerializer`; a fresh session re-parses the S3 service
