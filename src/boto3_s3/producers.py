@@ -706,6 +706,28 @@ def _filter_single_local_source(
             yield info
 
 
+def _references_parent(relative: str) -> bool:
+    """Whether ``relative`` climbs out of the directory it is joined to."""
+    return os.path.normpath("." + os.sep + relative).startswith(".." + os.sep)
+
+
+def _os_key(plan: transferplan.TransferPlan, compare_key: str) -> str:
+    """``compare_key`` in the form the OS gets under the destination's ``filename_encoding``.
+
+    The parent-reference check runs on it too: an encoding that is not ASCII
+    compatible (EBCDIC, say) can turn text with no ``..`` into bytes that
+    climb out. A key the encoding cannot represent is left to fail as its
+    item where it is written.
+    """
+    dest = plan.dest
+    if not isinstance(dest, LocalStorage):
+        return compare_key
+    try:
+        return dest.os_path(compare_key)
+    except UnicodeError:
+        return compare_key
+
+
 def download_item_from_info(
     plan: transferplan.TransferPlan,
     info: FileInfo,
@@ -750,7 +772,7 @@ def download_item_from_info(
     # compare_key that relativizes to a leading slash (e.g. "/../secret" from
     # an S3 key "data//../secret") must still be caught - bare
     # normpath("/../secret") == "/secret" would slip the "..".
-    if os.path.normpath("." + os.sep + compare_key).startswith(".." + os.sep):
+    if _references_parent(compare_key) or _references_parent(_os_key(plan, compare_key)):
         transferrer.warner.warn(
             f"Skipping file {compare_key}. File references a parent directory.",
             info=info,

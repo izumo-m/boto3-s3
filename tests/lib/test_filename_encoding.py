@@ -21,7 +21,7 @@ from boto3_s3.localstorage import LocalStorage
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.types import LocalScanOptions, OpResult
-from tests.utils.fakes3 import get_response, head_response
+from tests.utils.fakes3 import get_response, head_response, listing
 from tests.utils.recorder import make_recording_client, ops
 
 _FS_ENCODING = codecs.lookup(sys.getfilesystemencoding()).name
@@ -140,3 +140,20 @@ class TestConversion:
         assert ops(calls) == ["HeadObject", "GetObject"]
         with open(_native(dest, "新.txt"), "rb") as handle:
             assert handle.read() == b"payload"
+
+    def test_a_key_that_climbs_out_once_encoded_is_skipped(self, tmp_path: Path) -> None:
+        # cp037 (EBCDIC) encodes ACK ACK BEL as b"../": text with no ".." that
+        # would land outside the destination is refused like a "../" key.
+        dest = tmp_path / "dl"
+        client, calls = make_recording_client([listing(("d/\x06\x06\x07x", 1))])
+        results: list[OpResult] = []
+        S3(filename_encoding="cp037").cp(
+            S3Storage("s3://b/d/", client=client),
+            str(dest),
+            recursive=True,
+            on_result=results.append,
+        )
+        assert ops(calls) == ["ListObjectsV2"]
+        assert [result.outcome.name for result in results] == ["WARNED"]
+        assert "parent directory" in str(results[0].error)
+        assert not os.path.exists(os.path.join(os.fsencode(tmp_path), b"\xa7"))
