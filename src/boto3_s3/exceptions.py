@@ -20,8 +20,8 @@ class Boto3S3Error(Exception):
     ``MissingDependencyException`` through boto3-faithfully. Direct
     instances appear only where no classification exists: the error
     translators' last-resort fallbacks (``s3storage.translate_boto_error``,
-    the deleter's per-key unknown-code and unconfirmed-deletion entries, the
-    transfer engine's unclassified task exceptions) and the message envelope on
+    the deleter's per-key unknown-code entries, the transfer engine's
+    unclassified task exceptions) and the message envelope on
     WARNED / NOTICE ``OpResult`` records.
     """
 
@@ -65,21 +65,6 @@ class InvalidValueError(ValidationError):
 
 class TransportError(Boto3S3Error):
     """Network or local I/O failure (connection, timeout, OSError)."""
-
-
-class MalformedResponseError(Boto3S3Error):
-    """The service answered, but with a response this library cannot consume.
-
-    A listing entry, a bucket entry or a single-object ``HeadObject`` missing
-    an element aws-cli reads by subscript (``Key`` / ``LastModified`` /
-    ``Size``, a common prefix's ``Prefix``, a bucket's ``CreationDate`` /
-    ``Name``, a HEAD's ``ContentLength`` / ``LastModified``) - a truncating
-    proxy, a partial S3 implementation. aws-cli dies with the bare
-    ``KeyError``; this class carries that exception on ``__cause__`` and its
-    ``str()`` as the message. The run stops where aws-cli's stops: the
-    entries ahead of the bad one are already delivered (design/exceptions.md
-    section 3).
-    """
 
 
 class ConfigurationError(Boto3S3Error):
@@ -184,7 +169,6 @@ __all__ = [
     "ConfigurationError",
     "InvalidConfigError",
     "InvalidValueError",
-    "MalformedResponseError",
     "NotFoundError",
     "TransportError",
     "ValidationError",

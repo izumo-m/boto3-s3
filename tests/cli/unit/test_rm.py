@@ -284,21 +284,6 @@ class TestExitCodeShape:
         assert result.stderr.startswith("fatal error: ")
         assert "NoSuchBucket" in result.stderr
 
-    def test_an_incomplete_listing_entry_is_rc_1_fatal(self) -> None:
-        # An entry the response left without a LastModified: aws-cli reads the
-        # element unguarded while building the FileInfo, and the KeyError lands
-        # in the same result recorder every other run-killing error does - a
-        # fatal error at rc 1, measured against the pinned aws through a
-        # 127.0.0.1 fake serving the crafted listing (the same response gives
-        # `ls` rc 255, which is why the code is not shared).
-        result, _ = run_recorded(
-            [{"Contents": [{"Key": "p/a.txt", "Size": 1}]}],
-            ["rm", "s3://b/p/", "--recursive", "--dryrun"],
-        )
-        assert result.rc == 1
-        assert result.stderr.startswith("fatal error: ")
-        assert "LastModified" in result.stderr  # the report names the missing element
-
     def test_an_unclassified_run_error_is_rc_1_fatal(self) -> None:
         # rm's span reports by exception *position*, not by type: whatever the
         # operation raises is one `fatal error:` line at rc 1, because aws runs

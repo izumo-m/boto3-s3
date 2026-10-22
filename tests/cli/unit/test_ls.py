@@ -244,44 +244,6 @@ class TestListingTimestampEndToEnd:
         assert captured.err.startswith("boto3-s3: [ERROR]: ")
 
 
-class TestMalformedListing:
-    """A listing entry ``ls`` cannot read stops it where aws-cli stops.
-
-    aws-cli reads the elements it needs off each entry by subscript, so a
-    response omitting one stops the listing at that entry - the lines ahead of
-    it are already on stdout - at rc 255 (measured against the pinned aws
-    through a 127.0.0.1 fake serving the crafted XML). The library tier pins
-    the scan order (tests/lib/test_s3storage.py); these pin the CLI's rc and
-    what was already printed, for the object and the all-buckets listing.
-    """
-
-    def test_objects_before_the_bad_entry_are_printed(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        page = {
-            "Contents": [
-                _obj("p/a.txt"),
-                {"Key": "p/bad.txt", "Size": 1},  # no LastModified
-                _obj("p/z.txt"),
-            ]
-        }
-        ctx, _ = _fake_ctx([page])
-        assert cli.main(["ls", "--summarize", "s3://bucket/p/"], ctx=ctx) == 255
-        captured = capsys.readouterr()
-        # The summary aws prints after a clean listing is not reached.
-        assert [line.split()[-1] for line in captured.out.splitlines()] == ["a.txt"]
-        assert "LastModified" in captured.err  # the report names the missing element
-
-    def test_buckets_before_the_bad_entry_are_printed(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        ctx, _ = _fake_ctx([{"Buckets": [_bucket("alpha"), {"Name": "zzz"}]}])
-        assert cli.main(["ls"], ctx=ctx) == 255
-        captured = capsys.readouterr()
-        assert [line.split()[-1] for line in captured.out.splitlines()] == ["alpha"]
-        assert "CreationDate" in captured.err
-
-
 class TestGlobalOptionPosition:
     """Globals must parse whether they precede or follow the subcommand."""
 

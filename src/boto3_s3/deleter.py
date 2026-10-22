@@ -581,28 +581,22 @@ class S3Deleter:
             )
             return
         else:
-            failures, unattributable = self._translate_errors(
-                response.get("Errors", []), [info for _, info in batch]
-            )
+            failures = self._translate_errors(response.get("Errors", []))
             if self._capture_response:
                 deleted = self._delete_slots(response)
-            # Read before the fail-closed synthesis below adds its own entries:
-            # only a key the service itself reported a passing fault for.
             if self._resend_transient:
                 transient = {
                     key for key, failure in failures.items() if isinstance(failure, TransportError)
                 }
-            if unattributable:
-                self._fail_unconfirmed(batch, failures, deleted, unattributable)
         resend: list[tuple[int, FileInfo]] = []
         for index, info in batch:
             if info.key in transient:
                 resend.append((index, info))
                 continue
             errors[index] = failures.get(info.key)
-            # A slot belongs to a success only: a response listing one key
-            # under both Deleted[] and Errors[] is reported by its error.
-            deletes[index] = None if errors[index] is not None else deleted.get(info.key)
+            if errors[index] is None:
+                # A slot rides a successful delete only.
+                deletes[index] = deleted.get(info.key)
         if resend:
             # The service answered each of these keys with a fault it asks the
             # caller to retry (InternalError, SlowDown, ...). aws-cli, sending
@@ -748,75 +742,22 @@ class S3Deleter:
             slots[key] = slot
         return slots
 
-    def _translate_errors(
-        self, entries: list[ErrorTypeDef], batch: list[FileInfo]
-    ) -> tuple[dict[str, Boto3S3Error], list[str]]:
-        """Map the response ``Errors[]`` onto the submitted keys (worker thread).
+    def _translate_errors(self, entries: list[ErrorTypeDef]) -> dict[str, Boto3S3Error]:
+        """Map the response ``Errors[]`` onto the keys they name (worker thread).
 
         Quiet=True: the response lists failures only, so a submitted key absent
-        from the mapping is provisionally a success. Returns those per-key
-        failures plus one detail string per entry that cannot be attributed to
-        a submitted key (no ``Key``, or a key spelled differently than we sent
-        it); such an entry is logged as a warning and hands the caller the
-        material for `_fail_unconfirmed`, which fails the rest of the batch
-        closed rather than letting the absence-means-success synthesis invent
-        a success for the key the entry was about.
+        from the mapping is a success.
         """
-        if not entries:
-            return {}, []
-        submitted = {info.key for info in batch}
         failures: dict[str, Boto3S3Error] = {}
-        unattributable: list[str] = []
         for err in entries:
             key = err.get("Key")
-            # An entry missing its code or message still fails its key.
+            if key is None:
+                continue
             code = err.get("Code", "Unknown")
             message = err.get("Message", "Unknown")
-            if key is None or key not in submitted:
-                logger.warning(
-                    "unattributable DeleteObjects error for s3://%s: key=%r %s (%s)",
-                    self._bucket,
-                    key,
-                    code,
-                    message,
-                )
-                unattributable.append(f"key={key!r} {code} ({message})")
-                continue
             logger.debug("delete failed for s3://%s/%s: %s (%s)", self._bucket, key, code, message)
             failures[key] = self._translate_key_error(code, message, key)
-        return failures, unattributable
-
-    def _fail_unconfirmed(
-        self,
-        batch: list[tuple[int, FileInfo]],
-        failures: dict[str, Boto3S3Error],
-        deleted: dict[str, dict[str, Any]],
-        unattributable: list[str],
-    ) -> None:
-        """Fail every key an unattributable ``Errors[]`` entry left unconfirmed.
-
-        An entry nobody can attribute means the response no longer says which
-        submitted keys really went away, and under ``Quiet=True`` there is no
-        positive per-key evidence at all - "everything not in ``Errors[]``
-        succeeded" would report the very key that entry was about as deleted,
-        licensing a caller to discard its own record of an object that may
-        still exist. Fail closed instead: a key keeps its own attributable
-        error (more informative), a ``Deleted[]`` entry (present only under
-        ``capture_response``) is positive proof the key went away and stays a
-        success, and every other key of the batch gets this synthesized
-        failure. It carries the unattributable details so the failure line
-        says why.
-        """
-        text = (
-            "The DeleteObjects response carried an unattributable error entry "
-            f"({'; '.join(unattributable)}), so this key's deletion cannot be confirmed"
-        )
-        for _, info in batch:
-            if info.key in failures or info.key in deleted:
-                continue
-            failures[info.key] = Boto3S3Error(
-                text, operation=self._operation, bucket=self._bucket, key=info.key
-            )
+        return failures
 
     def _translate_key_error(self, code: str, message: str, key: str) -> Boto3S3Error:
         """Translate one per-key ``Errors[]`` entry into the exception taxonomy.

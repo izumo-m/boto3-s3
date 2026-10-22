@@ -498,7 +498,6 @@ class S3ScanOptions(ScanOptions):
     request_payer: str | None = None
     fetch_owner: bool = False
     prefix: str | None = None
-    include_common_prefixes: bool = False
 ```
 
 `page_size` (default `None`) is the listing page size. `None` sends no
@@ -523,12 +522,6 @@ key — a recursive `cp` / `mv` / `sync` / `rm` source, where the plan appends a
 trailing `/` — so that the storage instance the caller passed is the one
 scanned, rather than a fresh one rebuilt from a URI. A custom `S3Storage`
 subclass and its `scan_pages` override therefore survive the operation.
-
-`include_common_prefixes` (default `False`) widens a *recursive* listing to also
-emit one `DIRECTORY`-kind entry per `CommonPrefixes` entry the response
-carries, ahead of that page's objects. It has no effect on a non-recursive
-listing, which always emits them. `S3.ls` sets it; the transfers leave it off
-([`storage.md`](./storage.md#s3storage)).
 
 `page_size`, `request_payer` and `fetch_owner` are not validated here. Like
 `aws s3`, they pass through to the service, which decides: `page_size=0` lists

@@ -625,8 +625,8 @@ class TestPackageLogger:
     def test_the_package_logger_carries_a_null_handler(self) -> None:
         # The library reports through logging and never prints (design/deleter.md
         # section 4): with no handler configured anywhere, a WARNING it emits -
-        # the deleter's unattributable-entry guard - would otherwise reach
-        # stderr through Python's lastResort handler. boto3's and botocore's own
+        # the CRT manager builder's ignored-config warning - would otherwise
+        # reach stderr through Python's lastResort handler. boto3's and botocore's own
         # package loggers carry the same NullHandler; a configured handler (the
         # CLI's --debug stream logger, an application's root handler) still
         # sees every record.

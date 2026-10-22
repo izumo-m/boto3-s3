@@ -92,9 +92,9 @@ class TestFastParseTimestamp:
         ],
     )
     def test_other_iso_spellings_answer_as_botocore_answers(self, value: str) -> None:
-        # Whatever the interpreter's fromisoformat accepts, an S3-compatible
-        # endpoint's odd spelling must parse - or fail, stopping the listing
-        # as it stops aws's - exactly as botocore's parser does.
+        # Whatever the interpreter's fromisoformat accepts, any other spelling
+        # - the session builds every service's clients - must parse, or fail,
+        # exactly as botocore's parser does.
         def outcome(parse: Any) -> object:
             try:
                 return parse(value)

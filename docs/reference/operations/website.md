@@ -83,9 +83,9 @@ The category contracts are specified in
 `website` acts on one bucket and raises its category exception directly; it
 never raises [`BatchError`](../exceptions.md#batcherror). The botocore error
 behind the failure is kept as the raised exception's `__cause__`. Any other
-exception the `PutBucketWebsite` call raised from inside botocore — a redirect
-loop ending in `RecursionError`, a response missing an element botocore reads —
-surfaces as the base [`Boto3S3Error`](../exceptions.md#boto3s3error) with the
+exception the `PutBucketWebsite` call raised from inside botocore — the
+`FileNotFoundError` of a refreshing `credential_process` whose program is gone,
+say — surfaces as the base [`Boto3S3Error`](../exceptions.md#boto3s3error) with the
 original on `__cause__`, the same capture a per-item failure gets;
 `AssertionError` alone is not translated.
 

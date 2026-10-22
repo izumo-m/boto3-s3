@@ -192,7 +192,7 @@ query. A backend that does not declare it leaves the filter to `scan`.
 `options.recursive` normally walks every transferable entry beneath the
 location, all of `FileKind.FILE` with no directory grouping; a backend-specific
 source setting may widen that view, as `LocalScanOptions.enumerate_all_entries`
-and `S3ScanOptions.include_common_prefixes` do. A non-recursive scan normally
+does. A non-recursive scan normally
 yields the immediate entries plus one `FileKind.DIRECTORY` entry per
 sub-"directory".
 
@@ -863,21 +863,9 @@ Returns an `S3ScanOptions` seeded with the constructor's `page_size` and
 Yields one `list[S3FileInfo]` per `ListObjectsV2` page. Requires an
 `S3ScanOptions`; a foreign `ScanOptions` raises `TypeError`.
 
-An entry the service returned incomplete stops the listing rather than being
-dropped from it: a `Contents` entry missing `Key`, `LastModified` or `Size`, or
-a `CommonPrefixes` entry missing `Prefix`, raises
-[`MalformedResponseError`](./exceptions.md#malformedresponseerror) naming the
-element (that `KeyError` on `__cause__`). The entries converted before it are still delivered — that
-page is emitted short and the error follows it — so a consumer sees them ahead
-of the failure exactly as the AWS CLI's entry-by-entry listing does. One shape
-loses the whole page instead: when the response echoes `EncodingType` (S3 and
-MinIO do), botocore URL-decodes every `Key` and `Prefix` of the page before
-handing it over, so an entry missing one fails there — the same class, element
-and cause, with none of that page's entries delivered, which is also where the
-AWS CLI's listing stops. A `LastModified` the host's local zone cannot
-represent is listed with its UTC value, where the AWS CLI's conversion of
-every timestamp it reads to local time ends the run; a zone-less one the
-local zone cannot place is read as UTC. (`LocalStorage` applies a local-zone
+A `LastModified` the host's local zone cannot represent is listed with its UTC
+value, where the AWS CLI's conversion of every timestamp it reads to local
+time ends the run. (`LocalStorage` applies a local-zone
 test to a file's mtime and keeps the file with a warning and `EPOCH_TIME`,
 as the AWS CLI does.)
 
@@ -887,18 +875,6 @@ non-recursive scan sends `Delimiter='/'` and additionally emits one
 `DIRECTORY`-kind entry per sub-"directory", ahead of that page's objects.
 `FileInfo.key` is the full S3 key, or the prefix for a directory entry, and
 `compare_key` is that key with the listing's `Prefix` removed.
-
-`options.include_common_prefixes` widens a *recursive* scan to emit directory
-entries too: whatever `CommonPrefixes` the service returns to a listing that
-sent no `Delimiter` — none, from a service that follows the API — ahead of that
-page's objects, the same shape a non-recursive page has. It has no effect on a
-non-recursive scan, which always emits them, since the `Delimiter` it sends is
-what asks for them. `S3.ls` sets it, because `aws s3 ls` prints a page's common
-prefixes recursive or not; the transfers leave it off, since a directory record
-is not transferable and a page's leading prefix entries would cost the recursive
-stream the byte order `sync` merge-joins on. As with
-`LocalScanOptions.enumerate_all_entries`, the caller that widens the enumeration
-owns the filtering.
 
 `options.prefix` overrides the storage's own key as the listing anchor, driving
 both the `Prefix` sent and the `compare_key` relativization, so a transfer
@@ -930,11 +906,6 @@ container rather than an openable entity, so no transfer scan ever yields one.
 
 `name_prefix` and `region` map to `ListBuckets`'s `Prefix` and `BucketRegion`,
 omitted when falsy. The page size is the storage's own `page_size`.
-
-As in `scan_pages`, a bucket entry missing `CreationDate` or `Name` raises
-[`MalformedResponseError`](./exceptions.md#malformedresponseerror) naming the
-element at that
-bucket, with the buckets ahead of it already delivered.
 
 Requesting either filter on a botocore whose `ListBuckets` model lacks the
 matching input member raises `ValidationError` before any request (see
@@ -998,11 +969,7 @@ its `compare_key` is the key's basename.
 
 Raises: a `404` returns `None` rather than raising. Any other error — `403`,
 transport, 5xx — is raised translated, because existence could not be
-determined, with `operation` unset like every storage-level call's. A response
-missing `ContentLength` or `LastModified` raises
-[`MalformedResponseError`](./exceptions.md#malformedresponseerror) naming the
-element — the AWS CLI's own reading of its single-object
-HEAD, and the single-entry counterpart of the `scan_pages` rule. A
+determined, with `operation` unset like every storage-level call's. A
 `LastModified` the host's local zone cannot represent is returned with its
 UTC value, as `scan_pages` lists it. This is the generic HEAD; the
 SSE-C-aware single-source HEAD lives in the transfer engine, which reads the

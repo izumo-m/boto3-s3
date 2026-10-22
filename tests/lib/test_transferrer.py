@@ -45,7 +45,6 @@ from boto3_s3.exceptions import (
     CancelledError,
     ConfigurationError,
     InvalidConfigError,
-    MalformedResponseError,
     NotFoundError,
     TransportError,
     ValidationError,
@@ -742,35 +741,11 @@ class TestCopy:
                 id="head-raises",
             ),
             pytest.param(
-                TransferOptions(), [{}, {}], MalformedResponseError, "TagSet", id="no-tagset"
-            ),
-            pytest.param(
-                TransferOptions(),
-                [{}, {"TagSet": [{"Value": "v"}]}],
-                MalformedResponseError,
-                "Key",
-                id="tag-without-key",
-            ),
-            pytest.param(
-                TransferOptions(),
-                [{}, {"TagSet": [{"Key": "k"}]}],
-                MalformedResponseError,
-                "Value",
-                id="tag-without-value",
-            ),
-            pytest.param(
                 TransferOptions(copy_props=CopyPropsMode.ALL),
                 [{}, {"TagSet": []}, KeyError("Credentials")],
                 Boto3S3Error,
                 "Credentials",
                 id="listing-raises",
-            ),
-            pytest.param(
-                TransferOptions(copy_props=CopyPropsMode.ALL),
-                [{}, {"TagSet": []}, {"Annotations": [{"Size": 1}]}],
-                MalformedResponseError,
-                "AnnotationName",
-                id="entry-without-name",
             ),
             pytest.param(
                 TransferOptions(copy_props=CopyPropsMode.ALL),
@@ -783,13 +758,6 @@ class TestCopy:
                 Boto3S3Error,
                 "Credentials",
                 id="annotation-raises",
-            ),
-            pytest.param(
-                TransferOptions(copy_props=CopyPropsMode.ALL),
-                [{}, {"TagSet": []}, {"Annotations": [{"AnnotationName": "n"}]}, {}],
-                MalformedResponseError,
-                "AnnotationPayload",
-                id="reply-without-payload",
             ),
             pytest.param(
                 TransferOptions(copy_props=CopyPropsMode.ALL),
@@ -812,10 +780,9 @@ class TestCopy:
         error_type: type[Boto3S3Error],
         text: str,
     ) -> None:
-        # Whatever a source-side read raises - botocore's family or not - or
-        # a reply missing an element aws-cli reads by subscript fails the item
-        # against the *source*, not the copy destination _record_failure would
-        # otherwise stamp on it; the message names the missing element or the
+        # Whatever a source-side read raises - botocore's family or not -
+        # fails the item against the *source*, not the copy destination
+        # _record_failure would otherwise stamp on it; the message names the
         # cause.
         _, _, results, transferrer = _run(
             TransferType.COPY,

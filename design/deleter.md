@@ -151,10 +151,7 @@ the successful `Deleted[]` entries; each is reconstructed into a per-key
 The fallback route strips `ResponseMetadata` from its actual `DeleteObject`
 response and uses the same slot, so the caller sees a single-object shape
 regardless of the wire form (design/opresult.md). Failures are still read from
-`Errors[]` as below, and a slot rides a success only: a key listed under both
-`Deleted[]` and `Errors[]` is a failure without one, and a key `Deleted[]`
-leaves out is still a success (absence from `Errors[]`, the `Quiet=True` rule,
-which an endpoint ignoring `Quiet=False` depends on) with no slot to attach. One limitation: when the same key was submitted more than
+`Errors[]` as below. One limitation: when the same key was submitted more than
 once in a batch, all of that key's `OpResult`s share a single slot (the
 response's last entry for the key wins). `DeleteObjects` reports per key
 spelling, so per-submission responses (e.g. two distinct delete markers on a
@@ -199,27 +196,6 @@ versioned bucket) cannot be mapped back to submission order.
   when the attempts are spent the recorded error is the `DeleteObject`
   failure, kept as the cause. A batch request that failed as a whole
   sends its keys the same way, whatever the policy (below).
-- **an unattributable `Errors[]` entry** (a missing `Key`, or a spelling that
-  does not match the submitted key): logs a WARNING (the trace stays) and
-  **fails the rest of that batch closed**. Such an entry means the response no
-  longer says which submitted keys really went away, so the synthesis above
-  must not run: under `Quiet=True` it would report the very key the entry was
-  about as a success, and a caller that treats a delete success as license to
-  drop its own record of the object would discard the record of an object that
-  may still exist. Every key of the batch that does not already carry an
-  attributable error is therefore recorded as failed, with a plain
-  `Boto3S3Error` carrying `operation` / `bucket` / `key` and the message
-  `The DeleteObjects response carried an unattributable error entry
-  (key=<key> <Code> (<Message>); ...), so this key's deletion cannot be
-  confirmed` - one `key=... Code (Message)` detail per unattributable entry, so
-  the CLI's `delete failed:` line says why. Keys with an attributable error keep
-  it - it is the more informative one - and under `capture_response=True` a key
-  listed in `Deleted[]` stays a success with its slot, since `Quiet=False` makes
-  that entry positive per-key evidence. These failures count in `failed` and can
-  be `first_error` like any other. Nothing here can fire against real S3, which
-  answers only for the keys the request carried (and aws-cli never issues
-  `DeleteObjects` at all, section 4), so this is a fail-closed defense rather
-  than an observable behavior.
 - **request-level failure** (the `delete_objects` call itself failing,
   whatever the failure - an error answer, a dropped or refused connection,
   anything else the call raised): decides nothing for the keys. aws-cli
@@ -317,14 +293,14 @@ that - so a key never gets fewer attempts than aws-cli gives it.
 - User-facing output such as `delete: s3://...` / `delete failed: s3://... <error>` /
   `(dryrun) delete: ...` (the format of aws-cli's `results.py`) is the CLI layer's
   responsibility to assemble from `on_result`. The library does not print; it
-  only emits the `boto3_s3.deleter` logger (debug: batch dispatch, request-level
-  failures, per-key failures / warning: unattributable entries) - an intentional
-  difference from aws-cli. The CLI's `--debug` picks up this logger, and nothing
-  else does: the `boto3_s3` package logger carries a `NullHandler` (registered
-  by `s3storage` and, for its own warning, by `crtsupport` - every logging path
-  imports one of the two - as boto3's own loggers do), so where no handler is
-  configured the warning stays off stderr instead
-  of surfacing through Python's `lastResort` handler.
+  only emits the `boto3_s3.deleter` logger at debug level (batch dispatch,
+  request-level failures, per-key failures) - an intentional difference from
+  aws-cli. The CLI's `--debug` picks up this logger, and nothing else does: the
+  `boto3_s3` package logger carries a `NullHandler` (registered by `s3storage`
+  and, for its own warning, by `crtsupport` - every logging path imports one of
+  the two - as boto3's own loggers do), so where no handler is configured a
+  warning the library emits stays off stderr instead of surfacing through
+  Python's `lastResort` handler.
 
 ## 5. Out of scope (outside this component)
 

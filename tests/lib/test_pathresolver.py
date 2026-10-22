@@ -8,6 +8,7 @@ GetCallerIdentity fails during validation).
 
 from __future__ import annotations
 
+import errno
 from typing import Any
 
 import pytest
@@ -18,7 +19,6 @@ from boto3_s3.exceptions import (
     Boto3S3Error,
     ConfigurationError,
     InvalidConfigError,
-    MalformedResponseError,
     ValidationError,
 )
 from boto3_s3.pathresolver import (
@@ -518,36 +518,14 @@ class TestResolve:
         assert "InvalidClientTokenId" in str(excinfo.value)
 
     def test_whatever_else_the_request_raised_is_the_base_error(self) -> None:
-        # botocore parsing a reply it cannot convert (an unparsable
-        # CreationDate) raises outside its own family; aws prints the text.
-        s3control = _FakeS3Control(error=ValueError('Invalid timestamp "garbage"'))
+        # A refreshing credential_process whose program is gone raises
+        # outside botocore's family; aws prints the text.
+        s3control = _FakeS3Control(
+            error=FileNotFoundError(errno.ENOENT, "No such file or directory", "/bin/helper")
+        )
         resolver = S3PathResolver(s3control_client=s3control, sts_client=_FakeSts())
         with pytest.raises(Boto3S3Error) as excinfo:
             resolver.resolve_underlying_s3_paths(f"s3://{_AP_ARN}/k.txt")
         assert type(excinfo.value) is Boto3S3Error
-        assert isinstance(excinfo.value.__cause__, ValueError)
-        assert excinfo.value.operation == "mv"
-
-    @pytest.mark.parametrize(
-        ("path", "s3control", "sts", "element"),
-        [
-            (f"s3://{_AP_ARN}/k.txt", _FakeS3Control(access_point={}), _FakeSts(), "Bucket"),
-            ("s3://my-ap-s3alias/k.txt", _FakeS3Control(), _FakeSts(identity={}), "Account"),
-            (
-                f"s3://{_MRAP_ARN}/k.txt",
-                _FakeS3Control(mrap_pages=[{}]),
-                _FakeSts(),
-                "AccessPoints",
-            ),
-        ],
-    )
-    def test_a_reply_missing_what_aws_subscripts(
-        self, path: str, s3control: _FakeS3Control, sts: _FakeSts, element: str
-    ) -> None:
-        # aws dies on the KeyError naming the element; one case per route.
-        resolver = S3PathResolver(s3control_client=s3control, sts_client=sts)
-        with pytest.raises(MalformedResponseError) as excinfo:
-            resolver.resolve_underlying_s3_paths(path)
-        assert element in str(excinfo.value)  # the message names the missing element
-        assert isinstance(excinfo.value.__cause__, KeyError)
+        assert isinstance(excinfo.value.__cause__, FileNotFoundError)
         assert excinfo.value.operation == "mv"

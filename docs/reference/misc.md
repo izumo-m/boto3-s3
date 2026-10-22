@@ -77,8 +77,9 @@ rejects with `ValueError` — falls through to botocore's own `parse_timestamp`
 untouched. The form is a deliberate guard: Python 3.11+'s `fromisoformat`
 reads much more than S3 sends — a digit-only `"20200101"`, which botocore reads
 as epoch seconds, a week date (`2025-W01-1`), and on 3.14 an hour of `24` —
-where botocore answers differently or refuses, so the guard keeps every other
-spelling on botocore's interpretation on every supported Python.
+where botocore answers differently or refuses, and the session builds the
+clients of every service, so the guard keeps every other spelling on
+botocore's interpretation on every supported Python.
 
 The return is a `datetime`. For every input both paths accept, the two agree in
 value; the difference is the tzinfo class — `datetime.timezone` on the fast
@@ -444,13 +445,12 @@ Raises:
   [`TransportError`](./exceptions.md#transporterror) — for a failing
   `GetAccessPoint`, `GetCallerIdentity` or `ListMultiRegionAccessPoints`, with
   whatever the request raised kept as `__cause__` — a botocore error, or
-  anything else botocore died of inside it (a reply value its parser cannot
-  convert), which is the base class carrying that exception's text.
-- [`MalformedResponseError`](./exceptions.md#malformedresponseerror) for a reply
-  missing an element the AWS CLI reads by subscript (`GetAccessPoint`'s
-  `Bucket`, `GetCallerIdentity`'s `Account`, the listing's `AccessPoints` and
-  each access point's `Alias`, `Regions` and region `Bucket`), with the AWS
-  CLI's text: the element's name in quotes.
+  anything else botocore died of inside it (a refreshing `credential_process`
+  whose program is gone), which is the base class carrying that exception's
+  text.
+- [`Boto3S3Error`](./exceptions.md#boto3s3error) itself for a
+  `ListMultiRegionAccessPoints` listing that repeats its `NextToken`, which
+  would otherwise page forever (botocore's paginator rule).
 
 All of the above carry `operation="mv"`: the tag is fixed in this class rather
 than taken as a parameter.
@@ -700,8 +700,8 @@ all.
 
 The library prints nothing. Beyond the results, the deleter logs to the
 `boto3_s3.deleter` logger: batch dispatches, the per-key fallback, and
-request-level and per-key failures at DEBUG, and unattributable response
-entries as warnings ([`../library/logging.md`](../library/logging.md)).
+request-level and per-key failures at DEBUG
+([`../library/logging.md`](../library/logging.md)).
 
 ### Captured responses
 
@@ -713,12 +713,8 @@ the entry minus its `Key`, with a `DeleteMarkerVersionId` renamed to
 `VersionId` (which is how a single `DeleteObject` reports the same id), plus
 the batch-wide `RequestCharged` when the response carries one. The per-key
 fallback route uses its real `DeleteObject` response with `ResponseMetadata`
-stripped. Either way the caller sees the same shape. Failed keys get no slot
-— a key the response lists under both `Deleted[]` and `Errors[]` is a failure —
-and neither does a successful key the response's `Deleted[]` leaves out:
-success on the batch route is absence from `Errors[]` whichever way `Quiet` was
-sent, so an endpoint that answers `Quiet=False` without listing every key
-yields successes with nothing to show. With `capture_response=False` (the
+stripped. Either way the caller sees the same shape. Failed keys get no
+slot. With `capture_response=False` (the
 default) the batch is sent with `Quiet=True` and no slot is produced at all.
 
 One limitation: `DeleteObjects` reports per key spelling, so when the same key
@@ -782,19 +778,7 @@ started. A `DeleteObjects` request that fails as a whole sends its
 keys the same way, whatever the policy, as described below.
 
 Successes on the batch route are synthesized as the submitted keys minus the
-keys in `Errors[]`. An entry that cannot be attributed to a submitted key,
-because it has no `Key` or a key spelled differently from the one sent, is
-logged as a warning and **voids that synthesis for its batch**: every key of
-the batch that the response did not account for is instead recorded as failed,
-carrying a plain [`Boto3S3Error`](./exceptions.md#boto3s3error) with
-`operation` / `bucket` / `key` and a message quoting the offending entry and
-stating that the key's deletion cannot be confirmed. Otherwise the key that
-entry was about would be reported deleted on no evidence. A key that has an
-attributable error of its own keeps it, and with `capture_response=True` a key
-listed in `Deleted[]` stays a success with its slot, because `Quiet=False`
-makes that entry positive per-key evidence. These synthesized failures count in
-`failed` and can become `first_error`. S3 answers only for the keys the request
-carried, so this is a guard rather than a behavior a real run reaches.
+keys in `Errors[]`.
 
 A request-level failure — the `delete_objects` call itself failing, whatever
 the failure: an error the service answered with, a dropped or refused
@@ -810,7 +794,8 @@ dispatch that took the per-key fallback route are unaffected by it: there, that
 call's own success or translated exception is the key's result directly.
 
 An exception a request of either route raises outside the botocore family —
-botocore choking on a malformed response, a redirect loop — is the request
+the `FileNotFoundError` of a refreshing `credential_process` whose program is
+gone, say — is the request
 failing the same way: a batch's keys are sent again one by one, and a single
 key's request fails the key, as a plain
 [`Boto3S3Error`](./exceptions.md#boto3s3error) carrying the original as

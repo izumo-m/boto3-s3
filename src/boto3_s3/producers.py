@@ -32,12 +32,6 @@ from boto3_s3.localstorage import LocalStorage, to_native_path
 from boto3_s3.s3storage import (
     S3Storage,
     attribute_failure,
-    # The one out-of-module caller of these two: the required-element read
-    # and the aware reading of a stamp belong with the backend that reads S3
-    # responses, while aws-cli runs the same reads on the single-object HEAD
-    # this module owns.
-    aware_stamp,
-    read_required,
     s3_request,
 )
 from boto3_s3.storage import Storage, StorageCapability
@@ -883,28 +877,15 @@ def head_single(
             bucket=src_storage.bucket,
             key=key,
         ) from (exc.__cause__ or exc)
-    # aws-cli's `_list_single_object` reads the two elements the HEAD must
-    # carry by subscript - `ContentLength` first, then `LastModified` - and
-    # `ETag` with a default, so a response missing one of the two ends the run
-    # with a MalformedResponseError naming it (rc 1 in the CLI, as on aws)
-    # rather than riding on as None: the single-object counterpart of the
-    # listing rule the S3 backend applies (design/storage.md). The stream
-    # route never comes here, and aws is lenient there too.
-    bucket = src_storage.bucket
-    size: int = read_required(head, "ContentLength", operation=operation, bucket=bucket, key=key)
-    mtime = aware_stamp(
-        read_required(head, "LastModified", operation=operation, bucket=bucket, key=key)
-    )
-    etag = head.get("ETag")
     # A single (non-dir_op) source: the compare key is the key's basename,
     # matching transferplan.item_paths' single-item branch. storage stamps the
     # producing backend like every listing path, so src_info.storage agrees
     # with OpResult.src_storage and a filter can reach the backend.
     yield S3FileInfo(
         key=key,
-        size=size,
-        mtime=mtime,
-        etag=etag,
+        size=head["ContentLength"],
+        mtime=head["LastModified"],
+        etag=head.get("ETag"),
         storage_class=head.get("StorageClass"),
         head=head,
         compare_key=key.rsplit("/", 1)[-1],

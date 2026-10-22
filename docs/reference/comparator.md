@@ -617,9 +617,9 @@ it bare still compare equal).
 **What reads as indeterminate**, and is therefore copied rather than skipped:
 an object carrying no native checksum; an algorithm outside `crc32`, `crc32c`,
 `crc64nvme`, `sha1` and `sha256`; a `crc32c` / `crc64nvme` object past
-`pure_max_size` with no `awscrt`; a `COMPOSITE` object whose part sizes could
-not be read in full (no part listing, a part without a size, a continuation
-marker that does not move past the page it came with); two S3 sides whose
+`pure_max_size` with no `awscrt`; a `COMPOSITE` object whose part listing
+would not end (a continuation marker that does not move past the page it came
+with, or runs past S3's 10,000-part ceiling); two S3 sides whose
 stored checksums use different algorithms or are of different kinds; a
 readable side longer than the sum of the parts, an appended tail the per-part
 digests would not otherwise see; and any `ClientError` from a

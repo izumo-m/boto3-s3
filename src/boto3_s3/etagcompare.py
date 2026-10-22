@@ -319,8 +319,8 @@ def _bare_etag(etag: str | None) -> str | None:
     an ETag computed from bytes is the bare hex - so the quotes come off here,
     at the comparison. Only a matched surrounding pair is removed: an already
     bare value passes through (``content_differs`` accepts both forms), and
-    anything else - a weak ``W/"..."`` validator, say - is left as it is, which
-    never equals a computed ETag and so reads as differing.
+    anything else is left as it is, which never equals a computed ETag and so
+    reads as differing.
     """
     if etag and len(etag) >= 2 and etag[0] == etag[-1] == '"':
         return etag[1:-1]
@@ -330,10 +330,8 @@ def _bare_etag(etag: str | None) -> str | None:
 def _s3_etag(info: object) -> str | None:
     """The bare ETag of an S3 listing entry, or ``None`` when there is none to compare.
 
-    ``None`` for a side that is not an S3 entry, for an entry without an ETag,
-    and for one whose ETag is empty once the quotes are off (``""`` or
-    ``'""'``): an empty value identifies no content, so two of them must not
-    read as the same object.
+    ``None`` for a side that is not an S3 entry and for an entry without an
+    ETag.
     """
     if not isinstance(info, S3FileInfo):
         return None

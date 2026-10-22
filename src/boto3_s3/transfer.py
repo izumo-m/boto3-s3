@@ -104,7 +104,6 @@ from boto3_s3.s3storage import (
     attribute_failure,
     client_build_error,
     crt_error_name,
-    read_required,
     s3_errors,
     s3_request,
     translate_boto_error,
@@ -153,6 +152,12 @@ _METADATA_DIRECTIVE_PROPS: tuple[str, ...] = (
 # S3 caps the ``Tagging`` request header at ~2 KiB (URL-encoded); larger tag
 # sets fall back to a post-copy PutObjectTagging.
 _MAX_TAGGING_HEADER_SIZE = 2 * 1024
+
+# S3's limits on one object's annotations (PutObjectAnnotation): at most
+# 1,000 of them, each payload at most 1 MiB. A source reply past either is
+# outside the API, and the copy stops there instead of storing without bound.
+_MAX_ANNOTATIONS = 1_000
+_MAX_ANNOTATION_PAYLOAD = 1024 * 1024
 
 # user_context slot handing an oversized TagSet from on_queued to on_done.
 _POST_TAGGING_KEY = "boto3_s3_post_copy_tag_set"
@@ -3185,26 +3190,15 @@ class _SetAnnotations:
         finally:
             self.close()
 
-    def _source_element(self, entry: Mapping[str, Any], element: str) -> Any:
-        """An element aws-cli reads off a source reply by subscript (`read_required`).
-
-        A missing one is a ``MalformedResponseError`` with the ``KeyError``'s
-        text, naming the source rather than the copy destination.
-        """
-        return read_required(
-            entry,
-            element,
-            operation=self._operation,
-            bucket=self._item.src_bucket,
-            key=self._item.src_key,
-        )
-
     def _read_source(self) -> None:
         """Read every source annotation into the selected store.
 
         List all pages and collect every name before fetching payloads,
-        aws-cli's order. Any failure closes and discards the partial store
-        before the exception propagates.
+        aws-cli's order. A source past S3's limits (more than
+        ``_MAX_ANNOTATIONS`` names, a payload over ``_MAX_ANNOTATION_PAYLOAD``)
+        fails the item there, so a faulty server cannot grow the store without
+        bound. Any failure closes and discards the partial store before the
+        exception propagates.
         """
         if self._mode is AnnotationCopyMode.PRELOAD_TEMPFILE:
             store: _MemoryAnnotationStore | _TempfileAnnotationStore = _TempfileAnnotationStore(
@@ -3244,8 +3238,16 @@ class _SetAnnotations:
                     page = next(pages, None)
                 if page is None:
                     break
-                for annotation in page.get("Annotations", []):
-                    names.append(self._source_element(annotation, "AnnotationName"))
+                names.extend(
+                    annotation["AnnotationName"] for annotation in page.get("Annotations", [])
+                )
+                if len(names) > _MAX_ANNOTATIONS:
+                    raise Boto3S3Error(
+                        f"The source lists more than {_MAX_ANNOTATIONS} annotations",
+                        operation=self._operation,
+                        bucket=self._item.src_bucket,
+                        key=self._item.src_key,
+                    )
             for name in names:
                 with source_request():
                     response = self._source_client.get_object_annotation(
@@ -3254,9 +3256,21 @@ class _SetAnnotations:
                         AnnotationName=name,
                         **get_params,
                     )
-                body = self._source_element(response, "AnnotationPayload")
+                body = response["AnnotationPayload"]
                 with source_request():
-                    payload = body.read()
+                    payload = body.read(_MAX_ANNOTATION_PAYLOAD + 1)
+                    if len(payload) <= _MAX_ANNOTATION_PAYLOAD:
+                        # botocore checks the body's length and checksum only on
+                        # the read that finds its end, which a sized read that
+                        # takes the whole payload never is.
+                        payload += body.read(1)
+                if len(payload) > _MAX_ANNOTATION_PAYLOAD:
+                    raise Boto3S3Error(
+                        f"The source's annotation {name!r} is larger than 1 MiB",
+                        operation=self._operation,
+                        bucket=self._item.src_bucket,
+                        key=self._item.src_key,
+                    )
                 store.add(name, payload)
         except BaseException:
             self.close()
@@ -3567,35 +3581,7 @@ class _SetTags:
                 Key=self._item.src_key,
                 **requestparams.map_get_object_tagging_params(self._options),
             )
-        # aws-cli subscripts the reply's TagSet, then each tag's Key and Value
-        # as it serializes them; a missing one is a MalformedResponseError
-        # naming the source.
-        tags = read_required(
-            response,
-            "TagSet",
-            operation=self._operation,
-            bucket=self._item.src_bucket,
-            key=self._item.src_key,
-        )
-        return [
-            {
-                "Key": read_required(
-                    tag,
-                    "Key",
-                    operation=self._operation,
-                    bucket=self._item.src_bucket,
-                    key=self._item.src_key,
-                ),
-                "Value": read_required(
-                    tag,
-                    "Value",
-                    operation=self._operation,
-                    bucket=self._item.src_bucket,
-                    key=self._item.src_key,
-                ),
-            }
-            for tag in tags
-        ]
+        return response["TagSet"]
 
     def _rollback(self, bucket: str, key: str) -> BaseException | None:
         """Delete the destination whose tagging write failed, best-effort.

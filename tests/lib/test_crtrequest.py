@@ -188,22 +188,6 @@ class TestSend:
         assert exc_info.value.name == "AWS_ERROR_S3_NON_RECOVERABLE_ASYNC_ERROR"
         assert len(server.requests) == 1
 
-    def test_a_200_answer_that_is_not_xml_is_an_error(self, serve: Any) -> None:
-        # botocore's 500 for it; read as a DeleteObjects result it would list
-        # no failure, which reads as every key deleted.
-        _, sender = serve(_reply("200 OK", {}, b"not xml"))
-        with pytest.raises(ClientError) as exc_info:
-            sender.call("DeleteObjects", {"Bucket": "bkt", "Delete": {"Objects": [{"Key": "a"}]}})
-        assert exc_info.value.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 500
-
-    def test_a_single_delete_s_200_is_done_whatever_its_body(self, serve: Any) -> None:
-        # A DeleteObject reads nothing from its body; aws's CRT client takes
-        # the 200 as the delete done (measured), so the batch's rule stays
-        # with the batch.
-        _, sender = serve(_reply("200 OK", {}, b"<ListBucketResult><Contents>"))
-        response = sender.call("DeleteObject", {"Bucket": "bkt", "Key": "k"})
-        assert response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 200
-
     def test_a_request_botocore_rejects_never_goes_out(self, serve: Any) -> None:
         from botocore.exceptions import ParamValidationError
 

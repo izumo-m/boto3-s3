@@ -191,9 +191,6 @@ class TestS3ScanOptions:
             False,
             None,
         )
-        # The default is the transfer view: a recursive listing's common
-        # prefixes are dropped, so only ls opts into them.
-        assert opts.include_common_prefixes is False
         assert opts.recursive is False  # inherited common field
 
     def test_carries_all_values(self) -> None:
@@ -203,7 +200,6 @@ class TestS3ScanOptions:
             request_payer="requester",
             fetch_owner=True,
             prefix="p/",
-            include_common_prefixes=True,
         )
         assert (
             opts.recursive,
@@ -211,8 +207,7 @@ class TestS3ScanOptions:
             opts.request_payer,
             opts.fetch_owner,
             opts.prefix,
-            opts.include_common_prefixes,
-        ) == (True, 50, "requester", True, "p/", True)
+        ) == (True, 50, "requester", True, "p/")
 
     def test_page_size_passes_through_unvalidated(self) -> None:
         # aws-cli parity (exit-code charter): out-of-range values reach the

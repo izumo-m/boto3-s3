@@ -14,7 +14,6 @@ CATEGORIES: list[type[ex.Boto3S3Error]] = [
     ex.NotFoundError,
     ex.ValidationError,
     ex.TransportError,
-    ex.MalformedResponseError,
     ex.ConfigurationError,
     ex.CancelledError,
 ]
@@ -38,7 +37,6 @@ CATEGORY_NAMES = [
     "ValidationError",
     "InvalidValueError",
     "TransportError",
-    "MalformedResponseError",
     "ConfigurationError",
     "InvalidConfigError",
     "CancelledError",
@@ -111,8 +109,15 @@ class TestRefinementSubclasses:
 
     def test_categories_have_no_other_subclasses(self) -> None:
         # The refinement set is closed: a new category subclass must be added
-        # here (and to the CLI's exit-code mapping decision) deliberately.
-        actual = {sub for category in CATEGORIES for sub in category.__subclasses__()}
+        # here (and to the CLI's exit-code mapping decision) deliberately. A
+        # subclass the CLI defines for its own report is the CLI's, not one of
+        # the library's categories.
+        actual = {
+            sub
+            for category in CATEGORIES
+            for sub in category.__subclasses__()
+            if sub.__module__.partition(".")[0] == "boto3_s3"
+        }
         assert actual == set(REFINEMENTS)
 
 

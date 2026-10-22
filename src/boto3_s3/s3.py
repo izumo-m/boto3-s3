@@ -249,8 +249,8 @@ def _single_request(
     ``mb`` / ``rb`` / ``website`` / ``presign`` issue one client call and raise
     its category error directly (design/exceptions.md section 4). `s3_errors`
     translates the boto family; anything else the call raised from inside
-    botocore - a redirect loop ending in ``RecursionError``, a response
-    missing an element it reads - is that request failing all the same, and
+    botocore - a refreshing ``credential_process`` whose program is gone
+    (``FileNotFoundError``) - is that request failing all the same, and
     becomes the base ``Boto3S3Error`` carrying it as ``__cause__``, the
     `request_failure` shape the blind single-key ``rm`` applies. Only
     ``AssertionError`` passes through: an invariant or a test double's guard
@@ -1462,14 +1462,6 @@ class S3:
         raises ``ValidationError``. The target is validated eagerly. Entries are
         delivered in listing order to `on_entry` on the calling thread.
 
-        An object listing delivers one ``DIRECTORY``-kind entry per common
-        prefix, ahead of the objects of the page that carried it - ``recursive``
-        or not (`S3ScanOptions.include_common_prefixes`, which only ``ls``
-        sets). A recursive listing sends no ``Delimiter``, so a conforming
-        service returns no prefixes to keep; one that returns them anyway is
-        listed the way ``aws s3 ls`` prints such a page, rather than silently
-        dropping entries the service reported.
-
         `cancel_token` may be cancelled from `on_entry` or another thread.
         Cancellation stops entry delivery, drops prefetched pages, waits for a
         page request already in progress, reclaims the prefetch worker (the
@@ -1495,9 +1487,6 @@ class S3:
                     storage.default_scan_options(),
                     recursive=recursive,
                     request_payer=request_payer,
-                    # The listing view: keep the common prefixes a recursive
-                    # listing is handed, which a transfer scan drops.
-                    include_common_prefixes=True,
                     reusable_after_interrupt=self._reusable_after_interrupt,
                 ),
                 cancel_token=cancel_token,

@@ -119,9 +119,8 @@ cannot carry, or a re-send) that had not gone out when the run was abandoned —
 `close(flush=False)` for anything but a graceful cancel, or by an immediate
 one. It is dropped without a record, like a buffered entry.
 
-Nothing is printed. Beyond the result records, the deleter logs to the
-`boto3_s3.deleter` logger — batch dispatches and failures at debug level,
-unattributable responses as warnings.
+Nothing is printed. Beyond the result records, the deleter logs batch
+dispatches and failures to the `boto3_s3.deleter` logger at debug level.
 
 ## 3. Failures
 
@@ -156,20 +155,11 @@ without a line on botocore; S3 may still have deleted it. A key the run is
 abandoned before re-sending gets no record, like an entry still in the
 buffer.
 
-Success on the batch route is normally read as "not in the response's error
-list". If the response carries an error the deleter cannot pin on any key it
-sent — an entry with no key, or one naming a key it never submitted — that
-reading is no longer safe, so **every key of that batch that the response did
-not account for is recorded as failed**, with a message saying the deletion
-could not be confirmed and quoting the offending entry. A key with an error of
-its own keeps that error, and with `capture_response=True` a key the response
-lists as deleted stays a success. Failing closed matters if a delete success
-licenses you to drop your own record of the object: the object may still be
-there. S3 answers only for the keys you sent, so in practice this never fires;
-it is a guard, and it logs a warning as well.
+Success on the batch route is read as "not in the response's error list".
 
 An exception the delete request itself raises that is not a botocore error —
-botocore choking on a malformed response, a redirect loop — is that request
+the `FileNotFoundError` of a refreshing `credential_process` whose program is
+gone, say — is that request
 failing all the same: a batch's keys are sent again one by one, and a single
 key's request fails the key, as a plain `Boto3S3Error` carrying the original
 as `__cause__`. Anything outside that — a genuine programming error, or an
@@ -181,11 +171,8 @@ re-raised to you on the next non-empty `flush()` or `close()`.
 
 With `capture_response=True`, a successful key's `OpResult.extra_info` gains
 a `"delete"` slot holding a single-object-shaped response, regardless of which
-wire form was used. A success the batch response does not list under
-`Deleted[]` — an endpoint that leaves a key out, or answers quietly although
-asked not to — is still a success, with `extra_info` left at `None`, so read
-the slot defensively. One more limitation: if the same key was submitted twice
-in one batch, both records share a single slot.
+wire form was used. One limitation: if the same key was submitted twice in
+one batch, both records share a single slot.
 
 ## 4. Differences from `aws s3`
 

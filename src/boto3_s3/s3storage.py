@@ -34,7 +34,6 @@ import secrets
 import stat as stat_module
 from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import closing, contextmanager, suppress
-from datetime import datetime, timezone
 from importlib.metadata import version
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
@@ -68,7 +67,6 @@ from boto3_s3.exceptions import (
     Boto3S3Error,
     ConfigurationError,
     InvalidConfigError,
-    MalformedResponseError,
     NotFoundError,
     TransportError,
     ValidationError,
@@ -93,13 +91,13 @@ if TYPE_CHECKING:
 # The package logger takes a NullHandler, as boto3's and botocore's own do (the
 # logging HOWTO's rule for libraries): the library reports through `logging` and
 # never prints, so a WARNING it emits where the application configured no
-# handler - the deleter's unattributable-entry guard - must not reach stderr
-# through Python's `lastResort` handler. Registered here because the deleter
-# and the transfer engine import this module, and again in `crtsupport`, a
-# documented surface reachable on its own whose warning fires inside the
-# manager builder; both registrations skip a handler already present, so the
-# logger carries one. A configured handler (the CLI's --debug stream logger,
-# an application's root handler) still sees every record.
+# handler - the CRT manager builder's ignored-config warning - must not reach
+# stderr through Python's `lastResort` handler. Registered here because the
+# deleter and the transfer engine import this module, and again in
+# `crtsupport`, a documented surface reachable on its own whose warning fires
+# inside the manager builder; both registrations skip a handler already
+# present, so the logger carries one. A configured handler (the CLI's --debug
+# stream logger, an application's root handler) still sees every record.
 _package_logger = logging.getLogger("boto3_s3")
 if not any(isinstance(h, logging.NullHandler) for h in _package_logger.handlers):
     _package_logger.addHandler(logging.NullHandler())
@@ -546,9 +544,8 @@ def request_failure(
     `s3_errors` (or a backend's own translation) has already turned the boto
     family into a ``Boto3S3Error``, which passes through with its own cause
     and gets the attribution it left unset (`attribute_failure`). Anything
-    else the call raised - botocore reading a response that lacks an element
-    it needs (an S3 Express ``CreateSession`` reply without ``Credentials``,
-    ``KeyError``), a redirect loop ending in ``RecursionError`` - is the
+    else the call raised - a refreshing ``credential_process`` whose program
+    is gone (``FileNotFoundError`` from botocore's ``Popen``) - is the
     request failing all the same, and becomes `translate_boto_error`'s
     last-resort ``Boto3S3Error`` (the exception's ``str()`` as the message)
     carrying the original as ``__cause__``. This is aws-cli's shape: its
@@ -575,15 +572,13 @@ def s3_request(
     """Report whatever one S3 request raised as a ``Boto3S3Error``.
 
     `s3_errors` for the boto family, plus the `request_failure` capture for
-    everything else the call raised from inside botocore - a redirect loop
-    ending in ``RecursionError``, an S3 Express ``CreateSession`` reply without
-    ``Credentials`` (``KeyError``), a response value its parser cannot convert
-    (``ValueError``) - so ``except Boto3S3Error`` catches a failed request
-    whatever botocore died of. Those become the base error carrying the
-    original as ``__cause__`` and its ``str()`` as the message. A family error raised inside
-    passes through untouched, and ``AssertionError`` alone is left
-    untranslated (an invariant or a test double's guard, never a request
-    outcome).
+    everything else the call raised from inside botocore - a refreshing
+    ``credential_process`` whose program is gone (``FileNotFoundError``) -
+    so ``except Boto3S3Error`` catches a failed request whatever botocore died
+    of. Those become the base error carrying the original as ``__cause__`` and
+    its ``str()`` as the message. A family error raised inside passes through
+    untouched, and ``AssertionError`` alone is left untranslated (an invariant
+    or a test double's guard, never a request outcome).
 
     Wrap the request only - the client call, or one step of a paginator -
     never the code that consumes its result: what that code raises is not a
@@ -598,58 +593,6 @@ def s3_request(
         raise request_failure(exc, operation=operation, bucket=bucket, key=key) from exc
 
 
-def read_required(
-    entry: Mapping[str, Any],
-    element: str,
-    *,
-    operation: str | None = None,
-    bucket: str | None = None,
-    key: str | None = None,
-) -> Any:
-    """Read an element a response entry must carry: aws-cli's subscript, as a family error.
-
-    aws-cli reads these by subscript and dies on the ``KeyError`` naming the
-    element; here that becomes `MalformedResponseError` with the same message
-    (the ``KeyError``'s ``str()``, the element name in quotes) and the
-    ``KeyError`` on ``__cause__``, so a consumer catches it as a family error.
-    """
-    try:
-        return entry[element]
-    except KeyError as exc:
-        raise MalformedResponseError(str(exc), operation=operation, bucket=bucket, key=key) from exc
-
-
-def aware_stamp(mtime: datetime) -> datetime:
-    """A response timestamp as the aware value ``FileInfo.mtime`` promises.
-
-    Every form S3 itself sends carries a zone, and botocore parses it into an
-    aware ``datetime``; that value is returned as it is. A text with no zone
-    at all (an S3-compatible endpoint's ``2025-01-01T00:00:00``) parses naive,
-    and a naive ``mtime`` cannot be set against the other side's aware one -
-    sync's size-and-time judgment would end the run on the subtraction.
-    aws-cli reads such a stamp as local time (its ``.astimezone(tzlocal())``
-    presumes the system zone for a naive value) and carries on, so that is the
-    reading here, converted to UTC: the instant aws-cli compares, stamps a
-    download with and prints.
-
-    A naive stamp the local zone cannot place - near the ends of
-    ``datetime``'s range (the first and last day, depending on the zone and
-    the Python version), or, on Windows, outside the span its ``localtime``
-    covers - is read as UTC instead. aws-cli's own conversion dies there and
-    ends the run; the stamp is a valid value all the same, so the run goes on
-    (docs/cli/aws-differences.md). An aware stamp is never converted here, so
-    no timestamp a response carries stops a run.
-    """
-    if mtime.utcoffset() is not None:
-        return mtime
-    try:
-        return mtime.astimezone(timezone.utc)
-    except (OverflowError, ValueError, OSError):
-        # OSError is Windows': its localtime fails outright below the epoch
-        # and past its own upper limit, where POSIX raises OverflowError.
-        return mtime.replace(tzinfo=timezone.utc)
-
-
 def _page_to_infos(
     page: ListObjectsV2OutputTypeDef,
     *,
@@ -661,12 +604,11 @@ def _page_to_infos(
 
     Runs on the prefetch worker thread under ``Storage.scan`` (a direct
     ``scan_pages`` consumer drives it on its own thread). With
-    ``include_common_prefixes`` the page emits one ``DIRECTORY``-kind entry per
-    ``CommonPrefixes`` entry (before the page's objects); the caller derives that
-    from the listing shape - a non-recursive listing always includes them, a
-    recursive one only when ``S3ScanOptions.include_common_prefixes`` asks.
-    Every object becomes a ``FILE``-kind ``S3FileInfo``. ``owner`` reads
-    the canonical ``Owner["ID"]`` (present only when listed with ``FetchOwner``).
+    ``include_common_prefixes`` (a non-recursive listing) the page emits one
+    ``DIRECTORY``-kind entry per ``CommonPrefixes`` entry (before the page's
+    objects). Every object becomes a ``FILE``-kind ``S3FileInfo``. ``owner``
+    reads the canonical ``Owner["ID"]`` (present only when listed with
+    ``FetchOwner``).
     ``compare_key`` is stamped as ``key[len(prefix):]`` - ``prefix`` is the listing
     ``Prefix``, so every object key and common-prefix starts with it, and the
     slice is the ``Prefix``-relative key operations and custom filters match
@@ -674,96 +616,29 @@ def _page_to_infos(
     ``storage`` (the listing backend) is stamped on every entry alongside
     ``compare_key``, before ``scan_pages`` sieves, so a ``ScanOptions.filter`` sees
     ``info.storage``.
-
-    The elements a listing entry must carry are read as required, not by
-    ``get``: aws-cli reads them by subscript (``BucketLister`` takes ``Key`` then
-    ``LastModified``, its consumer ``Size``; a common prefix is read as
-    ``Prefix``), so an entry missing one stops the listing right there with
-    `MalformedResponseError` naming the element (`read_required`) rather than
-    being dropped from it. This is a generator, entry by entry, for the same
-    reason - the entries ahead of the bad one are already emitted when it is
-    reached, as in aws-cli.
     """
-    bucket = storage.bucket
     if include_common_prefixes:
-        for common in page.get("CommonPrefixes", []):
-            dir_prefix: str = read_required(common, "Prefix", bucket=bucket)
+        for common in cast("list[Mapping[str, Any]]", page.get("CommonPrefixes", [])):
+            dir_prefix: str = common["Prefix"]
             yield S3FileInfo(
                 key=dir_prefix,
                 kind=FileKind.DIRECTORY,
                 compare_key=dir_prefix[len(prefix) :],
                 storage=storage,
             )
-    for obj in page.get("Contents", []):
-        key: str = read_required(obj, "Key", bucket=bucket)
-        mtime = aware_stamp(read_required(obj, "LastModified", bucket=bucket, key=key))
-        size: int = read_required(obj, "Size", bucket=bucket, key=key)
-        etag = obj.get("ETag")
+    for obj in cast("list[Mapping[str, Any]]", page.get("Contents", [])):
+        key: str = obj["Key"]
         owner = obj.get("Owner")
         yield S3FileInfo(
             key=key,
-            size=size,
-            mtime=mtime,
-            etag=etag,
+            size=obj["Size"],
+            mtime=obj["LastModified"],
+            etag=obj.get("ETag"),
             storage_class=obj.get("StorageClass"),
             owner=owner.get("ID") if owner else None,
             compare_key=key[len(prefix) :],
             storage=storage,
         )
-
-
-# The entry elements botocore itself subscripts on a listing page, ahead of
-# `_page_to_infos`: a response that echoes ``EncodingType`` (S3 and MinIO do,
-# botocore having asked for ``url``) has every ``Contents`` ``Key`` and every
-# ``CommonPrefixes`` ``Prefix`` URL-decoded in place as the page is parsed.
-_LISTING_DECODED_ELEMENTS = frozenset({"Key", "Prefix"})
-
-
-def _next_listing_page(
-    pages: Iterator[ListObjectsV2OutputTypeDef], *, bucket: str
-) -> ListObjectsV2OutputTypeDef | None:
-    """Fetch the next ``ListObjectsV2`` page, or ``None`` once the listing ends.
-
-    A page whose entry lacks ``Key`` (or whose common prefix lacks ``Prefix``)
-    never reaches `_page_to_infos` when the response echoes ``EncodingType``:
-    botocore's own URL-decoding of the page subscripts the same element first
-    and dies on the ``KeyError``, as aws-cli does on the same response. That is
-    the incomplete entry `read_required` reports, met one step earlier, so it
-    is reported the same way - `MalformedResponseError` naming the element,
-    the ``KeyError`` on ``__cause__``. Here the whole page is lost with it, the
-    decoding running before any of its entries is handed out (aws-cli's
-    listing stops at the same point). Any other ``KeyError`` is left to the
-    caller's request capture.
-    """
-    try:
-        return next(pages, None)
-    except KeyError as exc:
-        if exc.args and exc.args[0] in _LISTING_DECODED_ELEMENTS:
-            raise MalformedResponseError(str(exc), bucket=bucket) from exc
-        raise
-
-
-def _collect_page(entries: Iterator[S3FileInfo]) -> Iterator[list[S3FileInfo]]:
-    """Collect one page's entries, emitting those built before a rejected one stopped it.
-
-    ``Storage.scan`` hands whole pages to its prefetch worker, so a page is the
-    smallest chunk this producer can deliver, while aws-cli reads its listing one
-    entry at a time and dies on the first entry it cannot read - with the entries
-    ahead of it already on their way out. Emitting the prefix and only then
-    re-raising reproduces that order end to end, because ``prefetch`` re-raises a
-    producer error after the chunks it has already queued have been consumed. A
-    page that converts cleanly is emitted whole (empty pages included, the shape
-    a page-level ``scan_pages`` consumer sees).
-    """
-    built: list[S3FileInfo] = []
-    try:
-        for info in entries:
-            built.append(info)
-    except Exception:
-        if built:
-            yield built
-        raise
-    yield built
 
 
 def _page_to_bucket_infos(page: ListBucketsOutputTypeDef, storage: Storage) -> Iterator[S3FileInfo]:
@@ -777,22 +652,13 @@ def _page_to_bucket_infos(page: ListBucketsOutputTypeDef, storage: Storage) -> I
     listing supplies no ``Prefix``, so ``compare_key`` is the bucket name itself;
     ``storage`` (the service-level ``S3Storage``) is stamped as the producing
     backend, like every other producer's entries.
-
-    Both elements are read as required, as aws-cli's bucket listing
-    subscripts them, so a
-    bucket entry missing one stops the listing at that bucket with
-    `MalformedResponseError` naming the element - the buckets ahead of it are
-    already delivered, this being a generator its caller yields straight
-    through. The date is made aware like any other stamp (`aware_stamp`).
     """
-    for entry in page.get("Buckets", []):
-        name_hint = entry.get("Name")
-        creation = aware_stamp(read_required(entry, "CreationDate", bucket=name_hint))
-        name: str = read_required(entry, "Name", bucket=name_hint)
+    for entry in cast("list[Mapping[str, Any]]", page.get("Buckets", [])):
+        name: str = entry["Name"]
         yield S3FileInfo(
             key=name,
             kind=FileKind.BUCKET,
-            mtime=creation,
+            mtime=entry["CreationDate"],
             compare_key=name,
             storage=storage,
         )
@@ -1294,13 +1160,6 @@ class S3Storage(Storage):
         ``Delimiter`` and yields every object as a ``FILE`` entry; non-recursive
         passes ``Delimiter='/'`` and additionally emits one ``DIRECTORY``-kind
         ``S3FileInfo`` per sub-"directory" (before the page's objects).
-        ``options.include_common_prefixes`` additionally emits the directory
-        entries of a *recursive* listing - whatever ``CommonPrefixes`` the
-        service returns to a listing that sent no ``Delimiter`` (a conforming
-        one returns none). ``S3.ls`` sets it, since ``aws s3 ls`` prints a
-        page's common prefixes recursive or not; a transfer leaves it off,
-        because those entries would enter the transfer stream and cost it the
-        byte order below.
         ``FileInfo.key`` is the full S3 key (or the prefix for directories) -
         for a recursive listing, in ListObjectsV2's UTF-8 lexicographic byte
         order across pages, so that stream is directly merge-joinable (the
@@ -1339,15 +1198,8 @@ class S3Storage(Storage):
         (a transfer's normalized prefix) - both the ``Prefix`` and the
         ``compare_key`` relativization use it - so this instance lists under it
         without being rebuilt.
-
-        Whether a page's ``CommonPrefixes`` become ``DIRECTORY`` entries is
-        decided once here: a non-recursive listing sent the ``Delimiter`` that
-        asks for them, and a recursive listing emits whatever the service
-        returns only when ``options.include_common_prefixes`` asks for it
-        (``S3.ls``, mirroring what ``aws s3 ls`` prints).
         """
         prefix = options.prefix if options.prefix is not None else self._key
-        include_common_prefixes = not options.recursive or options.include_common_prefixes
         paging: dict[str, Any] = {
             "Bucket": self._bucket,
             "Prefix": prefix,
@@ -1371,13 +1223,13 @@ class S3Storage(Storage):
             # Each page is its own request, and only the request sits inside
             # the capture: what the conversion below raises is this module's.
             with s3_request(operation=None, bucket=self._bucket):
-                page = _next_listing_page(pages, bucket=self._bucket)
+                page = next(pages, None)
             if page is None:
                 return
-            yield from _collect_page(
+            yield list(
                 _page_to_infos(
                     page,
-                    include_common_prefixes=include_common_prefixes,
+                    include_common_prefixes=not options.recursive,
                     prefix=prefix,
                     storage=self,
                 )
@@ -1554,21 +1406,11 @@ class S3Storage(Storage):
                 head = self.get_client().head_object(Bucket=self._bucket, Key=target_key)
         except NotFoundError:
             return None
-        # Read as required as aws-cli subscripts them (`ContentLength` and
-        # `LastModified`; `ETag` takes a default), like the listing
-        # converter above and the transfer engine's `producers.head_single`: a
-        # response missing one is a MalformedResponseError naming it instead
-        # of an entry with the value unset.
-        size: int = read_required(head, "ContentLength", bucket=self._bucket, key=target_key)
-        mtime = aware_stamp(
-            read_required(head, "LastModified", bucket=self._bucket, key=target_key)
-        )
-        etag = head.get("ETag")
         return S3FileInfo(
             key=target_key,
-            size=size,
-            mtime=mtime,
-            etag=etag,
+            size=head["ContentLength"],
+            mtime=head["LastModified"],
+            etag=head.get("ETag"),
             storage_class=head.get("StorageClass"),
             head=head,
             compare_key=target_key.rsplit("/", 1)[-1],
@@ -1637,15 +1479,12 @@ class S3Storage(Storage):
         # closing(): the body holds its HTTP connection until it is released,
         # whether the download finished or a local failure abandoned it.
         with closing(cast("BinaryIO", response["Body"])) as body:
-            stamp: datetime | None = response.get("LastModified")
-            mtime = stamp and aware_stamp(stamp)
             self._write_body_atomically(body, dest, key=target_key)
-        etag = response.get("ETag")
         return S3FileInfo(
             key=target_key,
             size=response.get("ContentLength"),
-            mtime=mtime,
-            etag=etag,
+            mtime=response.get("LastModified"),
+            etag=response.get("ETag"),
             storage_class=response.get("StorageClass"),
             head=strip_response_metadata(response, drop_body=True),
             compare_key=target_key.rsplit("/", 1)[-1],

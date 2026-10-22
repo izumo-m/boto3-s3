@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A local source that cannot be walked as a directory (a file, an unreadable or special path, a symlink not followed) now stops a `sync` or recursive `cp` / `mv` before it starts instead of running on an empty source, a `LastModified` only a local-time conversion cannot hold no longer stops a run, and `requestparams.validate_grants` checks a grants value on its own.
 - The library no longer checks or works around code you hand it that breaks its documented contract (streams, custom storages, `GlobFilter`'s `compare_key`), and records what that code raises as the error policy says: a `CancelledError` it raises as it is, a CRT stream upload's read failure instead of awscrt's unknown error, and a custom backend's failure during a content comparison as a `Boto3S3Error`.
 - More code that only reproduced `aws s3`'s error details or made up for an older SDK or Python is gone: when two things are wrong the other may be reported, a symbolic link a `follow_symlinks=False` walk skips is skipped without a warning wherever it sits, the service root reads as `s3:///` however it is typed, and a boto3 too old for the `DEFAULTS` table keeps its own `max_io_queue`.
+- Responses outside S3's API are no longer checked; `MalformedResponseError` and `S3ScanOptions.include_common_prefixes` are removed.
 
 ## [0.12.0] - 2026-10-18
 

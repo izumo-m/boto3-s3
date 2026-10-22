@@ -87,6 +87,9 @@ _ALGO_BY_KEY = {
     "ChecksumSHA256": "sha256",
 }
 
+# S3's ceiling on an object's parts: part numbers run from 1 to 10,000.
+_MAX_PARTS = 10_000
+
 _MASK32 = 0xFFFFFFFF
 _MASK64 = 0xFFFFFFFFFFFFFFFF
 _POLY_CRC32C = 0x82F63B78  # CRC32C (Castagnoli), reflected
@@ -189,13 +192,6 @@ class ChecksumComparison(ContentComparison):
         if not _can_compute(remote_checksum.algorithm, readable.size, self.pure_max_size):
             return True
         part_sizes = remote_checksum.part_sizes
-        if part_sizes is not None and remote_checksum.part_count not in (
-            None,
-            str(len(part_sizes)),
-        ):
-            # The value's own part count disagrees with the part listing: the
-            # two describe different objects, so nothing read here could match.
-            return True
         algorithm = remote_checksum.algorithm
 
         def digest(fh: BinaryIO) -> str | None:
@@ -271,7 +267,7 @@ def _fetch_remote(
     """GetObjectAttributes -> the object's checksum, or ``None`` (indeterminate).
 
     ``None`` means "cannot compare, copy": no checksum on the object, a COMPOSITE
-    object whose part listing cannot be relied on (`_part_sizes`), or any
+    object whose part listing would not end (`_part_sizes`), or any
     ``ClientError`` anywhere in the read (a 404, a denied
     ``s3:GetObjectAttributes``, an SSE-C object needing a key, a failure mid
     part-size pagination, ...) - a per-object rejection never aborts the sync.
@@ -337,9 +333,9 @@ def _get_object_attributes(client: Any, **kwargs: Any) -> Any:
 
     The boto family is `_fetch_remote`'s to sort (a ``ClientError`` is
     per-object, a ``BotoCoreError`` aborts). Anything else the call raises
-    from inside botocore - its parser failing on a ``LastModified`` that is no
-    timestamp, an ``ObjectSize`` that is no integer - is this request failing
-    all the same, and becomes the base ``Boto3S3Error`` with the original as
+    from inside botocore - a refreshing ``credential_process`` whose program
+    is gone (``FileNotFoundError``) - is this request failing all the same,
+    and becomes the base ``Boto3S3Error`` with the original as
     ``__cause__``, the shape every other request point gives it
     (`s3storage.request_failure`). ``AssertionError`` passes: an invariant or
     a test double's guard, never a request outcome.
@@ -368,32 +364,21 @@ def _part_sizes(
 ) -> tuple[int, ...] | None:
     """The COMPOSITE object's part byte sizes, in order (paginated past 1000).
 
-    ``None`` when the listing cannot be trusted to describe the object - no
-    ``ObjectParts`` at all, a part without a usable ``Size``, a truncated page
-    with no marker to continue from or with one that does not move past the
-    page just read (following it would ask for the same page forever), or no
-    parts in the end. The caller reads that as indeterminate (copy): a part
-    split that is not known exactly cannot reproduce the checksum.
+    ``None`` when a truncated page's marker does not move past the page just
+    read, or runs past S3's last part number: following it could page
+    forever. The caller reads that as indeterminate (copy).
     """
-    parts_info: Any = first.get("ObjectParts")
-    if not parts_info:
-        return None
+    parts_info: Any = first["ObjectParts"]
     extra: dict[str, Any] = {"RequestPayer": request_payer} if request_payer else {}
     sizes: list[int] = []
     followed = 0  # the marker the page in hand was asked with (0: the first page)
     while True:
         parts: list[Any] = parts_info.get("Parts") or []
-        try:
-            sizes.extend(int(part["Size"]) for part in parts)
-        except (KeyError, TypeError, ValueError):
-            return None
+        sizes.extend(part["Size"] for part in parts)
         if not parts_info.get("IsTruncated", False):
-            break
-        try:
-            marker = int(parts_info.get("NextPartNumberMarker") or 0)
-        except (TypeError, ValueError):
-            return None
-        if marker <= followed:
+            return tuple(sizes)
+        marker: int = parts_info.get("NextPartNumberMarker") or 0
+        if not followed < marker < _MAX_PARTS:
             return None
         followed = marker
         resp: Any = _get_object_attributes(
@@ -404,10 +389,7 @@ def _part_sizes(
             PartNumberMarker=marker,
             **extra,
         )
-        parts_info = resp.get("ObjectParts") or {}
-    # An empty part list is degenerate (S3 multipart objects have >= 1 part);
-    # treat it as indeterminate rather than hashing a digest that cannot match.
-    return tuple(sizes) if sizes else None
+        parts_info = resp["ObjectParts"]
 
 
 def _can_compute(algorithm: str, size: int | None, pure_max_size: int | None) -> bool:

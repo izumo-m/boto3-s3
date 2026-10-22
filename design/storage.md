@@ -85,26 +85,6 @@ front only when the declaration is honest:
   `read_ahead=False` in its `default_scan_options`, which the operations narrow
   but never widen.
 
-  **A producer that fails part-way through a page** should yield what it has
-  already built and only then raise: `scan`'s prefetch re-raises a producer
-  error after the chunks it had queued are consumed, so the entries ahead of
-  the failure reach the consumer first - the entry-by-entry order aws-cli dies
-  in, where a page is the smallest chunk this interface can deliver. The
-  built-in S3 backend is what needs it: it reads the elements a listing entry
-  must carry by subscript, as aws-cli does (`Key`, `LastModified` and
-  `Size` for an object, `Prefix` for a common prefix, `CreationDate` and `Name`
-  for a bucket), so an entry missing one raises `MalformedResponseError`
-  naming the element (the `KeyError` as its cause) instead of being
-  silently dropped - the object listing emitting the part of
-  the page it had converted, the bucket listing being streamed entry by entry
-  to begin with. (A response that echoes `EncodingType` has botocore
-  URL-decode each `Key` / `Prefix` by subscript while it parses the page, so
-  there the same error is raised from the page fetch, the whole page lost with
-  it - aws-cli's listing dies in that same handler.) Its single-object `HeadObject` (`get_fileinfo`, and the
-  transfer engine's `producers.head_single`) reads `ContentLength` ->
-  `LastModified` the same way, `ETag` with a default - aws-cli's
-  `_list_single_object` order.
-
   `options.filter` (the `--exclude`/`--include` predicate) is applied by
   **`scan()`** by default, after `scan_pages`, so a backend need not filter at
   all. A backend that filters at its source applies it in `scan_pages` and
@@ -123,7 +103,7 @@ front only when the declaration is honest:
   `ScanOptions` subclass still carries them to `scan_pages`, but the caller
   does not pass them per operation (`S3ScanOptions` = the `ListObjectsV2`
   knobs `page_size` / `fetch_owner`, plus the operation-set `request_payer` /
-  `prefix` / `include_common_prefixes`; `LocalScanOptions` = `follow_symlinks` /
+  `prefix`; `LocalScanOptions` = `follow_symlinks` /
   `detect_symlink_loops` / `enumerate_all_entries`, plus the internal `storage`
   back-reference the walk stamps on each entry). A subclass keeps one backend's
   knobs from leaking into another's; the built-ins reject a foreign options
@@ -137,18 +117,6 @@ front only when the declaration is honest:
   transfer cannot consume, or accept the operation's normal failure, blocking,
   device-side-effect, and deletion behavior. The default `False` keeps aws-cli
   transfer enumeration.
-
-  The S3 side has one widening of the same kind, `include_common_prefixes`:
-  emit the `CommonPrefixes` of a **recursive** page as `DIRECTORY` entries
-  (a non-recursive page always emits them — its `Delimiter` is what asks for
-  them). Only `S3.ls` sets it, because aws-cli's display prints a page's common
-  prefixes whether or not `--recursive` was given, while its transfer-side
-  generator reads `Contents` only; a listing without a `Delimiter` gets no
-  prefixes from a conforming service, so the setting is visible only against
-  one that returns them anyway. The transfers keep the default `False`: a
-  directory record is not transferable, and a page's prefixes arrive ahead of
-  its objects, which would break the `compare_key` byte order `sync`'s
-  merge-join asserts on (section 3).
 
   `LocalStorage` also takes one **destination-side** constructor knob that is
   *not* a scan source-config: `fsync` (default off, as aws-cli), a library

@@ -32,7 +32,7 @@ from __future__ import annotations
 import re
 from typing import Any, NamedTuple
 
-from boto3_s3.exceptions import ConfigurationError, ValidationError
+from boto3_s3.exceptions import Boto3S3Error, ConfigurationError, ValidationError
 
 # aws-cli regexes, verbatim. ``has_underlying_s3_path`` and the resolution
 # dispatch share them; the suffix forms (-s3alias / --op-s3 / --xa-s3) have no
@@ -355,12 +355,12 @@ class S3PathResolver:
     def _get_access_point_bucket(self, account: str, name: str) -> str:
         with self._request():
             response = self._s3control_client.get_access_point(AccountId=account, Name=name)
-        return self._required(response, "Bucket")
+        return response["Bucket"]
 
     def _get_account_id(self) -> str:
         with self._request():
             response = self._sts_client.get_caller_identity()
-        return self._required(response, "Account")
+        return response["Account"]
 
     def _get_mrap_buckets(self, account: str, alias: str) -> list[str]:
         next_token: str | None = None
@@ -370,18 +370,21 @@ class S3PathResolver:
                 args["NextToken"] = next_token
             with self._request():
                 response = self._s3control_client.list_multi_region_access_points(**args)
-            for access_point in self._required(response, "AccessPoints"):
-                if self._required(access_point, "Alias") == alias:
-                    return [
-                        self._required(region, "Bucket")
-                        for region in self._required(access_point, "Regions")
-                    ]
-            next_token = response.get("NextToken")
+            for access_point in response["AccessPoints"]:
+                if access_point["Alias"] == alias:
+                    return [region["Bucket"] for region in access_point["Regions"]]
+            previous_token, next_token = next_token, response.get("NextToken")
             if not next_token:
                 raise ValidationError(
                     "Couldn't find multi-region access point "
                     f"with alias {alias} in account {account}",
                     operation="mv",
+                )
+            if next_token == previous_token:
+                # botocore's paginator rule: a server repeating its token
+                # would have this loop page forever.
+                raise Boto3S3Error(
+                    f"The same next token was received twice: {next_token}", operation="mv"
                 )
 
     @staticmethod
@@ -391,28 +394,17 @@ class S3PathResolver:
         `s3storage.s3_request`, keeping ``__cause__``: aws lets the raw
         ClientError escape to its generic 254 handler (a failing
         GetCallerIdentity exits 254), and anything else botocore raises inside
-        the request - a reply value its parser cannot convert, an unparsable
-        ``CreationDate`` - to its general 255 one with the exception's text;
-        the library shape for both is a translated ``Boto3S3Error`` with the
-        original as its cause, whose text the CLI prints unchanged. Deferred
-        import: keeps this module SDK-free at import time (the path split
-        already lazily loads ``s3storage`` the same way, so by resolution time
-        it is warm).
+        the request - a refreshing ``credential_process`` whose program is
+        gone (``FileNotFoundError``) - to its general 255 one with the
+        exception's text; the library shape for both is a translated
+        ``Boto3S3Error`` with the original as its cause, whose text the CLI
+        prints unchanged. Deferred import: keeps this module SDK-free at
+        import time (the path split already lazily loads ``s3storage`` the
+        same way, so by resolution time it is warm).
         """
         from boto3_s3.s3storage import s3_request
 
         return s3_request(operation="mv")
-
-    @staticmethod
-    def _required(entry: Any, element: str) -> Any:
-        """Read an element of a reply aws reads by subscript (`s3storage.read_required`).
-
-        aws dies on the ``KeyError`` naming a missing element; here that is a
-        ``MalformedResponseError`` naming it.
-        """
-        from boto3_s3.s3storage import read_required
-
-        return read_required(entry, element, operation="mv")
 
 
 __all__ = [

@@ -294,6 +294,10 @@ chain:
     preload storage and startup delay, but a source read failure leaves the
     completed destination in place.
 
+  Every mode reads at most S3's limits on one object's annotations - 1,000
+  names, 1 MiB a payload - and fails the item on a source past them
+  ([`exceptions.md`](./exceptions.md) section 3.1).
+
   The writes are aws-cli's SetAnnotationsSubscriber, ported
   (`_SetAnnotations.on_done`): after a successful copy, one
   PutObjectAnnotation per staged name in the source listing's order, mapping
@@ -560,28 +564,6 @@ dest-existence check for download. We ported the same three faces:
   comparison and the deletes go on (docs/cli/aws-differences.md). The CLI's
   `ls` still renders such a stamp in local time, as aws-cli does, so that
   rendering can still fail there.
-- **an S3-side timestamp with no zone is local time.** S3 always sends a zone;
-  an S3-compatible endpoint that leaves it off (`2025-01-01T00:00:00`) makes
-  botocore return a naive `datetime`, and aws-cli's same `astimezone(tzlocal())`
-  presumes the system zone for it. `s3storage.aware_stamp` gives every stamp a
-  response supplies that reading (listing entries, the single-object HEAD,
-  `get_fileinfo`, bucket creation dates) and keeps it as aware UTC, so the
-  `FileInfo.mtime` contract holds and sync's size-and-time judgment compares
-  the instant aws-cli compares (measured against aws-cli under `TZ=UTC`,
-  `TZ=Asia/Tokyo` and `TZ=America/New_York`). A stamp the local zone cannot
-  place - at the edges of `datetime`'s range, or outside what Windows'
-  `localtime` covers - is read as UTC instead, where aws-cli dies on the
-  conversion.
-- **a single-object HEAD missing `ContentLength` or `LastModified` ends the
-  run** the same way: aws-cli's `_list_single_object` reads those two by
-  subscript (`ContentLength` first) and `ETag` with a default, so
-  `producers.head_single` does too - a `MalformedResponseError` naming the
-  element with aws-cli's `KeyError` text, the
-  CLI's `fatal error: 'LastModified'` at rc 1 (measured for a download, a
-  `--dryrun` copy and a `--dryrun` move) - rather than an entry carrying
-  `None`. The single-object counterpart of the listing rule
-  ([`storage.md`](./storage.md) section 2); the stream route never resolves
-  its source this way, and aws is lenient there too.
 - **symlink-loop guard** (`detect_symlink_loops`, a **library extension**, default
   off so `cp` / `mv` / `sync` match aws - `aws s3` has no such option):
   off, a symlink cycle descends until the kernel's `ELOOP` / path-length

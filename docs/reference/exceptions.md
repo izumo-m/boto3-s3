@@ -12,7 +12,7 @@ from the command will find its exit codes specified separately in
 [`../cli/exit-codes.md`](../cli/exit-codes.md); they are a CLI concept and play
 no part in the library contract below.
 
-All eleven classes are exported from the `boto3_s3` root and from
+All ten classes are exported from the `boto3_s3` root and from
 `boto3_s3.exceptions`.
 
 ```
@@ -22,7 +22,6 @@ Boto3S3Error
 ├── ValidationError
 │   └── InvalidValueError
 ├── TransportError
-├── MalformedResponseError
 ├── ConfigurationError
 │   └── InvalidConfigError
 ├── CancelledError
@@ -82,21 +81,21 @@ instances exist only where no classification applies:
   category for (a cancellation, an unknown error), or an `OSError` a request
   raises from a credential provider (a `credential_process` executable or a
   web identity token file that is missing), say;
-- whatever an S3 request raised from inside botocore that is none of
-  botocore's own exceptions — a redirect loop ending in `RecursionError`, an
-  S3 Express session reply without `Credentials` (`KeyError`), a response
-  value its parser cannot convert (`ValueError`). The request failed all the
-  same, so every request the library issues reports it as the base error
-  with that exception on `__cause__` and its text — what the AWS CLI prints —
-  as the message;
+- whatever else an S3 request raised from inside botocore that is none of
+  botocore's own exceptions. The request failed all the same, so every
+  request the library issues reports it as the base error with that
+  exception on `__cause__` and its text — what the AWS CLI prints — as the
+  message;
 - the status-widening fallback for a `ClientError` whose error code is not in
   the category table and whose HTTP status is not one the widening rules cover
   (403, 404, 5xx, other 4xx);
 - a per-key `DeleteObjects` failure whose code is not in the category table
   (such an entry carries no HTTP status to widen on);
-- the deleter's fail-closed failure for a key whose deletion an unattributable
-  `DeleteObjects` error entry leaves unconfirmed (see
-  [`S3Deleter`](./misc.md#s3deleter));
+- the guards that keep a server answering outside S3's API from making a
+  run loop or grow without bound: a copy's source annotations past S3's
+  limits (more than 1,000, or a payload over 1 MiB), a multi-region access
+  point listing that repeats its `NextToken`
+  ([`../../design/exceptions.md`](../../design/exceptions.md) section 3.1);
 - the message envelope on `WARNED` and `NOTICE` `OpResult` records, where the
   instance is a carrier for display text and is never raised (see
   [`results.md`](./results.md)).
@@ -111,19 +110,22 @@ for a failed S3 request carries the originating botocore `ClientError` on
 stamps the original exception onto the record error's `__cause__`, and an error
 that was already a `Boto3S3Error` passes through keeping whatever cause it had.
 The exception-free paths are the deleter's per-key failures synthesized from a
-`DeleteObjects` response body — an error entry, and the unconfirmed-deletion
-failure above — with no exception object behind them, so their `__cause__` is
-`None` and only the message carries the S3 error code.
+`DeleteObjects` response body's error entries, and the guards' failures above,
+with no exception object behind them, so their `__cause__` is `None` and only
+the message says what happened.
 
 Some exceptions stay outside the hierarchy by design. Programming bugs
 (`TypeError`, `AssertionError`) propagate unwrapped on the synchronous paths —
 the library's own code, that is: what botocore raises from inside a request is
 the request failing, reported as above, with `AssertionError` alone left
 untranslated there too (bar the CRT signer's refusal of a non-positive
-`expires_in` in `presign`, an `InvalidValueError`). `KeyboardInterrupt` and `SystemExit` always propagate. A response the service
-returned incomplete is inside it:
-[`MalformedResponseError`](#malformedresponseerror) carries the `KeyError`
-the AWS CLI dies with on `__cause__` and its text as the message. Selecting the CRT engine
+`expires_in` in `presign`, an `InvalidValueError`). `KeyboardInterrupt` and
+`SystemExit` always propagate. What a response outside S3's API leads to —
+a missing element, a value the API does not define, a value that cannot be
+read — is not specified: it may be any failure, the bare exception the
+library's reading of the response raised included, or none
+([`../../design/exceptions.md`](../../design/exceptions.md) section 3.1).
+Selecting the CRT engine
 explicitly with `preferred_transfer_client="crt"` while awscrt is absent (or
 older than boto3's minimum) is a [`ConfigurationError`](#configurationerror)
 when the library resolves the config (`S3.resolve_transfer_config`, which
@@ -240,48 +242,6 @@ engine gave up retrying, a local file it cannot open, read or write.
 
 ```python
 class TransportError(Boto3S3Error): ...
-```
-
-Adds no attributes and no constructor of its own. It has no subclasses in the
-hierarchy.
-
-## MalformedResponseError
-
-The service answered, but with a response the library cannot consume. Raised
-where the AWS CLI itself dies reading the same response: a `ListObjectsV2`
-entry missing `Key`, `LastModified` or `Size`, a `CommonPrefixes` entry
-missing `Prefix`, a `ListBuckets` entry missing `CreationDate` or `Name`, or a
-single-object `HeadObject` missing `ContentLength` or `LastModified` (the
-exact rules are under `scan_pages`, `list_buckets` and
-`get_fileinfo` in [`storage.md`](./storage.md); the access point replies
-[`S3PathResolver`](./misc.md#s3pathresolver) reads are listed there), a copy's
-source `GetObjectTagging` reply missing `TagSet` or a tag's `Key` / `Value`, or
-its source annotation listing or `GetObjectAnnotation` reply missing
-`AnnotationName` / `AnnotationPayload` (attributed to the source). A
-truncating proxy or a partial S3 implementation is the usual source. A
-`LastModified` the host's local zone cannot represent (years 1 and 9999,
-within the zone's offset of `datetime`'s range; on Windows also every
-timestamp before 1970 or past about the year 3000), where the AWS CLI's
-conversion of every S3 timestamp to local time dies, is not this class: the
-UTC value is kept and the run goes on. An element
-that is present but unreadable — a
-`LastModified` that is no timestamp, a `Size` that is no integer — is not this
-class: botocore's own parser fails on it before the library reads anything,
-and that arrives as the base [`Boto3S3Error`](#boto3s3error) carrying the
-parser's `ValueError`.
-
-The run stops where the CLI's stops: the entries ahead of the bad one are
-already delivered — an `ls` has reported them, a transfer has submitted them —
-and nothing after it is read. The message is the `KeyError`'s `str()`, which
-is the element name in quotes (`'LastModified'`); that original exception is
-on `__cause__`. `bucket` and `key` name the entry when the
-response carried them (an entry missing `Key` names only its bucket; a bucket
-entry puts its name in `bucket`), and `operation` names the operation that
-was reading the response and is left unset on a storage-level call, like
-every other error those raise.
-
-```python
-class MalformedResponseError(Boto3S3Error): ...
 ```
 
 Adds no attributes and no constructor of its own. It has no subclasses in the

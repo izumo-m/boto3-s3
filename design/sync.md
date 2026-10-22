@@ -428,9 +428,9 @@ strategy in `ParallelFilter` (section 10) to run those concurrently.
   `GetObjectAttributes` **`ClientError`** (a 404, a denied
   `s3:GetObjectAttributes`, an SSE-C object that needs a key) is treated as
   differing - the strategy never skips on an indeterminate compare. So is a
-  `COMPOSITE` object whose part listing cannot be relied on: a part with no
-  size, or a truncated page whose continuation marker does not advance (which
-  is not followed - it would ask for the same page forever). A
+  `COMPOSITE` object whose part listing would not end: a truncated page whose
+  continuation marker does not advance, or runs past S3's 10,000-part ceiling,
+  is not followed ([`exceptions.md`](./exceptions.md) section 3.1). A
   `BotoCoreError` (no credentials, an unreachable endpoint, a timeout) is not
   per-object: it aborts the sync, translated to the library taxonomy
   (silently "copy everything" would mask a broken environment).

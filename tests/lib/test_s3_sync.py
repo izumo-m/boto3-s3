@@ -692,25 +692,6 @@ class TestSyncDownload:
         assert [call.params["Key"] for call in calls[1:]] == ["d/new.txt", "d/touched.txt"]
         assert (out / "new.txt").read_bytes() == b"payload"
 
-    def test_a_zoneless_listing_stamp_is_judged_as_local_time(self, tmp_path: Path) -> None:
-        # An endpoint whose LastModified carries no zone: aws-cli reads it as
-        # local time and judges the pair; a naive value left as it was ended
-        # the run on "can't subtract offset-naive and offset-aware datetimes".
-        out = tmp_path / "out"
-        naive = datetime(2025, 1, 1, 12, 0, 0)
-        local = naive.astimezone()  # the same wall clock, read as local time
-        _write(out, "old.txt", b"xx", mtime=local - timedelta(hours=1))  # local older -> skip
-        _write(out, "touched.txt", b"xx", mtime=local + timedelta(hours=1))  # newer -> download
-        page = {
-            "Contents": [
-                {"Key": f"d/{name}", "Size": 2, "LastModified": naive, "ETag": '"e"'}
-                for name in ("old.txt", "touched.txt")
-            ]
-        }
-        client, calls = make_recording_client([page, get_response()])
-        S3().sync(S3Storage("s3://bucket/d", client=client), str(out), transfer_config=_SERIAL)
-        assert [call.params["Key"] for call in calls[1:]] == ["d/touched.txt"]
-
     def test_exact_timestamps_downloads_on_any_skew(self, tmp_path: Path) -> None:
         # Both skew directions: local-older is the discriminating case (the
         # default skips it), local-newer pins that exact_timestamps still
@@ -1052,30 +1033,6 @@ class TestSyncFilesystemRoot:
             dryrun=True,
         )
         assert seen == ["/bin/x"]
-
-
-class TestSyncS3SourceCommonPrefixes:
-    """A listing page's ``CommonPrefixes`` never enter sync's item stream.
-
-    ``ls`` opts into them (``S3ScanOptions.include_common_prefixes``, so that a
-    recursive listing prints the ``PRE`` lines aws prints); a transfer must not,
-    on both counts sync is strict about - a directory record is not a
-    transferable item, and a page yields its prefixes *ahead* of its objects,
-    which would break the merge-join's requirement that each side arrive in
-    ``compare_key`` byte order.
-    """
-
-    def test_a_prefix_carrying_page_syncs_only_the_object(self, tmp_path: Path) -> None:
-        out = tmp_path / "out"
-        page = listing(("d/a.txt", 7))
-        # A service that answers a Delimiter-less listing with prefixes anyway;
-        # 'zdir/' sorts after 'a.txt', so a leaked entry breaks the byte order.
-        page["CommonPrefixes"] = [{"Prefix": "d/zdir/"}]
-        client, calls = make_recording_client([page, get_response()])
-        S3().sync(S3Storage("s3://bucket/d", client=client), str(out), transfer_config=_SERIAL)
-        assert ops(calls) == ["ListObjectsV2", "GetObject"]
-        assert calls[1].params["Key"] == "d/a.txt"
-        assert sorted(path.name for path in out.iterdir()) == ["a.txt"]
 
 
 class TestSyncCopy:

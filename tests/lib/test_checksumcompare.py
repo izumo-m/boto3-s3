@@ -12,9 +12,9 @@ Canned attribute shapes are deliberately miniature: part sizes far below S3's
 5 MiB floor, digest strings that are not real base64. The code under test does
 arithmetic and string comparison over the returned values - the live service's
 size and format rules do not change its paths - and miniature shapes keep the
-fixtures readable and the suite fast. (Tests that exercise *malformed* inputs
-- a wrong part count, a truncated listing without its marker - say so in
-their own comments.)
+fixtures readable and the suite fast. (Tests that feed a part listing outside
+S3's API - a truncated one without its marker - say so in their own
+comments.)
 
 CRC goldens come from ``awscrt`` (the same C implementation S3 uses); tests that
 need them skip when it is absent. The pure-Python CRC is additionally pinned to
@@ -345,18 +345,6 @@ class TestComposite:
         )
         assert _upload_filter(client)(pair) is False
 
-    def test_wrong_count_copies(self, tmp_path: Path) -> None:
-        # Right digits, wrong "-N": the part count participates -> differ.
-        p = _write(tmp_path)
-        value = _composite_golden(_DATA, _PARTS, "crc32c").rsplit("-", 1)[0] + "-9"
-        client = _FakeClient({"obj": _composite_resp("crc32c", value, _PARTS)})
-        pair = _pair(
-            TransferType.UPLOAD,
-            src=local_info(native_key(p), size=len(_DATA)),
-            dest=_s3(size=len(_DATA)),
-        )
-        assert _upload_filter(client)(pair) is True
-
     def test_paginated_parts(self, tmp_path: Path) -> None:
         p = _write(tmp_path)
         value = _composite_golden(_DATA, _PARTS, "crc32c")
@@ -442,14 +430,6 @@ class TestCompositeForms:
         resp = _composite_resp("sha256", value, _PARTS)
         del resp["Checksum"]["ChecksumType"]
         assert self._upload(tmp_path, resp) is False
-
-    def test_a_part_count_that_disagrees_with_the_listing_copies(self, tmp_path: Path) -> None:
-        resp = _composite_resp("sha256", f"{_sha256_composite(_DATA, _PARTS)}-9", _PARTS)
-        assert self._upload(tmp_path, resp) is True
-
-    def test_a_part_count_that_is_no_number_copies(self, tmp_path: Path) -> None:
-        resp = _composite_resp("sha256", f"{_sha256_composite(_DATA, _PARTS)}-x", _PARTS)
-        assert self._upload(tmp_path, resp) is True
 
 
 # -- s3 -> s3 (COPY) -----------------------------------------------------------
@@ -606,11 +586,11 @@ class TestClientErrorIndeterminate:
 
 
 class TestPartListingIndeterminate:
-    """A part listing that cannot be relied on reads as indeterminate (copy).
+    """A part listing that would not end reads as indeterminate (copy).
 
-    The part split has to be known exactly to reproduce a COMPOSITE checksum;
-    a listing short of that is neither followed forever nor allowed to stop
-    the run.
+    A marker that does not move past the page just read, or that runs past
+    S3's last part number, is not followed: a server answering that way could
+    otherwise page forever.
     """
 
     def _upload(self, tmp_path: Path, client: _FakeClient) -> bool:
@@ -637,7 +617,7 @@ class TestPartListingIndeterminate:
         assert self._upload(tmp_path, client) is True
         assert len(client.calls) == 2  # the first page, and the one that repeated its marker
 
-    @pytest.mark.parametrize("marker", ["x", 0, -1])
+    @pytest.mark.parametrize("marker", [0, -1, 10_000])
     def test_a_marker_that_cannot_continue_the_listing_copies(
         self, tmp_path: Path, marker: object
     ) -> None:
@@ -652,30 +632,6 @@ class TestPartListingIndeterminate:
         client = _FakeClient({"obj": page})
         assert self._upload(tmp_path, client) is True
         assert len(client.calls) == 1
-
-    def test_a_part_without_a_size_copies(self, tmp_path: Path) -> None:
-        page = {
-            "Checksum": {"ChecksumSHA256": "ABC-2", "ChecksumType": "COMPOSITE"},
-            "ObjectParts": {"Parts": [{"PartNumber": 1}, {"PartNumber": 2, "Size": 524}]},
-        }
-        assert self._upload(tmp_path, _FakeClient({"obj": page})) is True
-
-    def test_a_later_page_part_without_a_size_copies(self, tmp_path: Path) -> None:
-        def respond(kw: dict[str, Any]) -> Any:
-            if kw.get("PartNumberMarker"):
-                return {"ObjectParts": {"Parts": [{"PartNumber": 2}], "IsTruncated": False}}
-            return {
-                "Checksum": {"ChecksumSHA256": "ABC-2", "ChecksumType": "COMPOSITE"},
-                "ObjectParts": {
-                    "Parts": [{"PartNumber": 1, "Size": 500}],
-                    "IsTruncated": True,
-                    "NextPartNumberMarker": 1,
-                },
-            }
-
-        client = _FakeClient({"obj": respond})
-        assert self._upload(tmp_path, client) is True
-        assert len(client.calls) == 2
 
 
 class TestBotoCoreErrorAborts:
@@ -722,11 +678,11 @@ class TestBotoCoreErrorAborts:
     def test_a_failure_from_outside_the_boto_family_is_the_requests_too(
         self, tmp_path: Path
     ) -> None:
-        # botocore's parser raises a bare ValueError on an attribute it
-        # cannot convert (a LastModified that is no timestamp). Every other
-        # request point reports that as the base error; this one let the
-        # ValueError out of S3.sync, past `except Boto3S3Error`.
-        err = ValueError('Invalid timestamp "garbage": Unknown string format: garbage')
+        # A refreshing credential_process whose program is gone raises a bare
+        # FileNotFoundError inside the request. Every other request point
+        # reports that as the base error; this one let it out of S3.sync,
+        # past `except Boto3S3Error`.
+        err = FileNotFoundError(errno.ENOENT, "No such file or directory", "/bin/helper")
         client = _FakeClient({"obj": err})
         with pytest.raises(Boto3S3Error) as excinfo:
             _upload_filter(client)(self._pair_at(tmp_path))
@@ -742,7 +698,7 @@ class TestBotoCoreErrorAborts:
         # The second GetObjectAttributes - the next page of a COMPOSITE
         # object's parts - goes through the same wrapper; reverting that one
         # call left every test green.
-        err = ValueError("invalid literal for int() with base 10: 'abc'")
+        err = FileNotFoundError(errno.ENOENT, "No such file or directory", "/bin/helper")
 
         def respond(kw: dict[str, Any]) -> Any:
             if kw.get("PartNumberMarker"):
