@@ -103,6 +103,8 @@ class TestStdStreams:
         monkeypatch.setattr(sys, "stdout", out)
         monkeypatch.setattr(sys, "stderr", None)
         monkeypatch.setattr(textencoding, "text_encoding", lambda: "UTF-8")
+        # The error handler aws's stdout takes depends on the host locale; pin it.
+        monkeypatch.setattr(textencoding, "_stdout_errors", lambda: "surrogateescape")
         textencoding.configure_std_streams()
         assert (out.encoding, out.errors) == ("utf-8", "surrogateescape")
 
