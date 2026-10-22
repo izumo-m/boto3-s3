@@ -56,7 +56,7 @@ from boto3_s3.comparator import (
     SrcOnlyPair,
     SyncPair,
 )
-from boto3_s3.deleter import S3Deleter, crt_delete_sender
+from boto3_s3.deleter import S3Deleter, crt_delete_sender, delete_record
 from boto3_s3.exceptions import (
     AccessDeniedError,
     BatchError,
@@ -77,6 +77,7 @@ from boto3_s3.localstorage import (
 from boto3_s3.s3storage import (
     CA_BUNDLE_ENVIRONMENT_VETTED,
     S3Storage,
+    attribute_failure,
     client_build_error,
     reject_empty_ca_bundle,
     request_failure,
@@ -93,7 +94,6 @@ from boto3_s3.types import (
     FileInfo,
     ListingCallback,
     OpOutcome,
-    OpResult,
     ProgressCallback,
     ResultCallback,
     S3FileInfo,
@@ -244,25 +244,22 @@ def _single_request(
     """Report whatever one request raised as the single-call operation's failure.
 
     ``mb`` / ``rb`` / ``website`` / ``presign`` issue one client call and raise
-    its category error directly (design/exceptions.md section 4). `s3_errors`
-    translates the boto family; anything else the call raised from inside
-    botocore - a refreshing ``credential_process`` whose program is gone
-    (``FileNotFoundError``) - is that request failing all the same, and
-    becomes the base ``Boto3S3Error`` carrying it as ``__cause__``, the
-    `request_failure` shape the blind single-key ``rm`` applies. Only
-    ``AssertionError`` passes through: an invariant or a test double's guard
-    (``presign`` reads the CRT signer's own one itself).
+    its category error directly (design/exceptions.md section 4). The capture
+    is a request's own (`s3_request`): the boto family translated, anything
+    else the call raised from inside botocore - a refreshing
+    ``credential_process`` whose program is gone (``FileNotFoundError``) - the
+    base ``Boto3S3Error`` carrying it as ``__cause__``, the `request_failure`
+    shape the blind single-key ``rm`` applies, and only ``AssertionError``
+    passed through: an invariant or a test double's guard (``presign`` reads
+    the CRT signer's own one itself). On top of it, a family error the call
+    raised unattributed is named after this call (`attribute_failure`).
     """
-    try:
-        with s3_errors(operation=operation, bucket=bucket, key=key):
+    with s3_request(operation=operation, bucket=bucket, key=key):
+        try:
             yield
-    except AssertionError:
-        raise
-    except Exception as exc:
-        error = request_failure(exc, operation=operation, bucket=bucket, key=key)
-        if error is exc:
+        except Boto3S3Error as exc:
+            attribute_failure(exc, operation=operation, bucket=bucket, key=key)
             raise
-        raise error from exc
 
 
 def _emit_result(
@@ -283,14 +280,12 @@ def _emit_result(
     """
     if on_result is not None:
         on_result(
-            OpResult(
-                transfer_type=TransferType.DELETE,
-                compare_key=info.compare_key if info.compare_key is not None else info.key,
-                outcome=outcome,
-                error=error,
+            delete_record(
+                info,
+                outcome,
                 src=f"s3://{storage.bucket}/{info.key}" if src is None else src,
-                src_info=info,
-                src_storage=storage,
+                storage=storage,
+                error=error,
                 extra_info=extra_info,
             )
         )
@@ -332,6 +327,44 @@ def _scan_teardown(entries: object, *, reusable_after_interrupt: bool) -> Genera
             close()
 
 
+@contextmanager
+def _producer_teardown(
+    *producers: Generator[object, None, None], reusable_after_interrupt: bool
+) -> Generator[None]:
+    """Close a transfer run's producers on exit, honoring the process-fatal posture.
+
+    ``cp`` / ``mv`` (`S3._run_transfer`) and ``sync`` (its two side scans)
+    close their producers - joining their scan prefetch workers - on every
+    exit but one: under ``reusable_after_interrupt=False`` a
+    ``KeyboardInterrupt`` skips the close, since the unwind must not wait on
+    an in-flight page pull (`S3` docstring), and marks the unwind instead
+    (`concurrency.mark_interrupt_unwinding`). The interrupt may have landed
+    outside the scan's own pull (a submission wait, a result callback), so
+    the producers' eventual teardown - the interpreter finalizes them once
+    the traceback holding the caller's frame is released - arrives as a plain
+    ``GeneratorExit``; marked, it abandons the page worker instead of joining
+    it. Producers close in the order given.
+
+    `_scan_teardown` (``ls`` / ``rm``) closes after marking instead, which
+    the mark turns into an abandon at once; folding the two would move these
+    producers' teardown on a fatal Ctrl-C from the traceback's release into
+    the unwind itself, so they stay apart. Where the close lands relative to
+    the engine's own exit is the caller's placement.
+    """
+    interrupted = False
+    try:
+        yield
+    except KeyboardInterrupt:
+        interrupted = True
+        if not reusable_after_interrupt:
+            concurrency.mark_interrupt_unwinding()
+        raise
+    finally:
+        if reusable_after_interrupt or not interrupted:
+            for producer in producers:
+                producer.close()
+
+
 def _is_folder_marker(info: FileInfo) -> bool:
     """A zero-byte ``/``-terminated key - the manual-folder convention."""
     return info.size == 0 and info.key.endswith("/")
@@ -369,28 +402,94 @@ def _delete_via_filter(keep: FileFilter) -> Callable[[DestOnlyPair], bool]:
     return decide
 
 
+def _update_via_filter(decide: PairFilter) -> PairFilter:
+    """``update_filter`` as a ``PairFilter``: it already decides over the update
+    lane's ``SyncPair``, so it is used as it is."""
+    return decide
+
+
 _PairT = TypeVar("_PairT")
+# The entry type a lane's filter takes: a FileInfo (create / delete) or the pair itself (update).
+_E = TypeVar("_E")
 
 
-def _resolve_side_lane(
-    flt: bool | FileFilter | ParallelFilter[FileInfo],
-    wrap: Callable[[FileFilter], Callable[[_PairT], bool]],
-) -> tuple[Callable[[_PairT], bool], Executor | None]:
-    """Resolve a create / delete lane's filter to ``(decide, executor)``.
+@dataclass(frozen=True, slots=True)
+class _LaneDecision(Generic[_PairT]):
+    """One ``S3.sync`` lane's resolved filter.
 
-    ``True`` acts on every pair, ``False`` on none; a ``FileFilter`` is turned by
-    ``wrap`` (``_create_via_filter`` / ``_delete_via_filter``) into a decision
-    over the lane's pair shape; a ``ParallelFilter`` unwraps to that same filter
-    plus the caller's pool (the executor its ``decide`` should run on).
+    ``decide`` is the predicate over the lane's pair shape selecting whether to
+    act on a pair; ``executor`` is the caller's pool when the filter was a
+    ``ParallelFilter`` (else ``None``: decide inline on the calling thread).
+    """
+
+    decide: Callable[[_PairT], bool]
+    executor: Executor | None
+
+
+def _resolve_lane(
+    flt: bool | Callable[[_E], bool] | ParallelFilter[_E],
+    wrap: Callable[[Callable[[_E], bool]], Callable[[_PairT], bool]],
+) -> _LaneDecision[_PairT]:
+    """Resolve one lane's filter by the shapes every lane takes.
+
+    ``True`` acts on every pair, ``False`` on none; a filter is turned by
+    ``wrap`` (`_create_via_filter` / `_update_via_filter` /
+    `_delete_via_filter`) into a decision over the lane's pair shape; a
+    ``ParallelFilter`` unwraps to that same filter plus the caller's pool (the
+    executor its ``decide`` should run on).
     """
     if flt is True:
-        return _always, None
+        return _LaneDecision(_always, None)
     if flt is False:
-        return _never, None
+        return _LaneDecision(_never, None)
     if isinstance(flt, ParallelFilter):
-        pooled = cast("ParallelFilter[FileInfo]", flt)  # isinstance loses the type arg; pin it
-        return wrap(pooled.decide), pooled.executor
-    return wrap(flt), None
+        pooled = cast("ParallelFilter[_E]", flt)  # isinstance loses the type arg; pin it
+        return _LaneDecision(wrap(pooled.decide), pooled.executor)
+    return _LaneDecision(wrap(flt), None)
+
+
+def _resolve_lanes(
+    *,
+    create_filter: bool | FileFilter | ParallelFilter[FileInfo],
+    update_filter: bool | PairFilter | ParallelFilter[SyncPair] | None,
+    delete_filter: bool | FileFilter | ParallelFilter[FileInfo],
+    pair_filter: MergedPairFilter | None,
+) -> tuple[_LaneDecision[SrcOnlyPair], _LaneDecision[SyncPair], _LaneDecision[DestOnlyPair] | None]:
+    """``S3.sync``'s create, update and delete decisions; the delete one is ``None`` when off.
+
+    Each lane's filter resolves by the shapes every lane takes
+    (`_resolve_lane`), each lane keeping its own pair shape and one rule of
+    its own (below); a ``pair_filter`` replaces all three.
+    """
+    if pair_filter is not None:
+        # One callable in place of the three lanes: each lane's decide IS that
+        # callable, since each hands it its own MergedPair shape, and no lane
+        # gets a pool (the hook decides serially, in compare-key order, on the
+        # calling thread). The delete lane is live either way - the callback
+        # may delete - so sync prepares its machinery exactly as for a callable
+        # delete_filter, including the destination walk's dropped read-ahead
+        # (the delete decision is not None). The three lane filters are at
+        # their defaults here (`_reject_pair_filter_conflicts`), so none is
+        # overridden.
+        return (
+            _LaneDecision(pair_filter, None),
+            _LaneDecision(pair_filter, None),
+            _LaneDecision(pair_filter, None),
+        )
+    # create_filter: True copies every new (source-only) entry, False none, a
+    # FileFilter only those it keeps (matched like rm).
+    create = _resolve_lane(create_filter, _create_via_filter)
+    # update_filter picks exactly one copy strategy for the update
+    # (both-sides) pairs; update_filter=None is the aws-cli size +
+    # last-modified default, equivalently AwsCliComparison().
+    update = _resolve_lane(
+        AwsCliComparison() if update_filter is None else update_filter, _update_via_filter
+    )
+    # delete_filter: False = off, True deletes every orphan (destination-only),
+    # a FileFilter only those it keeps (matched like rm); the producer-stamped
+    # compare_key lets it read the entry directly.
+    delete = None if delete_filter is False else _resolve_lane(delete_filter, _delete_via_filter)
+    return create, update, delete
 
 
 def _reject_pair_filter_conflicts(
@@ -511,8 +610,8 @@ class _Lane(Generic[_PairT]):
     ``_PairT`` is the lane's pair shape (``SrcOnlyPair`` / ``SyncPair`` /
     ``DestOnlyPair``). ``decide`` is the predicate selecting whether to act on a
     pair; ``submit`` performs it (``submit_copy`` for create / update,
-    ``submit_delete`` for delete). ``executor`` is the caller's pool when the
-    lane's filter was wrapped in ``ParallelFilter`` - then ``decide`` runs
+    ``_SyncDeletes.submit`` for delete). ``executor`` is the caller's pool when
+    the lane's filter was wrapped in ``ParallelFilter`` - then ``decide`` runs
     there and ``submit`` runs on the calling thread once the result is in; ``None``
     runs both inline in compare-key order.
     """
@@ -959,14 +1058,12 @@ class _SyncDeletes:
     ) -> None:
         if self._on_result is not None:
             self._on_result(
-                OpResult(
-                    transfer_type=TransferType.DELETE,
-                    compare_key=info.compare_key if info.compare_key is not None else info.key,
-                    outcome=outcome,
-                    error=error,
+                delete_record(
+                    info,
+                    outcome,
                     src=src,
-                    src_info=info,
-                    src_storage=self._dest,
+                    storage=self._dest,
+                    error=error,
                     extra_info=extra_info,
                 )
             )
@@ -1707,52 +1804,28 @@ class S3:
                     operation=operation,
                     reusable_after_interrupt=self._reusable_after_interrupt,
                 )
-            # Check cancellation *before* pulling the next item, not after:
-            # pulling only while the run is live keeps a cancelled run from
-            # enumerating and materializing items it will never submit - the
-            # listing stops promptly instead of paging on. (The open routes'
-            # deferred handles never open for an unsubmitted item, so no
-            # resource is at stake; this is about not doing pointless work.)
-            interrupted = False
-            try:
-                item_iter = iter(items)
-                while True:
-                    _raise_if_cancelled(cancel_token, operation)
-                    try:
-                        # The pull runs the enumeration - a listing page, the
-                        # source walk - inside a storage that cannot know the
-                        # operation: what it raises unnamed is this run's.
-                        with _attributed_to(operation):
-                            item = next(item_iter)
-                    except StopIteration:
-                        break
+            # Close the producer (joining its scan prefetch worker) before
+            # Transferrer.__exit__ shuts down and unregisters the capture
+            # handlers - the teardown mirror of prepare()'s
+            # register-before-enumeration ordering, so no listing traffic
+            # emits on the client during the deregistration.
+            with _producer_teardown(items, reusable_after_interrupt=self._reusable_after_interrupt):
+                # Check cancellation *before* pulling the next item, not after:
+                # pulling only while the run is live keeps a cancelled run from
+                # enumerating and materializing items it will never submit - the
+                # listing stops promptly instead of paging on. (The open routes'
+                # deferred handles never open for an unsubmitted item, so no
+                # resource is at stake; this is about not doing pointless work.)
+                _raise_if_cancelled(cancel_token, operation)
+                # The pull runs the enumeration - a listing page, the source
+                # walk - inside a storage that cannot know the operation: what
+                # it raises unnamed is this run's.
+                for item in _attributed_entries(items, operation):
                     if dryrun:
                         transferrer.dryrun(item)
                     else:
                         transferrer.submit(item)
-            except KeyboardInterrupt:
-                interrupted = True
-                if not self._reusable_after_interrupt:
-                    # The interrupt may have landed outside the scan's own
-                    # pull (a submission wait, a result callback), so the
-                    # producer's eventual teardown - the interpreter
-                    # finalizes it once this frame's traceback is released -
-                    # arrives as a GeneratorExit. Marked, that teardown
-                    # abandons the page worker instead of joining it.
-                    concurrency.mark_interrupt_unwinding()
-                raise
-            finally:
-                # Close the producer (joining its scan prefetch worker) before
-                # Transferrer.__exit__ shuts down and unregisters the capture
-                # handlers - the teardown mirror of prepare()'s
-                # register-before-enumeration ordering, so no listing traffic
-                # emits on the client during the deregistration. Under the
-                # process-fatal posture a Ctrl-C unwind skips it: the unwind
-                # must not wait on an in-flight page pull (`S3` docstring,
-                # `reusable_after_interrupt`), and the mark above makes the deferred
-                # finalization abandon rather than join.
-                if self._reusable_after_interrupt or not interrupted:
-                    items.close()
+                    _raise_if_cancelled(cancel_token, operation)
         _raise_if_cancelled(cancel_token, operation)
         if transferrer.failed:
             raise BatchError(
@@ -2227,48 +2300,12 @@ class S3:
         # write ``sync(no_overwrite=True)``): strip it from the engine options
         # and apply it in the loop, keeping sync decision-only (no IfNoneMatch).
         no_overwrite = options.pop("no_overwrite", False)
-        # Each lane resolves to (decide, executor): the predicate over the
-        # lane's pair shape selecting whether to act, and the caller's pool when
-        # the filter was a ParallelFilter (else None = decide inline on the
-        # calling thread).
-        # create_filter: True copies every new (source-only) entry, False none, a
-        # FileFilter only those it keeps (matched like rm).
-        create_decide, create_pool = _resolve_side_lane(create_filter, _create_via_filter)
-        # update_filter picks exactly one copy strategy for the update
-        # (both-sides) pairs; update_filter=None is the aws-cli size +
-        # last-modified default, equivalently AwsCliComparison().
-        update_pool: Executor | None = None
-        update_decide: PairFilter
-        if isinstance(update_filter, ParallelFilter):
-            pooled = cast("ParallelFilter[SyncPair]", update_filter)  # isinstance loses type arg
-            update_decide = pooled.decide
-            update_pool = pooled.executor
-        elif update_filter is None:
-            update_decide = AwsCliComparison()
-        elif update_filter is True:
-            update_decide = _always
-        elif update_filter is False:
-            update_decide = _never
-        else:
-            update_decide = update_filter
-        # delete_filter: False = off, True deletes every orphan (destination-only),
-        # a FileFilter only those it keeps (matched like rm); the producer-stamped
-        # compare_key lets it read the entry directly.
-        delete_decide, delete_pool = (
-            (None, None)
-            if delete_filter is False
-            else _resolve_side_lane(delete_filter, _delete_via_filter)
+        create_decision, update_decision, delete_decision = _resolve_lanes(
+            create_filter=create_filter,
+            update_filter=update_filter,
+            delete_filter=delete_filter,
+            pair_filter=pair_filter,
         )
-        if pair_filter is not None:
-            # One callable in place of the three lanes: each lane's decide IS
-            # that callable, since each hands it its own MergedPair shape, and
-            # no lane gets a pool (the hook decides serially, in compare-key
-            # order, on this thread). The delete lane is live either way - the
-            # callback may delete - so the machinery below is prepared exactly
-            # as for a callable delete_filter, including the destination walk's
-            # dropped read-ahead (delete_decide is not None).
-            create_decide = update_decide = delete_decide = pair_filter
-            create_pool = update_pool = delete_pool = None
         case_gate = producers.sync_case_gate(transfer_type, dest_storage, options=options)
 
         transferrer = Transferrer(
@@ -2344,31 +2381,18 @@ class S3:
                 # The delete lane removes this side's orphans while this same
                 # listing is still running, so a walked destination must not be
                 # read ahead of it (see sync_entries).
-                deletes_orphans=delete_decide is not None,
+                deletes_orphans=delete_decision is not None,
             )
-
-            def _close_scans(
-                exc_type: type[BaseException] | None,
-                exc: BaseException | None,
-                tb: object,
-            ) -> None:
-                # Close both sides' producers (joining their scan prefetch
-                # workers) before the stack unwinds into Transferrer.__exit__'s
-                # capture deregistration - the teardown mirror of prepare()'s
-                # register-before-enumeration ordering. Under the process-fatal
-                # posture a Ctrl-C unwind skips it and marks the unwind
-                # instead, like `_run_transfer`'s guard: the unwind must not
-                # wait on an in-flight page pull (`S3` docstring,
-                # `reusable_after_interrupt`), and the mark makes the deferred
-                # finalization of both producers abandon rather than join.
-                if exc_type is not None and issubclass(exc_type, KeyboardInterrupt):
-                    if not self._reusable_after_interrupt:
-                        concurrency.mark_interrupt_unwinding()
-                        return
-                dest_entries.close()
-                src_entries.close()
-
-            stack.push(_close_scans)
+            # Close both sides' producers before the stack unwinds into
+            # Transferrer.__exit__'s capture deregistration - the teardown
+            # mirror of prepare()'s register-before-enumeration ordering.
+            stack.enter_context(
+                _producer_teardown(
+                    dest_entries,
+                    src_entries,
+                    reusable_after_interrupt=self._reusable_after_interrupt,
+                )
+            )
 
             def submit_copy(pair: SrcOnlyPair | SyncPair) -> None:
                 item = producers.sync_transfer_item(
@@ -2388,9 +2412,6 @@ class S3:
                 else:
                     transferrer.submit(item)
 
-            def submit_delete(pair: DestOnlyPair) -> None:
-                deletes.submit(pair)
-
             # no_overwrite rules out every update up front (an existing
             # destination is never overwritten), so the update lane is dropped.
             # A family error a decision raises unnamed - a content strategy's
@@ -2399,14 +2420,18 @@ class S3:
             with _attributed_to("sync"):
                 _run_sync_pairs(
                     Comparator(transfer_type).compare(src_entries, dest_entries),
-                    create_lane=_Lane(create_decide, submit_copy, create_pool),
+                    create_lane=_Lane(
+                        create_decision.decide, submit_copy, create_decision.executor
+                    ),
                     update_lane=(
-                        None if no_overwrite else _Lane(update_decide, submit_copy, update_pool)
+                        None
+                        if no_overwrite
+                        else _Lane(update_decision.decide, submit_copy, update_decision.executor)
                     ),
                     delete_lane=(
                         None
-                        if delete_decide is None
-                        else _Lane(delete_decide, submit_delete, delete_pool)
+                        if delete_decision is None
+                        else _Lane(delete_decision.decide, deletes.submit, delete_decision.executor)
                     ),
                     cancel_token=cancel_token,
                 )

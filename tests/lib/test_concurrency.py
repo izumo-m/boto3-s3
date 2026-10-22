@@ -330,10 +330,10 @@ def test_transfer_teardown_abandons_after_the_interrupt_is_marked() -> None:
 
 
 def test_sync_teardown_abandons_after_the_interrupt_is_marked() -> None:
-    # sync closes its two side scans through its own `_close_scans` guard,
-    # not `_run_transfer`'s - a separate copy of the mark-then-skip decision
-    # that a review found lagging on the pre-mark behaviour (the deferred
-    # finalization joined the pull the posture forbids waiting on).
+    # sync enters the same `_producer_teardown` guard as `_run_transfer`, but
+    # on its ExitStack and with its two side scans - a separate site of the
+    # mark-then-skip decision, pinned here on its own (the deferred
+    # finalization must not join the pull the posture forbids waiting on).
     import tempfile
 
     from boto3_s3 import S3

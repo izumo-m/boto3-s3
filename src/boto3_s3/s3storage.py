@@ -35,7 +35,7 @@ import stat as stat_module
 from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import closing, contextmanager, suppress
 from importlib.metadata import version
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeVar, cast
 
 import boto3
 import botocore.utils
@@ -552,10 +552,10 @@ def request_failure(
     per-key ``DeleteObject`` runs as an s3transfer task, which records
     whatever the request raises as that key's failure. The
     transfer engine gets the same from s3transfer itself; the deleter, the
-    blind single-key delete, sync's synchronous deletes and the single-call
-    operations apply it by hand, and the storage's own requests - the listing,
-    the HEAD, ``open`` / ``delete`` / ``get_file`` / ``put_file`` - through
-    `s3_request`.
+    blind single-key delete and sync's synchronous deletes apply it by hand,
+    and the single-call operations and the storage's own requests - the
+    listing, the HEAD, ``open`` / ``delete`` / ``get_file`` / ``put_file`` -
+    through `s3_request`.
     """
     error = translate_boto_error(exc, operation=operation, bucket=bucket, key=key)
     if error is not exc:
@@ -580,9 +580,9 @@ def s3_request(
     untouched, and ``AssertionError`` alone is left untranslated (an invariant
     or a test double's guard, never a request outcome).
 
-    Wrap the request only - the client call, or one step of a paginator -
-    never the code that consumes its result: what that code raises is not a
-    request failing.
+    Wrap the request only - the client call, or one step of a paginator
+    (`request_pages`) - never the code that consumes its result: what that
+    code raises is not a request failing.
     """
     try:
         with s3_errors(operation=operation, bucket=bucket, key=key):
@@ -591,6 +591,27 @@ def s3_request(
         raise
     except Exception as exc:
         raise request_failure(exc, operation=operation, bucket=bucket, key=key) from exc
+
+
+_T = TypeVar("_T")
+
+
+def request_pages(
+    pages: Iterator[_T], *, operation: str | None, bucket: str | None = None, key: str | None = None
+) -> Iterator[_T]:
+    """Yield a paginator's pages, each pull - one request - inside `s3_request`.
+
+    Each page is its own request, and only the request sits inside the
+    capture: what the consumer does with a page runs between two pulls,
+    outside it, so what that code raises is not a request failing. Creating
+    the paginator stays with the caller.
+    """
+    while True:
+        with s3_request(operation=operation, bucket=bucket, key=key):
+            page = next(pages, None)
+        if page is None:
+            return
+        yield page
 
 
 def _page_to_infos(
@@ -662,6 +683,32 @@ def _page_to_bucket_infos(page: ListBucketsOutputTypeDef, storage: Storage) -> I
             compare_key=name,
             storage=storage,
         )
+
+
+def object_info(storage: S3Storage, key: str, head: Mapping[str, Any]) -> S3FileInfo:
+    """A single S3 object's entry from its HEAD-shaped response (no I/O).
+
+    ``Storage.get_fileinfo``'s entry, and the one every single-object route
+    builds alike: the full ``key``, ``ContentLength`` as ``size``,
+    ``LastModified`` as ``mtime``, the ETag as the response carried it, the
+    storage class, and ``head`` itself kept on the entry. The size and the
+    time are read by subscript, as aws-cli's ``_list_single_object`` reads
+    them; the rest with a default. A single object's
+    ``compare_key`` is its key's last component (`transferplan.item_paths`'
+    single-item branch), and ``storage`` stamps the producing backend like
+    every listing path, so ``src_info.storage`` agrees with
+    ``OpResult.src_storage`` and a filter can reach the backend.
+    """
+    return S3FileInfo(
+        key=key,
+        size=head["ContentLength"],
+        mtime=head["LastModified"],
+        etag=head.get("ETag"),
+        storage_class=head.get("StorageClass"),
+        head=head,
+        compare_key=key.rsplit("/", 1)[-1],
+        storage=storage,
+    )
 
 
 # The ``operation`` the single-request lane stamps on the errors it raises.
@@ -1219,13 +1266,8 @@ class S3Storage(Storage):
         # its own name in (attribute_failure).
         with s3_request(operation=None, bucket=self._bucket):
             pages = iter(self.get_client().get_paginator("list_objects_v2").paginate(**paging))
-        while True:
-            # Each page is its own request, and only the request sits inside
-            # the capture: what the conversion below raises is this module's.
-            with s3_request(operation=None, bucket=self._bucket):
-                page = next(pages, None)
-            if page is None:
-                return
+        # What the conversion below raises is this module's, not the request's.
+        for page in request_pages(pages, operation=None, bucket=self._bucket):
             yield list(
                 _page_to_infos(
                     page,
@@ -1289,12 +1331,7 @@ class S3Storage(Storage):
         paging: dict[str, Any] = {"PaginationConfig": {"PageSize": self._page_size}, **filters}
         with s3_request(operation=None):
             pages = iter(client.get_paginator("list_buckets").paginate(**paging))
-        while True:
-            # Only the request sits inside the capture, as in the object listing.
-            with s3_request(operation=None):
-                page = next(pages, None)
-            if page is None:
-                return
+        for page in request_pages(pages, operation=None):
             yield from _page_to_bucket_infos(page, self)
 
     @override
@@ -1407,16 +1444,7 @@ class S3Storage(Storage):
                 head = self.get_client().head_object(Bucket=self._bucket, Key=target_key)
         except NotFoundError:
             return None
-        return S3FileInfo(
-            key=target_key,
-            size=head["ContentLength"],
-            mtime=head["LastModified"],
-            etag=head.get("ETag"),
-            storage_class=head.get("StorageClass"),
-            head=head,
-            compare_key=target_key.rsplit("/", 1)[-1],
-            storage=self,
-        )
+        return object_info(self, target_key, head)
 
     # -- single-request object transfer (outside the transfer engine) --------
 
@@ -1481,16 +1509,9 @@ class S3Storage(Storage):
         # whether the download finished or a local failure abandoned it.
         with closing(cast("BinaryIO", response["Body"])) as body:
             self._write_body_atomically(body, dest, key=target_key)
-        return S3FileInfo(
-            key=target_key,
-            size=response.get("ContentLength"),
-            mtime=response.get("LastModified"),
-            etag=response.get("ETag"),
-            storage_class=response.get("StorageClass"),
-            head=strip_response_metadata(response, drop_body=True),
-            compare_key=target_key.rsplit("/", 1)[-1],
-            storage=self,
-        )
+        # The response minus its body and transport metadata keeps its own
+        # ContentLength / LastModified / ETag / StorageClass.
+        return object_info(self, target_key, strip_response_metadata(response, drop_body=True))
 
     def put_file(self, path: str | os.PathLike[str], *, key: str = "") -> S3FileInfo:
         """Upload the local file ``path`` to one object with a single ``PutObject``.

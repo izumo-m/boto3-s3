@@ -48,6 +48,7 @@ from concurrent.futures import (
 from concurrent.futures import (
     TimeoutError as FutureTimeoutError,
 )
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 from boto3_s3 import crtsupport
@@ -68,6 +69,7 @@ from boto3_s3.types import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from types import TracebackType
 
     from boto3.s3.transfer import TransferConfig
@@ -80,6 +82,7 @@ if TYPE_CHECKING:
     )
 
     from boto3_s3.crtrequest import CrtRequestSender
+    from boto3_s3.storage import Storage
     from boto3_s3.types import FileInfo, ResultCallback
 
 logger = logging.getLogger(__name__)
@@ -179,6 +182,55 @@ def _delete_objects_compatible(key: str) -> bool:
     the URL instead and is the route aws-cli uses for every key.
     """
     return _XML_INCOMPATIBLE.search(key) is None
+
+
+def delete_record(
+    info: FileInfo,
+    outcome: OpOutcome,
+    *,
+    src: str,
+    storage: Storage,
+    error: Boto3S3Error | None = None,
+    extra_info: Mapping[str, Any] | None = None,
+) -> OpResult:
+    """One delete's ``OpResult``, the record shape every delete route reports.
+
+    A ``DELETE`` named by the entry's ``compare_key``, falling back to its key
+    when the entry has none; the removed entry is ``src_info`` (its full key
+    stays on ``src_info.key``) and ``storage``, the side it was deleted from,
+    is ``src_storage`` (design/opresult.md). How the target is shown (``src``)
+    and the ``capture_response`` slot (``extra_info``) are the caller's. Shared
+    by `S3Deleter`, ``rm``'s single-key and dryrun records, and sync's own
+    orphan records (its dryrun, its local / custom deletes), so they agree.
+    """
+    return OpResult(
+        transfer_type=TransferType.DELETE,
+        compare_key=info.compare_key if info.compare_key is not None else info.key,
+        outcome=outcome,
+        error=error,
+        src=src,
+        src_info=info,
+        src_storage=storage,
+        extra_info=extra_info,
+    )
+
+
+@dataclass(slots=True)
+class _KeyOutcome:
+    """One submitted entry of a batch and its outcome, filled in by the route that sends it.
+
+    ``error`` is the key's failure (``None``: deleted). ``delete`` is its
+    ``capture_response`` slot, set on a successful delete only. ``unsent``
+    marks a key that gets no record and no count: the run was abandoned
+    before its own request went out - no request, like an entry still in the
+    buffer and like aws-cli's never-started future. Each entry is written only
+    by the one task that sends it, so the per-key pool needs no lock.
+    """
+
+    info: FileInfo
+    error: Boto3S3Error | None = None
+    delete: dict[str, Any] | None = None
+    unsent: bool = False
 
 
 class S3Deleter:
@@ -504,37 +556,24 @@ class S3Deleter:
     def _run_batch(self, batch: list[FileInfo]) -> None:
         """Delete one batch, falling back for keys XML 1.0 cannot carry."""
         logger.debug("deleting %d object(s) from s3://%s", len(batch), self._bucket)
-        batchable: list[tuple[int, FileInfo]] = []
-        singles: list[tuple[int, FileInfo]] = []
-        for index, info in enumerate(batch):
-            (batchable if _delete_objects_compatible(info.key) else singles).append((index, info))
-        errors: list[Boto3S3Error | None] = [None] * len(batch)
-        deletes: list[dict[str, Any] | None] = [None] * len(batch)
-        # A key that gets no record and no count: the run was abandoned before
-        # its own request went out - no request, like an entry still in the
-        # buffer and like aws-cli's never-started future.
-        unsent = [False] * len(batch)
+        entries = [_KeyOutcome(info) for info in batch]
+        batchable: list[_KeyOutcome] = []
+        singles: list[_KeyOutcome] = []
+        for entry in entries:
+            (batchable if _delete_objects_compatible(entry.info.key) else singles).append(entry)
 
         if batchable:
-            self._run_delete_objects(batchable, errors, deletes, unsent)
+            self._run_delete_objects(batchable)
         if singles:
-            self._send_singly(
-                singles, errors, deletes, unsent, purpose="deleting XML-incompatible key"
-            )
+            self._send_singly(singles, purpose="deleting XML-incompatible key")
 
-        for index, info in enumerate(batch):
-            if not unsent[index]:
-                self._record(info, errors[index], deletes[index])
+        for entry in entries:
+            if not entry.unsent:
+                self._record(entry.info, entry.error, entry.delete)
 
-    def _run_delete_objects(
-        self,
-        batch: list[tuple[int, FileInfo]],
-        errors: list[Boto3S3Error | None],
-        deletes: list[dict[str, Any] | None],
-        unsent: list[bool],
-    ) -> None:
+    def _run_delete_objects(self, batch: list[_KeyOutcome]) -> None:
         """Delete the XML-compatible portion with one ``DeleteObjects`` request."""
-        objects: list[ObjectIdentifierTypeDef] = [{"Key": info.key} for _, info in batch]
+        objects: list[ObjectIdentifierTypeDef] = [{"Key": entry.info.key} for entry in batch]
         # capture_response needs the per-key Deleted[] entries, which Quiet=True
         # suppresses; request the full (larger) response only then.
         quiet = not self._capture_response
@@ -576,9 +615,7 @@ class S3Deleter:
             # non-empty flush() or close().
             failure = request_failure(exc, operation=self._operation, bucket=self._bucket)
             logger.debug("delete_objects failed for s3://%s: %s", self._bucket, failure)
-            self._send_singly(
-                batch, errors, deletes, unsent, purpose="resending a failed DeleteObjects request"
-            )
+            self._send_singly(batch, purpose="resending a failed DeleteObjects request")
             return
         else:
             failures = self._translate_errors(response.get("Errors", []))
@@ -588,15 +625,16 @@ class S3Deleter:
                 transient = {
                     key for key, failure in failures.items() if isinstance(failure, TransportError)
                 }
-        resend: list[tuple[int, FileInfo]] = []
-        for index, info in batch:
-            if info.key in transient:
-                resend.append((index, info))
+        resend: list[_KeyOutcome] = []
+        for entry in batch:
+            key = entry.info.key
+            if key in transient:
+                resend.append(entry)
                 continue
-            errors[index] = failures.get(info.key)
-            if errors[index] is None:
+            entry.error = failures.get(key)
+            if entry.error is None:
                 # A slot rides a successful delete only.
-                deletes[index] = deleted.get(info.key)
+                entry.delete = deleted.get(key)
         if resend:
             # The service answered each of these keys with a fault it asks the
             # caller to retry (InternalError, SlowDown, ...). aws-cli, sending
@@ -610,19 +648,9 @@ class S3Deleter:
             # a no-retry policy, where nothing is re-sent at all
             # (`_retries_disabled`; the CRT client retries whatever that
             # policy says) and the key keeps the batch's error.
-            self._send_singly(
-                resend, errors, deletes, unsent, purpose="retrying transient DeleteObjects failure"
-            )
+            self._send_singly(resend, purpose="retrying transient DeleteObjects failure")
 
-    def _send_singly(
-        self,
-        entries: list[tuple[int, FileInfo]],
-        errors: list[Boto3S3Error | None],
-        deletes: list[dict[str, Any] | None],
-        unsent: list[bool],
-        *,
-        purpose: str,
-    ) -> None:
+    def _send_singly(self, entries: list[_KeyOutcome], *, purpose: str) -> None:
         """Send each entry as a ``DeleteObject`` of its own, several at a time.
 
         The per-key route of a batch: the keys XML 1.0 cannot carry, the
@@ -646,15 +674,14 @@ class S3Deleter:
         worker that shutdown is waiting for.
         """
 
-        def send(entry: tuple[int, FileInfo]) -> None:
-            index, info = entry
+        def send(entry: _KeyOutcome) -> None:
             if self._abandoned or (
                 self._cancel_token is not None and self._cancel_token.mode is CancelMode.IMMEDIATE
             ):
-                unsent[index] = True
+                entry.unsent = True
                 return
-            logger.debug("%s with DeleteObject: s3://%s/%s", purpose, self._bucket, info.key)
-            self._run_delete_object(index, info, errors, deletes)
+            logger.debug("%s with DeleteObject: s3://%s/%s", purpose, self._bucket, entry.info.key)
+            self._run_delete_object(entry)
 
         if len(entries) == 1:
             send(entries[0])
@@ -664,7 +691,7 @@ class S3Deleter:
             thread_name_prefix="boto3-s3-deleter-resend",
         ) as pool:
             started: list[Future[None]] = []
-            refused: list[tuple[int, FileInfo]] = []
+            refused: list[_KeyOutcome] = []
             for entry in entries:
                 try:
                     started.append(pool.submit(send, entry))
@@ -678,13 +705,7 @@ class S3Deleter:
             for future in started:
                 future.result()
 
-    def _run_delete_object(
-        self,
-        index: int,
-        info: FileInfo,
-        errors: list[Boto3S3Error | None],
-        deletes: list[dict[str, Any] | None],
-    ) -> None:
+    def _run_delete_object(self, entry: _KeyOutcome) -> None:
         """Delete one key through aws-cli's per-key route, on the run's client.
 
         Taken by a key the batch cannot carry, by a key the batch response
@@ -695,11 +716,12 @@ class S3Deleter:
         response included (aws-cli's classic client loses that one with no
         line; this does not copy it).
         """
-        kwargs: dict[str, Any] = {"Bucket": self._bucket, "Key": info.key}
+        key = entry.info.key
+        kwargs: dict[str, Any] = {"Bucket": self._bucket, "Key": key}
         if self._request_payer is not None:
             kwargs["RequestPayer"] = self._request_payer
         try:
-            with s3_errors(operation=self._operation, bucket=self._bucket, key=info.key):
+            with s3_errors(operation=self._operation, bucket=self._bucket, key=key):
                 response = (
                     self._crt.call("DeleteObject", kwargs)
                     if self._crt is not None
@@ -708,12 +730,12 @@ class S3Deleter:
         except AssertionError:
             raise  # as in _run_delete_objects
         except Exception as exc:
-            errors[index] = request_failure(
-                exc, operation=self._operation, bucket=self._bucket, key=info.key
+            entry.error = request_failure(
+                exc, operation=self._operation, bucket=self._bucket, key=key
             )
         else:
             if self._capture_response:
-                deletes[index] = strip_response_metadata(response)
+                entry.delete = strip_response_metadata(response)
 
     def _delete_slots(self, response: DeleteObjectsOutputTypeDef) -> dict[str, dict[str, Any]]:
         """Per-key DeleteObject-shaped slots from a non-Quiet DeleteObjects response.
@@ -809,14 +831,12 @@ class S3Deleter:
         """
         if self._on_result is not None:
             self._on_result(
-                OpResult(
-                    transfer_type=TransferType.DELETE,
-                    compare_key=info.compare_key if info.compare_key is not None else info.key,
-                    outcome=outcome,
-                    error=error,
+                delete_record(
+                    info,
+                    outcome,
                     src=f"s3://{self._bucket}/{info.key}",
-                    src_info=info,
-                    src_storage=self._storage,
+                    storage=self._storage,
+                    error=error,
                     extra_info={"delete": delete} if delete is not None else None,
                 )
             )
