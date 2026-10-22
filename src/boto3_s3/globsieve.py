@@ -301,6 +301,27 @@ class _Pattern(NamedTuple):
     rest: str = ""
 
 
+def _classify(
+    position: int, include: bool, pattern: str, fold: Callable[[str], str] | None
+) -> _Pattern:
+    """How ``pattern`` joins onto a base on this host model (the module docstring's forms).
+
+    ``fold`` is ``None`` for the POSIX model and the Windows fold otherwise.
+    """
+    if fold is None:
+        # posixpath.join drops the base exactly for a leading "/".
+        form = _FULL if pattern.startswith("/") else _RELATIVE
+        return _Pattern(position, include, form, pattern)
+    drive, root, rest = _splitroot(pattern)
+    if not drive and not root:
+        return _Pattern(position, include, _RELATIVE, fold(pattern))
+    if drive and root:
+        return _Pattern(position, include, _FULL, fold(pattern))
+    if root:
+        return _Pattern(position, include, _ROOTED, fold(pattern))
+    return _Pattern(position, include, _DRIVE, "", drive, rest)
+
+
 _Match = Callable[[str], "re.Match[str] | None"]
 
 
@@ -430,21 +451,7 @@ class GlobFilter:
                 )
             include = isinstance(rule, Include)
             for pattern in rule.patterns:
-                index = len(patterns)
-                if fold is None:
-                    # posixpath.join drops the base exactly for a leading "/".
-                    form = _FULL if pattern.startswith("/") else _RELATIVE
-                    patterns.append(_Pattern(index, include, form, pattern))
-                    continue
-                drive, root, rest = _splitroot(pattern)
-                if not drive and not root:
-                    patterns.append(_Pattern(index, include, _RELATIVE, fold(pattern)))
-                elif drive and root:
-                    patterns.append(_Pattern(index, include, _FULL, fold(pattern)))
-                elif root:
-                    patterns.append(_Pattern(index, include, _ROOTED, fold(pattern)))
-                else:
-                    patterns.append(_Pattern(index, include, _DRIVE, "", drive, rest))
+                patterns.append(_classify(len(patterns), include, pattern, fold))
         self._rules = rules
         self._windows = windows
         self._fold = fold

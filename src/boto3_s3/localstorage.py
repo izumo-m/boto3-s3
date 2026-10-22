@@ -123,6 +123,7 @@ single-path point op) reuses them too.
 from __future__ import annotations
 
 import codecs
+import contextlib
 import os
 import stat as stat_module
 import sys
@@ -215,18 +216,24 @@ class _FilenameCodec:
         except UnicodeError:
             return body
 
-    def text_names(self, exc: BaseException) -> None:
-        """Turn the file names an ``OSError`` carries into text, in place.
 
-        ``str(exc)`` formats them at call time, so every report built from the
-        error afterwards names the files as the storage's text.
-        """
-        if not isinstance(exc, OSError):
-            return
-        if isinstance(exc.filename, str):
-            exc.filename = self.message(exc.filename)
-        if isinstance(exc.filename2, str):
-            exc.filename2 = self.message(exc.filename2)
+def name_files_as_text(exc: BaseException, text_path: Callable[[str], str]) -> None:
+    """Turn the file names an ``OSError`` carries into a local side's text, in place.
+
+    The OS reports the names it was handed, in the OS form; ``str(exc)``
+    formats them when a report is built, so this makes every report built
+    from the error afterwards name the files the way the results do.
+    ``text_path`` is the side's conversion (`LocalStorage.text_path`, or a
+    codec's ``to_text``); a name it cannot convert (``UnicodeError``) stays
+    as it is, and any other exception is left alone.
+    """
+    if not isinstance(exc, OSError):
+        return
+    for attr in ("filename", "filename2"):
+        name = getattr(exc, attr)
+        if isinstance(name, str):
+            with contextlib.suppress(UnicodeError):
+                setattr(exc, attr, text_path(name))
 
 
 def _filename_codec(encoding: str | None) -> _FilenameCodec | None:
@@ -264,6 +271,30 @@ def _text_notify(notify: Callable[[str], None], codec: _FilenameCodec) -> Callab
         notify(codec.message(body))
 
     return text_notify
+
+
+def _complete_root(
+    walker: LocalFileGenerator,
+    root: str,
+    options: LocalScanOptions,
+    notify: Callable[[str], None],
+    codec: _FilenameCodec | None,
+) -> LocalFileInfo | None:
+    """The complete view's scanned-path entry as a scan hands it on, or ``None``.
+
+    ``walker.root_info``'s record for the OS-form anchor ``root`` (so an
+    override applies), its key turned into text and its producing storage
+    (``options.storage``) stamped. One rule for the recursive walk
+    (``list_file_pages``) and the one-level scan (``_scan_one_level``), so the
+    two name the scanned path identically. ``codec`` is the scanning
+    storage's conversion, ``None`` for none.
+    """
+    record = walker.root_info(root, options=options, notify=notify)
+    if record is not None:
+        if codec is not None:
+            record.key = codec.to_text(record.key)
+        record.storage = options.storage
+    return record
 
 
 def _is_special_mode(mode: int) -> bool:
@@ -557,12 +588,9 @@ class LocalFileGenerator:
             notify = _text_notify(notify, codec)
         follow_symlinks = options.follow_symlinks
         if options.enumerate_all_entries:
-            root_record = self.root_info(root, options=options, notify=notify)
+            root_record = _complete_root(self, root, options, notify, codec)
             if root_record is None:
                 return
-            if codec is not None:
-                root_record.key = codec.to_text(root_record.key)
-            root_record.storage = options.storage
             if options.filter is None or options.filter(root_record):
                 yield [root_record]
             if root_record.kind is not FileKind.DIRECTORY:
@@ -916,7 +944,7 @@ class LocalFileGenerator:
                     return None
                 codec = _walk_codec(options)
                 if codec is not None:
-                    codec.text_names(exc)
+                    name_files_as_text(exc, codec.to_text)
                 raise
             notify(f"Skipping file {path}. File does not exist.")
             try:
@@ -1045,7 +1073,7 @@ class LocalFileGenerator:
             if not self.triggers_warning(probe, notify):
                 codec = _walk_codec(options)
                 if codec is not None:
-                    codec.text_names(exc)
+                    name_files_as_text(exc, codec.to_text)
                 raise
             return []
         try:
@@ -1581,16 +1609,17 @@ class LocalStorage(Storage):
         return path if codec is None else codec.to_text(path)
 
     def _os_root(self, path: str | None = None) -> str:
-        """`abspath` (or the text ``path``) in the OS form, the root a walk is handed.
+        """`abspath` (or the text ``path``) in the OS form: a walk's root, or `_stat_one`'s path.
 
         A character the ``filename_encoding`` cannot represent is the
-        caller's path, a ``ValidationError`` (`translate_os_error`).
+        caller's path: the ``ValueError`` an OS call raises for a name its
+        encoding cannot represent, a ``ValidationError`` (`_os_failure`).
         """
         text = self._abspath if path is None else path
         try:
             return self.os_path(text)
         except ValueError as exc:
-            raise translate_os_error(exc, operation=None, key=text.replace(os.sep, "/")) from exc
+            raise self._os_failure(exc, text) from exc
 
     def _single_filter_root(self) -> str:
         """aws-cli's ``_get_local_root`` for this location as a single (non-``dir_op``) source.
@@ -1856,34 +1885,23 @@ class LocalStorage(Storage):
         walk_notify = notify if codec is None else _text_notify(notify, codec)
         os_root = self._os_root(root)
         item_filter = options.filter
+        # The anchor (root + a separator), not the bare root, is what the root
+        # step classifies or vets and what the children step scans: it names
+        # each child the same way (os.path.join collapses a doubled separator)
+        # and it is the path a failed scan warns about, so this one-level scan
+        # and the recursive walk - which descends from that same anchor - name
+        # the scanned directory identically.
+        root_anchor = os.path.join(root, "")
+        os_anchor = os.path.join(os_root, "")
         if options.enumerate_all_entries:
-            root_anchor = os.path.join(root, "")
-            os_anchor = os.path.join(os_root, "")
-            root_record = self._walker.root_info(os_anchor, options=options, notify=walk_notify)
+            root_record = _complete_root(self._walker, os_anchor, options, walk_notify, codec)
             if root_record is None:
                 return
-            if codec is not None:
-                root_record.key = codec.to_text(root_record.key)
-            root_record.storage = options.storage
             if item_filter is None or item_filter(root_record):
                 yield root_record
             if root_record.kind is not FileKind.DIRECTORY:
                 return
-            strip = len(root_anchor.replace(os.sep, "/"))
-            # The anchor, not the bare root: it names each child the same way
-            # (os.path.join collapses the doubled separator) and it is the path a
-            # failed scan warns about, so this one-level scan and the recursive
-            # walk - which descends from that same anchor - name the scanned
-            # directory identically.
-            for _sort_name, info, _loop_key in self._walker.scan_children(
-                os_anchor, strip=strip, options=options, notify=walk_notify
-            ):
-                info.storage = options.storage
-                _warn_unrepresentable_mtime(info, notify)
-                if item_filter is None or item_filter(info):
-                    yield info
-            return
-        if not os.path.isdir(os_root):
+        elif not os.path.isdir(os_root):
             # A single-file non-recursive scan honors the passed options'
             # follow_symlinks (like the directory branch below), so it stats
             # through _stat_one directly rather than get_fileinfo (which reads the
@@ -1895,23 +1913,20 @@ class LocalStorage(Storage):
                 if item_filter is None or item_filter(info):
                     yield info
             return
-        # Vet the root the way the recursive walk does (should_ignore_file on the
-        # anchor, before any descent or scanned-path record): a no-follow symlink
-        # root is silently skipped, and an unreadable / special root
-        # warns-and-skips. So a one-level scan agrees with the recursive walk
-        # instead of descending a link follow_symlinks=False forbids or emitting
-        # a record the recursive walk's vetting would drop.
-        root_anchor = os.path.join(root, "")  # root + separator (the walk anchor)
-        os_anchor = os.path.join(os_root, "")
-        if self._walker.should_ignore_file(
+        elif self._walker.should_ignore_file(
             os_anchor, follow_symlinks=options.follow_symlinks, notify=walk_notify
         ):
+            # Vet the root the way the recursive walk does (should_ignore_file on
+            # the anchor, before any descent or scanned-path record): a no-follow
+            # symlink root is silently skipped, and an unreadable / special root
+            # warns-and-skips. So a one-level scan agrees with the recursive walk
+            # instead of descending a link follow_symlinks=False forbids or
+            # emitting a record the recursive walk's vetting would drop.
             return
         # scan_children stamps compare_key as info.key[strip:]; strip is the
         # normalized prefix length of the directory being enumerated
         # (root_anchor = root + a sep, the prefix of every child key). One level
-        # down this equals the name. The anchor is also what is scanned, so a
-        # failed scan names the scanned directory as the recursive walk would.
+        # down this equals the name.
         strip = len(root_anchor.replace(os.sep, "/"))
         for _sort_name, info, _loop_key in self._walker.scan_children(
             os_anchor, strip=strip, options=options, notify=walk_notify
@@ -1949,11 +1964,7 @@ class LocalStorage(Storage):
         ``path`` is text: the OS calls take its OS form, while the key and the
         warnings keep the text.
         """
-        try:
-            native = self.os_path(path)
-        except ValueError as exc:
-            # What os.stat raises for a name its encoding cannot represent.
-            raise translate_os_error(exc, operation=None, key=path.replace(os.sep, "/")) from exc
+        native = self._os_root(path)
         is_symlink = os.path.islink(native)
         if not follow_symlinks and is_symlink:
             return None
@@ -1966,12 +1977,7 @@ class LocalStorage(Storage):
             # None per get_fileinfo's contract, not a raised transport error.
             return None
         except (OSError, ValueError) as exc:
-            # operation=None, like open / delete: the storage cannot know which
-            # operation resolves the path, so the operation layer fills the
-            # name in (attribute_failure); key names the path, the entry's own
-            # address space (exceptions.md).
-            self._text_names(exc)
-            raise translate_os_error(exc, operation=None, key=path.replace(os.sep, "/")) from exc
+            raise self._os_failure(exc, path) from exc
         if _is_special_mode(st.st_mode):
             notify(
                 f"Skipping file {path}. File is character special device, "
@@ -2034,11 +2040,7 @@ class LocalStorage(Storage):
                 os.makedirs(parent, exist_ok=True)
             return cast("BinaryIO", open(native, "wb"))
         except (OSError, ValueError) as exc:
-            # operation=None: the storage cannot know which operation opened
-            # it; the operation layer fills the name in (attribute_failure).
-            # key names the file opened, as get_fileinfo / delete name theirs.
-            self._text_names(exc)
-            raise translate_os_error(exc, operation=None, key=target.replace(os.sep, "/")) from exc
+            raise self._os_failure(exc, target) from exc
 
     @override
     def delete(self, info: FileInfo) -> None:
@@ -2046,15 +2048,29 @@ class LocalStorage(Storage):
         try:
             os.remove(self.os_path(to_native_path(info.key)))
         except (OSError, ValueError) as exc:
-            # operation=None, like open: an mv's source delete and a sync's
-            # orphan removal both reach this and stamp their own name.
-            self._text_names(exc)
-            raise translate_os_error(exc, operation=None, key=info.key) from exc
+            raise self._os_failure(exc, info.key) from exc
 
     def _text_names(self, exc: BaseException) -> None:
         """Name an OS error's files as this storage's text (no-op without a conversion)."""
-        if self._codec is not None:
-            self._codec.text_names(exc)
+        codec = self._codec
+        if codec is not None:
+            name_files_as_text(exc, codec.to_text)
+
+    def _os_failure(self, exc: OSError | ValueError, path: str) -> Boto3S3Error:
+        """This storage's error for an OS call's failure on the text ``path``.
+
+        The one rule of the single-entry primitives (`_os_root` - so
+        `_stat_one` - ``open`` and ``delete``), each of which raises the
+        result ``from exc``: the files the error names are this storage's text
+        (`_text_names`); ``operation`` is ``None``, as the storage cannot know
+        which operation resolves, opens or deletes the path - the operation
+        layer fills the name in (``attribute_failure``), so an mv's source
+        delete and a sync's orphan removal each stamp their own; and ``key``
+        names the path acted on, ``/``-separated, the entry's own address space
+        (exceptions.md).
+        """
+        self._text_names(exc)
+        return translate_os_error(exc, operation=None, key=path.replace(os.sep, "/"))
 
     @override
     def get_fileinfo(
