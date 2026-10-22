@@ -141,9 +141,15 @@ class TestConversion:
         with open(_native(dest, "新.txt"), "rb") as handle:
             assert handle.read() == b"payload"
 
-    def test_a_key_that_climbs_out_once_encoded_is_skipped(self, tmp_path: Path) -> None:
+    def test_a_key_that_climbs_out_once_encoded_is_skipped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # cp037 (EBCDIC) encodes ACK ACK BEL as b"../": text with no ".." that
         # would land outside the destination is refused like a "../" key.
+        # cp037 turns the destination's own "/" into "a" too, so its OS form
+        # is one relative name in the working directory, and a key that
+        # climbed out of it would land there: run inside tmp_path.
+        monkeypatch.chdir(tmp_path)
         dest = tmp_path / "dl"
         client, calls = make_recording_client([listing(("d/\x06\x06\x07x", 1))])
         results: list[OpResult] = []
