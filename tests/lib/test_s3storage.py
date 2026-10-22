@@ -787,7 +787,7 @@ class TestScanErrorMapping:
 
     def test_keyboard_interrupt_passes_through_untranslated(self) -> None:
         # design/exceptions.md section 2: KeyboardInterrupt is never wrapped.
-        from boto3_s3.s3storage import s3_errors
+        from boto3_s3.sdkerrors import s3_errors
 
         with pytest.raises(KeyboardInterrupt):
             with s3_errors(operation="ls"):
@@ -801,7 +801,7 @@ class TestScanErrorMapping:
         # seam and stays unwrapped.
         from botocore.exceptions import MissingDependencyException
 
-        from boto3_s3.s3storage import s3_errors
+        from boto3_s3.sdkerrors import s3_errors
 
         with pytest.raises(ConfigurationError) as exc_info:
             with s3_errors(operation="presign", bucket="b", key="k"):

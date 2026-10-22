@@ -249,8 +249,9 @@ class S3Deleter:
     transfer's engine: botocore's, or the CRT client when it selects the CRT
     engine (`crt_delete_sender`, built on the caller's thread during
     construction). ``session`` and the ``crt_*`` arguments are the CRT
-    engine's postures, ``Transferrer``'s and ``S3``'s own; ``S3.rm`` and
-    ``sync`` pass their instance's. A dryrun deleter builds no engine.
+    engine's postures, ``S3``'s own, which it carries as one
+    `crtsupport.CrtPostures`; ``S3.rm`` and ``sync`` pass their instance's.
+    A dryrun deleter builds no engine.
 
     ``dryrun=True`` turns the whole deleter into a rehearsal for a direct
     consumer: ``submit`` validates its entry exactly as a real run does and

@@ -48,8 +48,7 @@ from boto3_s3.types import (
 )
 
 if TYPE_CHECKING:
-    # Annotation-only names: mypy_boto3_s3 is a stubs-only distribution, and
-    # the rest are used in annotations alone.
+    # Used in annotations alone.
     from boto3.s3.transfer import TransferConfig
 
 
