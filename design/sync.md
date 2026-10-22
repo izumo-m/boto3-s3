@@ -59,7 +59,8 @@ dest listing -- filter (visibility) --+        |
 | `comparator.py` | `Comparator` (pure pairing: merge-joins two key-ascending streams and emits every *entry* as one `MergedPair` shape - `SrcOnlyPair` / `SyncPair` / `DestOnlyPair`, telling by type which sides hold it; makes no decision), the pair types, `PairFilter` (the update judgment) and `MergedPairFilter` (one judgment for all three shapes, section 11), `all_of` / `any_of` (visibility combinators). No SDK import |
 | `awsclicompare.py` | `AwsCliComparison`, the aws-compatible size + last-modified default (aws-cli's sync strategies plus `compare_time`, reading `pair.transfer_type`). No SDK import |
 | `S3.sync` in `s3.py` | orchestration: route classification -> pre-validation (src missing 255 / dest dir creation) -> build both-side entry streams (visibility applied) -> pairing -> copy decision -> item builder + gate shared with cp -> `Transferrer` submit; delete decision -> delete lane. The rollup is a `BatchError` combining transfer + delete |
-| `_SyncDeletes` in `s3.py` | delete lane: an S3 dest uses `S3Deleter` (batch, lazily created on the first submit), a local or custom dest uses a synchronous `Storage.delete(info)` on the calling thread (`LocalStorage.delete` is an `os.remove`, the shape of aws-cli's `LocalDeleteRequestSubmitter`). dryrun emits only a DRYRUN record. Emits with a display endpoint (`s3://bucket/key` / native path) on the `OpResult` |
+| `synclanes.py` | the three lanes: each lane's filter resolved to a decision (shapes and `pair_filter` conflicts refused before anything is resolved), and the pair loop that routes each pair to its lane, with pooled decisions in flight (`run_sync_pairs`). Nothing else uses it |
+| `SyncDeletes` in `synclanes.py` | delete lane: an S3 dest uses `S3Deleter` (batch, lazily created on the first submit), a local or custom dest uses a synchronous `Storage.delete(info)` on the calling thread (`LocalStorage.delete` is an `os.remove`, the shape of aws-cli's `LocalDeleteRequestSubmitter`). dryrun emits only a DRYRUN record. Emits with a display endpoint (`s3://bucket/key` / native path) on the `OpResult` |
 
 Structural correspondence with aws-cli: aws-cli's `Comparator` calls three
 strategies inside its merge loop (`file_at_src_and_dest` / `file_not_at_dest` /
@@ -95,7 +96,7 @@ overwrite judgment for the intersection. The aws `sync` equivalent is the defaul
 of all three (`create_filter=True` / `update_filter=None` / `delete_filter=False`).
 A value outside a lane's shapes - `None` on `create_filter` / `delete_filter`
 (the slip `update_filter`'s default invites), an integer - is refused with
-`ValidationError` before anything is resolved (`_reject_lane_filter_shapes`),
+`ValidationError` before anything is resolved (`reject_lane_filter_shapes`),
 the eager-refusal rule `pair_filter`'s `ParallelFilter` check follows
 (section 11): it would otherwise pass the `is True` / `is False` tests, list
 both sides, submit the new entries and only then die as a mid-run `TypeError`.
@@ -582,7 +583,7 @@ underneath (a callback wanting it calls `AwsCliComparison()` itself), so the
 `aws sync` equivalent is expressible as one predicate: not a `DestOnlyPair`, and
 either not a `SyncPair` or `AwsCliComparison()(pair)`.
 
-- **It rides the three lanes internally.** Each `_Lane`'s `decide` is literally
+- **It rides the three lanes internally.** Each `Lane`'s `decide` is literally
   the `pair_filter` callable - the pair loop already hands each lane its own
   `MergedPair` shape, and the shapes are exactly this callable's argument - and
   no lane gets an executor. Nothing downstream is aware of the hook: routing,

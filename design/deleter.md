@@ -307,13 +307,13 @@ that - so a key never gets fewer attempts than aws-cli gives it.
 Each of the following lives outside this component:
 
 - **The sync engine and local-side deletion** - implemented, but in the sync
-  orchestrator rather than in this deleter module: `_SyncDeletes` drives an
+  orchestrator rather than in this deleter module: `SyncDeletes` drives an
   `S3Deleter` for an S3 dest and a synchronous `os.remove` for a local dest
   (see [`sync.md`](./sync.md) section 2 / 5).
 - **A `Deleter` ABC / `Storage.deleter()` factory** - considered but not
   adopted: sync uses `S3Deleter` directly, and the `Storage` ABC keeps deletion
   as the plain per-key `delete`.
-- **The orchestrators' dryrun** - `S3.rm` and sync's `_SyncDeletes` keep their
+- **The orchestrators' dryrun** - `S3.rm` and sync's `SyncDeletes` keep their
   own dryrun branches and never build a `dryrun=True` deleter. Each already
   emits its DRYRUN record at a point the deleter cannot reach: `rm`'s blind
   single-key path builds its `FileInfo` without any deleter at all, and a

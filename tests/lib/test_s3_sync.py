@@ -1133,7 +1133,7 @@ class TestParallelFilter:
     moves off the calling thread. It applies to any of the three lanes."""
 
     def test_pool_window_tracks_the_executor(self) -> None:
-        from boto3_s3.s3 import _pool_window
+        from boto3_s3.synclanes import _pool_window
 
         with ThreadPoolExecutor(3) as pool:
             assert _pool_window(pool) == 3

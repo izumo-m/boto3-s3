@@ -996,7 +996,7 @@ and has no `aws s3` counterpart to compare with.
   `DELETE` when `--delete` removes orphans from an `s3open` custom destination
   (`opens3` orphans are S3, deleted without the custom side). `sync` passes
   `ScanOptions(sort=True)` to the custom side; the built-ins always sort and
-  ignore the flag. Orphans are removed through `_SyncDeletes`: `DeleteObjects` for
+  ignore the flag. Orphans are removed through `SyncDeletes`: `DeleteObjects` for
   an S3 destination, the backend's `Storage.delete` for a custom one. The
   case-conflict gate is scoped to a `LocalStorage` destination (a custom one owns
   its key space). The transfer of each surviving pair reuses the `opens3` /
