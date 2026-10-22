@@ -49,8 +49,11 @@ class WebsiteCommand(Command):
         path: str = args.paths
         if path.startswith(("file://", "fileb://")):
             raise ValidationError(
-                "Error parsing parameter 'paths': a file:// or fileb:// reference "
-                "cannot name the bucket; give the bucket itself",
+                usage.param_error(
+                    "paths",
+                    "a file:// or fileb:// reference cannot name the bucket; "
+                    "give the bucket itself",
+                ),
                 operation="website",
             )
         # Both document options are expanded at parse time, as on aws.

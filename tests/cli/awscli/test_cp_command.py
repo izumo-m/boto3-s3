@@ -90,7 +90,7 @@ Not ported, with reasons:
   mapping they pin, including the copy-source HEAD, is covered by
   ``tests/lib/test_requestparams.py``. The fifth,
   ``test_cp_with_sse_c_copy_source_fileb``, additionally pins ``fileb://``
-  expansion of ``--sse-c-copy-source-key``; that expansion shares ``blob_value``
+  expansion of ``--sse-c-copy-source-key``; that expansion shares ``paramfile.load_argument``
   with ``--sse-c-key`` and is already pinned by the ported
   ``test_cp_with_sse_c_fileb``.
 - The two s3s3 SSE-KMS *copy* tests (``test_cp_copy_with_sse_kms_and_key_id`` /

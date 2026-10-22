@@ -257,8 +257,8 @@ class TestMainExitCodes:
         # handler chain (ParamValidation 252, NoCredentials/NoRegion 253,
         # ClientError 254, else 255) as a one-line report that shows its cause,
         # without a traceback (design/overview.md section 3).
-        # The client factory raising is the cleanest injection - ls.run calls
-        # ctx.client_factory(args) directly, so the raw error escapes run.
+        # The client factory raising is the cleanest injection - ls.run builds its
+        # client through the injected client factory, so the raw error escapes run.
         def factory(_args: Any) -> Any:
             raise error
 

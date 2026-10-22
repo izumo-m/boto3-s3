@@ -9,7 +9,6 @@ import sys
 # Loaded at dispatch once mv is determined (stage 2 of the lazy dispatch).
 from boto3_s3 import (
     S3,
-    NotFoundError,
     S3PathResolver,
     S3Storage,
     ValidationError,
@@ -66,50 +65,21 @@ class MvCommand(Command):
         ClientError-caused failure 254, a transport failure 255).
         """
         head = transferargs.classify_paths(args, ctx, operation="mv")
-        page_size, progress_frequency = head.page_size, head.progress_frequency
         src, dest = head.src, head.dest
-        src_type, dest_type = head.src_type, head.dest_type
-        if src == "-" or dest == "-":
-            # aws-cli's _validate_streaming_paths: only cp streams, so the
-            # message names cp even from mv.
-            raise ValidationError(
-                "Streaming currently is only compatible with non-recursive cp commands",
-                operation="mv",
-            )
+        transferargs.validate_streaming_paths(head, recursive=args.recursive, operation="mv")
         paths_type = head.paths_type  # "locals3" | "s3local" | "s3s3" here
         if paths_type == "s3s3":
             self._validate_same_paths(args, ctx, head.s3, src, dest)
         transferargs.validate_checksum_paths_type(args, paths_type, operation="mv")
-        if src_type == "local" and not transferargs.local_path_exists(src):
-            # aws-cli's _validate_path_args checks the missing local source (its
-            # bare RuntimeError -> rc 255). NotFoundError without a ClientError
-            # cause maps to the same rc 255.
-            raise NotFoundError(f"The user-provided path {src} does not exist.", operation="mv")
-        if args.recursive and src_type == "local":
-            transferargs.refuse_unwalkable_source(
-                src, follow_symlinks=args.follow_symlinks, operation="mv"
-            )
+        transferargs.check_local_source(args, head, recursive=args.recursive, operation="mv")
         transferargs.validate_sse_c_pairing(args, paths_type, operation="mv")
 
         s3 = head.s3
         client = head.client
-        src_location, dest_location = transferargs.resolve_locations(
-            args,
-            ctx,
-            s3,
-            client,
-            src,
-            dest,
-            src_type=src_type,
-            dest_type=dest_type,
-            page_size=page_size,
-        )
+        src_location, dest_location = transferargs.resolve_locations(args, ctx, head)
 
         item_filter = filters.compile_filter(args.filters)
-        transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
-        # aws builds the transfer manager here, before it decides anything about
-        # the run: a CRT selection pays its construction even for a --dryrun.
-        transferargs.materialize_transfer_engine(s3, client, transfer_config)
+        transfer_config = transferargs.build_transfer_engine(ctx, s3, client, paths_type=paths_type)
         # aws validates --case-conflict against S3 Express while building the
         # run's instructions, past the transfer manager.
         case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="mv")
@@ -124,7 +94,7 @@ class MvCommand(Command):
             # The dir_op half of aws's _validate_path_args, once every check
             # above has passed (transferargs.create_local_dest_dir).
             transferargs.create_local_dest_dir(dest, operation="mv")
-        printer = transferargs.build_printer(args, progress_frequency)
+        printer = transferargs.build_printer(args, head.progress_frequency)
 
         def run_mv() -> None:
             s3.mv(

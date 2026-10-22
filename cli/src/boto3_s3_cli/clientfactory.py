@@ -10,10 +10,11 @@ path validation needs (section 5.8). Everything here reaches the AWS SDK.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import enum
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from datetime import datetime
 from functools import cache
 from typing import TYPE_CHECKING, Any, Final, Literal, cast
@@ -295,7 +296,7 @@ def _default_client_config(args: argparse.Namespace) -> Any:
     ``cp --no-sign-request --sse aws:kms`` has aws call STS unsigned and then
     sign the upload with what it got back). And being the session *default*
     is what lets a per-client ``signature_version`` beat it, which is how
-    ``--sse aws:kms`` restores signing (`_sends_unsigned_requests`).
+    ``--sse aws:kms`` restores signing (`_signature_version_pin`).
 
     The clients this module builds pass the same two timeouts in their own
     ``Config`` as well, which botocore merges on top of this one - the same
@@ -306,20 +307,15 @@ def _default_client_config(args: argparse.Namespace) -> Any:
     from botocore.config import Config
     from botocore.endpoint import DEFAULT_TIMEOUT
 
-    read = (
-        DEFAULT_TIMEOUT
-        if args.cli_read_timeout is None
-        else _coerce_cli_timeout(args.cli_read_timeout)
-    )
-    connect = (
-        DEFAULT_TIMEOUT
-        if args.cli_connect_timeout is None
-        else _coerce_cli_timeout(args.cli_connect_timeout)
-    )
+    timeouts: dict[str, Any] = {
+        "connect_timeout": DEFAULT_TIMEOUT,
+        "read_timeout": DEFAULT_TIMEOUT,
+        **_cli_timeouts(args),
+    }
     overrides: dict[str, Any] = {}
     if args.no_sign_request:
         overrides["signature_version"] = UNSIGNED
-    return Config(connect_timeout=connect, read_timeout=read, **overrides)
+    return Config(**timeouts, **overrides)
 
 
 def _credential_cache_dir() -> str:
@@ -455,28 +451,53 @@ def validate_endpoint_url(args: argparse.Namespace) -> None:
         )
 
 
+@contextlib.contextmanager
+def _construction_errors() -> Generator[None, None, None]:
+    """Translate botocore's construction-time errors into the library taxonomy.
+
+    Opening a session and building a client can raise raw botocore errors
+    (``ProfileNotFound`` for a bad ``--profile``, credential or region
+    resolution failures); left raw they would fall to the dispatcher's
+    generic chain, losing aws's 253 / 255 split (design/cli.md section 6).
+    aws has dedicated handlers for ``NoCredentialsError`` / ``NoRegionError``
+    (-> `ConfigurationError`, 253); every other botocore error
+    (``ProfileNotFound``, ``PartialCredentialsError``, ...) falls to its
+    ``GeneralExceptionHandler`` (-> 255) - `InvalidConfigError`, which
+    exit_code_for maps to 255, not 253. The library's own errors pass
+    through as they are.
+    """
+    from botocore.exceptions import BotoCoreError, NoCredentialsError, NoRegionError
+
+    try:
+        yield
+    except (NoCredentialsError, NoRegionError) as exc:
+        raise ConfigurationError(str(exc)) from exc
+    except BotoCoreError as exc:
+        raise InvalidConfigError(str(exc)) from exc
+
+
 def build_session(args: argparse.Namespace) -> Boto3Session:
     """Build and validate the one boto3 session owned by a CLI `S3` command.
 
-    The session's clients parse response timestamps through the library's
-    `fast_parse_timestamp` (registered on this CLI-owned session before any
-    client is built) - large listings parse their ``LastModified`` values at
-    C speed where aws-cli walks dateutil's generic parser per object, with
-    byte-identical output.
+    Every session this CLI opens is built here - the client builders open
+    theirs through it when no session is handed in. The session's clients
+    parse response timestamps through the library's `fast_parse_timestamp`
+    (registered on this CLI-owned session before any client is built) -
+    large listings parse their ``LastModified`` values at C speed where
+    aws-cli walks dateutil's generic parser per object, with byte-identical
+    output.
     """
     import boto3
-    from botocore.exceptions import BotoCoreError
 
     from boto3_s3 import fast_parse_timestamp
 
-    try:
+    with _construction_errors():
         botocore_session = _open_botocore_session(args)
         botocore_session.get_component("response_parser_factory").set_parser_defaults(
             timestamp_parser=fast_parse_timestamp
         )
-        return boto3.Session(botocore_session=botocore_session)
-    except BotoCoreError as exc:
-        raise InvalidConfigError(str(exc)) from exc
+        session = boto3.Session(botocore_session=botocore_session)
+    return session
 
 
 def build_s3(args: argparse.Namespace) -> S3:
@@ -541,7 +562,7 @@ def build_s3(args: argparse.Namespace) -> S3:
     # on its own `sign_request` parameter - `--no-sign-request` and nothing
     # else - so the per-client Config(signature_version='s3v4') that
     # `--sse aws:kms` adds, which does restore signing on the classic lane
-    # (`_sends_unsigned_requests`), never reaches its CRT client. Declaring the
+    # (`_signature_version_pin`), never reaches its CRT client. Declaring the
     # flag directly reproduces that: measured on the pinned aws-cli against a
     # fake S3, `--no-sign-request --sse aws:kms` sends every CRT request
     # anonymously (single PUT, the multipart trio, download HEAD/GET, mv, sync,
@@ -748,51 +769,47 @@ def build_service_client(
     """
     # Deferred like build_client: only a command that opts into path
     # resolution (mv's --validate-same-s3-paths, which builds both resolver
-    # clients regardless of the path shapes) pays the boto3 import.
-    import boto3
+    # clients regardless of the path shapes) pays the SDK import.
     from botocore.config import Config
-    from botocore.exceptions import BotoCoreError, NoCredentialsError, NoRegionError
 
-    # Client construction can raise raw botocore errors (e.g. ProfileNotFound for
-    # a bad --profile); translate them so the credential/region 253 split
-    # survives - untranslated they would fall to the dispatcher's generic
-    # chain (see build_client).
-    try:
+    with _construction_errors():
+        opened_here = session is None
         if session is None:
-            from boto3_s3 import fast_parse_timestamp
-
-            botocore_session = _open_botocore_session(args)
-            # Same fast timestamp parsing as build_session: every CLI-built
-            # session carries it.
-            botocore_session.get_component("response_parser_factory").set_parser_defaults(
-                timestamp_parser=fast_parse_timestamp
-            )
-            session = boto3.Session(botocore_session=botocore_session)
+            session = build_session(args)
+        botocore_session = session._session  # pyright: ignore[reportPrivateUsage]
+        if opened_here:
             _bind_region(botocore_session, args, _resolve_region(args.region, botocore_session))
-        else:
-            botocore_session = session._session  # pyright: ignore[reportPrivateUsage]
         # aws's startup handlers thread the timeouts through the session
         # default config that from_session's create_client inherits
         # (build_client mirrors the same); the UNSIGNED signature arrives
         # through that config too, so this client never names one - which is
         # what keeps `mv`'s resolver clients anonymous under
         # --no-sign-request even when --sse aws:kms signs the transfer.
-        service_overrides: dict[str, Any] = {}
-        if args.cli_read_timeout is not None:
-            service_overrides["read_timeout"] = _coerce_cli_timeout(args.cli_read_timeout)
-        if args.cli_connect_timeout is not None:
-            service_overrides["connect_timeout"] = _coerce_cli_timeout(args.cli_connect_timeout)
-        return _create_client(
+        client = _create_client(
             session,
             service,
             region_name=region,
             verify=_resolve_verify(args, botocore_session),
-            config=Config(**service_overrides),
+            config=Config(**_cli_timeouts(args)),
         )
-    except (NoCredentialsError, NoRegionError) as exc:
-        raise ConfigurationError(str(exc)) from exc
-    except BotoCoreError as exc:
-        raise InvalidConfigError(str(exc)) from exc
+    return client
+
+
+def _cli_timeouts(args: argparse.Namespace) -> dict[str, Any]:
+    """The ``Config`` fields of the timeout flags given: aws-cli's ``_resolve_timeout``.
+
+    ``--cli-read-timeout`` / ``--cli-connect-timeout`` arrive as raw strings
+    (see globalargs.add_common_arguments) and are coerced aws-style
+    (`_coerce_cli_timeout`), read before connect - the order aws registers its
+    two handlers in. A flag not given names no field, leaving the session's
+    default (`_default_client_config`).
+    """
+    timeouts: dict[str, Any] = {}
+    if args.cli_read_timeout is not None:
+        timeouts["read_timeout"] = _coerce_cli_timeout(args.cli_read_timeout)
+    if args.cli_connect_timeout is not None:
+        timeouts["connect_timeout"] = _coerce_cli_timeout(args.cli_connect_timeout)
+    return timeouts
 
 
 def _coerce_cli_timeout(value: str) -> int | None:
@@ -872,31 +889,72 @@ def _includes_endpoint_auth_path(args: argparse.Namespace) -> bool:
     )
 
 
-def _sends_unsigned_requests(args: argparse.Namespace) -> bool:
-    """Whether this run's S3 client is the anonymous one ``--no-sign-request`` asks for.
+def _signature_version_pin(args: argparse.Namespace) -> str | None:
+    """The ``signature_version`` this run's S3 client names, or None for none.
 
-    aws leaves UNSIGNED where its startup handler put it - the session default
-    client config (`_default_client_config`) - and names a per-client
-    ``signature_version`` in exactly one case: ``--sse aws:kms``, for which its
-    ``ClientFactory.create_client`` passes ``Config(signature_version='s3v4')``.
-    botocore merges the per-client config on top of the session's, so that one
-    case signs, resolves credentials, and reaches the credential chain, while
-    every other unsigned run stays anonymous. Measured without credentials:
+    ``v4`` - always-on SigV4 (design/cli.md section 4 item 2): aws-cli v2's
+    bundled botocore has no S3 SigV2 (hmacv1 "s3"-family signers) left - only
+    the generic query-protocol "v2" - while stock botocore still downgrades
+    *presigned URLs* to SigV2 in regions that accept it (a default us-east-1
+    client). Pin SigV4 so every command - visibly, presign's URLs - matches aws
+    v2. (The other half of that divergence, us-east-1 resolving to the legacy
+    global endpoint, is pinned on the session instead:
+    `_pin_regional_s3_endpoint`.) The pinned name is the generic ``v4``, the
+    one aws's endpoint resolution hands its requests: botocore keeps a
+    requested name as the request's ``auth_type``, and its own
+    ``choose-signer`` handler turns ``v4`` into the S3 signer (``s3v4``) and
+    answers there, while an ``s3v4`` there is passed by and left to whatever
+    handler comes next. Every ``choose-signer`` handler also sees ``v4`` /
+    ``v4-query``, as on aws.
+
+    None when the command targets an MRAP ARN, an S3 Outposts access point
+    (ARN or ``--op-s3`` alias), or an S3 Express directory bucket
+    (`_includes_endpoint_auth_path`): an explicit signature_version suppresses
+    botocore's auth-scheme resolution, and those endpoints must resolve to
+    asymmetric SigV4a (the MRAP and Outposts shapes) / ``sigv4-s3express``
+    (with `CreateSession` credentials) - a pinned ``s3v4`` (or ``v4``) matches
+    all those scheme names up to the first dash and silently signs a plain
+    SigV4 request instead. aws v2's bundled botocore pins only the symmetric
+    families (`_pin_python_sigv4_signers`) and leaves the resolutions alive.
+    With awscrt absent, a SigV4a target (MRAP or Outposts) surfaces botocore's
+    own MissingDependencyException (-> ConfigurationError, 253) instead of a
+    silently mis-signed SigV4 request.
+
+    None for an anonymous run (``--no-sign-request``) too: aws leaves UNSIGNED
+    where its startup handler put it - the session default client config
+    (`_default_client_config`) - and that is what must reach the client; a
+    per-client ``signature_version``, this pin included, beats it in
+    botocore's merge.
+
+    ``s3v4`` under ``--sse aws:kms`` (`_requests_kms_signing`), the exception
+    to both stand-downs: it is the one case for which aws names a per-client
+    ``signature_version`` - its ``ClientFactory.create_client`` passes
+    ``Config(signature_version='s3v4')`` whatever the target. botocore merges
+    the per-client config on top of the session's, so that one case signs,
+    resolves credentials, and reaches the credential chain, while every other
+    unsigned run stays anonymous. Measured without credentials:
     ``cp``/``mv``/``sync``/``cp s3://.. s3://..`` with
     ``--no-sign-request --sse aws:kms`` are rc 1 ``Unable to locate
     credentials`` and send nothing under aws (this CLI uploaded anonymously,
     rc 0), and a broken ``source_profile`` under the same flags is aws's
     rc 255 profile report; ``--sse AES256`` and ``--sse-c AES256`` upload
-    anonymously on both.
-
-    Which runs get that per-client config is `_requests_kms_signing`.
+    anonymously on both. An MRAP, Outposts or S3 Express target signs plain
+    SigV4 there too, with or without ``--no-sign-request`` (measured offline
+    on the pinned aws: ``AWS4-HMAC-SHA256`` with the client's region in the
+    scope, where the resolution would have chosen SigV4a /
+    ``sigv4-s3express``). That pin keeps aws's own ``s3v4``, and with it the
+    ``auth_type`` botocore's handler passes by.
 
     This governs the *botocore* client alone, which is aws's own split: its
     CRT factory reads ``--no-sign-request`` directly and never the client, so
     the same KMS run transfers anonymously on the CRT lane. `build_s3`
     declares that separately (``crt_sign_requests``).
     """
-    return bool(args.no_sign_request) and not _requests_kms_signing(args)
+    if _requests_kms_signing(args):
+        return "s3v4"
+    if _includes_endpoint_auth_path(args) or args.no_sign_request:
+        return None
+    return "v4"
 
 
 def _requests_kms_signing(args: argparse.Namespace) -> bool:
@@ -937,88 +995,25 @@ def build_client(
     (`_default_client_config`, `_open_botocore_session`), which is what puts
     the clients botocore builds for itself on them too.
     """
-    # Importing boto3 drags in botocore and s3transfer. The informational exits
+    # The SDK is imported here, not at module load: the informational exits
     # (`--version`, the help token) return before this normal-dispatch path.
-    import boto3
     from botocore.config import Config
-    from botocore.exceptions import BotoCoreError, NoCredentialsError, NoRegionError
 
     _pin_python_sigv4_signers()
 
     validate_endpoint_url(args)
 
-    # aws-cli v2's bundled botocore has no S3 SigV2 (hmacv1 "s3"-family
-    # signers) left - only the generic query-protocol "v2" - while stock
-    # botocore still downgrades *presigned URLs* to SigV2 in regions that
-    # accept it (a default us-east-1 client). Pin SigV4 so every command -
-    # visibly, presign's URLs - matches aws v2. (The other half of that
-    # divergence, us-east-1 resolving to the legacy global endpoint, is pinned
-    # on the session instead: `_pin_regional_s3_endpoint`.)
-    # The pinned name is the generic `v4`, the one aws's endpoint resolution
-    # hands its requests: botocore keeps a requested name as the request's
-    # `auth_type`, and its own `choose-signer` handler turns `v4` into the S3
-    # signer (`s3v4`) and answers there, while an `s3v4` there is passed by
-    # and left to whatever handler comes next.
-    # Every `choose-signer` handler also sees `v4` / `v4-query`, as on aws.
-    # The pin stands down when the command targets an MRAP ARN, an S3 Outposts
-    # access point (ARN or `--op-s3` alias), or an S3 Express directory
-    # bucket: an explicit signature_version suppresses botocore's auth-scheme
-    # resolution, and those endpoints must resolve to asymmetric SigV4a (the
-    # MRAP and Outposts shapes) / ``sigv4-s3express`` (with `CreateSession`
-    # credentials) - a pinned
-    # s3v4 matches all those scheme names up to the first dash and silently
-    # signs a plain SigV4 request instead. aws v2's bundled botocore pins
-    # only the symmetric families (_pin_python_sigv4_signers) and leaves the
-    # resolutions alive. With awscrt absent, a SigV4a target (MRAP or
-    # Outposts) surfaces botocore's own MissingDependencyException
-    # (-> ConfigurationError, 253) instead of a silently mis-signed SigV4
-    # request. (`v4` matches those scheme names the same way.)
-    # The pin also stands down for an anonymous run (`_sends_unsigned_requests`),
-    # where the UNSIGNED signature waiting in the session default client config
-    # is what must reach the client - a per-client signature_version, this pin
-    # included, beats it in botocore's merge.
-    # `--sse aws:kms` is the exception to both stand-downs: aws's
-    # `ClientFactory.create_client` passes `Config(signature_version='s3v4')`
-    # for it whatever the target, so an MRAP, Outposts or S3 Express target
-    # signs plain SigV4 there too, with or without `--no-sign-request`
-    # (measured offline on the pinned aws: `AWS4-HMAC-SHA256` with the
-    # client's region in the scope, where the resolution would have chosen
-    # SigV4a / `sigv4-s3express`). That pin keeps aws's own `s3v4`, and with
-    # it the `auth_type` botocore's handler passes by.
     overrides: dict[str, Any] = {}
-    if _requests_kms_signing(args):
-        overrides["signature_version"] = "s3v4"
-    elif not _includes_endpoint_auth_path(args) and not _sends_unsigned_requests(args):
-        overrides["signature_version"] = "v4"
-    # The timeouts arrive as raw strings (see globalargs.add_common_arguments)
-    # and are coerced here, aws-cli-style: int() with a 0 -> None ("no timeout")
-    # sentinel, a bad value mapped to rc 255 rather than a parse-time rc 252.
-    if args.cli_read_timeout is not None:
-        overrides["read_timeout"] = _coerce_cli_timeout(args.cli_read_timeout)
-    if args.cli_connect_timeout is not None:
-        overrides["connect_timeout"] = _coerce_cli_timeout(args.cli_connect_timeout)
+    signature_version = _signature_version_pin(args)
+    if signature_version is not None:
+        overrides["signature_version"] = signature_version
+    overrides.update(_cli_timeouts(args))
 
-    # Client construction can raise raw botocore errors (e.g. ProfileNotFound for
-    # a bad --profile, or credential/region resolution failures). Translate them
-    # into the library taxonomy so exit_code_for maps them (credential/region ->
-    # ConfigurationError [253], the rest -> InvalidConfigError [255]); left
-    # raw they would fall to the dispatcher's generic chain, losing that
-    # 253/255 split.
-    try:
+    with _construction_errors():
+        opened_here = session is None
         if session is None:
-            from boto3_s3 import fast_parse_timestamp
-
-            botocore_session = _open_botocore_session(args)
-            # Same fast timestamp parsing as build_session: every CLI-built
-            # session carries it.
-            botocore_session.get_component("response_parser_factory").set_parser_defaults(
-                timestamp_parser=fast_parse_timestamp
-            )
-            session = boto3.Session(botocore_session=botocore_session)
-            opened_here = True
-        else:
-            botocore_session = session._session  # pyright: ignore[reportPrivateUsage]
-            opened_here = False
+            session = build_session(args)
+        botocore_session = session._session  # pyright: ignore[reportPrivateUsage]
         client_region = (
             _resolve_region(args.region, botocore_session) if region is _UNRESOLVED else region
         )
@@ -1037,15 +1032,7 @@ def build_client(
         )
         s3errormsg.register(client)
         checksumdefault.register(client)
-        return client
-    except (NoCredentialsError, NoRegionError) as exc:
-        # aws has dedicated handlers for these two (-> 253); every other botocore
-        # error (ProfileNotFound, PartialCredentialsError, ...) falls to its
-        # GeneralExceptionHandler (-> 255) via the BotoCoreError clause below -
-        # InvalidConfigError, which exit_code_for maps to 255, not 253.
-        raise ConfigurationError(str(exc)) from exc
-    except BotoCoreError as exc:
-        raise InvalidConfigError(str(exc)) from exc
+    return client
 
 
 def _create_client(session: Boto3Session, service: str, **kwargs: Any) -> Any:
@@ -1082,7 +1069,7 @@ def _reject_empty_ca_bundle(verify: Any) -> None:
     (`_check_every_client`), the SDK's own included; `_create_client` checks
     again, for a client built from a session this module did not open.
     ``build_client`` / ``build_service_client`` catch it in their
-    ``except BotoCoreError`` clause and refine it to the library
+    `_construction_errors` scope and refine it to the library
     ``InvalidConfigError`` (rc 255), exactly as they would botocore's own.
     ``False`` (``--no-verify-ssl``) and a real path pass through untouched.
     """

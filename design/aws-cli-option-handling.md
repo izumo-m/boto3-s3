@@ -142,7 +142,7 @@ the two SSE-C key blobs (`--sse-c-key`, `--sse-c-copy-source-key`) take the
 loaded *bytes* verbatim into the request (a `string`-shaped request parameter
 untouched, as above), and the string-typed integer options feed them to
 `int()`. A `fileb://` on any other single-string argument in the list above
-is refused at 252 without reading the file (`base.refuse_binary_paramfile`):
+is refused at 252 without reading the file (`paramfile.load_text_argument`):
 no bytes can be a string value. On a free-string option aws reaches the same
 252 after loading the bytes (botocore's client-side check for a
 `string`-typed parameter); the uses it mishandles are below.

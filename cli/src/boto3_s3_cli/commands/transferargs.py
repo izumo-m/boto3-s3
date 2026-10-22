@@ -41,11 +41,9 @@ from boto3_s3_cli import (
 from boto3_s3_cli.commands.base import (
     add_page_size_argument,
     add_request_payer_argument,
-    expand_integer_paramfile,
     expand_option_paramfile,
-    parse_integer_option,
-    refuse_binary_paramfile,
     refuse_bucketless,
+    resolve_integer_option,
 )
 from boto3_s3_cli.output import uni_write
 from boto3_s3_cli.progress import TransferPrinter
@@ -53,6 +51,7 @@ from boto3_s3_cli.progress import TransferPrinter
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from boto3.s3.transfer import TransferConfig
     from mypy_boto3_s3 import S3Client
 
     from boto3_s3 import S3
@@ -81,7 +80,7 @@ _STORAGE_CLASS_CHOICES = [
 ]
 
 # The free-string transfer options that take aws's paramfile resolution
-# (``resolve_text_paramfile``). Each is a string-typed server parameter, so a
+# (``expand_option_paramfile``). Each is a string-typed server parameter, so a
 # ``file://`` reference sends the file text and a ``fileb://`` one is refused
 # (252). The choices-validated options (acl / storage_class / sse / ... ) can't
 # carry such a value (argparse rejects it as an invalid choice first);
@@ -319,25 +318,25 @@ def resolve_paramfile_values(args: argparse.Namespace, *, operation: str) -> tup
     ``expand_option_paramfile``). ``build_transfer_options`` consumes the
     resolved values verbatim.
     """
+    # The SSE-C key blobs take aws's paramfile on both prefixes: a ``fileb://``
+    # loads raw bytes, a ``file://`` text, and anything else passes through
+    # verbatim - aws sends an arbitrary ``--sse-c-key`` string to the server
+    # untouched (no base64 decoding, rc 1 from the endpoint), so a malformed
+    # key is *not* a usage error.
     if args.sse_c_key is not None:
-        args.sse_c_key = blob_value(args.sse_c_key, "--sse-c-key", operation=operation)
+        args.sse_c_key = paramfile.load_argument(args.sse_c_key, "--sse-c-key", operation=operation)
     if args.sse_c_copy_source_key is not None:
-        args.sse_c_copy_source_key = blob_value(
+        args.sse_c_copy_source_key = paramfile.load_argument(
             args.sse_c_copy_source_key, "--sse-c-copy-source-key", operation=operation
         )
     _resolve_grants(args, operation=operation)
     for option in _PARAMFILE_TEXT_OPTIONS:
-        value = getattr(args, option, None)
-        if value is not None:
-            resolved = resolve_text_paramfile(
-                value, f"--{option.replace('_', '-')}", operation=operation
-            )
-            setattr(args, option, resolved)
-    progress_frequency = _resolve_integer_option(args, "progress_frequency", operation=operation)
+        expand_option_paramfile(args, option, operation=operation)
+    progress_frequency = resolve_integer_option(args, "progress_frequency", operation=operation)
     # --progress-frequency's argparse default is 0, so its unset-None branch is
     # unreachable; --page-size's default is None (nothing sent, aws parity).
     assert progress_frequency is not None
-    page_size = _resolve_integer_option(args, "page_size", operation=operation)
+    page_size = resolve_integer_option(args, "page_size", operation=operation)
     return page_size, progress_frequency
 
 
@@ -371,29 +370,16 @@ def _resolve_grants(args: argparse.Namespace, *, operation: str) -> None:
         and items[0].startswith(("file://", "fileb://"))
     ):
         raise ValidationError(
-            "Error parsing parameter '--grants': a file:// or fileb:// reference "
-            "is not supported; give each grant as an argument",
+            usage.param_error(
+                "--grants",
+                "a file:// or fileb:// reference is not supported; give each grant as an argument",
+            ),
             operation=operation,
         )
     try:
         requestparams.validate_grants(cast("list[str]", items), operation=operation)
     except ValidationError as exc:
-        raise ValidationError(
-            f"Error parsing parameter '--grants': {exc}", operation=operation
-        ) from exc
-
-
-def _resolve_integer_option(args: argparse.Namespace, dest: str, *, operation: str) -> int | None:
-    """Expand a string-typed integer option's paramfile, then coerce.
-
-    aws expands the paramfile then runs its bare ``int()`` at the option's
-    registration position (a missing reference is the load 252, a non-integer
-    the coercion 255). ``expand_integer_paramfile`` loads both ``file://`` text
-    and ``fileb://`` bytes (aws feeds either to ``int()``); prefix-less values
-    fall through into ``int()``.
-    """
-    expand_integer_paramfile(args, dest, operation=operation)
-    return parse_integer_option(getattr(args, dest), operation=operation)
+        raise ValidationError(usage.param_error("--grants", exc), operation=operation) from exc
 
 
 def resolve_metadata_option(args: argparse.Namespace, *, operation: str) -> None:
@@ -401,13 +387,13 @@ def resolve_metadata_option(args: argparse.Namespace, *, operation: str) -> None
 
     A ``file://`` whole-value reference loads the map text (252 on a missing
     file). A ``fileb://`` one is refused at 252 without being read
-    (``resolve_text_paramfile``): aws loads the bytes and then crashes in its
-    shorthand parser (rc 255), and no bytes can be a map
+    (``paramfile.load_text_argument``): aws loads the bytes and then crashes in
+    its shorthand parser (rc 255), and no bytes can be a map
     (docs/cli/aws-differences.md section 2).
     """
     if args.metadata is None:
         return
-    metadata_value = resolve_text_paramfile(args.metadata, "--metadata", operation=operation)
+    metadata_value = paramfile.load_text_argument(args.metadata, "--metadata", operation=operation)
     args.metadata = shorthand.parse_map_option(
         metadata_value, name="--metadata", operation=operation
     )
@@ -523,6 +509,47 @@ def local_path_exists(path: str) -> bool:
         return os.path.exists(textencoding.os_path(path))
     except ValueError:
         return False
+
+
+def validate_streaming_paths(head: TransferPaths, *, recursive: bool, operation: str) -> bool:
+    """aws-cli's ``_validate_streaming_paths``: whether the run streams (252 if it may not).
+
+    A ``-`` on either side is a stream, and only a non-recursive ``cp``
+    streams: anywhere else aws refuses it, with a message that names cp
+    whatever the command (``mv`` and ``sync`` included).
+    """
+    if head.src != "-" and head.dest != "-":
+        return False
+    if operation != "cp" or recursive:
+        raise ValidationError(
+            "Streaming currently is only compatible with non-recursive cp commands",
+            operation=operation,
+        )
+    return True
+
+
+def check_local_source(
+    args: argparse.Namespace, head: TransferPaths, *, recursive: bool, operation: str
+) -> None:
+    """aws-cli's missing-source check (``_validate_path_args``), then the walk's root check.
+
+    A local source that does not exist stops the run (aws's bare
+    ``RuntimeError``, rc 255; a `NotFoundError` without a ``ClientError``
+    cause maps to the same 255). A ``-`` source is a stream, not a path, and
+    is not probed. A *recursive* run (``cp`` / ``mv`` ``--recursive``, every
+    ``sync``) walks the source as a directory, so a root the walk would skip
+    is refused next (`refuse_unwalkable_source`, 255).
+    """
+    if head.src_type != "local" or head.src == "-":
+        return
+    if not local_path_exists(head.src):
+        raise NotFoundError(
+            f"The user-provided path {head.src} does not exist.", operation=operation
+        )
+    if recursive:
+        refuse_unwalkable_source(
+            head.src, follow_symlinks=args.follow_symlinks, operation=operation
+        )
 
 
 def refuse_unwalkable_source(src: str, *, follow_symlinks: bool, operation: str) -> None:
@@ -679,7 +706,7 @@ def resolve_case_conflict(
     mode = CaseConflictMode(args.case_conflict)
     if mode is CaseConflictMode.IGNORE or paths_type != "s3local" or not recursive:
         return mode
-    if not (is_s3express_path(src) or is_s3express_accesspoint_path(src)):
+    if not lists_unordered(src):
         return mode
     if mode is not CaseConflictMode.WARN:
         raise ValidationError(
@@ -704,6 +731,18 @@ def resolve_case_conflict(
         "s3-case-insensitivity.html.",
     )
     return CaseConflictMode.IGNORE
+
+
+def lists_unordered(path: str) -> bool:
+    """Whether *path* lists in no lexicographic order: a directory bucket or its access point.
+
+    aws special-cases an S3 Express directory bucket (``--x-s3``) wherever a
+    step relies on ordered listings - sync, the ``--case-conflict`` check -
+    and tests that suffix only. An access point of a directory bucket
+    (``--xa-s3``) lists just as unordered, so it counts here too (a
+    deliberate difference, docs/cli/aws-differences.md).
+    """
+    return is_s3express_path(path) or is_s3express_accesspoint_path(path)
 
 
 def default_upload_checksum(client: Any, paths_type: str, transfer_config: Any) -> str | None:
@@ -790,47 +829,8 @@ def build_transfer_options(
     return options
 
 
-def resolve_text_paramfile(value: str, name: str, *, operation: str) -> str:
-    """Apply aws's paramfile resolution to a string-typed argument.
-
-    aws-cli registers a global URI paramfile handler on every ``aws s3`` arg, so
-    ``--content-type file://ct.txt`` (etc.) sends the *file contents*. A value
-    without a paramfile prefix passes through verbatim. A ``fileb://``
-    reference is refused unread (252, ``refuse_binary_paramfile``).
-    """
-    if value.startswith("file://"):
-        with paramfile.named_argument(name, operation=operation):
-            return paramfile.read_text_paramfile(value, operation=operation)
-    refuse_binary_paramfile(value, name, operation=operation)
-    return value
-
-
-def blob_value(value: str, name: str, *, operation: str) -> str | bytes:
-    """Resolve a blob argument the way ``aws s3`` does.
-
-    A ``fileb://`` reference loads raw bytes and a ``file://`` reference loads
-    text (aws's paramfile, both prefixes); anything else passes through verbatim
-    - aws sends an arbitrary ``--sse-c-key`` string to the
-    server untouched (no base64 decoding, rc 1 from the endpoint), so a malformed
-    key is *not* a usage error.
-    """
-    if value.startswith("fileb://"):
-        with paramfile.named_argument(name, operation=operation):
-            return paramfile.read_binary_paramfile(value, operation=operation)
-    return resolve_text_paramfile(value, name, operation=operation)
-
-
 def resolve_locations(
-    args: argparse.Namespace,
-    ctx: Context,
-    s3: S3,
-    client: Any,
-    src: str,
-    dest: str,
-    *,
-    src_type: str,
-    dest_type: str,
-    page_size: int | None,
+    args: argparse.Namespace, ctx: Context, head: TransferPaths
 ) -> tuple[object, object]:
     """Build the library-side location pair for the non-stream routes.
 
@@ -842,20 +842,21 @@ def resolve_locations(
     ``--source-region`` the source side gets its own client in that region with the
     ``--endpoint-url`` override dropped (aws-cli ClientFactory).
     """
+    src, dest, client = head.src, head.dest, head.client
 
     def _s3(arg: str, client_for: Any) -> S3Storage:
         # build_s3_storage applies the path refusals (rc 252 ahead of the
         # pipeline). The CLI's process-fatal Ctrl-C posture is not a storage
         # concern:
         # build_s3 declares it once (S3's reusable_after_interrupt).
-        return build_s3_storage(arg, client=client_for, page_size=page_size)
+        return build_s3_storage(arg, client=client_for, page_size=head.page_size)
 
     def _local(path: str) -> LocalStorage:
         return local_storage(path, follow_symlinks=args.follow_symlinks)
 
-    if src_type == "local":
+    if head.src_type == "local":
         return _local(src), _s3(dest, client)
-    if dest_type == "local":
+    if head.dest_type == "local":
         # aws-cli reads an empty destination of a single download as the
         # working directory (its local_format absolutizes "" to the cwd, which
         # is a directory); the library refuses "" as no location at all, so
@@ -869,7 +870,7 @@ def resolve_locations(
         source_args = argparse.Namespace(**vars(args))
         source_args.region = args.source_region
         source_args.endpoint_url = None
-        source_client = ctx.client(source_args, s3)
+        source_client = ctx.client(source_args, head.s3)
     return _s3(src, source_client), _s3(dest, client)
 
 
@@ -908,28 +909,35 @@ def resolve_transfer_config(ctx: Context, s3: S3, *, paths_type: str) -> Any:
     ``ctx.transfer_config`` (a test's determinism lever) supplies the settings
     it sets; the rest come from the profile's ``[s3]`` section of the exact
     session bound to *s3*, and the engine is picked as aws picks it
-    (`S3.resolve_transfer_config`). Called at aws's ``_get_transfer_manager``
-    slot: after the path validations, before anything the run itself does.
+    (`S3.resolve_transfer_config`). The first half of `build_transfer_engine`.
     """
     return s3.resolve_transfer_config(ctx.transfer_config, copy=paths_type == "s3s3")
 
 
-def materialize_transfer_engine(s3: S3, client: S3Client, transfer_config: Any) -> None:
-    """aws's transfer-manager construction slot, for every command that has one.
+def build_transfer_engine(
+    ctx: Context, s3: S3, client: S3Client, *, paths_type: str
+) -> TransferConfig:
+    """aws's ``_get_transfer_manager`` slot: ``[s3]`` read, then the engine built.
 
-    aws builds the manager (``TransferManagerFactory.create_transfer_manager``)
-    right after reading ``[s3]`` and before it decides anything about the run,
-    so a CRT selection pays its whole construction there - the cross-process
-    lock and ``create_s3_crt_client`` - even for a ``--dryrun`` that transfers
-    nothing, and even for ``rm``, whose deletes ride it but build it later
-    (with the deleter, or just before a single key's request). Call it at that
-    slot so the same failures land at the same point.
+    Every command that has the slot calls it there - cp, mv, sync and rm:
+    after the path validations, before anything the run itself does. The
+    config comes from `resolve_transfer_config` (an invalid ``[s3]`` value
+    is 255) and is returned for the run. aws then builds the manager
+    (``TransferManagerFactory.create_transfer_manager``) before it decides
+    anything about the run, so a CRT selection pays its whole construction
+    there - the cross-process lock and ``create_s3_crt_client`` - even for a
+    ``--dryrun`` that transfers nothing, and even for ``rm``, whose deletes
+    ride it but build it later (with the deleter, or just before a single
+    key's request). `S3.materialize_crt_engine` pays the same construction
+    here, so the same failures land at the same point.
 
     The CLI's `S3` stops a CRT run there when the region chain resolved
     nothing (`clientfactory.build_s3`); every failure the construction raises
     is reported as it is.
     """
+    transfer_config = resolve_transfer_config(ctx, s3, paths_type=paths_type)
     s3.materialize_crt_engine(client, transfer_config=transfer_config)
+    return transfer_config
 
 
 def build_printer(
@@ -996,11 +1004,23 @@ def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], 
         raise
     if error is None:
         return 2 if printer.warned else 0
+    return report_failed_run(error, quiet=quiet)
+
+
+def report_failed_run(error: BaseException, *, quiet: bool) -> int:
+    """aws's ``CommandResultRecorder`` on a run span that raised *error*: rc 1.
+
+    The span's closing line (`_closing_line`) goes to stderr unless *quiet*,
+    and the run exits 1 - `finish_transfer`'s verdict once its printer has
+    drained, and ``rm``'s, whose run span sits inside the same recorder on
+    aws (rm is an ``S3TransferCommand`` there too). An ``AssertionError`` -
+    an internal-invariant violation, a bug - is re-raised instead, surfacing
+    loudly like the dispatcher's own re-raise (cli.py): masking it as a fatal
+    error would also blunt the test doubles' unexpected-call guards.
+    ``SystemExit`` and the rest of the ``BaseException`` family (a
+    ``KeyboardInterrupt`` aside) pass the same way.
+    """
     if isinstance(error, AssertionError) or not isinstance(error, Exception | KeyboardInterrupt):
-        # An internal-invariant violation (a bug) surfaces loudly, like the
-        # dispatcher's AssertionError re-raise (cli.py) - masking it as a
-        # fatal error would also blunt the test doubles' unexpected-call
-        # guards; SystemExit and the rest of the BaseException family pass.
         raise error
     line = _closing_line(error)
     if line is not None and not quiet:
@@ -1009,7 +1029,10 @@ def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], 
 
 
 def _closing_line(error: BaseException) -> str | None:
-    """The line a run that raised *error* ends with, or None (finish_transfer).
+    """The line a run that raised *error* ends with, or None.
+
+    `report_failed_run` writes it, and `finish_transfer` for a Ctrl-C in its
+    drain.
 
     ``BatchError`` has none - its per-item failure lines were already
     streamed by the printer. A ``KeyboardInterrupt`` inside the pipeline span
@@ -1033,25 +1056,25 @@ def _closing_line(error: BaseException) -> str | None:
 __all__ = [
     "TransferPaths",
     "add_transfer_arguments",
-    "blob_value",
     "build_printer",
+    "build_transfer_engine",
     "build_transfer_options",
+    "check_local_source",
     "classify_paths",
     "create_local_dest_dir",
     "finish_transfer",
     "identify_type",
-    "is_s3express_accesspoint_path",
-    "is_s3express_path",
-    "materialize_transfer_engine",
+    "lists_unordered",
     "normalize_s3_path",
     "path_storage",
     "refuse_unwalkable_source",
+    "report_failed_run",
     "resolve_case_conflict",
     "resolve_locations",
     "resolve_metadata_option",
     "resolve_paramfile_values",
-    "resolve_text_paramfile",
     "resolve_transfer_config",
     "validate_checksum_paths_type",
     "validate_sse_c_pairing",
+    "validate_streaming_paths",
 ]

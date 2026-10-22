@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 
 # Loaded at dispatch once sync is determined (stage 2 of the lazy dispatch).
-from boto3_s3 import NotFoundError, ValidationError
+from boto3_s3 import ValidationError
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3_cli import filters
 from boto3_s3_cli.commands import transferargs
@@ -57,32 +57,13 @@ class SyncCommand(Command):
         sides (design/sync.md section 1).
         """
         head = transferargs.classify_paths(args, ctx, operation="sync")
-        page_size, progress_frequency = head.page_size, head.progress_frequency
         src, dest = head.src, head.dest
-        src_type, dest_type = head.src_type, head.dest_type
-        if src == "-" or dest == "-":
-            # aws-cli's _validate_streaming_paths: only cp streams, so the
-            # message names cp even from sync.
-            raise ValidationError(
-                "Streaming currently is only compatible with non-recursive cp commands",
-                operation="sync",
-            )
+        transferargs.validate_streaming_paths(head, recursive=True, operation="sync")
         paths_type = head.paths_type  # "locals3" | "s3local" | "s3s3" here
         transferargs.validate_checksum_paths_type(args, paths_type, operation="sync")
-        if src_type == "local" and not transferargs.local_path_exists(src):
-            # Missing local source (aws-cli's _validate_path_args): aws's bare
-            # RuntimeError -> rc 255 (NotFoundError without a ClientError
-            # cause maps the same).
-            raise NotFoundError(f"The user-provided path {src} does not exist.", operation="sync")
-        if src_type == "local":
-            transferargs.refuse_unwalkable_source(
-                src, follow_symlinks=args.follow_symlinks, operation="sync"
-            )
+        transferargs.check_local_source(args, head, recursive=True, operation="sync")
         transferargs.validate_sse_c_pairing(args, paths_type, operation="sync")
-        if any(
-            transferargs.is_s3express_path(path) or transferargs.is_s3express_accesspoint_path(path)
-            for path in (src, dest)
-        ):
+        if any(transferargs.lists_unordered(path) for path in (src, dest)):
             # aws-cli's _validate_not_s3_express_bucket_for_sync: directory-bucket
             # listings are not lexicographic, so sync rejects them outright.
             # aws tests only the --x-s3 suffix and so runs a sync through an
@@ -99,26 +80,13 @@ class SyncCommand(Command):
         s3 = head.s3
         client = head.client
 
-        src_location, dest_location = transferargs.resolve_locations(
-            args,
-            ctx,
-            s3,
-            client,
-            src,
-            dest,
-            src_type=src_type,
-            dest_type=dest_type,
-            page_size=page_size,
-        )
+        src_location, dest_location = transferargs.resolve_locations(args, ctx, head)
 
         # One filter applied to both sides by S3.sync (design/sync.md section
         # 1): each side's entries carry their path below that side's base, as
         # aws joins every pattern onto each side's rootdir.
         item_filter = filters.compile_filter(args.filters)
-        transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
-        # aws builds the transfer manager here, before it decides anything about
-        # the run: a CRT selection pays its construction even for a --dryrun.
-        transferargs.materialize_transfer_engine(s3, client, transfer_config)
+        transfer_config = transferargs.build_transfer_engine(ctx, s3, client, paths_type=paths_type)
         # After the engine is resolved: the upload checksum default is the
         # engine's.
         options = transferargs.build_transfer_options(
@@ -128,11 +96,11 @@ class SyncCommand(Command):
                 client, paths_type, transfer_config
             ),
         )
-        if dest_type == "local":
+        if head.dest_type == "local":
             # The s3local destination aws's _validate_path_args creates, once
             # every check above has passed (transferargs.create_local_dest_dir).
             transferargs.create_local_dest_dir(dest, operation="sync")
-        printer = transferargs.build_printer(args, progress_frequency)
+        printer = transferargs.build_printer(args, head.progress_frequency)
 
         def run_sync() -> None:
             s3.sync(

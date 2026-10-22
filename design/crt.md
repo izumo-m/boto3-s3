@@ -342,7 +342,7 @@ lever). In the CLI the reading of `[s3]` is placed **before** everything the
 run itself does, so an invalid `[s3]` value stops every rm form (measured); a
 path with no bucket is refused earlier still, before the client is built.
 
-### Materializing the engine (`materialize_transfer_engine`)
+### Materializing the engine (`build_transfer_engine`)
 
 aws builds the transfer manager immediately after that read
 (`_get_transfer_manager`), before it decides anything about the run, so a CRT
@@ -352,8 +352,8 @@ library builds its manager only once a live run starts - `prepare()` just ahead
 of enumeration, or the first submit on a stream route - and never for a
 dryrun, which would put those failures inside the operation (rc 1), or skip
 them, instead of ahead of it (rc 255). So all four commands call
-`transferargs.materialize_transfer_engine` at aws's slot; it delegates to
-`S3.materialize_crt_engine`, which builds the engine the
+`transferargs.build_transfer_engine` at aws's slot; after the `[s3]` read it
+delegates to `S3.materialize_crt_engine`, which builds the engine the
 effective `TransferConfig` selects and drops it (a no-op when that engine is
 classic; the CRT client is a process-wide singleton, so the transfer that
 follows reuses whatever was built).

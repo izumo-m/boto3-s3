@@ -15,6 +15,7 @@ import pytest
 
 from boto3_s3.exceptions import InvalidValueError, ValidationError
 from boto3_s3.types import CaseConflictMode
+from boto3_s3_cli import paramfile
 from boto3_s3_cli.commands import transferargs
 
 
@@ -165,36 +166,34 @@ class TestParamfile:
         p = tmp_path / "ct.txt"
         p.write_text("text/x-from-file")
         assert (
-            transferargs.resolve_text_paramfile(f"file://{p}", "--content-type", operation="cp")
+            paramfile.load_text_argument(f"file://{p}", "--content-type", operation="cp")
             == "text/x-from-file"
         )
 
     def test_no_prefix_passes_through_verbatim(self) -> None:
         # A non-prefixed value (e.g. an http:// website redirect) is untouched.
         assert (
-            transferargs.resolve_text_paramfile(
-                "http://example.com", "--website-redirect", operation="cp"
-            )
+            paramfile.load_text_argument("http://example.com", "--website-redirect", operation="cp")
             == "http://example.com"
         )
 
     def test_blob_file_prefix_loads_text(self, tmp_path: Path) -> None:
         p = tmp_path / "key.txt"
         p.write_text("0123456789abcdef0123456789abcdef")
-        assert transferargs.blob_value(f"file://{p}", "--sse-c-key", operation="cp") == (
+        assert paramfile.load_argument(f"file://{p}", "--sse-c-key", operation="cp") == (
             "0123456789abcdef0123456789abcdef"
         )
 
     def test_blob_fileb_prefix_loads_bytes(self, tmp_path: Path) -> None:
         p = tmp_path / "key.bin"
         p.write_bytes(b"\x00\x01\x02binary-key")
-        assert transferargs.blob_value(f"fileb://{p}", "--sse-c-key", operation="cp") == (
+        assert paramfile.load_argument(f"fileb://{p}", "--sse-c-key", operation="cp") == (
             b"\x00\x01\x02binary-key"
         )
 
     def test_missing_text_paramfile_is_252(self) -> None:
         with pytest.raises(ValidationError, match="Unable to load paramfile"):
-            transferargs.resolve_text_paramfile(
+            paramfile.load_text_argument(
                 "file:///nonexistent/boto3_s3_xyz", "--content-type", operation="cp"
             )
 
@@ -204,7 +203,7 @@ class TestParamfile:
         p = tmp_path / "ct.bin"
         p.write_bytes(b"hi\n")
         with pytest.raises(ValidationError) as excinfo:
-            transferargs.resolve_text_paramfile(f"fileb://{p}", "--content-type", operation="cp")
+            paramfile.load_text_argument(f"fileb://{p}", "--content-type", operation="cp")
         assert not isinstance(excinfo.value, InvalidValueError)
 
 
@@ -293,7 +292,7 @@ class TestMetadataParamfile:
         # elsewhere may be a codec that decodes any byte (cp1252 on Windows).
         monkeypatch.setenv("AWS_CLI_FILE_ENCODING", "utf-8")
         with pytest.raises(ValidationError) as excinfo:
-            transferargs.blob_value(f"file://{p}", "--sse-c-key", operation="cp")
+            paramfile.load_argument(f"file://{p}", "--sse-c-key", operation="cp")
         # The report names the option and the file, and points at fileb://.
         message = str(excinfo.value)
         assert "--sse-c-key" in message
@@ -309,11 +308,11 @@ class TestMetadataParamfile:
         monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows expanduser reads this, not HOME
         monkeypatch.setenv("BOTO3_S3_TESTDIR", str(tmp_path))
         assert (
-            transferargs.resolve_text_paramfile("file://~/ct.txt", "--content-type", operation="cp")
+            paramfile.load_text_argument("file://~/ct.txt", "--content-type", operation="cp")
             == "text/x-home"
         )
         assert (
-            transferargs.resolve_text_paramfile(
+            paramfile.load_text_argument(
                 "file://$BOTO3_S3_TESTDIR/ct.txt", "--content-type", operation="cp"
             )
             == "text/x-home"
@@ -328,7 +327,7 @@ class TestMetadataParamfile:
         p.write_bytes("caf\xe9".encode("latin-1"))  # 0xe9, invalid UTF-8
         monkeypatch.setenv("AWS_CLI_FILE_ENCODING", "latin-1")
         assert (
-            transferargs.resolve_text_paramfile(f"file://{p}", "--content-type", operation="cp")
+            paramfile.load_text_argument(f"file://{p}", "--content-type", operation="cp")
             == "caf\xe9"
         )
 

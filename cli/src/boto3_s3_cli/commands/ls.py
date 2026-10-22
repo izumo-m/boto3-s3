@@ -12,10 +12,9 @@ from boto3_s3_cli.commands.base import (
     Context,
     add_page_size_argument,
     add_request_payer_argument,
-    expand_integer_paramfile,
     expand_option_paramfile,
     expand_positional_paramfile,
-    parse_integer_option,
+    resolve_integer_option,
 )
 
 
@@ -61,8 +60,7 @@ class LsCommand(Command):
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """List objects/prefixes (or all buckets) and return an ``aws s3``-style code."""
         expand_positional_paramfile(args, "paths", name="paths", operation="ls")
-        expand_integer_paramfile(args, "page_size", operation="ls")
-        page_size = parse_integer_option(args.page_size, operation="ls")
+        page_size = resolve_integer_option(args, "page_size", operation="ls")
         expand_option_paramfile(args, "bucket_name_prefix", operation="ls")
         expand_option_paramfile(args, "bucket_region", operation="ls")
         target: str = args.paths

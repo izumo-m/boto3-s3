@@ -37,11 +37,13 @@ class Context:
     """Runtime dependencies ``main()`` hands to the dispatched ``Command``.
 
     ``client_factory`` builds the boto3 S3 client from the parsed
-    connection/auth globals (default: ``boto3_s3_cli.clientfactory.build_client``).
+    connection/auth globals in place of the CLI's own construction; ``None``
+    (the default) leaves it to the command's `S3`, which builds it on its
+    session (``boto3_s3_cli.clientfactory.build_s3`` / ``build_client``).
     Tests inject a factory returning a fake client.
     ``service_client_factory`` does the same for the non-S3 clients ``mv``'s
-    path validation needs (default:
-    ``boto3_s3_cli.clientfactory.build_service_client``). ``transfer_config``
+    path validation needs (``None``: ``clientfactory.build_service_client``
+    on the command's session). ``transfer_config``
     overrides the transfer engine's defaults (aws-equivalent 8 MiB
     threshold/chunk); tests inject ``TransferConfig(use_threads=False, ...)``
     to make multipart call order deterministic against canned clients.
@@ -55,15 +57,9 @@ class Context:
         service_client_factory: ServiceClientFactory | None = None,
         transfer_config: TransferConfig | None = None,
     ) -> None:
-        self.client_factory: ClientFactory = (
-            build_client if client_factory is None else client_factory
-        )
-        self._client_factory_injected = client_factory is not None
+        self._client_factory = client_factory
         self._s3_factory = s3_factory
-        self.service_client_factory: ServiceClientFactory = (
-            build_service_client if service_client_factory is None else service_client_factory
-        )
-        self._service_client_factory_injected = service_client_factory is not None
+        self._service_client_factory = service_client_factory
         self.transfer_config: TransferConfig | None = transfer_config
 
     def s3(self, args: argparse.Namespace) -> S3:
@@ -73,10 +69,9 @@ class Context:
 
         from boto3_s3 import S3
 
-        if not self._client_factory_injected:
+        client_factory = self._client_factory
+        if client_factory is None:
             return build_s3(args)
-
-        client_factory = self.client_factory
 
         class InjectedClientS3(S3):
             def client(self) -> S3Client:
@@ -100,11 +95,9 @@ class Context:
         carries over unchanged.
         """
         clone = Context(
-            client_factory=self.client_factory if self._client_factory_injected else None,
+            client_factory=self._client_factory,
             s3_factory=lambda _args: s3,
-            service_client_factory=(
-                self.service_client_factory if self._service_client_factory_injected else None
-            ),
+            service_client_factory=self._service_client_factory,
             transfer_config=self.transfer_config,
         )
         return clone
@@ -112,8 +105,8 @@ class Context:
     def client(self, args: argparse.Namespace, s3: S3) -> S3Client:
         """Build an additional S3 client from the command's bound session
         (an injected test factory builds from its own wiring instead)."""
-        if self._client_factory_injected:
-            return self.client_factory(args)
+        if self._client_factory is not None:
+            return self._client_factory(args)
         return build_client(args, session=s3.session)
 
     def service_client(
@@ -126,8 +119,8 @@ class Context:
     ) -> Any:
         """Build a non-S3 client from the command's bound session
         (an injected test factory builds from its own wiring instead)."""
-        if self._service_client_factory_injected:
-            return self.service_client_factory(service, args, region=region)
+        if self._service_client_factory is not None:
+            return self._service_client_factory(service, args, region=region)
         return build_service_client(service, args, region=region, session=s3.session)
 
 
@@ -158,23 +151,6 @@ def parse_integer_option(value: object, *, operation: str) -> int | None:
         raise InvalidValueError(str(exc), operation=operation) from exc
 
 
-def refuse_binary_paramfile(value: str, name: str, *, operation: str) -> None:
-    """Refuse a ``fileb://`` reference on a string-typed argument (252), unread.
-
-    No bytes can be a string value: aws loads them and then refuses them (an
-    option, through botocore's type check) or mishandles them (a path
-    positional, a whole ``--metadata`` value; docs/cli/aws-differences.md
-    section 2). Here the prefix is refused before the file is read. *name* is
-    the argument name the report carries.
-    """
-    if value.startswith("fileb://"):
-        raise ValidationError(
-            f"Error parsing parameter '{name}': a fileb:// reference is not supported, "
-            "as the value cannot be bytes; use file:// to read it from a file",
-            operation=operation,
-        )
-
-
 def _expand_string_paramfile(
     args: argparse.Namespace, dest: str, *, name: str, operation: str
 ) -> None:
@@ -183,18 +159,13 @@ def _expand_string_paramfile(
     Shared body of the string option and positional helpers below. aws expands
     references at parse time, so a missing ``file://`` reference is the load
     252; a ``file://`` yields text, and a ``fileb://`` is refused unread
-    (`refuse_binary_paramfile`). A value without a prefix (or a non-string,
-    e.g. an integer default) is untouched. *name* is the argument name aws
-    reports in the load failure.
+    (`paramfile.load_text_argument`). A value without a prefix (or a
+    non-string, e.g. an integer default) is untouched. *name* is the argument
+    name aws reports in the load failure.
     """
     value = getattr(args, dest, None)
-    if not isinstance(value, str):
-        return
-    refuse_binary_paramfile(value, name, operation=operation)
-    with paramfile.named_argument(name, operation=operation):
-        loaded = paramfile.get_paramfile(value, operation=operation)
-    if loaded is not None:
-        setattr(args, dest, loaded)
+    if isinstance(value, str):
+        setattr(args, dest, paramfile.load_text_argument(value, name, operation=operation))
 
 
 def expand_option_paramfile(args: argparse.Namespace, option: str, *, operation: str) -> None:
@@ -203,7 +174,7 @@ def expand_option_paramfile(args: argparse.Namespace, option: str, *, operation:
     aws expands paramfile references on every plain option during argument
     parsing, so a bad reference is its ParamValidation 252. Runs in place; a
     value without a prefix (or a non-string) is untouched. For an integer
-    option use ``expand_integer_paramfile``, whose loaded bytes feed
+    option use ``resolve_integer_option``, whose loaded bytes feed
     ``int()`` rather than being rejected as a string.
     """
     _expand_string_paramfile(
@@ -211,23 +182,23 @@ def expand_option_paramfile(args: argparse.Namespace, option: str, *, operation:
     )
 
 
-def expand_integer_paramfile(args: argparse.Namespace, option: str, *, operation: str) -> None:
-    """aws's parse-time paramfile expansion for a string-typed integer option (252).
+def resolve_integer_option(args: argparse.Namespace, option: str, *, operation: str) -> int | None:
+    """aws's ``integer`` option: its paramfile expanded, then the bare ``int()``.
 
-    aws loads the paramfile before the bare ``int()`` coercion, so a missing
+    aws loads the paramfile at parse time, before the coercion, so a missing
     reference is the load 252 *before* the coercion's 255 (measured:
     ``--page-size file:///no/x`` exits 252). Unlike the string helper it keeps
     ``fileb://`` bytes rather than rejecting them: aws feeds them to ``int()``
     too (``--page-size fileb://<5>`` succeeds, ``<abc>`` fails 255 with a
-    ``b'abc'`` repr). ``parse_integer_option`` performs the coercion.
+    ``b'abc'`` repr). A value without a prefix falls through into ``int()``;
+    ``parse_integer_option`` performs the coercion. The loaded value replaces
+    ``args.<option>`` in place, as the string helpers do.
     """
     value = getattr(args, option, None)
     if isinstance(value, str):
         name = f"--{option.replace('_', '-')}"
-        with paramfile.named_argument(name, operation=operation):
-            loaded = paramfile.get_paramfile(value, operation=operation)
-        if loaded is not None:
-            setattr(args, option, loaded)
+        setattr(args, option, paramfile.load_argument(value, name, operation=operation))
+    return parse_integer_option(getattr(args, option), operation=operation)
 
 
 def expand_positional_paramfile(
@@ -237,7 +208,7 @@ def expand_positional_paramfile(
 
     A ``file://`` reference loads the path as text (a missing or undecodable
     file is the load 252). A ``fileb://`` one is refused at 252 without being
-    read (`refuse_binary_paramfile`): aws loads the bytes into the path, and
+    read (`paramfile.load_text_argument`): aws loads the bytes into the path, and
     each command then mishandles them its own way - a crash on ls and
     website, a delete of the decoded path on rm - an aws bug this CLI does
     not copy (docs/cli/aws-differences.md section 2). *name* is the argument

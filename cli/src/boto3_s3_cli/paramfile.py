@@ -2,25 +2,26 @@
 
 The execution half of aws's ``paramfile.py`` (``get_paramfile`` over its
 ``LOCAL_PREFIX_MAP``) - aws v2 itself carries only the local file forms
-there (its http/https fetchers are gone), so this is the whole surface.
-Three callers share it: the
-transfer-argument resolution (``commands/transferargs.py``: the free-string
-options, ``--metadata``'s pre-parse, the SSE-C blobs), the shorthand
-parser's ``@=`` operator (``shorthand.py``), and the plain-option expansions
-(``commands/base.py``'s ``expand_option_paramfile`` and its integer wrapper
-``expand_integer_paramfile``: ls / rm ``--page-size``,
-presign ``--expires-in``). A bad ``AWS_CLI_FILE_ENCODING`` raises
-``LookupError`` into the general handler (255), as in aws.
+there (its http/https fetchers are gone), so this is the whole surface - and
+aws's ``load-cli-arg`` handler (``URIArgumentHandler``) over it. The handler
+is `load_argument`, which keeps the loaded value whatever its type (the SSE-C
+blobs, the integer options); a string-typed argument loads through
+`load_text_argument`, which refuses ``fileb://`` (the free-string options,
+``--metadata``'s whole value, the path positionals). Their callers are
+``commands/transferargs.py`` and ``commands/base.py``; the shorthand
+parser's ``@=`` operator (``shorthand.py``) calls `get_paramfile` itself. A
+bad ``AWS_CLI_FILE_ENCODING`` raises ``LookupError`` into the general
+handler (255), as in aws.
 
 A read failure is a `ParamfileLoadError` naming no argument; every caller
 loads inside `named_argument`, which reports it as the argument's parse error
-(rc 252) - the port of aws's ``load-cli-arg`` handler (``URIArgumentHandler``),
-which re-raises its ``ResourceLoadingError`` as the named argument's
-``ParamError``. aws's shorthand parser alone calls ``get_paramfile`` outside
-that handler, so its ``@=`` load failure reaches the general handler bare
-(rc 255); here the shorthand's ``@=`` (``shorthand.py``) loads inside the
-option's scope too, so a file named on the command line that cannot be read
-is 252 wherever it is named (docs/cli/exit-codes.md).
+(rc 252) - the port of aws's handler, which re-raises its
+``ResourceLoadingError`` as the named argument's ``ParamError``. aws's
+shorthand parser alone calls ``get_paramfile`` outside that handler, so its
+``@=`` load failure reaches the general handler bare (rc 255); here the
+shorthand's ``@=`` (``shorthand.py``) loads inside the option's scope too, so
+a file named on the command line that cannot be read is 252 wherever it is
+named (docs/cli/exit-codes.md).
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ import os
 from typing import TYPE_CHECKING
 
 from boto3_s3 import InvalidValueError, ValidationError
-from boto3_s3_cli import textencoding
+from boto3_s3_cli import textencoding, usage
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -59,9 +60,7 @@ def named_argument(name: str, *, operation: str) -> Generator[None, None, None]:
     try:
         yield
     except ParamfileLoadError as exc:
-        raise ValidationError(
-            f"Error parsing parameter '{name}': {exc}", operation=operation
-        ) from exc
+        raise ValidationError(usage.param_error(name, exc), operation=operation) from exc
 
 
 def _text_encoding() -> str:
@@ -152,9 +151,49 @@ def get_paramfile(value: str, *, operation: str) -> str | bytes | None:
     return None
 
 
+def load_argument(value: str, name: str, *, operation: str) -> str | bytes:
+    """aws's ``URIArgumentHandler`` on one argument: load a reference, else keep it.
+
+    aws loads a ``file://`` / ``fileb://`` reference on every ``aws s3``
+    argument at parse time - text or raw bytes, which the argument's own type
+    then decides about - so a bad reference is the load 252 (`named_argument`,
+    reported under *name*). A value without a prefix passes through verbatim.
+    """
+    with named_argument(name, operation=operation):
+        loaded = get_paramfile(value, operation=operation)
+    return value if loaded is None else loaded
+
+
+def load_text_argument(value: str, name: str, *, operation: str) -> str:
+    """`load_argument` for a string-typed argument: a ``fileb://`` is refused (252).
+
+    A ``file://`` reference loads as text and a value without a prefix passes
+    through verbatim. A ``fileb://`` reference is refused before the file is
+    read: no bytes can be a string value. aws loads them and then refuses them
+    (an option, through botocore's type check) or mishandles them (a path
+    positional, a whole ``--metadata`` value; docs/cli/aws-differences.md
+    section 2). *name* is the argument name the report carries.
+    """
+    if value.startswith("fileb://"):
+        raise ValidationError(
+            usage.param_error(
+                name,
+                "a fileb:// reference is not supported, as the value cannot be bytes; "
+                "use file:// to read it from a file",
+            ),
+            operation=operation,
+        )
+    if value.startswith("file://"):
+        with named_argument(name, operation=operation):
+            return read_text_paramfile(value, operation=operation)
+    return value
+
+
 __all__ = [
     "ParamfileLoadError",
     "get_paramfile",
+    "load_argument",
+    "load_text_argument",
     "named_argument",
     "read_binary_paramfile",
     "read_text_paramfile",

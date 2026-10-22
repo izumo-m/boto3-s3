@@ -375,15 +375,15 @@ def _shared_globals_parent() -> _ParamValidationArgumentParser:
     return shared
 
 
-def _build_stage1_parser() -> argparse.ArgumentParser:
-    """The top-level rendering parser: globals + the subcommand names and help lines.
+def _top_level_parser() -> tuple[
+    _ParamValidationArgumentParser,
+    argparse._SubParsersAction[_ParamValidationArgumentParser],  # pyright: ignore[reportPrivateUsage]
+]:
+    """The top-level parser both trees share, and its empty subcommand slot.
 
-    No command module is imported here. The stub entries carry only the
-    table's name/help, so the top-level help page renders exactly as the full
-    tree renders it while the path stays SDK- and command-module-free. The
-    dispatch never parses through this parser at all: ``_find_command_token``
-    locates the subcommand and ``_resolve_command`` reports a rejected one, so
-    this one only ever prints help.
+    The program name, description, the globals and the ``<subcommand>``
+    placeholder - so `_build_stage1_parser` and `build_parser` render the same
+    top-level page by construction; each fills the slot with its own entries.
 
     ``add_help=False`` everywhere in the tree: like aws, the only way to a help
     page is the ``help`` token, so no parser declares a help option and none
@@ -396,6 +396,20 @@ def _build_stage1_parser() -> argparse.ArgumentParser:
     )
     globalargs.add_common_arguments(parser)
     subparsers = parser.add_subparsers(dest="command", metavar="<subcommand>", required=True)
+    return parser, subparsers
+
+
+def _build_stage1_parser() -> argparse.ArgumentParser:
+    """The top-level rendering parser: globals + the subcommand names and help lines.
+
+    No command module is imported here. The stub entries carry only the
+    table's name/help, so the top-level help page renders exactly as the full
+    tree renders it while the path stays SDK- and command-module-free. The
+    dispatch never parses through this parser at all: ``_find_command_token``
+    locates the subcommand and ``_resolve_command`` reports a rejected one, so
+    this one only ever prints help.
+    """
+    parser, subparsers = _top_level_parser()
     for name, (_module, _cls, help_text) in _COMMAND_TABLE.items():
         subparsers.add_parser(name, help=help_text, add_help=False)
     return parser
@@ -488,14 +502,8 @@ def build_parser() -> argparse.ArgumentParser:
     builds the whole surface at once - importing every command module - for
     the tests that parse a full command line.
     """
-    parser = _ParamValidationArgumentParser(
-        prog="boto3-s3",
-        description="An aws s3-compatible CLI built on the boto3-s3 library.",
-        add_help=False,
-    )
-    globalargs.add_common_arguments(parser)
+    parser, subparsers = _top_level_parser()
     shared = _shared_globals_parent()
-    subparsers = parser.add_subparsers(dest="command", metavar="<subcommand>", required=True)
     for name in _COMMAND_TABLE:
         command_cls = _load_command(name)
         command_cls().configure(

@@ -1,8 +1,9 @@
 """Usage and error strings shared across subcommands.
 
-The usage errors are aws-cli's own text, the program name aside; the
-bucket-name report is this CLI's. Each wording has one home here, and the
-commands interpolate only their own name or value.
+The usage errors and the frame of a parameter's parse error are aws-cli's
+own text, the program name aside; the bucket-name report is this CLI's. Each
+wording has one home here, and the commands interpolate only their own name,
+value or detail.
 """
 
 from __future__ import annotations
@@ -33,6 +34,16 @@ def bare_single_uri_usage() -> str:
 def two_path_usage(command: str) -> str:
     """aws's usage error for a two-path transfer command (cp / mv / sync) - rc 252."""
     return f"usage: boto3-s3 {command} {_TWO_PATH_FORMS}\nError: Invalid argument type"
+
+
+def param_error(name: str, message: object) -> str:
+    """aws's ``ParamError`` text: an argument that failed to parse (252).
+
+    ``Error parsing parameter '<name>': <message>`` (aws-cli's
+    ``argprocess.ParamError``). *name* is the option's ``--flag`` form or the
+    positional's name; *message* is the caller's own detail.
+    """
+    return f"Error parsing parameter '{name}': {message}"
 
 
 def invalid_bucket_name_message(name: str = "") -> str:

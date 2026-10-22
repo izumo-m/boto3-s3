@@ -31,7 +31,7 @@ import string
 from typing import TypeAlias, cast
 
 from boto3_s3 import ValidationError
-from boto3_s3_cli import paramfile
+from boto3_s3_cli import paramfile, usage
 
 # What one shorthand value can carry: text, or the bytes of an `@=fileb://`
 # load (refused by `parse_map_option` once the whole value has parsed).
@@ -90,14 +90,13 @@ def parse_map_option(value: str, *, name: str, operation: str) -> dict[str, str]
         with paramfile.named_argument(name, operation=operation):
             parsed = _Parser(value, operation=operation).parse()
     except _ShorthandParseError as exc:
-        raise ValidationError(
-            f"Error parsing parameter '{name}': {exc}", operation=operation
-        ) from exc
+        raise ValidationError(usage.param_error(name, exc), operation=operation) from exc
     for key, item in parsed.items():
         if isinstance(item, bytes):
             raise ValidationError(
-                f"Error parsing parameter '{name}': the value of key {key!r} must be "
-                "text, not the bytes of a fileb:// file",
+                usage.param_error(
+                    name, f"the value of key {key!r} must be text, not the bytes of a fileb:// file"
+                ),
                 operation=operation,
             )
     return cast("dict[str, str]", parsed)
@@ -110,22 +109,23 @@ def _parse_json_map(value: str, *, name: str, operation: str) -> dict[str, str]:
     """
     if value.lstrip()[0] != "{":
         raise ValidationError(
-            f"Error parsing parameter '{name}': expected a JSON object, received: {value}",
+            usage.param_error(name, f"expected a JSON object, received: {value}"),
             operation=operation,
         )
     try:
         data = json.loads(value)
     except json.JSONDecodeError as exc:
         raise ValidationError(
-            f"Error parsing parameter '{name}': Invalid JSON: {exc}\nJSON received: {value}",
+            usage.param_error(name, f"Invalid JSON: {exc}\nJSON received: {value}"),
             operation=operation,
         ) from exc
     entries = cast("dict[str, object]", data)  # a `{`-led document decodes to an object
     for key, item in entries.items():
         if not isinstance(item, str):
             raise ValidationError(
-                f"Error parsing parameter '{name}': the value of key {key!r} must be "
-                f"a string, not {json.dumps(item)}",
+                usage.param_error(
+                    name, f"the value of key {key!r} must be a string, not {json.dumps(item)}"
+                ),
                 operation=operation,
             )
     return cast("dict[str, str]", entries)

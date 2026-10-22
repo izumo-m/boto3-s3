@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 
 # Loaded at dispatch once cp is determined (stage 2 of the lazy dispatch).
-from boto3_s3 import NotFoundError, StdioStorage, ValidationError
+from boto3_s3 import StdioStorage, ValidationError
 from boto3_s3.transferplan import item_paths, plan_transfer
 from boto3_s3_cli import filters
 from boto3_s3_cli.commands import transferargs
@@ -51,34 +51,21 @@ class CpCommand(Command):
         just ahead of it.
         """
         head = transferargs.classify_paths(args, ctx, operation="cp")
-        page_size, progress_frequency = head.page_size, head.progress_frequency
         src, dest = head.src, head.dest
         src_type, dest_type = head.src_type, head.dest_type
-        is_stream = src == "-" or dest == "-"
-        if is_stream:
-            # aws-cli's _validate_streaming_paths: cp-only, never recursive, and
-            # a streaming download cannot honor --no-overwrite.
-            if args.recursive:
-                raise ValidationError(
-                    "Streaming currently is only compatible with non-recursive cp commands",
-                    operation="cp",
-                )
-            if dest == "-" and args.no_overwrite:
-                raise ValidationError(
-                    "--no-overwrite parameter is not supported for streaming downloads",
-                    operation="cp",
-                )
+        is_stream = transferargs.validate_streaming_paths(
+            head, recursive=args.recursive, operation="cp"
+        )
+        if dest == "-" and args.no_overwrite:
+            # aws-cli's _validate_no_overwrite_for_download_streaming: a
+            # streaming download cannot honor --no-overwrite.
+            raise ValidationError(
+                "--no-overwrite parameter is not supported for streaming downloads",
+                operation="cp",
+            )
         paths_type = head.paths_type  # "locals3" | "s3local" | "s3s3" here
         transferargs.validate_checksum_paths_type(args, paths_type, operation="cp")
-        if src_type == "local" and src != "-" and not transferargs.local_path_exists(src):
-            # aws-cli's _validate_path_args checks the missing local source (its bare
-            # RuntimeError -> rc 255); '-' is a stream, not a path. NotFoundError
-            # without a ClientError cause maps to the same rc 255.
-            raise NotFoundError(f"The user-provided path {src} does not exist.", operation="cp")
-        if args.recursive and src_type == "local":
-            transferargs.refuse_unwalkable_source(
-                src, follow_symlinks=args.follow_symlinks, operation="cp"
-            )
+        transferargs.check_local_source(args, head, recursive=args.recursive, operation="cp")
         transferargs.validate_sse_c_pairing(args, paths_type, operation="cp")
 
         s3 = head.s3
@@ -102,24 +89,11 @@ class CpCommand(Command):
             src_location = transferargs.build_s3_storage(src, client=client)
             dest_location = StdioStorage()
         else:
-            src_location, dest_location = transferargs.resolve_locations(
-                args,
-                ctx,
-                s3,
-                client,
-                src,
-                dest,
-                src_type=src_type,
-                dest_type=dest_type,
-                page_size=page_size,
-            )
+            src_location, dest_location = transferargs.resolve_locations(args, ctx, head)
 
         # The stream route consults no filter (aws applies none to a stream).
         item_filter = None if is_stream else filters.compile_filter(args.filters)
-        transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
-        # aws builds the transfer manager here, before it decides anything about
-        # the run: a CRT selection pays its construction even for a --dryrun.
-        transferargs.materialize_transfer_engine(s3, client, transfer_config)
+        transfer_config = transferargs.build_transfer_engine(ctx, s3, client, paths_type=paths_type)
         # aws validates --case-conflict against S3 Express while building the
         # run's instructions, past the transfer manager.
         case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="cp")
@@ -136,7 +110,9 @@ class CpCommand(Command):
             transferargs.create_local_dest_dir(dest, operation="cp")
         # Streams force the errors-only printer (aws-cli is_stream rule):
         # a streaming download owns stdout for the object bytes.
-        printer = transferargs.build_printer(args, progress_frequency, only_show_errors=is_stream)
+        printer = transferargs.build_printer(
+            args, head.progress_frequency, only_show_errors=is_stream
+        )
 
         def run_cp() -> None:
             # Both conversions fail in-pipeline like aws: --expected-size is

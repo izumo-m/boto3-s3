@@ -10,9 +10,8 @@ from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import (
     Command,
     Context,
-    expand_integer_paramfile,
     expand_positional_paramfile,
-    parse_integer_option,
+    resolve_integer_option,
 )
 
 
@@ -57,8 +56,7 @@ class PresignCommand(Command):
         request ever sent, nothing separates "started" from "not started".
         """
         expand_positional_paramfile(args, "path", name="path", operation="presign")
-        expand_integer_paramfile(args, "expires_in", operation="presign")
-        expires_in = parse_integer_option(args.expires_in, operation="presign")
+        expires_in = resolve_integer_option(args, "expires_in", operation="presign")
         # --expires-in's argparse default is 3600, so the unset-None branch of
         # parse_integer_option is unreachable here.
         assert expires_in is not None

@@ -9,7 +9,6 @@ import sys
 # Module-level imports are fine here: rm is loaded at dispatch (stage 2 of
 # the lazy dispatch), after the command is determined.
 from boto3_s3 import (
-    BatchError,
     OpOutcome,
     OpResult,
     ValidationError,
@@ -21,9 +20,8 @@ from boto3_s3_cli.commands.base import (
     Context,
     add_page_size_argument,
     add_request_payer_argument,
-    expand_integer_paramfile,
     expand_positional_paramfile,
-    parse_integer_option,
+    resolve_integer_option,
 )
 
 logger = logging.getLogger(__name__)
@@ -119,8 +117,8 @@ class RmCommand(Command):
         form - exit 252 via ``main``, but
         every failure after the operation starts is rc 1 whatever its type
         (rm is an ``S3TransferCommand`` in aws too, so its execution span sits
-        inside the same result recorder cp / mv / sync's does -
-        ``transferargs.finish_transfer`` derives its code from the same rule):
+        inside the same result recorder cp / mv / sync's does - one rule,
+        ``transferargs.report_failed_run``, derives the code of both):
         per-key failures
         print ``delete failed:`` lines, a Ctrl-C prints one ``cancelled:
         ctrl-c received`` line, anything else that kills the run (the
@@ -131,8 +129,7 @@ class RmCommand(Command):
         failures stop the run before it starts (253 or 255 by kind).
         """
         expand_positional_paramfile(args, "paths", name="paths", operation="rm")
-        expand_integer_paramfile(args, "page_size", operation="rm")
-        page_size = parse_integer_option(args.page_size, operation="rm")
+        page_size = resolve_integer_option(args, "page_size", operation="rm")
         target: str = args.paths
         if not target.startswith("s3://"):
             # aws check_path_type: rm takes S3 paths only -> rc 252.
@@ -150,8 +147,7 @@ class RmCommand(Command):
         # - with the deleter, or just before a single key's request
         # (design/crt.md sections 4 and 6) - so its construction failures are
         # brought forward here, where they stop the run as they do on aws.
-        transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type="s3")
-        transferargs.materialize_transfer_engine(s3, client, transfer_config)
+        transfer_config = transferargs.build_transfer_engine(ctx, s3, client, paths_type="s3")
 
         storage = transferargs.build_s3_storage(target, client=client, page_size=page_size)
 
@@ -169,31 +165,11 @@ class RmCommand(Command):
                 # the client they ride and its retry policy.
                 transfer_config=transfer_config,
             )
-        except BatchError:
-            # Per-key failure lines were already streamed by the printer.
-            return 1
-        except KeyboardInterrupt:
-            # Same conversion as the cp/mv/sync span (transferargs.
-            # finish_transfer): aws's shared result machinery makes a
-            # mid-run Ctrl-C a cancelled run - one `cancelled: ctrl-c
-            # received` line, rc 1 (measured mid-rm, 2.36.40) - never the
+        except BaseException as exc:
+            # By position rather than by type: aws's rm runs inside the same
+            # `CommandResultRecorder` cp/mv/sync do, which turns whatever
+            # escapes the pipeline into its closing line at rc 1 - a mid-run
+            # Ctrl-C included (measured mid-rm, 2.36.40), never the
             # dispatcher's 130.
-            if not args.quiet:
-                sys.stderr.write("cancelled: ctrl-c received\n")
-            return 1
-        except AssertionError:
-            # An internal-invariant violation (a bug) surfaces loudly, like the
-            # dispatcher's AssertionError re-raise (cli.py) and the cp/mv/sync
-            # span's - masking it as a fatal error would also blunt the test
-            # doubles' unexpected-call guards.
-            raise
-        except Exception as exc:
-            # Everything the operation raises is one `fatal error:` line at
-            # rc 1, by position rather than by type: aws's rm runs inside the
-            # same `CommandResultRecorder` cp/mv/sync do, which turns whatever
-            # escapes the pipeline into an ErrorResult.
-            # `SystemExit` is a BaseException and still passes, like there.
-            if not args.quiet:
-                sys.stderr.write(f"fatal error: {exc}\n")
-            return 1
+            return transferargs.report_failed_run(exc, quiet=args.quiet)
         return 0
