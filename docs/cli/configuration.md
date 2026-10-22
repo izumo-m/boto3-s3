@@ -49,10 +49,11 @@ On top of those, the command reads `AWS_REGION`, `AWS_DEFAULT_REGION`,
 `AWS_CLI_OUTPUT_ENCODING` and `AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS` itself.
 
 The two encoding variables name codecs. `AWS_CLI_FILE_ENCODING` is the codec a
-`file://` paramfile is read with (section 7). `AWS_CLI_OUTPUT_ENCODING` is only
-checked: `aws` writes its error reports in that codec, while here every report
-keeps the stream's own codec. A codec Python does not know is a configuration
-error, exit code 255, on either variable.
+`file://` paramfile is read with (section 7). `AWS_CLI_OUTPUT_ENCODING` is the
+codec the error reports (`boto3-s3: [ERROR]: ...`) are written in, as `aws`
+writes its own; result lines, warnings and the other output keep the encoding
+both tools use by default (section 8). A codec Python does not know is a
+configuration error, exit code 255, on either variable.
 
 `AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS` is honored only when it is literally
 `true` (case-insensitively). `AWS_CLI_AUTO_PROMPT` and the profile key
@@ -194,7 +195,42 @@ Two exclusions are worth knowing:
 - **Options with a fixed choice list cannot use it**, because the value is
   rejected as an invalid choice first.
 
-A file that cannot be read, or a binary file given to the text `file://` form,
-is a usage error. `fileb://` yields raw bytes only for `--sse-c-key` and
+`file://` text is decoded with `AWS_CLI_FILE_ENCODING` when it is set, and
+otherwise with the encoding `aws` uses by default (section 8). A file that
+cannot be read, or a binary file given to the text `file://` form, is a usage
+error. `fileb://` yields raw bytes only for `--sse-c-key` and
 `--sse-c-copy-source-key`; those two keys are never base64-decoded, matching
 `aws`.
+
+## 8. Text encodings: file names, arguments, output
+
+The command converts text the way `aws` does in the same environment,
+whichever Python runs it — Python 3.15 turns UTF-8 mode on by default, and
+`PYTHONUTF8=1` does on any version, while `aws` ignores both. The encoding:
+
+- on Linux and other POSIX systems, UTF-8 under a `C` or `POSIX` locale
+  (`LC_CTYPE`), otherwise the locale's own encoding (`EUC-JP` under
+  `ja_JP.eucJP`, say);
+- on Windows, the system's ANSI code page (cp932 on Japanese Windows).
+
+It applies to:
+
+- **local file names** on Linux and other non-Apple POSIX systems: the keys an
+  upload makes are the names decoded with it, and a download creates its files
+  with the keys encoded with it. A name it cannot decode is carried as it is
+  and fails as an S3 key; a key it cannot encode fails as that file. Windows
+  names files in Unicode, and macOS in UTF-8, on both tools.
+- **the command line** on the same systems: an argument is read with it, so a
+  key or a path typed in the locale's encoding names what `aws` would.
+- **standard output and standard error**, a terminal included (a Windows
+  console is written in Unicode). A character the encoding cannot
+  represent prints as `?` in result lines and listings, and as an escape
+  (`\uXXXX`) on standard error. The error reports alone follow
+  `AWS_CLI_OUTPUT_ENCODING`, or UTF-8 under `PYTHONUTF8=1`, as on `aws`.
+- **`file://` text**, unless `AWS_CLI_FILE_ENCODING` names another codec
+  (section 7).
+
+The config and credentials files are read by botocore with Python's own
+default encoding, as any `boto3` program reads them; for non-ASCII text in
+them that can differ from `aws`
+([`aws-differences.md`](./aws-differences.md)).

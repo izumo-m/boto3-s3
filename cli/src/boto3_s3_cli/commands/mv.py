@@ -80,7 +80,7 @@ class MvCommand(Command):
         if paths_type == "s3s3":
             self._validate_same_paths(args, ctx, head.s3, src, dest)
         transferargs.validate_checksum_paths_type(args, paths_type, operation="mv")
-        if src_type == "local" and not os.path.exists(src):
+        if src_type == "local" and not transferargs.local_path_exists(src):
             # aws-cli's _validate_path_args checks the missing local source (its
             # bare RuntimeError -> rc 255). NotFoundError without a ClientError
             # cause maps to the same rc 255.

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 # These exception names do not themselves import the AWS SDK.
 from boto3_s3 import InvalidValueError, ValidationError
-from boto3_s3_cli import paramfile, usage
+from boto3_s3_cli import paramfile, textencoding, usage
 from boto3_s3_cli.clientfactory import build_client, build_s3, build_service_client
 
 if TYPE_CHECKING:
@@ -83,8 +83,10 @@ class Context:
                 return client_factory(args)
 
         # reusable_after_interrupt=False like build_s3: the injected-client seam must
-        # keep the CLI's process-fatal Ctrl-C posture.
-        return InjectedClientS3(reusable_after_interrupt=False)
+        # keep the CLI's process-fatal Ctrl-C posture, and its local names.
+        return InjectedClientS3(
+            reusable_after_interrupt=False, filename_encoding=textencoding.filename_encoding()
+        )
 
     def with_s3(self, s3: S3) -> Context:
         """A view of this context whose ``s3`` always returns *s3*.

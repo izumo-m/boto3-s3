@@ -35,6 +35,7 @@ from boto3_s3_cli import (
     filters,
     paramfile,
     shorthand,
+    textencoding,
     usage,
 )
 from boto3_s3_cli.commands.base import (
@@ -500,6 +501,30 @@ def normalize_s3_path(path: str, *, operation: str) -> str:
     return S3Storage.normalize_s3_uri(path)
 
 
+def local_storage(path: str, *, follow_symlinks: bool = True) -> LocalStorage:
+    """A ``LocalStorage`` for a command-line path, its names in the CLI's encoding.
+
+    ``filename_encoding`` is `textencoding.filename_encoding`: the encoding
+    ``aws`` reads and writes local names with here (design/cli.md section 1).
+    """
+    return LocalStorage(
+        path, follow_symlinks=follow_symlinks, filename_encoding=textencoding.filename_encoding()
+    )
+
+
+def local_path_exists(path: str) -> bool:
+    """aws's missing-source probe (``os.path.exists``) on a command-line path.
+
+    The path is the CLI's text; the OS gets its own form of it
+    (`textencoding.os_path`), and a name the encoding cannot represent names
+    no file.
+    """
+    try:
+        return os.path.exists(textencoding.os_path(path))
+    except ValueError:
+        return False
+
+
 def refuse_unwalkable_source(src: str, *, follow_symlinks: bool, operation: str) -> None:
     """Refuse a directory source whose root the walk would skip (255).
 
@@ -515,20 +540,23 @@ def refuse_unwalkable_source(src: str, *, follow_symlinks: bool, operation: str)
     listed, sent or deleted. The library refuses the same roots for its own
     callers; this is the CLI's check, made where the missing-source one is.
     """
-    storage = LocalStorage(src, follow_symlinks=follow_symlinks)
+    storage = local_storage(src, follow_symlinks=follow_symlinks)
     reasons: list[str] = []
+    # The walker takes the OS form (the source exists, so the encoding
+    # represents its name) and names it in its warnings, read back as text.
+    path = storage.os_path(storage.abspath)
     if not storage.walker.should_ignore_file(
-        storage.abspath + os.sep, follow_symlinks=follow_symlinks, notify=reasons.append
+        path + os.sep, follow_symlinks=follow_symlinks, notify=reasons.append
     ):
         return
-    path = storage.abspath
+    reasons = [storage.text_path(reason) for reason in reasons]
     if not follow_symlinks and os.path.islink(path):
         why = "It is a symbolic link, which --no-follow-symlinks does not follow."
     elif not os.path.lexists(path):
         # The kernel found the path as typed (the missing-source check), the
         # walk's absolute form names nothing: a `..` after a symlinked
         # directory, which the absolute form folds lexically.
-        why = f"It does not exist as {path}."
+        why = f"It does not exist as {storage.abspath}."
     elif not os.path.isdir(path):
         why = "It is not a directory."
     elif reasons:
@@ -555,13 +583,20 @@ def create_local_dest_dir(dest: str, *, operation: str) -> None:
     call it after every check of their own, where aws creates it in the middle
     of its validation: a run refused before it starts leaves nothing behind.
     The bare ``exists`` test then bare ``makedirs`` mirror aws; every
-    ``translate_os_error`` category maps to the same rc 255.
+    ``translate_os_error`` category maps to the same rc 255. The path is the
+    CLI's text, handed to the OS in its own form (`textencoding.os_path`).
     """
-    if not os.path.exists(dest):
-        try:
-            os.makedirs(dest)
-        except OSError as exc:
-            raise translate_os_error(exc, operation=operation, key=None) from exc
+    try:
+        native = textencoding.os_path(dest)
+        if not os.path.exists(native):
+            os.makedirs(native)
+    except OSError as exc:
+        textencoding.name_files_as_text(exc)
+        raise translate_os_error(exc, operation=operation, key=None) from exc
+    except ValueError as exc:
+        # A name the CLI's encoding cannot represent (aws's own makedirs
+        # fails the same way): the pre-pipeline 255 all the same.
+        raise translate_os_error(exc, operation=operation, key=None) from exc
 
 
 def validate_checksum_paths_type(
@@ -816,7 +851,7 @@ def resolve_locations(
         return build_s3_storage(arg, client=client_for, page_size=page_size)
 
     def _local(path: str) -> LocalStorage:
-        return LocalStorage(path, follow_symlinks=args.follow_symlinks)
+        return local_storage(path, follow_symlinks=args.follow_symlinks)
 
     if src_type == "local":
         return _local(src), _s3(dest, client)
@@ -847,7 +882,7 @@ def path_storage(arg: str, kind: str) -> S3Storage | LocalStorage:
     stdin dest key). The real transfer storages (with a client) are built in
     ``resolve_locations``.
     """
-    return S3Storage(arg) if kind == "s3" else LocalStorage(arg)
+    return S3Storage(arg) if kind == "s3" else local_storage(arg)
 
 
 def build_s3_storage(arg: str, *, client: Any, page_size: int | None = None) -> S3Storage:

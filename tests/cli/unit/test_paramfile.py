@@ -1,19 +1,21 @@
 """Unit tests for boto3_s3_cli.paramfile: text encoding, and the error shape.
 
 The encoding half pins the aws-cli ``compat.getpreferredencoding`` port:
-``AWS_CLI_FILE_ENCODING`` wins, a ``C`` / ``POSIX`` ``LC_CTYPE`` reads as UTF-8
-(verified against the pinned aws-cli under ``LC_ALL=C``), anything else falls to
-the locale default. The error half pins which exit code a load failure carries.
+``AWS_CLI_FILE_ENCODING`` wins, anything else falls to the CLI's text encoding
+(``textencoding``; a ``C`` / ``POSIX`` ``LC_CTYPE`` reads as UTF-8, verified
+against the pinned aws-cli under ``LC_ALL=C``). The error half pins which exit
+code a load failure carries.
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
 
 from boto3_s3 import ValidationError
-from boto3_s3_cli import paramfile
+from boto3_s3_cli import paramfile, textencoding
 
 
 class TestTextEncoding:
@@ -27,21 +29,14 @@ class TestTextEncoding:
         monkeypatch.setenv("AWS_CLI_FILE_ENCODING", "")
         assert paramfile._text_encoding() == ""
 
-    @pytest.mark.parametrize("lc_ctype", ["C", "POSIX"])
-    def test_c_locale_reads_as_utf8(self, monkeypatch: pytest.MonkeyPatch, lc_ctype: str) -> None:
-        # aws implements PEP 540's C/POSIX -> UTF-8 coercion itself (its
-        # frozen build lacks the interpreter's); the port matches it where
-        # PYTHONCOERCECLOCALE=0 would otherwise leave open() on ASCII.
+    def test_without_it_the_cli_text_encoding(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # aws's getpreferredencoding past its override: the encoding the CLI
+        # writes its output in (textencoding's own tests pin how it is chosen).
         monkeypatch.delenv("AWS_CLI_FILE_ENCODING", raising=False)
-        monkeypatch.setattr(paramfile.locale, "setlocale", lambda category: lc_ctype)
-        assert paramfile._text_encoding() == "UTF-8"
-
-    def test_normal_locale_falls_to_preferred(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("AWS_CLI_FILE_ENCODING", raising=False)
-        monkeypatch.setattr(paramfile.locale, "setlocale", lambda category: "en_US.UTF-8")
-        monkeypatch.setattr(paramfile.locale, "getpreferredencoding", lambda: "utf-8-sentinel")
+        monkeypatch.setattr(textencoding, "text_encoding", lambda: "utf-8-sentinel")
         assert paramfile._text_encoding() == "utf-8-sentinel"
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="the C locale is POSIX's")
     def test_utf8_paramfile_readable_under_c_locale(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -51,7 +46,7 @@ class TestTextEncoding:
         ref = tmp_path / "val.txt"
         ref.write_text("こんにちは", encoding="utf-8")
         monkeypatch.delenv("AWS_CLI_FILE_ENCODING", raising=False)
-        monkeypatch.setattr(paramfile.locale, "setlocale", lambda category: "C")
+        monkeypatch.setattr(textencoding.locale, "setlocale", lambda category: "C")
         loaded = paramfile.read_text_paramfile(f"file://{ref}", operation="cp")
         assert loaded == "こんにちは"
 

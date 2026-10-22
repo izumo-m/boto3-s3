@@ -19,7 +19,7 @@ from boto3_s3 import (
     InvalidValueError,
     ValidationError,
 )
-from boto3_s3_cli import globalargs
+from boto3_s3_cli import globalargs, textencoding
 from boto3_s3_cli.commands.base import Command, Context
 
 # Loggers a masked stderr handler is attached to under --debug, via the
@@ -128,9 +128,10 @@ _TOO_FEW_ARGUMENTS = (
 # the top-level block (`_GlobalsArgumentParser`).
 _FIRST_PASS_USAGE = "usage: boto3-s3 [--profile PROFILE] [--debug]\n"
 
-# aws's codec override for its error reports; only an unknown codec named
-# there is acted on (`_dispatch`).
-_OUTPUT_ENCODING_ENV_VAR = "AWS_CLI_OUTPUT_ENCODING"
+# aws's codec override for its error reports: an unknown codec named there
+# stops the run (`_dispatch`), a known one re-encodes the reports
+# (`textencoding.prepare_error_report`).
+_OUTPUT_ENCODING_ENV_VAR = textencoding.OUTPUT_ENCODING_ENV_VAR
 
 
 def _configuration_report(exc: BaseException) -> tuple[str, str] | None:
@@ -190,7 +191,8 @@ def _write_error(message: object, *, rc: int | None = None) -> None:
     The envelope goes on before the strip, as aws's formatter strips the
     whole enveloped message; stripping keeps a message that ends with a
     newline - the usage block of a parse error - from surfacing as a
-    trailing blank line.
+    trailing blank line. The report is written in the encoding aws writes
+    its reports in (`textencoding.prepare_error_report`).
     """
     text = str(message)
     if rc == _PARAM_VALIDATION_ERROR_RC:
@@ -199,6 +201,7 @@ def _write_error(message: object, *, rc: int | None = None) -> None:
         report = _configuration_report(message)
         if report is not None:
             text = f"An error occurred ({report[0]}): {report[1]}"
+    textencoding.prepare_error_report(sys.stderr)
     sys.stderr.write(f"boto3-s3: [ERROR]: {text.strip()}".rstrip() + "\n")
 
 
@@ -607,7 +610,17 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
     newline on stdout and rc 130 (128+SIGINT), never a traceback. The
     standard streams are flushed before the code is returned
     (`_settle_std_streams`), so the code is the one the process ends with.
+
+    Without ``argv`` - the console script - the process is set up as ``aws``
+    sets itself up first: the standard streams take the encoding ``aws``
+    writes (`textencoding.configure_std_streams`) and the command line is
+    read with the encoding ``aws`` reads it with
+    (`textencoding.decode_argv`). An ``argv`` given by a caller is taken as
+    it is.
     """
+    if argv is None:
+        textencoding.configure_std_streams()
+        argv = textencoding.decode_argv(sys.argv[1:])
     try:
         rc = _main(argv, ctx)
     except KeyboardInterrupt:
@@ -750,7 +763,8 @@ def _dispatch(argv: list[str], ctx: Context) -> int:
         return 0 if not exc.code else _PARAM_VALIDATION_ERROR_RC
     tokens = remainder[1:] if argv[:1] == ["--"] else remainder
     # aws refuses an unknown AWS_CLI_OUTPUT_ENCODING codec before any command
-    # runs (rc 255). Nothing else here reads the variable.
+    # runs (rc 255); a known one sets the error reports' encoding
+    # (`textencoding.prepare_error_report`).
     output_encoding = os.environ.get(_OUTPUT_ENCODING_ENV_VAR)
     if output_encoding is not None:
         try:

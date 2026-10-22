@@ -62,6 +62,7 @@ Engine choices (parity-driven):
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import functools
 import logging
@@ -179,7 +180,9 @@ class TransferItem:
     ``compare_key`` is the item's operation-relative name (``transferplan.item_paths``)
     - the identity under which results and progress are reported. The
     per-route fields are populated by the orchestrator: ``src_path`` /
-    ``dest_path`` are native local paths; bucket/key pairs are S3 sides.
+    ``dest_path`` are local paths with native separators, in the local
+    storage's text form (``LocalStorage.filename_encoding``; the engine hands
+    the OS its own form, `_os_form`); bucket/key pairs are S3 sides.
     ``head`` carries the single-source HeadObject payload so a single-file
     copy never heads the source twice; ``mtime`` is the source LastModified a
     download stamps onto the local file; ``src_display`` / ``dest_display``
@@ -582,6 +585,42 @@ def _names_item_file(exc: OSError, path: str) -> bool:
         if other == own or other.startswith(own + "."):
             return True
     return False
+
+
+def _same_path(path: str) -> str:
+    return path
+
+
+def _os_form(storage: Storage | None, path: str) -> str:
+    """A local side's text path as the OS calls take it (`LocalStorage.os_path`).
+
+    Items carry their local paths as the storage's text - what the results
+    report - and every OS call, s3transfer's and the CRT's included, gets
+    this form. A name the filename encoding cannot represent raises the
+    ``UnicodeEncodeError`` for the caller to record as the item's failure.
+    """
+    return storage.os_path(path) if isinstance(storage, LocalStorage) else path
+
+
+def _text_form(storage: Storage | None) -> Callable[[str], str]:
+    """The reverse of `_os_form`: a local side's OS-form names as its text."""
+    return storage.text_path if isinstance(storage, LocalStorage) else _same_path
+
+
+def _name_files_as_text(exc: BaseException, text_path: Callable[[str], str]) -> None:
+    """Turn the file names an ``OSError`` carries into a local side's text, in place.
+
+    The OS reports the names it was handed, in the OS form; ``str(exc)``
+    formats them when a report is built, so this makes every report name the
+    files the way the results do.
+    """
+    if not isinstance(exc, OSError):
+        return
+    for attr in ("filename", "filename2"):
+        name = getattr(exc, attr)
+        if isinstance(name, str):
+            with contextlib.suppress(UnicodeError):
+                setattr(exc, attr, text_path(name))
 
 
 def _set_file_utime(path: str, timestamp: float) -> None:
@@ -1596,11 +1635,18 @@ class Transferrer:
         # otherwise open it and mask the read failure as an opaque rewind
         # error, so detect it and surface the OS error directly. A stream
         # (src_fileobj) is never a directory.
-        if item.src_fileobj is None and item.src_path and os.path.isdir(item.src_path):
-            self._record_failure(
-                item, IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), item.src_path)
-            )
-            return None
+        src_path = item.src_path
+        if item.src_fileobj is None and src_path:
+            try:
+                src_path = _os_form(self._src_storage, src_path)
+            except ValueError as exc:
+                self._record_failure(item, exc)
+                return None
+            if os.path.isdir(src_path):
+                self._record_failure(
+                    item, IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), item.src_path)
+                )
+                return None
         name = ""
         if self._options.get("guess_mime_type", True) and "ContentType" not in extra_args:
             name = item.src_path or ""
@@ -1644,7 +1690,7 @@ class Transferrer:
         if self._capture is not None:
             # Admit the key: only submitted items' responses are recorded.
             self._capture.expect(item.dest_bucket, item.dest_key)
-        fileobj: Any = item.src_fileobj if item.src_fileobj is not None else item.src_path
+        fileobj: Any = item.src_fileobj if item.src_fileobj is not None else src_path
         if item.src_fileobj is not None and not isinstance(manager, TransferManager):
             # The CRT engine reads the body on an awscrt thread (`_GuardedReader`);
             # the completion reads back what the guard caught there.
@@ -1663,9 +1709,18 @@ class Transferrer:
     def _submit_download(self, item: TransferItem) -> Any:
         """Map one download and order destination, durability, and completion hooks."""
         extra_args = requestparams.map_get_object_params(self._options)
+        dest_path = item.dest_path
+        if dest_path is not None:
+            # The OS form of the destination (`_os_form`); a key whose name the
+            # filename encoding cannot represent fails here, as the item.
+            try:
+                dest_path = _os_form(self._dest_storage, dest_path)
+            except ValueError as exc:
+                self._record_failure(item, exc)
+                return None
         subscribers, counted = self._common_subscribers(item)
-        if item.dest_path is not None:
-            subscribers.append(_DirectoryCreator())
+        if dest_path is not None:
+            subscribers.append(_DirectoryCreator(_text_form(self._dest_storage)))
         if item.dest_fileobj is not None:
             subscribers.append(_CloseFileobj(item.dest_fileobj))
         # Before the mv source delete, like aws-cli registering
@@ -1679,11 +1734,11 @@ class Transferrer:
             # destination path can be fsynced - a stream / custom (open-route) dest
             # owns its own durability, so item.dest_fileobj downloads are excluded.
             if (
-                item.dest_path is not None
+                dest_path is not None
                 and isinstance(self._dest_storage, LocalStorage)
                 and self._dest_storage.fsync
             ):
-                subscribers.append(_FsyncDest(item.dest_path))
+                subscribers.append(_FsyncDest(dest_path, self._dest_storage.text_path))
             subscribers.append(self._delete_source_subscriber(item))
         if item.case_conflict_cleanup is not None:
             # After the source delete, aws-cli's slot for
@@ -1696,7 +1751,7 @@ class Transferrer:
         subscribers.append(_ForgetFuture(self._forget_future))
         # Manager first: a stream run builds it (and the capture) at first submit.
         manager = self._get_manager()
-        if item.dest_path is not None and not isinstance(manager, TransferManager):
+        if dest_path is not None and not isinstance(manager, TransferManager):
             subscribers.insert(0, _KeepRenameFailure())
         if self._capture is not None:
             # Admit the key only now: a same-run content filter may have read
@@ -1710,7 +1765,7 @@ class Transferrer:
             manager.download,
             bucket=item.src_bucket,
             key=item.src_key,
-            fileobj=item.dest_fileobj if item.dest_fileobj is not None else item.dest_path,
+            fileobj=item.dest_fileobj if item.dest_fileobj is not None else dest_path,
             extra_args=extra_args,
             subscribers=subscribers,
         )
@@ -2241,11 +2296,17 @@ class Transferrer:
         ``mime.types`` - raised in the same task; a stream item has no local
         path and keeps the request's attribution.
         """
-        path = item.dest_path if self._transfer_type is TransferType.DOWNLOAD else item.src_path
+        download = self._transfer_type is TransferType.DOWNLOAD
+        path = item.dest_path if download else item.src_path
         if path is None or isinstance(exc, BotoCoreError):
             return None
         key = path.replace(os.sep, "/")
         if isinstance(exc, OSError):
+            # The engines name the files in the OS form; the item's path and
+            # every report are the local side's text.
+            _name_files_as_text(
+                exc, _text_form(self._dest_storage if download else self._src_storage)
+            )
             if not _names_item_file(exc, path):
                 return None
             return translate_os_error(exc, operation=self._operation, key=key)
@@ -2275,8 +2336,12 @@ class Transferrer:
         if item.mtime is None or item.dest_path is None:
             return
         try:
-            _set_file_utime(item.dest_path, item.mtime.replace(microsecond=0).timestamp())
+            _set_file_utime(
+                _os_form(self._dest_storage, item.dest_path),
+                item.mtime.replace(microsecond=0).timestamp(),
+            )
         except Exception as exc:
+            _name_files_as_text(exc, _text_form(self._dest_storage))
             self.warn(
                 f"Skipping file {item.dest_path}. Successfully Downloaded {item.dest_path} "
                 f"but was unable to update the last modified time. {exc}",
@@ -2662,10 +2727,18 @@ class _CountBytes:
 
 
 class _DirectoryCreator:
-    """Create the download destination's parent directory (aws-cli subscriber)."""
+    """Create the download destination's parent directory (aws-cli subscriber).
+
+    The download's file is in the OS form (`_os_form`); ``text_path`` turns
+    the names a failure reports back into the destination's text.
+    """
+
+    def __init__(self, text_path: Callable[[str], str] = _same_path) -> None:
+        self._text_path = text_path
 
     def on_queued(self, future: Any, **kwargs: Any) -> None:
-        directory = os.path.dirname(future.meta.call_args.fileobj)
+        fileobj: str = future.meta.call_args.fileobj
+        directory = os.path.dirname(fileobj)
         try:
             if not os.path.exists(directory):
                 os.makedirs(directory)
@@ -2675,11 +2748,12 @@ class _DirectoryCreator:
             # key names the file being downloaded (a local failure's address,
             # design/exceptions.md section 2.1), as the engine's own record
             # of the item's local file does.
+            _name_files_as_text(exc, self._text_path)
             raise translate_os_error(
                 exc,
                 operation=None,
-                key=future.meta.call_args.fileobj.replace(os.sep, "/"),
-                message=f"Could not create directory {directory}: {exc}",
+                key=self._text_path(fileobj).replace(os.sep, "/"),
+                message=f"Could not create directory {self._text_path(directory)}: {exc}",
             ) from exc
 
 
@@ -2707,8 +2781,11 @@ class _FsyncDest:
     own parent; the common case downloads into an existing tree.
     """
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, text_path: Callable[[str], str] = _same_path) -> None:
+        # ``path`` is the OS form the download wrote (`_os_form`); ``text_path``
+        # names it - and the files an error carries - as the destination's text.
         self._path = path
+        self._text_path = text_path
 
     def on_done(self, future: Any, **kwargs: Any) -> None:
         if _outcome(future) is not None:
@@ -2716,12 +2793,14 @@ class _FsyncDest:
         try:
             self._fsync()
         except OSError as exc:
+            _name_files_as_text(exc, self._text_path)
+            text = self._text_path(self._path)
             future.set_exception(
                 translate_os_error(
                     exc,
                     operation=None,
-                    key=self._path.replace(os.sep, "/"),
-                    message=f"Failed to persist {self._path} to disk: {exc}",
+                    key=text.replace(os.sep, "/"),
+                    message=f"Failed to persist {text} to disk: {exc}",
                 )
             )
 

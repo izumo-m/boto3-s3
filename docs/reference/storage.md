@@ -468,6 +468,7 @@ class LocalStorage(Storage):
         detect_symlink_loops: bool = False,
         enumerate_all_entries: bool = False,
         fsync: bool = False,
+        filename_encoding: str | None = None,
     ) -> None: ...
 ```
 
@@ -509,9 +510,41 @@ directory has no fsyncable handle on Windows, where the file flush alone is the
 durability step. The transfer engine reads it off the destination side and only
 on the `mv` download route.
 
-`path`, `abspath`, `fsync` and `walker` are read-only properties exposing the
-constructor input, the construction-time absolute form, the durability knob and
-the walk strategy respectively.
+`filename_encoding` names the encoding of local file names on POSIX. `None`,
+the default, is Python's own choice — the file system encoding
+(`sys.getfilesystemencoding()`), which depends on the Python version, the
+locale and UTF-8 mode — and converts nothing. With a name, every local name
+the storage holds is *text* in that encoding: `path` and `abspath`, the `key`
+and `compare_key` of each entry it lists, the `key` that `open`,
+`get_fileinfo` and `delete` take, and the paths its warnings and errors name
+are the name's bytes decoded with it (`surrogateescape` for bytes it cannot
+decode), and the OS gets that text encoded with it. A walk sorts by the text,
+so the order is S3's key order of the names the text becomes. Nothing is
+converted when the name is the file system encoding itself. A character the
+encoding cannot represent names no file: `exists()` is `False`, and an
+operation on it fails like Python's own call does for a character its file
+system encoding cannot represent (`ValidationError`, or the item's failure in
+a transfer). A listed name whose text encodes back to other bytes - an
+encoding that reads several byte sequences as one character, as cp932 does -
+would address another file, so the walk skips it with a warning. On Windows
+the OS names files in Unicode and the setting has no
+effect. An unknown codec raises `InvalidValueError` from the constructor.
+
+`path`, `abspath`, `fsync`, `walker` and `filename_encoding` are read-only
+properties exposing the constructor input, the construction-time absolute
+form, the durability knob, the walk strategy and the filename encoding
+respectively.
+
+### os_path(path) / text_path(path)
+
+Convert a local path between this storage's text form and the form Python's
+`os` functions take and return. `os_path` takes a path as the storage reports
+it — `abspath`, a `FileInfo.key` in either separator — and returns the string
+to hand to `os.stat`, `open` and the like, so they reach the file the text
+names; `text_path` is the reverse, for a name from `os.listdir` or
+`os.getcwd`. Without a converting `filename_encoding` both return the path
+unchanged. `os_path` raises `UnicodeEncodeError` (a `ValueError`) for a
+character the encoding cannot represent.
 
 ### exists()
 
@@ -1394,6 +1427,18 @@ child injected as a leaf is stat'ed again by `restat_leaf` when its turn comes,
 so one that is not a live filesystem path needs that seam overridden too —
 otherwise the yield-time stat fails and warn-skips it as missing.
 
+**Under a converting `filename_encoding`.** The walk runs on the form Python's
+`os` functions take (`LocalStorage.os_path`): `root`, `dir_path`, `full` and
+`path` are that form, and so is every path in a warning a method builds —
+`list_file_pages` hands the warnings on as the storage's text. `scan_children`
+turns each child's `sort_name` and `info.key` into text before it stamps
+`compare_key` and calls `finalize_children`, so from `finalize_children` on —
+the sort, the filter, the yielded entries — everything is text, in the text's
+order, and `walk_dir` descends a sub-directory by its text name converted back.
+A `scan_children` that builds its own children converts them the same way. The
+walk reads the encoding from `options.storage`, so options built without a
+storage convert nothing.
+
 ### list_files(root, options)
 
 Yields every file under `root` recursively as a flat stream in byte order.
@@ -1409,7 +1454,8 @@ are handed off just before the next descent, so a page never spans two
 directory reads and a consumer can overlap the next read. The pages concatenate
 to `list_files`'s flat stream.
 
-`root` is the absolute directory path **with a trailing `os.sep`**. Each
+`root` is the absolute directory path **with a trailing `os.sep`**, in the OS
+form under a converting `filename_encoding` (see above). Each
 `LocalFileInfo.key` is the absolute path with `os.sep` folded to `/`, and
 `compare_key` is relative to that directory — the axis `options.filter`
 matches.

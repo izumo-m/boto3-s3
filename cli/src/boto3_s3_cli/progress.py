@@ -72,6 +72,7 @@ in-process tests capture the printer thread's output (rm precedent).
 from __future__ import annotations
 
 import _thread
+import os
 import queue
 import sys
 import threading
@@ -81,6 +82,7 @@ from typing import TYPE_CHECKING, TextIO
 
 from boto3_s3 import OpOutcome
 from boto3_s3.localstorage import LocalStorage
+from boto3_s3_cli import textencoding
 from boto3_s3_cli.output import human_readable_size, uni_write
 
 if TYPE_CHECKING:
@@ -150,12 +152,14 @@ def _render_path(path: str | None) -> str:
 
     The stream endpoint token ``-`` is also verbatim (aws prints
     ``upload: - to s3://...``); relativizing it would render ``<cwd>/-``.
+    A local side is the CLI's text (`textencoding`), so it is made relative
+    to the working directory read as that text.
     """
     if path is None:
         return ""
     if path.startswith("s3://") or path == "-":
         return path
-    return LocalStorage.relative_path(path)
+    return LocalStorage.relative_path(path, textencoding.text_path(os.getcwd()))
 
 
 class TransferPrinter:

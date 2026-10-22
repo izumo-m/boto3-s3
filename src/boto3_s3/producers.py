@@ -124,6 +124,22 @@ _GLACIER_STORAGE_CLASSES = ("GLACIER", "DEEP_ARCHIVE")
 _JOIN_SEPARATORS: tuple[str, ...] = ("/", "\\") if os.name == "nt" else ("/",)
 
 
+def local_path_exists(storage: Storage | None, path: str) -> bool:
+    """``os.path.exists`` for a local path in ``storage``'s text form.
+
+    A ``LocalStorage`` hands the OS its own form of the name
+    (`LocalStorage.os_path`); a name its filename encoding cannot represent
+    names no file, as ``os.path.exists`` answers for one the file system
+    encoding cannot represent.
+    """
+    if isinstance(storage, LocalStorage):
+        try:
+            path = storage.os_path(path)
+        except ValueError:
+            return False
+    return os.path.exists(path)
+
+
 def _compare_key(info: FileInfo) -> str:
     """The producer-stamped ``compare_key``, narrowed to ``str``.
 
@@ -181,10 +197,17 @@ def _warn_absent_local_source(src: Storage, transferrer: Transferrer) -> None:
     if not isinstance(src, LocalStorage):
         return
     path = src.abspath
-    if not src.default_scan_options().follow_symlinks and os.path.islink(path):
-        return
-    if not os.path.exists(path):
-        transferrer.warner.warn(f"Skipping file {path}. File does not exist.")
+    try:
+        native = src.os_path(path)
+    except ValueError:
+        # A name the filename encoding cannot represent: no file has it.
+        native = None
+    if native is not None:
+        if not src.default_scan_options().follow_symlinks and os.path.islink(native):
+            return
+        if os.path.exists(native):
+            return
+    transferrer.warner.warn(f"Skipping file {path}. File does not exist.")
 
 
 def _source_bucket(info: FileInfo) -> str:
@@ -355,6 +378,7 @@ class CaseConflictGate:
         dest_keys: Iterable[str] | None,
         *,
         operation: str = "cp",
+        dest: Storage | None = None,
     ) -> None:
         # ``dest_keys`` is the destination listing in its walk order, merged
         # against the source keys as they arrive (`_DestinationMerge`); None
@@ -363,6 +387,9 @@ class CaseConflictGate:
         self._mode = mode
         self._merge = None if dest_keys is None else _DestinationMerge(dest_keys)
         self._operation = operation
+        # The destination storage, whose text paths the existence probe hands
+        # to the OS in its own form (`local_path_exists`).
+        self._dest = dest
         self._submitted: set[str] = set()
 
     def _admit(self, item: TransferItem, lowered: str) -> bool:
@@ -384,7 +411,7 @@ class CaseConflictGate:
         lowered = item.compare_key.lower()
         src = f"{item.src_bucket}/{item.src_key}"
         dest = os.path.abspath(item.dest_path or "")
-        if lowered not in self._submitted and not os.path.exists(dest):
+        if lowered not in self._submitted and not local_path_exists(self._dest, dest):
             return self._admit(item, lowered)
         if self._mode is CaseConflictMode.SKIP:
             transferrer.notice(
@@ -475,9 +502,12 @@ def upload_item_from_info(
     dest = transferplan.dest_for(plan, compare_key)
     if info.size is not None and info.size > _MAX_UPLOAD_SIZE:
         # aws-cli's _warn_if_too_large: warn (rendered relative) but
-        # still attempt, so S3's own EntityTooLarge stays visible.
+        # still attempt, so S3's own EntityTooLarge stays visible. The path
+        # is text, so it is made relative to the working directory as text.
+        src = plan.src
+        start = src.text_path(os.getcwd()) if isinstance(src, LocalStorage) else os.curdir
         transferrer.warner.warn(
-            f"File {LocalStorage.relative_path(native)} exceeds s3 upload limit of "
+            f"File {LocalStorage.relative_path(native, start)} exceeds s3 upload limit of "
             f"{_MAX_UPLOAD_SIZE_TEXT}.",
             info=info,
         )
@@ -726,7 +756,7 @@ def download_item_from_info(
             info=info,
         )
         return None
-    if options.get("no_overwrite") and os.path.exists(dest):
+    if options.get("no_overwrite") and local_path_exists(plan.dest, dest):
         # aws-cli's _warn_if_file_exists_with_no_overwrite: a silent
         # skip (debug-level only on the aws side; rc stays 0).
         transferrer.skip(item)
@@ -1332,7 +1362,7 @@ def cp_case_gate(
             )
         )
     ]
-    return CaseConflictGate(mode, dest_keys, operation=operation)
+    return CaseConflictGate(mode, dest_keys, operation=operation, dest=plan.dest)
 
 
 def sync_case_gate(
@@ -1356,7 +1386,7 @@ def sync_case_gate(
         or not isinstance(dest_storage, LocalStorage)
     ):
         return None
-    return CaseConflictGate(mode, None, operation="sync")
+    return CaseConflictGate(mode, None, operation="sync", dest=dest_storage)
 
 
 def sync_entries(

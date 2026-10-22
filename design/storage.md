@@ -226,7 +226,9 @@ A `FileInfo` carries two keys (see [`glossary.md`](./glossary.md)):
 - **`key`** is the entry's full, `/`-separated identifier **in the backend's own
   address space** — what `delete(info)` acts on (the built-ins key on
   `info.key`). A backend chooses its own space (`S3Storage`'s `key` is the full
-  bucket key, `LocalStorage`'s an absolute path). A typical custom backend uses
+  bucket key, `LocalStorage`'s an absolute path - as text in its
+  `filename_encoding`, which `LocalStorage.os_path` turns into what the OS
+  calls take; design/transfer.md section 8). A typical custom backend uses
   keys relative to its location, so a recursive entry's `key` is its
   `compare_key` and the single location is `""`. `open`'s
   address argument is backend-specific: `S3Storage.open` takes the full bucket

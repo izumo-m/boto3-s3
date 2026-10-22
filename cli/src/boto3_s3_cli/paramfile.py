@@ -26,11 +26,11 @@ is 252 wherever it is named (docs/cli/exit-codes.md).
 from __future__ import annotations
 
 import contextlib
-import locale
 import os
 from typing import TYPE_CHECKING
 
 from boto3_s3 import InvalidValueError, ValidationError
+from boto3_s3_cli import textencoding
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -68,20 +68,30 @@ def _text_encoding() -> str:
     """The ``file://`` text encoding - aws's ``compat.getpreferredencoding``.
 
     ``AWS_CLI_FILE_ENCODING`` wins when present (even empty - the unknown
-    codec fails in ``open``, present-wins like aws). Without it, a ``C`` /
-    ``POSIX`` ``LC_CTYPE`` reads as UTF-8: aws implements PEP 540's
-    locale coercion itself (its frozen build lacks the interpreter's), so a
-    ``LC_ALL=C`` run decodes UTF-8 content where the plain locale default
-    would be ASCII - matched here for the case where the interpreter's own
-    coercion is disabled (``PYTHONCOERCECLOCALE=0``). Otherwise the locale
-    default (``locale.getpreferredencoding``, like aws).
+    codec fails in ``open``, present-wins like aws). Without it, the CLI's
+    text encoding (`textencoding.text_encoding`): a ``C`` / ``POSIX``
+    ``LC_CTYPE`` reads as UTF-8, as aws implements PEP 540's locale coercion
+    itself, and otherwise the locale's own encoding whatever Python's UTF-8
+    mode says - so a ``file://`` reads the same under Python 3.15, or
+    ``PYTHONUTF8=1``, as under ``aws``.
     """
     encoding = os.environ.get("AWS_CLI_FILE_ENCODING")
     if encoding is not None:
         return encoding
-    if locale.setlocale(locale.LC_CTYPE) in ("C", "POSIX"):
-        return "UTF-8"
-    return locale.getpreferredencoding()
+    return textencoding.text_encoding()
+
+
+def _local_path(reference: str) -> tuple[str, str]:
+    """A paramfile reference's path, expanded as aws's ``get_file`` expands it.
+
+    ``expandvars(expanduser(...))`` (expanduser inner), on the path as the OS
+    calls take it (`textencoding.os_path` - the command line is the CLI's
+    text), so the variables and the home directory expand to the bytes the
+    OS gave them. Returns ``(os_form, text)``: the first to open, the second
+    to report.
+    """
+    native = os.path.expandvars(os.path.expanduser(textencoding.os_path(reference)))
+    return native, textencoding.text_path(native)
 
 
 def read_text_paramfile(original: str, *, operation: str) -> str:
@@ -91,10 +101,10 @@ def read_text_paramfile(original: str, *, operation: str) -> str:
     (expanduser inner). The encoding is `_text_encoding` (aws's
     ``compat_open`` / ``getpreferredencoding``).
     """
-    path = os.path.expandvars(os.path.expanduser(original[len("file://") :]))
+    native, path = _local_path(original[len("file://") :])
     encoding = _text_encoding()
     try:
-        with open(path, encoding=encoding) as handle:
+        with open(native, encoding=encoding) as handle:
             return handle.read()
     except UnicodeDecodeError as exc:
         # The decode-error message names the EXPANDED path in parentheses; the
@@ -107,7 +117,8 @@ def read_text_paramfile(original: str, *, operation: str) -> str:
         ) from exc
     except OSError as exc:
         raise ParamfileLoadError(
-            f"Unable to load paramfile {original}: {exc}", operation=operation
+            f"Unable to load paramfile {original}: {textencoding.name_files_as_text(exc)}",
+            operation=operation,
         ) from exc
 
 
@@ -116,13 +127,14 @@ def read_binary_paramfile(original: str, *, operation: str) -> bytes:
 
     Path expansion matches aws's ``get_file``: ``expandvars(expanduser(...))``.
     """
-    path = os.path.expandvars(os.path.expanduser(original[len("fileb://") :]))
+    native, _path = _local_path(original[len("fileb://") :])
     try:
-        with open(path, "rb") as handle:
+        with open(native, "rb") as handle:
             return handle.read()
     except OSError as exc:
         raise ParamfileLoadError(
-            f"Unable to load paramfile {original}: {exc}", operation=operation
+            f"Unable to load paramfile {original}: {textencoding.name_files_as_text(exc)}",
+            operation=operation,
         ) from exc
 
 

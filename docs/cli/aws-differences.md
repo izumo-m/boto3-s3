@@ -47,8 +47,9 @@ hold, a
 malformed `--grants`, a file whose size and time could not be read and then
 could, the destination directory of a refused run, a help page or an `mb` /
 `rb` success line that cannot be written, a
-`file://` or `fileb://` reference `aws` mishandles, and the `PYTHON*`
-environment variables. A difference of that kind anywhere else is a
+`file://` or `fileb://` reference `aws` mishandles, the `PYTHON*`
+environment variables, and non-ASCII text in the config and credentials
+files. A difference of that kind anywhere else is a
 bug worth reporting; which of two mistakes an error report names, or text
 botocore, Python or S3 wrote, is not.
 
@@ -585,22 +586,33 @@ that say outright that the run comes out differently, listed in section 1.
 - **The `PYTHON*` environment variables reach this command and not `aws`.**
   The official `aws` distribution is a frozen interpreter running in isolated
   mode, so the interpreter ignores that whole family; this command runs on
-  your own Python, which does not. `PYTHONIOENCODING` therefore re-codes what
-  is printed here while `aws` keeps its own codec (UTF-8 on Linux, the host
-  code page on Windows): under `PYTHONIOENCODING=ascii` a `café.txt` result
-  line comes out `caf?.txt`, and under `latin-1` it comes out in latin-1
-  bytes. One member `aws`'s own code reads back: `PYTHONUTF8=1`, which it
-  applies only to the streams it writes error reports on; here it is the
-  interpreter's own UTF-8 mode and reaches every stream. `PYTHONUTF8=0` with
-  `PYTHONCOERCECLOCALE=0` under a C locale goes the other way and makes a
-  UTF-8 config file unreadable here — exit code 255 — where `aws` still reads
-  it. The same packaging decides one thing more: an
-  argument carrying a byte that is not valid UTF-8 is accepted here and the
-  run proceeds, while `aws`'s bootloader rejects it before Python starts,
-  exiting 255 with `Failed to set sys.argv: decoding error`. Leave the family
-  unset and the two agree: under a plain C, ISO-8859-1 or ASCII locale, config
-  reading, `file://` decoding, and the scanning and display of file names all
-  match.
+  your own Python, which does not. What this command prints, the local file
+  names it reads and writes, its command line and its `file://` text are
+  converted with the encoding `aws` uses in the same environment whatever the
+  family says: `PYTHONIOENCODING` and Python's UTF-8 mode (`PYTHONUTF8`, and
+  the default from Python 3.15 on) move none of them. `PYTHONUTF8=1` moves
+  the error reports to UTF-8 on both tools, `aws`'s own code reading it back
+  for those reports alone. What the family still reaches is how Python reads
+  the config and credentials files (next item). One difference comes from
+  the packaging rather than the variables: an argument carrying bytes the
+  locale's encoding cannot decode is accepted here, and fails where it is
+  used (as an S3 key, say), while `aws`'s bootloader rejects it before Python
+  starts, exiting 255 with `Failed to set sys.argv: decoding error`.
+- **Non-ASCII text in the config and credentials files is decoded as boto3
+  decodes it.** Both files are read by botocore, which opens them with
+  Python's default text encoding: the locale's, or UTF-8 in Python's UTF-8
+  mode — the default from Python 3.15 on, and under `PYTHONUTF8=1` on any
+  version. `aws` always decodes them with the locale's encoding. A file whose
+  non-ASCII text (a comment, a profile name) is in the locale's encoding —
+  cp932 on Japanese Windows, EUC-JP under a `ja_JP.eucJP` locale — therefore
+  fails to load here under Python 3.15 or `PYTHONUTF8=1` (`Unable to parse
+  config file`, exit code 255) where `aws` reads it, and one written in UTF-8
+  loads here where `aws` fails. Under a C or POSIX locale `aws` reads UTF-8;
+  so does this command, except under `PYTHONUTF8=0` with the locale left
+  uncoerced (`LC_ALL=C`, or `PYTHONCOERCECLOCALE=0`), where a UTF-8 file
+  fails here too. A file in plain ASCII reads the same everywhere. The
+  `boto3` library itself reads the files the same way, so the command agrees
+  with any `boto3` program run by the same Python.
 - **Which CA certificates are trusted.** Both tools verify every TLS connection
   against an explicit CA file — never the operating system's trust store — but
   not the same file: `aws` uses the `cacert.pem` bundled in its own

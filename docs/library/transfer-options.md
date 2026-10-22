@@ -187,5 +187,28 @@ by default to keep that behavior: without it a symlink cycle descends until
 the operating system stops it, exactly as `aws s3` does; with it, a directory
 that resolves to one of its own ancestors is skipped with a warning.
 
+**Local file names.** On Linux and other POSIX systems a file name is bytes,
+and Python turns them into text with its file system encoding: the locale's,
+or UTF-8 in Python's UTF-8 mode — which Python 3.15 turns on by default, and
+`PYTHONUTF8=1` on any version. The library follows that choice. An application
+written for one encoding names it, on the storage or once on `S3` for every
+local path given as a string:
+
+```python
+s3 = S3(filename_encoding="euc_jp")
+
+s3.sync("./site", "s3://bucket/site/")           # names read as EUC-JP
+s3.cp("s3://bucket/a/", "./a", recursive=True)   # files created with EUC-JP names
+```
+
+An upload's keys are the names decoded with that encoding, a download's files
+are the keys encoded with it, and the paths the results and warnings report are
+that text. A name the encoding cannot decode is carried with `surrogateescape`
+and fails as an S3 key; a key it cannot encode fails as that item. The paths
+you pass are text in that encoding too, and `LocalStorage.os_path` gives the
+form to hand to Python's own `os` functions. Windows names files in Unicode,
+so the setting has no effect there. The `boto3-s3` command sets it to the
+encoding `aws` uses.
+
 Listing behavior is likewise configured on `S3Storage` — `page_size` and
 `fetch_owner`. See [`s3-object.md`](./s3-object.md).

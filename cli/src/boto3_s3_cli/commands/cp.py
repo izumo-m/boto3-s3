@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 
 # Loaded at dispatch once cp is determined (stage 2 of the lazy dispatch).
 from boto3_s3 import NotFoundError, StdioStorage, ValidationError
@@ -71,7 +70,7 @@ class CpCommand(Command):
                 )
         paths_type = head.paths_type  # "locals3" | "s3local" | "s3s3" here
         transferargs.validate_checksum_paths_type(args, paths_type, operation="cp")
-        if src_type == "local" and src != "-" and not os.path.exists(src):
+        if src_type == "local" and src != "-" and not transferargs.local_path_exists(src):
             # aws-cli's _validate_path_args checks the missing local source (its bare
             # RuntimeError -> rc 255); '-' is a stream, not a path. NotFoundError
             # without a ClientError cause maps to the same rc 255.

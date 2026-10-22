@@ -24,6 +24,21 @@ the complete view warns and falls back to lstat. These settings ride
 ``LocalScanOptions`` (seeded from the ``LocalStorage`` constructor), so every scan
 and high-level operation preserves the configured candidate enumeration policy.
 
+Names under a ``filename_encoding`` (``LocalStorage``, POSIX only): the storage
+holds its local names as *text* - the name's bytes decoded with that encoding -
+while Python's OS calls take and return the *OS form* (the bytes decoded with
+the file system encoding). The conversion is made only where a name crosses
+into or out of the OS, and not at all when the encoding is the file system
+encoding (`_filename_codec`). The walk itself runs on the OS form: every path it
+hands to the OS and every path in a warning it builds is that form, so the
+override seams keep their plain ``os`` semantics. ``scan_children`` turns each
+child's ``sort_name`` and ``key`` into text before ``compare_key`` is stamped
+and the children are sorted - so the order is the text's (S3's key order) and
+everything the walk emits is text - ``walk_dir`` descends a sub-directory by its
+text name encoded back, and ``list_file_pages`` turns its warnings into text. The
+walk finds the encoding through ``LocalScanOptions.storage``; a hand-built
+options object without a storage walks in the OS form throughout.
+
 An app customizes the walk by subclassing ``LocalFileGenerator``, overriding
 its **public** methods, and passing an instance to
 ``LocalStorage(path, walker=MyWalker())`` - no protected-method surgery on
@@ -107,8 +122,10 @@ single-path point op) reuses them too.
 
 from __future__ import annotations
 
+import codecs
 import os
 import stat as stat_module
+import sys
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, ClassVar, Literal, NamedTuple, cast
@@ -118,6 +135,7 @@ from typing_extensions import override
 from boto3_s3.exceptions import (
     AccessDeniedError,
     Boto3S3Error,
+    InvalidValueError,
     NotFoundError,
     TransportError,
     ValidationError,
@@ -159,9 +177,93 @@ def to_native_path(key: str) -> str:
     """Native form of a ``/``-separated ``FileInfo`` key.
 
     Lossless because no supported filesystem allows ``/`` inside a file name
-    (it is the separator on POSIX and rejected on Windows).
+    (it is the separator on POSIX and rejected on Windows). Only the separator
+    changes: under a ``filename_encoding`` the result is still text, which
+    `LocalStorage.os_path` turns into what the OS calls take.
     """
     return key.replace("/", os.sep)
+
+
+class _FilenameCodec:
+    """Local names between text in a named encoding and Python's OS form (POSIX).
+
+    ``to_os`` encodes the text with ``encoding`` and decodes the bytes the way
+    Python's own path calls do (``os.fsdecode``: the file system encoding,
+    ``surrogateescape``), so handing the result to any ``os`` function reaches
+    exactly those bytes; ``to_text`` is the reverse. Both carry undecodable
+    bytes as ``surrogateescape`` surrogates. ``to_os`` raises
+    ``UnicodeEncodeError`` (a ``ValueError``) for a character the encoding
+    cannot represent - where Python's own call with the file system encoding
+    would raise the same.
+    """
+
+    __slots__ = ("encoding",)
+
+    def __init__(self, encoding: str) -> None:
+        self.encoding = encoding
+
+    def to_os(self, path: str) -> str:
+        return os.fsdecode(path.encode(self.encoding, "surrogateescape"))
+
+    def to_text(self, path: str) -> str:
+        return os.fsencode(path).decode(self.encoding, "surrogateescape")
+
+    def message(self, body: str) -> str:
+        """A warning built from OS-form paths, as text (unchanged if it cannot be)."""
+        try:
+            return self.to_text(body)
+        except UnicodeError:
+            return body
+
+    def text_names(self, exc: BaseException) -> None:
+        """Turn the file names an ``OSError`` carries into text, in place.
+
+        ``str(exc)`` formats them at call time, so every report built from the
+        error afterwards names the files as the storage's text.
+        """
+        if not isinstance(exc, OSError):
+            return
+        if isinstance(exc.filename, str):
+            exc.filename = self.message(exc.filename)
+        if isinstance(exc.filename2, str):
+            exc.filename2 = self.message(exc.filename2)
+
+
+def _filename_codec(encoding: str | None) -> _FilenameCodec | None:
+    """The conversion a ``filename_encoding`` asks for, or ``None`` for none.
+
+    An unknown codec name is an ``InvalidValueError`` on every platform (as
+    ``IOStorage(encoding=...)``). ``None`` - no conversion at all - for no
+    encoding, on Windows (the OS names files in Unicode, so there is no byte
+    form to choose), and for the file system encoding itself (compared by
+    ``codecs.lookup`` name), so the common case costs nothing per name.
+    """
+    if encoding is None:
+        return None
+    try:
+        name = codecs.lookup(encoding).name
+    except LookupError as exc:
+        raise InvalidValueError(str(exc)) from exc
+    if sys.platform == "win32" or name == codecs.lookup(sys.getfilesystemencoding()).name:
+        return None
+    return _FilenameCodec(name)
+
+
+def _walk_codec(options: LocalScanOptions) -> _FilenameCodec | None:
+    """The filename conversion of the storage a walk runs for (``options.storage``)."""
+    storage = options.storage
+    if isinstance(storage, LocalStorage):
+        return storage._codec  # pyright: ignore[reportPrivateUsage]
+    return None
+
+
+def _text_notify(notify: Callable[[str], None], codec: _FilenameCodec) -> Callable[[str], None]:
+    """``notify`` for warnings that name OS-form paths, handing them on as text."""
+
+    def text_notify(body: str) -> None:
+        notify(codec.message(body))
+
+    return text_notify
 
 
 def _is_special_mode(mode: int) -> bool:
@@ -420,9 +522,10 @@ class LocalFileGenerator:
         e.g. ``Storage.scan``'s prefetch worker - overlaps the next
         read on a network-mounted path, the reason the walk is paged at all. The
         pages concatenate to ``list_files``'s flat stream. The ``root`` parameter
-        is the absolute directory path with a trailing ``os.sep``; each
-        ``LocalFileInfo.key`` is the absolute path (``os.sep`` folded to ``/``)
-        and ``compare_key`` is relative to that directory, stamped in
+        is the absolute directory path with a trailing ``os.sep``, in the OS
+        form under a converting ``filename_encoding`` (module docstring); each
+        ``LocalFileInfo.key`` is the absolute path (``os.sep`` folded to ``/``,
+        as text) and ``compare_key`` is relative to that directory, stamped in
         ``scan_children`` (so a custom
         ``finalize_children`` can already filter on it) - the axis
         ``options.filter`` matches.
@@ -448,11 +551,17 @@ class LocalFileGenerator:
         notify: Callable[[str], None] = (
             options.on_warning if options.on_warning is not None else (lambda body: None)
         )
+        codec = _walk_codec(options)
+        if codec is not None:
+            # The walk names OS-form paths in its warnings (module docstring).
+            notify = _text_notify(notify, codec)
         follow_symlinks = options.follow_symlinks
         if options.enumerate_all_entries:
             root_record = self.root_info(root, options=options, notify=notify)
             if root_record is None:
                 return
+            if codec is not None:
+                root_record.key = codec.to_text(root_record.key)
             root_record.storage = options.storage
             if options.filter is None or options.filter(root_record):
                 yield [root_record]
@@ -465,8 +574,9 @@ class LocalFileGenerator:
         detector = LoopDetector(root) if options.detect_symlink_loops and follow_symlinks else None
         # root ends in os.sep, so its normalized directory path ends in "/" and
         # the slice (in scan_children) never leaves a leading separator;
-        # compare_key is relative to that directory.
-        strip = len(root.replace(os.sep, "/"))
+        # compare_key is relative to that directory - the text root's length,
+        # as the keys it is cut from are text (scan_children).
+        strip = len((root if codec is None else codec.to_text(root)).replace(os.sep, "/"))
         item_filter = options.filter
         storage = options.storage
         pages = self.walk_dir(root, options, strip=strip, notify=notify, detector=detector)
@@ -531,14 +641,16 @@ class LocalFileGenerator:
         # One join per directory rather than per child: dir_path is an absolute
         # directory path, so a child's path is this prefix plus its sort name.
         prefix = dir_path if dir_path.endswith(os.sep) else dir_path + os.sep
+        codec = _walk_codec(options)
         for sort_name, info, loop_key in self.scan_children(
             dir_path, strip=strip, options=options, notify=notify
         ):
             # sort_name carries the trailing os.sep for a sub-directory (the sort
             # suffix) and is the bare name for a leaf, so this path is spelled the
             # way the child is addressed - which the loop warning and the warnings
-            # raised by the descent keep.
-            sub = prefix + sort_name
+            # raised by the descent keep. Under a converting filename encoding
+            # the name is text (scan_children) and the path the OS form.
+            sub = prefix + (sort_name if codec is None else codec.to_os(sort_name))
             if info.kind != FileKind.DIRECTORY:
                 fresh = self.restat_leaf(sub, info, options=options, notify=notify)
                 if fresh is None:
@@ -798,10 +910,13 @@ class LocalFileGenerator:
         is_symlink = os.path.islink(path)
         try:
             st = os.stat(path, follow_symlinks=follow_symlinks)
-        except OSError:
+        except OSError as exc:
             if not (options.enumerate_all_entries and is_symlink and follow_symlinks):
                 if self.triggers_warning(path, notify):
                     return None
+                codec = _walk_codec(options)
+                if codec is not None:
+                    codec.text_names(exc)
                 raise
             notify(f"Skipping file {path}. File does not exist.")
             try:
@@ -844,7 +959,9 @@ class LocalFileGenerator:
         it scans ``dir_path`` once with ``os.scandir``, turns each entry into
         a ``WalkChild`` via ``classify_child`` (skips return ``None``),
         stamps each child's ``compare_key`` (the key with the ``strip``-long
-        directory prefix removed, aws-cli's ``src_path[len(src['path']):]``), then hands
+        directory prefix removed, aws-cli's ``src_path[len(src['path']):]``) -
+        after turning each child's ``sort_name`` and ``key`` into text under a
+        converting ``filename_encoding`` (module docstring) - then hands
         the list to
         ``finalize_children`` (which sorts, and is the override point for
         pruning / registration). ``options`` carries the per-walk context the
@@ -873,7 +990,8 @@ class LocalFileGenerator:
         synthetic entries or read a different source - reusing
         ``classify_child`` / ``dir_child`` / ``normalize_sort`` so the
         sort key and directory-info shape need not be reproduced (an injected
-        child still needs its ``compare_key`` stamped - ``info.key[strip:]``;
+        child still needs its ``compare_key`` stamped - ``info.key[strip:]``,
+        and under a converting ``filename_encoding`` its name and key as text;
         ``FileInfo.storage`` need not be set - the caller stamps the producing
         backend after the walk yields a page). To prune / register / re-order after
         the fact, override the finer ``finalize_children`` instead; for a
@@ -899,7 +1017,7 @@ class LocalFileGenerator:
             if use_fd:
                 dir_fd = os.open(dir_path, self.dir_open_flags)
             scan = os.scandir(dir_fd if dir_fd is not None else dir_path)
-        except OSError:
+        except OSError as exc:
             # The directory stopped being an openable directory between its
             # parent's scan and this descent - replaced by a file, deleted, or
             # chmod'd away. aws-cli re-tests the child immediately before
@@ -925,6 +1043,9 @@ class LocalFileGenerator:
             if dir_fd is not None:
                 os.close(dir_fd)
             if not self.triggers_warning(probe, notify):
+                codec = _walk_codec(options)
+                if codec is not None:
+                    codec.text_names(exc)
                 raise
             return []
         try:
@@ -938,6 +1059,26 @@ class LocalFileGenerator:
         finally:
             if dir_fd is not None:
                 os.close(dir_fd)
+        codec = _walk_codec(options)
+        if codec is not None:
+            # The OS-form names become the storage's text here, before the key
+            # is cut and the children sorted: the order is the text's. A name
+            # whose text encodes back to other bytes (a codec that maps several
+            # byte sequences to one character, as cp932 does) would address
+            # another file, so it is skipped with a warning.
+            converted: list[WalkChild] = []
+            for child in children:
+                os_key = child.info.key
+                text_key = codec.to_text(os_key)
+                if codec.to_os(text_key) != os_key:
+                    notify(
+                        f"Skipping file {os_key}. File name does not survive "
+                        f"{codec.encoding} unchanged."
+                    )
+                    continue
+                child.info.key = text_key
+                converted.append(child._replace(sort_name=codec.to_text(child.sort_name)))
+            children = converted
         for child in children:
             child.info.compare_key = child.info.key[strip:]
         return self.finalize_children(children)
@@ -1274,6 +1415,17 @@ class LocalStorage(Storage):
     the traversal - e.g. to resolve Cygwin ``!<symlink>`` files on a
     native-Python Windows build - without subclassing ``LocalStorage`` itself.
 
+    ``filename_encoding`` names the encoding of the local names on POSIX
+    (``None``, the default: Python's file system encoding). Every name the
+    storage holds - ``path`` and ``abspath``, each ``FileInfo.key`` /
+    ``compare_key`` it lists, the key an ``open`` / ``get_fileinfo`` /
+    ``delete`` takes, and the paths in its warnings and errors - is then the
+    name's bytes decoded with it (``surrogateescape`` for bytes it cannot
+    decode), and the OS gets that text encoded with it. `os_path` and
+    `text_path` convert between that text and the form Python's own OS calls
+    take and return. On Windows the OS names files in Unicode and the setting
+    has no effect; an unknown codec is an ``InvalidValueError``.
+
     Class attributes: ``sep`` is the host-native separator (``os.sep``;
     ``format`` returns ``os.sep`` forms, unlike every other backend's ``/``
     space). ``capabilities`` is the full set - the local filesystem supports every
@@ -1324,23 +1476,40 @@ class LocalStorage(Storage):
         detect_symlink_loops: bool = False,
         enumerate_all_entries: bool = False,
         fsync: bool = False,
+        filename_encoding: str | None = None,
     ) -> None:
+        # The conversion between this storage's text names and the OS form
+        # (None: none at all - see _filename_codec). Checked first, so an
+        # unknown codec fails the construction.
+        self._filename_encoding = filename_encoding
+        self._codec = _filename_codec(filename_encoding)
         self._path = os.fspath(path)
         # Absolutize once, at construction (against the cwd then): every scan /
         # get_fileinfo anchors here so ``FileInfo.key`` comes out absolute, and
         # ``os.path.abspath`` calls ``os.getcwd()`` - too costly to repeat per
         # entry. Binding the cwd here also keeps a relative path resolving
         # consistently if the process later chdir's.
-        self._abspath = os.path.abspath(self._path)
         # The same anchor without abspath's lexical normalization, for
         # ``exists``: ``..`` folded by abspath and ``..`` resolved by the
         # kernel name different files once a symlinked directory is involved.
         # An absolute path needs no anchor, and must not ask for one: getcwd
         # fails in a process whose working directory has been removed, where
-        # abspath above - which consults it for a relative path only - works.
-        self._unnormalized = (
-            self._path if os.path.isabs(self._path) else os.path.join(os.getcwd(), self._path)
-        )
+        # abspath - which consults it for a relative path only - works.
+        if self._codec is None:
+            self._abspath = os.path.abspath(self._path)
+            self._unnormalized = (
+                self._path if os.path.isabs(self._path) else os.path.join(os.getcwd(), self._path)
+            )
+        else:
+            # POSIX only (the codec is None on Windows), where abspath is the
+            # normalized join onto the cwd - taken here as text, so the anchor
+            # and the typed path share one form.
+            self._unnormalized = (
+                self._path
+                if os.path.isabs(self._path)
+                else os.path.join(self._codec.to_text(os.getcwd()), self._path)
+            )
+            self._abspath = os.path.normpath(self._unnormalized)
         # How this local source is read: symlink interpretation, whether every
         # metadata-readable native entry is enumerated before filtering, and
         # whether recursive descent guards against symlink cycles. Seeded into
@@ -1381,6 +1550,48 @@ class LocalStorage(Storage):
         """
         return self._abspath
 
+    @property
+    def filename_encoding(self) -> str | None:
+        """The ``filename_encoding`` given at construction (see the class docstring)."""
+        return self._filename_encoding
+
+    def os_path(self, path: str) -> str:
+        """``path``, a local path in this storage's text form, as the OS calls take it.
+
+        The text form is what the storage holds and reports - `abspath`, a
+        ``FileInfo.key`` (in either separator). Without a converting
+        ``filename_encoding`` this returns ``path`` itself; with one, the text
+        encoded with that encoding and decoded the way Python's own ``os``
+        functions read a path, so ``os.stat(storage.os_path(key))`` reaches the
+        file the key names. A character the encoding cannot represent raises
+        ``UnicodeEncodeError`` (a ``ValueError``), as Python's own call does
+        for one its file system encoding cannot represent.
+        """
+        codec = self._codec
+        return path if codec is None else codec.to_os(path)
+
+    def text_path(self, path: str) -> str:
+        """``path``, as Python's OS calls return it, in this storage's text form.
+
+        The reverse of `os_path`: a name from ``os.listdir`` or ``os.getcwd``
+        becomes the text this storage would report for it. Without a
+        converting ``filename_encoding`` this returns ``path`` itself.
+        """
+        codec = self._codec
+        return path if codec is None else codec.to_text(path)
+
+    def _os_root(self, path: str | None = None) -> str:
+        """`abspath` (or the text ``path``) in the OS form, the root a walk is handed.
+
+        A character the ``filename_encoding`` cannot represent is the
+        caller's path, a ``ValidationError`` (`translate_os_error`).
+        """
+        text = self._abspath if path is None else path
+        try:
+            return self.os_path(text)
+        except ValueError as exc:
+            raise translate_os_error(exc, operation=None, key=text.replace(os.sep, "/")) from exc
+
     def _single_filter_root(self) -> str:
         """aws-cli's ``_get_local_root`` for this location as a single (non-``dir_op``) source.
 
@@ -1413,7 +1624,14 @@ class LocalStorage(Storage):
         """
         if not self._path:
             return False
-        return os.path.exists(self._unnormalized)
+        try:
+            target = self.os_path(self._unnormalized)
+        except ValueError:
+            # A name the filename encoding cannot represent names no file -
+            # what os.path.exists answers for one the file system encoding
+            # cannot represent.
+            return False
+        return os.path.exists(target)
 
     def ensure_directory(self) -> None:
         """Create the location as a directory unless it exists, as aws-cli's pre-check does.
@@ -1434,10 +1652,16 @@ class LocalStorage(Storage):
         resolves it. Each of these is aws-cli's own outcome, measured. (The
         ``..`` cases are POSIX's: Windows folds ``..`` before the filesystem
         sees the path, leaving the trailing separator the only difference.)
-        An ``OSError`` propagates for the caller to translate.
+        An ``OSError`` (naming its files as text) or the ``ValueError`` of a
+        name the ``filename_encoding`` cannot represent propagates for the
+        caller to translate.
         """
         if not self.exists():
-            os.makedirs(self._unnormalized)
+            try:
+                os.makedirs(self.os_path(self._unnormalized))
+            except OSError as exc:
+                self._text_names(exc)
+                raise
 
     @property
     def fsync(self) -> bool:
@@ -1494,11 +1718,18 @@ class LocalStorage(Storage):
         the source's name.
         """
         full_path = self._abspath
-        if (os.path.exists(full_path) and os.path.isdir(full_path)) or dir_op:
+        if dir_op or self._is_directory(full_path):
             return full_path + os.sep, True
         if self._path.endswith(os.sep):
             return full_path + os.sep, True
         return full_path, False
+
+    def _is_directory(self, path: str) -> bool:
+        """``os.path.isdir`` for a text path (``False`` for one the encoding cannot carry)."""
+        try:
+            return os.path.isdir(self.os_path(path))
+        except ValueError:
+            return False
 
     @override
     def default_scan_options(self) -> LocalScanOptions:
@@ -1560,7 +1791,9 @@ class LocalStorage(Storage):
         # entries are this storage's. (walk_local sets it the same way.)
         options = replace(options, storage=self)
         if options.recursive:
-            yield from self._walker.list_file_pages(self._abspath + os.sep, options)
+            # The walk runs on the OS form and finds this storage's encoding
+            # through options.storage (module docstring).
+            yield from self._walker.list_file_pages(self._os_root() + os.sep, options)
             return
         page = list(self._scan_one_level(self._abspath, options))
         if page:
@@ -1592,7 +1825,7 @@ class LocalStorage(Storage):
         # directory being enumerated) and, from options.storage below, each
         # entry's producing backend.
         yield from self._walker.list_files(
-            self._abspath + os.sep,
+            self._os_root() + os.sep,
             replace(self.default_scan_options(), on_warning=on_warning, storage=self),
         )
 
@@ -1611,16 +1844,26 @@ class LocalStorage(Storage):
         scanned path first, then its immediate children when it is a directory.
         Every entry has its ``compare_key`` stamped, its producing backend set
         (``options.storage``), and ``options.filter`` applied.
+
+        ``root`` is text; the walker's methods get it in the OS form, and the
+        warnings they build (which name that form) reach ``on_warning`` as
+        text, like the recursive walk's (module docstring).
         """
         notify: Callable[[str], None] = (
             options.on_warning if options.on_warning is not None else (lambda body: None)
         )
+        codec = self._codec
+        walk_notify = notify if codec is None else _text_notify(notify, codec)
+        os_root = self._os_root(root)
         item_filter = options.filter
         if options.enumerate_all_entries:
             root_anchor = os.path.join(root, "")
-            root_record = self._walker.root_info(root_anchor, options=options, notify=notify)
+            os_anchor = os.path.join(os_root, "")
+            root_record = self._walker.root_info(os_anchor, options=options, notify=walk_notify)
             if root_record is None:
                 return
+            if codec is not None:
+                root_record.key = codec.to_text(root_record.key)
             root_record.storage = options.storage
             if item_filter is None or item_filter(root_record):
                 yield root_record
@@ -1633,14 +1876,14 @@ class LocalStorage(Storage):
             # walk - which descends from that same anchor - name the scanned
             # directory identically.
             for _sort_name, info, _loop_key in self._walker.scan_children(
-                root_anchor, strip=strip, options=options, notify=notify
+                os_anchor, strip=strip, options=options, notify=walk_notify
             ):
                 info.storage = options.storage
                 _warn_unrepresentable_mtime(info, notify)
                 if item_filter is None or item_filter(info):
                     yield info
             return
-        if not os.path.isdir(root):
+        if not os.path.isdir(os_root):
             # A single-file non-recursive scan honors the passed options'
             # follow_symlinks (like the directory branch below), so it stats
             # through _stat_one directly rather than get_fileinfo (which reads the
@@ -1659,8 +1902,9 @@ class LocalStorage(Storage):
         # instead of descending a link follow_symlinks=False forbids or emitting
         # a record the recursive walk's vetting would drop.
         root_anchor = os.path.join(root, "")  # root + separator (the walk anchor)
+        os_anchor = os.path.join(os_root, "")
         if self._walker.should_ignore_file(
-            root_anchor, follow_symlinks=options.follow_symlinks, notify=notify
+            os_anchor, follow_symlinks=options.follow_symlinks, notify=walk_notify
         ):
             return
         # scan_children stamps compare_key as info.key[strip:]; strip is the
@@ -1670,7 +1914,7 @@ class LocalStorage(Storage):
         # failed scan names the scanned directory as the recursive walk would.
         strip = len(root_anchor.replace(os.sep, "/"))
         for _sort_name, info, _loop_key in self._walker.scan_children(
-            root_anchor, strip=strip, options=options, notify=notify
+            os_anchor, strip=strip, options=options, notify=walk_notify
         ):
             # scan_children stamps compare_key only; stamp the producing backend
             # here (options.storage == self, forced by scan_pages) before the filter.
@@ -1701,12 +1945,20 @@ class LocalStorage(Storage):
         opens between them (the walk's single-stat design via
         ``entry_stat_result`` / ``classify_child``). The info carries that
         one followed ``stat_result`` and the ``is_symlink`` flag.
+
+        ``path`` is text: the OS calls take its OS form, while the key and the
+        warnings keep the text.
         """
-        is_symlink = os.path.islink(path)
+        try:
+            native = self.os_path(path)
+        except ValueError as exc:
+            # What os.stat raises for a name its encoding cannot represent.
+            raise translate_os_error(exc, operation=None, key=path.replace(os.sep, "/")) from exc
+        is_symlink = os.path.islink(native)
         if not follow_symlinks and is_symlink:
             return None
         try:
-            st = os.stat(path)  # the one snapshot, reused below (followed)
+            st = os.stat(native)  # the one snapshot, reused below (followed)
         except (FileNotFoundError, NotADirectoryError):
             # ENOENT and ENOTDIR (a path component along the way is a file, not a
             # directory) both mean the entry is definitively absent - os.path.exists
@@ -1718,6 +1970,7 @@ class LocalStorage(Storage):
             # operation resolves the path, so the operation layer fills the
             # name in (attribute_failure); key names the path, the entry's own
             # address space (exceptions.md).
+            self._text_names(exc)
             raise translate_os_error(exc, operation=None, key=path.replace(os.sep, "/")) from exc
         if _is_special_mode(st.st_mode):
             notify(
@@ -1725,10 +1978,10 @@ class LocalStorage(Storage):
                 "block special device, FIFO, or socket."
             )
             return None
-        if not is_readable(path, stat_module.S_ISDIR(st.st_mode)):
+        if not is_readable(native, stat_module.S_ISDIR(st.st_mode)):
             notify(f"Skipping file {path}. File/Directory is not readable.")
             return None
-        size, mtime = get_file_stat(path, st)
+        size, mtime = get_file_stat(native, st)
         if mtime is None:
             notify(_INVALID_TIMESTAMP)
             mtime = _EPOCH
@@ -1773,28 +2026,35 @@ class LocalStorage(Storage):
         # target file's own path before the open fails.
         target = self._abspath if not key else os.path.join(self._abspath, to_native_path(key))
         try:
+            native = self.os_path(target)
             if mode == "rb":
-                return cast("BinaryIO", open(target, "rb"))
-            parent = os.path.dirname(target)
+                return cast("BinaryIO", open(native, "rb"))
+            parent = os.path.dirname(native)
             if parent:
                 os.makedirs(parent, exist_ok=True)
-            return cast("BinaryIO", open(target, "wb"))
+            return cast("BinaryIO", open(native, "wb"))
         except (OSError, ValueError) as exc:
             # operation=None: the storage cannot know which operation opened
             # it; the operation layer fills the name in (attribute_failure).
             # key names the file opened, as get_fileinfo / delete name theirs.
+            self._text_names(exc)
             raise translate_os_error(exc, operation=None, key=target.replace(os.sep, "/")) from exc
 
     @override
     def delete(self, info: FileInfo) -> None:
-        """Remove the file at ``info.key`` (an absolute local path)."""
-        target = to_native_path(info.key)
+        """Remove the file at ``info.key`` (an absolute local path, as text)."""
         try:
-            os.remove(target)
+            os.remove(self.os_path(to_native_path(info.key)))
         except (OSError, ValueError) as exc:
             # operation=None, like open: an mv's source delete and a sync's
             # orphan removal both reach this and stamp their own name.
+            self._text_names(exc)
             raise translate_os_error(exc, operation=None, key=info.key) from exc
+
+    def _text_names(self, exc: BaseException) -> None:
+        """Name an OS error's files as this storage's text (no-op without a conversion)."""
+        if self._codec is not None:
+            self._codec.text_names(exc)
 
     @override
     def get_fileinfo(

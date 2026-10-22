@@ -211,8 +211,7 @@ class TestInvalidBinaryFormat:
 class TestUnknownOutputEncoding:
     """An unknown `AWS_CLI_OUTPUT_ENCODING` codec ends the run at rc 255.
 
-    aws refuses such a codec before any command runs; nothing else here reads
-    the variable.
+    aws refuses such a codec before any command runs.
     """
 
     @pytest.mark.parametrize("argv", [["ls", "s3://bucket/p/"], ["help"]], ids=["listing", "help"])

@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A path that names no bucket (`s3://`, `s3:///key`) is now refused before anything runs on every command but `ls`; a recursive `cp` / `mv` or a `sync` whose local source cannot be walked as a directory (a file, an unreadable directory, a symbolic link under `--no-follow-symlinks`) now stops before it starts instead of running on an empty source, which let `sync --delete` empty the destination; and an S3 timestamp that only `aws`'s local-time conversion cannot hold no longer stops a transfer or delete (exit codes changed).
 - `retry_mode = legacy`, `api_versions`, `SSLKEYLOGFILE` and `BOTO_DISABLE_CRT` now take effect as for any boto3 application, and a too-old SDK's refusal of `--no-overwrite`, of `ls`'s bucket filters and of an S3 Express access point under `mv --validate-same-s3-paths` is reported as the library reports it (exit codes changed).
 - A Ctrl-C during a single-key `rm` no longer prints the `delete:` line of the request in flight, and a local file time only the local zone cannot hold is used as it is, with no warning (exit codes changed).
+- Local file names, the command line, output and `file://` text now use the encoding `aws` uses in the same environment, whatever the Python version or `PYTHONUTF8` (Python 3.15 on a non-UTF-8 locale or on Windows no longer differs), and `AWS_CLI_OUTPUT_ENCODING` (or `PYTHONUTF8=1`) sets the error report's encoding as on `aws`; `PYTHONIOENCODING` no longer changes the output.
 
 ## [0.9.0] - 2026-10-18
 

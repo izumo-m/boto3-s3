@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 
 # These exception names do not themselves import the AWS SDK.
 from boto3_s3 import ConfigurationError, InvalidConfigError, InvalidValueError, ValidationError
-from boto3_s3_cli import checksumdefault, s3errormsg
+from boto3_s3_cli import checksumdefault, s3errormsg, textencoding
 from boto3_s3_cli.globalargs import PROFILE_ENV_VARS
 
 if TYPE_CHECKING:
@@ -548,12 +548,15 @@ def build_s3(args: argparse.Namespace) -> S3:
     # stream) and uploads with no credentials at all, rc 0. Deriving the mode
     # from the client instead signed those requests here (design/crt.md
     # section 4).
+    # filename_encoding: the encoding aws reads and writes local names with
+    # in this environment, whatever Python's own choice (textencoding).
     return CliS3(
         session=session,
         endpoint_url=args.endpoint_url,
         reusable_after_interrupt=False,
         crt_allow_lockless=True,
         crt_sign_requests=not args.no_sign_request,
+        filename_encoding=textencoding.filename_encoding(),
     )
 
 
@@ -700,7 +703,7 @@ def _resolve_verify(args: argparse.Namespace, botocore_session: BotocoreSession)
     if args.no_verify_ssl:
         return False
     if args.ca_bundle is not None:
-        return cast("str", args.ca_bundle)
+        return textencoding.os_path(cast("str", args.ca_bundle))
     configured = botocore_session.get_config_variable("ca_bundle")
     if configured is not None:
         return cast("str", configured)

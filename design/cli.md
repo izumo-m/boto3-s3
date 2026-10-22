@@ -76,6 +76,29 @@ solidified design is added here.
 - `ctx` (`Context`) is the injection point for runtime dependencies (section 3.1). When
   not supplied, the real one (the default `Context()`) is assembled. Tests pass a
   `Context` loaded with fakes.
+- **Text encodings, first of all.** The console script calls `main()` with no
+  `argv`, and before anything else `main` sets the process up the way aws's
+  encoding decision would (`textencoding`; design/overview.md section 3,
+  "Text encodings"): standard output and standard error are re-encoded where
+  Python chose another encoding (UTF-8 mode - Python 3.15's default, or
+  `PYTHONUTF8=1` - or `PYTHONIOENCODING`), stdout with the error handler
+  aws's interpreter gives it there (`strict` - so `output.uni_write` prints
+  `?` as aws's `uni_print` does - except `surrogateescape` on Windows and in
+  the C / POSIX locales) and stderr with `backslashreplace`; a Windows
+  console is left alone, it takes Unicode. Then `sys.argv` is read again
+  with the CLI's filename encoding where it differs from the file system
+  encoding (Linux and the other non-Apple POSIX systems): each argument's
+  bytes (`os.fsencode`) decoded with it, `surrogateescape` for bytes it
+  cannot decode, where aws's bootloader refuses them (rc 255). An `argv`
+  given by a caller (the tests, an embedding application) is taken as it is
+  and the streams are left alone, except that an `[ERROR]` report re-encodes
+  standard error under `AWS_CLI_OUTPUT_ENCODING` or `PYTHONUTF8=1`, as aws's
+  does. Every local path the CLI builds a
+  `LocalStorage` for, or probes itself (the missing-source and
+  destination-directory checks, `file://`, `--ca-bundle`), is that text, handed to the OS in
+  its own form (`textencoding.os_path`); the `file://` encoding falls back to
+  the same text encoding when `AWS_CLI_FILE_ENCODING` is unset. The config and
+  credentials files are botocore's to read and are not converted.
 
 ## 2. Parser construction (standard argparse, no added dependencies)
 
@@ -242,6 +265,7 @@ solidified design is added here.
 | `progress.py` | `TransferPrinter`: aws-compatible rendering of transfer result lines / progress (section 5.7-5.9. Worker-thread callbacks only count (the rc inputs) and enqueue slim records; a dedicated printer thread renders in queue order - aws's `ResultProcessor` shape, but with a **bounded** queue (aws-cli-option-handling.md section 6). The verb is `TransferType.value` - mv is `move` on every path. A record with no `dest` is rendered with a single endpoint - sync's `delete:` lines) |
 | `shorthand.py` | Parsing of map-type option values (`--metadata k=v,...` / JSON form / the `@=` paramfile operator). The grammar is aws's, cut down to scalar values: it accepts exactly what aws accepts, and refuses while parsing the lists and nested maps aws parses and then rejects, as well as bytes from `@=fileb://`. Every refusal is the parser's `Error parsing parameter '<name>'` (252). A `{`- or `[`-led value is read as JSON, and only an object of strings is accepted |
 | `paramfile.py` | aws's local paramfile loaders (`file://` text, `fileb://` binary; the `get_paramfile` counterpart) shared by the option resolution and the shorthand `@=` operator. A load failure is a `ParamfileLoadError`, which every caller - the shorthand's `@=` included - turns into the named argument's rc-252 parse error through `named_argument` (aws's `load-cli-arg` handler; aws's shorthand alone skips it and ends at 255) |
+| `textencoding.py` | The CLI's text encoding, decided as aws decides it in the same environment whatever Python chose (design/overview.md section 3, "Text encodings"; section 1 below): `text_encoding` (UTF-8 under a `C` / `POSIX` `LC_CTYPE`, otherwise the locale's own encoding read past UTF-8 mode; the ANSI code page on Windows), `filename_encoding` (the same on Linux and the other non-Apple POSIX systems, `None` on Windows and macOS, whose names are Unicode / UTF-8 on both tools) handed to every `S3` / `LocalStorage` the CLI builds, the startup re-decoding of the command line and re-encoding of the standard streams, aws's `set_preferred_output_encoding` for the `[ERROR]` report, and the `os_path` / `text_path` conversions of a command-line path. Standard library only at import (it runs before parsing) |
 | `output.py` | `aws s3`-compatible output formatting (`ls` listing lines, `rm` delete lines. Kept as pure functions; not turned into a class) |
 | `usage.py` | The single home of the usage / error strings shared across subcommands (`single_uri_usage` / `bare_single_uri_usage` / `two_path_usage`, aws's own, and `invalid_bucket_name_message`); commands interpolate only their own name or value |
 
@@ -1436,11 +1460,15 @@ all-buckets listing and `--human-readable --summarize` were byte-identical
 under `wire`, `iso8601` and no setting at all. So only the validation is
 implemented; there is no parser to swap.
 
-**`AWS_CLI_OUTPUT_ENCODING` is checked, not applied.** An unknown codec
-stops the run at rc 255 before any command runs, as aws stops it. A valid one
-changes nothing: reports are written in the stream's own encoding, so aws's
-re-encoding of its reports - and the 255 it turns a report the codec cannot
-write into - is not reproduced.
+**`AWS_CLI_OUTPUT_ENCODING` re-encodes the error reports.** An unknown
+codec stops the run at rc 255 before any command runs, as aws stops it. A
+valid one is the encoding the `[ERROR]` reports are written in, and without it
+`PYTHONUTF8=1` makes them UTF-8 - aws's `set_preferred_output_encoding`,
+which its error handlers call and nothing else does (measured: result lines,
+warnings and `fatal error:` lines keep the CLI's text encoding,
+`textencoding.prepare_error_report`). The handler is `backslashreplace`
+where aws's is `strict`, so a report the codec cannot represent is still
+written rather than turned into another failure.
 
 **The exception rule for rm / cp / mv / sync (the transfer-family commands)**:
 aws-cli's transfer family (rm / cp / mv / sync) aggregates errors after the start

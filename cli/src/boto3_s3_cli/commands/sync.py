@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 
 # Loaded at dispatch once sync is determined (stage 2 of the lazy dispatch).
 from boto3_s3 import NotFoundError, ValidationError
@@ -70,7 +69,7 @@ class SyncCommand(Command):
             )
         paths_type = head.paths_type  # "locals3" | "s3local" | "s3s3" here
         transferargs.validate_checksum_paths_type(args, paths_type, operation="sync")
-        if src_type == "local" and not os.path.exists(src):
+        if src_type == "local" and not transferargs.local_path_exists(src):
             # Missing local source (aws-cli's _validate_path_args): aws's bare
             # RuntimeError -> rc 255 (NotFoundError without a ClientError
             # cause maps the same).

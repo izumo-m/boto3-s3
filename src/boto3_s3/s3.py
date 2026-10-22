@@ -21,6 +21,7 @@ SDK-free (design/imports.md).
 
 from __future__ import annotations
 
+import codecs
 import functools
 import inspect
 import os
@@ -713,11 +714,15 @@ def _check_local_source_root(storage: LocalStorage, *, operation: str) -> None:
     if options.enumerate_all_entries:
         return
     reasons: list[str] = []
+    # The walker takes the OS form (`LocalStorage.os_path`; the source exists,
+    # so its name is one the encoding represents) and names it in its
+    # warnings, which read here as text again.
+    path = storage.os_path(storage.abspath)
     if not storage.walker.should_ignore_file(
-        storage.abspath + os.sep, follow_symlinks=options.follow_symlinks, notify=reasons.append
+        path + os.sep, follow_symlinks=options.follow_symlinks, notify=reasons.append
     ):
         return
-    path = storage.abspath
+    reasons = [storage.text_path(reason) for reason in reasons]
     typed = storage.path
     if not options.follow_symlinks and os.path.islink(path):
         raise NotFoundError(
@@ -729,7 +734,8 @@ def _check_local_source_root(storage: LocalStorage, *, operation: str) -> None:
         # the walk's absolutized form names nothing: a `..` after a symlinked
         # directory.
         raise NotFoundError(
-            f"The user-provided path {typed} does not exist as {path}.", operation=operation
+            f"The user-provided path {typed} does not exist as {storage.abspath}.",
+            operation=operation,
         )
     if not os.path.isdir(path):
         raise NotFoundError(
@@ -1054,6 +1060,12 @@ class S3:
     ``signature_version`` restores signing for botocore - still transfers
     anonymously on aws's CRT lane while its classic lane signs. Only the CLI
     distribution sets it (design/crt.md section 4).
+
+    ``filename_encoding`` is handed to every ``LocalStorage`` `resolve` builds
+    from a string: the encoding of local file names on POSIX (``None``, the
+    default, is Python's file system encoding; it has no effect on Windows).
+    See ``LocalStorage`` for what it changes; an unknown codec is an
+    ``InvalidValueError`` here. A ``LocalStorage`` passed in keeps its own.
     """
 
     def __init__(
@@ -1066,6 +1078,7 @@ class S3:
         reusable_after_interrupt: bool = True,
         crt_allow_lockless: bool = False,
         crt_sign_requests: bool | None = None,
+        filename_encoding: str | None = None,
     ) -> None:
         self._session = session
         self._endpoint_url = endpoint_url
@@ -1074,6 +1087,14 @@ class S3:
         self._reusable_after_interrupt = reusable_after_interrupt
         self._crt_allow_lockless = crt_allow_lockless
         self._crt_sign_requests = crt_sign_requests
+        # Checked here, as LocalStorage checks it: an unknown codec fails the
+        # construction rather than the first local path resolved.
+        if filename_encoding is not None:
+            try:
+                codecs.lookup(filename_encoding)
+            except LookupError as exc:
+                raise InvalidValueError(str(exc)) from exc
+        self._filename_encoding = filename_encoding
         # Memoized AwsConfig (aws_config()): resolve+parse the config file once
         # per instance, since a sync filter may consult it per object. A benign,
         # idempotent cache - concurrent first calls recompute the same reader.
@@ -1238,7 +1259,8 @@ class S3:
 
         A ``Storage`` instance is returned unchanged; an ``"s3://..."`` string
         becomes an ``S3Storage`` carrying `client`; anything else is a
-        ``LocalStorage`` (aws-cli's rule: only ``s3://`` is special). Override to
+        ``LocalStorage`` with this instance's ``filename_encoding`` (aws-cli's
+        rule: only ``s3://`` is special). Override to
         add schemes such as ``http://``, deferring the rest to
         ``super().resolve(loc)``.
 
@@ -1254,7 +1276,7 @@ class S3:
         text = os.fspath(loc)
         if text.startswith("s3://"):
             return S3Storage(S3Storage.normalize_s3_uri(text), client=self.client())
-        return LocalStorage(text)
+        return LocalStorage(text, filename_encoding=self._filename_encoding)
 
     def aws_config(self) -> AwsConfig:
         """Read this instance's AWS config file (``~/.aws/config``).

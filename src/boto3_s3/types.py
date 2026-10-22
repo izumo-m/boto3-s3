@@ -313,8 +313,10 @@ class LocalScanOptions(ScanOptions):
     ``LocalFileGenerator`` can stamp each entry's
     ``FileInfo.storage`` before the visibility filter runs, without holding a
     back-reference to any one storage (which would misfire when one walker is
-    shared across storages). ``None`` on a hand-built options object -
-    ``Storage.scan`` fills ``FileInfo.storage`` afterwards instead.
+    shared across storages); the walk also reads that storage's
+    ``filename_encoding`` from it. ``None`` on a hand-built options object -
+    ``Storage.scan`` fills ``FileInfo.storage`` afterwards instead, and the
+    walk converts no names.
     """
 
     follow_symlinks: bool = True

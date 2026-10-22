@@ -146,16 +146,15 @@ def _run_subprocess(
     # credentials/endpoint intact); the caller's overrides win (the CRT lane
     # points AWS_CONFIG_FILE at a preferred_transfer_client=crt profile).
     #
-    # PYTHONUTF8=1 fixes the child's stdio at UTF-8, the encoding the capture
-    # below decodes. Left alone, a Windows child writes the host's codepage
-    # (cp932 and cp1252 measured on two hosts) and its non-ASCII output would
-    # come back as U+FFFD. The pinned aws.exe honors the variable for its
-    # error reports alone (aws's own code reads it back for those streams; its
-    # frozen interpreter ignores it), so an error report moves to UTF-8 on both
-    # sides while aws.exe's result lines keep the host codepage (measured) -
-    # PYTHONIOENCODING moves neither, aws.exe ignores it. UTF-8 mode also pins the
-    # child's locale.getpreferredencoding(), so a subprocess test of the
-    # file:// paramfile encoding must set AWS_CLI_FILE_ENCODING itself.
+    # PYTHONUTF8=1 moves the error reports to UTF-8, the encoding the capture
+    # below decodes, on both tools: the pinned aws.exe and the CLI read it back
+    # for those reports alone (aws's frozen interpreter ignores it). Everything
+    # else either writes - result lines, warnings - keeps the encoding aws
+    # uses: UTF-8 on a UTF-8 Linux host, the host's codepage on Windows (cp932
+    # and cp1252 measured on two hosts), where non-ASCII result lines come back
+    # as U+FFFD from both tools alike. PYTHONIOENCODING moves neither. The
+    # file:// paramfile encoding follows the same host encoding, so a
+    # subprocess test of it sets AWS_CLI_FILE_ENCODING itself.
     proc_env = {**os.environ, "PYTHONUTF8": "1", **(env or {})}
     proc = subprocess.run(
         cmd,
