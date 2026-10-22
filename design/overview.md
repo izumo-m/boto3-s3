@@ -75,10 +75,14 @@ maintaining high functional compatibility.
   is the reference rather than a target to match in full. What decides the
   functional outcome is matched: a run carries on past a per-item failure
   where `aws s3` carries on (a `sync` that meets an error keeps going), and
-  stops before it starts where `aws s3` stops. The details of a particular
-  error are not: its wording, which of two simultaneous mistakes is reported,
-  the order of the reports. A functional difference is either a bug or a
-  deliberate deviation written down in
+  stops before it starts where `aws s3` stops. Messages follow aws-cli too:
+  a warning or error message aws-cli's own code writes is written the same
+  way, unless aws-cli's text is inappropriate or makes no sense, where ours
+  may say it differently. Other details of a particular error are not
+  matched: which of two simultaneous mistakes is reported, the order of the
+  reports, and the text the SDK, Python or S3 writes, which is reported as
+  they write it. A functional difference is either a bug or a deliberate
+  deviation written down in
   [`aws-differences.md`](../docs/cli/aws-differences.md); a difference in an
   error's details is neither, and is not written down. One source of
   deliberate functional deviation is settled: S3 objects are deleted in
@@ -145,6 +149,29 @@ maintaining high functional compatibility.
      from a filter or a callback reaches the caller as it is: a filter decides
      on an item and a callback reports on one, so their failure is not the
      item's.
+- **Responses outside S3's API are not specified**: the library relies on S3,
+  or an S3-compatible server, answering as S3's API defines. What a response
+  outside that definition leads to - a missing element, a value the API does
+  not define, a value that cannot be read - is not specified: the run may
+  fail, may go on and succeed, or may come out differently, and no code
+  checks for such a response, works around it or classifies its failure, nor
+  matches what aws-cli does with it. The error rules above apply to responses
+  within the API. One exception is security: a server, faulty or hostile,
+  must not be able to make a run loop or grow without bound, so that much is
+  checked; the rules on secrets and protections above hold as well.
+- **Text encodings**: which encoding turns bytes into text and back depends on
+  the Python version and its environment, and only the application knows
+  which one it was written for.
+  1. The library follows Python's defaults wherever it converts - local file
+     names, text streams - and lets the caller name the encoding instead, so
+     an application can fix the one it relies on.
+  2. The CLI uses the encoding aws-cli uses in the same environment wherever
+     it converts: local file names, its command line, its output, and the
+     files it reads values from. A run that replaces `aws s3` with the CLI
+     handles the same names and the same text.
+  3. The AWS config and credentials files are read as boto3 reads them, by
+     the library and the CLI alike: a file boto3 refuses is refused, and one
+     boto3 reads is read. Settings the library or the CLI ignores are exempt.
 - **Exit codes** (the CLI): follow the meaning aws-cli gives each value
   ([`exit-codes.md`](../docs/cli/exit-codes.md)). Matching aws-cli's value in
   every corner (two mistakes at once, say) is not a goal.
