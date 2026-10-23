@@ -205,6 +205,34 @@ class TestWalkWarnings:
         # not to be a directory, so the path carries no trailing separator.
         assert f"{os.sep}up. " in warnings[0], warnings
 
+    @pytest.mark.skipif(
+        os.name != "posix" or os.pathconf("/", "PC_PATH_MAX") != 4096, reason="Linux's PATH_MAX"
+    )
+    def test_a_directory_one_byte_short_of_path_max_keeps_its_separator(
+        self, tmp_path: Path
+    ) -> None:
+        # Its own path (4095 bytes) is a directory; only the separator the
+        # descent opens takes it past the limit. aws-cli's parent listing
+        # sees a directory, adds the separator, and its descent warns the
+        # separator form - the walk must warn the same, not end the run.
+        _make_tree(tmp_path, "top.txt")
+        fd = os.open(tmp_path, os.O_RDONLY)
+        length = len(str(tmp_path))
+        while length < 4095:
+            name = "d" * min(200, 4095 - length - 1)
+            if 0 < 4095 - length - 1 - len(name) < 2:
+                name = name[:-2]
+            os.mkdir(name, dir_fd=fd)
+            child = os.open(name, os.O_RDONLY, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            length += 1 + len(name)
+        os.close(fd)
+        warnings: list[str] = []
+        assert _keys(tmp_path, on_warning=warnings.append) == ["top.txt"]
+        _assert_warned(warnings, ("does not exist",))
+        assert f"{os.sep}. " in warnings[0], warnings
+
     def test_symlink_leaf_at_the_cycle_boundary_warns_like_aws(self, tmp_path: Path) -> None:
         # A cycle whose boundary directory still holds a *symlink* file leaf: the
         # fast walk vets that leaf through the directory fd (its own single link,

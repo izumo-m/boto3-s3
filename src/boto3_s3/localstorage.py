@@ -1071,10 +1071,17 @@ class LocalFileGenerator:
             # directory.
             if dir_fd is not None:
                 os.close(dir_fd)
-            if exc.errno in (errno.ELOOP, errno.ENAMETOOLONG) and probe.endswith(os.sep):
+            if (
+                exc.errno in (errno.ELOOP, errno.ENAMETOOLONG)
+                and probe.endswith(os.sep)
+                and not os.path.isdir(probe[:-1])
+            ):
                 # aws-cli's parent listing already finds such a path not to
                 # be a directory (its ``isdir`` fails the same way), so it is
-                # never given the separator and is warned as a file.
+                # never given the separator and is warned as a file. A path
+                # that is a directory there - one byte short of the limit,
+                # which only the separator takes past it - keeps the
+                # separator, as aws-cli's descent names it.
                 probe = probe[:-1]
             if not self.triggers_warning(probe, notify):
                 codec = _walk_codec(options)
