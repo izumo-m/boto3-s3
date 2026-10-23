@@ -278,7 +278,9 @@ def open_side_display(storage: Storage, key: str) -> str:
     ``key`` appended when it addresses a child (``""`` is the location itself).
     """
     text = storage.as_text()
-    return f"{text.rstrip('/')}/{key}" if key else text
+    if not key:
+        return text
+    return f"{text}{key}" if text.endswith("/") else f"{text}/{key}"
 
 
 def _glacier_blocked(info: FileInfo, *, options: TransferOptions) -> bool:

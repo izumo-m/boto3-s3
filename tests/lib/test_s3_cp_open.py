@@ -986,3 +986,21 @@ class TestMoveRoute:
             S3().mv(src, S3Storage("s3://gone/up/", client=client), transfer_config=_SYNC)
         assert src.deletes == []
         assert src._store == {"": b"x" * 7}
+
+
+class TestOpenSideDisplay:
+    @pytest.mark.parametrize(
+        ("location", "key", "expected"),
+        [
+            ("mem://data", "a.txt", "mem://data/a.txt"),
+            ("mem://data/", "a.txt", "mem://data/a.txt"),
+            # A location that is all scheme keeps its own slashes.
+            ("dict://", "sub/b.txt", "dict://sub/b.txt"),
+            ("dict://", "", "dict://"),
+        ],
+    )
+    def test_the_key_joins_the_location_with_one_separator(
+        self, location: str, key: str, expected: str
+    ) -> None:
+        storage = _MemStorage({}, location=location)
+        assert producers.open_side_display(storage, key) == expected
