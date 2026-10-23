@@ -1006,7 +1006,11 @@ class LocalFileGenerator:
         first strips the separator and tests the name itself, as aws-cli's
         ``should_ignore_file`` does at the top of each descent: a directory
         that became a symlink is skipped silently rather than followed, and
-        the battery names the stripped path.
+        the battery names the stripped path. The battery also takes the
+        stripped path, symlinks followed or not, when the open failed on a
+        symlink loop or the path-length limit and the bare path is not a
+        directory either: aws-cli's parent listing, whose ``isdir`` fails
+        the same way, never added the separator.
 
         The fast path scans through the directory's own fd where the platform
         allows (``have_dir_fd``), so each entry's stat and readability probe

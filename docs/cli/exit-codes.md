@@ -28,9 +28,9 @@ or without warnings, but whose output stdout could not take (a full disk, a
 reader gone), a help page included: the work is done, the exit code is 255
 with the error. With stdout closed (`1>&-`), `ls` and `presign`, which have
 result lines to write, fail at 255 as `aws` does; the other commands write
-nothing there and the code is the work's. An error report that stderr cannot
-take (`2>&-`, a full disk, a reader gone) changes no code either, where `aws`
-exits 1.
+nothing there and the code is the work's. An error report, failure line or
+warning that stderr cannot take (`2>&-`, a full disk, a reader gone) changes
+no code either, where `aws` exits 1.
 
 ### 1 — the operation failed after it started
 

@@ -86,9 +86,9 @@ instances exist only where no classification applies:
   request the library issues reports it as the base error with that
   exception on `__cause__` and its text — what the AWS CLI prints — as the
   message;
-- a single transfer's local file whose name the operating system refuses
-  before asking the filesystem (an embedded NUL, a lone surrogate), which
-  fails that item (see [`ValidationError`](#validationerror));
+- a single download's local destination file whose name the operating
+  system refuses before asking the filesystem (an embedded NUL, a lone
+  surrogate), which fails that item (see [`ValidationError`](#validationerror));
 - an exception a stream raises (an `IOStorage` or `StdioStorage` side) that is
   not already a `Boto3S3Error`, an `OSError` included — a download to a full
   disk, say; where the SDK reads the stream itself, the SDK's category applies
