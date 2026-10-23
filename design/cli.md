@@ -1008,8 +1008,8 @@ streaming downloads`). An absent stdin is an in-pipeline fatal (`fatal error:
 stdin is required for this operation, but is not available.`, rc 1). An absent
 stdout has no counterpart check, aws guarding stdin only, so it fails the one
 item instead: `download failed: s3://b/k to - 'NoneType' object has no
-attribute 'write'`, rc 1 either way, while an empty object writes nothing and
-succeeds (transfer.md section 6). A stdout that
+attribute 'write'`, rc 1 either way, an empty object included (transfer.md
+section 6). A stdout that
 cannot take the bytes - full, or a reader that left the pipe (`cp s3://b/k - |
 head -c1` on an object larger than the pipe holds) - fails the item the same
 way, whether a write or the flush as the item settles meets it:
@@ -1382,8 +1382,9 @@ was buffered.
 A Ctrl-C during the final flush ends at 130 with both streams pointed at the
 null device, so the exit's flush does not wait on the same reader again. A stdout that is
 `None` (closed before the process started, `1>&-`) takes nothing and is left
-alone; the code is the work's. A stderr that cannot be flushed changes no
-code.
+alone; the code is the work's. A stderr that cannot take an error report or
+be flushed, or that is `None` (`2>&-`), changes no code (`_write_error`
+discards what it cannot write).
 
 The mapping is `cli.exit_code_for`. It prioritizes "**whether the server was
 reached** (whether it derives from `ClientError`)" over the library's exception

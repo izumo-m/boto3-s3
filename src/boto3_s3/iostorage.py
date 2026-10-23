@@ -106,7 +106,8 @@ class _WriteOnly:
     nothing is held from ``open`` time: a process without a stdout therefore
     fails on the ``write`` itself, from inside the transfer, which reports it
     as that item's failure the way aws does - not as a precondition of
-    starting one.
+    starting one. An empty object, which writes nothing, fails the same way
+    at ``close``, as on aws.
 
     ``close`` flushes the process stream and never closes it. The transfer
     closes its writer as the item settles (`transfer._CloseFileobj`), so a
@@ -126,8 +127,10 @@ class _WriteOnly:
     def close(self) -> None:
         stdout: Any = sys.stdout
         if stdout is None:
-            # No stdout: a non-empty object already failed on its write, and
-            # an empty one, which writes nothing, has nothing to flush.
+            # No stdout fails the item whatever the object held: an empty one
+            # writes nothing, so this is where it fails, with the error aws's
+            # writer meets on its write (a non-empty one already failed there).
+            self.write(b"")
             return
         getattr(stdout, "buffer", stdout).flush()
 

@@ -201,8 +201,19 @@ def _write_error(message: object, *, rc: int | None = None) -> None:
         report = _configuration_report(message)
         if report is not None:
             text = f"An error occurred ({report[0]}): {report[1]}"
+    if sys.stderr is None:
+        # Closed before the process started (`2>&-`): nothing to report to,
+        # and the code is the work's, as for a closed stdout.
+        return
     textencoding.prepare_error_report(sys.stderr)
-    sys.stderr.write(f"boto3-s3: [ERROR]: {text.strip()}".rstrip() + "\n")
+    try:
+        sys.stderr.write(f"boto3-s3: [ERROR]: {text.strip()}".rstrip() + "\n")
+    except OSError:
+        # A stderr that cannot take the report (a reader that left the pipe,
+        # a full disk) changes no code: what it holds goes to the null device,
+        # so the exit's flush does not end the process at 120
+        # (`_settle_std_streams`).
+        _discard(sys.stderr)
 
 
 def _invalid_choice_message(value: object, choices: Iterable[object]) -> str:

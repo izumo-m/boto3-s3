@@ -471,9 +471,9 @@ The caller's stream is never closed by `IOStorage`.
   caller's. Only stdin is checked ahead of the transfer (`open("rb")` raises
   `ValidationError`, aws's `StdinMissingError` sentence); stdout has no
   counterpart on either side, so a process without one fails the item from
-  inside the transfer (`'NoneType' object has no attribute 'write'`); an
-  empty object writes nothing and its `close` has no stream to flush, so it
-  succeeds, as on aws.
+  inside the transfer (`'NoneType' object has no attribute 'write'`), an
+  empty object included - it writes nothing, so its writer's `close` fails it
+  with the same error, as aws's writer does on its write.
   An `IOStorage` (caller-supplied stream) keeps the stream's own
   seekability: the caller chose the object, so its protocol governs - and its
   writer view absorbs the transfer's `close` into a flush in the same way.

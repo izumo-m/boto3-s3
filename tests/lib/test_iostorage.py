@@ -617,21 +617,26 @@ class TestStreamDownloadWithABrokenStdout:
         assert isinstance(error.__cause__, OSError)
         assert str(error) == str(error.__cause__)  # the cause shows in the message
 
-    def test_an_empty_object_without_a_stdout_succeeds(
+    def test_an_empty_object_without_a_stdout_fails_the_item(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Nothing is written, so nothing fails: the writer's close has no
-        # stream to flush and returns, as aws's writer, never written to, does.
+        # Nothing is written, but there is nowhere it could have gone: the
+        # writer's close fails the item with the error a write meets, as aws's
+        # writer fails it (measured, rc 1 with the same line).
         monkeypatch.setattr("sys.stdout", None)
         client, _calls = make_recording_client([head_response(ContentLength=0), get_response(b"")])
         results: list[OpResult] = []
-        S3().cp(
-            S3Storage("s3://b/d/empty.txt", client=client),
-            StdioStorage(),
-            transfer_config=_SYNC,
-            on_result=results.append,
-        )
-        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+        with pytest.raises(BatchError):
+            S3().cp(
+                S3Storage("s3://b/d/empty.txt", client=client),
+                StdioStorage(),
+                transfer_config=_SYNC,
+                on_result=results.append,
+            )
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        error = results[0].error
+        assert isinstance(error, Boto3S3Error)
+        assert isinstance(error.__cause__, AttributeError)
 
     def test_no_stdout_at_all_fails_the_item(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # aws checks stdin before starting a transfer but never stdout, so this

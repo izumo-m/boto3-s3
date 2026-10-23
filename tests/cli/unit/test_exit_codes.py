@@ -343,6 +343,30 @@ class TestMainExitCodes:
         assert cli.main(["ls"]) == 0
         assert capsys.readouterr().err == ""
 
+    def test_an_error_report_stderr_cannot_take_keeps_the_code(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `2>/dev/full`, or `2>&1 | head` once the reader left: the report's
+        # own write fails. That failure must not escape main, whose final
+        # flush then never runs and Python's flush at exit ends the process
+        # at 120; the code is the work's.
+        class _FullStderr:
+            encoding = "utf-8"
+
+            def write(self, _text: str) -> int:
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+            def flush(self) -> None:
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr(sys, "stderr", _FullStderr())
+        assert cli.main(["ls", "--bogus"]) == 252
+
+    def test_a_run_without_a_stderr_keeps_its_code(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # `2>&-`: Python starts with no stderr, and the report has nowhere to go.
+        monkeypatch.setattr(sys, "stderr", None)
+        assert cli.main(["ls", "--bogus"]) == 252
+
     def test_keyboard_interrupt_exits_130_with_a_bare_newline(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
