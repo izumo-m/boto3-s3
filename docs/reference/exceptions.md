@@ -194,7 +194,11 @@ where a stream needs it (there is no `stdout` counterpart — matching the AWS
 CLI, a missing one fails that item from inside the transfer instead); a local
 path the operating system refuses before asking the filesystem (an embedded
 NUL, a lone surrogate the filesystem encoding cannot carry), with the
-`ValueError` on `__cause__`. It is also the class for botocore's
+`ValueError` on `__cause__`, where `LocalStorage` itself is asked about it
+(`get_fileinfo`, `open`, a recursive download's destination directory) - as a
+single transfer's local file it fails the item with the base `Boto3S3Error`,
+and as an upload source it is a missing source (`NotFoundError`). It is also
+the class for botocore's
 `ParamValidationError` — client-side validation, so no request was sent — and
 for an S3 4xx other than 403 and 404 whose code is not in the category table.
 
