@@ -92,8 +92,8 @@ predicate runs inside the listing, and the operation puts its name on a
 listing failure that carries none — so a `Boto3S3Error` the predicate lets out
 with `operation` unset (from a storage call of its own, say) arrives with
 `operation` set to the operation's name, the same exception object otherwise.
-On the single-object paths, and from `on_result` / `on_entry`, it arrives as
-raised.
+A non-recursive `cp` / `mv` sets it the same way; from `rm`'s blind single-key
+delete, and from `on_result` / `on_entry`, it arrives as raised.
 
 **Where it does not apply.** `cp`'s stream route — an `IOStorage` on either
 side — has no listing to prune, and `filter` is not consulted on it. `mv` has

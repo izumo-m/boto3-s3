@@ -379,12 +379,15 @@ path resolve the engine differently. The same root fixture points
 profile's `[s3]` section (cli.md section 8), this stops the host config from
 leaking tuning into the moto/recorder tiers and - on a CRT-optimized host -
 keeps `auto` from silently resolving to an engine moto cannot intercept. That
-config file only covers the CLI transfer tiers (`resolve_transfer_client`),
-not the library's own default `auto` path, which consults
-`awscrt.s3.is_optimized_for_system()` directly (`crtsupport.should_use_crt`);
-a second autouse fixture (`_pin_classic_engine`) monkeypatches that probe to `False`
-so the in-process/library transfer tests stay deterministic on a
-CRT-optimized host (`test_transferrer.py` depends on it).
+config file covers every run that reads `[s3]` - the CLI tiers and the
+library's own cp / mv / sync / rm alike (`S3.resolve_transfer_config`, whose
+engine choice is `resolve_transfer_client`) - but not a config that gives
+`preferred_transfer_client` itself (an explicit `auto`) or a `Transferrer`
+built directly, which consult `awscrt.s3.is_optimized_for_system()` directly
+(`crtsupport.should_use_crt`); a second autouse fixture
+(`_pin_classic_engine`) monkeypatches that probe to `False` so those tests
+stay deterministic on a CRT-optimized host (`test_transferrer.py` depends on
+it).
 
 The dev environment is always CRT-present (the dev dependency group installs
 `botocore[crt]`), matching aws v2 - the condition every comparison tier runs

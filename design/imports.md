@@ -47,8 +47,8 @@ to exactly this contract - the "Library consumption contract" in
   and `sessions.py` import `boto3` (which itself pulls in s3transfer via its
   `compat` module),
   and `transferconfig.py` (the re-export home for the public `TransferConfig`:
-  boto3's subclass plus the CRT fields and `annotation_temp_dir`, crt.md
-  section 2) imports `boto3.s3.transfer`, while `transfer.py` imports
+  boto3's subclass plus the CRT field `target_bandwidth` and
+  `annotation_temp_dir`, crt.md section 2) imports `boto3.s3.transfer`, while `transfer.py` imports
   `s3transfer` directly and `sdkerrors.py` the botocore and s3transfer
   exceptions it classifies. The bare-import contract holds because the lazy root
   defers those *module* loads, not because the modules defer the SDK -

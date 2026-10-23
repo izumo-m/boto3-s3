@@ -186,7 +186,9 @@ raises them unnamed (the object listing is shared with the recursive forms of
   [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement — a
   client that cannot be built: a set-but-unusable profile, partial
   credentials, a malformed region or endpoint; and missing credentials, which
-  fail the listing's first request rather than the build.
+  fail the listing's first request rather than the build. An S3 Express
+  location the SDK predates raises `ConfigurationError` naming the version,
+  before any request.
 - [`Boto3S3Error`](../exceptions.md#boto3s3error) itself — a failure the
   translator cannot classify.
 

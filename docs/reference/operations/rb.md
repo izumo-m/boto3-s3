@@ -55,7 +55,8 @@ Raises:
   target, whose client is this instance's `client()`, and an `S3Storage`
   constructed without a `client`, which builds its default on first use.
   Missing credentials fail no build: they raise `ConfigurationError` when the
-  `DeleteBucket` request is signed.
+  `DeleteBucket` request is signed. An S3 Express location the SDK predates
+  raises `ConfigurationError` naming the version, before any request.
 - The `DeleteBucket` rejection itself, translated to its category:
   `NoSuchBucket` becomes [`NotFoundError`](../exceptions.md#notfounderror), a
   403 becomes [`AccessDeniedError`](../exceptions.md#accessdeniederror), a 5xx

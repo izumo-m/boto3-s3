@@ -53,7 +53,8 @@ The two encoding variables name codecs. `AWS_CLI_FILE_ENCODING` is the codec a
 codec the error reports (`boto3-s3: [ERROR]: ...`) are written in, as `aws`
 writes its own; result lines, warnings and the other output keep the encoding
 both tools use by default (section 8). A codec Python does not know is a
-configuration error, exit code 255, on either variable.
+configuration error, exit code 255: in `AWS_CLI_OUTPUT_ENCODING` on every
+command, in `AWS_CLI_FILE_ENCODING` only when a `file://` value is read.
 
 `AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS` is honored only when it is literally
 `true` (case-insensitively). `AWS_CLI_AUTO_PROMPT` and the profile key
@@ -153,9 +154,9 @@ What it does do is stop every subcommand when the value is neither: exit code
 cli_timestamp_format value: <value>, valid values are "wire" or "iso8601"`.
 `help` and `--version` do not read the config files, so
 they still work under such a value; `aws` checks it as its session comes up
-and fails them too. `cli_binary_format` is checked the same way: a value other
-than `base64` or `raw-in-base64-out` stops every subcommand with exit code
-255, unless `--cli-binary-format` is given.
+and fails its `help` too, though not its `--version`. `cli_binary_format` is
+checked the same way: a value other than `base64` or `raw-in-base64-out` stops
+every subcommand with exit code 255, unless `--cli-binary-format` is given.
 
 The value is read from the selected profile only — a `[profile x]` setting
 applies under `--profile x` or `AWS_PROFILE=x`, not otherwise — and the shared
@@ -185,15 +186,22 @@ writes it.
 
 Any option or path that takes a single string can be given as `file://path`
 (read as text) or `fileb://path` (read as bytes), resolved before the command
-runs. This covers the `<S3Uri>` positional of `ls` / `rm` / `website` / `mb` /
-`rb` / `presign` and the free-string options of `cp` / `mv` / `sync`.
+runs. This covers the `<S3Uri>` positional of `ls` / `rm` / `mb` / `rb` /
+`presign` and the free-string options of `cp` / `mv` / `sync`.
 
-Two exclusions are worth knowing:
+The exclusions worth knowing:
 
+- **A path takes `file://` only.** A `fileb://` path, and either prefix as
+  `website`'s bucket, are usage errors (exit code 252), as is a whole
+  `--metadata fileb://...`.
 - **List-valued options are not expanded** — `--exclude`, `--include`, and
-  `mb --tags` keep the text verbatim.
+  `mb --tags` keep the text verbatim. `--grants` refuses either prefix as a
+  usage error; give each grant as an argument.
 - **Options with a fixed choice list cannot use it**, because the value is
   rejected as an invalid choice first.
+
+Section 2 of [`aws-differences.md`](./aws-differences.md#2-behavior-differences)
+says what `aws` does with the refused forms.
 
 `file://` text is decoded with `AWS_CLI_FILE_ENCODING` when it is set, and
 otherwise with the encoding `aws` uses by default (section 8). A file that

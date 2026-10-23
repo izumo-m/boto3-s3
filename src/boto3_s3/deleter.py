@@ -163,9 +163,9 @@ def _delete_objects_compatible(key: str) -> bool:
     A carriage return can be sent - botocore escapes CR/LF before sending the
     document - but the response is the other half: its ``Errors[]`` names the
     failed keys, and a service writing the CR back unescaped has it normalized
-    to LF by the parser. The failure then matches no submitted key (failing
-    the whole batch closed), or matches a sibling key that differs only by
-    that CR/LF - reporting the wrong one failed and the failed one deleted. So
+    to LF by the parser. The failure then matches no submitted key (so the
+    failed key reads as deleted), or matches a sibling key that differs only
+    by that CR/LF - reporting the wrong one failed and the failed one deleted. So
     a key with a CR is not batched either. ``DeleteObject`` carries the key in
     the URL instead and is the route aws-cli uses for every key.
     """

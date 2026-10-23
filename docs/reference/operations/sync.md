@@ -350,7 +350,10 @@ order rather than in compare-key order.
   settings with `preferred_transfer_client="crt"`, rejected when the transfer
   engine is built and therefore not under `dryrun`.
 - [`NotFoundError`](../exceptions.md#notfounderror) — the local source path of
-  an upload does not exist.
+  an upload does not exist, or is one the walk would skip as a directory root
+  (a file, a special file, a symbolic link the storage does not follow), with
+  [`AccessDeniedError`](../exceptions.md#accessdeniederror) for a directory it
+  cannot read; both before anything is listed or deleted.
 - [`ConfigurationError`](../exceptions.md#configurationerror), or its
   [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement —
   a profile, region, endpoint or partial credentials that will not resolve

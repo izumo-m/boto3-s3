@@ -423,10 +423,11 @@ to enumerate anything.
 
 `OPEN_READ` and `OPEN_WRITE` promise `open(key, "rb")` and `open(key, "wb")`
 respectively; a backend that implements one mode declares only that one.
-`GET_FILEINFO` promises `get_fileinfo(key)`. `SCAN` promises `scan` /
-`scan_pages`. `SORTABLE_SCAN` promises that `scan` yields entries in UTF-8 byte
-order of their `compare_key` when `ScanOptions(sort=True)` asks for it.
-`DELETE` promises `delete(info)`.
+`GET_FILEINFO` promises `get_fileinfo(key="", *, on_warning=None)`, in that
+form, since the engine calls it with no `key` (the location itself) and with
+`on_warning`. `SCAN` promises `scan` / `scan_pages`. `SORTABLE_SCAN` promises
+that `scan` yields entries in UTF-8 byte order of their `compare_key` when
+`ScanOptions(sort=True)` asks for it. `DELETE` promises `delete(info)`.
 
 The three reading members form a lattice: `SORTABLE_SCAN` implies `SCAN`
 implies `GET_FILEINFO`, since ordered enumeration implies enumeration implies

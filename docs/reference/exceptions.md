@@ -86,6 +86,10 @@ instances exist only where no classification applies:
   request the library issues reports it as the base error with that
   exception on `__cause__` and its text — what the AWS CLI prints — as the
   message;
+- an exception a stream raises (an `IOStorage` or `StdioStorage` side) that is
+  not already a `Boto3S3Error`, an `OSError` included — a download to a full
+  disk, say; where the SDK reads the stream itself, the SDK's category applies
+  instead ([`storage.md`](./storage.md#iostorage));
 - the status-widening fallback for a `ClientError` whose error code is not in
   the category table and whose HTTP status is not one the widening rules cover
   (403, 404, 5xx, other 4xx);
@@ -136,7 +140,9 @@ exception surfacing inside a translated S3 call becomes a `ConfigurationError`.
 
 An exception raised by a custom `Storage` backend that is not already a
 `Boto3S3Error` is wrapped into this base class when it surfaces as a per-item
-failure, but one raised during enumeration (`scan`) or on the fatal path
+failure, and so is one raised while a `sync` content comparison
+(`EtagComparison` / `ChecksumComparison`) reads that backend, which aborts the
+`sync`; one raised during enumeration (`scan`) or elsewhere on the fatal path
 propagates as-is (see [`storage.md`](./storage.md)). Attribution on a per-item
 failure is filled in the same best-effort spirit: a family error raised
 in-pipeline, from a backend's `open` or its reads and writes, arrives with
@@ -221,10 +227,11 @@ those two failure modes; a library consumer can ignore it and catch
 class InvalidValueError(ValidationError): ...
 ```
 
-Adds no attributes and no constructor of its own. Inside `boto3_s3` two paths
-raise it: [`presign`](./operations/presign.md) with a non-positive
-`expires_in` the CRT signer refuses, and an `IOStorage` given an unknown
-`encoding` ([`storage.md`](./storage.md)). Otherwise it is raised by the
+Adds no attributes and no constructor of its own. Inside `boto3_s3` these
+paths raise it: [`presign`](./operations/presign.md) with a non-positive
+`expires_in` the CRT signer refuses, an `IOStorage` given an unknown
+`encoding`, and an [`S3`](./s3.md) or a `LocalStorage` given an unknown
+`filename_encoding` ([`storage.md`](./storage.md)). Otherwise it is raised by the
 `boto3-s3-cli` distribution (and is available to callers who want the same
 refinement); a handler around library calls need only catch
 `ValidationError`.
@@ -235,8 +242,9 @@ A network or local I/O failure. Raised for an S3 5xx or a throttling response
 (`InternalError`, `SlowDown`, `ServiceUnavailable`, `RequestTimeout`), for
 botocore's connection and HTTP-client failures (endpoint or connect failure,
 proxy failure, read timeout, a dropped connection, a response body that ends
-short of its `Content-Length`), and for a local `OSError`
-that is neither `FileNotFoundError` nor `PermissionError`, including a failed
+short of its `Content-Length`), and for a local `OSError` (not one a stream
+raises, which is the base class; see above) that is neither
+`FileNotFoundError` nor `PermissionError`, including a failed
 directory creation and one raised inside the classic transfer engine (the
 AWS CLI's message text kept as it is), and an `OSError` while a client is
 built that is not a configured path failing (out of file descriptors, say). On the CRT engine the same events

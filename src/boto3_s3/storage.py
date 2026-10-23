@@ -116,7 +116,8 @@ class StorageCapability(Flag):
     single-URL backend reads one object but cannot enumerate):
 
     - ``OPEN_READ`` / ``OPEN_WRITE`` - ``open(key, "rb")`` / ``open(key, "wb")``
-    - ``GET_FILEINFO`` - ``get_fileinfo(key)``, resolving a single entry
+    - ``GET_FILEINFO`` - ``get_fileinfo(key="", *, on_warning=None)``, resolving
+      a single entry
     - ``SCAN`` - ``scan`` / ``scan_pages``, enumerating a container
     - ``SORTABLE_SCAN`` - ``scan`` yields keys in UTF-8 byte order when asked
       (``ScanOptions(sort=True)``); ``sync``'s merge-join needs it on both sides,

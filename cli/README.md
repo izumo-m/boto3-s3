@@ -52,8 +52,9 @@ Over the more permissive Python library, this CLI narrows the inputs to what
 Compatibility is functional rather than full: when something fails, the
 outcome follows `aws s3` (a failed item leaves the others running; a run that
 cannot proceed stops before it starts). Messages `aws`'s own code writes read
-the same, apart from a few `aws` words wrongly; an error's other details, such as which of two mistakes is reported
-or the text botocore or Python writes, may differ. Deliberate
+the same, apart from the few that `aws` words wrongly; an error's other
+details, such as which of two mistakes is reported or the text botocore or
+Python writes, may differ. Deliberate
 differences, such as batched deletes and credentials masked in debug output,
 are listed in
 [`docs/cli/aws-differences.md`](https://github.com/izumo-m/boto3-s3/blob/main/docs/cli/aws-differences.md);

@@ -27,7 +27,8 @@ solidified design is added here.
   The exit codes for exceptions and usage errors are covered in section 6.
 - Nothing before the command reads aws's config or credentials files. aws
   builds its botocore session before it parses the command line, so a broken
-  file or setting fails even its `help` and `--version`; here botocore reads
+  setting fails even its `help`, and a config or credentials file it cannot
+  parse its `--version` as well; here botocore reads
   the files when a command opens its session (section 6), so the
   informational exits succeed under a broken config and stay SDK-free
   ([`imports.md`](./imports.md)). This is the accepted ordering difference of
@@ -275,8 +276,8 @@ public surfaces (the two-layer export contract of
 (`boto3_s3.__all__`) and
 the documented submodule surfaces (each module's `__all__`: the `transferplan`
 planner,
-`globsieve`, `localstorage.translate_os_error`, `awsconfig`'s shared size
-core, `awsclicompare`, `crtsupport`, `masking`'s `SecretMaskingFilter`, and
+`globsieve`, `localstorage.translate_os_error`, `awsclicompare`,
+`crtsupport`, `masking`'s `SecretMaskingFilter`, and
 `pathresolver`'s pin stand-down probes `is_mrap_path` / `is_outpost_path` /
 `is_outpost_alias_path` / `is_s3express_path` / `is_s3express_accesspoint_path`,
 `requestparams.validate_grants` (the `--grants` check the CLI makes before the
@@ -316,9 +317,9 @@ their dependencies through a `Context`.
     creates the s3control / sts clients (section 5.8).
   - `transfer_config` (`TransferConfig | None`) - overrides the transfer
     engine's defaults; tests inject `use_threads=False` to make the multipart
-    call order deterministic. **Only when it is `None`** do cp / mv / sync
-    build the config from `[s3]` (section 8), so an injected value always
-    takes precedence.
+    call order deterministic. cp / mv / sync / rm hand it to
+    `S3.resolve_transfer_config` (section 8): each setting it sets takes
+    precedence, and the rest still come from `[s3]`, which is read either way.
 
   Tests inject a fake client via
   `cli.main(argv, ctx=Context(client_factory=<fake>))` (no monkeypatching of
@@ -818,7 +819,8 @@ rc 252. **A key on a bucket is also rc 252** ("Please specify a valid bucket
 name only. E.g. s3://<bucket>"). A bare trailing slash in `s3://b/` is
 allowed, treating the key as empty = same as aws. A path that names no bucket
 (`s3://`, `s3:///k`) is refused before the client is built (252,
-`base.refuse_bucketless`), `--force` or not; aws sends `Bucket=""` and reports
+`base.refuse_bucketless`), `--force` or not. aws refuses `s3:///k` at 252 as a
+key on a bucket, `--force` or not; for `s3://` it sends `Bucket=""` and reports
 an rb failure at rc 1, or under `--force` runs the inner rm first and ends at
 255.
 
@@ -1334,8 +1336,8 @@ sorted comparison).
 
 rc forms: the same **0 / 1 / 2 / 252 / 253 / 255** as cp (a deletion failure is
 also aggregated into 1 by the transfer-exception rule. When src is a file, it is
-2 from a walk warning; when dest is a file, it is 1 from a per-item `[Errno 20]` -
-sync.md section 6).
+255 before anything is listed (a source that cannot be walked as a directory);
+when dest is a file, it is 1 from a per-item `[Errno 20]` - sync.md section 6).
 
 ## 6. Exit codes
 
@@ -1434,8 +1436,8 @@ not implement. `ConfigurationErrorHandler` (`Configuration`) claims the
 `ConfigurationError` aws's own customizations raise, and one of them lands
 inside the mapped surface: `cli_timestamp_format` set to anything other than
 `wire` or `iso8601` stops the run at rc 253. aws checks the setting when its
-session starts, so it fails every invocation, `help` and `--version`
-included. Here `clientfactory._reject_unknown_cli_formats` checks it, with
+session starts, so it fails every subcommand and its `help`, though not its
+`--version`. Here `clientfactory._reject_unknown_cli_formats` checks it, with
 `cli_binary_format` (rc 255; an explicit `--cli-binary-format` replaces the
 config value), every time `_open_botocore_session` opens a session - so every
 command stops, while `help` and `--version`, which open none, succeed (the
@@ -1453,7 +1455,8 @@ file: <path>`, rc 255) and an IMDS setting botocore refuses while it builds the
 credential chain (`metadata_service_timeout`, `metadata_service_num_attempts`,
 `ec2_metadata_service_endpoint_mode`, `ec2_metadata_service_endpoint`; rc 255
 with botocore's text), which `_inject_credential_cache` builds. aws reaches
-both at startup too, so they also fail its `help` and `--version`.
+both at startup too, so they also fail its `help`, and an unparsable file its
+`--version` as well (the IMDS setting leaves its `--version` working).
 
 The **accepted values change nothing on this surface**. On aws the setting
 swaps botocore's timestamp parser for one that keeps the wire string (`wire`)

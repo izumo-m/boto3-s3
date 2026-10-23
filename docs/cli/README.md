@@ -22,15 +22,15 @@ the runtime SDK.
 pip install boto3-s3-cli
 ```
 
-Two optional extras:
+One optional extra:
 
 ```bash
 pip install "boto3-s3-cli[crt]"   # the AWS Common Runtime transfer engine
                                   # and the CRT-family checksums
 ```
 
-Not sure whether you need them? Start without either — the command is complete
-on its own. Install `crt` if you want the AWS Common Runtime transfer engine,
+Not sure whether you need it? Start without it — the command is complete on
+its own. Install `crt` if you want the AWS Common Runtime transfer engine,
 typically faster on large transfers, or a `--checksum-algorithm` that needs it
 (`CRC64NVME`, `CRC32C`, the `XXHASH` family). Installing it can also change
 which engine runs by default; see

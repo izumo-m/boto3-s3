@@ -32,9 +32,10 @@ with gzip.open("hello.txt.gz", "wb") as f:
 output, the equivalent of `aws s3 cp - …` and `aws s3 cp … -`. A download
 through it goes straight into `sys.stdout.buffer`, which is flushed when the
 transfer finishes: a stdout that cannot take the bytes (a full disk, a reader
-that left the pipe) fails the download. The bytes it refused stay in the
-buffer, and Python tries them again when your program exits (exit status 120)
-unless you discard them.
+that left the pipe) fails the download. Bytes it refused can stay in the
+buffer (a large write bypasses it, so not always); if they do, Python tries
+them again when your program exits (exit status 120) unless you discard
+them.
 
 ## 1. Text streams carry the object as text
 

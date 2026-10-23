@@ -68,7 +68,7 @@ of: what you pass to `TransferConfig`, the `[s3]` value, the default above —
 so `TransferConfig(max_concurrency=4)` overrides the concurrency and leaves the
 rest to the file. A plain `boto3.s3.transfer.TransferConfig` is used as it is.
 To keep a run free of the file, point `AWS_CONFIG_FILE` elsewhere, as for
-boto3 ([`S3.resolve_transfer_config`](../reference/s3.md#resolve_transfer_config)).
+boto3 ([`S3.resolve_transfer_config`](../reference/s3.md#resolve_transfer_configtransfer_confignone--copyfalse)).
 
 `preferred_transfer_client` selects the engine — `"auto"` (the default),
 `"classic"`, or `"crt"`. S3-to-S3 copies always use the classic engine, since

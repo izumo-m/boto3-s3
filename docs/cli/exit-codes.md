@@ -108,8 +108,8 @@ Of the S3 Express refusals, then, only `ls`, `presign`, `website` and an
 access point under `mv --validate-same-s3-paths` land here.
 An unusable `cli_timestamp_format` in the profile lands here too: every
 subcommand stops on it. `help` and `--version` do not read the config files,
-so they still work, where `aws` fails them as well
-([`configuration.md`](./configuration.md)).
+so they still work, where `aws` fails its `help` as well (its `--version`
+still works; [`configuration.md`](./configuration.md)).
 
 Unresolved credentials, an unresolved region and an unusable
 `cli_timestamp_format` are reported as `aws` reports them (the region one
@@ -156,7 +156,8 @@ A config file that cannot be parsed is 255 as well — `~/.aws/config` (or
 — and so are an unusable `cli_binary_format` in the profile and an unusable
 instance-metadata setting (`AWS_METADATA_SERVICE_TIMEOUT=abc`). Every
 subcommand stops on them. `help` and `--version` do not read the config
-files, so they still work, where `aws` fails them with 255 too.
+files, so they still work, where `aws` fails its `help` with 255 too, and its
+`--version` only for a config or credentials file it cannot parse.
 
 ## 2. Which code a failure gets
 

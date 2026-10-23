@@ -90,8 +90,7 @@ constant is `boto3_s3.deleter.S3_DELETE_BATCH`.
 For XML-compatible keys, success and failure are reconstructed from the
 `Quiet=True` response: failures come from `Errors[]`, and successes are
 synthesized as "the submitted keys minus the keys in `Errors[]`" (to reduce the
-response payload) - unless an entry cannot be attributed to a submitted key at
-all, which voids that synthesis for its batch (below). XML-incompatible keys
+response payload). XML-incompatible keys
 use `DeleteObject`, whose request success or translated exception directly
 determines the per-key result. A batch's per-key requests - these, the
 re-sends of transient failures below, and the keys of a batch request that
@@ -274,9 +273,10 @@ that - so a key never gets fewer attempts than aws-cli gives it.
   batching for the other keys. A key containing a carriage return takes the
   same route for the response's sake: the request can carry it (botocore sends
   a character reference), but an `Errors[]` entry that writes it back
-  unescaped is read with the CR normalized to LF, which would either strand
-  the entry (failing the batch closed) or pin it on a sibling key that differs
-  only by CR/LF - a delete reported for the key that was refused.
+  unescaped is read with the CR normalized to LF, which would either name no
+  submitted key (leaving the refused key to read as deleted) or pin it on a
+  sibling key that differs only by CR/LF - a delete reported for the key that
+  was refused.
 - A Ctrl-C (or any abandonment) cannot cancel a request already out: a batch
   in flight completes and reports every key it carried, and the CLI prints
   those lines before its closing `cancelled: ctrl-c received`, where aws-cli,

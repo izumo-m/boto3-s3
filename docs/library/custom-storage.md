@@ -34,20 +34,28 @@ minimal backend implements exactly what it promised.
 - **`as_text()`** — how this side appears in results and progress.
 - **`open(key, mode, *, size=None)`** — per-object byte I/O. `"rb"` returns a
   readable stream, `"wb"` a writable one whose `close()` flushes. `size` is an
-  optional length hint, for reads as well as writes.
+  optional length hint, for reads as well as writes. The `key` the engine
+  passes is the entry's `compare_key` (on a single-entry destination, the
+  source's basename), and `""` when your storage is a single-entry source
+  (the location itself).
 - **`scan_pages(options)`** — enumerate the container one page of `FileInfo` at
   a time. Callers reach it through `scan()`, which flattens the pages and
   prefetches them in the background.
-- **`get_fileinfo(key)`** — one entry, or `None` when it does not exist.
+- **`get_fileinfo(key="", *, on_warning=None)`** — one entry, or `None` when
+  it does not exist. `key` is relative to your location, and `""` is the
+  location itself: that is how the engine calls it, with no `key` and with
+  `on_warning`, a callable taking a skip message, so implement this exact
+  form.
 - **`delete(info)`** — remove one entry. When the operation runs with
   `capture_response=True`, a mapping you return surfaces on the result record
   under `extra_info["delete"]`.
 
 ### Keys
 
-Two key spaces meet here. `key` is yours — whatever addresses an entry in your
-backend. `compare_key` is the operation-relative, `/`-separated identity that
-globs match and that `sync` pairs the two sides on. **Your `scan_pages` must
+Two key spaces meet here. `FileInfo.key` is yours — whatever addresses an entry
+in your backend, which `delete(info)` locates it by. `compare_key` is the
+operation-relative, `/`-separated identity that globs match, that `sync` pairs
+the two sides on, and that the engine passes to `open`. **Your `scan_pages` must
 stamp `compare_key` on every entry it yields, and no two entries of one listing
 may share one.** Nothing downstream checks either or makes up for it.
 
@@ -158,6 +166,7 @@ class DictStorage(Storage):
 
 Declaring only the two `OPEN_*` flags makes this usable as the destination of
 a `cp` or `mv` from S3, single-entry or recursive. To be a source it also needs
-`GET_FILEINFO` (and `get_fileinfo`) for a single entry, or `SCAN` (and
+`GET_FILEINFO` (and `get_fileinfo(key="", *, on_warning=None)`, where `""`
+is the location itself) for a single entry, or `SCAN` (and
 `scan_pages`) for a recursive transfer; `SORTABLE_SCAN` for `sync`; and
 `DELETE` to be an `mv` source.

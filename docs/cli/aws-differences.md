@@ -145,8 +145,9 @@ that say outright that the run comes out differently, listed in section 1.
   once the client's retries are spent — or the HTTP layer refuses to send a
   header value (a line break in `--cache-control`) — `aws`'s completion
   handler on its classic engine fails on the missing response and loses the
-  item (a download's read of the object aside, which s3transfer retries and
-  then reports as a failure): it prints no line for it and, if nothing else
+  item (a download's read of the object that times out aside, which
+  s3transfer retries and then reports as a failure; one whose connection is
+  closed is lost like the rest): it prints no line for it and, if nothing else
   failed, exits 0,
   whether or not the request took effect (measured on `cp`, `mv`, recursive
   `cp` and `rm`). Under the CRT engine an `mv` download meets it in
@@ -239,8 +240,10 @@ that say outright that the run comes out differently, listed in section 1.
   page itself, so `help > /dev/full`, or a reader that closes at once, is
   exit code 255 here, with the write error. `mb` and `rb` print their success
   line inside the same catch as the request on `aws`, so a bucket created or
-  removed is reported as `make_bucket failed:` / `remove_bucket failed:` at
-  exit code 1 when that line cannot be written; here the bucket is done and
+  removed is reported as `make_bucket failed:` / `remove_bucket failed:` when
+  that line cannot be written, at exit code 120 (Python's code for output it
+  cannot flush at exit), or 1 with stdout closed (`1>&-`); here the bucket is
+  done and
   the lost line follows the rule every command follows
   ([`exit-codes.md`](./exit-codes.md)): exit code 255 with the write error,
   or 0 with stdout closed (`1>&-`).
@@ -256,21 +259,25 @@ that say outright that the run comes out differently, listed in section 1.
   can.
 - **A transfer answered `412 PreconditionFailed` fails here, unless the
   answer is to `--no-overwrite`'s own write.** The same `aws` rule covers
-  every request of a transfer. A multipart download reads each part on the
-  condition that the object still has the ETag it was listed with, and a
-  multipart copy copies each part on the same condition about its source, so
-  an object overwritten between the listing and the transfer is answered
-  `412`; so can the tag write that follows a multipart copy whose tag set is
-  too large for its create request, after which `aws` deletes the copied
-  object again. In each case `aws` prints no line for the item, does not count
-  it and, if nothing else failed, exits 0: the item leaves no file or object
-  behind, and a `mv` keeps its source. This command reports the item as failed
-  (`download failed:`, `copy failed:`, `move failed:`) and exits 1, with the
-  same files and objects left behind. `--no-overwrite`'s own write - a
-  `PutObject` or `CopyObject`, or the call completing a multipart upload or
-  copy - answered `412` is a silent skip on both tools, and any other request
-  answered that way is a failure here even under `--no-overwrite`. What `aws`
-  does is read from its source, not measured.
+  every request of a transfer whose `412` reaches it. Under the CRT engine a
+  multipart download reads each part on the condition that the object has not
+  changed since the download began, so an object overwritten during the
+  download is answered `412`; so can the tag write that follows a multipart
+  copy whose tag set is too large for its create request, after which `aws`
+  deletes the copied object again. In each case `aws` prints no line for the
+  item, does not count it and, if nothing else failed, exits 0: the item
+  leaves no file or object behind, and a `mv` keeps its source. This command
+  reports the item as failed (`download failed:`, `copy failed:`,
+  `move failed:`) and exits 1, with the same files and objects left behind.
+  The classic engine's multipart download and any multipart copy put the same
+  condition on each part, but there the part's `412` comes back as an ETag
+  mismatch, which both tools report the same way (`download failed:` /
+  `copy failed:` / `move failed:` with `... did not match expected ETag.`,
+  exit code 1). `--no-overwrite`'s own write - a `PutObject` or `CopyObject`,
+  or the call completing a multipart upload or copy - answered `412` is a
+  silent skip on both tools, and any other request answered that way is a
+  failure here even under `--no-overwrite`. Measured on `aws` 2.36.40 through
+  a proxy answering `412`.
 - **A local source that cannot be walked as a directory stops the run
   here.** A `sync` or a recursive `cp` / `mv` reads its local source as a
   directory. When the source is a file, a special file, a directory it cannot
@@ -287,8 +294,9 @@ that say outright that the run comes out differently, listed in section 1.
   buckets for both, as `aws` does). `aws` carries it into the run: an upload
   fails each file with a line of its own at exit code 1, a `--dryrun` `cp`
   or `rm` prints its success line and exits 0, a lookup or listing ends in a
-  fatal error at 1, `mb` and `rb` report their failure at 1, and `rb
-  --force` runs its deletion first and exits 255.
+  fatal error at 1, `mb` and `rb` report their failure at 1 (`rb s3:///key`
+  is refused at 252 as a key on a bucket, as here), and `rb --force` runs
+  its deletion first and exits 255.
 - **A timestamp only `aws`'s local-time conversion cannot hold does not stop
   the run here.** `aws` converts every `LastModified` it reads to local time,
   so an object stamped within the local zone's offset of the year 1 or 9999
@@ -524,7 +532,11 @@ that say outright that the run comes out differently, listed in section 1.
   upload, and the previewed line differs: `aws` threads the source through in
   its trailing-separator form and prints `(dryrun) upload: d/ to s3://bkt/` —
   with the destination key folded away — where this command prints
-  `(dryrun) upload: ./d to s3://bkt/d`.
+  `(dryrun) upload: ./d to s3://bkt/d`. The failure line differs the same
+  way: `aws` prints `upload failed: d/ to s3://bkt/k ...` where this command
+  prints `upload failed: ./d to s3://bkt/k ...`, and into a prefix `aws`
+  names the prefix itself (`d/ to s3://bkt/`) where this command names
+  `./d to s3://bkt/d`.
 - **Glob characters in a filtered command's path are literal here.** `aws`
   joins the path a command names into every `--exclude` / `--include`
   pattern, so a `[`, `*` or `?` in that path is read as part of the pattern:

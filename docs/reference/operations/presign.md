@@ -151,6 +151,8 @@ The category contracts are specified in
   [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement covers
   configuration that is present but unusable, such as a set-but-unknown
   `AWS_PROFILE`, partial credentials, or a malformed region or `endpoint_url`.
+  An S3 Express location the SDK predates raises `ConfigurationError` naming
+  the version, before any request.
 - [`NotFoundError`](../exceptions.md#notfounderror),
   [`AccessDeniedError`](../exceptions.md#accessdeniederror) and
   [`TransportError`](../exceptions.md#transporterror) — on the directory-bucket

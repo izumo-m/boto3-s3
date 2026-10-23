@@ -266,12 +266,12 @@ classic engine, as in boto3.
 A `cp` / `mv` / `sync` / `rm` run fills the settings this object leaves unset
 from the `[s3]` section of `~/.aws/config`, as `aws s3` reads it: a value
 passed to the constructor wins, then the `[s3]` value, then the default
-([`S3.resolve_transfer_config`](./s3.md#resolve_transfer_config)). A plain
+([`S3.resolve_transfer_config`](./s3.md#resolve_transfer_configtransfer_confignone--copyfalse)). A plain
 `boto3.s3.transfer.TransferConfig` is used as it is.
 
 `preferred_transfer_client` selects the transfer engine — `"auto"` (the
 default), `"classic"`, or `"crt"` — resolved as `aws s3` resolves it
-([`S3.resolve_transfer_config`](./s3.md#resolve_transfer_config)); a plain
+([`S3.resolve_transfer_config`](./s3.md#resolve_transfer_configtransfer_confignone--copyfalse)); a plain
 boto3 config keeps boto3's own resolution. It
 is accepted on every supported boto3, including one whose base constructor does
 not take the parameter. Two settings override the choice: an S3-to-S3 copy runs

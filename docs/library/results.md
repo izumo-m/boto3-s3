@@ -106,7 +106,10 @@ and the stream endpoint displays as `-`.
 `extra_info` is a mapping carrying the affected object's S3 response metadata.
 By default it holds a single `"ETag"` key, in S3's raw quoted form:
 
-- **copy** and **download** — the source object's ETag.
+- **copy** and **download** — the source object's ETag. A download on the CRT
+  engine leaves it out, as does an s3transfer older than 0.13.0
+  ([`compatibility.md`](../compatibility.md#1-features-by-required-version)),
+  so `extra_info` is then `None`.
 - **upload** — `None`. Pass `capture_response=True` when you need the written
   object's ETag.
 - **delete** and advisories — `None`.

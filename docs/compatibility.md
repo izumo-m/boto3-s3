@@ -36,12 +36,12 @@ bound, so a newer `boto3` is picked up as it is.
 | `[s3]` tuning reaching the CRT transfer manager | boto3 >= 1.42.0 |
 | `mb` on an account-regional bucket (a name ending `-an`) | boto3 >= 1.42.67 |
 | `checksum_algorithm` = `SHA512` | boto3 >= 1.42.94 |
-| `checksum_algorithm` = `MD5` | not usable: the S3 model lists it, but `botocore` cannot compute it, so an upload with it fails per item |
+| `checksum_algorithm` = `MD5` | not usable: the S3 model lists it, but `botocore` cannot compute it, so an upload with it fails per item on the classic engine; on the CRT engine the run stops with `ValidationError` before anything is recorded |
 | `checksum_algorithm` = the `XXHASH` family | boto3 >= 1.42.94, plus the `crt` extra |
 | S3 object annotations (GA 2026-06) | boto3 >= 1.43.31 |
 | `copy_props=ALL` / `--copy-props all` | boto3 >= 1.43.31 |
 | `checksum_algorithm` = `CRC32C` | any supported boto3, plus the `crt` extra |
-| the source ETag in `OpResult.extra_info` on a copy or download | boto3 >= 1.43.31 |
+| the source ETag in `OpResult.extra_info` on a copy or download | s3transfer >= 0.13.0 (required by boto3 1.38.46 and later); on a download, the classic engine only (the CRT engine's downloads leave it `None`) |
 
 `CRC32`, `SHA1` and `SHA256` are available on every supported installation and
 are not listed.

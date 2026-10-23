@@ -151,8 +151,11 @@ record: attribution is best-effort, not per-record.
 
 Custom backends: an exception a custom `Storage` raises that is not already a
 `Boto3S3Error` is wrapped into the **base** `Boto3S3Error` when it surfaces as
-a per-item failure (the translators' last-resort clause, section 3), but one
-raised during enumeration (`scan`) or on the fatal path propagates **as-is**.
+a per-item failure (the translators' last-resort clause, section 3), and so is
+one raised while a `sync` content comparison (`EtagComparison` /
+`ChecksumComparison`) reads the custom side, which aborts the `sync`
+(`comparator`'s `_read_readable`); one raised during enumeration (`scan`) or
+elsewhere on the fatal path propagates **as-is**.
 The library assumes a well-behaved backend that maps its own errors to this
 taxonomy ([`storage.md`](./storage.md) section 2).
 

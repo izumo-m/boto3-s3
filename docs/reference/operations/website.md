@@ -79,6 +79,8 @@ The category contracts are specified in
   Its [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement
   covers configuration that is present but unusable, such as a set-but-unknown
   `AWS_PROFILE`, partial credentials, or a malformed region or `endpoint_url`.
+  An S3 Express location the SDK predates raises `ConfigurationError` naming
+  the version, before any request.
 
 `website` acts on one bucket and raises its category exception directly; it
 never raises [`BatchError`](../exceptions.md#batcherror). The botocore error

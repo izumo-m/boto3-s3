@@ -175,7 +175,7 @@ The reader holds no defaults table of its own — every getter takes the
 caller's default. The transfer operations read the `[s3]` section through it
 and apply `aws s3`'s own interpretation of it — its defaults table, its
 validation, its engine choice
-([`S3.resolve_transfer_config`](./s3.md#resolve_transfer_config)); the values
+([`S3.resolve_transfer_config`](./s3.md#resolve_transfer_configtransfer_confignone--copyfalse)); the values
 are readable here all the same, as
 `cfg.profile().get_size("s3.multipart_chunksize", default)`.
 
@@ -191,8 +191,9 @@ an unparsable file; and from a value a getter cannot convert. Its parent is
 `except ConfigurationError` covers all of them.
 
 The same module also carries `SIZE_SUFFIX`, the 1024-based suffix table the
-size and rate getters share with the `boto3-s3` command's own parser, and
-`split_size_suffix`; neither is exported from the package root.
+size and rate getters share with the `[s3]` reading of
+[`S3.resolve_transfer_config`](./s3.md#resolve_transfer_configtransfer_confignone--copyfalse),
+and `split_size_suffix`; neither is exported from the package root.
 
 ## ConfigSection
 

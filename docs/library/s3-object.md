@@ -15,7 +15,8 @@ S3().cp("local.txt", "s3://bucket/key")
 ```python
 S3(session=None, *, endpoint_url=None, config=None,
    transfer_config=None, reusable_after_interrupt=True,
-   crt_allow_lockless=False, crt_sign_requests=None)
+   crt_allow_lockless=False, crt_sign_requests=None,
+   filename_encoding=None)
 ```
 
 - **`session`** — a `boto3.Session`. Omit it for a default session.
@@ -47,6 +48,10 @@ S3(session=None, *, endpoint_url=None, config=None,
   factory decides from its own `sign_request` flag and never from the client,
   which is how `--no-sign-request --sse aws:kms` transfers anonymously on
   aws's CRT engine while its classic engine signs.
+- **`filename_encoding`** — the encoding of local file names on POSIX, for
+  every `LocalStorage` built from a string path. `None` (the default) is
+  Python's file system encoding. It has no effect on Windows, and an unknown
+  codec raises `InvalidValueError`.
 
 ## 2. Which client a location uses
 

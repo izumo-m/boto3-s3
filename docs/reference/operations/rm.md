@@ -181,7 +181,9 @@ Raises:
   request. The blind single-key delete, which lists nothing, reports missing
   credentials as its item's failure instead (`BatchError` below). A selected
   CRT engine that cannot be built — a CA bundle it cannot read or use — is an
-  `InvalidConfigError`, raised where the engine is built (above).
+  `InvalidConfigError`, raised where the engine is built (above). An S3 Express
+  location the SDK predates raises `ConfigurationError` naming the version,
+  before any request.
 - botocore's `MissingDependencyException` — a plain boto3 `TransferConfig`
   requesting `preferred_transfer_client="crt"` explicitly without a usable
   awscrt, raised where the engine would be built, as a transfer raises it

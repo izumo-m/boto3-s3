@@ -71,7 +71,7 @@ the JMESPath expression at `top-level-args-parsed`, independent of the
 response-formatter pipeline, so a malformed expression is still a usage error
 (rc 252) even though the compiled value is never applied to anything.
 `boto3-s3-cli`'s `globalargs.validate_query` matches this - the dispatcher
-calls it once the command line is parsed (cli.md section 2).
+calls it once the command line is parsed (cli.md sections 5.7 and 6).
 
 `--color` is a no-op for a related reason: the parsed `color` global is
 consulted only by other parts of aws-cli (the table formatter, the error
