@@ -164,7 +164,13 @@ maintaining high functional compatibility.
   which one it was written for.
   1. The library follows Python's defaults wherever it converts - local file
      names, text streams - and lets the caller name the encoding instead, so
-     an application can fix the one it relies on.
+     an application can fix the one it relies on. An encoding the caller
+     names for local file names is used as given: the OS gets the names in
+     it. Whether the OS and its filesystem can take names in that encoding
+     is the caller's concern; the library only refuses a codec Python does
+     not know, and neither checks the encoding further nor works around what
+     the OS makes of the names. The check that keeps a download inside its
+     destination still runs on the names in the form the OS gets.
   2. The CLI uses the encoding aws-cli uses in the same environment wherever
      it converts: local file names, its command line, its output, and the
      files it reads values from. A run that replaces `aws s3` with the CLI
