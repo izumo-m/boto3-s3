@@ -462,7 +462,8 @@ class StdioStorage(IOStorage):
     the error carries no operation name - the operation that invoked the
     storage fills it in (a direct call leaves it ``None``). Stdout has no such
     check, again like aws: a missing one surfaces from the writer's first
-    ``write``, inside the transfer, as that item's failure.
+    ``write`` (an empty object's ``close``), inside the transfer, as that
+    item's failure.
     """
 
     scheme: ClassVar[str] = "stdio"

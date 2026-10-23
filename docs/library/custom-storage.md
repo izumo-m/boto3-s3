@@ -35,9 +35,10 @@ minimal backend implements exactly what it promised.
 - **`open(key, mode, *, size=None)`** — per-object byte I/O. `"rb"` returns a
   readable stream, `"wb"` a writable one whose `close()` flushes. `size` is an
   optional length hint, for reads as well as writes. The `key` the engine
-  passes is the entry's `compare_key` (on a single-entry destination, the
-  source's basename), and `""` when your storage is a single-entry source
-  (the location itself).
+  passes is the entry's `compare_key`. A single-entry source gets `""`, the
+  location itself; a single-entry destination gets the source's basename when
+  your `as_text()` ends with `/` (a container), and `""` otherwise (the
+  location is the object).
 - **`scan_pages(options)`** — enumerate the container one page of `FileInfo` at
   a time. Callers reach it through `scan()`, which flattens the pages and
   prefetches them in the background.

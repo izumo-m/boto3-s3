@@ -185,15 +185,16 @@ writes it.
 ## 7. Reading a value from a file
 
 Any option or path that takes a single string can be given as `file://path`
-(read as text) or `fileb://path` (read as bytes), resolved before the command
-runs. This covers the `<S3Uri>` positional of `ls` / `rm` / `mb` / `rb` /
-`presign` and the free-string options of `cp` / `mv` / `sync`.
+(read as text), resolved before the command runs. This covers the `<S3Uri>`
+positional of `ls` / `rm` / `mb` / `rb` / `presign` and the free-string
+options of `cp` / `mv` / `sync`. `fileb://path` (read as bytes) is taken only
+by the SSE-C keys (`--sse-c-key`, `--sse-c-copy-source-key`) and the integer
+options; on a text option it is a usage error (exit code 252).
 
 The exclusions worth knowing:
 
-- **A path takes `file://` only.** A `fileb://` path, and either prefix as
-  `website`'s bucket, are usage errors (exit code 252), as is a whole
-  `--metadata fileb://...`.
+- **`website`'s bucket takes neither prefix**: either is a usage error
+  (exit code 252).
 - **List-valued options are not expanded** — `--exclude`, `--include`, and
   `mb --tags` keep the text verbatim. `--grants` refuses either prefix as a
   usage error; give each grant as an argument.
