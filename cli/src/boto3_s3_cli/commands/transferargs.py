@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from boto3_s3 import (
@@ -33,6 +32,7 @@ from boto3_s3.pathresolver import is_s3express_accesspoint_path, is_s3express_pa
 from boto3_s3_cli import (
     checksumdefault,
     filters,
+    output,
     paramfile,
     shorthand,
     textencoding,
@@ -45,7 +45,6 @@ from boto3_s3_cli.commands.base import (
     refuse_bucketless,
     resolve_integer_option,
 )
-from boto3_s3_cli.output import uni_write
 from boto3_s3_cli.progress import TransferPrinter
 
 if TYPE_CHECKING:
@@ -717,11 +716,11 @@ def resolve_case_conflict(
         )
     # aws emits this via ``uni_print`` with no trailing newline (measured: the
     # message ends at ``...html.`` and the next stderr output concatenates);
-    # uni_write is that port - same bytes plus the flush that keeps the
-    # newline-less warning from sitting in a block-buffered stderr (a
-    # redirected run) until process exit, behind output aws prints after it.
-    uni_write(
-        sys.stderr,
+    # uni_write (under `output.write_stderr`) is that port - same bytes plus
+    # the flush that keeps the newline-less warning from sitting in a
+    # block-buffered stderr (a redirected run) until process exit, behind
+    # output aws prints after it.
+    output.write_stderr(
         "warning: Recursive copies/moves from an S3 Express directory "
         "bucket to a case-insensitive local filesystem may result in "
         "undefined behavior if there are S3 object key names that differ "
@@ -1000,7 +999,7 @@ def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], 
         # `cancelled: ctrl-c received` and exits 130).
         line = None if error is None else _closing_line(error)
         if line is not None and not quiet:
-            sys.stderr.write(line)
+            output.write_stderr(line)
         raise
     if error is None:
         return 2 if printer.warned else 0
@@ -1024,7 +1023,7 @@ def report_failed_run(error: BaseException, *, quiet: bool) -> int:
         raise error
     line = _closing_line(error)
     if line is not None and not quiet:
-        sys.stderr.write(line)
+        output.write_stderr(line)
     return 1
 
 

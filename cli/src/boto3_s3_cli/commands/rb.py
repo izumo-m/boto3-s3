@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from typing import TYPE_CHECKING
 
 # Module-level imports are fine here: rb is loaded at dispatch (stage 2 of
@@ -98,7 +97,7 @@ class RbCommand(Command):
         try:
             s3.rb(storage)
         except Exception as exc:
-            sys.stderr.write(output.format_remove_bucket_failed(target, exc) + "\n")
+            output.write_stderr(output.format_remove_bucket_failed(target, exc) + "\n")
             return 1
         # The bucket is gone from here, so the line is outside the failure
         # catch (aws's spans it, reporting a removed bucket as failed).

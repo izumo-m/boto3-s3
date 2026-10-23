@@ -12,6 +12,7 @@ escapes unwrapped, exactly as aws's does.
 from __future__ import annotations
 
 import datetime as dt
+import errno
 import io
 import sys
 from typing import Any
@@ -118,6 +119,25 @@ class TestPostStartErrors:
         assert result.stdout == ""
         assert result.stderr.startswith("remove_bucket failed: s3://b ")
         assert "NoSuchBucket" in result.stderr
+
+    @pytest.mark.parametrize("stderr", ["closed", "full"])
+    def test_a_failure_line_stderr_cannot_take_keeps_rc_1(
+        self, stderr: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `2>&-` (no stderr at all) or `2>/dev/full`: the lost failure line
+        # changes no code - not 255 through the dispatcher's backstop.
+        class _FullStderr:
+            encoding = "utf-8"
+
+            def write(self, _text: str) -> int:
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+            def flush(self) -> None:
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+        client = _RaisingDeleteBucketClient(client_error("NoSuchBucket", 404, "DeleteBucket"))
+        monkeypatch.setattr(sys, "stderr", None if stderr == "closed" else _FullStderr())
+        assert cli.main(["rb", "s3://b"], ctx=client_ctx(client)) == 1
 
     def test_bucket_not_empty_is_rc_1(self) -> None:
         client = _RaisingDeleteBucketClient(client_error("BucketNotEmpty", 409, "DeleteBucket"))

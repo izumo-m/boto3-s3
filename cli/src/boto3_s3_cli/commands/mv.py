@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 
 # Loaded at dispatch once mv is determined (stage 2 of the lazy dispatch).
 from boto3_s3 import (
@@ -14,7 +13,7 @@ from boto3_s3 import (
     ValidationError,
     has_underlying_s3_path,
 )
-from boto3_s3_cli import filters
+from boto3_s3_cli import filters, output
 from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import Command, Context
 
@@ -166,7 +165,7 @@ class MvCommand(Command):
                     if S3Storage.same_path(src_path, dest_path):
                         raise ValidationError(message, operation="mv")
         elif has_underlying_s3_path(norm_src) or has_underlying_s3_path(norm_dest):
-            sys.stderr.write(_VALIDATE_WARNING)
+            output.write_stderr(_VALIDATE_WARNING)
 
 
 __all__ = ["MvCommand"]

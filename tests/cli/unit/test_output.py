@@ -95,6 +95,26 @@ class TestUniWrite:
         assert stream.flushes == 1
 
 
+class TestWriteStderr:
+    def test_a_report_goes_to_stderr(self, capsys: pytest.CaptureFixture[str]) -> None:
+        output.write_stderr("fatal error: boom\n")
+        assert capsys.readouterr().err == "fatal error: boom\n"
+
+    def test_no_stderr_takes_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("sys.stderr", None)
+        output.write_stderr("fatal error: boom\n")  # `2>&-`: nothing raised
+
+    def test_a_stderr_that_cannot_take_it_raises_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class _FullStream(io.StringIO):
+            def write(self, _text: str) -> int:
+                raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr("sys.stderr", _FullStream())
+        output.write_stderr("fatal error: boom\n")  # `2>/dev/full`: dropped
+
+
 class TestHumanReadableSize:
     def test_one_byte(self) -> None:
         assert output.human_readable_size(1) == "1 Byte"

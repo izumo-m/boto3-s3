@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from collections.abc import Sequence
 from typing import Any, ClassVar, cast
 
@@ -115,7 +114,7 @@ class MbCommand(Command):
         try:
             s3.mb(storage, tags=tags)
         except Exception as exc:
-            sys.stderr.write(output.format_make_bucket_failed(target, exc) + "\n")
+            output.write_stderr(output.format_make_bucket_failed(target, exc) + "\n")
             return 1
         # The bucket exists from here, so the line is outside the failure
         # catch (aws's spans it, reporting a created bucket as failed).

@@ -15,7 +15,7 @@ import pytest
 
 from boto3_s3.exceptions import InvalidValueError, ValidationError
 from boto3_s3.types import CaseConflictMode
-from boto3_s3_cli import paramfile
+from boto3_s3_cli import output, paramfile
 from boto3_s3_cli.commands import transferargs
 
 
@@ -339,9 +339,7 @@ class TestExpressCaseConflictWarning:
         # flush. A raw stderr.write sits in a block-buffered redirect until
         # process exit, inverting aws's output order.
         writes: list[tuple[object, str]] = []
-        monkeypatch.setattr(
-            transferargs, "uni_write", lambda stream, text: writes.append((stream, text))
-        )
+        monkeypatch.setattr(output, "uni_write", lambda stream, text: writes.append((stream, text)))
         args = argparse.Namespace(case_conflict="warn", recursive=True)
         mode = transferargs.resolve_case_conflict(
             args, "s3://b--use1-az4--x-s3/p/", "s3local", operation="cp"
@@ -361,7 +359,7 @@ class TestExpressCaseConflictWarning:
         # then pair wrongly - skip dropped objects that conflicted with nothing
         # (measured on real S3) - so the access point takes it here too.
         writes: list[str] = []
-        monkeypatch.setattr(transferargs, "uni_write", lambda _stream, text: writes.append(text))
+        monkeypatch.setattr(output, "uni_write", lambda _stream, text: writes.append(text))
         for value in ("skip", "error"):
             args = argparse.Namespace(case_conflict=value, recursive=True)
             with pytest.raises(ValidationError, match="when operating on S3 Express"):

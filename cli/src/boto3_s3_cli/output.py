@@ -44,6 +44,23 @@ def uni_write(stream: TextIO, text: str) -> None:
     stream.flush()
 
 
+def write_stderr(text: str) -> None:
+    """Write a report - a failure line, a warning - to stderr (`uni_write`).
+
+    A stderr that cannot take it changes no exit code: a process without one
+    (``2>&-``, ``sys.stderr`` None) writes nothing, and a write error is
+    dropped, leaving what stderr still holds to the final flush, which
+    discards it (``cli._settle_std_streams``).
+    """
+    stream = sys.stderr
+    if stream is None:
+        return
+    try:
+        uni_write(stream, text)
+    except OSError:
+        pass
+
+
 def write_result_line(line: str) -> None:
     """Write a finished command's one result line to stdout (``mb`` / ``rb``).
 
