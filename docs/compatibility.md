@@ -60,6 +60,8 @@ The CLI's default request checksum is aws's `CRC64NVME` when the installed
 botocore can compute it (boto3 1.36 or later with awscrt 0.23.4 or later);
 otherwise botocore's own default stands — `CRC32` from boto3 1.36 on, and
 below it no default checksum at all (an upload carries `Content-MD5`). The
+batched deletes the CRT engine sends carry botocore's own default even with
+awscrt; `aws` sends no such request, its deletes going one key at a time. The
 library leaves botocore's default in place either way; name
 `checksum_algorithm` to choose.
 How it fails differs by feature: `preferred_transfer_client = crt` is refused

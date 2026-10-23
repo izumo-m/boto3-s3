@@ -774,7 +774,7 @@ dest-existence check for download. We ported the same three faces:
   every other request with a `ChecksumAlgorithm` member: `checksumdefault`,
   cli.md section 5.7), where the installed botocore can compute CRC64NVME;
   without awscrt the CLI falls back to botocore's `CRC32`, the residual
-  difference docs/cli/aws-differences.md records. On the CRT engine the
+  difference docs/compatibility.md section 2 records. On the CRT engine the
   algorithm also costs wall time: aws-checksums computes CRC32 in software,
   a measured 10% on a 1 GB upload (benchmarks/RESULTS.md, 2026-09-06).
 - aws-cli's bundled s3transfer fork validates the full-object checksum of a

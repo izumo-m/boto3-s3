@@ -148,7 +148,8 @@ that say outright that the run comes out differently, listed in section 1.
   header value (a line break in `--cache-control`) — `aws`'s classic engine
   loses the item (a download's timed-out read aside): it prints no line for
   it and, if nothing else failed, exits 0. Under the CRT engine an `mv`
-  download meets it in its source delete, and there `aws` never exits. This
+  download meets it in its source delete, a plain `DeleteObject` the CRT
+  client does not send, and there `aws` never exits. This
   command reports such an item like any other failure and exits 1; `rb
   --force` then stops with 255 before removing the bucket. S3 may have acted
   on the request before the response was lost, so the object may have been
@@ -243,7 +244,9 @@ that say outright that the run comes out differently, listed in section 1.
   leaves no file or object behind, and a `mv` keeps its source. This command
   reports the item as failed (`download failed:`, `copy failed:`,
   `move failed:`) and exits 1, with the same files and objects left behind.
-  `--no-overwrite`'s own write - a `PutObject` or `CopyObject`,
+  The classic engine's multipart download and any multipart copy put the same
+  condition on each part, but there a part's `412` fails the item as an ETag
+  mismatch on both tools. `--no-overwrite`'s own write - a `PutObject` or `CopyObject`,
   or the call completing a multipart upload or copy - answered `412` is a
   silent skip on both tools, and any other request answered that way is a
   failure here even under `--no-overwrite`. Measured on `aws` 2.36.40 through
@@ -259,7 +262,8 @@ that say outright that the run comes out differently, listed in section 1.
 - **A path with no bucket is refused here.** `s3:///key` or a bare `s3://`
   given to `cp`, `mv`, `sync`, `rm`, `mb` or `rb` is exit code 252 before
   any request (`presign` and `website` refused it already; `ls` lists the
-  buckets for both, as `aws` does). `aws` carries it into the run, where it
+  buckets for both, as `aws` does, and `rb s3:///key` is refused at 252 as a
+  key on a bucket on both tools). `aws` carries the rest into the run, where it
   fails item by item or as a fatal error — or, for a `--dryrun` `cp` or
   `rm`, prints its success line and exits 0 — and `rb --force` runs its
   deletion first.
@@ -417,7 +421,8 @@ that say outright that the run comes out differently, listed in section 1.
   line for each transfer cut short and no closing line, and an interrupt that
   cuts nothing short leaves it exiting 0 as if uninterrupted; this command
   prints no line for those transfers and closes with `cancelled: ctrl-c
-  received`, as on the classic engine, and does not exit 0. For deletes `aws`
+  received`, as on the classic engine, and does not exit 0. The same
+  transfers are cut short on both tools. For deletes `aws`
   goes on sending every per-key delete already queued; this command's
   batched deletes — an accepted difference (above) — stop at the interrupt as
   on the classic engine: the requests already out finish, no further one
@@ -539,7 +544,9 @@ that say outright that the run comes out differently, listed in section 1.
   non-UTF-8 locale's encoding — cp932 on Japanese Windows, EUC-JP under a
   `ja_JP.eucJP` locale — fails to load here (`Unable to parse config file`,
   exit code 255) where `aws` reads it, and one written in UTF-8 loads here
-  where `aws` fails. A file in plain ASCII reads the same everywhere, and any
+  where `aws` fails. Under a C or POSIX locale both read UTF-8, except under
+  `PYTHONUTF8=0` with the locale left uncoerced (`LC_ALL=C`, or
+  `PYTHONCOERCECLOCALE=0`), where a UTF-8 file fails here. A file in plain ASCII reads the same everywhere, and any
   `boto3` program run by the same Python reads the files as this command
   does.
 - **`REQUESTS_CA_BUNDLE` reaches the CRT engine here.** `aws` honors it on
