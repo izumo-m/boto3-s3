@@ -211,7 +211,8 @@ def _warn_absent_local_source(src: Storage, transferrer: Transferrer) -> None:
 
     The pre-check (``_check_local_source_exists`` -> `LocalStorage.exists`)
     asks the kernel about the path as typed, the generator looks for the
-    lexical ``abspath`` form, and ``..`` after a symlinked directory makes
+    lexical ``local_format`` form (``abspath``, with a trailing separator for
+    a directory or a path typed with one), and ``..`` after a symlinked directory makes
     those two different files (``lsub/../x``); a source that vanished between
     the two is the same case. `get_fileinfo` returns a silent ``None`` for
     absence by contract, so the warning aws-cli's ``should_ignore_file``
@@ -222,14 +223,19 @@ def _warn_absent_local_source(src: Storage, transferrer: Transferrer) -> None:
     """
     if not isinstance(src, LocalStorage):
         return
-    path = src.abspath
+    # The local_format form get_fileinfo looked up: a directory, or a path
+    # typed with a trailing separator, is named with one.
+    path, _use_src_name = src.format(dir_op=False)
     try:
         native = src.os_path(path)
     except ValueError:
         # A name the filename encoding cannot represent: no file has it.
         native = None
     if native is not None:
-        if not src.default_scan_options().follow_symlinks and os.path.islink(native):
+        # should_ignore_file looks at a directory form's symlink without the
+        # separator, which the OS would follow.
+        link = native[:-1] if native.endswith(os.sep) and os.path.isdir(native) else native
+        if not src.default_scan_options().follow_symlinks and os.path.islink(link):
             return
         if os.path.exists(native):
             return
@@ -510,25 +516,8 @@ def upload_items(
             # Only the locals3 route comes here, so the source is local.
             src = cast("LocalStorage", plan.src)
             infos = _filter_single_local_source(infos, item_filter, src)
-        infos = (_single_directory_source(info, cast("LocalStorage", plan.src)) for info in infos)
     for info in infos:
         yield upload_item_from_info(plan, info, dest_bucket=dest_bucket, transferrer=transferrer)
-
-
-def _single_directory_source(info: FileInfo, storage: LocalStorage) -> FileInfo:
-    """A single local source in aws-cli's directory form, named as aws-cli names it.
-
-    aws-cli's ``local_format`` gives a directory - or a path typed with one -
-    a trailing separator, so the source reads ``d/`` and its last component -
-    the name a destination that takes the source's name appends - is empty:
-    ``cp d s3://bkt/`` shows ``d/ to s3://bkt/`` in its dry-run and failure
-    lines. The engine then fails the item on the directory (``[Errno 21] Is a
-    directory``).
-    """
-    full, _use_src_name = storage.format(dir_op=False)
-    if not full.endswith(os.sep):
-        return info
-    return replace(info, key=full.replace(os.sep, "/"), compare_key="")
 
 
 def upload_item_from_info(
@@ -692,8 +681,9 @@ def _filter_single_local_source(
 ) -> Iterator[FileInfo]:
     """Apply ``item_filter`` to a single local source the way aws-cli matches it.
 
-    The record carries the absolute path and its basename, which name the
-    source and the destination. aws-cli matches the source in its
+    The record carries the absolute path and its basename (a directory's
+    path with a trailing separator, and ``""``), which name the source and
+    the destination. aws-cli matches the source in its
     ``local_format`` form instead - with a trailing separator for a
     directory, or for a path typed with one (`LocalStorage.format`) - against
     patterns joined onto ``abspath(dirname(path as typed))``

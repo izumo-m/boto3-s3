@@ -1958,7 +1958,12 @@ class LocalStorage(Storage):
                 yield info
 
     def _stat_one(
-        self, path: str, *, follow_symlinks: bool, notify: Callable[[str], None]
+        self,
+        path: str,
+        *,
+        follow_symlinks: bool,
+        notify: Callable[[str], None],
+        directory_form: bool = False,
     ) -> LocalFileInfo | None:
         """One path's ``LocalFileInfo``, or ``None`` when there is no transferable entry.
 
@@ -1979,10 +1984,19 @@ class LocalStorage(Storage):
         one followed ``stat_result`` and the ``is_symlink`` flag.
 
         ``path`` is text: the OS calls take its OS form, while the key and the
-        warnings keep the text.
+        warnings keep the text. ``directory_form`` (the location itself, see
+        `get_fileinfo`) names a directory with a trailing separator, from the
+        same stat: in the key, and in the warnings when symlinks are followed
+        (aws-cli warns about a no-follow directory without it).
         """
         native = self._os_root(path)
-        is_symlink = os.path.islink(native)
+        # The location typed with a trailing separator is stat'd with it
+        # (`get_fileinfo`); aws-cli's should_ignore_file looks at a directory
+        # so named without that separator, since the OS follows a symlink
+        # named with one.
+        typed_separator = directory_form and self._path.endswith(os.sep)
+        link = native[:-1] if typed_separator and os.path.isdir(native) else native
+        is_symlink = os.path.islink(link)
         if not follow_symlinks and is_symlink:
             return None
         try:
@@ -1995,14 +2009,24 @@ class LocalStorage(Storage):
             return None
         except (OSError, ValueError) as exc:
             raise self._os_failure(exc, path) from exc
+        is_directory = stat_module.S_ISDIR(st.st_mode)
+        # aws-cli's local_format names a directory with a separator appended
+        # (a root's included: "/" is "//"), and its should_ignore_file hands a
+        # no-follow directory to the warnings with that separator removed.
+        if directory_form and is_directory and not typed_separator:
+            path += os.sep
+        if directory_form and is_directory and not follow_symlinks:
+            shown = path[:-1]
+        else:
+            shown = path
         if _is_special_mode(st.st_mode):
             notify(
-                f"Skipping file {path}. File is character special device, "
+                f"Skipping file {shown}. File is character special device, "
                 "block special device, FIFO, or socket."
             )
             return None
-        if not is_readable(native, stat_module.S_ISDIR(st.st_mode)):
-            notify(f"Skipping file {path}. File/Directory is not readable.")
+        if not is_readable(native, is_directory):
+            notify(f"Skipping file {shown}. File/Directory is not readable.")
             return None
         size, mtime = get_file_stat(native, st)
         if mtime is None:
@@ -2012,7 +2036,7 @@ class LocalStorage(Storage):
             key=path.replace(os.sep, "/"),
             # A directory target carries its real kind (the FileInfo contract;
             # the transfer routes still hand it through to fail like aws).
-            kind=FileKind.DIRECTORY if stat_module.S_ISDIR(st.st_mode) else FileKind.FILE,
+            kind=FileKind.DIRECTORY if is_directory else FileKind.FILE,
             size=size,
             mtime=mtime,
             stat_result=st,
@@ -2100,7 +2124,12 @@ class LocalStorage(Storage):
 
         Anchored at the absolutized path (``self._abspath``, joined with ``key``
         for a child), so ``FileInfo.key`` is absolute; ``compare_key`` is its
-        basename. As with ``open``, ``key`` is joined under the location and
+        basename. The location itself (``key=""``) is looked up in aws-cli's
+        ``local_format`` form (`format`): a path typed with a trailing
+        ``os.sep`` is stat'd with one, so a file so named is absent (``None``),
+        and a directory is named with one, so its key ends in ``/`` and its
+        ``compare_key`` is ``""`` - as aws-cli finds and names them. As with
+        ``open``, ``key`` is joined under the location and
         a ``..`` / absolute ``key`` deliberately resolves outside it (a building
         block an app drives, not a confinement boundary - see ``open``).
         Whether a symlink is followed is the storage's own ``follow_symlinks``
@@ -2111,10 +2140,15 @@ class LocalStorage(Storage):
         notify: Callable[[str], None] = (
             on_warning if on_warning is not None else (lambda body: None)
         )
-        target = self._abspath
         if key:
-            target = os.path.join(target, to_native_path(key))
-        info = self._stat_one(target, follow_symlinks=self._follow_symlinks, notify=notify)
+            target = os.path.join(self._abspath, to_native_path(key))
+        elif self._path.endswith(os.sep):
+            target = self._abspath + os.sep
+        else:
+            target = self._abspath
+        info = self._stat_one(
+            target, follow_symlinks=self._follow_symlinks, notify=notify, directory_form=not key
+        )
         if info is not None:
             info.compare_key = info.key.rsplit("/", 1)[-1]
         return info

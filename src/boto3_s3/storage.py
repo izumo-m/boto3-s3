@@ -427,7 +427,9 @@ class Storage(abc.ABC):
         - present -> a ``FileInfo`` whose ``compare_key`` is the
           entry's basename (``kind`` reflects the entry: a local directory
           target resolves as a DIRECTORY-kind entry that a transfer later
-          fails on, like aws);
+          fails on, like aws - and, looked up as the location itself
+          (``key=""``), named as aws-cli names it, with a trailing separator,
+          so its ``compare_key`` is ``""``);
         - **definitively absent** (an S3 ``404``, a local ``ENOENT`` / ``ENOTDIR``)
           -> ``None``, no warning;
         - present but not a transferable regular file (a local special device /

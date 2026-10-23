@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `~/.aws/cli/alias` is no longer read: no alias applies, and a file there is no error; a shell alias does the same job.
 - The interactive auto-prompt and the `autoprompt` extra are gone: `--cli-auto-prompt` and `--no-cli-auto-prompt` are accepted and ignored, and `AWS_CLI_AUTO_PROMPT` and `cli_auto_prompt` are not read.
 - The config files are now read only when a subcommand runs: a broken config file or setting still stops every subcommand, but no longer `help` and `--version` (exit codes changed).
-- A `cp` / `mv` of a directory without `--recursive` now names it as `aws` does (`d/ to s3://bkt/`) in its `--dryrun` and failure lines.
+- A `cp` / `mv` of a directory without `--recursive` now names it as `aws` does (`d/ to s3://bkt/`) in its `--dryrun`, failure and warning lines.
 - When several things are wrong on a command line, which one is reported may differ from `aws` (exit codes changed).
 - Error reports quoting Python's own text read as the host's Python writes it, and a digit-led endpoint scheme is no longer refused on Python 3.10 (exit codes changed).
 - `file://` and `fileb://` are now refused where `aws` mishandles them (a `fileb://` path argument, a `website` bucket read from a file, `--metadata fileb://`, a single `--grants` file), a `fileb://` on any text option is refused without reading the file, and a `--metadata` value no map can hold is reported in plainer words (exit codes changed).

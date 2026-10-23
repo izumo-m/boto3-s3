@@ -71,7 +71,9 @@ class FileInfo:
     yields (a contract of the backend's listing, not of the base ``Storage.scan``),
     so a custom ``ScanOptions.filter`` predicate - notably ``GlobFilter`` - matches
     it directly without re-deriving it from ``key``. The built-in
-    ``get_fileinfo`` methods use the basename for a single entry (an operation
+    ``get_fileinfo`` methods use the basename for a single entry (``""`` for a
+    local directory looked up as the location itself, ``key=""``, which
+    aws-cli names with a trailing separator; an operation
     shows a filter aws-cli's form of a single source instead,
     design/globsieve.md section 5). The name mirrors
     aws-cli's ``FileInfo.compare_key``; a hand-built ``FileInfo`` may leave it as

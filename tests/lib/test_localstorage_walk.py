@@ -1689,8 +1689,94 @@ class TestGetFileinfo:
         # entry (the FileInfo contract), so a filter can tell it apart.
         info = LocalStorage(str(tmp_path)).get_fileinfo()
         assert info is not None
-        assert info.key == str(tmp_path).replace(os.sep, "/")
         assert info.kind is FileKind.DIRECTORY
+
+    @pytest.mark.parametrize("typed_separator", [False, True])
+    def test_directory_is_named_with_a_trailing_separator(
+        self, tmp_path: Path, typed_separator: bool
+    ) -> None:
+        # aws-cli's local_format names a directory with a trailing separator,
+        # so its last component - its compare_key - is empty.
+        typed = str(tmp_path) + (os.sep if typed_separator else "")
+        info = LocalStorage(typed).get_fileinfo()
+        assert info is not None
+        assert info.key == str(tmp_path).replace(os.sep, "/") + "/"
+        assert info.compare_key == ""
+
+    def test_file_typed_with_a_trailing_separator_is_absent(self, tmp_path: Path) -> None:
+        # aws-cli looks the path up with the separator typed, which a file
+        # does not take (ENOTDIR).
+        target = tmp_path / "a.txt"
+        target.write_bytes(b"x")
+        warnings: list[str] = []
+        storage = LocalStorage(str(target) + os.sep)
+        assert storage.get_fileinfo(on_warning=warnings.append) is None
+        assert warnings == []
+
+    @skip_if_chmod_is_inert
+    @pytest.mark.parametrize(("follow", "suffix"), [(True, os.sep), (False, "")])
+    def test_unreadable_directory_warns_in_aws_cli_form(
+        self, tmp_path: Path, follow: bool, suffix: str
+    ) -> None:
+        # local_format's trailing separator, which should_ignore_file removes
+        # from a no-follow directory before it warns (measured on aws).
+        locked = tmp_path / "locked"
+        locked.mkdir()
+        locked.chmod(0)
+        warnings: list[str] = []
+        storage = LocalStorage(str(locked), follow_symlinks=follow)
+        try:
+            assert storage.get_fileinfo(on_warning=warnings.append) is None
+        finally:
+            locked.chmod(0o755)
+        assert warnings == [f"Skipping file {locked}{suffix}. File/Directory is not readable."]
+
+    @pytest.mark.skipif(os.name != "nt", reason="the Windows drive root")
+    @pytest.mark.parametrize("tail", ["\\", "/", "\\."])
+    def test_a_drive_root_keeps_its_separator_for_the_symlink_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tail: str
+    ) -> None:
+        # Only a separator the user typed is removed before the symlink
+        # check: "C:/" stripped to "C:" would name the drive's working
+        # directory, which a no-follow lookup skips when that directory was
+        # entered through a symlink.
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        try:
+            link.symlink_to(real, target_is_directory=True)
+        except OSError:
+            pytest.skip("cannot create symlinks here")
+        monkeypatch.chdir(link)
+        drive = tmp_path.drive
+        info = LocalStorage(drive + tail, follow_symlinks=False).get_fileinfo()
+        assert info is not None
+        assert (info.key, info.compare_key) == (f"{drive}//", "")
+
+    @pytest.mark.skipif(os.name == "nt", reason="the POSIX root")
+    @pytest.mark.parametrize("typed", ["/", "/.", "/.."])
+    def test_the_root_gains_a_separator_like_any_directory(self, typed: str) -> None:
+        # local_format appends the separator to abspath, which already ends
+        # in one at the root: aws-cli's form of "/" is "//".
+        info = LocalStorage(typed).get_fileinfo()
+        assert info is not None
+        assert (info.key, info.compare_key) == ("//", "")
+
+    @pytest.mark.skipif(not hasattr(os, "symlink"), reason="needs symlinks")
+    @pytest.mark.parametrize("typed_separator", [False, True])
+    def test_no_follow_directory_symlink_skips_with_either_form(
+        self, tmp_path: Path, typed_separator: bool
+    ) -> None:
+        # The OS follows a symlink named with a trailing separator, so the
+        # link is looked at without it (aws-cli's should_ignore_file).
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
+        typed = str(link) + (os.sep if typed_separator else "")
+        assert LocalStorage(typed, follow_symlinks=False).get_fileinfo() is None
+        followed = LocalStorage(typed).get_fileinfo()
+        assert followed is not None and followed.is_symlink
 
     def test_missing_returns_none_silently(self, tmp_path: Path) -> None:
         # Definitively absent -> None, no warning (the existence-check contract).

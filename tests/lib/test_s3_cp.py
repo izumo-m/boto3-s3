@@ -219,6 +219,35 @@ class TestUploadRoute:
         assert [r.outcome for r in results] == [OpOutcome.WARNED]
         assert str(tmp_path / "x") in str(results[0].error)
 
+    @pytest.mark.skipif(
+        os.name == "nt", reason="Windows folds `..` before the filesystem sees the path"
+    )
+    def test_a_source_typed_with_a_separator_is_looked_up_with_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `lsub/../x/` is the directory sub/x to the kernel, which admits it,
+        # and the file <cwd>/x/ to aws's generator, which a file does not
+        # take: "Skipping file <cwd>/x/. File does not exist.", rc 2
+        # (measured), where the lexical form without the separator would
+        # upload <cwd>/x.
+        (tmp_path / "sub" / "other").mkdir(parents=True)
+        (tmp_path / "sub" / "x").mkdir()
+        (tmp_path / "x").write_bytes(b"x")
+        (tmp_path / "lsub").symlink_to(tmp_path / "sub" / "other")
+        monkeypatch.chdir(tmp_path)
+        client, calls = make_recording_client([])
+        results: list[OpResult] = []
+        S3().cp(
+            LocalStorage("lsub/../x/"),
+            S3Storage("s3://bucket/k", client=client),
+            on_result=results.append,
+        )
+        assert calls == []
+        assert [r.outcome for r in results] == [OpOutcome.WARNED]
+        assert f"Skipping file {tmp_path / 'x'}{os.sep}. File does not exist." in str(
+            results[0].error
+        )
+
     @pytest.mark.skipif(os.name != "nt", reason="the Windows path rule")
     def test_on_windows_that_source_is_refused_as_missing_like_aws(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

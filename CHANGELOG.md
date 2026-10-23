@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `GlobFilter`'s builder is replaced by `Exclude` / `Include` rules compiled with `globsieve.compile`, which matches as `aws s3` does on every OS (absolute and Windows drive forms, Windows case and separators, a single source in `aws s3`'s form); `GlobPattern`, `PatternKind`, `is_anchored` and the matcher classes are gone.
 - `cp`, `mv`, `sync` and `rm` now read the `[s3]` section of the AWS config file the way `aws s3` does, filling the transfer settings a `TransferConfig` leaves unset and picking the engine as `aws s3` picks it; `S3.resolve_transfer_config` returns the config a run would use.
 - An exception from `on_progress` now ends the run and reaches the caller as it is, like one from `on_result`, instead of failing the item it reported on.
-- A single local source that is a directory is now named as `aws s3` names it in its result (a trailing separator, and no name appended to a prefix destination).
+- A single local source that is a directory is now named as `aws s3` names it in its result and warnings (a trailing separator, and no name appended to a prefix destination), and `LocalStorage.get_fileinfo()` finds a file typed with a trailing separator absent, as `aws s3` does.
 - A request that dies without any response (a connection closed, a read timeout) now fails its item instead of leaving no record.
 - A classic download that gave up retrying a body read now fails with `TransportError` instead of the base `Boto3S3Error`.
 - A multipart copy whose post-copy tag write and its cleanup delete both fail is now reported as failed, so `mv` keeps its source, and a Ctrl-C in a copy's post-copy writes under `use_threads=False` now cancels the item.

@@ -275,7 +275,9 @@ its skip messages and ignored by `S3Storage`.
 
 The outcomes are uniform across backends:
 
-- present — a `FileInfo` whose `compare_key` is the entry's basename, with
+- present — a `FileInfo` whose `compare_key` is the entry's basename (`""`
+  for a local directory at the location itself, named with a trailing
+  separator; see [`LocalStorage`](#localstorage)), with
   `kind` reflecting what was found (a local directory resolves as a
   `DIRECTORY`-kind entry that a transfer later fails on, matching `aws s3`);
 - definitively absent (an S3 `404`, a local `ENOENT` / `ENOTDIR`) — `None`,
@@ -502,7 +504,12 @@ every scan through `default_scan_options`, so an operation inherits them
 without being passed them; their per-entry meanings are on `LocalScanOptions`
 ([`./options.md`](./options.md)). `get_fileinfo` reads `follow_symlinks` only —
 the enumeration and loop settings shape a walk and do not apply to resolving
-one entry.
+one entry. It looks the location itself up in the AWS CLI's form: a path typed
+with a trailing `os.sep` (`\` on Windows, where `/` does not count) is looked
+up with one, so a file so named is absent, and a directory is named with one —
+its `key` ends in `/` and its `compare_key` is `""`. Its skip warnings name it
+the AWS CLI's way too: with the separator when symlinks are followed
+(`Skipping file /data/d/. ...`), without it when they are not.
 
 `fsync` is a destination-side durability knob, default off to match `aws s3`.
 When set, a `mv` whose download lands in this storage flushes the file to disk
@@ -671,7 +678,9 @@ translated `NotFoundError` / `AccessDeniedError` / `TransportError`.
 
 Stats a single path, anchored at the absolutized location and joined with `key`
 for a child, following the same deliberate `..` / absolute-key resolution as
-`open`. `FileInfo.key` is absolute and `compare_key` is its basename. Whether a
+`open`. `FileInfo.key` is absolute and `compare_key` is its basename — for the
+location itself, in the AWS CLI's form described under the constructor (a
+directory's `key` ends in `/` and its `compare_key` is `""`). Whether a
 symlink is followed is the storage's own `follow_symlinks`, not a parameter.
 
 One `os.stat` is taken and reused for the size, the mtime, the special-file
