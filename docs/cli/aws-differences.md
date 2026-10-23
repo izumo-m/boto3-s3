@@ -65,11 +65,10 @@ configure credentials by running "aws login".`, a missing-region one points at
 `aws s3api get-bucket-location`. This command has none of them, but both tools
 read the same config and credentials files, so following the advice fixes the
 run either way. That is exactly what makes parsing fragile: the wording is aws's
-to change, and it does change from one `aws` release to the next. Five of
+to change, and it does change from one `aws` release to the next. Four of
 section 2's entries cover the text that differs on purpose — the progress
-display, help pages and `--debug` traces, the `--dryrun` line of a directory
-copied without `--recursive`, the `--version` line, and the history warning
-`aws` writes and this command has not. Text that botocore, Python or S3
+display, help pages and `--debug` traces, the `--version` line, and the
+history warning `aws` writes and this command has not. Text that botocore, Python or S3
 writes is reported as they write it, so it can read differently where their
 versions differ from the ones `aws` bundles. And the ordering of concurrent
 output is not reproducible on either tool (below).
@@ -524,19 +523,6 @@ that say outright that the run comes out differently, listed in section 1.
   it prints `aws`'s "may resolve to same underlying s3 object(s)" warning,
   and under `--validate-same-s3-paths` resolves the access point and refuses
   the move with exit code 252.
-- **Copying a directory without `--recursive`.** A `cp` or `mv` whose local
-  source is a directory fails — exit code 1 on both tools, the source left in
-  place — unless a filter excludes the source (`--exclude 'd/'`, its
-  trailing-separator form, or `--exclude '*'`), when both tools do nothing and
-  exit 0. Under `--dryrun` both tools instead exit 0 and preview the doomed
-  upload, and the previewed line differs: `aws` threads the source through in
-  its trailing-separator form and prints `(dryrun) upload: d/ to s3://bkt/` —
-  with the destination key folded away — where this command prints
-  `(dryrun) upload: ./d to s3://bkt/d`. The failure line differs the same
-  way: `aws` prints `upload failed: d/ to s3://bkt/k ...` where this command
-  prints `upload failed: ./d to s3://bkt/k ...`, and into a prefix `aws`
-  names the prefix itself (`d/ to s3://bkt/`) where this command names
-  `./d to s3://bkt/d`.
 - **Glob characters in a filtered command's path are literal here.** `aws`
   joins the path a command names into every `--exclude` / `--include`
   pattern, so a `[`, `*` or `?` in that path is read as part of the pattern:

@@ -120,7 +120,8 @@ here — the same shape as that fallback. It is the same key space the
 operations' filters match against ([`filters.md`](./filters.md)). Outside those
 two cases it is not the full object key; read `src_info.key` for that, on a
 record that carries a source entry. Advisory records that belong to no item — a
-directory-walk warning — carry `""`.
+directory-walk warning — carry `""`, as does the item of a single local
+source that is a directory ([`filters.md`](./filters.md#filefilter)).
 
 `outcome` is the record kind; see [`OpOutcome`](#opoutcome).
 
@@ -396,7 +397,9 @@ a `ScanOptions.filter` predicate, `GlobFilter` in particular, can match it
 without re-deriving it from `key`. The built-in single-entry lookups use the
 basename; an operation shows its filter the AWS CLI's form of a single source
 instead (and of the few recursive bases where the two differ), on a copy,
-while the record keeps its own ([`filters.md`](./filters.md#filefilter)). A
+while the record keeps its own - except a single local source that is a
+directory, whose record takes the AWS CLI's form, `""` included
+([`filters.md`](./filters.md#filefilter)). A
 hand-built `FileInfo` may leave it `None`.
 
 `storage` is the backend the entry was listed from, stamped by the producer

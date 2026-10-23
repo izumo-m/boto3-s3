@@ -51,7 +51,12 @@ unchanged (it names the destination):
   (`/`-separated, with a trailing `/` for a directory or a path typed with
   one) and its path below the typed path's parent as `compare_key`: `d` gives
   `d/`; `d/`, `.` and `../` give `""`; a bare `..` gives `None`, so only
-  patterns matched against the full path apply.
+  patterns matched against the full path apply. A source in that
+  trailing-`/` form (a directory) is also handed on in it, as the AWS CLI
+  names it: its record's `key` ends in `/` and its `compare_key` is `""`, so
+  a destination that takes the source's name gets none (`d` into
+  `s3://bucket/p/` names `s3://bucket/p/`), and the transfer fails on the
+  directory.
 
 Two recursive cases differ too, and are shown a copy with a leading `/` in
 `compare_key`: a local walk of a filesystem root (`/`, `D:\`), which the AWS

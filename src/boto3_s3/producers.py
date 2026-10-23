@@ -510,8 +510,25 @@ def upload_items(
             # Only the locals3 route comes here, so the source is local.
             src = cast("LocalStorage", plan.src)
             infos = _filter_single_local_source(infos, item_filter, src)
+        infos = (_single_directory_source(info, cast("LocalStorage", plan.src)) for info in infos)
     for info in infos:
         yield upload_item_from_info(plan, info, dest_bucket=dest_bucket, transferrer=transferrer)
+
+
+def _single_directory_source(info: FileInfo, storage: LocalStorage) -> FileInfo:
+    """A single local source in aws-cli's directory form, named as aws-cli names it.
+
+    aws-cli's ``local_format`` gives a directory - or a path typed with one -
+    a trailing separator, so the source reads ``d/`` and its last component -
+    the name a destination that takes the source's name appends - is empty:
+    ``cp d s3://bkt/`` shows ``d/ to s3://bkt/`` in its dry-run and failure
+    lines. The engine then fails the item on the directory (``[Errno 21] Is a
+    directory``).
+    """
+    full, _use_src_name = storage.format(dir_op=False)
+    if not full.endswith(os.sep):
+        return info
+    return replace(info, key=full.replace(os.sep, "/"), compare_key="")
 
 
 def upload_item_from_info(

@@ -445,6 +445,27 @@ class TestUploadRoute:
         assert isinstance(results[0].error.__cause__, IsADirectoryError)
         assert (excinfo.value.succeeded, excinfo.value.failed) == (0, 1)
 
+    @pytest.mark.parametrize("dest", ["s3://b/k", "s3://b/p/"])
+    def test_directory_single_source_is_named_with_its_separator(
+        self, tmp_path: Path, dest: str
+    ) -> None:
+        # aws-cli's local_format gives a directory source a trailing separator,
+        # so its last component - the name a prefix destination appends - is
+        # empty: aws shows "d/ to s3://b/p/", not "./d to s3://b/p/d".
+        src = tmp_path / "adir"
+        src.mkdir()
+        client, calls = make_recording_client([])
+        results: list[OpResult] = []
+        S3().cp(
+            str(src),
+            S3Storage(dest, client=client),
+            dryrun=True,
+            transfer_config=_SYNC,
+            on_result=results.append,
+        )
+        assert calls == []
+        assert [(result.src, result.dest) for result in results] == [(str(src) + os.sep, dest)]
+
     def test_local_to_local_is_rejected(self, tmp_path: Path) -> None:
         src = tmp_path / "a.txt"
         src.write_bytes(b"x")

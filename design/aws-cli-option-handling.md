@@ -301,8 +301,8 @@ what `aws` displays. **The list is exhaustive for the display layer's
 functional differences**: nothing here licenses an unrecorded one, and a new
 one is added by the same explicit decision a new normalization rule takes.
 Those a user sees on a successful run (the pipeline's five, the help pages
-and `--debug` traces, the `--version` line, the missing `cli_history`
-warning, and the `--dryrun` line of a directory-source copy below) are
+and `--debug` traces, the `--version` line and the missing `cli_history`
+warning below) are
 carried in [`aws-differences.md`](../docs/cli/aws-differences.md) section 2
 as well. The rest are kept here only as implementation notes: an interrupted
 `mv`'s record, and the last, which no real run reaches.
@@ -366,12 +366,6 @@ The rest sit outside the pipeline:
   the program identifying itself, but the shape of the line differs beyond a
   token rewrite, so it is recorded here rather than folded into the
   program-identity mapping.
-- **The `--dryrun` line of a non-recursive directory source** names the
-  source as given (`(dryrun) upload: ./d to s3://bkt/d`) where aws threads
-  its trailing-separator form through its engines
-  (`(dryrun) upload: d/ to s3://bkt/`). The source keeps its given form so
-  that the run without `--dryrun` fails the item with the operating
-  system's `[Errno 21]` (rc 1) (decided 2026-08-01).
 - **No `cli_history` warning.** This command has no history mechanism, so it
   never writes aws's `Warning: Unable to record CLI history. ...` line.
 - **`--human-readable` past EiB.** aws's suffix loop falls through above EiB
