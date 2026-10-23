@@ -124,6 +124,7 @@ from __future__ import annotations
 
 import codecs
 import contextlib
+import errno
 import os
 import stat as stat_module
 import sys
@@ -1062,14 +1063,19 @@ class LocalFileGenerator:
             # close), re-raise like aws-cli's ``listdir`` would - never prune
             # silently. This open is by full path, so a directory past the
             # kernel's symlink-loop or path-length limit - which the parent's
-            # fd-relative vetting cannot see - is warned here as aws-cli's
-            # full-path re-test warns it (a leaf past it, by ``restat_leaf``'s
-            # full-path stat at its turn). Scoped to the open/scandir
+            # fd-relative vetting cannot see - is warned here, under the name
+            # aws-cli's full-path listing warns it by (a leaf past it, by
+            # ``restat_leaf``'s full-path stat at its turn). Scoped to the open/scandir
             # establishment only - a per-entry OSError (from a race mid-scan or
             # an override's classify_child) propagates rather than dropping the
             # directory.
             if dir_fd is not None:
                 os.close(dir_fd)
+            if exc.errno in (errno.ELOOP, errno.ENAMETOOLONG) and probe.endswith(os.sep):
+                # aws-cli's parent listing already finds such a path not to
+                # be a directory (its ``isdir`` fails the same way), so it is
+                # never given the separator and is warned as a file.
+                probe = probe[:-1]
             if not self.triggers_warning(probe, notify):
                 codec = _walk_codec(options)
                 if codec is not None:

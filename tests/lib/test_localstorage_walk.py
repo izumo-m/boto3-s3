@@ -201,6 +201,9 @@ class TestWalkWarnings:
             assert warnings
             return
         _assert_warned(warnings, ("does not exist",))
+        # Named as aws-cli names it: its parent listing finds the looping path
+        # not to be a directory, so the path carries no trailing separator.
+        assert f"{os.sep}up. " in warnings[0], warnings
 
     def test_symlink_leaf_at_the_cycle_boundary_warns_like_aws(self, tmp_path: Path) -> None:
         # A cycle whose boundary directory still holds a *symlink* file leaf: the
