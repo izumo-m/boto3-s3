@@ -510,7 +510,9 @@ error's details need not (checked by the e2e CRT lane - testing.md).
   CRT client's `use_ssl` from `--endpoint-url` alone, so an `http://` endpoint
   supplied through `AWS_ENDPOINT_URL_S3` is dialed over TLS and the transfer
   dies with `AWS_IO_SOCKET_CLOSED`, where `_derive_endpoint` reads the scheme
-  off the endpoint the client actually resolved and the same run transfers.
+  off the endpoint the client actually resolved and the same run transfers
+  (bar a host under an AWS DNS suffix, which derives `None` and keeps TLS
+  on, as aws-cli does - section 3).
   The user sees a different exit code and a different S3 state - a functional
   difference - so this one is recorded in
   [`aws-differences.md`](../docs/cli/aws-differences.md) section 2 too

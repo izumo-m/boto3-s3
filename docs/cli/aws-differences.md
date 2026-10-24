@@ -408,7 +408,9 @@ that say outright that the run comes out differently, listed in section 1.
   the resulting S3 state differ, in the direction of working. Pass
   `--endpoint-url` and the two agree again
   ([`../../design/crt.md`](../../design/crt.md) section 3 records the
-  measurement).
+  measurement). A host under an AWS domain (`s3.us-east-1.amazonaws.com`,
+  a VPC endpoint's name) is the exception: its scheme is not read here
+  either, so TLS stays on, as on `aws`.
 - **A FIPS pseudo-region under the CRT engine.** Under
   `preferred_transfer_client = crt`, a region named in the old FIPS form
   (`--region fips-us-east-1`, `us-east-1-fips`) reaches `aws`'s CRT client as
