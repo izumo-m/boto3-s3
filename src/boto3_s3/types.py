@@ -357,7 +357,8 @@ class OpOutcome(enum.Enum):
     API call does not occur (enumeration and the single-object HeadObject
     still run) and the exit code is unaffected. ``NOTICE`` carries display-only
     text on ``error`` (aws-cli prints some advisories - the case-conflict
-    messages - straight to stderr without counting them as warnings); it
+    messages, ``mv``'s same-underlying-path warning - straight to stderr
+    without counting them as warnings); it
     never affects counts or the exit code, and may precede the same item's
     real outcome. ``CANCELLED`` reports an accepted item revoked before it
     could complete - a fatal error elsewhere in the run, an immediate cancel,

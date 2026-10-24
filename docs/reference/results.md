@@ -256,7 +256,8 @@ mutating API call does not occur. It affects no `BatchError` counter.
 
 `NOTICE` — display-only text carried on `error`, used where `aws s3` prints an
 advisory straight to stderr without counting it as a warning (the case-conflict
-messages). It affects no counter, and it may precede the same item's real
+messages, and `mv`'s warning that two S3 paths may name the same object, which
+belongs to no item and comes before the run's records). It affects no counter, and it may precede the same item's real
 outcome, so a consumer must not assume one callback per key. The body already
 carries its own `warning: ` prefix.
 

@@ -778,13 +778,16 @@ class S3:
             return self._assembly.client("s3", region=region, endpoint_url=None)
         return self._build_client("s3", region_name=region, config=self._config)
 
-    def _service_client(self, service: str, *, region: str | None) -> Any:
-        """A non-S3 client the way this instance builds its own (``mv``'s path validation).
+    def service_client(self, service: str, *, region: str | None = None) -> Any:
+        """A client of another AWS *service*, for ``mv``'s ``validate_same_s3_paths``.
 
-        aws-cli's ``S3PathResolver.from_session``: only the session, the region
-        (``None`` leaves the session's), and - on an instance `from_aws_cli`
-        built - the TLS flags and timeouts aws-cli gives every client; no
-        endpoint override and no ``config``.
+        aws-cli's ``S3PathResolver.from_session``: the session and *region*
+        (``None`` leaves the session's) alone - no endpoint override and no
+        ``config`` - plus, on an instance `from_aws_cli` built, the TLS flags
+        and timeouts aws-cli gives every client. ``mv`` asks for ``s3control``
+        and ``sts``. It fails as `client` fails. A subclass whose `client`
+        returns test doubles, or another account's clients, overrides this
+        too.
         """
         if self._assembly is not None:
             return self._assembly.client(service, region=region)
@@ -1299,7 +1302,7 @@ class S3:
         only when the two *keys* match. With *validate*, both sides resolve
         through `S3PathResolver` - the source's s3control client in
         *source_region*, the destination's in this instance's own region, an
-        sts client with no region of its own (`_service_client`; an unset
+        sts client with no region of its own (`service_client`; an unset
         region is the session's) - and a resolved pair naming the same path
         stops the move before it starts, with the original locations in the
         report. Without it, a side shaped like one of those gets aws-cli's
@@ -1322,13 +1325,13 @@ class S3:
                 ).notice(_SAME_UNDERLYING_PATH_WARNING)
             return
         own_region = self._assembly.settings.region if self._assembly is not None else None
-        sts = self._service_client("sts", region=None)
+        sts = self.service_client("sts", region=None)
         src_paths = S3PathResolver(
-            s3control_client=self._service_client("s3control", region=source_region),
+            s3control_client=self.service_client("s3control", region=source_region),
             sts_client=sts,
         ).resolve_underlying_s3_paths(norm_src)
         dest_paths = S3PathResolver(
-            s3control_client=self._service_client("s3control", region=own_region),
+            s3control_client=self.service_client("s3control", region=own_region),
             sts_client=sts,
         ).resolve_underlying_s3_paths(norm_dest)
         for src_path in src_paths:

@@ -95,7 +95,7 @@ class TestValidateSameS3Paths:
         """Stand in for the resolver and its clients, recording the regions asked for."""
         seen: dict[str, Any] = {"regions": [], "map": {}}
 
-        def service_client(_self: S3, service: str, *, region: str | None) -> Any:
+        def service_client(_self: S3, service: str, *, region: str | None = None) -> Any:
             seen["regions"].append((service, region))
             return object()
 
@@ -106,7 +106,7 @@ class TestValidateSameS3Paths:
             seen["ran"] = True
 
         seen["ran"] = False
-        monkeypatch.setattr(S3, "_service_client", service_client)
+        monkeypatch.setattr(S3, "service_client", service_client)
         monkeypatch.setattr(S3, "_run_transfer", run)
         monkeypatch.setattr(pathresolver.S3PathResolver, "__init__", lambda self, **_kw: None)
         monkeypatch.setattr(pathresolver.S3PathResolver, "resolve_underlying_s3_paths", resolve)

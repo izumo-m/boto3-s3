@@ -141,9 +141,11 @@ removes the only copy (measured on real S3).
 `validate_same_s3_paths=True` is `aws s3 mv --validate-same-s3-paths`. When
 both sides are S3 and their keys match, each side is resolved to the paths it
 may land in through [`S3PathResolver`](../misc.md#s3pathresolver) — the
-source's `s3control` client in `source_region`, the destination's in this
-instance's own region, and an `sts` client, each built as this instance builds
-its clients (an unset region is the session's) — and a resolved pair naming
+source's `s3control` client in `source_region`, the destination's in the
+`region` given to [`S3.from_aws_cli`](../s3.md#from_aws_cli) (the session's for
+an `S3()`, and for an unset region either way), and an `sts` client, each from
+[`S3.service_client`](../s3.md#service_clientservice--regionnone), which uses
+neither `endpoint_url` nor `config` — and a resolved pair naming
 the same path is refused with the same `ValidationError`, naming the original
 URIs, before anything runs. Resolving sends `s3control` and `sts` requests, and
 their failures raise as the resolver's do. Without it, a same-key move one of
