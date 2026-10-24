@@ -97,7 +97,7 @@ def prepare_process() -> None:
     SSOTokenProvider.DEFAULT_CACHE_CLS = awsclisession.credential_cache_class()
 
 
-def build_s3(args: argparse.Namespace) -> S3:
+def build_s3(args: argparse.Namespace, *, s3_class: type[S3] | None = None) -> S3:
     """Build the command's `S3`: `S3.from_aws_cli` on the parsed globals.
 
     The library opens the session the way aws-cli opens its own and walks the
@@ -109,10 +109,14 @@ def build_s3(args: argparse.Namespace) -> S3:
     pull (aws-cli dies immediately); the library default keeps waiting. Its S3
     clients carry aws-cli's error-message rewriter (`s3errormsg`), and the
     profile's ``cli_*`` formats are checked as aws-cli checks them when its
-    session starts (`_reject_unknown_cli_formats`).
+    session starts (`_reject_unknown_cli_formats`). *s3_class* replaces the
+    command's own class (`cli_s3_class`) with a subclass of it - the test
+    seam's (``Context``), which injects clients - and keeps the rest.
     """
     prepare_process()
-    s3 = cli_s3_class().from_aws_cli(**from_aws_cli_arguments(args), reusable_after_interrupt=False)
+    s3 = (s3_class or cli_s3_class()).from_aws_cli(
+        **from_aws_cli_arguments(args), reusable_after_interrupt=False
+    )
     assert s3.session is not None  # from_aws_cli opened it
     _reject_unknown_cli_formats(s3.session._session, args)  # pyright: ignore[reportPrivateUsage]
     return s3

@@ -235,8 +235,8 @@ solidified design is added here.
   `Host`-less CONNECT served every `aws` command and failed every command
   here. The library's `boto3_s3.pin_proxy_connect` installs the 3.12+ opener
   onto botocore's `AWSConnection`; the CLI calls it from
-  `clientfactory._create_client`, the one seam every client this CLI hands out
-  passes through, which puts one CONNECT on the wire across every supported
+  `clientfactory.prepare_process` before it opens its session, so every
+  client it builds gets it, which puts one CONNECT on the wire across every supported
   Python (bar an IPv6 endpoint on 3.12.0 to 3.12.2, whose own opener brackets
   the literal in `Host`). The library leaves the call to the application, the change being
   process-wide ([`overview.md`](./overview.md) section 3, rule 1).

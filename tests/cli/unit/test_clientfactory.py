@@ -1487,6 +1487,21 @@ class TestS3ErrorMsgRegistration:
 
 
 class TestContextSeams:
+    @pytest.mark.parametrize("seam", ["client_factory", "service_client_factory"])
+    def test_an_injected_s3_checks_the_cli_formats_too(
+        self, seam: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Only clients are injected; the profile's cli_* checks still run.
+        from boto3_s3_cli.clientfactory import UnknownTimestampFormatError
+        from boto3_s3_cli.commands.base import Context
+
+        config = tmp_path / "config"
+        config.write_text("[default]\ncli_timestamp_format = bogus\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        context = Context(**{seam: lambda *_a, **_k: object()})
+        with pytest.raises(UnknownTimestampFormatError):
+            context.s3(_parse(["--region", "us-east-1"]))
+
     def test_a_service_client_factory_alone_is_used(self) -> None:
         # Without a client_factory the S3 clients stay the command's own, the
         # rewriter included, and only the non-S3 clients are injected.

@@ -165,8 +165,9 @@ config=None read as `'auto'` - with the same rules as boto3.
     maps to `None`, which is boto3-faithful (plain boto3 passes no `verify` to
     `create_s3_crt_client` either) but means the **platform** trust store,
     not the certifi bundle the classic engine uses. A caller's
-    `CrtClientOptions.verify` replaces the derivation. The CLI declares one
-    the way aws-cli's CRT factory resolves it (`clientfactory._crt_verify`:
+    `CrtClientOptions.verify` replaces the derivation. `S3.from_aws_cli` (the
+    CLI's assembly) declares one the way aws-cli's CRT factory resolves it
+    (`awsclisession.crt_verify`:
     `--no-verify-ssl` > `--ca-bundle` > `ca_bundle` config variable >
     botocore's bundled `cacert.pem`, never `REQUESTS_CA_BUNDLE`), apart from
     the botocore clients' own resolution, so its two engines trust what

@@ -70,7 +70,7 @@ DEFAULT_EXPIRES = 3600
 
 
 def _frozen_clock(remove_tzinfo: bool = True) -> datetime.datetime:
-    """``get_current_datetime`` replacement (CRT signers pass ``False``)."""
+    """``get_current_datetime`` replacement (honoring ``remove_tzinfo``)."""
     if remove_tzinfo:
         return FROZEN_DATETIME
     return FROZEN_DATETIME.replace(tzinfo=datetime.timezone.utc)
@@ -231,7 +231,7 @@ class TestPresignCommand:
 
     def test_can_support_addressing_mode_config(self) -> None:
         # aws-cli enables path-style addressing via a config file; the client
-        # Config equivalent keeps the rest of the pinned base.
+        # Config equivalent keeps the rest of the assembly's base.
         stdout = _get_presigned_url_for_cmd(
             ["presign", "s3://bucket/key"], config=_PATH_STYLE_CONFIG
         )

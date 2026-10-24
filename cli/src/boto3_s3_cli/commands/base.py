@@ -16,12 +16,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 # These exception names do not themselves import the AWS SDK.
 from boto3_s3 import InvalidValueError, ValidationError
 from boto3_s3_cli import paramfile, usage
-from boto3_s3_cli.clientfactory import (
-    build_s3,
-    cli_s3_class,
-    from_aws_cli_arguments,
-    prepare_process,
-)
+from boto3_s3_cli.clientfactory import build_s3, cli_s3_class
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -102,13 +97,11 @@ class Context:
                     return service_client_factory(service, args, region=region)
                 return super().service_client(service, region=region)
 
-        # Assembled like build_s3's - the session, the region, the CRT client's
-        # settings, the local names, the process-fatal Ctrl-C posture - with
-        # the clients the factory hands out.
-        prepare_process()
-        return InjectedClientS3.from_aws_cli(
-            **from_aws_cli_arguments(args), reusable_after_interrupt=False
-        )
+        # Built as build_s3 builds the command's own - the session, the
+        # region, the CRT client's settings, the local names, the
+        # process-fatal Ctrl-C posture, the cli_* format checks - with the
+        # clients the factories hand out.
+        return build_s3(args, s3_class=InjectedClientS3)
 
     def with_s3(self, s3: S3) -> Context:
         """A view of this context whose ``s3`` always returns *s3*.

@@ -759,8 +759,8 @@ dest-existence check for download. We ported the same three faces:
   computed with awscrt. Whether to switch the transfer engine itself to CRT is
   decided by `preferred_transfer_client` (section 2 / [`crt.md`](./crt.md)), and
   the botocore client's request signing (awscrt's signers when awscrt is
-  importable, as botocore picks them; `presign` always signs pure-Python,
-  cli.md section 4) does not change with the transfer engine.
+  importable, as botocore picks them; `presign` signs symmetric SigV4
+  pure-Python, cli.md section 4) does not change with the transfer engine.
 
 ## 10. SDK version differences (not matched)
 
