@@ -62,8 +62,9 @@ otherwise botocore's own default stands — `CRC32` from boto3 1.36 on, and
 below it no default checksum at all (an upload carries `Content-MD5`). The
 batched deletes the CRT engine sends carry botocore's own default even with
 awscrt; `aws` sends no such request, its deletes going one key at a time. In
-the library an `S3` built with `S3.from_aws_cli` has the same default on its
-clients; one built with `S3()` leaves botocore's default in place either way.
+the library the clients an `S3` built with `S3.from_aws_cli` builds have the
+same default; an `S3()`'s own clients leave botocore's default in place either
+way.
 Name `checksum_algorithm` to choose.
 How it fails differs by feature: `preferred_transfer_client = crt` is refused
 before the run starts (exit code 253), while an explicit CRT-only

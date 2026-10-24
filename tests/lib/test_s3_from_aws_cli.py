@@ -235,6 +235,17 @@ class TestFailingBeforeARun:
         with pytest.raises(ConfigurationError, match="You must specify a region"):
             S3._require_crt_region(TransferConfig(), s3.client())  # pyright: ignore[reportPrivateUsage]
 
+    def test_a_client_left_to_the_sessions_region_is_marked_with_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AWS_REGION", "eu-west-1")
+        s3 = S3.from_aws_cli()
+        assert s3._assembly is not None  # pyright: ignore[reportPrivateUsage]
+        client = s3._assembly.client("s3", region=None)  # pyright: ignore[reportPrivateUsage]
+        mark = awsclisession.assembled(client)
+        assert mark is not None and mark.region == "eu-west-1"
+        S3._require_crt_region(TransferConfig(), client)  # pyright: ignore[reportPrivateUsage]
+
     def test_a_stand_in_that_answers_every_attribute_is_not_taken_for_one(self) -> None:
         # A mark is an `Assembled`, not whatever getattr returns.
         from unittest.mock import MagicMock

@@ -166,7 +166,12 @@ class AwsCliAssembly:
             client = create_client(self.session, service, **kwargs)
         if service == "s3":
             register_default_checksum(client)
-        setattr(client, ASSEMBLED_BY, Assembled(self, region))
+        # The region the client signs for: the one named, else the session's
+        # bound answer (aws-cli's CRT factory `_resolve_region` reads it so).
+        built_for = (
+            region if region is not None else self.botocore_session.get_config_variable("region")
+        )
+        setattr(client, ASSEMBLED_BY, Assembled(self, cast("str | None", built_for)))
         return client
 
     def crt_verify(self) -> str | Literal[False]:
