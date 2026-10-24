@@ -2334,7 +2334,9 @@ def _sigv4_presign(client: Any, operation: str, expires_in: int) -> Generator[No
     marking the request; it runs ahead of botocore's downgrade, which sits on
     the less specific ``choose-signer.s3``, and so ahead of any handler a
     caller registered there. botocore then signs nothing, and a
-    ``before-sign.s3.<operation>`` handler registered last applies
+    ``before-sign.s3.<operation>`` handler registered last on that event
+    (handlers on the less specific ``before-sign.s3`` / ``before-sign`` still
+    follow it) applies
     ``S3SigV4QueryAuth`` to the marked request with the region, signing name
     and credentials botocore would have used: the endpoint's signing context
     first, the client's own otherwise. Every other signer is left as botocore
@@ -2416,12 +2418,16 @@ def _regional_presign(client: Any) -> Generator[None, None, None]:
     value an operation returns is matched to aws-cli however the client was
     built). Unregistered in a ``finally``.
 
-    Everything botocore resolves regionally already is untouched: a
-    non-``aws`` partition, dualstack, an explicit ``virtual`` or ``path``
-    ``addressing_style``, an ARN bucket, a directory bucket, and a
-    DNS-incompatible name that forces path style. A custom ``endpoint_url``
+    Outside us-east-1, everything botocore resolves regionally already is
+    untouched: a non-``aws`` partition, dualstack, an explicit ``virtual`` or
+    ``path`` ``addressing_style``, an ARN bucket, a directory bucket, and a
+    DNS-incompatible name that forces path style; a legacy us-east-1 client
+    moves to the regional host in path style too. A custom ``endpoint_url``
     overrides the resolved host either way (all measured against the pinned
-    aws-cli).
+    aws-cli). The host follows the client's region: a client built with no
+    region configured is a us-east-1 one in botocore and gets its regional
+    host, where aws-cli without a region presigns ``aws-global``'s global one
+    (`S3.from_aws_cli` resolves the region as aws-cli does).
 
     ``use_global_endpoint`` is a botocore-internal context key; if a botocore
     version renames or drops it this override simply no-ops (the ``pop`` finds

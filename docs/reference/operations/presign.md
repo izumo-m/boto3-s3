@@ -105,7 +105,9 @@ Every other signer choice is left as botocore made it:
 
 A handler of the caller's own on the client's `choose-signer.s3` event does not
 see a SigV4 presign: `presign` answers that event first, for the operation
-being signed. No new client is built and the client's own configuration is not
+being signed. A handler on `before-sign.s3` or `before-sign` runs after the URL
+is signed, and is told the signature version is `UNSIGNED`: a query parameter
+it adds lands outside the signature. No new client is built and the client's own configuration is not
 modified: the client signs exactly as it did before once the call returns.
 
 ### The host in the URL
@@ -119,15 +121,23 @@ botocore resolves a *presigned* URL's endpoint as if the client's region were
 still names `eu-central-1`, so its host and its signature disagree. And a
 `us-east-1` client whose `us_east_1_regional_endpoint` is `legacy` — stock
 botocore's default, a setting aws-cli does not have — sends all its requests to
-the global host. `presign` names the regional host in both cases; the client's
-own requests are not affected.
+the global host. `presign` names the regional host in both cases, path-style
+and DNS-incompatible bucket names included; the client's own requests are not
+affected.
 
-These already resolve regionally and are unchanged: a dualstack or accelerate
-endpoint, an explicit `s3={"addressing_style": ...}` of `"path"` or
-`"virtual"` (an explicit `"auto"` is substituted like the default, and
-corrected), an access point ARN, a directory bucket, and a bucket name too long
-or DNS-incompatible for virtual hosting, which addresses path-style. An
+Outside `us-east-1`, these already resolve regionally and are unchanged: a
+dualstack or accelerate endpoint, an explicit `s3={"addressing_style": ...}` of
+`"path"` or `"virtual"` (an explicit `"auto"` is substituted like the default,
+and corrected), an access point ARN, a directory bucket, and a bucket name too
+long or DNS-incompatible for virtual hosting, which addresses path-style. An
 explicit `endpoint_url` overrides the host either way.
+
+The URL follows the client's region, so it is `aws s3 presign`'s for that
+region. A client built where no region is configured at all is a `us-east-1`
+client in botocore, and its URL names `us-east-1`'s regional host; `aws s3
+presign` with no region resolves the `aws-global` pseudo-region instead and
+names the global host. An `S3` built with `S3.from_aws_cli` resolves the region
+as aws-cli does, so its URL names the global host there too.
 
 ### Raises
 
