@@ -20,7 +20,7 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
 | `transfer.py` | `Transferrer`: the transfer engine proper that drives the classic / CRT transfer manager (the subject of this document). With `is_move` it deletes the source and reports MOVE (section 11). Engine selection is in section 2 / [`crt.md`](./crt.md) |
 | `transferconfig.py` | The public `TransferConfig` = a subclass of boto3's that adds the CRT tuning field `target_bandwidth` and `annotation_temp_dir` ([`crt.md`](./crt.md) section 2) |
 | `crtsupport.py` | CRT engine resolution (a faithful port of boto3 `boto3/crt.py` plus refinements). `should_use_crt` / `create_crt_transfer_manager` / lock, and `create_crt_request_sender` for the deletes on the same engine (`crtrequest.py`). The design is in [`crt.md`](./crt.md) |
-| `pathresolver.py` | A port of aws-cli's `S3PathResolver` (resolves access point ARN / alias / MRAP to the real bucket; the s3control / sts client is injected). The building block for `mv --validate-same-s3-paths` (cli.md section 5.8) |
+| `pathresolver.py` | A port of aws-cli's `S3PathResolver` (resolves access point ARN / alias / MRAP to the real bucket; the s3control / sts client is injected). The building block for `S3.mv(validate_same_s3_paths=True)` (`S3._check_underlying_paths`) |
 | `comparator.py` | sync's pairing and the building blocks for its decisions (`Comparator` / the `MergedPair` pair shapes / `PairFilter` / combinators). The design is in [`sync.md`](./sync.md) |
 | `S3.cp` / `S3.mv` / `S3.sync` in `s3.py` | orchestration: path classification -> pre-validation -> enumeration -> gates (glacier / parent-ref / dryrun) -> submit -> `BatchError` aggregation (cp / mv share `_run_transfer`). mv adds a same-path guard and `is_move` ahead of that. sync forks the enumeration into two streams, inserts pair decisions in between, and shares the per-info item builder and the gates with cp |
 
@@ -885,11 +885,12 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
   (`ValidationError`). `--recursive` is also subject to this (a faithful
   reproduction of aws-cli's false positive; the CLI maps this `ValidationError`
   to rc 252). This is a string guard and does not look at
-  identity across an access point - that resolution uses `pathresolver.py`
-  (`S3PathResolver` + `has_underlying_s3_path`), which the caller uses with an
-  injected client (the CLI's `--validate-same-s3-paths`; the library API
-  deliberately has no such flag - under the connection model, the library does
-  not implicitly create the s3control / sts client).
+  identity across an access point - that resolution is
+  `validate_same_s3_paths=True` (`S3._check_underlying_paths`: `pathresolver.py`'s
+  `S3PathResolver` over s3control / sts clients built as the instance builds its
+  own, `_service_client`; the source side in `source_region`), and without it
+  `has_underlying_s3_path` gates aws-cli's warning, a `NOTICE`. Only same-key
+  moves are looked at, as in aws-cli.
 - **The mtime stamp precedes the deletion**, matching aws-cli's subscriber
   order (`ProvideLastModifiedTimeSubscriber` before
   `DeleteSourceObjectSubscriber`): `_StampMtime` is an independent subscriber

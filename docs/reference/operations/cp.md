@@ -44,6 +44,7 @@ def cp(
     cancel_token: CancelToken | None = None,
     transfer_config: TransferConfig | None = None,
     capture_response: bool = False,
+    source_region: str | None = None,
     **options: Unpack[TransferOptions],
 ) -> None: ...
 ```
@@ -187,6 +188,14 @@ limit and the transfer engine selection.
 successful record's `extra_info` — `"write"` for an upload or copy, `"read"`
 for a download — and forces the classic transfer engine, since the CRT data
 plane does not expose them ([`../results.md`](../results.md)).
+
+`source_region` is `aws s3`'s `--source-region`. For an S3-to-S3 run whose
+source is a string, the source side gets [`source_client`](../s3.md#source_clientregion)
+in that region: built without this instance's `endpoint_url`, which names the
+destination's, as aws-cli builds its source client (an endpoint from the
+environment or the config file still applies). An empty value, any other route,
+and a source `Storage` — which keeps its own client — ignore it, as aws-cli
+does.
 
 `**options` are the transfer options `cp` / `mv` / `sync` share — object
 metadata and headers, ACLs and storage class, encryption, checksums,

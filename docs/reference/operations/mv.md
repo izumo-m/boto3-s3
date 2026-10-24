@@ -35,6 +35,8 @@ def mv(
     cancel_token: CancelToken | None = None,
     transfer_config: TransferConfig | None = None,
     capture_response: bool = False,
+    source_region: str | None = None,
+    validate_same_s3_paths: bool = False,
     **options: Unpack[TransferOptions],
 ) -> None: ...
 ```
@@ -45,8 +47,8 @@ The parameters are `cp`'s minus `expected_size`, and each behaves as
 [`cp.md`](./cp.md) specifies: `src` / `dest` resolution and the accepted
 pairings, directory semantics and destination naming, single-object versus
 recursive enumeration, `filter` and the key it matches, `dryrun`,
-`on_progress`, `cancel_token`, `transfer_config`, `capture_response` and
-`**options`. The gates are the same too — the archived-object gate, the
+`on_progress`, `cancel_token`, `transfer_config`, `capture_response`,
+`source_region` and `**options`. `validate_same_s3_paths` is `mv`'s own (below). The gates are the same too — the archived-object gate, the
 parent-directory guard, `no_overwrite`, `case_conflict` — as are the walk
 warnings, the `BatchError` model and the per-item record stream.
 `expected_size` is absent because it is a hint for uploading from a stream,
@@ -134,10 +136,22 @@ bucket through an access point ARN, an access point alias, a multi-region
 access point, or an access point of an S3 Express directory bucket (`--xa-s3`)
 and the directory bucket itself are not detected by it — and S3 may then accept
 the copy onto itself, which a directory bucket does, so the delete that follows
-removes the only copy (measured on real S3); resolve them yourself with
-[`S3PathResolver`](../misc.md#s3pathresolver) beforehand when that risk
-applies. The library never builds the `s3control` / `sts` clients such a
-resolution needs.
+removes the only copy (measured on real S3).
+
+`validate_same_s3_paths=True` is `aws s3 mv --validate-same-s3-paths`. When
+both sides are S3 and their keys match, each side is resolved to the paths it
+may land in through [`S3PathResolver`](../misc.md#s3pathresolver) — the
+source's `s3control` client in `source_region`, the destination's in this
+instance's own region, and an `sts` client, each built as this instance builds
+its clients (an unset region is the session's) — and a resolved pair naming
+the same path is refused with the same `ValidationError`, naming the original
+URIs, before anything runs. Resolving sends `s3control` and `sts` requests, and
+their failures raise as the resolver's do. Without it, a same-key move one of
+whose sides is shaped like an access point emits aws-cli's warning — `warning:
+Provided s3 paths may resolve to same underlying s3 object(s) ...` — as a
+`NOTICE` record on `on_result` before the run, and the move proceeds. Keys that
+differ are not looked at either way. The `boto3-s3` command reads
+`AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS` as aws-cli does; the library does not.
 
 ### The stream destination
 

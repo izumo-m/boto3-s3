@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `presign` now returns the URL `aws s3 presign` returns for the client's region, however the client was built: SigV4 in aws-cli's parameter order even with awscrt installed (a non-positive `expires_in` is signed as given), and the regional host for a us-east-1 client.
 - `pin_proxy_connect()` makes botocore open HTTPS-proxy tunnels with the CONNECT request aws-cli sends, for Python 3.10 and 3.11 behind a proxy that requires a `Host` header.
 - `S3.from_aws_cli()` builds an `S3` whose session and clients are assembled the way `aws s3` assembles its own, from the same common options (profile and region order, retries, the us-east-1 endpoint, the default checksum, the CRT engine's CA, local file-name encoding, the shared credential cache).
+- `cp`, `mv` and `sync` take `source_region` (`--source-region`), `S3.source_client()` builds that source client, and `mv` takes `validate_same_s3_paths` (`--validate-same-s3-paths`), resolving access points before a same-key move and otherwise warning as `aws s3 mv` does.
 
 ## [0.12.0] - 2026-10-18
 

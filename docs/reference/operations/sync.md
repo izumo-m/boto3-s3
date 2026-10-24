@@ -59,6 +59,7 @@ def sync(
     cancel_token: CancelToken | None = None,
     transfer_config: TransferConfig | None = None,
     capture_response: bool = False,
+    source_region: str | None = None,
     **options: Unpack[TransferOptions],
 ) -> None: ...
 ```
@@ -194,6 +195,14 @@ with, for this call only ([`../options.md`](../options.md)).
 `capture_response` surfaces the underlying S3 responses on
 `OpResult.extra_info` ([`../results.md`](../results.md)); for the delete side
 see below.
+
+`source_region` is `aws s3`'s `--source-region`. For an S3-to-S3 run whose
+source is a string, the source side gets [`source_client`](../s3.md#source_clientregion)
+in that region: built without this instance's `endpoint_url`, which names the
+destination's, as aws-cli builds its source client (an endpoint from the
+environment or the config file still applies). An empty value, any other route,
+and a source `Storage` — which keeps its own client — ignore it, as aws-cli
+does.
 
 `**options` are the shared `TransferOptions`
 ([`../options.md`](../options.md)); an unrecognized key raises

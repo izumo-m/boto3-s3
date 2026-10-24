@@ -413,8 +413,10 @@ Multi-Region Access Point ARN, or an access point of an S3 Express directory
 bucket can hide the bucket a path really addresses, so two different-looking
 paths can name the same object; resolving both sides first lets a caller
 compare the real pairs (with [`S3Storage.same_path`](./storage.md#s3storage))
-before moving anything. This is a port of the AWS CLI's own resolver, the
-machinery behind `aws s3 mv --validate-same-s3-paths`, with one shape added:
+before moving anything — which
+[`S3.mv(validate_same_s3_paths=True)`](./operations/mv.md#what-mv-rejects-that-cp-accepts)
+does for a move. This is a port of the AWS CLI's own resolver, the machinery
+behind `aws s3 mv --validate-same-s3-paths`, with one shape added:
 the AWS CLI does not resolve an S3 Express access point (`--xa-s3`), whose
 same-key move onto its directory bucket deletes the object on real S3 (the
 directory bucket accepts the copy onto itself). The AWS CLI's `from_session`

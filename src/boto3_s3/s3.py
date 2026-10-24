@@ -90,7 +90,7 @@ from boto3_s3.synclanes import (
     resolve_lanes,
     run_sync_pairs,
 )
-from boto3_s3.transfer import TransferItem, Transferrer, crt_engine_errors
+from boto3_s3.transfer import TransferItem, Transferrer, Warner, crt_engine_errors
 from boto3_s3.types import (
     CancelToken,
     CrtClientOptions,
@@ -193,6 +193,19 @@ def _attributed_to(operation: str) -> Generator[None, None, None]:
 
 
 _T = TypeVar("_T")
+
+# aws-cli's _emit_validate_s3_paths_warning, verbatim: the standing warning a
+# same-key mv gets when a side may name an access point and the paths are not
+# validated (`S3._check_underlying_paths`).
+_SAME_UNDERLYING_PATH_WARNING = (
+    "warning: Provided s3 paths may resolve to same underlying "
+    "s3 object(s) and result in deletion instead of being moved. "
+    "To resolve and validate underlying s3 paths are not the same, "
+    "specify the --validate-same-s3-paths flag or set the "
+    "AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS environment variable to true. "
+    "To resolve s3 outposts access point path, the arn must be "
+    "used instead of the alias."
+)
 
 
 def _attributed_entries(entries: Iterable[_T], operation: str) -> Iterator[_T]:
@@ -744,13 +757,53 @@ class S3:
         """
         if self._assembly is not None:
             return self._assembly.client("s3")
+        return self._build_client("s3", endpoint_url=self._endpoint_url, config=self._config)
+
+    def source_client(self, region: str) -> S3Client:
+        """The client for the source of an S3-to-S3 copy in *region* (``--source-region``).
+
+        aws-cli's ``ClientFactory`` builds the source client of an
+        S3-to-S3 run given ``--source-region`` in that region and without the
+        explicit endpoint (``--endpoint-url`` names the destination's); an
+        endpoint from the environment or the config file still applies, as
+        botocore reads it for any client. This is that client: on an instance
+        `from_aws_cli` built it comes from the same assembly as `client`, and
+        otherwise from ``session`` with ``config`` applied, failing as
+        `client` fails. ``cp`` / ``mv`` / ``sync`` build it for a source string
+        given ``source_region``; build it here to hand over yourself
+        (``S3Storage(uri, client=s3.source_client("eu-west-1"))``). A
+        subclass whose `client` returns test doubles overrides this too.
+        """
+        if self._assembly is not None:
+            return self._assembly.client("s3", region=region, endpoint_url=None)
+        return self._build_client("s3", region_name=region, config=self._config)
+
+    def _service_client(self, service: str, *, region: str | None) -> Any:
+        """A non-S3 client the way this instance builds its own (``mv``'s path validation).
+
+        aws-cli's ``S3PathResolver.from_session``: only the session, the region
+        (``None`` leaves the session's), and - on an instance `from_aws_cli`
+        built - the TLS flags and timeouts aws-cli gives every client; no
+        endpoint override and no ``config``.
+        """
+        if self._assembly is not None:
+            return self._assembly.client(service, region=region)
+        return self._build_client(service, region_name=region)
+
+    def _build_client(self, service: str, **kwargs: Any) -> Any:
+        """``session.client`` (or ``boto3.client``) with the library's translation.
+
+        A failed build raises the translated ``Boto3S3Error`` (`client`'s
+        Raises); a CA bundle setting that resolves to an empty or
+        whitespace-only string is refused.
+        """
         # Outside the translation: a session without `client` is the
         # caller's programming error, and passes through as one.
         build: Any = self._session.client if self._session is not None else boto3.client
         # operation=None: no subcommand is in scope at build time.
         with s3_errors(operation=None):
             try:
-                client = build("s3", endpoint_url=self._endpoint_url, config=self._config)
+                client = build(service, **kwargs)
             except (ValueError, AttributeError, OSError) as exc:
                 # What the SDK raises outside its own family while it reads
                 # the configuration (`client_build_error`). A `config` that is
@@ -759,7 +812,7 @@ class S3:
                 from botocore.config import Config as BotocoreConfig
 
                 if isinstance(exc, AttributeError) and not isinstance(
-                    self._config,
+                    kwargs.get("config"),
                     (BotocoreConfig, type(None)),  # pyright: ignore[reportUnnecessaryIsInstance] - a caller's value at runtime
                 ):
                     raise
@@ -934,6 +987,25 @@ class S3:
             return S3Storage(S3Storage.normalize_s3_uri(text), client=self.client())
         return LocalStorage(text, filename_encoding=self._filename_encoding)
 
+    def _resolve_source(self, src: Location, dest: Location, source_region: str | None) -> Storage:
+        """`resolve` for a run's source, honoring ``source_region`` as ``aws s3`` does.
+
+        aws-cli reads ``--source-region`` for an S3-to-S3 run alone, and only
+        when it is non-empty: an ``"s3://..."`` source string then gets
+        `source_client` instead of `client`. A source ``Storage`` is used as
+        given (its own client), and any other run resolves as `resolve` does.
+        """
+        if source_region and not isinstance(src, Storage):
+            text = os.fspath(src)
+            dest_is_s3 = isinstance(dest, S3Storage) or (
+                not isinstance(dest, Storage) and os.fspath(dest).startswith("s3://")
+            )
+            if text.startswith("s3://") and dest_is_s3:
+                return S3Storage(
+                    S3Storage.normalize_s3_uri(text), client=self.source_client(source_region)
+                )
+        return self.resolve(src)
+
     def aws_config(self) -> AwsConfig:
         """Read this instance's AWS config file (``~/.aws/config``).
 
@@ -1083,6 +1155,7 @@ class S3:
         cancel_token: CancelToken | None = None,
         transfer_config: TransferConfig | None = None,
         capture_response: bool = False,
+        source_region: str | None = None,
         **options: Unpack[TransferOptions],
     ) -> None:
         """Copy bytes between ``src`` and ``dest`` with ``aws s3 cp`` semantics.
@@ -1160,9 +1233,15 @@ class S3:
         - raise directly: a missing local source raises ``NotFoundError``
         (aws-cli's pre-pipeline rc 255 shape - no ``ClientError`` cause, so the
         CLI maps it to the general rc).
+
+        ``source_region`` is ``aws s3 cp --source-region``: for an S3-to-S3
+        copy whose source is a string, the source client is `source_client`
+        in that region (without this instance's ``endpoint_url``). An empty
+        value, any other route, and a source ``Storage`` (its own client)
+        ignore it, as aws-cli does.
         """
         _validate_transfer_options(options, operation="cp")
-        src_storage = self.resolve(src)
+        src_storage = self._resolve_source(src, dest, source_region)
         dest_storage = self.resolve(dest)
         # The strict location checks (construction was permissive; a stream
         # side validates as a no-op).
@@ -1202,6 +1281,63 @@ class S3:
             capture_response=capture_response,
             options=options,
         )
+
+    def _check_underlying_paths(
+        self,
+        src_storage: S3Storage,
+        dest_storage: S3Storage,
+        *,
+        validate: bool,
+        source_region: str | None,
+        on_result: ResultCallback | None,
+    ) -> None:
+        """``mv``'s ``--validate-same-s3-paths``: the same object under two spellings.
+
+        An access point ARN or alias, an Outposts or Multi-Region Access Point
+        ARN, or an S3 Express access point can name the very bucket the other
+        side names, and a move onto itself deletes the object. aws-cli looks
+        only when the two *keys* match. With *validate*, both sides resolve
+        through `S3PathResolver` - the source's s3control client in
+        *source_region*, the destination's in this instance's own region, an
+        sts client with no region of its own (`_service_client`; an unset
+        region is the session's) - and a resolved pair naming the same path
+        stops the move before it starts, with the original locations in the
+        report. Without it, a side shaped like one of those gets aws-cli's
+        standing warning, as a ``NOTICE`` on *on_result*, and the move
+        proceeds.
+        """
+        from boto3_s3.pathresolver import S3PathResolver, has_underlying_s3_path
+
+        norm_src, norm_dest = src_storage.normalized_uri(), dest_storage.normalized_uri()
+        if not S3Storage.same_key(norm_src, norm_dest):
+            return
+        if not validate:
+            if has_underlying_s3_path(norm_src) or has_underlying_s3_path(norm_dest):
+                Warner(
+                    transfer_type=TransferType.MOVE,
+                    src_storage=src_storage,
+                    dest_storage=dest_storage,
+                    operation="mv",
+                    on_result=on_result,
+                ).notice(_SAME_UNDERLYING_PATH_WARNING)
+            return
+        own_region = self._assembly.settings.region if self._assembly is not None else None
+        sts = self._service_client("sts", region=None)
+        src_paths = S3PathResolver(
+            s3control_client=self._service_client("s3control", region=source_region),
+            sts_client=sts,
+        ).resolve_underlying_s3_paths(norm_src)
+        dest_paths = S3PathResolver(
+            s3control_client=self._service_client("s3control", region=own_region),
+            sts_client=sts,
+        ).resolve_underlying_s3_paths(norm_dest)
+        for src_path in src_paths:
+            for dest_path in dest_paths:
+                if S3Storage.same_path(src_path, dest_path):
+                    raise ValidationError(
+                        f"Cannot mv a file onto itself: {norm_src} - {norm_dest}",
+                        operation="mv",
+                    )
 
     def _run_transfer(
         self,
@@ -1554,6 +1690,8 @@ class S3:
         cancel_token: CancelToken | None = None,
         transfer_config: TransferConfig | None = None,
         capture_response: bool = False,
+        source_region: str | None = None,
+        validate_same_s3_paths: bool = False,
         **options: Unpack[TransferOptions],
     ) -> None:
         """Move bytes with ``aws s3 mv`` semantics: ``cp``, then delete the source.
@@ -1579,15 +1717,20 @@ class S3:
         Moving an object onto itself (same URI, or a ``/``-terminated
         destination plus the source's basename - checked for ``--recursive``
         too, aws-cli's faithful false positive) raises
-        ``ValidationError`` before anything runs. That
-        guard is textual only: paths through access point ARNs or aliases
-        can still land on the same underlying bucket. Resolve them first
-        with `boto3_s3.pathresolver.S3PathResolver` (the
-        ``--validate-same-s3-paths`` machinery; bring your own s3control /
-        sts clients) when that risk applies.
+        ``ValidationError`` before anything runs. That guard is textual:
+        paths through access point ARNs or aliases can still land on the same
+        underlying bucket. ``validate_same_s3_paths=True`` (``aws s3 mv
+        --validate-same-s3-paths``) resolves both sides of a same-key S3 move
+        first and refuses one that lands on itself the same way; without it, a
+        side shaped like an access point gets aws-cli's warning as a
+        ``NOTICE`` and the move proceeds (`_check_underlying_paths`).
+
+        ``source_region`` (``--source-region``) builds the source client of an
+        S3-to-S3 move from a string in that region (`source_client`), as for
+        ``cp``.
         """
         _validate_transfer_options(options, operation="mv")
-        src_storage = self.resolve(src)
+        src_storage = self._resolve_source(src, dest, source_region)
         dest_storage = self.resolve(dest)
         # The strict location checks (see cp).
         _validate_storage(src_storage, operation="mv")
@@ -1630,6 +1773,13 @@ class S3:
                     f"- {dest_storage.normalized_uri()}",
                     operation="mv",
                 )
+            self._check_underlying_paths(
+                src_storage,
+                dest_storage,
+                validate=validate_same_s3_paths,
+                source_region=source_region,
+                on_result=on_result,
+            )
         self._run_transfer(
             src_storage,
             dest_storage,
@@ -1662,6 +1812,7 @@ class S3:
         cancel_token: CancelToken | None = None,
         transfer_config: TransferConfig | None = None,
         capture_response: bool = False,
+        source_region: str | None = None,
         **options: Unpack[TransferOptions],
     ) -> None:
         """Recursively synchronize ``src`` into ``dest`` (``aws s3 sync``).
@@ -1784,6 +1935,10 @@ class S3:
         `CancelledError` after shutdown: graceful mode stops new pair actions
         and drains accepted transfers/deletes; immediate mode additionally
         requests best-effort future cancellation.
+
+        ``source_region`` (``--source-region``) builds the source client of an
+        S3-to-S3 sync from a string in that region (`source_client`), as for
+        ``cp``.
         """
         _validate_transfer_options(options, operation="sync")
         # Shape checks over the arguments alone: refuse before any resolution
@@ -1799,7 +1954,7 @@ class S3:
                 delete_filter=delete_filter,
                 no_overwrite=bool(options.get("no_overwrite", False)),
             )
-        src_storage = self.resolve(src)
+        src_storage = self._resolve_source(src, dest, source_region)
         dest_storage = self.resolve(dest)
         _validate_storage(src_storage, operation="sync")
         _validate_storage(dest_storage, operation="sync")
