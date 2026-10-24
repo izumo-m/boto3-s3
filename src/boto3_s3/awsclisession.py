@@ -78,15 +78,29 @@ class _Unresolved(enum.Enum):
 # supplied ``None``.
 UNRESOLVED: Final = _Unresolved.TOKEN
 
-# The attribute naming, on a client an assembly built, the assembly that built
-# it: what `S3` reads to apply aws-cli's run-level defaults to that client's
-# runs alone, a client the caller hands over keeping its own settings.
+# The attribute carrying, on a client an assembly built, an `Assembled`: what
+# `S3` reads to apply aws-cli's run-level defaults to that client's runs alone,
+# any other client keeping its own settings.
 ASSEMBLED_BY = "_boto3_s3_aws_cli_assembly"
 
 
-def assembly_of(client: Any) -> AwsCliAssembly | None:
-    """The assembly that built *client*, or None for any other client."""
-    return getattr(client, ASSEMBLED_BY, None)
+@dataclass(frozen=True, slots=True)
+class Assembled:
+    """How an assembly built one client: by which assembly, for which region.
+
+    ``region`` is the region the client was built for - the assembly's
+    chain answer or one the builder named - ``None`` when nothing resolved
+    (botocore then gives the client the ``aws-global`` pseudo-region).
+    """
+
+    assembly: AwsCliAssembly
+    region: str | None
+
+
+def assembled(client: Any) -> Assembled | None:
+    """How an assembly built *client*, or None for any other client."""
+    mark = getattr(client, ASSEMBLED_BY, None)
+    return mark if isinstance(mark, Assembled) else None
 
 
 class AwsCliAssembly:
@@ -100,9 +114,9 @@ class AwsCliAssembly:
     """
 
     def __init__(self, settings: AwsCliSettings) -> None:
-        validate_endpoint_url(settings.endpoint_url)
         self.settings = settings
         with build_errors():
+            validate_endpoint_url(settings.endpoint_url)
             reject_empty_ca_bundle(settings.ca_bundle)
             botocore_session = open_botocore_session(settings)
             self.session: Boto3Session = boto3_session(botocore_session)
@@ -152,7 +166,7 @@ class AwsCliAssembly:
             client = create_client(self.session, service, **kwargs)
         if service == "s3":
             register_default_checksum(client)
-        setattr(client, ASSEMBLED_BY, self)
+        setattr(client, ASSEMBLED_BY, Assembled(self, region))
         return client
 
     def crt_verify(self) -> str | Literal[False]:
@@ -815,9 +829,10 @@ __all__ = [
     "AWS_DEFAULT_CHECKSUM_ALGORITHM",
     "PROFILE_ENV_VARS",
     "UNRESOLVED",
+    "Assembled",
     "AwsCliAssembly",
     "AwsCliSettings",
-    "assembly_of",
+    "assembled",
     "bind_region",
     "boto3_session",
     "build_errors",

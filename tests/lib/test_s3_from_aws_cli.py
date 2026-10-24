@@ -216,6 +216,31 @@ class TestFailingBeforeARun:
         with pytest.raises(InvalidConfigError, match="Invalid IPv6 URL"):
             S3.from_aws_cli().client()
 
+    def test_a_malformed_endpoint_keyword(self) -> None:
+        with pytest.raises(InvalidConfigError, match="Invalid IPv6 URL"):
+            S3.from_aws_cli(endpoint_url="http://[bad")
+
+    def test_a_client_built_for_a_named_region_is_not_held_to_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from boto3_s3 import crtsupport
+
+        monkeypatch.setattr(crtsupport, "selects_crt", lambda _config: True)
+        monkeypatch.delenv("AWS_REGION")
+        monkeypatch.delenv("AWS_DEFAULT_REGION")
+        s3 = S3.from_aws_cli()
+        assert s3._assembly is not None  # pyright: ignore[reportPrivateUsage]
+        named = s3._assembly.client("s3", region="eu-west-1")  # pyright: ignore[reportPrivateUsage]
+        S3._require_crt_region(TransferConfig(), named)  # pyright: ignore[reportPrivateUsage]
+        with pytest.raises(ConfigurationError, match="You must specify a region"):
+            S3._require_crt_region(TransferConfig(), s3.client())  # pyright: ignore[reportPrivateUsage]
+
+    def test_a_stand_in_that_answers_every_attribute_is_not_taken_for_one(self) -> None:
+        # A mark is an `Assembled`, not whatever getattr returns.
+        from unittest.mock import MagicMock
+
+        assert awsclisession.assembled(MagicMock()) is None
+
     def test_a_classic_run_without_a_region_proceeds(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

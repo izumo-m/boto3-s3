@@ -672,9 +672,9 @@ class S3:
         The session is opened now: a profile that does not exist or a config
         file botocore cannot read raises `InvalidConfigError` here, and a
         schemeless ``endpoint_url`` `ValidationError`, as ``aws`` stops before
-        a command runs. A CRT run with no region resolved raises
-        `ConfigurationError` before it starts, dry runs included, as ``aws``
-        does. Nothing beyond this instance's session is changed: for the
+        a command runs. A CRT run on a client built here with no region
+        resolved raises `ConfigurationError` before it starts, dry runs
+        included, as ``aws`` does. Nothing beyond this instance's session is changed: for the
         CONNECT request ``aws`` sends behind an HTTPS proxy, which is
         process-wide, see `pin_proxy_connect`. The session is `session`;
         `client` builds from it.
@@ -859,13 +859,14 @@ class S3:
         botocore would give the client the ``aws-global`` pseudo-region and the
         CRT would sign every request for it. botocore's own missing-region
         error is the cause, so the report is aws-cli's ``NoRegion`` one. Only
-        a client `from_aws_cli`'s assembly built (`awsclisession.assembly_of`)
-        is held to it; any other keeps botocore's answer.
+        a client aws-cli's assembly built with no region (`awsclisession.assembled`)
+        is held to it, on whichever ``S3`` it runs; any other keeps botocore's
+        answer.
         """
-        from boto3_s3.awsclisession import assembly_of
+        from boto3_s3.awsclisession import assembled
 
-        assembly = assembly_of(client)
-        if assembly is None or assembly.region is not None:
+        mark = assembled(client)
+        if mark is None or mark.region is not None:
             return
         if not crtsupport.selects_crt(config):
             return
@@ -883,8 +884,8 @@ class S3:
     ) -> TransferOptions:
         """*options* with aws-cli's default request checksum for an upload run.
 
-        Only for a run into S3 from anything but S3, onto a client
-        `from_aws_cli`'s assembly built, and only when the caller named no
+        Only for a run into S3 from anything but S3, onto a client aws-cli's
+        assembly built (on whichever ``S3`` it runs), and only when the caller named no
         ``checksum_algorithm``: the default aws-cli's bundled botocore would
         stamp, chosen by the engine *config* selects
         (`awsclisession.default_upload_algorithm`). Any other client is left to
@@ -897,10 +898,10 @@ class S3:
             or isinstance(src_storage, S3Storage)
         ):
             return options
-        from boto3_s3.awsclisession import assembly_of, default_upload_algorithm
+        from boto3_s3.awsclisession import assembled, default_upload_algorithm
 
         client = held_client(dest_storage)
-        if assembly_of(client) is None:
+        if assembled(client) is None:
             return options
         algorithm = default_upload_algorithm(client, crt=crtsupport.selects_crt(config))
         if algorithm is None:
