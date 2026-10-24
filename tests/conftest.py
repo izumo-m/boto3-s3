@@ -120,6 +120,20 @@ def _moto_isolation(monkeypatch: pytest.MonkeyPatch, _classic_aws_config: Path) 
         "REQUESTS_CA_BUNDLE",
     ):
         monkeypatch.delenv(leak, raising=False)
+    # No request leaves the host. Every HTTP(S) connection botocore or urllib3
+    # opens is sent to a proxy nothing listens on, and fails at once; the
+    # loopback endpoints tests run their own fakes on bypass it. Without
+    # this, a test that misses a fake reaches real AWS with the fake keys
+    # above (it happened: a dry run's HeadObject, a directory bucket's
+    # CreateSession). The EC2 metadata probe is turned off too. The proxy
+    # tests set their own (`proxy_environment`); the e2e suite, which must
+    # reach its endpoint, overrides this fixture.
+    for proxy_var in ("https_proxy", "http_proxy", "no_proxy", "all_proxy", "ALL_PROXY"):
+        monkeypatch.delenv(proxy_var, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost,::1")
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
     # A prior test's boto3.client() / session-less S3() installs a
     # process-global default session built under THAT test's env, and
     # AwsConfig.from_session(None) deliberately reuses the installed session
