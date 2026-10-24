@@ -14,7 +14,8 @@ operations share is in [`README.md`](./README.md).
 
 Returns the presigned URL for the object named by `target`, valid for
 `expires_in` seconds and authorizing the operation named by `method`. The URL
-is returned exactly as botocore produced it.
+is the one `aws s3 presign` returns for the same client settings, however the
+client was built ([Signing](#signing), [The host in the URL](#the-host-in-the-url)).
 
 ```python
 def presign(
@@ -52,13 +53,12 @@ validation.
 moment it is signed; it defaults to `3600`. The value is stamped into the
 signature and `presign` applies no range check of its own: a number above the
 604800-second maximum S3 accepts is signed and returned, and S3 applies its
-own limit only when the URL is presented. A non-positive value depends on the
-signer botocore uses. With `awscrt` installed — the `crt` extra — signing goes
-through the CRT signer, which rejects `0` and negative values; `presign` raises
-that refusal as [`InvalidValueError`](../exceptions.md#invalidvalueerror),
-with awscrt's bare `AssertionError` as its `__cause__`. Without `awscrt` the same values are signed and returned, carrying
-`X-Amz-Expires=0` or a negative count — as they are for a directory bucket
-with or without it, since the S3 Express signature has no CRT implementation.
+own limit only when the URL is presented. `0` and negative values are signed
+and returned too, carrying `X-Amz-Expires=0` or a negative count, as
+`aws s3 presign` returns them. A multi-region access point is the exception:
+its SigV4a URL is signed by awscrt's signer, which rejects them, and `presign`
+raises that refusal as [`InvalidValueError`](../exceptions.md#invalidvalueerror),
+with awscrt's bare `AssertionError` as its `__cause__`.
 
 `method` selects the operation the URL authorizes: `"get_object"`, the default,
 signs a download URL, and `"put_object"` signs an upload URL. Those two values
@@ -74,26 +74,24 @@ window in which to observe cancellation.
 
 ### Signing
 
-For a default client — one whose configuration sets no `signature_version`,
-which is the state a plain boto3 client is in — against an ordinary bucket, the
-returned URL is SigV4 query-signed: it carries
-`X-Amz-Algorithm=AWS4-HMAC-SHA256` and an `X-Amz-Signature` parameter. The
-signature-version difference from calling `generate_presigned_url` on the same
-client directly is confined to the regions that accept SigV2 (`us-east-1` among
-them), where stock botocore downgrades such a client's presigned URL to the
-deprecated SigV2 query form (`AWSAccessKeyId` / `Signature` / `Expires`) — a URL
-a SigV4-only bucket, or a bucket policy that requires SigV4, rejects. In the
-remaining regions a default client already produces SigV4 and `presign` changes
-nothing about how the URL is signed; the host is corrected separately
-([below](#the-host-in-the-url)). `aws s3 presign` produces SigV4, and `presign`
-matches it in every region.
+Against an ordinary bucket the URL is SigV4 query-signed — it carries
+`X-Amz-Algorithm=AWS4-HMAC-SHA256` and an `X-Amz-Signature` parameter — by
+botocore's pure-Python signer, the one aws-cli's bundled botocore signs with,
+so its query parameters come in `aws s3 presign`'s order (`X-Amz-Algorithm`,
+`X-Amz-Credential`, `X-Amz-Date`, `X-Amz-Expires`, `X-Amz-SignedHeaders`,
+`X-Amz-Signature`). Calling `generate_presigned_url` on the same client
+directly differs in two ways. In the regions that accept SigV2 (`us-east-1`
+among them), stock botocore downgrades a default client's presigned URL — one
+whose configuration sets no `signature_version` — to the deprecated SigV2
+query form (`AWSAccessKeyId` / `Signature` / `Expires`), a URL a SigV4-only
+bucket, or a bucket policy that requires SigV4, rejects. And whenever `awscrt`
+is importable, stock botocore signs SigV4 with awscrt's signer, which puts
+`X-Amz-Expires` after `X-Amz-SignedHeaders`.
 
-The upgrade is confined to that one case; every other signer choice is left as
-botocore made it:
+Every other signer choice is left as botocore made it:
 
-- a client configured with an explicit `signature_version`. SigV2 (`s3`) is
-  out of scope: a client configured for it gets whatever botocore signs, with
-  no promise that it works;
+- SigV2 (`signature_version="s3"`) is out of scope: a client configured for it
+  gets whatever botocore signs, with no promise that it works;
 - an unsigned client (`signature_version=botocore.UNSIGNED`), whose URL stays
   unsigned;
 - an S3 Express directory bucket, for which botocore resolves the
@@ -105,31 +103,31 @@ botocore made it:
   implementing only `generate_presigned_url`, of the kind a `client()` override
   may return — which signs however it chooses.
 
-No new client is built and the client's own configuration is not modified: the
-client signs exactly as it did before once the call returns.
+A handler of the caller's own on the client's `choose-signer.s3` event does not
+see a SigV4 presign: `presign` answers that event first, for the operation
+being signed. No new client is built and the client's own configuration is not
+modified: the client signs exactly as it did before once the call returns.
 
 ### The host in the URL
 
-The URL names the endpoint the client itself would send a request to. This too
-differs from calling `generate_presigned_url` directly: stock botocore resolves
-a *presigned* URL's endpoint as if the client's region were `aws-global`, so an
-`eu-central-1` client's URL points at `bucket.s3.amazonaws.com` while every
-real request that client sends goes to `bucket.s3.eu-central-1.amazonaws.com` —
-and the URL's own credential scope still names `eu-central-1`, so its host and
-its signature disagree. `presign` keeps the resolved regional host, matching
-`aws s3 presign`.
+The URL names the client's regional endpoint, as `aws s3 presign`'s does. This
+too differs from calling `generate_presigned_url` directly, in two ways. Stock
+botocore resolves a *presigned* URL's endpoint as if the client's region were
+`aws-global`, so an `eu-central-1` client's URL points at
+`bucket.s3.amazonaws.com` while every real request that client sends goes to
+`bucket.s3.eu-central-1.amazonaws.com` — and the URL's own credential scope
+still names `eu-central-1`, so its host and its signature disagree. And a
+`us-east-1` client whose `us_east_1_regional_endpoint` is `legacy` — stock
+botocore's default, a setting aws-cli does not have — sends all its requests to
+the global host. `presign` names the regional host in both cases; the client's
+own requests are not affected.
 
-As with the signing above, the correction reaches only the case botocore
-applies the substitution to. These already resolved regionally and are
-unchanged: a `us-east-1` client that resolves
-`us_east_1_regional_endpoint` to `regional` (the value the `boto3-s3` command
-pins on its session, so every client it builds resolves
-it), a dualstack or accelerate endpoint, an explicit
-`s3={"addressing_style": ...}` of `"path"` or `"virtual"` (an explicit `"auto"`
-is substituted like the default, and corrected), an access point ARN, a
-directory bucket, and a bucket name too long or DNS-incompatible for virtual
-hosting, which addresses path-style. An explicit `endpoint_url` overrides the
-host either way.
+These already resolve regionally and are unchanged: a dualstack or accelerate
+endpoint, an explicit `s3={"addressing_style": ...}` of `"path"` or
+`"virtual"` (an explicit `"auto"` is substituted like the default, and
+corrected), an access point ARN, a directory bucket, and a bucket name too long
+or DNS-incompatible for virtual hosting, which addresses path-style. An
+explicit `endpoint_url` overrides the host either way.
 
 ### Raises
 
@@ -142,8 +140,8 @@ The category contracts are specified in
   Lambda ARN, an Outposts bucket ARN, a key with no bucket); or botocore's
   client-side parameter validation rejects the request, which is what an absent
   key or an empty bucket name produces. Its
-  [`InvalidValueError`](../exceptions.md#invalidvalueerror) refinement is the
-  CRT signer's refusal of a non-positive `expires_in` (above).
+  [`InvalidValueError`](../exceptions.md#invalidvalueerror) refinement is
+  awscrt's SigV4a signer refusing a non-positive `expires_in` (above).
 - [`ConfigurationError`](../exceptions.md#configurationerror) — credentials
   cannot be resolved while the request is signed; or an optional dependency
   the resolved signer needs is absent, which is what a multi-region access
@@ -168,8 +166,8 @@ categories do not arise from the signing itself; any other botocore error
 raised on the way is translated by the same category table, and any other
 exception the signing raised from inside botocore surfaces as the base
 [`Boto3S3Error`](../exceptions.md#boto3s3error) with the original on
-`__cause__`. An `AssertionError` other than the CRT signer's refusal above is
-not translated.
+`__cause__`. An `AssertionError` other than awscrt's refusal above is not
+translated.
 
 ## boto3_s3.presign
 

@@ -148,11 +148,16 @@ class TestPresign:
         )
         assert "AWSAccessKeyId=" in after and "X-Amz-Signature=" not in after
 
-    def test_a_generic_v4_client_meets_its_own_handlers(self) -> None:
-        # The CLI pins the generic `v4`: botocore registers no downgrade for
-        # it and answers `v4-query` with the S3 signer itself, so the library
-        # stays out of the way - a `choose-signer.s3` handler the caller
-        # registered (a caller's own) still sees the presign, as on aws.
+    @pytest.mark.parametrize("signature_version", [None, "v4", "s3v4"])
+    def test_symmetric_sigv4_is_signed_as_aws_cli_signs_it(
+        self, signature_version: str | None
+    ) -> None:
+        # aws-cli's bundled botocore signs with the pure-Python query signer;
+        # the installed botocore swaps in awscrt's whenever it is importable,
+        # whose query order differs. Measured on the pinned aws-cli:
+        # Algorithm, Credential, Date, Expires, SignedHeaders, Signature.
+        import urllib.parse
+
         import boto3
         from botocore.config import Config
 
@@ -160,18 +165,49 @@ class TestPresign:
             aws_access_key_id="AKIAIOSFODNN7EXAMPLE",
             aws_secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
         )
-        client = session.client(
-            "s3", region_name="us-east-1", config=Config(signature_version="v4")
+        config = Config(signature_version=signature_version) if signature_version else None
+        client = session.client("s3", region_name="eu-west-1", config=config)
+        url = S3().presign(S3Storage("s3://b/k", client=client), expires_in=60)
+        query = urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query)
+        assert [key for key, _ in query] == [
+            "X-Amz-Algorithm",
+            "X-Amz-Credential",
+            "X-Amz-Date",
+            "X-Amz-Expires",
+            "X-Amz-SignedHeaders",
+            "X-Amz-Signature",
+        ]
+        assert dict(query)["X-Amz-Expires"] == "60"
+
+    @pytest.mark.parametrize("expires_in", [0, -5])
+    def test_a_non_positive_expiry_is_signed_as_given(self, expires_in: int) -> None:
+        # aws-cli signs any integer (measured: rc 0, X-Amz-Expires=0 / -5);
+        # only awscrt's signer refuses one, and it no longer signs SigV4 here.
+        import boto3
+
+        session = boto3.session.Session(
+            aws_access_key_id="AKIAIOSFODNN7EXAMPLE",
+            aws_secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
         )
-        seen: list[str] = []
+        client = session.client("s3", region_name="eu-west-1")
+        url = S3().presign(S3Storage("s3://b/k", client=client), expires_in=expires_in)
+        assert f"X-Amz-Expires={expires_in}&" in url
 
-        def watch(signature_version: str, **_kwargs: Any) -> None:
-            seen.append(signature_version)
+    def test_the_signing_is_scoped_to_the_call(self) -> None:
+        # Both handlers come off again: the client's own presign afterwards
+        # is botocore's, and its regular requests were never touched.
+        import boto3
 
-        client.meta.events.register("choose-signer.s3", watch)
-        url = S3().presign(S3Storage("s3://b/k", client=client))
-        assert "X-Amz-Algorithm=AWS4-HMAC-SHA256" in url
-        assert seen == ["v4-query"]
+        session = boto3.session.Session(
+            aws_access_key_id="AKIAIOSFODNN7EXAMPLE",
+            aws_secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        )
+        client = session.client("s3", region_name="us-east-1")
+        S3().presign(S3Storage("s3://b/k", client=client))
+        after = client.generate_presigned_url(
+            "get_object", Params={"Bucket": "b", "Key": "k"}, ExpiresIn=60
+        )
+        assert "AWSAccessKeyId=" in after
 
     def test_explicit_sigv4_client_is_unchanged(self) -> None:
         # A client already pinned to s3v4 resolves the s3v4 signer, which the
@@ -247,16 +283,22 @@ class TestPresignEndpointRegion:
         )
         assert self._host(after) == "bkt.s3.amazonaws.com"
 
-    def test_us_east_1_regional_pin_is_untouched(self) -> None:
-        # The CLI's own build: botocore never set the flag here, so the
-        # override changes nothing.
-        client = self._client(
-            "us-east-1",
-            signature_version="s3v4",
-            s3={"us_east_1_regional_endpoint": "regional"},
-        )
+    @pytest.mark.parametrize("setting", [None, "legacy", "regional"])
+    def test_us_east_1_signs_the_regional_host(self, setting: str | None) -> None:
+        # aws-cli has no `us_east_1_regional_endpoint`: its presign names the
+        # regional host (measured), where botocore's legacy default - and an
+        # explicit legacy - name the global one.
+        config = {"s3": {"us_east_1_regional_endpoint": setting}} if setting else {}
+        client = self._client("us-east-1", **config)
         url = S3().presign(S3Storage("s3://bkt/k", client=client))
         assert self._host(url) == "bkt.s3.us-east-1.amazonaws.com"
+        if setting != "regional":
+            # The client's own resolution is untouched: its requests, and a
+            # bare presign, still name the global host.
+            bare = client.generate_presigned_url(  # pyright: ignore[reportAttributeAccessIssue]
+                "get_object", Params={"Bucket": "bkt", "Key": "k"}, ExpiresIn=60
+            )
+            assert self._host(bare) == "bkt.s3.amazonaws.com"
 
     def test_shapes_botocore_already_exempts_are_unchanged(self) -> None:
         # dualstack and an explicit addressing style never set the flag; a

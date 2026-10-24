@@ -2225,13 +2225,11 @@ class S3:
         neither bucket nor key existence is checked, and ``expires_in`` is
         not range-validated here (aws-cli passes any integer through; S3
         enforces its 604800-second maximum only when the URL is *used*) -
-        though with awscrt installed botocore signs SigV4 and SigV4A through
-        the CRT signer, which refuses ``0`` and negative values with awscrt's
-        own bare ``AssertionError``; that refusal is raised as
-        `InvalidValueError`, the assertion kept as its ``__cause__``
-        (docs/reference/operations/presign.md). A directory bucket is the
-        exception: its S3 Express signature has no CRT implementation, so
-        such a value is signed there whether awscrt is installed or not. An
+        though SigV4A (a multi-region access point) is signed by awscrt's
+        signer, which refuses ``0`` and negative values with its own bare
+        ``AssertionError``; that refusal is raised as `InvalidValueError`,
+        the assertion kept as its ``__cause__``
+        (docs/reference/operations/presign.md). An
         empty bucket or key fails botocore's client-side parameter validation
         -> `ValidationError`. ``method`` selects the signed operation -
         aws-cli only ever signs ``get_object``; ``put_object`` is this
@@ -2240,21 +2238,18 @@ class S3:
         method taking Bucket and Key would sign an undocumented operation,
         and miss the SigV4 forcing below).
 
-        The URL is signed with SigV4, matching ``aws s3 presign``. This
-        matters because botocore, left to itself, still downgrades a default
-        us-east-1 client's presigned URL to the deprecated SigV2 - a URL a
-        SigV4-only bucket (or a modern bucket policy) rejects. So for the one
-        signer botocore would pick as SigV2 (the legacy hmacv1 ``"s3"``), the
-        presign is forced to ``"s3v4"`` for this call only, via botocore's
-        per-call ``choose-signer`` seam - no new client is built, and the
-        client's own configuration is otherwise untouched. The auth-scheme
-        signers a directory bucket (``v4-s3express``) or an MRAP ARN
-        (``s3v4a``) resolve to, and an unsigned client, are left as botocore
-        chose them.
-
-        The URL also names the client's **own** region, again matching
-        ``aws s3 presign`` and again against botocore's default - see
-        `_regional_presign`.
+        The URL is the one ``aws s3 presign`` returns, however the client
+        was built. A symmetric SigV4 URL is signed with botocore's pure-Python
+        signer, as aws-cli's bundled botocore signs it: botocore left to
+        itself downgrades a default client's presign to the deprecated SigV2
+        in the regions that accept it, and signs with awscrt's signer, whose
+        query order differs, whenever awscrt is importable (`_sigv4_presign`).
+        The auth-scheme signers a directory bucket (``v4-s3express``) or an
+        MRAP ARN (``s3v4a``) resolve to, and an unsigned client, are left as
+        botocore chose them. The URL names the client's **own** regional
+        host, as aws-cli's does, where botocore would name the global one
+        (`_regional_presign`). Both are scoped to this call: no client is
+        built, and the client's own configuration is untouched.
         """
         if method not in ("get_object", "put_object"):
             raise ValidationError(f"Invalid method value: {method!r}", operation="presign")
@@ -2263,7 +2258,7 @@ class S3:
         operation = "GetObject" if method == "get_object" else "PutObject"
         try:
             with _single_request("presign", bucket=storage.bucket, key=storage.key):
-                with _sigv4_presign(client, operation), _regional_presign(client):
+                with _sigv4_presign(client, operation, expires_in), _regional_presign(client):
                     return client.generate_presigned_url(
                         method,
                         Params={"Bucket": storage.bucket, "Key": storage.key},
@@ -2314,81 +2309,119 @@ class S3:
             client.put_bucket_website(Bucket=storage.bucket, WebsiteConfiguration=config)
 
 
+# The request-context key `_sigv4_presign` marks a presign it signs itself
+# with: its choose-signer answer sets it, its before-sign handler consumes it.
+_SIGV4_PRESIGN_MARK = "boto3_s3_sigv4_presign"
+
+
 @contextmanager
-def _sigv4_presign(client: Any, operation: str) -> Generator[None, None, None]:
-    """Force a presign onto SigV4 for the duration of one call.
+def _sigv4_presign(client: Any, operation: str, expires_in: int) -> Generator[None, None, None]:
+    """Sign one presign with SigV4 the way aws-cli does, for the duration of the call.
 
-    A default S3 client (no explicit ``signature_version``) resolves the
-    generic ``"v4-query"`` presign signer, which a later botocore
-    choose-signer handler then downgrades to the legacy hmacv1 SigV2 - the
-    URL a SigV4-only bucket rejects. This registers an earlier
-    ``choose-signer.s3.<operation>`` handler that answers ``"s3v4-query"`` for
-    exactly that ``"v4-query"`` input, pre-empting the downgrade (the emitter
-    takes the first non-None response). Every other signer gets ``None`` - a
-    defer - so an already-explicit ``s3v4``, an unsigned
-    (``--no-sign-request``) client, a user's explicit legacy ``s3``, and the
-    ``s3express`` / ``s3v4a`` auth-scheme signers all sign exactly as botocore
-    chose (the unsigned path in particular breaks if this handler answers for
-    it). A client configured with the generic ``"v4"`` (the CLI pins it) is
-    left alone too: botocore registers no downgrade for a configured version,
-    so its own ``choose-signer`` handler already answers ``"v4-query"`` with
-    the S3 signer, and an answer here would come ahead of the less specific
-    ``choose-signer.s3`` handlers the caller registered on the client, which
-    would then never see the presign. (A default client's config reads
-    ``"s3v4"`` once built, so that value cannot tell the two apart.)
-    ``"v4-query"`` / ``"s3v4-query"`` are botocore-internal signer tokens; if a
-    botocore version renames them this override simply no-ops back to
-    botocore's default (no crash). Scoped to this client and operation,
-    unregistered in a ``finally`` so no shared state leaks and no new client
-    is built.
+    aws-cli's bundled botocore presigns with its pure-Python SigV4 query
+    signer. Left to itself, the installed botocore differs twice: a default
+    client (no explicit ``signature_version``) in a region that still accepts
+    SigV2 downgrades the presign to the legacy hmacv1 SigV2 - a URL a
+    SigV4-only bucket rejects - and with awscrt importable every symmetric
+    SigV4 signer is the CRT one, which orders the query differently
+    (``X-Amz-Expires`` after ``X-Amz-SignedHeaders``). Both decisions go
+    through botocore's process-wide signer table, which this must not change
+    (design/overview.md section 3, rule 1), so the URL is signed here instead.
 
-    A client that does not expose botocore's event seam (a stand-in that only
-    implements ``generate_presigned_url``) is left to its own signing - the
-    override is a best-effort upgrade, never a hard requirement.
+    A ``choose-signer.s3.<operation>`` handler answers ``UNSIGNED`` for the
+    two symmetric SigV4 query signers (``v4-query`` from the endpoint's auth
+    scheme or a ``v4`` client, ``s3v4-query`` from an ``s3v4`` client),
+    marking the request; it runs ahead of botocore's downgrade, which sits on
+    the less specific ``choose-signer.s3``, and so ahead of any handler a
+    caller registered there. botocore then signs nothing, and a
+    ``before-sign.s3.<operation>`` handler registered last applies
+    ``S3SigV4QueryAuth`` to the marked request with the region, signing name
+    and credentials botocore would have used: the endpoint's signing context
+    first, the client's own otherwise. Every other signer is left as botocore
+    chose it - an unsigned client stays unsigned (it carries no mark), and
+    the ``s3express`` / SigV4a schemes keep their own signers. SigV2
+    configured explicitly is out of scope (design/overview.md section 2).
+    Both handlers are unregistered in a ``finally``: no client is built and
+    the client's configuration is untouched. ``client._request_signer``'s
+    credentials are a private attribute, read as botocore's own signer reads
+    them. A client that does not expose botocore's event seam (a stand-in
+    implementing only ``generate_presigned_url``) signs however it chooses.
     """
-    meta = getattr(client, "meta", None)
-    events = getattr(meta, "events", None)
-    configured = getattr(getattr(meta, "config", None), "signature_version", None)
-    if events is None or not hasattr(events, "register") or configured == "v4":
+    events = getattr(getattr(client, "meta", None), "events", None)
+    if events is None or not hasattr(events, "register_last"):
         yield
         return
+    from botocore import UNSIGNED
+    from botocore.auth import S3SigV4QueryAuth
+    from botocore.exceptions import NoRegionError
 
-    def _choose(signature_version: str, **_kwargs: Any) -> str | None:
-        return "s3v4-query" if signature_version == "v4-query" else None
+    def _choose(signature_version: Any, context: dict[str, Any], **_kwargs: Any) -> Any:
+        if signature_version not in ("v4-query", "s3v4-query"):
+            return None
+        context[_SIGV4_PRESIGN_MARK] = True
+        return UNSIGNED
 
-    event = f"choose-signer.s3.{operation}"
-    events.register(event, _choose)
+    def _sign(
+        request: Any,
+        signing_name: str,
+        region_name: str | None,
+        request_signer: Any,
+        **_kwargs: Any,
+    ) -> None:
+        if not request.context.pop(_SIGV4_PRESIGN_MARK, False):
+            return
+        if region_name is None:
+            # botocore's own signer refuses a region-less client the same way.
+            raise NoRegionError()
+        signing = request.context.get("signing", {})
+        credentials = signing.get("request_credentials") or request_signer._credentials
+        # None reaches the signer as botocore's own does, to fail there.
+        frozen: Any = credentials.get_frozen_credentials() if credentials is not None else None
+        S3SigV4QueryAuth(
+            frozen,
+            signing.get("signing_name", signing_name),
+            signing.get("region", region_name),
+            expires=expires_in,
+        ).add_auth(request)
+
+    choose_event = f"choose-signer.s3.{operation}"
+    sign_event = f"before-sign.s3.{operation}"
+    events.register(choose_event, _choose)
+    events.register_last(sign_event, _sign)
     try:
         yield
     finally:
-        events.unregister(event, _choose)
+        events.unregister(choose_event, _choose)
+        events.unregister(sign_event, _sign)
 
 
 @contextmanager
 def _regional_presign(client: Any) -> Generator[None, None, None]:
-    """Keep a presign on the client's own region for the duration of one call.
+    """Keep a presign on the client's own regional host for the duration of one call.
 
-    botocore marks presign requests with a ``use_global_endpoint`` context flag
-    and then resolves the endpoint with the region builtin replaced by
-    ``aws-global``, so an eu-central-1 client presigns
-    ``bucket.s3.amazonaws.com`` while every real request it sends goes to
-    ``bucket.s3.eu-central-1.amazonaws.com``. The URL still carries the true
-    region in its credential scope, so the host and the signature disagree.
-    aws-cli's bundled botocore has no such flag and always presigns the
-    resolved regional host; this restores that by clearing the flag before
-    botocore's own endpoint-builtins handler reads it (registered *first* on
-    ``before-endpoint-resolution.s3``, unregistered in a ``finally``).
+    aws-cli's bundled botocore always presigns the resolved regional host.
+    The installed botocore reaches a global ``bucket.s3.amazonaws.com`` two
+    ways. It marks presign requests with a ``use_global_endpoint`` context
+    flag and then resolves the endpoint with the region builtin replaced by
+    ``aws-global``, so an eu-central-1 client presigns the global host while
+    every real request it sends goes to the regional one - and the URL still
+    carries the true region in its credential scope, so host and signature
+    disagree. And a us-east-1 client whose ``us_east_1_regional_endpoint`` is
+    ``legacy`` (botocore's default; aws-cli has no such setting) carries the
+    ``AWS::S3::UseGlobalEndpoint`` builtin from its construction. A handler
+    registered *first* on ``before-endpoint-resolution.s3`` clears the flag
+    before botocore's own builtins handler reads it, and sets that builtin to
+    ``False``; botocore hands the event a copy of the builtins, so the
+    client's own requests keep their host (design/overview.md section 3: a
+    value an operation returns is matched to aws-cli however the client was
+    built). Unregistered in a ``finally``.
 
-    Everything botocore already exempts from the flag is untouched, because
-    clearing it only reaches the cases where it was set: a non-``aws``
-    partition, dualstack, an explicit ``virtual`` ``addressing_style``, and a
-    us-east-1 client with the regional pin the CLI applies never set it in the
-    first place, and botocore's handler ignores it for an explicit ``path``
+    Everything botocore resolves regionally already is untouched: a
+    non-``aws`` partition, dualstack, an explicit ``virtual`` or ``path``
     ``addressing_style``, an ARN bucket, a directory bucket, and a
     DNS-incompatible name that forces path style. A custom ``endpoint_url``
-    overrides the resolved host either way. The net change is exactly the
-    plain non-us-east-1 case, an explicit ``auto`` addressing style included
-    (all measured against the pinned aws-cli).
+    overrides the resolved host either way (all measured against the pinned
+    aws-cli).
 
     ``use_global_endpoint`` is a botocore-internal context key; if a botocore
     version renames or drops it this override simply no-ops (the ``pop`` finds
@@ -2400,15 +2433,18 @@ def _regional_presign(client: Any) -> Generator[None, None, None]:
         yield
         return
 
-    def _drop_global_endpoint(context: dict[str, Any], **_kwargs: Any) -> None:
+    def _regional_endpoint(
+        builtins: dict[str, Any], context: dict[str, Any], **_kwargs: Any
+    ) -> None:
         context.pop("use_global_endpoint", None)
+        builtins["AWS::S3::UseGlobalEndpoint"] = False
 
     event = "before-endpoint-resolution.s3"
-    events.register_first(event, _drop_global_endpoint)
+    events.register_first(event, _regional_endpoint)
     try:
         yield
     finally:
-        events.unregister(event, _drop_global_endpoint)
+        events.unregister(event, _regional_endpoint)
 
 
 # -- module-level convenience -------------------------------------------------
