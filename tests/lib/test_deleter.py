@@ -1274,7 +1274,7 @@ class TestCrtRoute:
             operation="rm",
             session=session,
             crt_endpoint="http://e",
-            crt=CrtClientOptions(allow_lockless=True, sign_requests=False, verify="/ca.pem"),
+            crt=CrtClientOptions(allow_lockless=True, verify="/ca.pem"),
         ).close()
         ((_, config, kwargs),) = built
         assert config is _crt()
@@ -1283,7 +1283,7 @@ class TestCrtRoute:
             "crt": crtsupport.CrtPostures(
                 endpoint="http://e",
                 session=session,
-                crt=CrtClientOptions(allow_lockless=True, sign_requests=False, verify="/ca.pem"),
+                crt=CrtClientOptions(allow_lockless=True, verify="/ca.pem"),
             ),
         }
 
@@ -1329,7 +1329,7 @@ class TestCrtDeleteSender:
             crt=crtsupport.CrtPostures(
                 endpoint="http://e",
                 session=session,
-                crt=CrtClientOptions(allow_lockless=True, sign_requests=True),
+                crt=CrtClientOptions(allow_lockless=True),
             ),
         )
         assert got is sender
@@ -1340,7 +1340,7 @@ class TestCrtDeleteSender:
                 {
                     "endpoint": "http://e",
                     "session": session,
-                    "crt": CrtClientOptions(allow_lockless=True, sign_requests=True),
+                    "crt": CrtClientOptions(allow_lockless=True),
                 },
             )
         ]

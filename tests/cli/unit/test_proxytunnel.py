@@ -41,16 +41,16 @@ class TestTheClientFactoryInstallsIt:
         if held is not None:
             monkeypatch.delattr(AWSConnection, "_tunnel")
         try:
-            clientfactory.build_client(_parse(["--region", "us-east-1"]))
+            clientfactory.build_s3(_parse(["--region", "us-east-1"])).client()
             assert AWSConnection._tunnel is proxytunnel._tunnel  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
         finally:
             if held is None and "_tunnel" in vars(AWSConnection):
                 delattr(AWSConnection, "_tunnel")
 
     def test_the_tunnel_request_is_the_one_aws_sends(self, proxy_environment: _StrictProxy) -> None:
-        client = clientfactory.build_client(
+        client = clientfactory.build_s3(
             _parse(["--region", "us-east-1", "--endpoint-url", f"https://127.0.0.1:{_TARGET_PORT}"])
-        )
+        ).client()
         with pytest.raises(Exception):  # noqa: B017 - the tunnel is cut after the 200
             client.list_buckets()
         assert proxy_environment.blocks[0] == [

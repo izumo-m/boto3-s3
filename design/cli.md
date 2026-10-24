@@ -258,8 +258,8 @@ solidified design is added here.
 |---|---|
 | `cli.py` | Two-stage dispatch (aws-cli's clidriver lazy-command-table shape): the globals pass consumes the globals off the full argv, the command scan matches its remainder against `_COMMAND_TABLE` (the registry: name -> module, class, help - no command module imported), stage 2 imports the matched module, builds its real parser and runs it. Wires `--debug`, maps exceptions to exit codes; the full `build_parser()` builds the whole surface for tests |
 | `globalargs.py` | Common option definitions (the parent; the aws-cli `globalargs.py` counterpart) |
-| `clientfactory.py` | The command's side of aws-cli's assembly, the rest being the library's `boto3_s3.awsclisession` (the session, the region chain, the TLS trust sources, the credential cache, the default request checksum - which `S3.from_aws_cli` builds on too): `build_client(args) -> S3Client` (the connection/authentication layer, section 4) + `build_service_client(service, args, *, region=None)` (the s3control / sts client used by mv's path validation, section 5.8). Both open their session, when none is handed in, through `build_session` - the botocore session `awsclisession.open_botocore_session` opens (the profile / retry / timeout / credential-cache alignment of section 4) - and create their client through `_create_client`, the single seam that installs the CONNECT pin (`boto3_s3.pin_proxy_connect`) - a seam rather than `awsclisession.open_botocore_session` because `build_client` may be handed a session built elsewhere. The construction-time botocore errors are translated in one place for all three (`_construction_errors`, section 6). Every S3 client the first one builds carries aws-cli's message rewriter (`s3errormsg`) |
-| `s3errormsg.py` | aws-cli's `after-call.s3` handler (its `s3errormsg` customization), ported verbatim: it rewrites two "requires Signature Version 4" messages and the cross-region `PermanentRedirect` in place, so every report carrying a service message - the top-level `[ERROR]` line and the per-item `upload failed:` / `download failed:` lines alike - reads as aws-cli's. aws-cli registers it on its session; here `build_client` registers it on each S3 client it builds, the CLI's only S3 client builder. The library stays boto3-faithful and never rewrites a service message |
+| `clientfactory.py` | `build_s3(args) -> S3`: the parsed connection / auth globals handed to the library's `S3.from_aws_cli` (`from_aws_cli_arguments`: the timeouts coerced aws-cli-style, `--ca-bundle` in the OS's form), which assembles the session and its clients the way aws-cli does (`boto3_s3.awsclisession`, section 4). Around it, what only the command does: `prepare_process` - the process-wide CONNECT pin (`boto3_s3.pin_proxy_connect`) and the SSO token cache class with aws-cli's write - before the session opens, aws-cli's `s3errormsg` on every S3 client the `S3` hands out (`client()` and `source_client()`), and the profile's `cli_timestamp_format` / `cli_binary_format` checks (`_reject_unknown_cli_formats`) once it is open |
+| `s3errormsg.py` | aws-cli's `after-call.s3` handler (its `s3errormsg` customization), ported verbatim: it rewrites two "requires Signature Version 4" messages and the cross-region `PermanentRedirect` in place, so every report carrying a service message - the top-level `[ERROR]` line and the per-item `upload failed:` / `download failed:` lines alike - reads as aws-cli's. aws-cli registers it on its session; here the command's `S3` (`clientfactory.build_s3`) registers it on each S3 client it hands out. The library stays boto3-faithful and never rewrites a service message |
 | `commands/base.py` | The `Command` ABC + `Context` (the injection point for runtime dependencies, section 3.1) |
 | `commands/<sub>.py` | The `Command` subclass for each subcommand (e.g., `LsCommand` in `ls.py`, `RmCommand` in `rm.py`) |
 | `commands/transferargs.py` | The surface shared by cp / mv / sync: the declaration equivalent to aws-cli `TRANSFER_ARGS` (`--expected-size` is cp-only opt-in, `--recursive` is opt-out for sync), validation of the SSE-C pair / checksum path types / case-conflict / S3 Express, conversion to `TransferOptions`, the non-stream location wiring (including the `--source-region` clone), the `[s3]` read and the engine's construction (`build_transfer_engine`, section 8), and the tail of exit-code derivation (`finish_transfer`, with `report_failed_run`, which rm shares) |
@@ -279,8 +279,7 @@ the documented submodule surfaces (each module's `__all__`: the `transferplan`
 planner,
 `globsieve`, `localstorage.translate_os_error`, `awsclicompare`,
 `crtsupport`, `masking`'s `SecretMaskingFilter`, and
-`pathresolver`'s pin stand-down probes `is_mrap_path` / `is_outpost_path` /
-`is_outpost_alias_path` / `is_s3express_path` / `is_s3express_accesspoint_path`,
+`pathresolver`'s `is_s3express_path` / `is_s3express_accesspoint_path`,
 `requestparams.validate_grants` (the `--grants` check the CLI makes before the
 run), and `s3storage`'s `CA_BUNDLE_ENVIRONMENT_VETTED` mark).
 What the in-repo CLI needs, any other application built on the library needs
@@ -306,16 +305,18 @@ their dependencies through a `Context`.
 - `Context` is the container for the runtime dependencies that `main()`
   resolves. Currently these are:
   - `client_factory` (`argparse.Namespace -> S3Client`, default `None` ->
-    the command's `S3` builds the client on its session -
-    `clientfactory.build_s3` / `build_client`; an injected factory builds it
-    instead).
+    the command's `S3` builds its clients - `clientfactory.build_s3`, the
+    library's `S3.from_aws_cli`; an injected factory builds the run's client
+    and, from a namespace naming that region, `--source-region`'s source
+    client instead, each marked as the assembly's own so the library's
+    run-level defaults reach it).
   - `s3_factory` (`argparse.Namespace -> S3`, default `None` -> `Context.s3()`'s
     standard construction; an injected factory takes precedence there) - tests
     inject it e.g. to share one session across a command's clients.
   - `service_client_factory` (`(service, args, *, region=None) -> client`,
-    default `None` -> `clientfactory.build_service_client` on the command's
-    session) - the injection point where mv's `--validate-same-s3-paths`
-    creates the s3control / sts clients (section 5.8).
+    default `None` -> the `S3`'s own `service_client`) - the injection point
+    for the s3control / sts clients mv's `--validate-same-s3-paths` resolves
+    through (`S3.check_mv_paths`, section 5.8).
   - `transfer_config` (`TransferConfig | None`) - overrides the transfer
     engine's defaults; tests inject `use_threads=False` to make the multipart
     call order deterministic. cp / mv / sync / rm hand it to
@@ -340,10 +341,9 @@ numbers in the bold item labels below are that document's.
   `signature_version=UNSIGNED` in the **session's default client config**
   (`awsclisession.default_client_config`, where aws-cli's own `no_sign_request` handler puts
   it - which is what leaves the credential chain's STS / SSO clients unsigned
-  too, and what lets a per-client `signature_version` beat it, item 2 below; the
-  CRT transfer lane takes the flag directly instead, as
-  `CrtClientOptions(sign_requests=not args.no_sign_request)` - aws-cli's CRT factory reads
-  its `sign_request` parameter and never the client's signature version),
+  too; the CRT transfer lane signs as the client does, which is aws-cli's
+  CRT factory's answer too with its `--sse aws:kms` pin not copied, item 2
+  below),
   `--cli-read-timeout` /
   `--cli-connect-timeout` -> `Config` and the session's default client config
   (item 8 below). The assembled client is handed to the
@@ -374,7 +374,8 @@ numbers in the bold item labels below are that document's.
   and refuses nothing aws-cli would not. It runs where aws-cli runs it, once
   `session.client` has built the client. `--no-verify-ssl` resolves to
   `False` ahead of the chain and is unaffected.
-- **The alignment with aws-cli v2**: `build_client` and the botocore session
+- **The alignment with aws-cli v2**: the library's aws-cli assembly
+  (`S3.from_aws_cli`, `boto3_s3.awsclisession`) and the botocore session
   every client is opened on absorb eight differences between the installed
   botocore on a host interpreter and the botocore aws-cli v2 ships frozen (the
   exception overview.md section 3 makes for a version difference that changes a
@@ -393,8 +394,8 @@ numbers in the bold item labels below are that document's.
      `AWS_DEFAULT_REGION` alone) and keeps its `IMDSRegionProvider` for
      smart-defaults only, so a bare client would resolve a *different* region
      whenever `AWS_REGION` is the sole source, or on an EC2 host with no
-     configured region. `build_client` / `build_service_client` rebuild that exact
-     chain in `_resolve_region` (reusing botocore's own `EnvironmentProvider` /
+     configured region. `awsclisession.region_chain` rebuilds that exact
+     chain (reusing botocore's own `EnvironmentProvider` /
      `ScopedConfigProvider` / `IMDSRegionProvider`); an empty `AWS_REGION=`
      therefore selects the empty region too -> the same `Invalid endpoint` failure
      as aws-cli (rc 255), not a fall-through to `AWS_DEFAULT_REGION`. The
@@ -424,61 +425,22 @@ numbers in the bold item labels below are that document's.
      (rc 1 / 253) succeed (measured). The library
      keeps stock botocore order on purpose (the boto3=library / aws-cli=CLI
      split, as for the profile chain in item 5).
-  2. **always-on SigV4** - stock botocore downgrades presigned URLs to SigV2 in
-     regions that accept SigV2 (us-east-1), but SigV2 does not exist in aws-cli
-     v2's botocore. `Config(signature_version="v4")` is set for every command
-     whose positionals name none of four targets (`"s3v4"` under `--sse
-     aws:kms`, as aws-cli sets it; the generic `v4` is the name aws-cli's
-     endpoint resolution hands its requests, which botocore's own
-     `choose-signer` handler then turns into the S3 signer - a pinned `s3v4`
-     left that choice to the next handler): an MRAP ARN, an S3 Outposts
-     access-point ARN, an S3 Outposts access-point *alias*, and an S3 Express
-     directory bucket. For those four
-     the pin stands down: an explicit `signature_version` suppresses botocore's
-     auth-scheme resolution, which must pick asymmetric SigV4a for an MRAP and
-     for an Outposts access point in either notation
-     (item 4) and `sigv4-s3express` (with `CreateSession` credentials) for a
-     directory bucket - a pinned `v4` (or `s3v4`) matches either scheme name up
-     to the first dash and would silently sign a plain SigV4 request instead. A plain,
-     region-qualified access-point ARN is *not* in the set: it signs symmetric
-     SigV4 like a bucket (every shape measured against the pinned aws-cli).
-     The pin stands down for one further reason, unrelated to the targets: an
-     **unsigned run**, so that the UNSIGNED waiting in the session default
-     client config is what reaches the client (a per-client
-     `signature_version`, this pin included, beats it in botocore's merge) -
-     **except under `--sse aws:kms`**, the one case for which aws-cli's own
-     `ClientFactory.create_client` passes `Config(signature_version='s3v4')`.
-     That combination therefore signs, resolves credentials and reaches the
-     credential chain on both tools, while every other unsigned run stays
-     anonymous (`_signature_version_pin`; measured without credentials across
-     `cp` / `mv` / `sync` / s3-to-s3 `cp`, where `aws` is rc 1 `Unable to locate
-     credentials` and sends nothing). `--sse AES256` and `--sse-c AES256`
-     upload anonymously on both, and `mv`'s path-resolver clients stay
-     anonymous throughout, since they name no `signature_version` of their own.
-     aws-cli's per-client config does not look at the target either, so under
-     `--sse aws:kms` the four targets above sign plain SigV4 too, with the
-     client's region in the scope, signed run or unsigned - the
-     endpoint's own SigV4a / `sigv4-s3express` choice is overridden on both
-     tools (`_requests_kms_signing`; measured in a network namespace with no
-     route out, reading the signed request from `--debug`).
-     **The gate is shaped after botocore's endpoint rules, not after aws-cli's
-     resolver regexes**, because the two answer different questions - the
-     regexes say which spellings `mv` can resolve to an underlying bucket
-     (section 5.8), the rules decide the signer. `pathresolver._parse_arn_bucket`
-     reads a bucket the way botocore's `aws.parseArn` does (six `:`-separated
-     fields, the resource split with `:` folded into `/`), so an MRAP is
-     recognized by an **empty ARN region** on an `s3` `accesspoint` resource
-     rather than by a `.mrap` spelling, and an Outposts ARN by service
-     `s3-outposts` with an `outpost/.../accesspoint/...` resource in any
-     separator mix. The alias carries no ARN, so `is_outpost_alias_path`
-     reproduces the rules' own positional test instead: the `--op-s3` suffix,
-     the hardware-type character (`o` / `e`) 50 back from the end, the 17
-     characters before it forming a valid host label, and a virtual-hostable
-     name overall - a name the branch turns away is an ordinary bucket the
-     rules sign plain SigV4, so the suffix alone would stand the pin down too
-     often. All of it measured against the pinned aws-cli: 11 shapes that must
-     sign SigV4a, 8 that keep the pin, and 7 that botocore rejects - the last
-     group reporting the same on both tools whether the pin applies or not.
+  2. **no SigV2, and no signature pinned** - stock botocore downgrades a
+     presigned URL to SigV2 in the regions that accept it, where aws-cli v2's
+     botocore has no SigV2 at all. The library's `S3.presign` signs SigV4 for
+     any client, per call (item 4), so no client names a `signature_version`:
+     botocore's endpoint rules choose SigV4, SigV4a (an MRAP, an S3 Outposts
+     access point by ARN or `--op-s3` alias) or `sigv4-s3express` (a
+     directory bucket and its access points) per request, as aws-cli's do.
+     Measured offline against the pinned aws-cli: the presigned URLs of 18
+     shapes - every MRAP / Outposts / near-miss alias / plain shape the old
+     client pin was measured on - match it but for date and signature. aws-cli's
+     own per-client pin, `Config(signature_version='s3v4')` under `--sse
+     aws:kms`, is not copied: it beats the session's UNSIGNED, so a
+     `--no-sign-request` KMS run signs and resolves credentials on aws-cli's
+     classic engine while its CRT engine stays anonymous, and it signs an MRAP,
+     Outposts or S3 Express target plain SigV4 - looks like a bug, so it is a
+     deliberate deviation ([`aws-differences.md`](../docs/cli/aws-differences.md)).
   3. **us-east-1 regional endpoint** - aws-cli v2 resolves us-east-1 as regional
      (`s3.us-east-1.amazonaws.com`), its bundled botocore having dropped the
      `us_east_1_regional_endpoint` key from its `[s3]` table outright, so a
@@ -503,20 +465,23 @@ numbers in the bold item labels below are that document's.
      clears the flag that does it, so a URL from either layer names the
      client's own regional host like aws-cli
      (docs/reference/operations/presign.md).
-  4. **a pure-Python pin for symmetric SigV4 signing** - when awscrt is
+  4. **pure-Python symmetric SigV4 for presigning** - when awscrt is
      importable (it can be pulled in via the opt-in `crt` extra - transfer.md section 9 -
      or via a co-installed package), stock botocore swaps `v4` / `v4-query` /
      `s3v4` / `s3v4-query` for the CRT signer, changing the parameter order of
      presigned URLs (`X-Amz-Expires` moves after `X-Amz-SignedHeaders`). The
      botocore bundled with aws-cli v2 pins these four to pure-Python classes and
-     lets CRT handle only the asymmetric SigV4a family - `build_client` restores
-     the same table (an in-place update of `AUTH_TYPE_MAPS`; with awscrt absent
-     it is a no-op that just re-sets the defaults). Asymmetric SigV4a (MRAP ARNs
+     lets CRT handle only the asymmetric SigV4a family. The library's `presign`
+     signs a symmetric SigV4 URL with the pure-Python signer per call
+     (`S3._sigv4_presign`), leaving botocore's process-wide table alone; the
+     requests themselves sign with whichever signer the table holds, which
+     differs only in an error or an unusual environment (awscrt's refuses an
+     empty region, and adds a lowercase `host` header) and is not compensated.
+     Asymmetric SigV4a (MRAP ARNs
      and the like) is a domain where botocore itself requires awscrt: with the
      `crt` extra, the CRT signer handles it just as in aws-cli v2 (measured: an
      MRAP presign signs `AWS4-ECDSA-P256-SHA256` with `X-Amz-Region-Set=*` on
-     both CLIs - this needs item 2's MRAP stand-down, since the SigV4 pin would
-     otherwise force a symmetric signature real AWS rejects); without it,
+     both CLIs); without it,
      botocore raises `MissingDependencyException` (`Missing Dependency: This
      operation requires an additional dependency. Use pip install
      botocore[crt] ...`), which the library translates to the plain
@@ -853,13 +818,9 @@ length for parameter Key") -> rc 252.
 | `--expires-in <seconds>` | Default 3600. **No range validation** (0 / a negative value / over 604800 are all signed as-is = same as aws-cli. S3 rejects it only **when the URL is used**). A non-integer is rc **255** (the integer-conversion rule of section 6). On a SigV4a target (an MRAP ARN) the CRT signer refuses 0 / a negative value with awscrt's bare `AssertionError`; the library raises it as `InvalidValueError`, so it is rc **255** as on `aws` (where the general handler reports the assertion) |
 
 Output: a single URL line to stdout. With `--no-sign-request`, a bare URL with no
-query (matches aws-cli). The signature format derives from the client
-configuration, and `build_client`'s always-on SigV4 + us-east-1 regional (section 4)
-makes it the same shape as aws-cli v2. The SigV4 pin here is belt-and-braces:
-stock boto3 downgrades a default client's presign to SigV2, and `S3.presign`
-already pre-empts that downgrade itself for the duration of the one call, so the
-library and the CLI produce the same v4 URL. What the CLI's pinned client
-adds is only that the pin is visible in its own configuration.
+query (matches aws-cli). The library's `S3.presign` returns aws-cli's URL for
+any client - SigV4 signed pure-Python, the regional host (section 4, items 2
+to 4) - so the command adds nothing to it.
 
 rc forms: **0 / 252 / 253 / 255 only** (because the server is never reached, 1 /
 254 cannot occur). Unlike mb / rb there is no local catch - botocore's
@@ -1062,16 +1023,18 @@ delegation chain `boto3-s3-cli[crt]` -> `boto3-s3[crt]` -> boto3's own
 become an in-pipeline failure (rc 1) and diverge from aws-cli (v2 bundles
 awscrt), but this is allowed because awscrt-dependent features are matched only
 where the CRT stack is usable (overview.md section 2, transfer.md section 9).
-Signing stays pure-Python via the pin of section 4.
+Request signing uses the signer botocore's table holds (section 4, item 4).
 
 Without `--checksum-algorithm`, aws-cli's default is its bundled botocore's
 `DEFAULT_CHECKSUM_ALGORITHM`, `CRC64NVME`, stamped on every request whose
 operation names a `ChecksumAlgorithm` member; pip botocore's is `CRC32`. The
-CLI names aws-cli's value (`awsclisession.register_default_checksum` / `default_upload_algorithm`) in the two places botocore
-would have stamped its own: an upload run's `TransferOptions` (`locals3` only -
-aws-cli sends no algorithm on a copy's requests, measured - so both transfer
-engines see it; the CRT engine reads its trailing checksum from that argument
-alone), and a `provide-client-params.s3.*` handler `build_client` attaches for
+library's aws-cli assembly names aws-cli's value in the two places botocore
+would have stamped its own: an upload run's `TransferOptions`
+(`S3._upload_options` with `awsclisession.default_upload_algorithm`, into S3
+from anything but S3 only - aws-cli sends no algorithm on a copy's requests,
+measured - so both transfer engines see it; the CRT engine reads its trailing
+checksum from that argument alone), and a `provide-client-params.s3.*` handler
+on every S3 client it builds (`awsclisession.register_default_checksum`) for
 every other request (`rm`'s DeleteObjects, `website`, the post-copy `PutObjectTagging`, the
 annotation writes). Only where the installed botocore can compute CRC64NVME
 (awscrt) and only where botocore would have stamped a default of its own: on
@@ -1083,9 +1046,9 @@ handler asks the operation model, in botocore's own order, so a
 `when_required` classic upload sends none on either. The CRT engine is the
 exception aws-cli itself makes: its bundled CRT module carries CRC64NVME as its
 own upload fallback and never reads the setting, so
-`transferargs.default_upload_checksum` picks by the resolved engine and a
+`awsclisession.default_upload_algorithm` picks by the resolved engine and a
 `when_required` CRT upload trails CRC64NVME on both tools (measured).
-The library keeps botocore's default (crt.md section 1); the measured stake
+An `S3()` keeps botocore's default (crt.md section 1); the measured stake
 is the CRT engine's 1 GB upload, where CRC32's software implementation cost
 10% (benchmarks/RESULTS.md, 2026-09-06).
 
@@ -1224,7 +1187,8 @@ construction in section 5.7):
    `boto3_s3.pathresolver.S3PathResolver` (access point ARN / alias / outposts
    ARN / MRAP ARN. A bare bucket passes through with no API call) and the
    same-path guard is reapplied to every combination - a match is 252 (the message
-   uses the original URI). The clients go via `Context.service_client`:
+   uses the original URI). The clients go via the `S3`'s `service_client`
+   (`S3.check_mv_paths`):
    the src-side s3control uses `--source-region`, and when that is unspecified
    names no region at all, like sts: both then land on the session's region,
    which is a truthy typed `--region` (item 1 of section 4) or the rest of the
@@ -1628,17 +1592,17 @@ them:
   the CRT engine anyway and fails each item inside its credentials delegate;
   the CLI keeps the library's boto3 rule, falls back to classic and fails the
   same items with `Unable to locate credentials` (crt.md section 4). With no
-  region resolved, `build_s3`'s `S3` stops a CRT run at the engine's
-  construction slot with botocore's missing-region error, rc 253, as aws-cli's
-  CRT run stops there (crt.md section 4, "Where the CRT region comes from").
-  The CRT client's settings are declared on `S3` as `CrtClientOptions`:
+  region resolved, the library stops a CRT run on the assembly's clients
+  before it starts (`S3._require_crt_region`, dry runs included) with
+  botocore's missing-region error, rc 253, as aws-cli's CRT run stops there
+  (crt.md section 4, "Where the CRT region comes from"). The CRT client's
+  settings come from `S3.from_aws_cli` as `CrtClientOptions`:
   `allow_lockless=True` makes an explicit `crt` preference build the CRT
   client even when another process holds the cross-process slot, aws-cli's
-  factory shape (crt.md section 4). The signing posture too:
-  `sign_requests=not args.no_sign_request` mirrors aws-cli's CRT factory, which reads only its `sign_request` parameter -
-  so `--no-sign-request --sse aws:kms` transfers anonymously on the CRT lane
-  while the classic lane signs, exactly aws-cli's engine split (crt.md section
-  4).
+  factory shape (crt.md section 4), and `verify` is aws-cli's CRT trust
+  source. Whether the CRT client signs follows the botocore client - UNSIGNED
+  under `--no-sign-request`, `--sse aws:kms` included, since aws-cli's KMS
+  pin is not copied (section 4, item 2).
 - **Annotation staging**: `build_transfer_options` always sets the library-only
   `AnnotationCopyMode.PRELOAD_MEMORY`. Thus `--copy-props all` reads every
   multipart source annotation before creating the destination, matching

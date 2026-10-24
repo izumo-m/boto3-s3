@@ -753,7 +753,7 @@ class TestCrtClientOptionsPosture:
     @pytest.mark.parametrize("route", ["cp", "stream", "sync"])
     @pytest.mark.parametrize(
         "declared",
-        [None, CrtClientOptions(sign_requests=False, verify="/ca.pem")],
+        [None, CrtClientOptions(verify="/ca.pem")],
         ids=["default", "declared"],
     )
     def test_posture_reaches_every_route(
@@ -804,7 +804,7 @@ class TestMaterializeCrtEngine:
         s3 = S3(
             session=session,
             endpoint_url=endpoint,
-            crt=CrtClientOptions(allow_lockless=True, sign_requests=False),
+            crt=CrtClientOptions(allow_lockless=True),
         )
         s3.materialize_crt_engine(client, transfer_config=config)  # pyright: ignore[reportArgumentType]
         assert [entry.pop("config").preferred_transfer_client for entry in seen] == ["crt"]
@@ -813,7 +813,7 @@ class TestMaterializeCrtEngine:
                 "client": client,
                 "endpoint": endpoint,
                 "session": session,
-                "crt": CrtClientOptions(allow_lockless=True, sign_requests=False),
+                "crt": CrtClientOptions(allow_lockless=True),
             }
         ]
 

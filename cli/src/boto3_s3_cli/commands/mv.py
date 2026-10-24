@@ -6,30 +6,12 @@ import argparse
 import os
 
 # Loaded at dispatch once mv is determined (stage 2 of the lazy dispatch).
-from boto3_s3 import (
-    S3,
-    S3PathResolver,
-    S3Storage,
-    ValidationError,
-    has_underlying_s3_path,
-)
+from boto3_s3 import OpResult
 from boto3_s3_cli import filters, output
 from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import Command, Context
 
 _VALIDATE_ENV_VAR = "AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS"
-
-# aws-cli's _emit_validate_s3_paths_warning, verbatim (emitted to stderr,
-# execution continues, rc unaffected).
-_VALIDATE_WARNING = (
-    "warning: Provided s3 paths may resolve to same underlying "
-    "s3 object(s) and result in deletion instead of being moved. "
-    "To resolve and validate underlying s3 paths are not the same, "
-    "specify the --validate-same-s3-paths flag or set the "
-    "AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS environment variable to true. "
-    "To resolve s3 outposts access point path, the arn must be "
-    "used instead of the alias.\n"
-)
 
 
 class MvCommand(Command):
@@ -68,7 +50,17 @@ class MvCommand(Command):
         transferargs.validate_streaming_paths(head, recursive=args.recursive, operation="mv")
         paths_type = head.paths_type  # "locals3" | "s3local" | "s3s3" here
         if paths_type == "s3s3":
-            self._validate_same_paths(args, ctx, head.s3, src, dest)
+            # Before the run, as aws-cli's _validate_path_args: the same object
+            # is a usage error (252) and a resolver failure keeps its class,
+            # where the run's own failures are its fatal error (rc 1).
+            head.s3.check_mv_paths(
+                src,
+                dest,
+                validate_same_s3_paths=args.validate_same_s3_paths
+                or os.environ.get(_VALIDATE_ENV_VAR, "").lower() == "true",
+                source_region=args.source_region,
+                on_result=_write_notice,
+            )
         transferargs.validate_checksum_paths_type(args, paths_type, operation="mv")
         transferargs.check_local_source(args, head, recursive=args.recursive, operation="mv")
         transferargs.validate_sse_c_pairing(args, paths_type, operation="mv")
@@ -85,9 +77,6 @@ class MvCommand(Command):
         options = transferargs.build_transfer_options(
             args,
             case_conflict,
-            default_checksum_algorithm=transferargs.default_upload_checksum(
-                client, paths_type, transfer_config
-            ),
         )
         if args.recursive and paths_type == "s3local":
             # The dir_op half of aws-cli's _validate_path_args, once every check
@@ -105,67 +94,20 @@ class MvCommand(Command):
                 on_progress=printer.on_progress if printer.wants_progress else None,
                 on_result=printer.on_result,
                 transfer_config=transfer_config,
+                validate_same_s3_paths=None,  # checked above, before the run
                 **options,
             )
 
         return transferargs.finish_transfer(printer, quiet=args.quiet, run=run_mv)
 
-    @staticmethod
-    def _validate_same_paths(
-        args: argparse.Namespace, ctx: Context, s3: S3, src: str, dest: str
-    ) -> None:
-        """The mv s3->s3 validation block (aws-cli's ``_validate_path_args`` head).
 
-        Always: the textual onto-itself guard on the keyless-normalized URIs
-        (the form aws-cli prints - ``mv s3://b/k s3://b`` reports ``s3://b/``),
-        ``--recursive`` included. When validation is on (the flag, or the
-        env variable set to ``true`` case-insensitively - aws-cli's
-        ``ensure_boolean``, so ``TRUE`` / ``True`` count too, any other value
-        off) and the *keys* match, both sides resolve
-        through ``S3PathResolver`` - the source-side s3control client in
-        ``--source-region``, the destination's in ``--region``, sts with no
-        per-client choice; an unset choice is left to the session's region,
-        as aws-cli's ``from_session`` clients inherit theirs (a truthy typed
-        ``--region``, else the region chain) - and every resolved pair
-        runs the same guard, still reporting the *original* URIs. When validation
-        is off, the two keys match, and a side looks access-point-shaped,
-        aws-cli's standing warning
-        goes to stderr and the move proceeds (non-matching keys return before
-        the warning branch).
+def _write_notice(result: OpResult) -> None:
+    """aws-cli's standing same-path warning, straight to stderr before the run.
 
-        A pure validator: the run's S3 client is already built
-        (``classify_paths``).
-        """
-        norm_src = S3Storage.normalize_s3_uri(src)
-        norm_dest = S3Storage.normalize_s3_uri(dest)
-        message = f"Cannot mv a file onto itself: {norm_src} - {norm_dest}"
-        same_key = S3Storage.same_key(norm_src, norm_dest)
-        resolving = same_key and (
-            args.validate_same_s3_paths or os.environ.get(_VALIDATE_ENV_VAR, "").lower() == "true"
-        )
-        if S3Storage.same_path(norm_src, norm_dest):
-            raise ValidationError(message, operation="mv")
-        if not same_key:
-            return
-        if resolving:
-            src_resolver = S3PathResolver(
-                s3control_client=ctx.service_client(
-                    "s3control", args, s3, region=args.source_region
-                ),
-                sts_client=ctx.service_client("sts", args, s3),
-            )
-            dest_resolver = S3PathResolver(
-                s3control_client=ctx.service_client("s3control", args, s3, region=args.region),
-                sts_client=ctx.service_client("sts", args, s3),
-            )
-            src_paths = src_resolver.resolve_underlying_s3_paths(norm_src)
-            dest_paths = dest_resolver.resolve_underlying_s3_paths(norm_dest)
-            for src_path in src_paths:
-                for dest_path in dest_paths:
-                    if S3Storage.same_path(src_path, dest_path):
-                        raise ValidationError(message, operation="mv")
-        elif has_underlying_s3_path(norm_src) or has_underlying_s3_path(norm_dest):
-            output.write_stderr(_VALIDATE_WARNING)
+    aws-cli's ``_emit_validate_s3_paths_warning`` writes it before any result
+    line and counts it as nothing (rc unaffected), ``--quiet`` included.
+    """
+    output.write_stderr(f"{result.error}\n")
 
 
 __all__ = ["MvCommand"]

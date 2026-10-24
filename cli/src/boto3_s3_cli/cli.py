@@ -588,7 +588,7 @@ def _exit_code_for_unexpected(exc: BaseException) -> int:
     252, a credential / region resolution failure is 253, a `ClientError` is
     254, and everything else is the general 255 (`GeneralExceptionHandler`).
     The common paths are already translated into `Boto3S3Error` (the library's
-    `s3_errors` and the CLI's `build_client`); this is the catch-all so no
+    `s3_errors` and `awsclisession.build_errors`); this is the catch-all so no
     path can crash the CLI with a traceback (rc 1), which the error rules
     forbid (design/overview.md section 3) - with two deliberate escapes:
     `AssertionError` (an internal-invariant bug) re-raises loudly instead of

@@ -608,17 +608,6 @@ class CrtClientOptions:
     lock either way - aws-cli's own ``auto`` resolution (design/crt.md
     section 6).
 
-    ``sign_requests`` says whether the CRT client signs at all. ``None`` (the
-    default) derives it from the botocore client, boto3's rule: only a client
-    configured with botocore's ``UNSIGNED`` signature transfers anonymously.
-    ``True`` / ``False`` is the application's own answer, aws-cli's
-    ``sign_request``: its CRT factory attaches a credentials provider on
-    ``--no-sign-request`` alone and never reads the client, so
-    ``--no-sign-request --sse aws:kms`` - where the per-client
-    ``signature_version`` restores signing for botocore - still transfers
-    anonymously on aws-cli's CRT lane while its classic lane signs
-    (design/crt.md section 4).
-
     ``verify`` is the CRT client's TLS trust source. ``None`` (the default)
     derives it from the botocore client: a client that names a CA bundle (its
     ``verify``, ``AWS_CA_BUNDLE``, a profile's ``ca_bundle``,
@@ -631,12 +620,14 @@ class CrtClientOptions:
     setting is (it would read as "verification off"). Both are a
     ``ValidationError`` at construction.
 
-    The CRT client is one per process: an operation whose settings differ
-    from the ones it was built with runs on the classic engine instead.
+    Whether the CRT client signs is the botocore client's answer, as it is
+    for boto3: one configured with botocore's ``UNSIGNED`` signature
+    transfers anonymously. The CRT client is one per process: an operation
+    whose settings differ from the ones it was built with runs on the classic
+    engine instead.
     """
 
     allow_lockless: bool = False
-    sign_requests: bool | None = None
     verify: str | Literal[False] | None = None
 
     def __post_init__(self) -> None:

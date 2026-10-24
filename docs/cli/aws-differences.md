@@ -37,8 +37,9 @@ delete answered `412`, a transfer answered `412` other than
 `--no-overwrite`'s own write, a CRT download that cannot put its file in
 place, a `mv` between two spellings of one Outposts object, an S3 Express
 access point, a plain-HTTP endpoint named anywhere but `--endpoint-url` under
-the CRT engine, a FIPS pseudo-region under the CRT engine, a `[plugins]`
-section, an alias file, a `cli_history` directory `aws` cannot create, the
+the CRT engine, a FIPS pseudo-region under the CRT engine, `--sse aws:kms`
+under `--no-sign-request` or against a multi-Region, Outposts or S3 Express
+target, a `[plugins]` section, an alias file, a `cli_history` directory `aws` cannot create, the
 modification time a download stamps in some local zones (and the `sync` runs that follow
 from it), a transfer or delete whose request dies
 without any response, a multipart copy whose tag write and its cleanup both
@@ -417,6 +418,23 @@ that say outright that the run comes out differently, listed in section 1.
   classic engine does on both tools. Name the plain region with
   `use_fips_endpoint = true` and the two agree
   ([`../../design/crt.md`](../../design/crt.md) section 4).
+- **`--sse aws:kms` leaves signing alone.** `aws` builds its S3 client with
+  SigV4 pinned whenever `--sse aws:kms` is given, and the pin outranks the
+  rest of its signing setup:
+  - **Under `--no-sign-request`** its classic engine signs anyway. With no
+    credentials the run fails with `Unable to locate credentials` (exit code
+    1) before sending anything, a profile whose credentials cannot be built
+    stops it with exit code 255, and with credentials the requests go out
+    signed. Its CRT engine stays anonymous (all measured). Here the run is
+    anonymous on both engines, as without the option.
+  - **Against a multi-Region access point, an S3 on Outposts access point or
+    an S3 Express directory bucket** it signs plain SigV4, where every other
+    run signs the endpoint's own scheme (SigV4a, or the S3 Express session).
+    Here `--sse aws:kms` signs that scheme too. The signatures were measured
+    offline; how those endpoints answer `aws`'s was not.
+
+  A signed run against any other bucket signs SigV4 either way and comes out
+  the same.
 - **Ctrl-C under the CRT engine.** `aws`'s CRT manager swallows an
   interrupt landing in its drain. For transfers `aws` then prints a failure
   line for each transfer cut short and no closing line, and an interrupt that

@@ -86,14 +86,14 @@ ASSEMBLED_BY = "_boto3_s3_aws_cli_assembly"
 
 @dataclass(frozen=True, slots=True)
 class Assembled:
-    """How an assembly built one client: by which assembly, for which region.
+    """The mark on a client aws-cli's assembly built: the region it was built for.
 
-    ``region`` is the region the client was built for - the assembly's
-    chain answer or one the builder named - ``None`` when nothing resolved
-    (botocore then gives the client the ``aws-global`` pseudo-region).
+    ``region`` is the assembly's chain answer or one the builder named,
+    ``None`` when nothing resolved (botocore then gives the client the
+    ``aws-global`` pseudo-region). A client built elsewhere to stand for an
+    assembled one - the command's test seam does - carries the same mark.
     """
 
-    assembly: AwsCliAssembly
     region: str | None
 
 
@@ -117,7 +117,8 @@ class AwsCliAssembly:
         self.settings = settings
         with build_errors():
             validate_endpoint_url(settings.endpoint_url)
-            reject_empty_ca_bundle(settings.ca_bundle)
+            # The value the clients get: no_verify_ssl discards ca_bundle first.
+            reject_empty_ca_bundle(client_verify(settings))
             botocore_session = open_botocore_session(settings)
             self.session: Boto3Session = boto3_session(botocore_session)
             self.region: str | None = resolve_region(settings.region, botocore_session)
@@ -171,7 +172,7 @@ class AwsCliAssembly:
         built_for = (
             region if region is not None else self.botocore_session.get_config_variable("region")
         )
-        setattr(client, ASSEMBLED_BY, Assembled(self, cast("str | None", built_for)))
+        setattr(client, ASSEMBLED_BY, Assembled(cast("str | None", built_for)))
         return client
 
     def crt_verify(self) -> str | Literal[False]:

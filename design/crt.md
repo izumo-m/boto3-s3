@@ -171,14 +171,12 @@ config=None read as `'auto'` - with the same rules as boto3.
     botocore's bundled `cacert.pem`, never `REQUESTS_CA_BUNDLE`), apart from
     the botocore clients' own resolution, so its two engines trust what
     aws-cli's do
-  - credentials = decided by the `sign_requests` declaration when the caller
-    makes one (aws-cli's `sign_request` parameter: `False` = no provider,
-    `True` = `BotocoreCRTCredentialsWrapper(client._get_credentials())`);
-    undeclared (`None`, the default) derives boto3's rule from the client -
-    no provider if `signature_version is UNSIGNED`, otherwise the wrapper.
+  - credentials = boto3's rule, from the client: no provider if
+    `signature_version is UNSIGNED` (and then no credentials resolved at
+    all), otherwise `BotocoreCRTCredentialsWrapper(client._get_credentials())`.
     No new singleton field encodes the mode: `_CrtS3Client.cred_wrapper`'s
-    presence already does, so the compatibility pin rejects a later request
-    declaring the other mode (classic fallback, never a wrong-mode transfer)
+    presence already does, so the compatibility pin rejects a later client
+    signing the other way (classic fallback, never a wrong-mode transfer)
   - serializer session = the caller's session (`S3(session=)` ->
     `Transferrer(crt=)`'s `CrtPostures.session` -> `create_crt_transfer_manager(session=)`), falling
     back to boto3's default session when one exists, then to a fresh botocore
@@ -381,16 +379,14 @@ both keep that rule: the run falls back to classic and fails the same item at
 rc 1 with botocore's `Unable to locate credentials`, and no traceback. The
 outcome is aws-cli's; only the report differs (overview.md section 3).
 
-The signing posture is the CLI's to declare: aws-cli's CRT factory attaches a
-credentials provider on its `sign_request` parameter alone - the per-client
-`Config(signature_version='s3v4')` that `--sse aws:kms` adds reaches its
-botocore client only - so aws-cli itself is inconsistent across engines for
-`--no-sign-request --sse aws:kms` (anonymous on CRT, signed on classic), and
-`build_s3` mirrors both halves by declaring
-`S3(crt=CrtClientOptions(sign_requests=not args.no_sign_request))` while the classic-lane
-signature logic stays as clientfactory resolves it. The declaration is off by
-default (`None` derives the mode from the client, boto3's rule), so nothing
-changes for a library caller.
+The signing posture follows the client on both engines. aws-cli's CRT factory
+attaches a credentials provider on its `sign_request` parameter alone, while
+the per-client `Config(signature_version='s3v4')` its `ClientFactory` adds for
+`--sse aws:kms` reaches its botocore client only, so aws-cli itself is
+inconsistent across engines for `--no-sign-request --sse aws:kms` (anonymous on
+CRT, signed on classic). That pin is not copied (cli.md section 4, item 2), so
+the botocore client is UNSIGNED under `--no-sign-request` whatever `--sse`
+says, and the CRT client, reading it, is anonymous too - aws-cli's CRT answer.
 
 The alternatives considered were both worse. Building the CRT manager on the
 CLI side - a port of aws-cli's `_create_crt_transfer_manager` - would duplicate

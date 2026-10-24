@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A Ctrl-C during a single-key `rm` no longer prints the `delete:` line of the request in flight, and a local file time only the local zone cannot hold is used as it is, with no warning (exit codes changed).
 - Local file names, the command line, output and `file://` text now use the encoding `aws` uses in the same environment, whatever the Python version or `PYTHONUTF8` (Python 3.15 on a non-UTF-8 locale or on Windows no longer differs), and `AWS_CLI_OUTPUT_ENCODING` (or `PYTHONUTF8=1`) sets the error report's encoding as on `aws`; `PYTHONIOENCODING` no longer changes the output.
 - Under the CRT engine, `REQUESTS_CA_BUNDLE` is no longer read and the default CA file is botocore's own, as with `aws`.
+- `--sse aws:kms` no longer changes how a run signs: under `--no-sign-request` it stays anonymous on both engines, and a multi-Region, Outposts or S3 Express target signs its own scheme (exit codes changed).
 
 ## [0.9.0] - 2026-10-18
 

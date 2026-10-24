@@ -100,9 +100,6 @@ class CpCommand(Command):
         options = transferargs.build_transfer_options(
             args,
             case_conflict,
-            default_checksum_algorithm=transferargs.default_upload_checksum(
-                client, paths_type, transfer_config
-            ),
         )
         if args.recursive and paths_type == "s3local":
             # The dir_op half of aws-cli's _validate_path_args, once every check

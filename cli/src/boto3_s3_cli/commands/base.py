@@ -15,8 +15,8 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 # These exception names do not themselves import the AWS SDK.
 from boto3_s3 import InvalidValueError, ValidationError
-from boto3_s3_cli import paramfile, textencoding, usage
-from boto3_s3_cli.clientfactory import build_client, build_s3, build_service_client
+from boto3_s3_cli import paramfile, usage
+from boto3_s3_cli.clientfactory import build_s3, from_aws_cli_arguments, prepare_process
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -37,13 +37,13 @@ class Context:
     """Runtime dependencies ``main()`` hands to the dispatched ``Command``.
 
     ``client_factory`` builds the boto3 S3 client from the parsed
-    connection/auth globals in place of the CLI's own construction; ``None``
-    (the default) leaves it to the command's `S3`, which builds it on its
-    session (``boto3_s3_cli.clientfactory.build_s3`` / ``build_client``).
-    Tests inject a factory returning a fake client.
-    ``service_client_factory`` does the same for the non-S3 clients ``mv``'s
-    path validation needs (``None``: ``clientfactory.build_service_client``
-    on the command's session). ``transfer_config``
+    connection/auth globals in place of the CLI's own construction - the
+    run's client and, for a namespace naming another region, the source client
+    of ``--source-region``; ``None`` (the default) leaves it to the command's
+    `S3` (``boto3_s3_cli.clientfactory.build_s3``). Tests inject a factory
+    returning a fake client. ``service_client_factory`` does the same for the
+    non-S3 clients ``mv``'s path validation needs (``None``: the `S3`'s own
+    ``service_client``). ``transfer_config``
     overrides the transfer engine's defaults (aws-cli-equivalent 8 MiB
     threshold/chunk); tests inject ``TransferConfig(use_threads=False, ...)``
     to make multipart call order deterministic against canned clients.
@@ -70,17 +70,33 @@ class Context:
         from boto3_s3 import S3
 
         client_factory = self._client_factory
+        service_client_factory = self._service_client_factory
         if client_factory is None:
             return build_s3(args)
 
         class InjectedClientS3(S3):
             def client(self) -> S3Client:
-                return client_factory(args)
+                return _stand_in(client_factory(args), self, args.region)
 
-        # reusable_after_interrupt=False like build_s3: the injected-client seam must
-        # keep the CLI's process-fatal Ctrl-C posture, and its local names.
-        return InjectedClientS3(
-            reusable_after_interrupt=False, filename_encoding=textencoding.filename_encoding()
+            def source_client(self, region: str) -> S3Client:
+                # The namespace a source client is built from: the region
+                # named, without --endpoint-url (aws-cli's ClientFactory).
+                source_args = argparse.Namespace(**vars(args))
+                source_args.region = region
+                source_args.endpoint_url = None
+                return _stand_in(client_factory(source_args), self, region)
+
+            def service_client(self, service: str, *, region: str | None = None) -> Any:
+                if service_client_factory is not None:
+                    return service_client_factory(service, args, region=region)
+                return super().service_client(service, region=region)
+
+        # Assembled like build_s3's - the session, the region, the CRT client's
+        # settings, the local names, the process-fatal Ctrl-C posture - with
+        # the clients the factory hands out.
+        prepare_process()
+        return InjectedClientS3.from_aws_cli(
+            **from_aws_cli_arguments(args), reusable_after_interrupt=False
         )
 
     def with_s3(self, s3: S3) -> Context:
@@ -102,26 +118,25 @@ class Context:
         )
         return clone
 
-    def client(self, args: argparse.Namespace, s3: S3) -> S3Client:
-        """Build an additional S3 client from the command's bound session
-        (an injected test factory builds from its own wiring instead)."""
-        if self._client_factory is not None:
-            return self._client_factory(args)
-        return build_client(args, session=s3.session)
 
-    def service_client(
-        self,
-        service: str,
-        args: argparse.Namespace,
-        s3: S3,
-        *,
-        region: str | None = None,
-    ) -> Any:
-        """Build a non-S3 client from the command's bound session
-        (an injected test factory builds from its own wiring instead)."""
-        if self._service_client_factory is not None:
-            return self._service_client_factory(service, args, region=region)
-        return build_service_client(service, args, region=region, session=s3.session)
+def _stand_in(client: Any, s3: S3, region: str | None) -> Any:
+    """*client* marked as the assembly's own, for an injected test client.
+
+    The library applies aws-cli's run-level defaults - the upload checksum,
+    the CRT region stop - to the clients `S3.from_aws_cli`'s assembly builds
+    (``awsclisession.assembled``); an injected client stands for one, so it
+    carries the mark with the region the assembly would have built it for. A
+    stand-in refusing attributes keeps no mark.
+    """
+    from contextlib import suppress
+
+    from boto3_s3.awsclisession import ASSEMBLED_BY, Assembled, resolve_region
+
+    if region is None and s3.session is not None:
+        region = resolve_region(None, s3.session._session)  # pyright: ignore[reportPrivateUsage]
+    with suppress(AttributeError):
+        setattr(client, ASSEMBLED_BY, Assembled(region))
+    return client
 
 
 def parse_integer_option(value: object, *, operation: str) -> int | None:

@@ -80,16 +80,15 @@ with mock_aws():
         result = run_cli_in_process(argv + ["--checksum-algorithm", algorithm])
         assert result.rc == 0, (algorithm, result.rc, result.stderr)
 
-    # Pure-Python signers are the no-awscrt default: the build_client pin is
-    # a no-op and presign keeps aws-cli v2's parameter order.
+    # presign signs with the pure-Python SigV4 query signer on any install,
+    # so the URL keeps aws-cli v2's parameter order.
     result = run_cli_in_process(["presign", "s3://crt-less-bucket/plain.txt"])
     assert result.rc == 0, (result.rc, result.stderr)
     url = result.stdout.strip()
     assert url.index("X-Amz-Expires=") < url.index("X-Amz-SignedHeaders="), url
 
-    # An MRAP target needs asymmetric SigV4a, which only awscrt implements:
-    # the always-SigV4 pin stands down for MRAP ARNs (clientfactory), so
-    # botocore's MissingDependencyException surfaces and maps to the
+    # An MRAP target needs asymmetric SigV4a, which only awscrt implements,
+    # so botocore's MissingDependencyException surfaces and maps to the
     # crt-absence ConfigurationError (rc 253) instead of a silently
     # SigV4-mis-signed URL that real AWS would reject.
     result = run_cli_in_process(

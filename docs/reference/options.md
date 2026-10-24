@@ -333,7 +333,6 @@ answers states the CRT side here. It is passed as
 @dataclass(frozen=True, slots=True, kw_only=True)
 class CrtClientOptions:
     allow_lockless: bool = False
-    sign_requests: bool | None = None
     verify: str | Literal[False] | None = None
 ```
 
@@ -351,17 +350,6 @@ explicit `crt` for processes that run at the same time. An `"auto"`
 preference respects the lock either way — that is `aws s3`'s own `auto`
 resolution.
 
-`sign_requests` declares whether the CRT client signs its requests. The
-default `None` derives the answer from the botocore client — boto3's rule: no
-credentials provider when the client's `signature_version` is botocore's
-`UNSIGNED`, a provider otherwise. An explicit value is the application's own
-answer and wins in both directions; `False` builds the CRT client with no
-credentials provider at all (no credentials are resolved), the shape aws-cli's
-CRT factory takes from its `sign_request` parameter. aws-cli signs
-`--no-sign-request --sse aws:kms` transfers on its classic engine but not on
-its CRT engine, and the declaration is what lets the `boto3-s3` command
-mirror that split.
-
 `verify` is the CRT client's TLS trust source. The default `None` derives it
 from the botocore client: a client that names a CA bundle — its `verify`,
 `AWS_CA_BUNDLE`, a profile's `ca_bundle`, `REQUESTS_CA_BUNDLE` — hands that
@@ -372,9 +360,11 @@ its own bundled CA file and awscrt as the platform store; an empty or
 whitespace-only path is refused too, as the botocore client's setting is. Both
 are a [`ValidationError`](./exceptions.md#validationerror) at construction.
 
-The CRT client is one per process, and it is pinned to the signing mode and
-the trust source it was built with: an operation whose options disagree runs
-on the classic engine instead.
+Whether the CRT client signs is the botocore client's answer, as for boto3: a
+client configured with botocore's `UNSIGNED` signature transfers anonymously,
+with no credentials resolved. The CRT client is one per process, and it is
+pinned to the signing mode and the trust source it was built with: an operation
+whose client or options disagree runs on the classic engine instead.
 
 ## ScanOptions
 

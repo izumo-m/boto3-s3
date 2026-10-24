@@ -516,6 +516,22 @@ def _classify_transfer_route(
     return TransferType.DOWNLOAD, src_storage, None, ""
 
 
+def _s3_location(loc: Location) -> S3Storage | None:
+    """*loc* as an ``S3Storage`` for `S3.check_mv_paths`, or None when it is not S3.
+
+    A string is normalized as `S3.resolve` normalizes it, into a storage that
+    holds no client: the checks read only its location.
+    """
+    if isinstance(loc, S3Storage):
+        return loc
+    if isinstance(loc, Storage):
+        return None
+    text = os.fspath(loc)
+    if not text.startswith("s3://"):
+        return None
+    return S3Storage(S3Storage.normalize_s3_uri(text))
+
+
 def _bucket_tags(
     tags: Sequence[tuple[str, str]] | Mapping[str, str] | None,
 ) -> list[dict[str, str]]:
@@ -590,10 +606,10 @@ class S3:
 
     ``crt`` is the CRT transfer engine's own client settings
     (`CrtClientOptions`): whether an explicit ``'crt'`` preference may run
-    without the cross-process lock, whether the engine signs, and what it
-    trusts for TLS. ``None`` (the default) keeps boto3's behavior, which
-    derives each from the client in hand. They reach the transfers and the
-    deletes this instance runs on that engine.
+    without the cross-process lock, and what it trusts for TLS. ``None`` (the
+    default) keeps boto3's behavior, which derives each from the client in
+    hand. They reach the transfers and the deletes this instance runs on that
+    engine.
 
     ``filename_encoding`` is handed to every ``LocalStorage`` `resolve` builds
     from a string: the encoding of local file names on POSIX (``None``, the
@@ -1285,6 +1301,54 @@ class S3:
             options=options,
         )
 
+    def check_mv_paths(
+        self,
+        src: Location,
+        dest: Location,
+        *,
+        validate_same_s3_paths: bool = False,
+        source_region: str | None = None,
+        on_result: ResultCallback | None = None,
+    ) -> None:
+        """The checks `mv` runs on an S3-to-S3 pair before it starts, on their own.
+
+        A move onto the same object is refused with ``ValidationError`` (the
+        keyless-normalized URIs compared, aws-cli's ``_same_path``, a
+        ``/``-terminated destination plus the source's basename included); with
+        ``validate_same_s3_paths``, access points are resolved first and a
+        same-key pair that lands on itself is refused the same way; without it,
+        a same-key pair one of whose sides is shaped like an access point gets
+        aws-cli's warning as a ``NOTICE`` on *on_result*
+        (`_check_underlying_paths`). Any pair that is not S3-to-S3 passes. A
+        location string is read as `resolve` reads it but builds no S3 client;
+        the resolution builds `service_client`'s.
+
+        `mv` runs these itself. aws-cli runs them before its run, so their
+        failures are reported apart from the run's (``aws s3 mv`` exits 252
+        for the same object, where a failure during the run is its fatal
+        error): call this first and pass ``validate_same_s3_paths=None`` to
+        `mv`, which then leaves them out, to do the same - the ``boto3-s3``
+        command does.
+        """
+        src_storage, dest_storage = _s3_location(src), _s3_location(dest)
+        if src_storage is None or dest_storage is None:
+            return
+        if src_storage.same_path_as(dest_storage):
+            # aws-cli words the error with the keyless-normalized URIs
+            # (`mv s3://b/k s3://b` reports `s3://b/`).
+            raise ValidationError(
+                f"Cannot mv a file onto itself: {src_storage.normalized_uri()} "
+                f"- {dest_storage.normalized_uri()}",
+                operation="mv",
+            )
+        self._check_underlying_paths(
+            src_storage,
+            dest_storage,
+            validate=validate_same_s3_paths,
+            source_region=source_region,
+            on_result=on_result,
+        )
+
     def _check_underlying_paths(
         self,
         src_storage: S3Storage,
@@ -1325,15 +1389,18 @@ class S3:
                 ).notice(_SAME_UNDERLYING_PATH_WARNING)
             return
         own_region = self._assembly.settings.region if self._assembly is not None else None
-        sts = self.service_client("sts", region=None)
-        src_paths = S3PathResolver(
-            s3control_client=self.service_client("s3control", region=source_region),
-            sts_client=sts,
-        ).resolve_underlying_s3_paths(norm_src)
-        dest_paths = S3PathResolver(
-            s3control_client=self.service_client("s3control", region=own_region),
-            sts_client=sts,
-        ).resolve_underlying_s3_paths(norm_dest)
+        # aws-cli's S3PathResolver.from_session per side, in its order - the
+        # side's s3control client, then an sts client - which decides whose
+        # construction failure is reported.
+        resolvers = [
+            S3PathResolver(
+                s3control_client=self.service_client("s3control", region=region),
+                sts_client=self.service_client("sts"),
+            )
+            for region in (source_region, own_region)
+        ]
+        src_paths = resolvers[0].resolve_underlying_s3_paths(norm_src)
+        dest_paths = resolvers[1].resolve_underlying_s3_paths(norm_dest)
         for src_path in src_paths:
             for dest_path in dest_paths:
                 if S3Storage.same_path(src_path, dest_path):
@@ -1694,7 +1761,7 @@ class S3:
         transfer_config: TransferConfig | None = None,
         capture_response: bool = False,
         source_region: str | None = None,
-        validate_same_s3_paths: bool = False,
+        validate_same_s3_paths: bool | None = False,
         **options: Unpack[TransferOptions],
     ) -> None:
         """Move bytes with ``aws s3 mv`` semantics: ``cp``, then delete the source.
@@ -1726,7 +1793,9 @@ class S3:
         --validate-same-s3-paths``) resolves both sides of a same-key S3 move
         first and refuses one that lands on itself the same way; without it, a
         side shaped like an access point gets aws-cli's warning as a
-        ``NOTICE`` and the move proceeds (`_check_underlying_paths`).
+        ``NOTICE`` and the move proceeds (`_check_underlying_paths`). These
+        are `check_mv_paths`; ``validate_same_s3_paths=None`` leaves them out,
+        for a caller that ran it first.
 
         ``source_region`` (``--source-region``) builds the source client of an
         S3-to-S3 move from a string in that region (`source_client`), as for
@@ -1767,19 +1836,11 @@ class S3:
                 "no_overwrite is not supported for streaming downloads",
                 operation="mv",
             )
-        if isinstance(src_storage, S3Storage) and isinstance(dest_storage, S3Storage):
-            if src_storage.same_path_as(dest_storage):
-                # aws-cli words the error with the keyless-normalized URIs
-                # (`mv s3://b/k s3://b` reports `s3://b/`).
-                raise ValidationError(
-                    f"Cannot mv a file onto itself: {src_storage.normalized_uri()} "
-                    f"- {dest_storage.normalized_uri()}",
-                    operation="mv",
-                )
-            self._check_underlying_paths(
+        if validate_same_s3_paths is not None:
+            self.check_mv_paths(
                 src_storage,
                 dest_storage,
-                validate=validate_same_s3_paths,
+                validate_same_s3_paths=validate_same_s3_paths,
                 source_region=source_region,
                 on_result=on_result,
             )

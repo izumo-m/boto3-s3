@@ -24,8 +24,6 @@ from boto3_s3 import (
     S3Storage,
     TransferOptions,
     ValidationError,
-    awsclisession,
-    crtsupport,
     requestparams,
 )
 from boto3_s3.localstorage import translate_os_error
@@ -744,40 +742,15 @@ def lists_unordered(path: str) -> bool:
     return is_s3express_path(path) or is_s3express_accesspoint_path(path)
 
 
-def default_upload_checksum(client: Any, paths_type: str, transfer_config: Any) -> str | None:
-    """aws-cli's default request checksum for the uploads a run makes, else None.
-
-    Only an upload run (``locals3``) gets one: by default aws-cli sends no
-    checksum algorithm on a copy's CopyObject / UploadPartCopy (measured
-    against the pinned `aws`; an explicit ``--checksum-algorithm`` reaches them
-    on both tools through the request mapping), and a download writes
-    nothing. The value is `awsclisession.default_upload_algorithm`'s, chosen by the engine
-    *transfer_config* resolves to (`resolve_transfer_config`; the same
-    `crtsupport.selects_crt` test the engine applies): the CRT engine's
-    default holds whatever ``request_checksum_calculation`` says, the classic
-    engine's only under ``when_supported`` - aws-cli's own split, measured on
-    the wire.
-    """
-    if paths_type != "locals3":
-        return None
-    return awsclisession.default_upload_algorithm(
-        client, crt=crtsupport.selects_crt(transfer_config)
-    )
-
-
 def build_transfer_options(
     args: argparse.Namespace,
     case_conflict: CaseConflictMode,
-    *,
-    default_checksum_algorithm: str | None = None,
 ) -> TransferOptions:
     """Translate parsed flags into the library's ``TransferOptions``.
 
-    ``default_checksum_algorithm`` (`default_upload_checksum`) stands in for
-    an absent ``--checksum-algorithm`` the way aws-cli's bundled botocore default
-    does for aws-cli: named here, it reaches both transfer engines through the
-    options, where the library would otherwise leave each engine to pip
-    s3transfer's own CRC32.
+    An absent ``--checksum-algorithm`` names nothing: the library's
+    `S3.from_aws_cli` clients name aws-cli's default for an upload run
+    themselves (``S3._upload_options``).
     """
     options = TransferOptions(
         annotation_copy_mode=AnnotationCopyMode.PRELOAD_MEMORY,
@@ -811,8 +784,6 @@ def build_transfer_options(
             # (aws-cli resolves them at parse time), so the values here are
             # consumed verbatim.
             options[option] = value  # type: ignore[literal-required]
-    if args.checksum_algorithm is None and default_checksum_algorithm is not None:
-        options["checksum_algorithm"] = default_checksum_algorithm
     if args.metadata is not None:
         options["metadata"] = args.metadata
     if args.sse_c_key is not None:
@@ -838,8 +809,8 @@ def resolve_locations(
     carrying ``--follow-symlinks``. The library reads how a source is walked /
     listed from the storage itself now (not from a per-operation argument), so the
     CLI bakes each command flag into the storage it builds here. For S3->S3 with
-    ``--source-region`` the source side gets its own client in that region with the
-    ``--endpoint-url`` override dropped (aws-cli ClientFactory).
+    ``--source-region`` the source side gets the `S3`'s ``source_client`` in that
+    region, ``--endpoint-url`` dropped (aws-cli ClientFactory).
     """
     src, dest, client = head.src, head.dest, head.client
 
@@ -864,12 +835,7 @@ def resolve_locations(
         # it before the run (`os.makedirs("")` fails: rc 255, as aws-cli's own
         # pre-create does); an empty source is refused as missing earlier.
         return _s3(src, client), _local(dest or os.curdir)
-    source_client = client
-    if args.source_region:
-        source_args = argparse.Namespace(**vars(args))
-        source_args.region = args.source_region
-        source_args.endpoint_url = None
-        source_client = ctx.client(source_args, head.s3)
+    source_client = head.s3.source_client(args.source_region) if args.source_region else client
     return _s3(src, source_client), _s3(dest, client)
 
 

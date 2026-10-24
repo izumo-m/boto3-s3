@@ -146,6 +146,12 @@ class TestTrust:
         with pytest.raises(InvalidConfigError, match="Invalid CA bundle"):
             S3.from_aws_cli(ca_bundle=value)
 
+    def test_no_verify_ssl_beats_an_empty_ca_bundle(self) -> None:
+        # aws-cli's resolve_verify_ssl reads --ca-bundle only without
+        # --no-verify-ssl, so the pair turns verification off (measured).
+        s3 = S3.from_aws_cli(no_verify_ssl=True, ca_bundle="")
+        assert _verify(s3.client()) is False
+
     def test_an_empty_ca_bundle_config_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("AWS_CA_BUNDLE", "")
         with pytest.raises(InvalidConfigError, match="Invalid CA bundle"):

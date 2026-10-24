@@ -92,9 +92,6 @@ class SyncCommand(Command):
         options = transferargs.build_transfer_options(
             args,
             case_conflict,
-            default_checksum_algorithm=transferargs.default_upload_checksum(
-                client, paths_type, transfer_config
-            ),
         )
         if head.dest_type == "local":
             # The s3local destination aws-cli's _validate_path_args creates, once

@@ -36,7 +36,7 @@ def mv(
     transfer_config: TransferConfig | None = None,
     capture_response: bool = False,
     source_region: str | None = None,
-    validate_same_s3_paths: bool = False,
+    validate_same_s3_paths: bool | None = False,
     **options: Unpack[TransferOptions],
 ) -> None: ...
 ```
@@ -155,6 +155,10 @@ Provided s3 paths may resolve to same underlying s3 object(s) ...` — as a
 differ are not looked at either way. The `boto3-s3` command reads
 `AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS` as aws-cli does; the library does not.
 
+`validate_same_s3_paths=None` leaves out the same-object check, the
+resolution and the warning: the caller has run them already through
+[`check_mv_paths`](#s3check_mv_paths). The stream checks still run.
+
 ### The stream destination
 
 A stream may be the destination of a non-recursive move: the bytes land on the
@@ -183,6 +187,35 @@ from `mv`'s own entry point (the recursive one in `mv`'s wording), and the
 extra `DELETE` capability requirement. A source that could not be deleted is not
 a separate exception: it is that item's `FAILED` record, aggregated into
 [`BatchError`](../exceptions.md#batcherror) with the rest.
+
+## S3.check_mv_paths
+
+```python
+def check_mv_paths(
+    self,
+    src: Location,
+    dest: Location,
+    *,
+    validate_same_s3_paths: bool = False,
+    source_region: str | None = None,
+    on_result: ResultCallback | None = None,
+) -> None: ...
+```
+
+Runs `mv`'s S3-to-S3 checks on their own: the same-object guard, then with
+`validate_same_s3_paths=True` the resolution through `S3PathResolver`, and
+without it the access-point warning as a `NOTICE` record on `on_result`
+([What `mv` rejects that `cp` accepts](#what-mv-rejects-that-cp-accepts)).
+The parameters mean what `mv`'s do. A pair that is not S3-to-S3 passes. A
+location string is read as [`resolve`](../s3.md#resolveloc) reads it, but no S3
+client is built; only the resolution builds its `s3control` / `sts` clients.
+A refused pair raises `ValidationError`, and the resolver's failures raise as
+they do under `mv`.
+
+`aws s3 mv` runs these checks before its run starts, so a refused pair is
+reported apart from a failure of the run. To do the same, call this first and
+pass `validate_same_s3_paths=None` to `mv`, which then runs none of them a
+second time; the `boto3-s3` command does.
 
 ## boto3_s3.mv
 

@@ -4048,14 +4048,12 @@ class TestEngineSelection:
         assert seen == [caller_session]
 
     @pytest.mark.parametrize(
-        "declaration", [None, False, True], ids=["library-default", "cli-unsigned", "cli-signed"]
+        "verify", [None, False, "/ca.pem"], ids=["derived", "disabled", "ca-bundle"]
     )
     def test_crt_options_are_threaded_to_crtsupport(
-        self, monkeypatch: pytest.MonkeyPatch, declaration: bool | None
+        self, monkeypatch: pytest.MonkeyPatch, verify: str | bool | None
     ) -> None:
-        # None keeps boto3's rule (derive the mode from the client); a
-        # declaration is aws-cli's `sign_request`, which is what keeps
-        # `--no-sign-request --sse aws:kms` anonymous on the CRT lane.
+        # The CRT client's own settings reach the engine builder as given.
         from boto3_s3 import crtsupport
 
         seen: list[CrtClientOptions | None] = []
@@ -4077,10 +4075,10 @@ class TestEngineSelection:
             TransferType.UPLOAD,
             client,
             transfer_config=TransferConfig(preferred_transfer_client="crt"),
-            crt=crtsupport.CrtPostures(crt=CrtClientOptions(sign_requests=declaration)),
+            crt=crtsupport.CrtPostures(crt=CrtClientOptions(verify=verify)),  # pyright: ignore[reportArgumentType]
         )
         transferrer._get_manager()
-        assert seen == [CrtClientOptions(sign_requests=declaration)]
+        assert seen == [CrtClientOptions(verify=verify)]  # pyright: ignore[reportArgumentType]
 
     def test_copy_kind_is_unconditionally_classic(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from s3transfer.manager import TransferManager

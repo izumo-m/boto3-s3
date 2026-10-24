@@ -27,11 +27,11 @@ client (design/crt.md):
 - **verify / signing**: by default the TLS verification setting is
   recovered from the client (boto3 ignores it), riding on private botocore
   attributes at the same level as ``client._get_credentials()``, which boto3
-  itself uses. Whether the CRT client signs at all is derived from the client
-  the same way. A caller that owns either decision, as aws-cli's CRT factory
-  does with its own ``verify_ssl`` / ``ca_bundle`` and ``sign_request``
-  readings, states it in ``CrtClientOptions`` instead (see
-  `create_crt_transfer_manager`).
+  itself uses. A caller that owns the decision, as aws-cli's CRT factory
+  does with its own ``verify_ssl`` / ``ca_bundle`` reading, states it in
+  ``CrtClientOptions`` instead (see `create_crt_transfer_manager`). Whether
+  the CRT client signs at all is the client's answer (an ``UNSIGNED`` client
+  signs nothing), as for boto3.
 - **compatibility**: the singleton additionally pins the derived endpoint and
   the signed/unsigned mode; a later client that disagrees falls back to
   classic, same as boto3's region/credentials mismatch. The credentials half
@@ -185,7 +185,7 @@ class _CrtS3Client:
         # `_is_compatible_request` recognizes by object, before any resolving.
         self.credentials = credentials
         # None = this CRT client signs nothing (the client resolved as
-        # unsigned, or the caller declared `sign_requests=False`), which is
+        # unsigned), which is
         # also the signing mode `_is_compatible_request` pins on.
         self.cred_wrapper = cred_wrapper
         # The botocore session and client arguments the shared serializer was
@@ -422,17 +422,9 @@ def create_crt_transfer_manager(
     the ``Transferrer``); the CRT request serializer is built from it rather
     than a fresh one - see ``_botocore_session`` for why that matters.
 
-    ``crt.sign_requests`` is the caller's signing declaration, aws-cli's
-    ``sign_request`` parameter. ``None`` (the default) derives it from the
-    client, boto3's rule: an ``UNSIGNED`` client gets no credentials provider
-    and everything else gets one. ``False`` builds the CRT client without a
-    provider whatever the client says, ``True`` always with one. The
-    declaration exists because aws-cli's CRT factory reads only its own
-    ``--no-sign-request`` while the per-client ``Config(signature_version=
-    's3v4')`` that ``--sse aws:kms`` adds reaches its *botocore* client alone:
-    an unsigned KMS run is anonymous on aws-cli's CRT lane and signed on its
-    classic lane, and only a declaration can reproduce that split from a
-    client that already resolved to signing (design/crt.md section 4).
+    Whether the CRT client signs is the client's answer, boto3's rule: an
+    ``UNSIGNED`` client gets no credentials provider and everything else gets
+    one.
 
     ``crt.verify`` is the CRT client's trust source; ``None`` derives it from
     the client (`_effective_verify`).
@@ -680,7 +672,7 @@ def _initialize(
         "part_size": _explicit_chunksize(config),
         "target_throughput": getattr(config, "target_bandwidth", None),
     }
-    cred_wrapper = _credentials_wrapper(client, postures.crt.sign_requests)
+    cred_wrapper = _credentials_wrapper(client)
     if cred_wrapper is not None:
         create_kwargs["crt_credentials_provider"] = cred_wrapper.to_crt_credentials_provider()
     # The object the wrapper holds, kept beside it for the identity
@@ -839,13 +831,10 @@ def _is_compatible_request(
     Incompatible means classic for that run, never a wrong-config CRT
     transfer.
 
-    ``crt`` holds the caller's options: its ``verify`` feeds the pins, and
-    its ``sign_requests`` must be the same declaration the singleton was
-    built under, so the signing pin compares like with like
-    (`_signs_requests`): the singleton's ``cred_wrapper`` already records
-    the mode it was created in, so a later request whose declaration
-    disagrees falls back to classic rather than transferring under the first
-    one's signing mode.
+    ``crt`` holds the caller's options; its ``verify`` feeds the pins. The
+    singleton's ``cred_wrapper`` records the signing mode it was created in,
+    so a later client that signs differently (`_is_unsigned`) falls back to
+    classic rather than transferring under the first one's signing mode.
 
     The credentials half compares by object before it compares by value: a
     client whose credentials object is the very one the singleton's delegate
@@ -863,7 +852,7 @@ def _is_compatible_request(
     """
     if crt_s3_client is None or _Pins.of(client, endpoint, crt) != crt_s3_client.pins:
         return False
-    if not _signs_requests(client, crt.sign_requests):
+    if _is_unsigned(client):
         return crt_s3_client.cred_wrapper is None
     if crt_s3_client.cred_wrapper is None:
         return False
@@ -1020,35 +1009,20 @@ def _is_unsigned(client: S3Client) -> bool:
     return config.signature_version is UNSIGNED
 
 
-def _signs_requests(client: S3Client, sign_requests: bool | None) -> bool:
-    """Whether the CRT client for this request signs at all.
-
-    ``None`` means the caller declared nothing, so the client answers -
-    boto3's rule, where an ``UNSIGNED`` client is the only unsigned one. A
-    declared value is the caller's own answer and rides verbatim, which is how
-    aws-cli's posture is reproduced: its CRT factory attaches a credentials
-    provider on its ``sign_request`` parameter (``--no-sign-request``) alone
-    and never looks at the client, so ``--no-sign-request --sse aws:kms``
-    transfers anonymously there even though the same run's botocore client
-    signs.
-    """
-    return not _is_unsigned(client) if sign_requests is None else sign_requests
-
-
 def _client_credentials(client: S3Client) -> Any:
     accessor: Any = client  # boto3/crt.py rides the same private accessor
     return accessor._get_credentials()
 
 
-def _credentials_wrapper(client: S3Client, sign_requests: bool | None) -> Any | None:
+def _credentials_wrapper(client: S3Client) -> Any | None:
     """The CRT credentials delegate, or ``None`` for a client that signs nothing.
 
-    A declared ``sign_requests=False`` short-circuits before
-    ``_client_credentials``, so an unsigned run never resolves credentials at
-    all - aws-cli's own behavior, where a credential-less anonymous CRT
-    upload succeeds instead of failing inside the delegate.
+    An ``UNSIGNED`` client short-circuits before ``_client_credentials``, so an
+    unsigned run never resolves credentials at all - aws-cli's own behavior,
+    where a credential-less anonymous CRT upload succeeds instead of failing
+    inside the delegate.
     """
-    if not _signs_requests(client, sign_requests):
+    if _is_unsigned(client):
         return None
     from s3transfer.crt import BotocoreCRTCredentialsWrapper
 

@@ -28,10 +28,10 @@ classifiers = [
 dependencies = [
     # Versioned independently; the range pins the library API this CLI is built against.
     "boto3-s3>=0.12.0,<0.13.0",
-    # Imported directly (the Session in build_client and the [s3] config read);
-    # floor matches boto3-s3's pin.
+    # Named directly in type annotations (TransferConfig); floor matches boto3-s3's pin.
     "boto3>=1.28",
-    # Imported directly by build_client (Config / UNSIGNED / signer pin); floor matches boto3-s3's botocore pin.
+    # Imported directly (the exception classes, the SSO token provider's cache class);
+    # floor matches boto3-s3's botocore pin.
     "botocore>=1.31",
     # Imported directly (the ls timestamp rendering uses dateutil's tzlocal,
     # like aws-cli); floor matches botocore's own dateutil pin.

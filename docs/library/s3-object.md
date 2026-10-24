@@ -43,12 +43,6 @@ S3(session=None, *, endpoint_url=None, config=None,
     classic engine, boto3's rule; `True` builds the CRT client regardless,
     which is what `aws s3` does for processes that run at the same time.
     `"auto"` respects the lock either way.
-  - `sign_requests` — whether the CRT client signs its requests. `None` (the
-    default) derives the answer from the client. An explicit `False` builds
-    the CRT client with no credentials provider (nothing is resolved, every
-    CRT request goes out anonymous); `True` forces a provider. This is how
-    `--no-sign-request --sse aws:kms` transfers anonymously on aws-cli's CRT
-    engine while its classic engine signs.
   - `verify` — what the CRT client trusts for TLS. `None` (the default)
     takes the CA bundle the client names, or the platform trust store when it
     names none. `False` turns verification off, and a string is a CA bundle

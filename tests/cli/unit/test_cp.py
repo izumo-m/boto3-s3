@@ -480,7 +480,7 @@ class TestSourceRegionWiring:
         # the --endpoint-url override for the source client.
         assert (source_args.region, source_args.endpoint_url) == ("eu-west-3", None)
         # Everything else rides over untouched. The TLS settings matter beyond
-        # tidiness: build_client resolves `verify` per client, and a source
+        # tidiness: the assembly resolves `verify` per client, and a source
         # client resolving a different value than the destination would make
         # the CRT singleton reject the second one and silently fall back to
         # classic (crtsupport._is_compatible_request).

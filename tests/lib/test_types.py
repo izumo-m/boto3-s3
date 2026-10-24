@@ -237,7 +237,7 @@ class TestLocalScanOptions:
 class TestCrtClientOptions:
     def test_defaults_keep_boto3s_behavior(self) -> None:
         opts = t.CrtClientOptions()
-        assert (opts.allow_lockless, opts.sign_requests, opts.verify) == (False, None, None)
+        assert (opts.allow_lockless, opts.verify) == (False, None)
 
     @pytest.mark.parametrize("verify", [False, "/etc/ca.pem"], ids=["disabled", "ca-bundle"])
     def test_accepts_off_and_a_path(self, verify: object) -> None:

@@ -89,6 +89,34 @@ class TestSourceRegion:
 _AP = "s3://arn:aws:s3:us-west-2:123456789012:accesspoint/myap/k"
 
 
+class TestCheckMvPaths:
+    """`S3.check_mv_paths`: mv's checks on their own, ahead of the run."""
+
+    def test_the_same_object_is_refused_without_a_client(self) -> None:
+        from boto3_s3.s3storage import held_client
+
+        src, dest = S3Storage("s3://b/k"), S3Storage("s3://b/")
+        with pytest.raises(
+            ValidationError, match="Cannot mv a file onto itself: s3://b/k - s3://b/"
+        ):
+            S3().check_mv_paths(src, dest)
+        assert held_client(src) is None and held_client(dest) is None
+        with pytest.raises(ValidationError, match="onto itself"):
+            S3().check_mv_paths("s3://b/k", "s3://b")
+
+    def test_a_pair_that_is_not_s3_to_s3_passes(self, tmp_path: Path) -> None:
+        S3().check_mv_paths(str(tmp_path), "s3://b/k")
+        S3().check_mv_paths("s3://b/k", str(tmp_path))
+
+    def test_mv_leaves_them_out_when_told(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # validate_same_s3_paths=None: the caller ran check_mv_paths itself.
+        ran: list[bool] = []
+        monkeypatch.setattr(S3, "_run_transfer", lambda *_a, **_k: ran.append(True))
+        results: list[OpResult] = []
+        S3().mv(_AP, "s3://mybucket/k", validate_same_s3_paths=None, on_result=results.append)
+        assert results == [] and ran == [True]
+
+
 class TestValidateSameS3Paths:
     @pytest.fixture
     def resolved(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
@@ -131,9 +159,13 @@ class TestValidateSameS3Paths:
             source_region="us-west-2",
             on_result=results.append,
         )
-        assert sorted(resolved["regions"], key=str) == sorted(
-            [("sts", None), ("s3control", "us-west-2"), ("s3control", "us-east-1")], key=str
-        )
+        # aws-cli's from_session per side, in its order.
+        assert resolved["regions"] == [
+            ("s3control", "us-west-2"),
+            ("sts", None),
+            ("s3control", "us-east-1"),
+            ("sts", None),
+        ]
         assert results == []
         assert resolved["ran"]
 

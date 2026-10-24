@@ -95,7 +95,7 @@ boto3-s3's own work - enumeration, compare, transfer orchestration, local
 file I/O - deterministically (spreads are typically a few percent), which
 makes it the sensitive lane for cross-run comparison. What it does not
 include: process startup (imports are warm after the first invocation), the
-production `build_client` path (the client is injected via `Context`), and
+production client build (`S3.from_aws_cli`; the client is injected via `Context`), and
 the network/server. Listing corpora are synthesized (100k keys costs
 nothing to "seed"), so it scales past what E2E seeding affords.
 

@@ -7,7 +7,7 @@ Version 4" shapes and the cross-region ``PermanentRedirect``. The rewrite shows
 on every report that carries a service message - the top-level ``[ERROR]``
 line and the per-item ``upload failed:`` / ``download failed:`` lines alike -
 so the handler has to ride the S3 clients the CLI builds
-(`clientfactory.build_client`). The library stays boto3-faithful and never
+(`clientfactory.build_s3`'s `S3`). The library stays boto3-faithful and never
 rewrites a service message.
 
 The wording is aws-cli's, verbatim, including the two commands it advises
@@ -42,8 +42,9 @@ def register(client: S3Client) -> None:
     """Attach the rewriter to one S3 client.
 
     aws-cli registers the handler on its session, so every S3 client it creates
-    carries it; registering per client is the same reach here, because
-    `clientfactory.build_client` is the CLI's only S3 client builder.
+    carries it; registering per client is the same reach here, because the
+    command's `S3` (`clientfactory._cli_s3_class`) registers it in `client()`
+    and `source_client()`, the only places it builds an S3 client.
     """
     client.meta.events.register("after-call.s3", enhance_error_msg)
 
