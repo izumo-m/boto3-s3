@@ -1046,13 +1046,14 @@ def _create_client(session: Boto3Session, service: str, **kwargs: Any) -> Any:
     """``session.client`` with the CONNECT pin and the CA bundle check around it.
 
     Every client this CLI hands out is created here, which is what makes this
-    the place the CONNECT pin goes on (`proxytunnel`): an HTTPS proxy sees the
-    tunnel request the *host interpreter* writes, and only 3.12 and later write
-    aws-cli's.
+    the place the CONNECT pin goes on (`boto3_s3.pin_proxy_connect`): an HTTPS
+    proxy sees the tunnel request the *host interpreter* writes, and only 3.12
+    and later write aws-cli's. The pin is process-wide, which the CLI, owning
+    its process, may install where the library may not on its own.
     """
-    from boto3_s3_cli import proxytunnel
+    from boto3_s3 import pin_proxy_connect
 
-    proxytunnel.pin_connect_request()
+    pin_proxy_connect()
     client = session.client(service, **kwargs)  # pyright: ignore[reportUnknownMemberType]
     _reject_empty_ca_bundle(kwargs.get("verify"))
     return client

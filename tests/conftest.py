@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from tests.utils.host import is_case_insensitive
+from tests.utils.strictproxy import StrictProxy
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -179,3 +180,24 @@ def _pin_classic_engine(monkeypatch: pytest.MonkeyPatch) -> None:
     # the library never calls it there (has_minimum_crt_version gates first),
     # and erroring the autouse fixture would fail every test at the SDK floor.
     monkeypatch.setattr(awscrt.s3, "is_optimized_for_system", lambda: False, raising=False)
+
+
+@pytest.fixture
+def proxy() -> Iterator[StrictProxy]:
+    server = StrictProxy()
+    try:
+        yield server
+    finally:
+        server.close()
+
+
+@pytest.fixture
+def proxy_environment(monkeypatch: pytest.MonkeyPatch, proxy: StrictProxy) -> StrictProxy:
+    """Route HTTPS through the fake proxy (`StrictProxy`), with nothing of the host's left."""
+    for leak in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(leak, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", proxy.url)
+    # One attempt: a retry would open a second tunnel and slow the test down
+    # without adding anything - the first block is what is under test.
+    monkeypatch.setenv("AWS_MAX_ATTEMPTS", "1")
+    return proxy

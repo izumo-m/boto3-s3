@@ -1,4 +1,4 @@
-"""The CONNECT request the official aws-cli distribution sends.
+"""The CONNECT request the official aws-cli distribution sends (`pin_proxy_connect`).
 
 An HTTPS request routed through an HTTPS proxy opens its tunnel with a CONNECT
 request, and the shape of that request belongs to the interpreter rather than
@@ -11,13 +11,13 @@ whose stdlib predates the fix, so a newer urllib3 does not move it either.
 aws-cli's official distribution runs on a frozen CPython 3.14, so aws-cli always
 sends the new shape. Against a proxy that answers 400 to a ``Host``-less
 CONNECT - the conforming reading - every `aws` command therefore succeeds and
-every command here failed, on the host interpreters this package supports.
-Pinning the new shape puts one CONNECT on the wire across all of them, the way
-`boto3_s3.mimetable` pins the bundled interpreter's MIME tables.
+every request from an older host interpreter fails. Pinning the new shape puts
+one CONNECT on the wire across all of them.
 
-The pin is the CLI's, not the library's: `clientfactory` installs it as it
-builds a client, so importing ``boto3_s3`` alone leaves an application's
-connections to its own interpreter and urllib3.
+The pin changes a process-wide class, so the library never installs it on its
+own: an application asks for it by calling `pin_proxy_connect`, and the
+``boto3-s3`` command does (design/overview.md section 3, rule 1). Importing
+this module changes nothing.
 """
 
 from __future__ import annotations
@@ -38,30 +38,43 @@ _OLD_REQUEST_LINE = b"HTTP/1.0"
 _read_headers: Any = getattr(http.client, "_read_headers", None)
 
 
-def pin_connect_request() -> None:
-    """Give urllib3's connections CPython 3.12+'s CONNECT request.
+def pin_proxy_connect() -> None:
+    """Make botocore open HTTPS-proxy tunnels with CPython 3.12+'s CONNECT request.
 
-    The replacement goes onto urllib3's own ``HTTPConnection``, which is where
-    botocore's connection classes inherit theirs from, so it reaches the S3
-    client, the STS / SSO clients the credential chain builds for itself, and
-    nothing outside this process.
+    That is the request aws-cli sends: ``CONNECT host:port HTTP/1.1`` with a
+    ``Host`` header, which a proxy that holds HTTP/1.1 to RFC 9110 requires.
+    Python 3.10 and 3.11 - and the copy urllib3 carries for them - send
+    ``HTTP/1.0`` with no ``Host``, which such a proxy refuses.
+
+    The replacement goes onto botocore's ``AWSConnection``, the mixin every
+    botocore connection class lists ahead of urllib3's, so it reaches every
+    botocore client in the process - the S3 client, the STS / SSO clients a
+    credential chain builds for itself, and the clients of any other boto3 code
+    the application runs - and nothing that is not botocore (urllib3 used
+    directly, requests). Call it once, before the first request; calling it
+    again changes nothing.
 
     Every precondition is a reason to decline quietly rather than to fail: no
-    urllib3, no tunnel opener to replace, an opener that no longer writes the
-    old request line (an interpreter that already sends aws-cli's shape - and this
-    module's own replacement, so a second call is a no-op), or a stdlib without
-    the header reader the replacement uses. A future urllib3 or CPython that
-    stops matching leaves the pin dormant instead of breaking the tunnel.
+    botocore or urllib3, no tunnel opener to read, an opener that no longer
+    writes the old request line (an interpreter that already sends aws-cli's
+    shape), an ``AWSConnection`` of a botocore that opens tunnels itself, or a
+    stdlib without the header reader the replacement uses. A future botocore,
+    urllib3 or CPython that stops matching leaves the pin dormant instead of
+    breaking the tunnel.
     """
     try:
+        from botocore.awsrequest import AWSConnection
         from urllib3.connection import HTTPConnection
     except ImportError:
         return
     if _read_headers is None:
         return
+    if "_tunnel" in vars(AWSConnection):
+        # Already pinned, or a botocore with an opener of its own.
+        return
     if not _sends_old_connect(getattr(HTTPConnection, "_tunnel", None)):
         return
-    HTTPConnection._tunnel = _tunnel  # pyright: ignore[reportPrivateUsage]
+    AWSConnection._tunnel = _tunnel  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def _sends_old_connect(tunnel: object) -> bool:
@@ -159,3 +172,6 @@ def _wrap_ipv6(host: bytes) -> bytes:
     if b":" in host and not host.startswith(b"["):
         return b"[" + host + b"]"
     return host
+
+
+__all__ = ["pin_proxy_connect"]

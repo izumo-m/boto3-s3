@@ -233,10 +233,12 @@ solidified design is added here.
   `HTTP/1.0` and no `Host` (a shape urllib3 carries its own copy of, so a
   newer urllib3 does not move it) - so a proxy that answers 400 to a
   `Host`-less CONNECT served every `aws` command and failed every command
-  here. `proxytunnel.pin_connect_request` installs the 3.12+ opener onto
-  urllib3's `HTTPConnection` from `clientfactory._create_client`, the one seam
-  every client this CLI hands out passes through, which puts one CONNECT on
-  the wire across every supported Python.
+  here. The library's `boto3_s3.pin_proxy_connect` installs the 3.12+ opener
+  onto botocore's `AWSConnection`; the CLI calls it from
+  `clientfactory._create_client`, the one seam every client this CLI hands out
+  passes through, which puts one CONNECT on the wire across every supported
+  Python. The library leaves the call to the application, the change being
+  process-wide ([`overview.md`](./overview.md) section 3, rule 1).
 - **Interpreter wordings are the host's.** Where a report quotes text the
   interpreter wrote - a `json` decode failure, `int()`'s digit limit, a
   codec's `LookupError`, the status phrase botocore puts in a body-less S3
@@ -255,8 +257,7 @@ solidified design is added here.
 |---|---|
 | `cli.py` | Two-stage dispatch (aws-cli's clidriver lazy-command-table shape): the globals pass consumes the globals off the full argv, the command scan matches its remainder against `_COMMAND_TABLE` (the registry: name -> module, class, help - no command module imported), stage 2 imports the matched module, builds its real parser and runs it. Wires `--debug`, maps exceptions to exit codes; the full `build_parser()` builds the whole surface for tests |
 | `globalargs.py` | Common option definitions (the parent; the aws-cli `globalargs.py` counterpart) |
-| `clientfactory.py` | `build_client(args) -> S3Client` (the connection/authentication layer, section 4) + `build_service_client(service, args, *, region=None)` (the s3control / sts client used by mv's path validation, section 5.8). Both open their session, when none is handed in, through `build_session` - the botocore session `_open_botocore_session` opens (the profile / retry / timeout / credential-cache alignment of section 4) - and create their client through `_create_client`, the single seam that installs the CONNECT pin - a seam rather than `_open_botocore_session` because `build_client` may be handed a session built elsewhere. The construction-time botocore errors are translated in one place for all three (`_construction_errors`, section 6). Every S3 client the first one builds carries aws-cli's message rewriter (`s3errormsg`) |
-| `proxytunnel.py` | The CONNECT request the official aws-cli distribution sends (section 2): a copy of CPython 3.12+'s tunnel opener, installed onto urllib3's `HTTPConnection` by `clientfactory._create_client` on the host interpreters whose own opener still writes `CONNECT ... HTTP/1.0` with no `Host`. Every precondition - no urllib3, no opener to read, an opener that already writes aws-cli's shape - declines quietly, so it is a no-op on 3.12+ and idempotent |
+| `clientfactory.py` | `build_client(args) -> S3Client` (the connection/authentication layer, section 4) + `build_service_client(service, args, *, region=None)` (the s3control / sts client used by mv's path validation, section 5.8). Both open their session, when none is handed in, through `build_session` - the botocore session `_open_botocore_session` opens (the profile / retry / timeout / credential-cache alignment of section 4) - and create their client through `_create_client`, the single seam that installs the CONNECT pin (`boto3_s3.pin_proxy_connect`) - a seam rather than `_open_botocore_session` because `build_client` may be handed a session built elsewhere. The construction-time botocore errors are translated in one place for all three (`_construction_errors`, section 6). Every S3 client the first one builds carries aws-cli's message rewriter (`s3errormsg`) |
 | `s3errormsg.py` | aws-cli's `after-call.s3` handler (its `s3errormsg` customization), ported verbatim: it rewrites two "requires Signature Version 4" messages and the cross-region `PermanentRedirect` in place, so every report carrying a service message - the top-level `[ERROR]` line and the per-item `upload failed:` / `download failed:` lines alike - reads as aws-cli's. aws-cli registers it on its session; here `build_client` registers it on each S3 client it builds, the CLI's only S3 client builder. The library stays boto3-faithful and never rewrites a service message |
 | `checksumdefault.py` | aws-cli's default request checksum (`CRC64NVME`, its bundled botocore's `DEFAULT_CHECKSUM_ALGORITHM`) reproduced on the CLI side: `default_algorithm(client)` feeds an upload run's `TransferOptions` (section 5.7, `--checksum-algorithm`), and `register(client)` - attached by `build_client` - stamps it at `provide-client-params.s3.*` on every other request whose operation names a `ChecksumAlgorithm` member, exactly where botocore would stamp its own (under `when_required`, only the checksum-required operations). Only where botocore can compute CRC64NVME. The library keeps botocore's default |
 | `commands/base.py` | The `Command` ABC + `Context` (the injection point for runtime dependencies, section 3.1) |

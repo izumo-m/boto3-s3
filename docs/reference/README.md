@@ -40,7 +40,8 @@ their area but are not indexed here.
   gate it, the local / S3 / stream backends, and the local walk's override
   seams.
 - [`misc.md`](./misc.md) — the tuned session, the AWS config-file reader,
-  masked debug logging, the CRT engine resolution (`boto3_s3.crtsupport`),
+  masked debug logging, the HTTPS-proxy CONNECT pin, the CRT engine resolution
+  (`boto3_s3.crtsupport`),
   access-point path resolution, batch deletion, and `__version__`.
 
 ## Symbol index
@@ -99,6 +100,7 @@ that wraps it is documented on the same page.
 - [`OpResult`](./results.md#opresult)
 - [`PairFilter`](./comparator.md#pairfilter)
 - [`ParallelFilter`](./comparator.md#parallelfilter)
+- [`pin_proxy_connect`](./misc.md#pin_proxy_connect)
 - [`presign`](./operations/presign.md#s3presign)
 - [`ProgressCallback`](./results.md#progresscallback)
 - [`rb`](./operations/rb.md#s3rb)

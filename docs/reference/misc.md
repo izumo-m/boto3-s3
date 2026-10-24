@@ -3,7 +3,8 @@
 The public symbols that stand outside the `S3` object and its options, results
 and filters: the tuned session factory and the timestamp parser it installs,
 the AWS config-file reader and the sections it hands out, the masked
-debug-logging entry point, the CRT engine resolution the command shares, the
+debug-logging entry point, the HTTPS-proxy CONNECT pin, the CRT engine
+resolution the command shares, the
 access-point path resolver, the batch-deletion driver and its batch limit,
 and the package version. The narrative
 counterparts are [`../library/s3-object.md`](../library/s3-object.md) for the
@@ -322,6 +323,31 @@ exception traceback attached to a record is masked on the same handler too.
 `ContinuationToken` / `NextToken` and the `-md5` / `KeyMD5` companions of SSE-C
 keys are deliberately left visible. The pattern-by-pattern table is
 [`../../design/masking.md`](../../design/masking.md) section 4.1.
+
+## pin_proxy_connect
+
+```python
+def pin_proxy_connect() -> None
+```
+
+Makes botocore open an HTTPS-proxy tunnel with the CONNECT request aws-cli
+sends: `CONNECT host:port HTTP/1.1` carrying a `Host` header. Python 3.10 and
+3.11 — and the copy of their opener urllib3 carries — send `HTTP/1.0` with no
+`Host`, which a proxy that holds HTTP/1.1 to RFC 9110 refuses, so behind such a
+proxy every request from those interpreters fails where `aws` succeeds (aws-cli
+ships its own Python 3.14). Python 3.12 and later already send the new shape,
+and there the call does nothing.
+
+The change is process-wide, which is why the library never makes it on its
+own: call it once, before the first request. It reaches every botocore client
+in the process — the library's, the STS and SSO clients a credential chain
+builds for itself, and those of any other boto3 code the application runs —
+and nothing that is not botocore, such as urllib3 used directly or requests.
+Calling it again changes nothing. It declines quietly, leaving the
+interpreter's own request in place, when there is nothing it recognizes to
+replace: a botocore or urllib3 it cannot import, a tunnel opener that already
+writes the new shape, or a botocore whose connections open tunnels themselves.
+The `boto3-s3` command calls it.
 
 ## crtsupport
 

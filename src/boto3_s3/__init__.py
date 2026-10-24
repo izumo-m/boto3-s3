@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     )
     from boto3_s3.masking import set_stream_logger
     from boto3_s3.pathresolver import S3PathResolver, has_underlying_s3_path
+    from boto3_s3.proxytunnel import pin_proxy_connect
     from boto3_s3.s3 import (
         S3,
         cp,
@@ -170,6 +171,7 @@ __all__ = [
     "ls",
     "mb",
     "mv",
+    "pin_proxy_connect",
     "presign",
     "rb",
     "rm",
@@ -229,6 +231,7 @@ _EXPORT_HOMES: dict[str, str] = {
     "set_stream_logger": "boto3_s3.masking",
     "S3PathResolver": "boto3_s3.pathresolver",
     "has_underlying_s3_path": "boto3_s3.pathresolver",
+    "pin_proxy_connect": "boto3_s3.proxytunnel",
     "S3": "boto3_s3.s3",
     "cp": "boto3_s3.s3",
     "ls": "boto3_s3.s3",
