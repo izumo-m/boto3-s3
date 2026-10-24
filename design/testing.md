@@ -9,7 +9,7 @@ every output comparison applies.
 
 | location | what | mechanism | runs |
 |---|---|---|---|
-| `tests/lib/` | `boto3-s3` library unit tests | hand-rolled fakes (two moto-backed spots: `test_capture_response.py` - the capture rides botocore's real event stream - and `test_s3storage.py`'s `TestSingleRequestTransferRoundTrip`) | always |
+| `tests/lib/` | `boto3-s3` library unit tests | hand-rolled fakes (two moto-backed spots: `test_capture_response.py` - the capture rides botocore's real event stream - and `test_s3storage.py`'s `TestSingleRequestTransferRoundTrip`), plus a loopback socket where a property is on the wire (`test_proxytunnel.py`: the CONNECT request a proxy receives from a real botocore client) | always |
 | `tests/cli/awscli/` | ports of aws-cli's own functional tests (one file per subcommand plus `test_s3_object_lambda.py`, diffable against aws-cli's `tests/functional/s3/`) | canned-response recording client (`tests/utils/recorder.py`) | always |
 | `tests/cli/unit/` | `boto3-s3-cli`'s own unit tests (everything the ports don't cover) | fake clients via `Context` injection, plus the few properties no in-runner fake can show: a subprocess where the property is per-process (the import contract, the environment botocore freezes at import) and a loopback socket where it is on the wire (the CONNECT request a proxy receives) | always |
 | `tests/cli/functional/` | golden replay: the CLI on moto must reproduce what aws-cli did on a real endpoint | in-process `moto.mock_aws` | always |

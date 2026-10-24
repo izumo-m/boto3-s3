@@ -237,7 +237,8 @@ solidified design is added here.
   onto botocore's `AWSConnection`; the CLI calls it from
   `clientfactory._create_client`, the one seam every client this CLI hands out
   passes through, which puts one CONNECT on the wire across every supported
-  Python. The library leaves the call to the application, the change being
+  Python (bar an IPv6 endpoint on 3.12.0 to 3.12.2, whose own opener brackets
+  the literal in `Host`). The library leaves the call to the application, the change being
   process-wide ([`overview.md`](./overview.md) section 3, rule 1).
 - **Interpreter wordings are the host's.** Where a report quotes text the
   interpreter wrote - a `json` decode failure, `int()`'s digit limit, a

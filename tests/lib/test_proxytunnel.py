@@ -21,6 +21,13 @@ from boto3_s3 import proxytunnel
 from tests.utils.strictproxy import TARGET_PORT as _TARGET_PORT
 from tests.utils.strictproxy import StrictProxy as _StrictProxy
 
+# 3.12.0 to 3.12.2 write the new request line but bracket an IPv6 literal in
+# the Host header they generate, so their opener is no oracle for that case.
+_EARLY_312_IPV6 = pytest.mark.skipif(
+    (3, 12) <= sys.version_info[:3] < (3, 12, 3),
+    reason="3.12.0 to 3.12.2 bracket an IPv6 Host themselves (left as it is)",
+)
+
 
 @pytest.fixture
 def unpinned() -> Iterator[Any]:
@@ -89,6 +96,7 @@ class TestBotocoreClients:
             b"Host: 127.0.0.1:%d" % _TARGET_PORT,
         ]
 
+    @_EARLY_312_IPV6
     def test_an_ipv6_endpoint_is_named_bare_in_the_host_header(
         self, unpinned: Any, proxy_environment: _StrictProxy
     ) -> None:
@@ -239,8 +247,10 @@ class TestTheReplacementRequest:
         ("host", "headers"),
         [
             ("proxy.example", {}),
-            ("::1", {}),
-            ("fd00:ec2::254", {"Proxy-Authorization": "Basic x"}),
+            pytest.param("::1", {}, marks=_EARLY_312_IPV6),
+            pytest.param(
+                "fd00:ec2::254", {"Proxy-Authorization": "Basic x"}, marks=_EARLY_312_IPV6
+            ),
             ("proxy.example", {"Host": "supplied:1", "X-Extra": "keep"}),
         ],
     )

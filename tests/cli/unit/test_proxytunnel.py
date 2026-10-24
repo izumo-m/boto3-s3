@@ -40,10 +40,12 @@ class TestTheClientFactoryInstallsIt:
         held = vars(AWSConnection).get("_tunnel")
         if held is not None:
             monkeypatch.delattr(AWSConnection, "_tunnel")
-        clientfactory.build_client(_parse(["--region", "us-east-1"]))
-        assert AWSConnection._tunnel is proxytunnel._tunnel  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
-        if held is None:
-            delattr(AWSConnection, "_tunnel")
+        try:
+            clientfactory.build_client(_parse(["--region", "us-east-1"]))
+            assert AWSConnection._tunnel is proxytunnel._tunnel  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
+        finally:
+            if held is None and "_tunnel" in vars(AWSConnection):
+                delattr(AWSConnection, "_tunnel")
 
     def test_the_tunnel_request_is_the_one_aws_sends(self, proxy_environment: _StrictProxy) -> None:
         client = clientfactory.build_client(

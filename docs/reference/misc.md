@@ -336,7 +336,9 @@ sends: `CONNECT host:port HTTP/1.1` carrying a `Host` header. Python 3.10 and
 `Host`, which a proxy that holds HTTP/1.1 to RFC 9110 refuses, so behind such a
 proxy every request from those interpreters fails where `aws` succeeds (aws-cli
 ships its own Python 3.14). Python 3.12 and later already send the new shape,
-and there the call does nothing.
+and there the call does nothing (3.12.0 to 3.12.2 still put an IPv6 literal in
+brackets in that `Host` header, which aws-cli's interpreter does not; that is
+left as it is).
 
 The change is process-wide, which is why the library never makes it on its
 own: call it once, before the first request. It reaches every botocore client
@@ -346,8 +348,13 @@ and nothing that is not botocore, such as urllib3 used directly or requests.
 Calling it again changes nothing. It declines quietly, leaving the
 interpreter's own request in place, when there is nothing it recognizes to
 replace: a botocore or urllib3 it cannot import, a tunnel opener that already
-writes the new shape, or a botocore whose connections open tunnels themselves.
-The `boto3-s3` command calls it.
+writes the new shape, a botocore whose connections open tunnels themselves, or
+a standard library without the private header reader (`http.client._read_headers`)
+the replacement reads the proxy's answer with. The replacement writes the
+request line and the headers botocore hands it as they are, without the
+control-character checks newer interpreters and urllib3 apply there: botocore
+validates the endpoint, region and bucket name it builds them from. The
+`boto3-s3` command calls it.
 
 ## crtsupport
 
