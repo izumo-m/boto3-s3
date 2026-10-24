@@ -62,6 +62,11 @@ maintaining high functional compatibility.
   extra. Which feature needs which version, and how an unavailable one behaves,
   is recorded in [`compatibility.md`](../docs/compatibility.md). Everything else works
   at the floor.
+- **No SigV2**: S3's legacy Signature Version 2 is out of scope, as it is for
+  aws-cli v2, whose bundled botocore has no S3 SigV2 signer left. Neither the
+  library nor the CLI signs with it on its own, and nothing is shaped to keep
+  it working. A client the caller configures for it (`signature_version='s3'`)
+  is neither refused nor supported: whether it works is the caller's concern.
 
 ## 3. Design policy
 

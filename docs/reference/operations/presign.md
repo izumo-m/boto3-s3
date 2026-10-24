@@ -91,8 +91,9 @@ matches it in every region.
 The upgrade is confined to that one case; every other signer choice is left as
 botocore made it:
 
-- a client configured with an explicit `signature_version`, whether that is
-  `s3v4` or a deliberately retained legacy `s3`;
+- a client configured with an explicit `signature_version`. SigV2 (`s3`) is
+  out of scope: a client configured for it gets whatever botocore signs, with
+  no promise that it works;
 - an unsigned client (`signature_version=botocore.UNSIGNED`), whose URL stays
   unsigned;
 - an S3 Express directory bucket, for which botocore resolves the
