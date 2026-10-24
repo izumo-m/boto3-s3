@@ -21,6 +21,7 @@ from boto3_s3 import (
     InvalidConfigError,
     InvalidValueError,
     ValidationError,
+    awsclisession,
 )
 from boto3_s3_cli import clientfactory, globalargs, s3errormsg
 from boto3_s3_cli.cli import exit_code_for
@@ -1085,7 +1086,7 @@ class TestCredentialCache:
         session = clientfactory.build_session(_parse([]))._session  # pyright: ignore[reportPrivateUsage]
         sso = session.get_component("credential_provider").get_provider("sso")
         token_cache = sso._token_provider._cache  # pyright: ignore[reportAttributeAccessIssue]
-        assert type(token_cache) is clientfactory._credential_cache_class()  # pyright: ignore[reportPrivateUsage]
+        assert type(token_cache) is awsclisession.credential_cache_class()
 
     def test_a_fetched_credential_lands_in_that_directory(self, tmp_path: Path) -> None:
         # The write half: whatever a provider caches becomes a file under the

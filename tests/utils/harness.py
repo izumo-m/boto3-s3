@@ -30,16 +30,16 @@ _SUBPROCESS_TIMEOUT = 60.0
 def default_checksum_algorithm() -> str:
     """The ``ChecksumAlgorithm`` a CLI upload names when ``--checksum-algorithm``
     is absent: aws-cli's CRC64NVME where the installed botocore can compute it
-    (``boto3_s3_cli.checksumdefault``), else pip botocore's own default, which
+    (``boto3_s3.awsclisession``), else pip botocore's own default, which
     s3transfer stamps on a classic upload. Tests that record upload requests
     compare against this rather than a literal so they hold on both stacks."""
     from botocore import httpchecksum
 
-    from boto3_s3_cli import checksumdefault
+    from boto3_s3 import awsclisession
 
     supported = getattr(httpchecksum, "_SUPPORTED_CHECKSUM_ALGORITHMS", ())
-    if checksumdefault.AWS_DEFAULT_CHECKSUM_ALGORITHM.lower() in supported:
-        return checksumdefault.AWS_DEFAULT_CHECKSUM_ALGORITHM
+    if awsclisession.AWS_DEFAULT_CHECKSUM_ALGORITHM.lower() in supported:
+        return awsclisession.AWS_DEFAULT_CHECKSUM_ALGORITHM
     return str(httpchecksum.DEFAULT_CHECKSUM_ALGORITHM)
 
 

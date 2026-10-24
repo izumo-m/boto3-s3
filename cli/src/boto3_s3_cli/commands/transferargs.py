@@ -24,13 +24,13 @@ from boto3_s3 import (
     S3Storage,
     TransferOptions,
     ValidationError,
+    awsclisession,
     crtsupport,
     requestparams,
 )
 from boto3_s3.localstorage import translate_os_error
 from boto3_s3.pathresolver import is_s3express_accesspoint_path, is_s3express_path
 from boto3_s3_cli import (
-    checksumdefault,
     filters,
     output,
     paramfile,
@@ -751,7 +751,7 @@ def default_upload_checksum(client: Any, paths_type: str, transfer_config: Any) 
     checksum algorithm on a copy's CopyObject / UploadPartCopy (measured
     against the pinned `aws`; an explicit ``--checksum-algorithm`` reaches them
     on both tools through the request mapping), and a download writes
-    nothing. The value is `checksumdefault`'s, chosen by the engine
+    nothing. The value is `awsclisession.default_upload_algorithm`'s, chosen by the engine
     *transfer_config* resolves to (`resolve_transfer_config`; the same
     `crtsupport.selects_crt` test the engine applies): the CRT engine's
     default holds whatever ``request_checksum_calculation`` says, the classic
@@ -760,9 +760,9 @@ def default_upload_checksum(client: Any, paths_type: str, transfer_config: Any) 
     """
     if paths_type != "locals3":
         return None
-    if crtsupport.selects_crt(transfer_config):
-        return checksumdefault.crt_default_algorithm()
-    return checksumdefault.default_algorithm(client)
+    return awsclisession.default_upload_algorithm(
+        client, crt=crtsupport.selects_crt(transfer_config)
+    )
 
 
 def build_transfer_options(

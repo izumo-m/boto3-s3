@@ -44,10 +44,11 @@ _PRELUDE = """
         assert "logging" not in sys.modules
 
     def assert_no_library_modules():
-        # The lazy boto3_s3 root and the pure exceptions taxonomy are the only
-        # library modules these exits may touch; in particular the SDK-backed
-        # boto3_s3.s3 (which imports boto3 at module top) must not load.
-        allowed = {"boto3_s3", "boto3_s3.exceptions"}
+        # The lazy boto3_s3 root, the pure exceptions taxonomy and the
+        # stdlib-only text encoding the command decides at startup are the
+        # only library modules these exits may touch; in particular the
+        # SDK-backed boto3_s3.s3 (which imports boto3 at module top) must not load.
+        allowed = {"boto3_s3", "boto3_s3.exceptions", "boto3_s3.localencoding"}
         loaded = sorted(
             m
             for m in sys.modules

@@ -48,26 +48,6 @@ class TestTextEncoding:
         assert textencoding.text_encoding() == "cp932"
 
 
-class TestFilenameEncoding:
-    @pytest.mark.parametrize("platform", ["win32", "darwin"])
-    def test_none_where_python_reads_names_as_aws_does(
-        self, monkeypatch: pytest.MonkeyPatch, platform: str
-    ) -> None:
-        monkeypatch.setattr(sys, "platform", platform)
-        monkeypatch.setattr(textencoding, "text_encoding", lambda: "euc_jp")
-        assert textencoding.filename_encoding() is None
-
-    def test_the_text_encoding_on_linux(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(sys, "platform", "linux")
-        monkeypatch.setattr(textencoding, "text_encoding", lambda: "EUC-JP")
-        assert textencoding.filename_encoding() == "EUC-JP"
-
-    def test_none_for_a_codec_python_lacks(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(sys, "platform", "linux")
-        monkeypatch.setattr(textencoding, "text_encoding", lambda: "no-such-codec")
-        assert textencoding.filename_encoding() is None
-
-
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows argv is Unicode: nothing to re-decode")
 class TestDecodeArgv:
     def test_arguments_are_read_with_the_cli_encoding(

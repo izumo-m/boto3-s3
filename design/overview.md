@@ -120,18 +120,28 @@ maintaining high functional compatibility.
   2. A difference that comes from aws-cli's bundled botocore or s3transfer is
      matched where it changes a normal run's outcome (the request sent, its
      endpoint, signature and headers, the objects selected, the profile used,
-     the retries made, the arguments accepted), by the library and the CLI,
-     each where the difference reaches it; a difference that shows only in an
-     error or in an unusual environment is not compensated.
+     the retries made, the arguments accepted); a difference that shows only
+     in an error or in an unusual environment is not compensated. Where it is
+     matched depends on what it touches:
+     - a value an operation returns to the caller (a presigned URL, its
+       signature and its host) is matched however the `S3` was assembled;
+     - how the clients send their requests (the endpoint they send to, such as
+       us-east-1's regional one, the retry posture, the default checksum, the
+       order the profile variables are read in) is matched only under
+       aws-cli's assembly (below).
   3. A difference that comes only from an SDK older than the pinned period,
      down to the floor, is not matched: it is neither a bug nor a deviation to
      write down, and nothing compensates for it.
 
-  The defaults of a client and its session that the caller does
-  not supply (the region, the profile, the default checksum) follow boto3 in
-  the library and aws-cli in the CLI: a library caller sets them as for any
-  boto3 application. The rules for errors below still hold on every
-  supported version.
+  The defaults of a client and its session that the caller does not supply
+  (the region, the profile, the default checksum, the CRT client's trust
+  source) follow how the `S3` was assembled: boto3's when the caller built it
+  itself (`S3()`), and aws-cli's when the caller asked for aws-cli's assembly
+  through `S3.from_aws_cli`, the assembly the CLI is built on
+  (`boto3_s3.awsclisession`). A client the caller hands over keeps its own
+  settings either way. A caller that assembles its own sets them as for any
+  boto3 application. The rules for errors below still hold on every supported
+  version.
 - **Security before compatibility**: where matching aws-cli would expose a
   secret or silently turn a protection off, the library and the CLI do not
   match it. For example, credentials are masked in debug logs
@@ -183,9 +193,13 @@ maintaining high functional compatibility.
 - **Text encodings**: which encoding turns bytes into text and back depends on
   the Python version and its environment, and only the application knows
   which one it was written for.
-  1. The library follows Python's defaults wherever it converts - local file
-     names, text streams - and lets the caller name the encoding instead, so
-     an application can fix the one it relies on. An encoding the caller
+  1. A library `S3` the caller assembles itself follows Python's defaults
+     wherever it converts - local file names, text streams - and lets the
+     caller name the encoding instead, so an application can fix the one it
+     relies on; one assembled through `S3.from_aws_cli` names local files in
+     the encoding aws-cli uses in the same environment, as the CLI does (rule
+     2), and a caller whose names come from Python's own default hands over a
+     `LocalStorage` instead. An encoding the caller
      names for local file names is used as given: the OS gets the names in
      it. Whether the OS and its filesystem can take names in that encoding
      is the caller's concern; the library only refuses a codec Python does

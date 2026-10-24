@@ -21,13 +21,18 @@ the standard library only, the library's ``LocalStorage`` loaded on first use
 
 from __future__ import annotations
 
-import codecs
 import contextlib
 import functools
 import locale
 import os
 import sys
 from typing import TYPE_CHECKING, TextIO
+
+# aws-cli's own encoding decisions, which the library's `S3.from_aws_cli`
+# shares: `text_encoding` for text, `filename_encoding` for local names (and
+# the command line). Light like this module: the standard library only.
+from boto3_s3.localencoding import codec_name as _codec_name
+from boto3_s3.localencoding import filename_encoding, text_encoding
 
 if TYPE_CHECKING:
     from boto3_s3 import LocalStorage
@@ -39,56 +44,6 @@ OUTPUT_ENCODING_ENV_VAR = "AWS_CLI_OUTPUT_ENCODING"
 # mode: C and POSIX, and the targets of its C-locale coercion (CPython's
 # ``_Py_IsLocaleCoercionTarget``).
 _SURROGATEESCAPE_LOCALES = frozenset({"C", "POSIX", "C.UTF-8", "C.utf8", "UTF-8"})
-
-
-def text_encoding() -> str:
-    """The encoding ``aws`` uses here for text: its output and ``file://``.
-
-    aws-cli's ``compat.getpreferredencoding`` without the
-    ``AWS_CLI_FILE_ENCODING`` override (that one is ``file://``'s alone): UTF-8
-    when the ``LC_CTYPE`` locale is ``C`` or ``POSIX`` (aws-cli applies PEP 540
-    itself, its frozen build lacking the interpreter's), otherwise the
-    locale's own encoding - read past Python's UTF-8 mode, which ``aws``
-    never runs in (what ``locale.getencoding()`` returns on 3.11+: the
-    ``LC_CTYPE`` codeset, UTF-8 when it names none). On Windows the ANSI code
-    page (``GetACP``), what ``aws``'s interpreter reads as the locale encoding
-    there.
-    """
-    if sys.platform == "win32":
-        import ctypes
-
-        return f"cp{ctypes.windll.kernel32.GetACP()}"
-    if locale.setlocale(locale.LC_CTYPE) in ("C", "POSIX"):
-        return "UTF-8"
-    # locale.getencoding() (3.11+) on every supported version: the codeset,
-    # UTF-8 where the locale names none.
-    return locale.nl_langinfo(locale.CODESET) or "utf-8"
-
-
-def _codec_name(encoding: str | None) -> str | None:
-    """``encoding``'s canonical codec name, or ``None`` for one Python lacks."""
-    if encoding is None:
-        return None
-    try:
-        return codecs.lookup(encoding).name
-    except LookupError:
-        return None
-
-
-def filename_encoding() -> str | None:
-    """The encoding of local file names and of the command line, or ``None``.
-
-    `text_encoding` where Python's file system encoding follows the locale
-    (Linux and the other non-Apple POSIX systems), so the library names and
-    creates files as ``aws`` does. ``None`` - Python's own choice, which is
-    ``aws``'s there - on Windows, whose names and command line are Unicode,
-    and on macOS, where Python (``aws``'s included) always reads both as
-    UTF-8; and for an encoding Python has no codec for.
-    """
-    if sys.platform in ("win32", "darwin"):
-        return None
-    encoding = text_encoding()
-    return encoding if _codec_name(encoding) is not None else None
 
 
 def _converts(encoding: str | None) -> bool:

@@ -31,7 +31,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Concatenate, Literal, ParamSpec, TypeVar
 
 import boto3
-from typing_extensions import Unpack
+from typing_extensions import Self, Unpack
 
 from boto3_s3 import (
     concurrency,
@@ -113,6 +113,8 @@ if TYPE_CHECKING:
     from botocore.config import Config
     from mypy_boto3_s3 import S3Client
     from mypy_boto3_s3.type_defs import WebsiteConfigurationTypeDef
+
+    from boto3_s3.awsclisession import AwsCliAssembly
 
 
 def rm_filter_root(key: str, *, recursive: bool) -> str:
@@ -531,6 +533,11 @@ class S3:
     defaults (its ``S3Storage`` carries `client`), while a ``Storage`` instance
     passed in is used verbatim (its own client).
 
+    Those defaults are boto3's for everything the caller leaves out (the
+    profile, the region, the retries, the trust store, the default checksum).
+    `from_aws_cli` builds an instance that answers each the way ``aws s3``
+    does instead, from the same options and environment.
+
     `client` and `resolve` are the customization seams - subclass and
     override ``client`` to change credentials / session / endpoint (or return a
     test double), or ``resolve`` to interpret new URL schemes (e.g. ``http://``).
@@ -616,6 +623,87 @@ class S3:
         # Without a session it is kept with the default session it was read
         # under, and read again once boto3's default session changes.
         self._aws_config: tuple[AwsConfig, object] | None = None
+        # The aws-cli assembly `from_aws_cli` built this instance on, or None
+        # for one the caller assembled (boto3's defaults).
+        self._assembly: AwsCliAssembly | None = None
+
+    @classmethod
+    def from_aws_cli(
+        cls,
+        *,
+        profile: str | None = None,
+        region: str | None = None,
+        endpoint_url: str | None = None,
+        no_verify_ssl: bool = False,
+        ca_bundle: str | None = None,
+        no_sign_request: bool = False,
+        cli_read_timeout: int | None = None,
+        cli_connect_timeout: int | None = None,
+        cache_credentials: bool = True,
+        transfer_config: TransferConfig | None = None,
+        reusable_after_interrupt: bool = True,
+    ) -> Self:
+        """An ``S3`` whose session and clients are assembled the way ``aws s3`` assembles its own.
+
+        Each keyword is the snake_case form of the ``aws`` common option of the
+        same name and means what that option means; one left out is resolved
+        as ``aws`` resolves the option's absence - from the environment
+        variables and the config file it reads, in its order: the profile from
+        ``AWS_PROFILE`` before ``AWS_DEFAULT_PROFILE``, the region from
+        ``AWS_REGION``, ``AWS_DEFAULT_REGION``, the profile and the EC2
+        instance metadata. The timeouts are seconds, ``0`` meaning no timeout
+        and ``None`` botocore's 60. What ``aws``'s bundled botocore does
+        differently from the installed one in a normal run is done its way
+        too: retries in ``standard`` mode with three attempts, us-east-1 on its
+        regional endpoint, CRC64NVME as the default request checksum where
+        botocore can compute it (an upload names it in its transfer options).
+        The CRT engine's client gets ``aws``'s trust source (``no_verify_ssl``,
+        ``ca_bundle``, the config's ``ca_bundle``, botocore's bundled CA file)
+        and builds without the cross-process lock under an explicit ``'crt'``
+        preference, as ``aws``'s does (`CrtClientOptions`); local file names
+        are read and written in the encoding ``aws`` uses in the same
+        environment. ``cache_credentials`` keeps the temporary credentials an
+        assumed role, a web identity or SSO fetches in aws-cli's own
+        ``~/.aws/cli/cache``, which ``aws`` reads too (``False``: in memory,
+        as boto3 does). ``transfer_config`` and ``reusable_after_interrupt``
+        are ``S3()``'s.
+
+        The session is opened now: a profile that does not exist or a config
+        file botocore cannot read raises `InvalidConfigError` here, and a
+        schemeless ``endpoint_url`` `ValidationError`, as ``aws`` stops before
+        a command runs. A CRT run with no region resolved raises
+        `ConfigurationError` before it starts, dry runs included, as ``aws``
+        does. Nothing beyond this instance's session is changed: for the
+        CONNECT request ``aws`` sends behind an HTTPS proxy, which is
+        process-wide, see `pin_proxy_connect`. The session is `session`;
+        `client` builds from it.
+        """
+        from boto3_s3.awsclisession import AwsCliAssembly, AwsCliSettings
+        from boto3_s3.localencoding import filename_encoding
+
+        assembly = AwsCliAssembly(
+            AwsCliSettings(
+                profile=profile,
+                region=region,
+                endpoint_url=endpoint_url,
+                no_verify_ssl=no_verify_ssl,
+                ca_bundle=ca_bundle,
+                no_sign_request=no_sign_request,
+                cli_read_timeout=cli_read_timeout,
+                cli_connect_timeout=cli_connect_timeout,
+                cache_credentials=cache_credentials,
+            )
+        )
+        s3 = cls(
+            session=assembly.session,
+            endpoint_url=endpoint_url,
+            transfer_config=transfer_config,
+            reusable_after_interrupt=reusable_after_interrupt,
+            crt=CrtClientOptions(allow_lockless=True, verify=assembly.crt_verify()),
+            filename_encoding=filename_encoding(),
+        )
+        s3._assembly = assembly
+        return s3
 
     @property
     def session(self) -> Session | None:
@@ -650,8 +738,11 @@ class S3:
         credentials and an unset region do not fail the build: missing
         credentials fail when the client first signs - a request, or a
         ``presign`` - as a ``ConfigurationError``, and an unset region falls
-        back to botocore's default for S3.
+        back to botocore's default for S3. An instance `from_aws_cli` built
+        builds the way ``aws`` does instead, failing as `from_aws_cli` does.
         """
+        if self._assembly is not None:
+            return self._assembly.client("s3")
         # Outside the translation: a session without `client` is the
         # caller's programming error, and passes through as one.
         build: Any = self._session.client if self._session is not None else boto3.client
@@ -724,6 +815,7 @@ class S3:
         and a later transfer on a compatible client reuses it.
         """
         config = self.resolve_transfer_config(transfer_config)
+        self._require_crt_region(config)
         if not crtsupport.selects_crt(config):
             # The no-op a classic selection makes of the call below, taken
             # here so a plain boto3 config's selection - and the
@@ -751,7 +843,62 @@ class S3:
         """`resolve_transfer_config` for a run between these two sides."""
         copy = isinstance(src_storage, S3Storage) and isinstance(dest_storage, S3Storage)
         with _attributed_to(operation):
-            return self.resolve_transfer_config(transfer_config, copy=copy)
+            config = self.resolve_transfer_config(transfer_config, copy=copy)
+            self._require_crt_region(config)
+        return config
+
+    def _require_crt_region(self, config: TransferConfig) -> None:
+        """Stop a CRT run of a `from_aws_cli` instance that resolved no region.
+
+        aws-cli hands its region chain's answer to the CRT client, and with
+        none its CRT run stops before it starts, a dry run included - where
+        botocore would give the client the ``aws-global`` pseudo-region and the
+        CRT would sign every request for it. botocore's own missing-region
+        error is the cause, so the report is aws-cli's ``NoRegion`` one. An
+        instance the caller assembled keeps botocore's answer.
+        """
+        if self._assembly is None or self._assembly.region is not None:
+            return
+        if not crtsupport.selects_crt(config):
+            return
+        from botocore.exceptions import NoRegionError
+
+        cause = NoRegionError()
+        raise ConfigurationError(str(cause)) from cause
+
+    def _upload_options(
+        self,
+        options: TransferOptions,
+        src_storage: Storage,
+        dest_storage: Storage,
+        config: TransferConfig,
+    ) -> TransferOptions:
+        """*options* with aws-cli's default request checksum for an upload run.
+
+        Only on an instance `from_aws_cli` built, only for a run into S3 from
+        anything but S3, and only when the caller named no
+        ``checksum_algorithm``: the default aws-cli's bundled botocore would
+        stamp, chosen by the engine *config* selects
+        (`awsclisession.default_upload_algorithm`). An instance the caller
+        assembled leaves each engine to botocore's own default.
+        """
+        if (
+            self._assembly is None
+            or "checksum_algorithm" in options
+            or not isinstance(dest_storage, S3Storage)
+            or isinstance(src_storage, S3Storage)
+        ):
+            return options
+        from boto3_s3.awsclisession import default_upload_algorithm
+
+        algorithm = default_upload_algorithm(
+            dest_storage.get_client(), crt=crtsupport.selects_crt(config)
+        )
+        if algorithm is None:
+            return options
+        with_default = TransferOptions(**options)
+        with_default["checksum_algorithm"] = algorithm
+        return with_default
 
     def resolve(self, loc: Location) -> Storage:
         """Resolve a ``Location`` to a ``Storage`` (the URL-interpretation seam).
@@ -1014,6 +1161,7 @@ class S3:
         transfer_config = self._run_transfer_config(
             transfer_config, src_storage, dest_storage, operation="cp"
         )
+        options = self._upload_options(options, src_storage, dest_storage, transfer_config)
         if isinstance(src_storage, IOStorage) or isinstance(dest_storage, IOStorage):
             self._cp_stream(
                 src_storage,
@@ -1437,6 +1585,7 @@ class S3:
         transfer_config = self._run_transfer_config(
             transfer_config, src_storage, dest_storage, operation="mv"
         )
+        options = self._upload_options(options, src_storage, dest_storage, transfer_config)
         if isinstance(src_storage, IOStorage):
             # A move deletes its source, which a stream cannot be (no delete).
             # The destination side is different: a single-object move onto a
@@ -1647,6 +1796,7 @@ class S3:
         transfer_config = self._run_transfer_config(
             transfer_config, src_storage, dest_storage, operation="sync"
         )
+        options = self._upload_options(options, src_storage, dest_storage, transfer_config)
         # A pre-cancelled token acts before this method's side effects (the
         # destination pre-create below, any lazily-deferred client build - a
         # caller-made S3Storage without a client; resolve() above already
@@ -1917,6 +2067,7 @@ class S3:
         storage = self._resolve_s3_target(target, operation="rm")
         with _attributed_to("rm"):
             config = self.resolve_transfer_config(transfer_config)
+            self._require_crt_region(config)
         _raise_if_cancelled(cancel_token, "rm")
         if not storage.bucket:
             # rm has no bucket-listing mode (scan is object listing only), so a

@@ -613,7 +613,7 @@ error's details need not (checked by the e2e CRT lane - testing.md).
   from 2.36.6 on (`Invalid CA bundle: ...` at rc 255, its bundled botocore and
   s3transfer fork both carrying the check), and so does the CLI - but at the
   botocore client build, which every command performs before any transfer
-  engine exists ([`cli.md`](./cli.md) section 4, `_reject_empty_ca_bundle`).
+  engine exists ([`cli.md`](./cli.md) section 4, `awsclisession.reject_empty_ca_bundle`).
   So the CRT lane is never handed one from the CLI, whichever engine the run
   selects, and both tools refuse it before any transfer (measured
   2026-09-06 under `preferred_transfer_client = crt`: an empty `--ca-bundle`,
@@ -638,7 +638,7 @@ error's details need not (checked by the e2e CRT lane - testing.md).
   client does not name the session that decides whether they are read.
   `S3.client()`'s clients carry `CA_BUNDLE_ENVIRONMENT_VETTED` (their own
   value answers for the environment), and so do the CLI's, which skip that guess
-  since `clientfactory._check_every_client` already checks every client
+  since `awsclisession.check_every_client` already checks every client
   their sessions build at aws-cli's own point, so each run is refused or
   completes as aws-cli's does.
 - **Process-pinned singleton**: the region / credentials / endpoint of the first
@@ -654,7 +654,7 @@ error's details need not (checked by the e2e CRT lane - testing.md).
   an upload that names no checksum; aws-cli's bundled one stamps `CRC64NVME`
   (its bundled botocore's default). The library keeps boto3's (section 1):
   a library caller names `checksum_algorithm` itself. The CLI names aws-cli's
-  value for both engines (`checksumdefault`, cli.md section 5.7), which is
+  value for both engines (`awsclisession.default_upload_algorithm`, cli.md section 5.7), which is
   where the two agree. The difference is not cosmetic on this lane:
   aws-checksums computes CRC32 in software on x86-64 (about 3 GiB/s against
   about 20 for CRC64NVME), which on a 4-vCPU instance pushing 800 MiB/s was

@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `S3` and `S3Deleter` take the CRT engine's own client settings as one `CrtClientOptions` (`crt=`) in place of `crt_allow_lockless` / `crt_sign_requests`, and it can also name the CRT client's TLS trust source (`verify`).
 - `presign` now returns the URL `aws s3 presign` returns for the client's region, however the client was built: SigV4 in aws-cli's parameter order even with awscrt installed (a non-positive `expires_in` is signed as given), and the regional host for a us-east-1 client.
 - `pin_proxy_connect()` makes botocore open HTTPS-proxy tunnels with the CONNECT request aws-cli sends, for Python 3.10 and 3.11 behind a proxy that requires a `Host` header.
+- `S3.from_aws_cli()` builds an `S3` whose session and clients are assembled the way `aws s3` assembles its own, from the same common options (profile and region order, retries, the us-east-1 endpoint, the default checksum, the CRT engine's CA, local file-name encoding, the shared credential cache).
 
 ## [0.12.0] - 2026-10-18
 

@@ -473,7 +473,7 @@ The cp port injects `Context.transfer_config` with `use_threads=False`
 (boto3's NonThreadedExecutor path) so multipart call order is deterministic
 against the positional canned list, and spells aws-cli's expected default
 `ChecksumAlgorithm: 'CRC64NVME'` as `DEFAULT_CHECKSUM`: the CLI names aws-cli's
-CRC64NVME itself (`checksumdefault`, cli.md section 5.7) wherever the
+CRC64NVME itself (`awsclisession.default_upload_algorithm`, cli.md section 5.7) wherever the
 installed botocore can compute it, and elsewhere (no awscrt) pip botocore's
 `'CRC32'` stands (an explicit `--checksum-algorithm` makes the two agree, and
 design/transfer.md section 10 has the full wire-deviation list). Its

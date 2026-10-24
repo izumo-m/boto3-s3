@@ -58,6 +58,32 @@ S3(session=None, *, endpoint_url=None, config=None,
   Python's file system encoding. It has no effect on Windows, and an unknown
   codec raises `InvalidValueError`.
 
+### The way `aws s3` builds it
+
+`S3()` takes boto3's defaults for everything you leave out. To get what an
+`aws s3` command would do in the same environment instead, build it with
+`S3.from_aws_cli`, passing the `aws` options you would have typed:
+
+```python
+from boto3_s3 import S3
+
+# aws s3 sync ./site s3://my-bucket/site --delete --profile dev --region ap-northeast-1
+s3 = S3.from_aws_cli(profile="dev", region="ap-northeast-1")
+s3.sync("./site", "s3://my-bucket/site", delete_filter=True)
+```
+
+The keywords are the `aws` common options in snake_case (`profile`, `region`,
+`endpoint_url`, `no_verify_ssl`, `ca_bundle`, `no_sign_request`,
+`cli_read_timeout`, `cli_connect_timeout`). What you leave out is resolved
+as `aws` resolves it — `AWS_REGION` and `AWS_PROFILE` read in its order, its
+retries, `us-east-1` on its regional endpoint, `CRC64NVME` as the default
+checksum, its CA file for the CRT engine, its local file-name encoding, and
+temporary credentials shared with `aws` through `~/.aws/cli/cache` (pass
+`cache_credentials=False` to keep them in memory). The full list is in
+[`../reference/s3.md`](../reference/s3.md#from_aws_cli). Behind an HTTPS proxy
+that requires a `Host` header, on Python 3.10 or 3.11, also call
+`boto3_s3.pin_proxy_connect()` once at start-up.
+
 ## 2. Which client a location uses
 
 A path argument is a `str`, an `os.PathLike`, or a `Storage` object. Bare

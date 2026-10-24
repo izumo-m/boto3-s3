@@ -13,7 +13,9 @@ usage errors, and subcommand help may all import the AWS SDK freely.
 3. `boto3-s3 help` and `boto3-s3 --version` complete without importing any
    AWS SDK module, any per-command module (the `commands` package's shared
    `base` infrastructure may load), or any library module beyond the lazy
-   `boto3_s3` root and its pure `exceptions`. Version tokens for installed
+   `boto3_s3` root, its pure `exceptions` and the standard-library-only
+   `localencoding` (aws-cli's text encoding, which the command decides at
+   startup). Version tokens for installed
    SDK distributions come from package metadata.
 
 ## 2. Export surface

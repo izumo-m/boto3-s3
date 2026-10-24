@@ -772,7 +772,7 @@ dest-existence check for download. We ported the same three faces:
   composite CRC32 where `aws s3 cp` stores a full-object CRC64NVME - valid
   integrity checks both, same result and rc. The CLI names aws-cli's value
   wherever aws-cli's botocore would have stamped it (uploads on both engines,
-  and every other request with a `ChecksumAlgorithm` member: `checksumdefault`,
+  and every other request with a `ChecksumAlgorithm` member: `awsclisession.register_default_checksum`,
   cli.md section 5.7), where the installed botocore can compute CRC64NVME;
   without awscrt the CLI falls back to botocore's `CRC32`, the residual
   difference docs/compatibility.md section 2 records. On the CRT engine the

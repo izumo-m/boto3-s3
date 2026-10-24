@@ -258,9 +258,8 @@ solidified design is added here.
 |---|---|
 | `cli.py` | Two-stage dispatch (aws-cli's clidriver lazy-command-table shape): the globals pass consumes the globals off the full argv, the command scan matches its remainder against `_COMMAND_TABLE` (the registry: name -> module, class, help - no command module imported), stage 2 imports the matched module, builds its real parser and runs it. Wires `--debug`, maps exceptions to exit codes; the full `build_parser()` builds the whole surface for tests |
 | `globalargs.py` | Common option definitions (the parent; the aws-cli `globalargs.py` counterpart) |
-| `clientfactory.py` | `build_client(args) -> S3Client` (the connection/authentication layer, section 4) + `build_service_client(service, args, *, region=None)` (the s3control / sts client used by mv's path validation, section 5.8). Both open their session, when none is handed in, through `build_session` - the botocore session `_open_botocore_session` opens (the profile / retry / timeout / credential-cache alignment of section 4) - and create their client through `_create_client`, the single seam that installs the CONNECT pin (`boto3_s3.pin_proxy_connect`) - a seam rather than `_open_botocore_session` because `build_client` may be handed a session built elsewhere. The construction-time botocore errors are translated in one place for all three (`_construction_errors`, section 6). Every S3 client the first one builds carries aws-cli's message rewriter (`s3errormsg`) |
+| `clientfactory.py` | The command's side of aws-cli's assembly, the rest being the library's `boto3_s3.awsclisession` (the session, the region chain, the TLS trust sources, the credential cache, the default request checksum - which `S3.from_aws_cli` builds on too): `build_client(args) -> S3Client` (the connection/authentication layer, section 4) + `build_service_client(service, args, *, region=None)` (the s3control / sts client used by mv's path validation, section 5.8). Both open their session, when none is handed in, through `build_session` - the botocore session `awsclisession.open_botocore_session` opens (the profile / retry / timeout / credential-cache alignment of section 4) - and create their client through `_create_client`, the single seam that installs the CONNECT pin (`boto3_s3.pin_proxy_connect`) - a seam rather than `awsclisession.open_botocore_session` because `build_client` may be handed a session built elsewhere. The construction-time botocore errors are translated in one place for all three (`_construction_errors`, section 6). Every S3 client the first one builds carries aws-cli's message rewriter (`s3errormsg`) |
 | `s3errormsg.py` | aws-cli's `after-call.s3` handler (its `s3errormsg` customization), ported verbatim: it rewrites two "requires Signature Version 4" messages and the cross-region `PermanentRedirect` in place, so every report carrying a service message - the top-level `[ERROR]` line and the per-item `upload failed:` / `download failed:` lines alike - reads as aws-cli's. aws-cli registers it on its session; here `build_client` registers it on each S3 client it builds, the CLI's only S3 client builder. The library stays boto3-faithful and never rewrites a service message |
-| `checksumdefault.py` | aws-cli's default request checksum (`CRC64NVME`, its bundled botocore's `DEFAULT_CHECKSUM_ALGORITHM`) reproduced on the CLI side: `default_algorithm(client)` feeds an upload run's `TransferOptions` (section 5.7, `--checksum-algorithm`), and `register(client)` - attached by `build_client` - stamps it at `provide-client-params.s3.*` on every other request whose operation names a `ChecksumAlgorithm` member, exactly where botocore would stamp its own (under `when_required`, only the checksum-required operations). Only where botocore can compute CRC64NVME. The library keeps botocore's default |
 | `commands/base.py` | The `Command` ABC + `Context` (the injection point for runtime dependencies, section 3.1) |
 | `commands/<sub>.py` | The `Command` subclass for each subcommand (e.g., `LsCommand` in `ls.py`, `RmCommand` in `rm.py`) |
 | `commands/transferargs.py` | The surface shared by cp / mv / sync: the declaration equivalent to aws-cli `TRANSFER_ARGS` (`--expected-size` is cp-only opt-in, `--recursive` is opt-out for sync), validation of the SSE-C pair / checksum path types / case-conflict / S3 Express, conversion to `TransferOptions`, the non-stream location wiring (including the `--source-region` clone), the `[s3]` read and the engine's construction (`build_transfer_engine`, section 8), and the tail of exit-code derivation (`finish_transfer`, with `report_failed_run`, which rm shares) |
@@ -335,11 +334,11 @@ numbers in the bold item labels below are that document's.
 
 - **Connection/authentication (effective, section 5)**: `--profile` -> the
   `profile` config variable of the botocore session every client is opened on
-  (`_open_botocore_session`, item 5 below - not a
+  (`awsclisession.open_botocore_session`, item 5 below - not a
   `boto3.Session(profile_name=)`), `--region` / `--endpoint-url` -> client kwargs,
   `--no-verify-ssl` / `--ca-bundle` -> `verify`, `--no-sign-request` ->
   `signature_version=UNSIGNED` in the **session's default client config**
-  (`_default_client_config`, where aws-cli's own `no_sign_request` handler puts
+  (`awsclisession.default_client_config`, where aws-cli's own `no_sign_request` handler puts
   it - which is what leaves the credential chain's STS / SSO clients unsigned
   too, and what lets a per-client `signature_version` beat it, item 2 below; the
   CRT transfer lane takes the flag directly instead, as
@@ -359,7 +358,7 @@ numbers in the bold item labels below are that document's.
   variable read off the session, then botocore's bundled `cacert.pem` -
   never `REQUESTS_CA_BUNDLE` or certifi ([`crt.md`](./crt.md)). An empty or
   whitespace-only answer is **refused** rather
-  than used: `_reject_empty_ca_bundle` raises botocore's own
+  than used: `awsclisession.reject_empty_ca_bundle` raises botocore's own
   `InvalidConfigError` (rc 255), which is what aws-cli v2 does
   from 2.36.6 on and what the installed botocore does from 1.43.54 - the
   supported floor is older, so the CLI supplies the check itself and the
@@ -369,7 +368,7 @@ numbers in the bold item labels below are that document's.
   engine's request serializer, which read the session's `ca_bundle` even when
   `--ca-bundle` or `--no-verify-ssl` set the S3 client's own trust - and
   so does the CLI: every session it opens checks each client it builds
-  (`_check_every_client`), and marks each with the
+  (`awsclisession.check_every_client`), and marks each with the
   library's `CA_BUNDLE_ENVIRONMENT_VETTED` so the library's own guess at an
   empty `AWS_CA_BUNDLE` (made for a client a caller hands it) stands down
   and refuses nothing aws-cli would not. It runs where aws-cli runs it, once
@@ -486,7 +485,7 @@ numbers in the bold item labels below are that document's.
      `legacy` from `AWS_S3_US_EAST_1_REGIONAL_ENDPOINT` or the config key
      decides nothing there. The installed botocore still reads the key, so
      the value is pinned on the **session's config store**
-     (`_pin_regional_s3_endpoint` / `_RegionalS3Section`): the wrapper forces
+     (`awsclisession.pin_regional_s3_endpoint` / `_RegionalS3Section`): the wrapper forces
      the section's value to `regional`, because dropping the key would select
      the legacy global endpoint here (a missing key reads as `legacy`). The
      wrapper also passes botocore's smart-defaults write through to the
@@ -543,7 +542,7 @@ numbers in the bold item labels below are that document's.
      (`['AWS_DEFAULT_PROFILE', 'AWS_PROFILE']` - the long-standing botocore #1725),
      so a bare `boto3.Session(profile_name=None)` would pick a *different* profile
      when both env vars are set. Every session the CLI opens comes from
-     `_open_botocore_session`, which **redeclares botocore's `profile` config
+     `awsclisession.open_botocore_session`, which **redeclares botocore's `profile` config
      variable** with aws-cli's env list and binds `--profile` onto the session
      instance only under aws-cli's truthy guard (its `_handle_top_level_args`),
      leaving an env-named profile to botocore's own read. The two are not
@@ -567,7 +566,7 @@ numbers in the bold item labels below are that document's.
   6. **retry defaults** - aws-cli v2's bundled botocore hard-codes
      `retry_mode='standard'` / `max_attempts=3` as its session defaults, where
      stock botocore defaults to `legacy` with 5 total attempts - a visible
-     difference under throttling. `_open_botocore_session` **redeclares both
+     difference under throttling. `awsclisession.open_botocore_session` **redeclares both
      as session config variables** with aws-cli's values (botocore's own env
      names and int conversion, so `AWS_RETRY_MODE` / `AWS_MAX_ATTEMPTS` and the
      profile config still win, present-wins - an empty value is fatal like
@@ -583,13 +582,13 @@ numbers in the bold item labels below are that document's.
      `mfa_serial` profile would prompt for a code every time - fatal (rc 255 on
      the `getpass` EOF) in any non-interactive run, where `aws` exits 0 from its
      cache. Two of aws-cli's `session-initialized` handlers replace that dict
-     with a `JSONFileCache` over `~/.aws/cli/cache`; `_open_botocore_session`
+     with a `JSONFileCache` over `~/.aws/cli/cache`; `awsclisession.open_botocore_session`
      does the same to every session it opens, at aws-cli's timing (its event
      fires after the driver has bound `--profile`, so the provider chain built
      here is the run's own). The directory is aws-cli's literal one and the
      cache key is botocore's, so the two tools reuse each other's entries -
      measured in both directions. The class installed is a `JSONFileCache`
-     **subclass carrying aws-cli's own write** (`_credential_cache_class`): the
+     **subclass carrying aws-cli's own write** (`awsclisession.credential_cache_class`): the
      entry goes straight to its final path (`O_WRONLY | O_CREAT`, mode 0600,
      then truncate) instead of through `tempfile.mkstemp` + `os.replace`, so an
      unwritable `~/.aws/cli/cache` names the entry rather than a random
@@ -605,7 +604,7 @@ numbers in the bold item labels below are that document's.
      client config as it binds the top-level arguments (its `_resolve_timeout`
      / `_update_default_client_config`, falling back to botocore's 60 s when
      the option is absent), so every client created from that session inherits
-     them. `_default_client_config` builds the same value while the session
+     them. `awsclisession.default_client_config` builds the same value while the session
      opens, which is what holds the credential chain's own clients to the
      flag's budget: a stalled STS ran to botocore's own default here where
      aws-cli gave up on the flag's (measured, `--cli-read-timeout 2` against an
@@ -1068,7 +1067,7 @@ Signing stays pure-Python via the pin of section 4.
 Without `--checksum-algorithm`, aws-cli's default is its bundled botocore's
 `DEFAULT_CHECKSUM_ALGORITHM`, `CRC64NVME`, stamped on every request whose
 operation names a `ChecksumAlgorithm` member; pip botocore's is `CRC32`. The
-CLI names aws-cli's value (`checksumdefault.py`) in the two places botocore
+CLI names aws-cli's value (`awsclisession.register_default_checksum` / `default_upload_algorithm`) in the two places botocore
 would have stamped its own: an upload run's `TransferOptions` (`locals3` only -
 aws-cli sends no algorithm on a copy's requests, measured - so both transfer
 engines see it; the CRT engine reads its trailing checksum from that argument
@@ -1443,7 +1442,7 @@ inside the mapped surface: `cli_timestamp_format` set to anything other than
 session starts, so it fails every subcommand and its `help`, though not its
 `--version`. Here `clientfactory._reject_unknown_cli_formats` checks it, with
 `cli_binary_format` (rc 255; an explicit `--cli-binary-format` replaces the
-config value), every time `_open_botocore_session` opens a session - so every
+config value), every time `awsclisession.open_botocore_session` opens a session - so every
 command stops, while `help` and `--version`, which open none, succeed (the
 accepted ordering difference of section 1). Both values come from botocore's
 scoped config, so the profile is the one the session is bound to; an undeclared
@@ -1458,7 +1457,7 @@ config or credentials file botocore cannot parse (`Unable to parse config
 file: <path>`, rc 255) and an IMDS setting botocore refuses while it builds the
 credential chain (`metadata_service_timeout`, `metadata_service_num_attempts`,
 `ec2_metadata_service_endpoint_mode`, `ec2_metadata_service_endpoint`; rc 255
-with botocore's text), which `_inject_credential_cache` builds. aws-cli reaches
+with botocore's text), which `awsclisession.inject_credential_cache` builds. aws-cli reaches
 both at startup too, so they also fail its `help`, and an unparsable file its
 `--version` as well (the IMDS setting leaves its `--version` working).
 
