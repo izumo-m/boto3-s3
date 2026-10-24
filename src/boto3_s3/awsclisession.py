@@ -78,6 +78,16 @@ class _Unresolved(enum.Enum):
 # supplied ``None``.
 UNRESOLVED: Final = _Unresolved.TOKEN
 
+# The attribute naming, on a client an assembly built, the assembly that built
+# it: what `S3` reads to apply aws-cli's run-level defaults to that client's
+# runs alone, a client the caller hands over keeping its own settings.
+ASSEMBLED_BY = "_boto3_s3_aws_cli_assembly"
+
+
+def assembly_of(client: Any) -> AwsCliAssembly | None:
+    """The assembly that built *client*, or None for any other client."""
+    return getattr(client, ASSEMBLED_BY, None)
+
 
 class AwsCliAssembly:
     """One session opened the way aws-cli opens its own, and the clients built from it.
@@ -92,7 +102,7 @@ class AwsCliAssembly:
     def __init__(self, settings: AwsCliSettings) -> None:
         validate_endpoint_url(settings.endpoint_url)
         self.settings = settings
-        with construction_errors():
+        with build_errors():
             reject_empty_ca_bundle(settings.ca_bundle)
             botocore_session = open_botocore_session(settings)
             self.session: Boto3Session = boto3_session(botocore_session)
@@ -138,10 +148,11 @@ class AwsCliAssembly:
         }
         if endpoint_url is not None:
             kwargs["endpoint_url"] = endpoint_url
-        with construction_errors():
+        with build_errors():
             client = create_client(self.session, service, **kwargs)
         if service == "s3":
             register_default_checksum(client)
+        setattr(client, ASSEMBLED_BY, self)
         return client
 
     def crt_verify(self) -> str | Literal[False]:
@@ -182,6 +193,26 @@ def construction_errors() -> Generator[None, None, None]:
         raise ConfigurationError(str(exc)) from exc
     except BotoCoreError as exc:
         raise InvalidConfigError(str(exc)) from exc
+
+
+@contextlib.contextmanager
+def build_errors() -> Generator[None, None, None]:
+    """`construction_errors`, plus what the SDK raises outside its own family meanwhile.
+
+    It reads the configuration while a session opens and a client is built: a
+    malformed endpoint is a plain ``ValueError``, a config value of the wrong
+    shape an ``AttributeError``, a ``credential_process`` that cannot run an
+    ``OSError`` - the library's `client_build_error` classifies them, as for
+    a client an `S3()` builds. The command, whose general handler takes them
+    raw, keeps `construction_errors` alone.
+    """
+    from boto3_s3.sdkerrors import client_build_error
+
+    with construction_errors():
+        try:
+            yield
+        except (ValueError, AttributeError, OSError) as exc:
+            raise client_build_error(exc) from exc
 
 
 def open_botocore_session(settings: AwsCliSettings) -> BotocoreSession:
@@ -780,13 +811,16 @@ def register_default_checksum(client: Any) -> None:
 # The assembly and its settings, and the building blocks the ``boto3-s3``
 # command composes its own clients from.
 __all__ = [
+    "ASSEMBLED_BY",
     "AWS_DEFAULT_CHECKSUM_ALGORITHM",
     "PROFILE_ENV_VARS",
     "UNRESOLVED",
     "AwsCliAssembly",
     "AwsCliSettings",
+    "assembly_of",
     "bind_region",
     "boto3_session",
+    "build_errors",
     "check_every_client",
     "cli_timeouts",
     "client_verify",

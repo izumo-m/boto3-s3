@@ -27,15 +27,6 @@ _COLOR_CHOICES = ["on", "off", "auto"]
 _CLI_ERROR_FORMAT_CHOICES = ["legacy", "json", "yaml", "text", "table", "enhanced"]
 _BINARY_FORMAT_CHOICES = ["base64", "raw-in-base64-out"]
 
-# aws-cli resolves the active profile as --profile > AWS_PROFILE >
-# AWS_DEFAULT_PROFILE > default: its bundled botocore lists the env vars as
-# ['AWS_PROFILE', 'AWS_DEFAULT_PROFILE'], whereas stock botocore reverses them to
-# ['AWS_DEFAULT_PROFILE', 'AWS_PROFILE'] - a long-standing divergence (botocore
-# #1725). A bare boto3.Session(profile_name=None) would inherit stock order, so
-# the two CLIs would pick *different* profiles when both env vars are set.
-# The single home of that ordering; every profile read goes through it.
-PROFILE_ENV_VARS = ("AWS_PROFILE", "AWS_DEFAULT_PROFILE")
-
 
 def validate_query(args: argparse.Namespace) -> None:
     """Reject an invalid ``--query`` JMESPath (rc 252).

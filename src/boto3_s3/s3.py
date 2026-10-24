@@ -70,6 +70,7 @@ from boto3_s3.localstorage import (
 from boto3_s3.s3storage import (
     CA_BUNDLE_ENVIRONMENT_VETTED,
     S3Storage,
+    held_client,
     reject_empty_ca_bundle,
     s3express_unsupported_reason,
 )
@@ -815,7 +816,7 @@ class S3:
         and a later transfer on a compatible client reuses it.
         """
         config = self.resolve_transfer_config(transfer_config)
-        self._require_crt_region(config)
+        self._require_crt_region(config, client)
         if not crtsupport.selects_crt(config):
             # The no-op a classic selection makes of the call below, taken
             # here so a plain boto3 config's selection - and the
@@ -844,20 +845,27 @@ class S3:
         copy = isinstance(src_storage, S3Storage) and isinstance(dest_storage, S3Storage)
         with _attributed_to(operation):
             config = self.resolve_transfer_config(transfer_config, copy=copy)
-            self._require_crt_region(config)
+            s3_side = dest_storage if isinstance(dest_storage, S3Storage) else src_storage
+            if isinstance(s3_side, S3Storage):
+                self._require_crt_region(config, held_client(s3_side))
         return config
 
-    def _require_crt_region(self, config: TransferConfig) -> None:
-        """Stop a CRT run of a `from_aws_cli` instance that resolved no region.
+    @staticmethod
+    def _require_crt_region(config: TransferConfig, client: Any | None) -> None:
+        """Stop a CRT run on an aws-cli-assembled client that resolved no region.
 
         aws-cli hands its region chain's answer to the CRT client, and with
         none its CRT run stops before it starts, a dry run included - where
         botocore would give the client the ``aws-global`` pseudo-region and the
         CRT would sign every request for it. botocore's own missing-region
-        error is the cause, so the report is aws-cli's ``NoRegion`` one. An
-        instance the caller assembled keeps botocore's answer.
+        error is the cause, so the report is aws-cli's ``NoRegion`` one. Only
+        a client `from_aws_cli`'s assembly built (`awsclisession.assembly_of`)
+        is held to it; any other keeps botocore's answer.
         """
-        if self._assembly is None or self._assembly.region is not None:
+        from boto3_s3.awsclisession import assembly_of
+
+        assembly = assembly_of(client)
+        if assembly is None or assembly.region is not None:
             return
         if not crtsupport.selects_crt(config):
             return
@@ -866,8 +874,8 @@ class S3:
         cause = NoRegionError()
         raise ConfigurationError(str(cause)) from cause
 
+    @staticmethod
     def _upload_options(
-        self,
         options: TransferOptions,
         src_storage: Storage,
         dest_storage: Storage,
@@ -875,25 +883,26 @@ class S3:
     ) -> TransferOptions:
         """*options* with aws-cli's default request checksum for an upload run.
 
-        Only on an instance `from_aws_cli` built, only for a run into S3 from
-        anything but S3, and only when the caller named no
+        Only for a run into S3 from anything but S3, onto a client
+        `from_aws_cli`'s assembly built, and only when the caller named no
         ``checksum_algorithm``: the default aws-cli's bundled botocore would
         stamp, chosen by the engine *config* selects
-        (`awsclisession.default_upload_algorithm`). An instance the caller
-        assembled leaves each engine to botocore's own default.
+        (`awsclisession.default_upload_algorithm`). Any other client is left to
+        botocore's own default. A storage that holds no client yet is not
+        given one here (the run's cancellation test comes first).
         """
         if (
-            self._assembly is None
-            or "checksum_algorithm" in options
+            "checksum_algorithm" in options
             or not isinstance(dest_storage, S3Storage)
             or isinstance(src_storage, S3Storage)
         ):
             return options
-        from boto3_s3.awsclisession import default_upload_algorithm
+        from boto3_s3.awsclisession import assembly_of, default_upload_algorithm
 
-        algorithm = default_upload_algorithm(
-            dest_storage.get_client(), crt=crtsupport.selects_crt(config)
-        )
+        client = held_client(dest_storage)
+        if assembly_of(client) is None:
+            return options
+        algorithm = default_upload_algorithm(client, crt=crtsupport.selects_crt(config))
         if algorithm is None:
             return options
         with_default = TransferOptions(**options)
@@ -2067,7 +2076,7 @@ class S3:
         storage = self._resolve_s3_target(target, operation="rm")
         with _attributed_to("rm"):
             config = self.resolve_transfer_config(transfer_config)
-            self._require_crt_region(config)
+            self._require_crt_region(config, held_client(storage))
         _raise_if_cancelled(cancel_token, "rm")
         if not storage.bucket:
             # rm has no bucket-listing mode (scan is object listing only), so a

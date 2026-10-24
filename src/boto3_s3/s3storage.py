@@ -1371,6 +1371,15 @@ class S3Storage(Storage):
                     raise translate_os_error(exc, operation=_GET_FILE_OPERATION, key=dest) from exc
 
 
+def held_client(storage: S3Storage) -> Any | None:
+    """The client *storage* already holds, or None - without building one.
+
+    For a check that must not build a client ahead of a run's cancellation
+    test (`S3`'s use of the aws-cli assembly's mark).
+    """
+    return storage._client  # pyright: ignore[reportPrivateUsage]
+
+
 __all__ = [
     "CA_BUNDLE_ENVIRONMENT_VETTED",
     "S3Storage",

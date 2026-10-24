@@ -181,6 +181,41 @@ class TestFailingBeforeARun:
         with pytest.raises(ConfigurationError, match="You must specify a region"):
             s3.rm("s3://bucket/f.txt", dryrun=True)
 
+    def test_a_client_the_caller_hands_over_is_not_held_to_it(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import boto3
+
+        from boto3_s3 import crtsupport
+
+        monkeypatch.setattr(crtsupport, "selects_crt", lambda _config: True)
+        monkeypatch.delenv("AWS_REGION")
+        monkeypatch.delenv("AWS_DEFAULT_REGION")
+        src = tmp_path / "f.txt"
+        src.write_text("x")
+        own = S3Storage("s3://bucket/f.txt", client=boto3.client("s3", region_name="eu-west-1"))
+        results: list[Any] = []
+        S3.from_aws_cli().cp(str(src), own, dryrun=True, on_result=results.append)
+        assert len(results) == 1
+
+    def test_a_config_value_botocore_cannot_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Raised outside botocore's own family (a bare ValueError), and still
+        # the library's InvalidConfigError, as for S3().client().
+        _config(tmp_path, monkeypatch, "[default]\nmetadata_service_timeout = abc\n")
+        monkeypatch.delenv("AWS_REGION")
+        monkeypatch.delenv("AWS_DEFAULT_REGION")
+        with pytest.raises(InvalidConfigError, match="invalid literal"):
+            S3.from_aws_cli()
+
+    def test_a_malformed_endpoint_from_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "http://[bad")
+        with pytest.raises(InvalidConfigError, match="Invalid IPv6 URL"):
+            S3.from_aws_cli().client()
+
     def test_a_classic_run_without_a_region_proceeds(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -248,6 +283,26 @@ class TestTheUploadChecksum:
         assert s3._upload_options({}, dest, src, config) == {}  # pyright: ignore[reportPrivateUsage]
         copy_dest = S3Storage("s3://other/k", client=s3.client())
         assert s3._upload_options({}, dest, copy_dest, config) == {}  # pyright: ignore[reportPrivateUsage]
+
+    def test_a_client_the_caller_hands_over_keeps_its_own(self, tmp_path: Path) -> None:
+        import boto3
+
+        s3 = S3.from_aws_cli()
+        src = s3.resolve(str(tmp_path))
+        own = S3Storage("s3://bucket/k", client=boto3.client("s3", region_name="us-east-1"))
+        config = TransferConfig(preferred_transfer_client="classic")
+        assert s3._upload_options({}, src, own, config) == {}  # pyright: ignore[reportPrivateUsage]
+
+    def test_a_storage_without_a_client_is_not_given_one(self, tmp_path: Path) -> None:
+        # The run's cancellation test comes before any client build.
+        from boto3_s3.s3storage import held_client
+
+        s3 = S3.from_aws_cli()
+        src = s3.resolve(str(tmp_path))
+        lazy = S3Storage("s3://bucket/k")
+        config = TransferConfig(preferred_transfer_client="classic")
+        assert s3._upload_options({}, src, lazy, config) == {}  # pyright: ignore[reportPrivateUsage]
+        assert held_client(lazy) is None
 
     def test_an_instance_the_caller_built_keeps_botocores_default(self, tmp_path: Path) -> None:
         s3 = S3()
