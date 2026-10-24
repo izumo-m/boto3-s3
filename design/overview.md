@@ -97,16 +97,32 @@ maintaining high functional compatibility.
   its own Python and its own copies of botocore and s3transfer, which differ
   from the Python and the PyPI releases this project runs on, and the library
   also runs on SDKs as old as the floor and on every supported Python
-  (section 2). A behavior that differs only because of such a
-  version difference is not matched: it is neither a bug nor a deviation to
-  write down, and nothing compensates for it. There is one exception: where
-  aws-cli's bundled botocore, s3transfer or Python differs from the one this
-  project runs on in a way that changes a normal run's outcome (the request
-  sent, its endpoint, signature and headers, the objects selected, the
-  profile used, the retries made, the arguments accepted), the library and
-  the CLI match aws-cli, each where the difference reaches it; a difference
-  that shows only in an error or in an unusual environment is not
-  compensated. The defaults of a client and its session that the caller does
+  (section 2). Three rules apply, by where a difference comes from:
+  1. A difference that comes from the Python version is matched to aws-cli
+     where it can be absorbed simply, and left as it is otherwise. Simply
+     means all three of: matching it changes nothing outside the library that
+     the application did not ask for (no process-wide replacement that the
+     application's other code would feel as a side effect of using the
+     library), it needs no large mechanism, and it conflicts with no settled
+     decision. A process-wide change the application asks for by calling a
+     function meant for it, with its reach documented, is not a side effect
+     (`set_stream_logger`'s masked debug output is one). The CLI owns its
+     process, so the first condition does not bind it. A
+     difference left as it is is neither a bug nor a deviation to write down,
+     so a behavior may depend on the Python version; where it is a default a
+     caller may want fixed, the library lets the caller name the value, as it
+     does for text encodings (below).
+  2. A difference that comes from aws-cli's bundled botocore or s3transfer is
+     matched where it changes a normal run's outcome (the request sent, its
+     endpoint, signature and headers, the objects selected, the profile used,
+     the retries made, the arguments accepted), by the library and the CLI,
+     each where the difference reaches it; a difference that shows only in an
+     error or in an unusual environment is not compensated.
+  3. A difference that comes only from an SDK older than the pinned period,
+     down to the floor, is not matched: it is neither a bug nor a deviation to
+     write down, and nothing compensates for it.
+
+  The defaults of a client and its session that the caller does
   not supply (the region, the profile, the default checksum) follow boto3 in
   the library and aws-cli in the CLI: a library caller sets them as for any
   boto3 application. The rules for errors below still hold on every
