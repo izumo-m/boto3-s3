@@ -828,36 +828,14 @@ def register_default_checksum(client: Any) -> None:
     client.meta.events.register("provide-client-params.s3.*", stamp)
 
 
-# The assembly and its settings, and the building blocks the ``boto3-s3``
-# command composes its own clients from.
+# What an application outside the library builds on: the SSO token cache class
+# with aws-cli's write (the ``boto3-s3`` command installs it, the change being
+# process-wide), the region chain, and the mark a stand-in client carries so
+# the run-level defaults reach it as they reach an assembled one. The rest is
+# `S3.from_aws_cli`'s own.
 __all__ = [
     "ASSEMBLED_BY",
-    "AWS_DEFAULT_CHECKSUM_ALGORITHM",
-    "PROFILE_ENV_VARS",
-    "UNRESOLVED",
     "Assembled",
-    "AwsCliAssembly",
-    "AwsCliSettings",
-    "assembled",
-    "bind_region",
-    "boto3_session",
-    "build_errors",
-    "check_every_client",
-    "cli_timeouts",
-    "client_verify",
-    "construction_errors",
-    "create_client",
     "credential_cache_class",
-    "credential_cache_dir",
-    "crt_verify",
-    "default_client_config",
-    "default_upload_algorithm",
-    "inject_credential_cache",
-    "open_botocore_session",
-    "pin_regional_s3_endpoint",
-    "region_chain",
-    "register_default_checksum",
-    "reject_empty_ca_bundle",
     "resolve_region",
-    "validate_endpoint_url",
 ]

@@ -280,6 +280,8 @@ planner,
 `globsieve`, `localstorage.translate_os_error`, `awsclicompare`,
 `crtsupport`, `masking`'s `SecretMaskingFilter`, and
 `pathresolver`'s `is_s3express_path` / `is_s3express_accesspoint_path`,
+`awsclisession`'s `credential_cache_class`, `resolve_region` and the
+`ASSEMBLED_BY` / `Assembled` mark,
 `requestparams.validate_grants` (the `--grants` check the CLI makes before the
 run), and `s3storage`'s `CA_BUNDLE_ENVIRONMENT_VETTED` mark).
 What the in-repo CLI needs, any other application built on the library needs
