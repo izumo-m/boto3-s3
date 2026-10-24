@@ -86,7 +86,7 @@ class TestBuildClient:
         # too, where the library default would silently run classic and, on a
         # dryrun, report success (design/crt.md section 6).
         s3 = clientfactory.build_s3(_parse([]))
-        assert s3._crt.allow_lockless is True  # pyright: ignore[reportPrivateUsage]
+        assert s3._crt.crt.allow_lockless is True  # pyright: ignore[reportPrivateUsage]
 
     @pytest.fixture
     def crt_builds(self, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
@@ -1310,7 +1310,7 @@ class TestNoSignRequestPosture:
         # the multipart trio, download HEAD/GET, mv, sync, stream) and the run
         # uploads at rc 0 with no credentials at all.
         s3 = clientfactory.build_s3(_parse_transfer(argv))
-        assert s3._crt.sign_requests is expected  # pyright: ignore[reportPrivateUsage]
+        assert s3._crt.crt.sign_requests is expected  # pyright: ignore[reportPrivateUsage]
 
     def test_a_signed_run_is_untouched_by_the_kms_case(self, _broken_role_profile: None) -> None:
         # Without --no-sign-request the SigV4 pin was always there; --sse
@@ -1814,20 +1814,24 @@ class TestBuildServiceClient:
 
 
 def _client_verify(client: Any) -> Any:
-    """The TLS trust source a built client will actually use.
+    """The TLS trust source a built botocore client will actually use.
 
-    botocore records the resolved ``verify`` on the endpoint's HTTP session;
-    it is the same private attribute ``crtsupport._derive_verify`` reads to
-    wire the CRT client, so asserting on it covers both engines.
+    botocore records the resolved ``verify`` on the endpoint's HTTP session
+    (``True`` is its own default bundle, opened per request).
     """
     return client._endpoint.http_session._verify
 
 
-def _botocore_default_bundle() -> Any:
-    """The CA file botocore itself would use for a client that names none."""
-    from botocore.httpsession import get_cert_path
+def _crt_verify(s3: Any) -> Any:
+    """The trust source `build_s3` declares for the CRT client."""
+    return s3._crt.crt.verify
 
-    return get_cert_path(True)
+
+def _crt_default_bundle() -> str:
+    """The CA file aws-cli's CRT factory falls back to: botocore's bundled one."""
+    from botocore.httpsession import DEFAULT_CA_BUNDLE
+
+    return DEFAULT_CA_BUNDLE
 
 
 class TestMalformedS3Section:
@@ -1871,13 +1875,11 @@ _EMPTY_CA_BUNDLE_REPORT = (
 
 
 class TestVerifyResolution:
-    """The TLS trust source, resolved explicitly for every CLI-built client.
+    """The botocore clients' TLS trust source: aws-cli's ``verify_ssl``.
 
-    Left as ``None``, botocore resolves it per request while
-    ``create_s3_crt_client`` falls back to the *platform* trust store - so the
-    two transfer engines would trust different roots (design/crt.md). Every
-    step below therefore has to land on a concrete value, and the same one for
-    every client the run builds.
+    ``--no-verify-ssl`` and ``--ca-bundle`` reach every client as ``verify``,
+    and botocore resolves the rest of the chain itself, as it does for
+    aws-cli's ``ClientFactory``. The CRT client's is `TestCrtTrustSource`.
     """
 
     @pytest.fixture(autouse=True)
@@ -2014,10 +2016,7 @@ class TestVerifyResolution:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # AWS_CA_BUNDLE reaches botocore as the `ca_bundle` config variable,
-        # which botocore already folded into the client at construction (so it
-        # reached both engines before the explicit resolution too). Resolving
-        # up front must not drop it - only the nothing-set case was ever
-        # engine-dependent.
+        # which botocore folds into the client at construction.
         bundle = tmp_path / "env.pem"
         bundle.write_text("")
         monkeypatch.setenv("AWS_CA_BUNDLE", str(bundle))
@@ -2033,7 +2032,7 @@ class TestVerifyResolution:
         config_file = tmp_path / "config"
         config_file.write_text(f"[default]\n[profile tls]\nca_bundle = {bundle}\n")
         monkeypatch.setenv("AWS_CONFIG_FILE", str(config_file))
-        assert _client_verify(clientfactory.build_client(_parse([]))) == _botocore_default_bundle()
+        assert _client_verify(clientfactory.build_client(_parse([]))) is True
         client = clientfactory.build_client(_parse(["--profile", "tls"]))
         assert _client_verify(client) == str(bundle)
 
@@ -2041,8 +2040,8 @@ class TestVerifyResolution:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # botocore's own last fallback before its default bundle
-        # (EndpointCreator._get_verify_value). Resolving up front must not drop
-        # it, or a working classic setup would silently change trust anchors.
+        # (EndpointCreator._get_verify_value), which aws-cli's botocore
+        # clients honor too.
         bundle = tmp_path / "requests.pem"
         bundle.write_text("")
         monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(bundle))
@@ -2056,29 +2055,10 @@ class TestVerifyResolution:
         client = clientfactory.build_client(_parse([]))
         assert _client_verify(client) == str(tmp_path / "aws.pem")
 
-    def test_nothing_set_resolves_botocore_s_own_bundle(self) -> None:
-        # Not True and not None: the concrete file botocore would have opened
-        # at request time (certifi's, or botocore's own where certifi is
-        # absent - which is why the expectation is asked of botocore).
-        verify = _client_verify(clientfactory.build_client(_parse([])))
-        assert verify == _botocore_default_bundle()
-        assert Path(verify).is_file()
-
-    def test_every_client_of_a_run_resolves_the_same_value(self) -> None:
-        # The CRT singleton refuses a later client whose verify differs
-        # (crtsupport._is_compatible_request), so a per-client difference
-        # would silently downgrade the second transfer to classic. The
-        # --source-region client rides the same build_client path.
-        args = _parse([])
-        destination = clientfactory.build_client(args)
-        source_args = argparse.Namespace(**vars(args))
-        source_args.region = "eu-west-1"
-        source_args.endpoint_url = None
-        source = clientfactory.build_client(source_args)
-        service = clientfactory.build_service_client("sts", args, region="us-east-1")
-        assert _client_verify(destination) == _botocore_default_bundle()
-        assert _client_verify(source) == _client_verify(destination)
-        assert _client_verify(service) == _client_verify(destination)
+    def test_nothing_set_leaves_botocore_its_default(self) -> None:
+        # aws-cli passes verify=None, so botocore opens its default bundle
+        # (certifi's, or its own where certifi is absent) per request.
+        assert _client_verify(clientfactory.build_client(_parse([]))) is True
 
     def test_no_verify_ssl_reaches_the_service_clients_too(self) -> None:
         client = clientfactory.build_service_client(
@@ -2088,8 +2068,12 @@ class TestVerifyResolution:
 
 
 class TestCrtTrustSource:
-    """What the resolved ``verify`` becomes once the CRT engine is wired.
+    """The CRT client's TLS trust source: aws-cli's CRT factory ``_resolve_verify``.
 
+    aws-cli resolves it apart from its botocore clients: ``--no-verify-ssl``,
+    ``--ca-bundle``, the ``ca_bundle`` config variable, then botocore's bundled
+    ``cacert.pem`` - never ``REQUESTS_CA_BUNDLE``. `build_s3` declares it as
+    ``CrtClientOptions.verify``. Where the CRT client is built,
     ``create_s3_crt_client`` is stubbed (the CRT cannot be exercised
     in-process); the assertion is on the kwargs it receives, following
     tests/lib/test_crtsupport.py.
@@ -2099,6 +2083,63 @@ class TestCrtTrustSource:
     def _no_host_ca_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("AWS_CA_BUNDLE", raising=False)
         monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+
+    def test_nothing_set_is_botocore_s_bundled_file(self) -> None:
+        verify = _crt_verify(clientfactory.build_s3(_parse([])))
+        assert verify == _crt_default_bundle()
+        assert Path(verify).is_file()
+
+    def test_no_verify_ssl_disables_verification(self, tmp_path: Path) -> None:
+        argv = ["--no-verify-ssl", "--ca-bundle", str(tmp_path / "ca.pem")]
+        assert _crt_verify(clientfactory.build_s3(_parse(argv))) is False
+
+    def test_ca_bundle_flag_beats_the_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AWS_CA_BUNDLE", str(tmp_path / "env.pem"))
+        argv = ["--ca-bundle", str(tmp_path / "flag.pem")]
+        assert _crt_verify(clientfactory.build_s3(_parse(argv))) == str(tmp_path / "flag.pem")
+
+    def test_aws_ca_bundle_env_is_honored(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AWS_CA_BUNDLE", str(tmp_path / "env.pem"))
+        assert _crt_verify(clientfactory.build_s3(_parse([]))) == str(tmp_path / "env.pem")
+
+    def test_profile_ca_bundle_key_is_honored(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Read off the session the clients are built from, so the resolved
+        # profile decides.
+        bundle = tmp_path / "profile.pem"
+        config_file = tmp_path / "config"
+        config_file.write_text(f"[default]\n[profile tls]\nca_bundle = {bundle}\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config_file))
+        assert _crt_verify(clientfactory.build_s3(_parse(["--profile", "tls"]))) == str(bundle)
+
+    def test_requests_ca_bundle_is_not_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws-cli's split: its botocore clients honor REQUESTS_CA_BUNDLE and
+        # its CRT transfers ignore it (measured on the pinned aws-cli: a
+        # bundle the CRT cannot read leaves cp / rm / sync running).
+        bundle = tmp_path / "requests.pem"
+        bundle.write_text("")
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(bundle))
+        s3 = clientfactory.build_s3(_parse([]))
+        assert _crt_verify(s3) == _crt_default_bundle()
+        assert _client_verify(s3.client()) == str(bundle)
+
+    @pytest.mark.parametrize("value", ["", "  "], ids=["empty", "whitespace"])
+    def test_an_empty_ca_bundle_config_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        # Never read as "verification off", with aws-cli's report and rc.
+        monkeypatch.setenv("AWS_CA_BUNDLE", value)
+        with pytest.raises(InvalidConfigError) as excinfo:
+            clientfactory.build_s3(_parse([]))
+        assert str(excinfo.value) == _EMPTY_CA_BUNDLE_REPORT
+        assert exit_code_for(excinfo.value) == 255
 
     def _stub_crt(self, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
         s3transfer_crt = pytest.importorskip("s3transfer.crt")
@@ -2132,29 +2173,32 @@ class TestCrtTrustSource:
         yield
         crtsupport._reset_for_tests()
 
-    def test_cli_client_gives_the_crt_the_classic_engine_s_ca_file(
-        self, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        ("argv", "requests_bundle"),
+        [([], None), ([], "requests.pem"), (["--ca-bundle", "ca.pem"], None)],
+        ids=["nothing-set", "requests-ca-bundle", "ca-bundle-flag"],
+    )
+    def test_the_declared_value_reaches_the_crt_client(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        argv: list[str],
+        requests_bundle: str | None,
     ) -> None:
         from boto3_s3 import crtsupport
 
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "ca.pem").write_text("")
+        if requests_bundle is not None:
+            (tmp_path / requests_bundle).write_text("")
+            monkeypatch.setenv("REQUESTS_CA_BUNDLE", requests_bundle)
         create_kwargs = self._stub_crt(monkeypatch)
-        client = clientfactory.build_client(_parse([]))
-        assert crtsupport.create_crt_transfer_manager(client, None) is not None
+        s3 = clientfactory.build_s3(_parse(argv))
+        client = s3.client()
+        engine_arguments = s3._crt.engine_arguments(client)  # pyright: ignore[reportPrivateUsage]
+        assert crtsupport.create_crt_transfer_manager(client, None, **engine_arguments) is not None
         [kwargs] = create_kwargs
-        assert kwargs["verify"] == _botocore_default_bundle()
-
-    def test_ca_bundle_flag_reaches_the_crt_client(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from boto3_s3 import crtsupport
-
-        bundle = tmp_path / "ca.pem"
-        bundle.write_text("")
-        create_kwargs = self._stub_crt(monkeypatch)
-        client = clientfactory.build_client(_parse(["--ca-bundle", str(bundle)]))
-        assert crtsupport.create_crt_transfer_manager(client, None) is not None
-        [kwargs] = create_kwargs
-        assert kwargs["verify"] == str(bundle)
+        assert kwargs["verify"] == ("ca.pem" if argv else _crt_default_bundle())
 
     def test_a_plain_library_client_still_defers_to_the_platform_store(
         self, monkeypatch: pytest.MonkeyPatch

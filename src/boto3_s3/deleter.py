@@ -58,6 +58,7 @@ from boto3_s3.sdkerrors import S3_CODE_CATEGORIES, request_failure, s3_errors
 from boto3_s3.types import (
     CancelMode,
     CancelToken,
+    CrtClientOptions,
     OpOutcome,
     OpResult,
     TransferType,
@@ -248,9 +249,10 @@ class S3Deleter:
     ``transfer_config`` picks the client the requests ride, as it picks a
     transfer's engine: botocore's, or the CRT client when it selects the CRT
     engine (`crt_delete_sender`, built on the caller's thread during
-    construction). ``session`` and the ``crt_*`` arguments are the CRT
-    engine's postures, ``S3``'s own, which it carries as one
-    `crtsupport.CrtPostures`; ``S3.rm`` and ``sync`` pass their instance's.
+    construction). ``session``, ``crt_endpoint`` and ``crt`` (a
+    `CrtClientOptions`) are the CRT engine's postures, ``S3``'s own, which it
+    carries as one `crtsupport.CrtPostures`; ``S3.rm`` and ``sync`` pass
+    their instance's.
     A dryrun deleter builds no engine.
 
     ``dryrun=True`` turns the whole deleter into a rehearsal for a direct
@@ -288,8 +290,7 @@ class S3Deleter:
         transfer_config: TransferConfig | None = None,
         session: Session | None = None,
         crt_endpoint: str | None = None,
-        crt_allow_lockless: bool = False,
-        crt_sign_requests: bool | None = None,
+        crt: CrtClientOptions | None = None,
     ) -> None:
         # Runtime guard for untyped callers (e.g. S3.resolve routing a bare
         # "bucket/key" to LocalStorage): fail inside the taxonomy, not with an
@@ -340,8 +341,7 @@ class S3Deleter:
                 crt=crtsupport.CrtPostures(
                     endpoint=crt_endpoint,
                     session=session,
-                    allow_lockless=crt_allow_lockless,
-                    sign_requests=crt_sign_requests,
+                    crt=crt if crt is not None else CrtClientOptions(),
                 ),
             )
         )

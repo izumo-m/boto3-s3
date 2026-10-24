@@ -15,8 +15,7 @@ S3().cp("local.txt", "s3://bucket/key")
 ```python
 S3(session=None, *, endpoint_url=None, config=None,
    transfer_config=None, reusable_after_interrupt=True,
-   crt_allow_lockless=False, crt_sign_requests=None,
-   filename_encoding=None)
+   crt=None, filename_encoding=None)
 ```
 
 - **`session`** — a `boto3.Session`. Omit it for a default session.
@@ -34,21 +33,26 @@ S3(session=None, *, endpoint_url=None, config=None,
   Either way the interrupt is re-raised, never swallowed — on the CRT engine
   too, whose manager would discard one landing in its transfer drain. Only
   `KeyboardInterrupt` is affected — every other exception reclaims fully.
-- **`crt_allow_lockless`** — what an explicit
-  `preferred_transfer_client="crt"` does when another process of this
-  application already holds the cross-process CRT slot. `False` (the default)
-  silently selects the classic engine, boto3's rule; `True` builds the CRT
-  client regardless, which is what `aws s3` does for processes that run at
-  the same time. `"auto"` respects the lock either way. Only reproducing
-  aws-cli's behavior needs it.
-- **`crt_sign_requests`** — whether the CRT transfer engine signs its
-  requests. `None` (the default) derives the answer from the built client,
-  boto3's rule. An explicit `False` builds the CRT client with no credentials
-  provider (nothing is resolved, every CRT request goes out anonymous);
-  `True` forces a provider. Only reproducing `aws s3` needs it — aws-cli's CRT
-  factory decides from its own `sign_request` flag and never from the client,
-  which is how `--no-sign-request --sse aws:kms` transfers anonymously on
-  aws-cli's CRT engine while its classic engine signs.
+- **`crt`** — the CRT transfer engine's own client settings, a
+  `CrtClientOptions`. `None` (the default) keeps boto3's behavior, which
+  derives them from the client in hand. Only reproducing `aws s3` needs it,
+  since aws-cli reads them for its CRT client apart from its botocore client:
+  - `allow_lockless` — what an explicit `preferred_transfer_client="crt"`
+    does when another process of this application already holds the
+    cross-process CRT slot. `False` (the default) silently selects the
+    classic engine, boto3's rule; `True` builds the CRT client regardless,
+    which is what `aws s3` does for processes that run at the same time.
+    `"auto"` respects the lock either way.
+  - `sign_requests` — whether the CRT client signs its requests. `None` (the
+    default) derives the answer from the client. An explicit `False` builds
+    the CRT client with no credentials provider (nothing is resolved, every
+    CRT request goes out anonymous); `True` forces a provider. This is how
+    `--no-sign-request --sse aws:kms` transfers anonymously on aws-cli's CRT
+    engine while its classic engine signs.
+  - `verify` — what the CRT client trusts for TLS. `None` (the default)
+    takes the CA bundle the client names, or the platform trust store when it
+    names none. `False` turns verification off, and a string is a CA bundle
+    path.
 - **`filename_encoding`** — the encoding of local file names on POSIX, for
   every `LocalStorage` built from a string path. `None` (the default) is
   Python's file system encoding. It has no effect on Windows, and an unknown

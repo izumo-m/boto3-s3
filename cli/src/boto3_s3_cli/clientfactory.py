@@ -520,12 +520,14 @@ def build_s3(args: argparse.Namespace) -> S3:
     call there) and raises botocore's own missing-region error, kept as the
     cause so the report is aws-cli's ``NoRegion`` one, rc 253.
     """
-    from boto3_s3 import S3
+    from boto3_s3 import S3, CrtClientOptions
 
     session = build_session(args)
     botocore_session = session._session  # pyright: ignore[reportPrivateUsage]
     region = _resolve_region(args.region, botocore_session)
     _bind_region(botocore_session, args, region)
+    with _construction_errors():
+        crt_verify = _crt_verify(args, botocore_session)
 
     class CliS3(S3):
         def client(self) -> S3Client:
@@ -552,13 +554,15 @@ def build_s3(args: argparse.Namespace) -> S3:
     # CRT lane's explicit-endpoint pin (design/crt.md) - without it, an
     # --endpoint-url under an AWS domain (a VPC interface endpoint) would be
     # dropped by the host heuristic and the CRT would re-resolve to public S3.
-    # crt_allow_lockless=True: aws-cli documents an explicit 'crt' preference as
+    # crt: the CRT client's own settings, read as aws-cli's CRT factory reads
+    # them, apart from the botocore clients'.
+    # allow_lockless=True: aws-cli documents an explicit 'crt' preference as
     # the way to make concurrently running processes use the CRT client, and
     # its factory builds the CRT client whether or not it got the
     # cross-process lock (a lock it does get still marks the slot for 'auto'
     # runs). An 'auto' preference respects the lock on both tools
     # (design/crt.md section 6).
-    # crt_sign_requests: aws-cli's CRT factory attaches a credentials provider
+    # sign_requests: aws-cli's CRT factory attaches a credentials provider
     # on its own `sign_request` parameter - `--no-sign-request` and nothing
     # else - so the per-client Config(signature_version='s3v4') that
     # `--sse aws:kms` adds, which does restore signing on the classic lane
@@ -569,14 +573,20 @@ def build_s3(args: argparse.Namespace) -> S3:
     # stream) and uploads with no credentials at all, rc 0. Deriving the mode
     # from the client instead signed those requests here (design/crt.md
     # section 4).
+    # verify: aws-cli's CRT factory resolves its own trust source
+    # (`_crt_verify`), which differs from its botocore clients' by ignoring
+    # REQUESTS_CA_BUNDLE and certifi.
     # filename_encoding: the encoding aws-cli reads and writes local names with
     # in this environment, whatever Python's own choice (textencoding).
     return CliS3(
         session=session,
         endpoint_url=args.endpoint_url,
         reusable_after_interrupt=False,
-        crt_allow_lockless=True,
-        crt_sign_requests=not args.no_sign_request,
+        crt=CrtClientOptions(
+            allow_lockless=True,
+            sign_requests=not args.no_sign_request,
+            verify=crt_verify,
+        ),
         filename_encoding=textencoding.filename_encoding(),
     )
 
@@ -695,47 +705,45 @@ def _bind_region(
         botocore_session.set_config_variable("region", region)
 
 
-def _resolve_verify(args: argparse.Namespace, botocore_session: BotocoreSession) -> bool | str:
-    """The TLS trust source, resolved to an explicit value for every CLI client.
+def _client_verify(args: argparse.Namespace) -> bool | str | None:
+    """The ``verify`` every botocore client this CLI builds is given.
 
-    ``--no-verify-ssl`` -> ``False``, ``--ca-bundle`` -> that path, then the
-    two fallbacks botocore itself would walk if the value were left ``None``:
-    the ``ca_bundle`` config variable (``AWS_CA_BUNDLE`` env or the profile's
-    ``ca_bundle`` key, read off the *same* session the client is built from, so
-    the resolved profile is honored) and the ``REQUESTS_CA_BUNDLE`` env var
-    (botocore's ``EndpointCreator._get_verify_value``, present-wins so an empty
-    value stops the chain as itself rather than falling through). An empty or
-    whitespace-only value that reaches the client is then rejected at build time
-    like aws-cli v2 (`_reject_empty_ca_bundle`), not read as "verification off".
-    Nothing set lands on the bundle botocore would have used at request time -
-    certifi's, or botocore's own ``cacert.pem`` where certifi is absent, which
-    is why this asks ``get_cert_path`` rather than importing certifi.
-
-    Resolving here rather than passing ``None`` is what gives the CRT engine a
-    CA file: ``create_s3_crt_client(verify=None)`` means the *platform* trust
-    store, so a ``None`` that classic silently resolved to certifi left the two
-    engines trusting different roots. aws-cli has the same split in reverse
-    (its CRT lane resolves its bundled ``cacert.pem`` explicitly, ``factory.py``
-    ``_resolve_verify``, while its classic clients ride the botocore chain);
-    resolving once, up front, keeps both of *our* engines on the file classic
-    was already using - and keeps every CLI-built client on one value, which
-    the CRT singleton's verify compatibility check requires.
+    aws-cli's ``resolve_verify_ssl``: ``--no-verify-ssl`` -> ``False``, else
+    ``--ca-bundle``, else ``None``, which leaves the rest of the chain to
+    botocore as aws-cli's ``ClientFactory`` does - the ``ca_bundle`` config
+    variable (``AWS_CA_BUNDLE`` or the profile's ``ca_bundle``), then
+    ``REQUESTS_CA_BUNDLE``, then its default bundle. The CRT client resolves
+    its own (`_crt_verify`).
     """
     if args.no_verify_ssl:
         return False
     if args.ca_bundle is not None:
         return textencoding.os_path(cast("str", args.ca_bundle))
-    configured = botocore_session.get_config_variable("ca_bundle")
-    if configured is not None:
-        return cast("str", configured)
-    requests_bundle = os.environ.get("REQUESTS_CA_BUNDLE")
-    if requests_bundle is not None:
-        return requests_bundle
-    # Present at the botocore floor (docs/compatibility.md); True means "the
-    # default bundle" and is exactly what botocore resolves per request.
-    from botocore.httpsession import get_cert_path
+    return None
 
-    return cast("str", get_cert_path(True))
+
+def _crt_verify(
+    args: argparse.Namespace, botocore_session: BotocoreSession
+) -> str | Literal[False]:
+    """The CRT client's trust source: aws-cli's CRT factory ``_resolve_verify``.
+
+    The flags first (`_client_verify`), then the ``ca_bundle`` config
+    variable read off the session the clients are built from, then botocore's
+    bundled ``cacert.pem`` (``DEFAULT_CA_BUNDLE``). ``REQUESTS_CA_BUNDLE`` is
+    not read and neither is certifi, though the botocore clients honor both:
+    aws-cli's CRT lane reads neither. An empty or whitespace-only value is
+    refused as a client's would be (`_reject_empty_ca_bundle`), before it
+    could reach the CRT as "verification off".
+    """
+    verify = _client_verify(args)
+    if verify is None:
+        verify = cast("str | None", botocore_session.get_config_variable("ca_bundle"))
+    if verify is None:
+        from botocore.httpsession import DEFAULT_CA_BUNDLE
+
+        verify = DEFAULT_CA_BUNDLE
+    _reject_empty_ca_bundle(verify)
+    return cast("str | Literal[False]", verify)
 
 
 def build_service_client(
@@ -750,7 +758,7 @@ def build_service_client(
     aws-cli's ``S3PathResolver.from_session``: a plain ``create_client`` carrying
     only the profile session, the caller's region choice (the source side
     passes ``--source-region``, the destination ``--region``, sts none),
-    and the resolved TLS ``verify`` setting (`_resolve_verify`) - no endpoint
+    and the TLS ``verify`` flags (`_client_verify`) - no endpoint
     override. A caller's ``None`` is left to the session, as there: aws-cli binds
     its region chain's answer into the session at startup, a truthy typed
     ``--region`` at its head, so a ``create_client`` with no ``region_name``
@@ -789,7 +797,7 @@ def build_service_client(
             session,
             service,
             region_name=region,
-            verify=_resolve_verify(args, botocore_session),
+            verify=_client_verify(args),
             config=Config(**_cli_timeouts(args)),
         )
     return client
@@ -948,7 +956,7 @@ def _signature_version_pin(args: argparse.Namespace) -> str | None:
     This governs the *botocore* client alone, which is aws-cli's own split: its
     CRT factory reads ``--no-sign-request`` directly and never the client, so
     the same KMS run transfers anonymously on the CRT lane. `build_s3`
-    declares that separately (``crt_sign_requests``).
+    declares that separately (``CrtClientOptions.sign_requests``).
     """
     if _requests_kms_signing(args):
         return "s3v4"
@@ -983,9 +991,8 @@ def build_client(
     *region* supplies the chain's already-computed answer (what `build_s3`
     threads in so one invocation walks the chain - and its IMDS probe - once);
     ``--endpoint-url`` and the timeouts map to client kwargs / a botocore
-    ``Config``; ``--no-verify-ssl`` and ``--ca-bundle`` head
-    the ``verify`` chain (`_resolve_verify`, always resolved to an explicit
-    value so both transfer engines trust the same roots). Every client also
+    ``Config``; ``--no-verify-ssl`` and ``--ca-bundle`` become ``verify``
+    (`_client_verify`), and botocore resolves the rest of the chain. Every client also
     carries aws-cli's S3 error-message rewriter (`s3errormsg`). The client is
     handed to the library through ``S3Storage`` - the library never rebuilds
     connection settings itself.
@@ -1027,7 +1034,7 @@ def build_client(
             "s3",
             region_name=client_region,
             endpoint_url=args.endpoint_url,
-            verify=_resolve_verify(args, botocore_session),
+            verify=_client_verify(args),
             config=Config(**overrides),
         )
         s3errormsg.register(client)
@@ -1067,7 +1074,8 @@ def _reject_empty_ca_bundle(verify: Any) -> None:
 
     Every client a CLI-opened session builds is held to it
     (`_check_every_client`), the SDK's own included; `_create_client` checks
-    again, for a client built from a session this module did not open.
+    the flags' own value again (`_client_verify`), for a client built from a
+    session this module did not open.
     ``build_client`` / ``build_service_client`` catch it in their
     `_construction_errors` scope and refine it to the library
     ``InvalidConfigError`` (rc 255), exactly as they would botocore's own.

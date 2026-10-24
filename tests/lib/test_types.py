@@ -14,6 +14,7 @@ DT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 TYPE_NAMES = [
     "CancelMode",
     "CancelToken",
+    "CrtClientOptions",
     "FileInfo",
     "FileKind",
     "LocalFileInfo",
@@ -231,6 +232,33 @@ class TestLocalScanOptions:
             False,
             True,
         )
+
+
+class TestCrtClientOptions:
+    def test_defaults_keep_boto3s_behavior(self) -> None:
+        opts = t.CrtClientOptions()
+        assert (opts.allow_lockless, opts.sign_requests, opts.verify) == (False, None, None)
+
+    @pytest.mark.parametrize("verify", [False, "/etc/ca.pem"], ids=["disabled", "ca-bundle"])
+    def test_accepts_off_and_a_path(self, verify: object) -> None:
+        assert t.CrtClientOptions(verify=verify).verify == verify  # pyright: ignore[reportArgumentType]
+
+    @pytest.mark.parametrize(
+        "verify",
+        [True, 0, b"/etc/ca.pem", Path("/etc/ca.pem")],
+        ids=["true", "int", "bytes", "path"],
+    )
+    def test_refuses_anything_else(self, verify: object) -> None:
+        # True is ambiguous (botocore: its bundled CA file; awscrt: the
+        # platform store), so it is refused rather than read either way.
+        with pytest.raises(boto3_s3.ValidationError, match="None, False or a CA bundle path"):
+            t.CrtClientOptions(verify=verify)  # pyright: ignore[reportArgumentType]
+
+    @pytest.mark.parametrize("verify", ["", "  "], ids=["empty", "whitespace"])
+    def test_refuses_an_empty_path(self, verify: str) -> None:
+        # Never read as "verification off".
+        with pytest.raises(boto3_s3.ValidationError, match="empty or whitespace-only"):
+            t.CrtClientOptions(verify=verify)
 
 
 class TestPublicReExport:

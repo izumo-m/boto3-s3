@@ -23,6 +23,7 @@ from boto3_s3 import (
     Boto3S3Error,
     CancelledError,
     CancelToken,
+    CrtClientOptions,
     FileInfo,
     FileKind,
     InvalidConfigError,
@@ -729,14 +730,14 @@ class TestTransferConfigDefault:
         assert _captured_transferrer_kwargs["transfer_config"].max_concurrency == 5
 
 
-class TestCrtSignRequestsPosture:
-    """``crt_sign_requests`` reaches every route that builds a Transferrer.
+class TestCrtClientOptionsPosture:
+    """``S3(crt=...)`` reaches every route that builds a Transferrer.
 
-    The declaration is what keeps ``boto3-s3-cli``'s ``--no-sign-request``
+    The options are what keep ``boto3-s3-cli``'s ``--no-sign-request``
     anonymous on the CRT lane even where ``--sse aws:kms`` restores signing on
-    the client (design/crt.md section 4); a route that forgot to thread it
-    would sign that route's transfers where ``aws s3`` sends them
-    unsigned.
+    the client (design/crt.md section 4), and its CRT lane on aws-cli's trust
+    source; a route that forgot to thread them would sign that route's
+    transfers where ``aws s3`` sends them unsigned.
     """
 
     def _run(self, s3: S3, tmp_path: Any, route: str) -> None:
@@ -750,18 +751,23 @@ class TestCrtSignRequestsPosture:
             s3.sync(str(tmp_path), "s3://bucket/pfx")
 
     @pytest.mark.parametrize("route", ["cp", "stream", "sync"])
-    @pytest.mark.parametrize("declared", [None, False, True], ids=["default", "unsigned", "signed"])
+    @pytest.mark.parametrize(
+        "declared",
+        [None, CrtClientOptions(sign_requests=False, verify="/ca.pem")],
+        ids=["default", "declared"],
+    )
     def test_posture_reaches_every_route(
         self,
         _captured_transferrer_kwargs: dict[str, Any],
         tmp_path: Any,
         route: str,
-        declared: bool | None,
+        declared: CrtClientOptions | None,
     ) -> None:
-        s3 = S3() if declared is None else S3(crt_sign_requests=declared)
+        s3 = S3(crt=declared)
         with pytest.raises(_StopTransferError):
             self._run(s3, tmp_path, route)
-        assert _captured_transferrer_kwargs["crt"].sign_requests is declared
+        expected = declared if declared is not None else CrtClientOptions()
+        assert _captured_transferrer_kwargs["crt"].crt == expected
 
 
 class TestMaterializeCrtEngine:
@@ -798,8 +804,7 @@ class TestMaterializeCrtEngine:
         s3 = S3(
             session=session,
             endpoint_url=endpoint,
-            crt_allow_lockless=True,
-            crt_sign_requests=False,
+            crt=CrtClientOptions(allow_lockless=True, sign_requests=False),
         )
         s3.materialize_crt_engine(client, transfer_config=config)  # pyright: ignore[reportArgumentType]
         assert [entry.pop("config").preferred_transfer_client for entry in seen] == ["crt"]
@@ -808,8 +813,7 @@ class TestMaterializeCrtEngine:
                 "client": client,
                 "endpoint": endpoint,
                 "session": session,
-                "allow_lockless": True,
-                "sign_requests": False,
+                "crt": CrtClientOptions(allow_lockless=True, sign_requests=False),
             }
         ]
 

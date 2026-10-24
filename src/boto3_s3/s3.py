@@ -92,6 +92,7 @@ from boto3_s3.synclanes import (
 from boto3_s3.transfer import TransferItem, Transferrer, crt_engine_errors
 from boto3_s3.types import (
     CancelToken,
+    CrtClientOptions,
     FileFilter,
     FileInfo,
     ListingCallback,
@@ -566,27 +567,12 @@ class S3:
     requests an *orderly* termination). The posture reaches the scans through
     ``ScanOptions.reusable_after_interrupt``.
 
-    ``crt_allow_lockless`` is the second such posture declaration, for the
-    CRT transfer engine under cross-process lock contention and an
-    **explicit** ``'crt'`` preference. ``False`` (the default) is
-    boto3's rule: another process of this application holding the CRT slot
-    silently selects the classic engine. ``True`` is aws-cli's: its factory
-    builds the CRT client regardless, as aws-cli documents an explicit
-    ``'crt'`` for processes that run at the same time. An ``'auto'``
-    preference respects the lock either way -
-    aws-cli's own ``auto`` resolution. Only the CLI distribution sets it
-    (design/crt.md section 6).
-
-    ``crt_sign_requests`` is the third, and says whether the CRT engine signs
-    at all. ``None`` (the default) derives it from the built client, boto3's
-    rule: only a client configured with botocore's ``UNSIGNED`` signature
-    transfers anonymously. ``True`` / ``False`` is the application's own
-    answer, aws-cli's ``sign_request``: its CRT factory attaches a credentials
-    provider on ``--no-sign-request`` alone and never reads the client, so
-    ``--no-sign-request --sse aws:kms`` - where the per-client
-    ``signature_version`` restores signing for botocore - still transfers
-    anonymously on aws-cli's CRT lane while its classic lane signs. Only the CLI
-    distribution sets it (design/crt.md section 4).
+    ``crt`` is the CRT transfer engine's own client settings
+    (`CrtClientOptions`): whether an explicit ``'crt'`` preference may run
+    without the cross-process lock, whether the engine signs, and what it
+    trusts for TLS. ``None`` (the default) keeps boto3's behavior, which
+    derives each from the client in hand. They reach the transfers and the
+    deletes this instance runs on that engine.
 
     ``filename_encoding`` is handed to every ``LocalStorage`` `resolve` builds
     from a string: the encoding of local file names on POSIX (``None``, the
@@ -603,8 +589,7 @@ class S3:
         config: Config | None = None,
         transfer_config: TransferConfig | None = None,
         reusable_after_interrupt: bool = True,
-        crt_allow_lockless: bool = False,
-        crt_sign_requests: bool | None = None,
+        crt: CrtClientOptions | None = None,
         filename_encoding: str | None = None,
     ) -> None:
         self._session = session
@@ -615,8 +600,7 @@ class S3:
         self._crt = crtsupport.CrtPostures(
             endpoint=endpoint_url,
             session=session,
-            allow_lockless=crt_allow_lockless,
-            sign_requests=crt_sign_requests,
+            crt=crt if crt is not None else CrtClientOptions(),
         )
         # Checked here, as LocalStorage checks it: an unknown codec fails the
         # construction rather than the first local path resolved.
@@ -1997,8 +1981,7 @@ class S3:
             transfer_config=config,
             session=self._crt.session,
             crt_endpoint=self._crt.endpoint,
-            crt_allow_lockless=self._crt.allow_lockless,
-            crt_sign_requests=self._crt.sign_requests,
+            crt=self._crt.crt,
         ) as deleter:
             # cancel_token on the scan too (like ls): the prefetch producer
             # stops between page pulls instead of fetching pages nobody reads.

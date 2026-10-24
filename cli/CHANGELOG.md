@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `retry_mode = legacy`, `api_versions`, `SSLKEYLOGFILE` and `BOTO_DISABLE_CRT` now take effect as for any boto3 application, and a too-old SDK's refusal of `--no-overwrite`, of `ls`'s bucket filters and of an S3 Express access point under `mv --validate-same-s3-paths` is reported as the library reports it (exit codes changed).
 - A Ctrl-C during a single-key `rm` no longer prints the `delete:` line of the request in flight, and a local file time only the local zone cannot hold is used as it is, with no warning (exit codes changed).
 - Local file names, the command line, output and `file://` text now use the encoding `aws` uses in the same environment, whatever the Python version or `PYTHONUTF8` (Python 3.15 on a non-UTF-8 locale or on Windows no longer differs), and `AWS_CLI_OUTPUT_ENCODING` (or `PYTHONUTF8=1`) sets the error report's encoding as on `aws`; `PYTHONIOENCODING` no longer changes the output.
+- Under the CRT engine, `REQUESTS_CA_BUNDLE` is no longer read and the default CA file is botocore's own, as with `aws`.
 
 ## [0.9.0] - 2026-10-18
 

@@ -63,6 +63,7 @@ from boto3_s3.types import (
     CancelMode,
     CancelToken,
     CopyPropsMode,
+    CrtClientOptions,
     FileInfo,
     OpOutcome,
     OpResult,
@@ -3941,8 +3942,7 @@ class TestEngineSelection:
             *,
             endpoint: str | None = None,
             session: Any | None = None,
-            allow_lockless: bool = False,
-            sign_requests: bool | None = None,
+            crt: CrtClientOptions | None = None,
         ) -> Any:
             seen.append((client, config, endpoint, session))
             return sentinel
@@ -3966,8 +3966,7 @@ class TestEngineSelection:
             *,
             endpoint: str | None = None,
             session: Any | None = None,
-            allow_lockless: bool = False,
-            sign_requests: bool | None = None,
+            crt: CrtClientOptions | None = None,
         ) -> Any:
             seen.append(endpoint)
             return object()
@@ -4004,8 +4003,7 @@ class TestEngineSelection:
             *,
             endpoint: str | None = None,
             session: Any | None = None,
-            allow_lockless: bool = False,
-            sign_requests: bool | None = None,
+            crt: CrtClientOptions | None = None,
         ) -> Any:
             seen.append(endpoint)
             return object()
@@ -4032,8 +4030,7 @@ class TestEngineSelection:
             *,
             endpoint: str | None = None,
             session: Any | None = None,
-            allow_lockless: bool = False,
-            sign_requests: bool | None = None,
+            crt: CrtClientOptions | None = None,
         ) -> Any:
             seen.append(session)
             return object()
@@ -4053,7 +4050,7 @@ class TestEngineSelection:
     @pytest.mark.parametrize(
         "declaration", [None, False, True], ids=["library-default", "cli-unsigned", "cli-signed"]
     )
-    def test_sign_requests_posture_is_threaded_to_crtsupport(
+    def test_crt_options_are_threaded_to_crtsupport(
         self, monkeypatch: pytest.MonkeyPatch, declaration: bool | None
     ) -> None:
         # None keeps boto3's rule (derive the mode from the client); a
@@ -4061,7 +4058,7 @@ class TestEngineSelection:
         # `--no-sign-request --sse aws:kms` anonymous on the CRT lane.
         from boto3_s3 import crtsupport
 
-        seen: list[bool | None] = []
+        seen: list[CrtClientOptions | None] = []
 
         def fake_create(
             client: Any,
@@ -4069,10 +4066,9 @@ class TestEngineSelection:
             *,
             endpoint: str | None = None,
             session: Any | None = None,
-            allow_lockless: bool = False,
-            sign_requests: bool | None = None,
+            crt: CrtClientOptions | None = None,
         ) -> Any:
-            seen.append(sign_requests)
+            seen.append(crt)
             return object()
 
         monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", fake_create)
@@ -4081,10 +4077,10 @@ class TestEngineSelection:
             TransferType.UPLOAD,
             client,
             transfer_config=TransferConfig(preferred_transfer_client="crt"),
-            crt=crtsupport.CrtPostures(sign_requests=declaration),
+            crt=crtsupport.CrtPostures(crt=CrtClientOptions(sign_requests=declaration)),
         )
         transferrer._get_manager()
-        assert seen == [declaration]
+        assert seen == [CrtClientOptions(sign_requests=declaration)]
 
     def test_copy_kind_is_unconditionally_classic(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from s3transfer.manager import TransferManager
@@ -4097,8 +4093,7 @@ class TestEngineSelection:
             *,
             endpoint: str | None = None,
             session: Any | None = None,
-            allow_lockless: bool = False,
-            sign_requests: bool | None = None,
+            crt: CrtClientOptions | None = None,
         ) -> Any:
             raise AssertionError("copy reached the CRT path")  # must not run
 

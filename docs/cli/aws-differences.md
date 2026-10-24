@@ -37,10 +37,9 @@ delete answered `412`, a transfer answered `412` other than
 `--no-overwrite`'s own write, a CRT download that cannot put its file in
 place, a `mv` between two spellings of one Outposts object, an S3 Express
 access point, a plain-HTTP endpoint named anywhere but `--endpoint-url` under
-the CRT engine, a FIPS pseudo-region under the CRT engine, a
-`REQUESTS_CA_BUNDLE` the CRT engine cannot use, a `[plugins]` section, an
-alias file, a `cli_history` directory `aws` cannot create, the modification
-time a download stamps in some local zones (and the `sync` runs that follow
+the CRT engine, a FIPS pseudo-region under the CRT engine, a `[plugins]`
+section, an alias file, a `cli_history` directory `aws` cannot create, the
+modification time a download stamps in some local zones (and the `sync` runs that follow
 from it), a transfer or delete whose request dies
 without any response, a multipart copy whose tag write and its cleanup both
 fail, a local source that cannot be walked as a directory, a path with no
@@ -551,13 +550,6 @@ that say outright that the run comes out differently, listed in section 1.
   `PYTHONCOERCECLOCALE=0`), where a UTF-8 file fails here. A file in plain ASCII reads the same everywhere, and any
   `boto3` program run by the same Python reads the files as this command
   does.
-- **`REQUESTS_CA_BUNDLE` reaches the CRT engine here.** `aws` honors it on
-  its classic engine only, and its CRT transfers ignore it; this command
-  honors it whichever engine runs. Under `preferred_transfer_client = crt`, a
-  `REQUESTS_CA_BUNDLE` the CRT cannot read or use — a missing path, a file
-  that is not a PEM bundle — therefore fails the command here at exit code
-  255, where `aws` runs the command as if the variable were unset (measured on
-  `cp`, `rm`, `sync` and their dryruns).
 
 Differences that depend on which dependencies are installed — the CRT engine,
 the default checksum and the CRT-family checksums, conditional writes, and

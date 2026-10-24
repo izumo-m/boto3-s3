@@ -22,7 +22,7 @@ from typing import Any, cast
 import pytest
 from boto3.s3.transfer import TransferConfig
 
-from boto3_s3 import Exclude, Include, crtsupport, globsieve
+from boto3_s3 import CrtClientOptions, Exclude, Include, crtsupport, globsieve
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3.comparator import ParallelFilter, SyncPair
 from boto3_s3.exceptions import (
@@ -1574,7 +1574,7 @@ class TestDeletesOnTheCrtEngine:
         client, calls = make_recording_client([listing(("p/z.txt", 1)), dead, dead])
         results: list[OpResult] = []
         with pytest.raises(BatchError):
-            S3(crt_allow_lockless=True).sync(
+            S3(crt=CrtClientOptions(allow_lockless=True)).sync(
                 str(tmp_path),
                 S3Storage("s3://bucket/p", client=client),
                 delete_filter=True,
@@ -1584,7 +1584,7 @@ class TestDeletesOnTheCrtEngine:
         ((sender, _, kwargs),) = built
         # The dead batch, then the key on its own (test_deleter pins why).
         assert [op for op, _ in sender.calls] == ["DeleteObjects", "DeleteObject"]
-        assert kwargs["crt"].allow_lockless is True
+        assert kwargs["crt"].crt.allow_lockless is True
         assert ops(calls) == ["ListObjectsV2", "DeleteObjects", "DeleteObject"]
         assert [r.outcome for r in results] == [OpOutcome.FAILED]
         assert results[0].error is not None

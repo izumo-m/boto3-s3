@@ -586,6 +586,76 @@ class TransferOptions(TypedDict, total=False):
     no_overwrite: bool
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CrtClientOptions:
+    """Settings of the CRT transfer engine's own S3 client, apart from botocore's.
+
+    The CRT engine sends transfers and deletes through awscrt's S3 client, not
+    the botocore client the operation was given; listings and ``HeadObject``
+    stay on botocore. aws-cli builds the two clients separately, each from its
+    own reading of the command line and the session, so an application that
+    wants aws-cli's answers states the CRT side here (``S3(crt=...)``,
+    ``S3Deleter(crt=...)``). Every default keeps boto3's own behavior, where
+    the CRT client is derived from the botocore client.
+
+    ``allow_lockless`` is for cross-process lock contention under an
+    **explicit** ``'crt'`` preference. ``False`` (the default) is boto3's
+    rule: another process of this application holding the CRT slot silently
+    selects the classic engine. ``True`` is aws-cli's: its factory builds the
+    CRT client regardless, as aws-cli documents an explicit ``'crt'`` for
+    processes that run at the same time. An ``'auto'`` preference respects the
+    lock either way - aws-cli's own ``auto`` resolution (design/crt.md
+    section 6).
+
+    ``sign_requests`` says whether the CRT client signs at all. ``None`` (the
+    default) derives it from the botocore client, boto3's rule: only a client
+    configured with botocore's ``UNSIGNED`` signature transfers anonymously.
+    ``True`` / ``False`` is the application's own answer, aws-cli's
+    ``sign_request``: its CRT factory attaches a credentials provider on
+    ``--no-sign-request`` alone and never reads the client, so
+    ``--no-sign-request --sse aws:kms`` - where the per-client
+    ``signature_version`` restores signing for botocore - still transfers
+    anonymously on aws-cli's CRT lane while its classic lane signs
+    (design/crt.md section 4).
+
+    ``verify`` is the CRT client's TLS trust source. ``None`` (the default)
+    derives it from the botocore client: a client that names a CA bundle (its
+    ``verify``, ``AWS_CA_BUNDLE``, a profile's ``ca_bundle``,
+    ``REQUESTS_CA_BUNDLE``) hands that file over, and one that names none
+    leaves the CRT on the platform trust store, as boto3 does. ``False``
+    turns certificate verification off, and a string is the path of a CA
+    bundle file. ``True`` is refused: botocore reads it as its own bundled CA
+    file and awscrt as the platform store, so either reading would mislead.
+    An empty or whitespace-only path is refused too, as the botocore client's
+    setting is (it would read as "verification off"). Both are a
+    ``ValidationError`` at construction.
+
+    The CRT client is one per process: an operation whose settings differ
+    from the ones it was built with runs on the classic engine instead.
+    """
+
+    allow_lockless: bool = False
+    sign_requests: bool | None = None
+    verify: str | Literal[False] | None = None
+
+    def __post_init__(self) -> None:
+        verify = self.verify
+        if verify is None or verify is False:
+            return
+        # Deferred: exceptions is light, but this module stays import-free.
+        from boto3_s3.exceptions import ValidationError
+
+        # Runtime guard for untyped callers: ``True`` and non-strings.
+        if not isinstance(verify, str):  # pyright: ignore[reportUnnecessaryIsInstance]
+            raise ValidationError(
+                f"CrtClientOptions.verify must be None, False or a CA bundle path (got {verify!r})"
+            )
+        if not verify.strip():
+            raise ValidationError(
+                "CrtClientOptions.verify must not be an empty or whitespace-only CA bundle path"
+            )
+
+
 ProgressCallback = Callable[[TransferProgress], None]
 ResultCallback = Callable[[OpResult], None]
 ListingCallback = Callable[[FileInfo], None]
@@ -623,6 +693,7 @@ __all__ = [
     "CancelToken",
     "CaseConflictMode",
     "CopyPropsMode",
+    "CrtClientOptions",
     "FileFilter",
     "FileInfo",
     "FileKind",

@@ -26,8 +26,8 @@ their area but are not indexed here.
   [`mv`](./operations/mv.md), [`presign`](./operations/presign.md),
   [`rb`](./operations/rb.md), [`rm`](./operations/rm.md),
   [`sync`](./operations/sync.md), [`website`](./operations/website.md).
-- [`options.md`](./options.md) — `TransferOptions`, `TransferConfig`, the
-  `ScanOptions` family, and the mode enums they carry.
+- [`options.md`](./options.md) — `TransferOptions`, `TransferConfig`,
+  `CrtClientOptions`, the `ScanOptions` family, and the mode enums they carry.
 - [`results.md`](./results.md) — `OpResult` and `OpOutcome`, transfer progress,
   the listing entry types, the callback aliases, and `CancelToken`.
 - [`exceptions.md`](./exceptions.md) — `Boto3S3Error` and its subclasses: what
@@ -67,6 +67,7 @@ that wraps it is documented on the same page.
 - [`ConfigSection`](./misc.md#configsection)
 - [`ConfigurationError`](./exceptions.md#configurationerror)
 - [`CopyPropsMode`](./options.md#copypropsmode)
+- [`CrtClientOptions`](./options.md#crtclientoptions)
 - [`cp`](./operations/cp.md#s3cp)
 - [`DestOnlyPair`](./comparator.md#destonlypair)
 - [`EtagComparison`](./comparator.md#etagcomparison)

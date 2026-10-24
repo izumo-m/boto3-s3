@@ -21,7 +21,7 @@ which are not objects; submitting them would try to delete prefixes.
 S3Deleter(storage, *, request_payer=None, on_result=None, cancel_token=None,
           batch_size=1000, operation="delete", capture_response=False,
           dryrun=False, transfer_config=None, session=None, crt_endpoint=None,
-          crt_allow_lockless=False, crt_sign_requests=None)
+          crt=None)
 ```
 
 `storage` must be an `S3Storage`; anything else raises `ValidationError`. Only
@@ -62,7 +62,7 @@ or — when it selects the CRT engine — the CRT client, built in the construct
 just as a transfer builds it. That is the client `aws s3` carries its deletes
 on under the same setting, so its retry policy and its error text are the
 deletes' here too; one difference it makes is spelled out under
-[Failures](#3-failures). `session` and the `crt_*` arguments are the CRT
+[Failures](#3-failures). `session`, `crt_endpoint` and `crt` are the CRT
 engine's postures, as on [`S3`](../reference/s3.md#s3); leave them alone
 unless you set them there. `rm` and `sync` pass their own `transfer_config`
 and postures (an S3-to-S3 `sync` always deletes on botocore, as `aws s3` runs

@@ -364,8 +364,9 @@ its `__all__`:
   process-wide CRT client for `client` and returns an s3transfer
   `CRTTransferManager`, or `None` where boto3 would fall back to classic (the
   lock held elsewhere, a client incompatible with the one the engine was built
-  for). The keyword arguments — `endpoint`, `session`, `allow_lockless`,
-  `sign_requests` — are the postures [`S3`](./s3.md#s3) declares and threads through; the
+  for). The keyword arguments — `endpoint`, `session` and `crt` (a
+  [`CrtClientOptions`](./options.md#crtclientoptions)) — are the postures
+  [`S3`](./s3.md#s3) declares and threads through; the
   failures it raises are classified at `S3`'s seams, not here.
   `materialize_crt_engine(client, config, ...)` — the same construction with
   the result dropped, after `selects_crt`; `caller_endpoint(client, endpoint)`
@@ -519,8 +520,7 @@ S3Deleter(
     transfer_config: TransferConfig | None = None,
     session: Session | None = None,
     crt_endpoint: str | None = None,
-    crt_allow_lockless: bool = False,
-    crt_sign_requests: bool | None = None,
+    crt: CrtClientOptions | None = None,
 )
 ```
 
@@ -543,8 +543,9 @@ to botocore where a transfer would fall back to classic; an explicit `'crt'`
 without a usable awscrt raises botocore's `MissingDependencyException`). On
 the CRT client a request is serialized by botocore and signed and sent by the
 CRT, so the CRT's retry policy and error text apply, as they do to `aws s3`'s
-deletes under that engine. `session` and the `crt_*` arguments are the CRT
-engine's postures, with [`S3`](./s3.md#s3)'s meaning (`crt_endpoint` is its
+deletes under that engine. `session`, `crt_endpoint` and `crt` (a
+[`CrtClientOptions`](./options.md#crtclientoptions)) are the CRT engine's
+postures, with [`S3`](./s3.md#s3)'s meaning (`crt_endpoint` is its
 `endpoint_url` pin, applied only to the client built from it); `S3.rm` and `sync`
 pass their instance's, and `sync` passes a classic config for an S3-to-S3 run,
 which `aws s3` always runs on its classic client. A `dryrun` deleter builds no

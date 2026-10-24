@@ -2,8 +2,9 @@
 
 The value objects that configure a call: the object-shaping options
 `cp` / `mv` / `sync` accept as keyword arguments, the `TransferConfig` that
-tunes the transfer engine, the `ScanOptions` family a `Storage` enumeration
-takes, and the mode enums those carry. The narrative treatment — which options
+tunes the transfer engine, the `CrtClientOptions` that set up the CRT engine's
+own S3 client, the `ScanOptions` family a `Storage` enumeration takes, and the
+mode enums those carry. The narrative treatment — which options
 matter when, with worked examples — is in
 [`../library/transfer-options.md`](../library/transfer-options.md); this page is
 the per-field contract. Every symbol below is exported from the `boto3_s3` root.
@@ -317,6 +318,63 @@ used without that resolution — a plain boto3 one, or one handed to
 `Transferrer` directly — propagates botocore's `MissingDependencyException`
 instead, which stays outside the `Boto3S3Error` hierarchy by design
 ([`exceptions.md`](./exceptions.md)).
+
+## CrtClientOptions
+
+The settings of the CRT transfer engine's own S3 client, kept apart from the
+botocore client's. On the CRT engine, transfers and deletes go through
+awscrt's S3 client, while listings and `HeadObject` stay on the botocore
+client. aws-cli builds the two clients separately, each from its own reading
+of the command line and the session; an application that wants aws-cli's
+answers states the CRT side here. It is passed as
+[`S3(crt=...)`](./s3.md#s3) and [`S3Deleter(crt=...)`](./misc.md#s3deleter).
+
+```python
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CrtClientOptions:
+    allow_lockless: bool = False
+    sign_requests: bool | None = None
+    verify: str | Literal[False] | None = None
+```
+
+Every default keeps boto3's behavior, which derives the CRT client from the
+botocore client in hand. None of the fields has an effect unless
+[`TransferConfig.preferred_transfer_client`](#transferconfig) selects the CRT
+engine.
+
+`allow_lockless` decides what an **explicit**
+`preferred_transfer_client="crt"` does when another process of this
+application already holds the cross-process CRT slot. `False` (the default) is
+boto3's rule: the run silently selects the classic engine. `True` is
+`aws s3`'s: the CRT client is built regardless, as the AWS CLI documents an
+explicit `crt` for processes that run at the same time. An `"auto"`
+preference respects the lock either way — that is `aws s3`'s own `auto`
+resolution.
+
+`sign_requests` declares whether the CRT client signs its requests. The
+default `None` derives the answer from the botocore client — boto3's rule: no
+credentials provider when the client's `signature_version` is botocore's
+`UNSIGNED`, a provider otherwise. An explicit value is the application's own
+answer and wins in both directions; `False` builds the CRT client with no
+credentials provider at all (no credentials are resolved), the shape aws-cli's
+CRT factory takes from its `sign_request` parameter. aws-cli signs
+`--no-sign-request --sse aws:kms` transfers on its classic engine but not on
+its CRT engine, and the declaration is what lets the `boto3-s3` command
+mirror that split.
+
+`verify` is the CRT client's TLS trust source. The default `None` derives it
+from the botocore client: a client that names a CA bundle — its `verify`,
+`AWS_CA_BUNDLE`, a profile's `ca_bundle`, `REQUESTS_CA_BUNDLE` — hands that
+file to the CRT, and one that names none leaves the CRT on the platform trust
+store, as boto3 does. `False` turns certificate verification off, and a string
+is the path of a CA bundle file. `True` is refused, since botocore reads it as
+its own bundled CA file and awscrt as the platform store; an empty or
+whitespace-only path is refused too, as the botocore client's setting is. Both
+are a [`ValidationError`](./exceptions.md#validationerror) at construction.
+
+The CRT client is one per process, and it is pinned to the signing mode and
+the trust source it was built with: an operation whose options disagree runs
+on the classic engine instead.
 
 ## ScanOptions
 

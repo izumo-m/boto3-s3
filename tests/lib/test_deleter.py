@@ -30,6 +30,7 @@ from boto3_s3 import (
     Boto3S3Error,
     CancelMode,
     CancelToken,
+    CrtClientOptions,
     LocalStorage,
     NotFoundError,
     OpOutcome,
@@ -1273,15 +1274,16 @@ class TestCrtRoute:
             operation="rm",
             session=session,
             crt_endpoint="http://e",
-            crt_allow_lockless=True,
-            crt_sign_requests=False,
+            crt=CrtClientOptions(allow_lockless=True, sign_requests=False, verify="/ca.pem"),
         ).close()
         ((_, config, kwargs),) = built
         assert config is _crt()
         assert kwargs == {
             "operation": "rm",
             "crt": crtsupport.CrtPostures(
-                endpoint="http://e", session=session, allow_lockless=True, sign_requests=False
+                endpoint="http://e",
+                session=session,
+                crt=CrtClientOptions(allow_lockless=True, sign_requests=False, verify="/ca.pem"),
             ),
         }
 
@@ -1325,7 +1327,9 @@ class TestCrtDeleteSender:
             _crt(),
             operation="rm",
             crt=crtsupport.CrtPostures(
-                endpoint="http://e", session=session, allow_lockless=True, sign_requests=True
+                endpoint="http://e",
+                session=session,
+                crt=CrtClientOptions(allow_lockless=True, sign_requests=True),
             ),
         )
         assert got is sender
@@ -1336,8 +1340,7 @@ class TestCrtDeleteSender:
                 {
                     "endpoint": "http://e",
                     "session": session,
-                    "allow_lockless": True,
-                    "sign_requests": True,
+                    "crt": CrtClientOptions(allow_lockless=True, sign_requests=True),
                 },
             )
         ]

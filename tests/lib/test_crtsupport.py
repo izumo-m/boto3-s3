@@ -28,6 +28,7 @@ from botocore.exceptions import ClientError, MissingDependencyException  # noqa:
 
 from boto3_s3 import crtsupport  # noqa: E402
 from boto3_s3.transferconfig import TransferConfig  # noqa: E402
+from boto3_s3.types import CrtClientOptions  # noqa: E402
 
 AWS_ENDPOINT = "https://s3.us-east-1.amazonaws.com"
 
@@ -363,7 +364,7 @@ class TestCreateCrtTransferManager:
         manager = crtsupport.create_crt_transfer_manager(
             FakeClient(),  # pyright: ignore[reportArgumentType]
             TransferConfig(preferred_transfer_client="crt"),
-            allow_lockless=True,
+            crt=CrtClientOptions(allow_lockless=True),
         )
         assert manager is not None
         assert len(stubs.create_kwargs) == 1
@@ -377,7 +378,7 @@ class TestCreateCrtTransferManager:
         manager = crtsupport.create_crt_transfer_manager(
             FakeClient(),  # pyright: ignore[reportArgumentType]
             TransferConfig(preferred_transfer_client="auto"),
-            allow_lockless=True,
+            crt=CrtClientOptions(allow_lockless=True),
         )
         assert manager is None
         assert stubs.create_kwargs == []
@@ -394,7 +395,7 @@ class TestCreateCrtTransferManager:
             crtsupport.create_crt_transfer_manager(
                 FakeClient(),  # pyright: ignore[reportArgumentType]
                 TransferConfig(preferred_transfer_client="crt"),
-                allow_lockless=True,
+                crt=CrtClientOptions(allow_lockless=True),
             )
             is not None
         )
@@ -402,7 +403,7 @@ class TestCreateCrtTransferManager:
             crtsupport.create_crt_transfer_manager(
                 FakeClient(),  # pyright: ignore[reportArgumentType]
                 TransferConfig(preferred_transfer_client="auto"),
-                allow_lockless=True,
+                crt=CrtClientOptions(allow_lockless=True),
             )
             is None
         )
@@ -431,7 +432,7 @@ class TestCreateCrtTransferManager:
             crtsupport.create_crt_transfer_manager(
                 FakeClient(),  # pyright: ignore[reportArgumentType]
                 TransferConfig(preferred_transfer_client="crt"),
-                allow_lockless=True,
+                crt=CrtClientOptions(allow_lockless=True),
             )
             is not None
         )
@@ -452,7 +453,7 @@ class TestCreateCrtTransferManager:
                 crtsupport.create_crt_transfer_manager(
                     FakeClient(),  # pyright: ignore[reportArgumentType]
                     TransferConfig(preferred_transfer_client="crt"),
-                    allow_lockless=True,
+                    crt=CrtClientOptions(allow_lockless=True),
                 )
                 is not None
             )
@@ -547,6 +548,50 @@ class TestCreateCrtTransferManager:
         with pytest.raises(BotocoreInvalidConfigError, match="Invalid CA bundle"):
             crtsupport.create_crt_transfer_manager(client, None)  # pyright: ignore[reportArgumentType]
         assert stubs.create_kwargs == []
+
+    @pytest.mark.parametrize("declared", [False, "/etc/crt.pem"], ids=["disabled", "ca-bundle"])
+    @pytest.mark.parametrize(
+        "botocore_verify", [True, "/etc/client.pem"], ids=["default", "bundle"]
+    )
+    def test_declared_verify_wins_over_the_client(
+        self, stubs: CrtStubs, botocore_verify: Any, declared: Any
+    ) -> None:
+        # aws-cli's split: its CRT factory resolves its own trust source and
+        # never reads the botocore client's.
+        client = FakeClient(verify=botocore_verify)
+        options = CrtClientOptions(verify=declared)
+        crtsupport.create_crt_transfer_manager(client, None, crt=options)  # pyright: ignore[reportArgumentType]
+        [kwargs] = stubs.create_kwargs
+        assert kwargs["verify"] == declared
+
+    @pytest.mark.parametrize(
+        ("first", "second", "compatible"),
+        [
+            ("/etc/a.pem", "/etc/a.pem", True),
+            ("/etc/a.pem", "/etc/b.pem", False),
+            (None, "/etc/a.pem", False),
+            ("/etc/a.pem", False, False),
+        ],
+        ids=["same", "other-bundle", "derived-then-declared", "bundle-then-off"],
+    )
+    def test_declared_verify_is_pinned(
+        self, stubs: CrtStubs, first: Any, second: Any, compatible: bool
+    ) -> None:
+        # The singleton keeps the trust source it was built with: a later
+        # request declaring another rides classic rather than the first's TLS.
+        manager = crtsupport.create_crt_transfer_manager(
+            FakeClient(),  # pyright: ignore[reportArgumentType]
+            None,
+            crt=CrtClientOptions(verify=first),
+        )
+        assert manager is not None
+        again = crtsupport.create_crt_transfer_manager(
+            FakeClient(),  # pyright: ignore[reportArgumentType]
+            None,
+            crt=CrtClientOptions(verify=second),
+        )
+        assert (again is not None) is compatible
+        assert len(stubs.create_kwargs) == 1
 
     def test_plain_config_is_not_forwarded_to_the_manager(
         self, stubs: CrtStubs, caplog: pytest.LogCaptureFixture
@@ -819,7 +864,7 @@ class TestCrtSigningPosture:
         assert crtsupport.create_crt_transfer_manager(
             FakeClient(),  # pyright: ignore[reportArgumentType]
             None,
-            sign_requests=False,
+            crt=CrtClientOptions(sign_requests=False),
         )
         [kwargs] = stubs.create_kwargs
         assert "crt_credentials_provider" not in kwargs
@@ -838,7 +883,9 @@ class TestCrtSigningPosture:
                 return super()._get_credentials()
 
         client = CountingClient()
-        assert crtsupport.create_crt_transfer_manager(client, None, sign_requests=False)  # pyright: ignore[reportArgumentType]
+        assert crtsupport.create_crt_transfer_manager(
+            client, None, crt=CrtClientOptions(sign_requests=False)
+        )  # pyright: ignore[reportArgumentType]
         assert client.credential_lookups == 0
 
     def test_a_declared_unsigned_run_admits_a_client_with_no_credentials(
@@ -850,7 +897,7 @@ class TestCrtSigningPosture:
         assert crtsupport.create_crt_transfer_manager(
             FakeClient(creds=None),  # pyright: ignore[reportArgumentType]
             None,
-            sign_requests=False,
+            crt=CrtClientOptions(sign_requests=False),
         )
         [kwargs] = stubs.create_kwargs
         assert "crt_credentials_provider" not in kwargs
@@ -860,7 +907,7 @@ class TestCrtSigningPosture:
         assert crtsupport.create_crt_transfer_manager(
             FakeClient(unsigned=True),  # pyright: ignore[reportArgumentType]
             None,
-            sign_requests=True,
+            crt=CrtClientOptions(sign_requests=True),
         )
         [kwargs] = stubs.create_kwargs
         assert kwargs["crt_credentials_provider"] == "crt-provider"
@@ -881,9 +928,13 @@ class TestCrtSigningPosture:
         # One CRT client per process bakes in its credentials provider (or the
         # absence of one), so a later request declaring the other mode must
         # fall back to classic rather than transfer under the first's.
-        assert crtsupport.create_crt_transfer_manager(FakeClient(), None, sign_requests=first)  # pyright: ignore[reportArgumentType]
+        assert crtsupport.create_crt_transfer_manager(
+            FakeClient(), None, crt=CrtClientOptions(sign_requests=first)
+        )  # pyright: ignore[reportArgumentType]
         assert (
-            crtsupport.create_crt_transfer_manager(FakeClient(), None, sign_requests=second)  # pyright: ignore[reportArgumentType]
+            crtsupport.create_crt_transfer_manager(
+                FakeClient(), None, crt=CrtClientOptions(sign_requests=second)
+            )  # pyright: ignore[reportArgumentType]
             is None
         )
 
@@ -892,14 +943,16 @@ class TestCrtSigningPosture:
             assert crtsupport.create_crt_transfer_manager(
                 FakeClient(),  # pyright: ignore[reportArgumentType]
                 None,
-                sign_requests=False,
+                crt=CrtClientOptions(sign_requests=False),
             )
         assert len(stubs.create_kwargs) == 1
 
     def test_materialize_threads_the_declaration(self, stubs: CrtStubs) -> None:
         # `rm`'s eager construction pays the same wiring the transfers get.
         config = TransferConfig(preferred_transfer_client="crt")
-        crtsupport.materialize_crt_engine(FakeClient(), config, sign_requests=False)  # pyright: ignore[reportArgumentType]
+        crtsupport.materialize_crt_engine(
+            FakeClient(), config, crt=CrtClientOptions(sign_requests=False)
+        )  # pyright: ignore[reportArgumentType]
         [kwargs] = stubs.create_kwargs
         assert "crt_credentials_provider" not in kwargs
 

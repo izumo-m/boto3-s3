@@ -538,8 +538,7 @@ class SyncDeletes:
                         transfer_config=self._transfer_config,
                         session=self._crt.session,
                         crt_endpoint=self._crt.endpoint,
-                        crt_allow_lockless=self._crt.allow_lockless,
-                        crt_sign_requests=self._crt.sign_requests,
+                        crt=self._crt.crt,
                     )
                 )
             self._deleter.submit(info)

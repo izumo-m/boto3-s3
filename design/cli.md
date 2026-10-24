@@ -341,22 +341,22 @@ numbers in the bold item labels below are that document's.
   it - which is what leaves the credential chain's STS / SSO clients unsigned
   too, and what lets a per-client `signature_version` beat it, item 2 below; the
   CRT transfer lane takes the flag directly instead, as
-  `S3(crt_sign_requests=not args.no_sign_request)` - aws-cli's CRT factory reads
+  `CrtClientOptions(sign_requests=not args.no_sign_request)` - aws-cli's CRT factory reads
   its `sign_request` parameter and never the client's signature version),
   `--cli-read-timeout` /
   `--cli-connect-timeout` -> `Config` and the session's default client config
   (item 8 below). The assembled client is handed to the
   library via `S3Storage(uri, client=...)` (the library does not rebuild the
-  connection settings). `verify` is never left to botocore to resolve later:
-  `_resolve_verify` walks `--no-verify-ssl` > `--ca-bundle` > the `ca_bundle`
-  config variable (`AWS_CA_BUNDLE` or the profile key, read off the session the
-  client is built from) > `REQUESTS_CA_BUNDLE` > `get_cert_path(True)`, so every
-  CLI-built client carries an explicit trust source. The first two steps are the
-  option mapping; the rest reproduce, up front, the chain botocore would have
-  walked at request time - which the CRT engine never sees, since
-  `create_s3_crt_client(verify=None)` means the platform trust store
-  ([`crt.md`](./crt.md)). Leaving it unresolved had the two engines trusting
-  different roots. An empty or whitespace-only answer is **refused** rather
+  connection settings). The trust source is resolved twice, as aws-cli
+  resolves it for its two clients. Every botocore client gets aws-cli's
+  `verify_ssl` parameter (`_client_verify`: `--no-verify-ssl` -> `False`, else
+  `--ca-bundle`, else `None`), and botocore walks the rest: the `ca_bundle`
+  config variable, `REQUESTS_CA_BUNDLE`, its default bundle. The CRT client
+  gets aws-cli's CRT factory resolution (`_crt_verify`, as
+  `CrtClientOptions.verify`): the same flags, then the `ca_bundle` config
+  variable read off the session, then botocore's bundled `cacert.pem` -
+  never `REQUESTS_CA_BUNDLE` or certifi ([`crt.md`](./crt.md)). An empty or
+  whitespace-only answer is **refused** rather
   than used: `_reject_empty_ca_bundle` raises botocore's own
   `InvalidConfigError` (rc 255), which is what aws-cli v2 does
   from 2.36.6 on and what the installed botocore does from 1.43.54 - the
@@ -1630,11 +1630,11 @@ them:
   region resolved, `build_s3`'s `S3` stops a CRT run at the engine's
   construction slot with botocore's missing-region error, rc 253, as aws-cli's
   CRT run stops there (crt.md section 4, "Where the CRT region comes from").
-  The lock posture is declared on `S3`: `S3(crt_allow_lockless=True)` makes an
-  explicit `crt` preference build the CRT client even when another process
-  holds the cross-process slot, aws-cli's factory shape (crt.md section 4). The
-  signing posture too: `S3(crt_sign_requests=not args.no_sign_request)`
-  mirrors aws-cli's CRT factory, which reads only its `sign_request` parameter -
+  The CRT client's settings are declared on `S3` as `CrtClientOptions`:
+  `allow_lockless=True` makes an explicit `crt` preference build the CRT
+  client even when another process holds the cross-process slot, aws-cli's
+  factory shape (crt.md section 4). The signing posture too:
+  `sign_requests=not args.no_sign_request` mirrors aws-cli's CRT factory, which reads only its `sign_request` parameter -
   so `--no-sign-request --sse aws:kms` transfers anonymously on the CRT lane
   while the classic lane signs, exactly aws-cli's engine split (crt.md section
   4).

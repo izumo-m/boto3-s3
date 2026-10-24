@@ -164,12 +164,13 @@ config=None read as `'auto'` - with the same rules as boto3.
     path ride through; botocore's own default (`True`, or nothing set at all)
     maps to `None`, which is boto3-faithful (plain boto3 passes no `verify` to
     `create_s3_crt_client` either) but means the **platform** trust store,
-    not the certifi bundle the classic engine uses. The CLI does not rely on
-    this mapping: `clientfactory._resolve_verify` resolves an explicit CA file
-    into every client it builds (`--no-verify-ssl` > `--ca-bundle` >
-    `ca_bundle` config variable > `REQUESTS_CA_BUNDLE` > botocore's
-    `get_cert_path(True)`), so both engines trust the same roots and every
-    CLI client passes the verify half of the compatibility check below
+    not the certifi bundle the classic engine uses. A caller's
+    `CrtClientOptions.verify` replaces the derivation. The CLI declares one
+    the way aws-cli's CRT factory resolves it (`clientfactory._crt_verify`:
+    `--no-verify-ssl` > `--ca-bundle` > `ca_bundle` config variable >
+    botocore's bundled `cacert.pem`, never `REQUESTS_CA_BUNDLE`), apart from
+    the botocore clients' own resolution, so its two engines trust what
+    aws-cli's do
   - credentials = decided by the `sign_requests` declaration when the caller
     makes one (aws-cli's `sign_request` parameter: `False` = no provider,
     `True` = `BotocoreCRTCredentialsWrapper(client._get_credentials())`);
@@ -386,7 +387,7 @@ credentials provider on its `sign_request` parameter alone - the per-client
 botocore client only - so aws-cli itself is inconsistent across engines for
 `--no-sign-request --sse aws:kms` (anonymous on CRT, signed on classic), and
 `build_s3` mirrors both halves by declaring
-`S3(crt_sign_requests=not args.no_sign_request)` while the classic-lane
+`S3(crt=CrtClientOptions(sign_requests=not args.no_sign_request))` while the classic-lane
 signature logic stays as clientfactory resolves it. The declaration is off by
 default (`None` derives the mode from the client, boto3's rule), so nothing
 changes for a library caller.
@@ -462,8 +463,8 @@ for `auto` runs). Clients built side by side only compete for throughput:
 output and exit codes are those of a run that holds the lock (measured
 2026-08-01). boto3 instead answers a held lock with the silent classic
 fallback. Same split as the signing posture above: the library keeps boto3's rule and the CLI opts out through
-`S3(crt_allow_lockless=True)` (`clientfactory.build_s3`), threaded to
-`create_crt_transfer_manager(allow_lockless=...)`. The opt-in is scoped to an
+`S3(crt=CrtClientOptions(allow_lockless=True))` (`clientfactory.build_s3`),
+threaded to `create_crt_transfer_manager(crt=...)`. The opt-in is scoped to an
 explicit `'crt'` preference - `auto` resolves classic under contention on `aws`
 too - and to the lock alone: every identity pin of the compatibility check is
 unchanged. The scoping survives construction: a singleton built under the
@@ -562,7 +563,7 @@ error's details need not (checked by the e2e CRT lane - testing.md).
   library default - silently falls back to classic. The two are
   indistinguishable in output and rc (proven; only the engine and so the
   throughput differ). The CLI keeps aws-cli's promise with
-  `S3(crt_allow_lockless=True)` (section 4, "Building without the
+  `CrtClientOptions(allow_lockless=True)` (section 4, "Building without the
   cross-process lock"); library callers keep boto3's fallback by default.
 - **Ctrl-C and fatals on the CRT lane**: pip s3transfer's CRT manager
   discards a drain-time `KeyboardInterrupt` - its coordinator converts the
