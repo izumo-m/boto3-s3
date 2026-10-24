@@ -473,7 +473,7 @@ numbers in the bold item labels below are that document's.
      botocore bundled with aws-cli v2 pins these four to pure-Python classes and
      lets CRT handle only the asymmetric SigV4a family. The library's `presign`
      signs a symmetric SigV4 URL with the pure-Python signer per call
-     (`S3._sigv4_presign`), leaving botocore's process-wide table alone; the
+     (`boto3_s3.s3._sigv4_presign`), leaving botocore's process-wide table alone; the
      requests themselves sign with whichever signer the table holds, which
      differs only in an error or an unusual environment (awscrt's refuses an
      empty region, and adds a lowercase `host` header) and is not compensated.
