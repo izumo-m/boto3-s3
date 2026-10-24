@@ -3,7 +3,7 @@
 aws-cli parses map-typed options with its shorthand grammar (``awscli/
 shorthand.py`` ``ShorthandParser``) and also accepts the equivalent JSON object.
 `_Parser` ports the part of that grammar a map of strings can take, so the CLI
-accepts exactly what aws accepts, including the corner cases the naive
+accepts exactly what aws-cli accepts, including the corner cases the naive
 ``split(",")``/``partition("=")`` got wrong:
 
 - a duplicate key is rejected (``Second instance of key ...`` -> rc 252), not
@@ -12,10 +12,10 @@ accepts exactly what aws accepts, including the corner cases the naive
 - single/double-quoted values that contain commas (``k="a,b"`` -> ``a,b``),
 - an empty segment between pairs is absorbed (``a=b,,c=d`` is two pairs),
 - the ``@=`` paramfile operator (``k@=file://path`` loads the file's text; a
-  prefix-less value passes through - aws's "file-optional-values").
+  prefix-less value passes through - aws-cli's "file-optional-values").
 
-aws's grammar also builds lists (``k=a,b``, ``k=[a,b]``) and nested maps
-(``k={a=b}``), which a map of strings cannot hold; aws parses them and then
+aws-cli's grammar also builds lists (``k=a,b``, ``k=[a,b]``) and nested maps
+(``k={a=b}``), which a map of strings cannot hold; aws-cli parses them and then
 rejects them with botocore's type report. Here they are rejected while
 parsing, as is a ``fileb://`` value loaded through ``@=``. Every rejection is
 an ``Error parsing parameter '<name>'`` usage error (rc 252 via
@@ -71,12 +71,12 @@ def parse_map_option(value: str, *, name: str, operation: str) -> dict[str, str]
     """Parse ``k1=v1,k2=v2`` shorthand or a JSON object into a string map.
 
     A value whose leading non-whitespace character is ``{`` or ``[`` is read
-    as JSON (aws's short-circuit to its JSON unpacker), and only an object
+    as JSON (aws-cli's short-circuit to its JSON unpacker), and only an object
     whose values are all strings is accepted. Everything else is parsed with
     `_Parser`; a value loaded as bytes through ``@=fileb://`` is then refused,
     since a map value must be text. Every refusal is the ``Error parsing
     parameter '<name>'`` usage error (rc 252 via ``ValidationError``), a
-    paramfile the ``@=`` operator cannot *load* included. aws reports that
+    paramfile the ``@=`` operator cannot *load* included. aws-cli reports that
     one load failure at 255 instead - its shorthand parser calls
     ``get_paramfile`` outside the handler that names the argument - an
     accident of its call path that is not copied: a file named on the
@@ -103,7 +103,7 @@ def parse_map_option(value: str, *, name: str, operation: str) -> dict[str, str]
 
 
 def _parse_json_map(value: str, *, name: str, operation: str) -> dict[str, str]:
-    """aws's map branch of ``_unpack_complex_cli_arg``: a JSON object of strings.
+    """aws-cli's map branch of ``_unpack_complex_cli_arg``: a JSON object of strings.
 
     A ``[`` lead is refused without decoding it: no array can be a map.
     """
@@ -135,7 +135,7 @@ class _Parser:
     """Recursive-descent port of aws-cli's ``ShorthandParser``, scalars only.
 
     ``parameter = keyval *("," keyval)`` over ``keyval = key ("=" / "@=")
-    value``. aws's grammar goes on to build lists and nested maps, which no
+    value``. aws-cli's grammar goes on to build lists and nested maps, which no
     map of strings can hold; here a value that would start one is refused
     where it starts (`_values`, `_csv_value`). What is accepted is unchanged:
     the csv second-value probe that tells a list from the next pair is kept,
@@ -176,8 +176,8 @@ class _Parser:
         # "=" the key is "" ("=bar" parses to {"": "bar"} and the transfer
         # proceeds, rc 0), and anything else fails _expect (rc 252).
         key = self._key()
-        # aws grammar: keyval = key "=" [values] / key "@=" [file-optional-values].
-        # '@' opts the value into paramfile resolution; aws probes it with the
+        # aws-cli grammar: keyval = key "=" [values] / key "@=" [file-optional-values].
+        # '@' opts the value into paramfile resolution; aws-cli probes it with the
         # same try/expect shape (whitespace consumed either way).
         self._resolve_paramfiles = False
         try:
@@ -195,12 +195,12 @@ class _Parser:
         return self._value[start : self._index]
 
     def _values(self) -> _ShorthandValue:
-        """aws's ``values`` dispatch, without its list and hash-literal branches."""
+        """aws-cli's ``values`` dispatch, without its list and hash-literal branches."""
         if self._at_eof():
             return ""
         char = self._value[self._index]
         if char in "[{":
-            # aws's explicit list / hash literal: never a string.
+            # aws-cli's explicit list / hash literal: never a string.
             raise _ShorthandParseError(
                 f"A value starting with '{char}' must be quoted for input:\n "
                 f"{self._error_marker(self._index)}"
@@ -208,10 +208,10 @@ class _Parser:
         return self._csv_value()
 
     def _csv_value(self) -> _ShorthandValue:
-        """aws's ``_csv_value``: one scalar, refusing the list that may follow it.
+        """aws-cli's ``_csv_value``: one scalar, refusing the list that may follow it.
 
-        After a ',' aws probes for a second value; the probe failing on
-        anything but EOF means the ',' ended the pair, and aws backtracks only
+        After a ',' aws-cli probes for a second value; the probe failing on
+        anything but EOF means the ',' ended the pair, and aws-cli backtracks only
         to the nearest ',' - which absorbs an empty segment between pairs
         (``a=b,,c=d`` is two pairs) and can land inside an escaped comma
         (``k=,\\,a=b``). An at-EOF failure propagates instead, which is why
@@ -246,7 +246,7 @@ class _Parser:
             return self._quoted_value(_DOUBLE_QUOTED_RE, escaped_char='"', name="double quoted")
         match = _FIRST_VALUE_RE.match(self._value[self._index :])
         if match is None:
-            # aws returns the empty value unresolved, without consuming anything.
+            # aws-cli returns the empty value unresolved, without consuming anything.
             return ""
         return self._resolve(self._consume_match(match).replace("\\,", ",").rstrip())
 
@@ -270,7 +270,7 @@ class _Parser:
         return self._resolve(body.replace("\\\\", "\\"))
 
     def _resolve(self, value: str) -> str | bytes:
-        """aws's ``_resolve_paramfiles``: load the value when ``@=`` armed the pair.
+        """aws-cli's ``_resolve_paramfiles``: load the value when ``@=`` armed the pair.
 
         A load failure is reported as the option's parse error by
         `parse_map_option`'s `paramfile.named_argument` scope.
@@ -323,7 +323,7 @@ class _Parser:
             self._index += 1
 
     def _current(self) -> str | None:
-        """The character under the cursor, or None at EOF (aws's ``_EOF`` sentinel)."""
+        """The character under the cursor, or None at EOF (aws-cli's ``_EOF`` sentinel)."""
         if self._index < len(self._value):
             return self._value[self._index]
         return None

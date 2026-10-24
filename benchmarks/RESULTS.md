@@ -34,17 +34,17 @@ Environment:
 - Python 3.14.7 (uv-managed, uv 0.12.10) on both architectures; boto3-s3
   0.11.0 / boto3-s3-cli 0.8.0; boto3/botocore 1.43.44, s3transfer 0.19.2,
   awscrt 0.32.2.
-- aws side: pinned aws-cli 2.36.40 (the x86_64 and aarch64 Linux builds,
+- aws-cli side: pinned aws-cli 2.36.40 (the x86_64 and aarch64 Linux builds,
   bundling Python 3.14.6).
 
-### E2E, m7i.xlarge (medians in seconds; ratio = net ours / net aws)
+### E2E, m7i.xlarge (medians in seconds; ratio = net ours / net `aws`)
 
-Startup probes (raw): `--version` ours 0.058 / aws 0.367 (classic),
-0.060 / 0.383 (crt); `startup_minimal` ours 0.301 / aws 0.527 (classic),
-0.308 / 0.549 (crt); `sync_tiny` ours 0.352 / aws 0.594 (classic),
+Startup probes (raw): `--version` ours 0.058 / `aws` 0.367 (classic),
+0.060 / 0.383 (crt); `startup_minimal` ours 0.301 / `aws` 0.527 (classic),
+0.308 / 0.549 (crt); `sync_tiny` ours 0.352 / `aws` 0.594 (classic),
 0.421 / 0.632 (crt).
 
-| scenario | engine | ours raw | ours net | aws raw | aws net | ratio |
+| scenario | engine | ours raw | ours net | `aws` raw | `aws` net | ratio |
 |---|---|---|---|---|---|---|
 | ls_recursive_10k | classic | 1.328 | 1.027 | 2.474 | 1.947 | 0.53 |
 | sync_noop_10k | classic | 1.399 | 1.098 | 2.671 | 2.144 | 0.51 |
@@ -63,12 +63,12 @@ Startup probes (raw): `--version` ours 0.058 / aws 0.367 (classic),
 
 ### E2E, m7g.xlarge (same layout)
 
-Startup probes (raw): `--version` ours 0.076 / aws 0.450 (classic),
-0.076 / 0.451 (crt); `startup_minimal` ours 0.387 / aws 0.637 (classic),
-0.390 / 0.630 (crt); `sync_tiny` ours 0.441 / aws 0.692 (classic),
+Startup probes (raw): `--version` ours 0.076 / `aws` 0.450 (classic),
+0.076 / 0.451 (crt); `startup_minimal` ours 0.387 / `aws` 0.637 (classic),
+0.390 / 0.630 (crt); `sync_tiny` ours 0.441 / `aws` 0.692 (classic),
 0.517 / 0.716 (crt).
 
-| scenario | engine | ours raw | ours net | aws raw | aws net | ratio |
+| scenario | engine | ours raw | ours net | `aws` raw | `aws` net | ratio |
 |---|---|---|---|---|---|---|
 | ls_recursive_10k | classic | 1.506 | 1.118 | 2.632 | 1.994 | 0.56 |
 | sync_noop_10k | classic | 1.513 | 1.125 | 3.044 | 2.407 | 0.47 |
@@ -87,7 +87,7 @@ Startup probes (raw): `--version` ours 0.076 / aws 0.450 (classic),
 
 ### Throughput and peak memory (E2E; MiB/s over net, median peak RSS in MiB)
 
-| scenario | engine | m7i ours | m7i aws | m7g ours | m7g aws | m7i RSS ours / aws | m7g RSS ours / aws |
+| scenario | engine | m7i ours | m7i `aws` | m7g ours | m7g `aws` | m7i RSS ours / `aws` | m7g RSS ours / `aws` |
 |---|---|---|---|---|---|---|---|
 | cp_upload_large (1GB) | classic | 595 | 591 | 600 | 599 | 107 / 131 | 110 / 131 |
 | cp_download_large (1GB) | classic | 545 | 418 | 439 | 366 | 79 / 103 | 91 / 111 |
@@ -125,7 +125,7 @@ Notes:
   tree an hour earlier on m7i showed the same (1.16). The CRT download is at
   parity (0.99 and 1.06, both tools at 1.0-1.2 GiB/s). This was the one row
   that flagged; the cause and the fix are in the follow-up below.
-- Peak RSS: ours runs at 52-89% of aws on every classic row (the listing
+- Peak RSS: ours runs at 52-89% of `aws` on every classic row (the listing
   and rm rows sit at 67-70 MiB against 87-134, the changed-file sync at
   100-125 against 124-140); on the CRT large-file
   rows both tools are dominated by the CRT's buffers (440-520 MiB each,
@@ -153,7 +153,7 @@ bundles 0.36.2) and the default upload checksum (pip s3transfer stamps
 `CRC64NVME`). Each was tried on its own, on m7i.xlarge against real S3, as a
 local one-commit change on top of `40ce11e` (not pushed):
 
-| change under test | crt cp_upload_large ratio | ours / aws MiB/s |
+| change under test | crt cp_upload_large ratio | ours / `aws` MiB/s |
 |---|---|---|
 | none (the baseline runs above) | 1.11, 1.12, 1.16 | 729 / 810, 690 / 774, 690 / 797 |
 | awscrt 0.36.2 (two runs) | 1.20, 1.19 | 685 / 824, 702 / 835 |
@@ -168,7 +168,7 @@ Over 1 GiB that is about 0.3 s of CRC32 against 0.05 s of CRC64NVME, and on
 four vCPUs pushing 800 MiB/s it shows in the wall time. Downloads were never
 affected because both tools validate with the CRT's own configuration.
 
-The fix names aws's default (`CRC64NVME`) on the CLI side wherever aws's
+The fix names aws-cli's default (`CRC64NVME`) on the CLI side wherever aws-cli's
 bundled botocore would stamp it: first on the library's CRT lane alone
 (`eb5711c`, the commit the confirmation runs below measured), then moved to
 the CLI layer for both engines and every checksummed request, with the
@@ -218,16 +218,16 @@ Environment:
   `.venv-bench`); boto3-s3 0.11.0 / boto3-s3-cli 0.8.0; boto3/botocore
   1.43.44, s3transfer 0.19.2, awscrt 0.32.2 - identical in both environments
   (one lockfile).
-- aws side: pinned aws-cli 2.36.40 (`exe/x86_64.ubuntu.26`, bundling
+- aws-cli side: pinned aws-cli 2.36.40 (`exe/x86_64.ubuntu.26`, bundling
   Python 3.14.6), the same binary on both runs.
 
-### E2E on Python 3.10 (medians in seconds; ratio = net ours / net aws)
+### E2E on Python 3.10 (medians in seconds; ratio = net ours / net `aws`)
 
-Startup probes (raw): `--version` ours 0.063 / aws 0.524 (classic),
-0.062 / 0.463 (crt); `startup_minimal` ours 0.405 / aws 0.765 (classic),
+Startup probes (raw): `--version` ours 0.063 / `aws` 0.524 (classic),
+0.062 / 0.463 (crt); `startup_minimal` ours 0.405 / `aws` 0.765 (classic),
 0.287 / 0.559 (crt).
 
-| scenario | engine | ours raw | ours net | aws raw | aws net | ratio |
+| scenario | engine | ours raw | ours net | `aws` raw | `aws` net | ratio |
 |---|---|---|---|---|---|---|
 | ls_recursive_10k | classic | 0.917 | 0.512 | 2.517 | 1.752 | 0.29 |
 | sync_noop_10k | classic | 0.756 | 0.351 | 2.300 | 1.535 | 0.23 |
@@ -243,11 +243,11 @@ Startup probes (raw): `--version` ours 0.063 / aws 0.524 (classic),
 
 ### E2E on Python 3.14 (same layout; "vs 3.10" is the change in ratio)
 
-Startup probes (raw): `--version` ours 0.088 / aws 0.437 (classic),
-0.149 / 0.682 (crt); `startup_minimal` ours 0.359 / aws 0.653 (classic),
+Startup probes (raw): `--version` ours 0.088 / `aws` 0.437 (classic),
+0.149 / 0.682 (crt); `startup_minimal` ours 0.359 / `aws` 0.653 (classic),
 0.291 / 0.548 (crt).
 
-| scenario | engine | ours raw | ours net | aws raw | aws net | ratio | vs 3.10 |
+| scenario | engine | ours raw | ours net | `aws` raw | `aws` net | ratio | vs 3.10 |
 |---|---|---|---|---|---|---|---|
 | ls_recursive_10k | classic | 0.668 | 0.309 | 1.982 | 1.329 | 0.23 | -21% |
 | sync_noop_10k | classic | 0.765 | 0.406 | 2.505 | 1.852 | 0.22 | -4% |
@@ -297,11 +297,11 @@ Notes:
 - Every flag the runs raised is a measurement artifact of that floor or of
   host noise: `startup_version` classic +40% is the 20 ms above; crt +142%
   is a burst (the five 3.14 samples were 0.069, 0.071, 0.149, 0.151 and
-  0.179, and aws's own `--version` in the same window spanned 0.41-0.90);
+  0.179, and `aws`'s own `--version` in the same window spanned 0.41-0.90);
   `cp_download_large` classic +63% and `rm_recursive_2k` +10% are
   noise-floor rows (nets of 0.06-0.18 s; the rm ratio is 0.06 on both
   interpreters and the flag is a quotient of two such numbers). The CRT
-  large-file rows show `-` on 3.14 because aws's raw medians (0.495 /
+  large-file rows show `-` on 3.14 because `aws`'s raw medians (0.495 /
   0.501) fell under its own `startup_minimal` (0.548), so no net exists;
   the 1.16 flag on the 3.10 CRT upload is the same noise-floor row.
   `inproc_dispatch` +31% is 0.002 -> 0.003 s, the `--version` floor at the
@@ -323,13 +323,13 @@ boto3-s3 0.7.0 / boto3-s3-cli 0.5.0 (as the run recorded them; the tree at
 the commit above declares boto3-s3-cli 0.6.0);
 boto3/botocore 1.43.44, s3transfer 0.19.0, awscrt 0.32.2, Python 3.10.20.
 
-### E2E (medians in seconds; ratio = net ours / net aws, < 1 is ours faster)
+### E2E (medians in seconds; ratio = net ours / net `aws`, < 1 is ours faster)
 
-Startup probes (raw): `--version` ours 0.045 / aws 0.358 (classic),
-0.045 / 0.370 (crt); `startup_minimal` ours 0.210 / aws 0.410 (classic),
+Startup probes (raw): `--version` ours 0.045 / `aws` 0.358 (classic),
+0.045 / 0.370 (crt); `startup_minimal` ours 0.210 / `aws` 0.410 (classic),
 0.224 / 0.440 (crt).
 
-| scenario | engine | ours raw | ours net | aws raw | aws net | ratio |
+| scenario | engine | ours raw | ours net | `aws` raw | `aws` net | ratio |
 |---|---|---|---|---|---|---|
 | ls_recursive_10k | classic | 0.610 | 0.401 | 1.752 | 1.342 | 0.30 |
 | sync_noop_10k | classic | 0.607 | 0.397 | 1.823 | 1.413 | 0.28 |
@@ -357,12 +357,12 @@ Startup probes (raw): `--version` ours 0.045 / aws 0.358 (classic),
 Notes:
 
 - The listing gains are the fast ISO 8601 timestamp parser (`abd1533`):
-  the aws ratio on listing-heavy scenarios halved (ls 0.62 -> 0.30,
+  the `aws` ratio on listing-heavy scenarios halved (ls 0.62 -> 0.30,
   sync_noop 0.58 -> 0.28) because aws-cli's bundled botocore still parses
   every `LastModified` through dateutil.
 - The cp rows' higher absolute levels versus 2026-07-14 are host drift, not
-  a code regression: the aws control moved in lockstep (E2E
-  cp_upload_large raw: ours +58% / aws +54%; small-file cp: both ~+15%),
+  a code regression: the `aws` control moved in lockstep (E2E
+  cp_upload_large raw: ours +58% / `aws` +54%; small-file cp: both ~+15%),
   and a 12-round in-process A/B of the tuned session versus a plain one
   read 0.997 on cp. The paired ratios are the trustworthy signal.
 - The run's two flags are measurement artifacts of that drift:
@@ -390,15 +390,15 @@ Environment:
 - Python 3.10.20; boto3-s3 0.6.0-dev / boto3-s3-cli 0.5.0-dev (the working
   tree at the commit above); boto3/botocore 1.43.44, s3transfer 0.19.0,
   awscrt 0.32.2
-- aws side: pinned aws-cli 2.35.18 (`exe/x86_64.ubuntu.26`)
+- aws-cli side: pinned aws-cli 2.35.18 (`exe/x86_64.ubuntu.26`)
 
-### E2E (medians in seconds; ratio = net ours / net aws, < 1 is ours faster)
+### E2E (medians in seconds; ratio = net ours / net `aws`, < 1 is ours faster)
 
-Startup probes (raw): `--version` ours 0.038 / aws 0.291 (classic),
-0.044 / 0.327 (crt); `startup_minimal` ours 0.196 / aws 0.403 (classic),
+Startup probes (raw): `--version` ours 0.038 / `aws` 0.291 (classic),
+0.044 / 0.327 (crt); `startup_minimal` ours 0.196 / `aws` 0.403 (classic),
 0.213 / 0.424 (crt).
 
-| scenario | engine | ours raw | ours net | aws raw | aws net | ratio |
+| scenario | engine | ours raw | ours net | `aws` raw | `aws` net | ratio |
 |---|---|---|---|---|---|---|
 | ls_recursive_10k | classic | 0.882 | 0.686 | 1.513 | 1.110 | 0.62 |
 | sync_noop_10k | classic | 0.933 | 0.737 | 1.676 | 1.273 | 0.58 |
@@ -429,7 +429,7 @@ Notes:
   the pre-fix measurement (dirty tree on `64a5a84`) had the CRT large-file
   ratios at 1.41 (upload) / 1.12 (download), which that fix brought to
   1.01 / 0.90 here. Every scenario now meets the "equal to or better than
-  aws s3" goal within noise.
+  `aws s3`" goal within noise.
 - In-process absolute levels on this host vary by tens of percent between
   runs under different host load; within-run spreads are the stable signal
   (design/benchmark.md "Reading the numbers").

@@ -534,8 +534,8 @@ class TestClientSeam:
     def test_a_client_the_cli_vetted_skips_the_environment(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # boto3-s3-cli checks every client its sessions build where aws does;
-        # a second look at the environment would refuse runs aws completes.
+        # boto3-s3-cli checks every client its sessions build where aws-cli does;
+        # a second look at the environment would refuse runs aws-cli completes.
         from boto3_s3.s3storage import CA_BUNDLE_ENVIRONMENT_VETTED
 
         monkeypatch.setenv("AWS_CA_BUNDLE", "")
@@ -769,7 +769,7 @@ class TestMaterializeCrtEngine:
 
     The seam ``rm`` uses to pay ``aws s3``'s transfer-manager construction
     without transferring; the postures it forwards are what make that
-    construction fail where aws's does.
+    construction fail where aws-cli's does.
     """
 
     @pytest.fixture(autouse=True)

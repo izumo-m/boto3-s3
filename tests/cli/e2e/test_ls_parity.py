@@ -4,10 +4,10 @@ For each scenario both CLIs run as subprocesses against the same live
 endpoint and the same seeded keys (``ls`` is read-only, so the sides share
 one seeding). Two layers of assertions:
 
-1. **Golden persist/check** - under ``UPDATE_GOLDENS=1`` the aws capture is
-   written to ``tests/cli/goldens/ls/``; otherwise the live aws output must
+1. **Golden persist/check** - under ``UPDATE_GOLDENS=1`` the `aws` capture is
+   written to ``tests/cli/goldens/ls/``; otherwise the live `aws` output must
    still match the committed golden (detects aws-cli drift after upgrades).
-   Runs *before* the diff so the aws truth is recorded even while our side
+   Runs *before* the diff so the aws-cli truth is recorded even while our side
    is divergent.
 2. **Live diff** - exit codes must match for every scenario, unconditionally
    (exit-code charter, design/overview.md section 3); normalized stdout must match

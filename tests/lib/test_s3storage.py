@@ -185,7 +185,7 @@ class TestEtagIsKeptAsReceived:
     download (and a multipart copy's ``CopySourceIfMatch``), and aws-cli sends
     the response's text there untouched. Stripping the quotes and putting them
     back is only an identity for the usual quoted form: measured against the
-    pinned aws (2.36.40) through a 127.0.0.1 fake, an ETag served as ``abc``
+    pinned `aws` (2.36.40) through a 127.0.0.1 fake, an ETag served as ``abc``
     goes back as ``abc`` and one served as ``W/"abc"`` as ``W/"abc"``, where a
     strip-and-requote sent ``"abc"`` and ``"W/"abc"``.
     """
@@ -544,7 +544,7 @@ class TestListBuckets:
     def test_scan_at_root_is_object_listing_not_buckets(self) -> None:
         # scan is object listing only: at a service root it uses list_objects_v2
         # (with an empty Bucket, which real botocore rejects as an Invalid bucket
-        # name - matching aws s3 cp/rm/sync s3://), never ListBuckets.
+        # name - matching `aws s3 cp/rm/sync s3://`), never ListBuckets.
         storage, client = _storage([], url="s3://")
         list(storage.scan())
         assert client.paginator_names == ["list_objects_v2"]
@@ -730,7 +730,7 @@ class TestScanErrorMapping:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # NoCredentials/NoRegion keep the PLAIN ConfigurationError - the CLI
-        # maps that to aws's dedicated rc 253, while the InvalidConfigError
+        # maps that to aws-cli's dedicated rc 253, while the InvalidConfigError
         # refinement maps to the general 255 (design/exceptions.md section 3).
         import boto3
         from botocore.exceptions import NoCredentialsError
@@ -1330,7 +1330,7 @@ class TestResolveRouting:
         assert S3().resolve(storage) is storage
 
     def test_resolve_reads_a_string_the_way_the_transfer_commands_do(self) -> None:
-        # aws's _normalize_s3_trailing_slash: a keyless URI is the bucket root,
+        # aws-cli's _normalize_s3_trailing_slash: a keyless URI is the bucket root,
         # and an Outposts access point closed with ":" re-reads as the key "/".
         arn = "arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-1/accesspoint/ap"
         resolved = S3().resolve(f"s3://{arn}:")
@@ -1767,7 +1767,7 @@ class TestPutFile:
         info = storage.put_file(source, key="manifest.json")
 
         # One request, and nothing shapes the object: no ContentType, so no MIME
-        # guessing (that is the transfer lanes' aws parity behavior, not this one's).
+        # guessing (that is the transfer lanes' aws-cli parity behavior, not this one's).
         assert client.calls == [{"Bucket": "bucket", "Key": "prefix/manifest.json"}]
         assert client.bodies == [b"payload-bytes"]
         assert isinstance(info, S3FileInfo)

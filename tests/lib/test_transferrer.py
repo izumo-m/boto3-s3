@@ -306,7 +306,7 @@ class TestUpload:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # boto3-faithful: the default is s3transfer's (CRC32 in its CRT module).
-        # aws's CRC64NVME default is the CLI's to name (boto3_s3_cli.checksumdefault,
+        # aws-cli's CRC64NVME default is the CLI's to name (boto3_s3_cli.checksumdefault,
         # design/crt.md section 1) - and it matters there, since aws-checksums
         # computes CRC32 in software (benchmarks/RESULTS.md 2026-09-06).
         extra_args = self._upload_on_crt(tmp_path, monkeypatch)
@@ -623,7 +623,7 @@ class TestCopy:
     def test_explicit_copy_directive_stays_on_a_single_part_copy(self) -> None:
         # Below the threshold the directive is a real CopyObject parameter -
         # S3 itself copies or replaces the metadata - so the multipart flip
-        # must not touch it: aws sends COPY verbatim.
+        # must not touch it: aws-cli sends COPY verbatim.
         calls, source_calls, _, _ = _run(
             TransferType.COPY,
             [self._item()],
@@ -882,7 +882,7 @@ class TestCopy:
         assert transferrer.succeeded == 1
 
     def test_annotation_write_drops_the_copy_checksum_algorithm(self) -> None:
-        # --checksum-algorithm rides the copy calls, but aws writes
+        # --checksum-algorithm rides the copy calls, but aws-cli writes
         # annotations from its own subscriber and maps only RequestPayer onto
         # PutObjectAnnotation; so does `_SetAnnotations` (this pins the wire).
         responses: list[dict[str, Any] | Exception] = [
@@ -1754,7 +1754,7 @@ class TestCrtSwallowedInterrupt:
 
 class TestFatalCancellation:
     """A fatal escaping the submission loop cancels the accepted transfers
-    (aws's manager-context behavior, measured live: a mid-listing fatal
+    (aws-cli's manager-context behavior, measured live: a mid-listing fatal
     leaves every queued transfer unrun), and on the classic lane each revoked
     item reports one CANCELLED record naming the fatal (design/opresult.md;
     the CRT lane's in TestCrtCancelClassification)."""
@@ -1828,7 +1828,7 @@ class TestFatalCancellation:
         # never reach the API" assertion cannot race the worker. The in-flight
         # one still finishes - a running request cannot be interrupted - and
         # reports SUCCEEDED: s3transfer lets a completing task overwrite the
-        # mid-flight cancel mark (the bytes really landed; aws's engine does
+        # mid-flight cancel mark (the bytes really landed; aws-cli's engine does
         # the same, its printer just never shows it).
         original_cancel = TransferCoordinatorController.cancel
 
@@ -1857,7 +1857,7 @@ class TestFatalCancellation:
                 raise raise_exc()
 
         # Only the already-running first transfer reached the API; the queued
-        # two were revoked before ever becoming requests (aws's transfer set:
+        # two were revoked before ever becoming requests (aws-cli's transfer set:
         # its uploads in flight at the fatal land on S3 the same way). Record
         # order is not part of the contract - a revoked item's record fires
         # from the cancelling thread or the executor's skip path, whichever
@@ -2743,7 +2743,7 @@ class TestDirectoryCreator:
 
 class TestCrtDownloadRenameFailure:
     """A CRT download whose rename into place fails (a directory at the
-    destination, a name too long to create) read as a success: aws then
+    destination, a name too long to create) read as a success: aws-cli then
     prints it done, and a mv deletes the source with nothing written
     (measured). The failure now settles the item."""
 
@@ -2949,7 +2949,7 @@ class TestFailureWithoutAResponse:
 
     aws-cli's completion handler reads ``exception.response.get(...)`` and
     raises on the ``None`` response botocore's closed-connection and timeout
-    errors carry; s3transfer swallows that, so aws prints no line and exits 0
+    errors carry; s3transfer swallows that, so `aws` prints no line and exits 0
     for the item (measured on cp, mv, recursive cp and rm). A failure is never
     reported as a success (design/overview.md section 3), so that is not
     copied: the item fails as a refused connection does.
@@ -3011,7 +3011,7 @@ class TestFailureWithoutAResponse:
 
     def test_a_crt_move_whose_source_delete_dies_fails(self, tmp_path: Path) -> None:
         # Under the CRT engine the download lands and the source goes through
-        # a botocore DeleteObject; aws hangs there (aws-differences.md).
+        # a botocore DeleteObject; aws-cli hangs there (aws-differences.md).
         dest = tmp_path / "a.bin"
         dest.write_bytes(b"payload")
         item = TransferItem(
@@ -3117,7 +3117,7 @@ class TestNoOverwrite:
         )
         assert "IfNoneMatch" not in calls[0].params
         # The conditional write rides only the completing call: neither part
-        # copy may carry it (aws puts IfNoneMatch on CompleteMultipartUpload).
+        # copy may carry it (aws-cli puts IfNoneMatch on CompleteMultipartUpload).
         assert "IfNoneMatch" not in calls[1].params
         assert "IfNoneMatch" not in calls[2].params
         assert calls[3].params["IfNoneMatch"] == "*"
@@ -3283,7 +3283,7 @@ class TestMove:
         assert calls[1].params == {"Bucket": "bucket", "Key": "d/a.bin"}
         target = tmp_path / "out" / "a.bin"
         assert target.read_bytes() == b"payload"
-        # The mtime stamp lands (registered before the delete, aws's order).
+        # The mtime stamp lands (registered before the delete, aws-cli's order).
         assert item.mtime is not None
         assert os.stat(target).st_mtime == item.mtime.timestamp()
         assert transferrer.succeeded == 1
@@ -3398,7 +3398,7 @@ class TestMove:
             is_move=True,
         )
         assert ops(calls) == ["GetObject", "DeleteObject"]
-        # The bytes are on disk (aws ditto), but the move reports failed.
+        # The bytes are on disk (aws-cli ditto), but the move reports failed.
         assert (tmp_path / "out" / "a.bin").read_bytes() == b"payload"
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         assert transferrer.first_error is not None
@@ -3530,7 +3530,7 @@ class TestMove:
 class TestDownloadMoveFsync:
     """``LocalStorage(fsync=True)``: the durability barrier before an mv's delete.
 
-    A library-only opt-in (off by default = aws parity): a ``mv`` whose download
+    A library-only opt-in (off by default = aws-cli parity): a ``mv`` whose download
     lands on a local destination fsyncs the file (and its parent dir on POSIX)
     before the S3 source is deleted, closing s3transfer's crash window (the source
     is deleted while the bytes may still be only in the page cache).
@@ -3622,7 +3622,7 @@ class TestDownloadMoveFsync:
             [item],
             [self._get_object_response(), {}],
             is_move=True,
-            dest_storage=LocalStorage(tmp_path),  # fsync defaults off = aws parity
+            dest_storage=LocalStorage(tmp_path),  # fsync defaults off = aws-cli parity
         )
         assert ops(calls) == ["GetObject", "DeleteObject"]
         assert fds == []
@@ -3787,7 +3787,7 @@ class TestStreams:
 
     def test_a_size_hint_sizes_a_non_seekable_stream_and_the_record_counts(self) -> None:
         # A reader without seek/tell is the hint's one target: s3transfer plans
-        # the parts from the provided size and reads to EOF regardless (aws's
+        # the parts from the provided size and reads to EOF regardless (aws-cli's
         # --expected-size, applied to its non-seekable stdin alone), so the
         # whole stream is sent and SUCCEEDED reports the bytes counted, not
         # the hint the engine was handed.
@@ -3875,7 +3875,7 @@ class TestStreams:
             src_display="s3://bucket/streaming.txt",
             dest_display="-",
         )
-        # Without size+etag s3transfer probes the object itself (the aws
+        # Without size+etag s3transfer probes the object itself (the aws-cli
         # stream wire shape: HeadObject then GetObject).
         calls, _, _, transferrer = _run(
             TransferType.DOWNLOAD,
@@ -4299,7 +4299,7 @@ class TestProvidedEtagIsTheResponseText:
 
     s3transfer puts the provided value on every ranged GET of a multipart
     download and on a multipart copy's ``CopySourceIfMatch``. Measured against
-    the pinned aws (2.36.40) through a 127.0.0.1 fake: an ETag served without
+    the pinned `aws` (2.36.40) through a 127.0.0.1 fake: an ETag served without
     quotes goes back without them, a weak ``W/"..."`` one as it came, and the
     usual quoted one quoted.
     """

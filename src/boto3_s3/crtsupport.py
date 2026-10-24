@@ -430,7 +430,7 @@ def create_crt_transfer_manager(
     declaration exists because aws-cli's CRT factory reads only its own
     ``--no-sign-request`` while the per-client ``Config(signature_version=
     's3v4')`` that ``--sse aws:kms`` adds reaches its *botocore* client alone:
-    an unsigned KMS run is anonymous on aws's CRT lane and signed on its
+    an unsigned KMS run is anonymous on aws-cli's CRT lane and signed on its
     classic lane, and only a declaration can reproduce that split from a
     client that already resolved to signing. Only the CLI distribution sets it
     (design/crt.md section 4).
@@ -597,7 +597,7 @@ def _get_crt_s3_client(
         ):
             # A singleton built under the lockless opt-in holds no lock, and
             # the opt-in is scoped to explicit-'crt' requests (design/crt.md
-            # section 6) - a lock-respecting request keeps aws's own lock
+            # section 6) - a lock-respecting request keeps aws-cli's own lock
             # semantics by re-attempting the acquisition: s3transfer stores
             # the lock process-globally, so a success upgrades this singleton
             # for every later request, while live contention resolves this
@@ -661,7 +661,7 @@ def _initialize(
     # The caller's client Config rides into the serializer's nested botocore
     # client (the serializer merges signature_version=UNSIGNED on top). Without
     # it, a None endpoint re-resolves under *stock botocore's* defaults, which
-    # send us-east-1 to the legacy global endpoint (s3.amazonaws.com) - aws v2's
+    # send us-east-1 to the legacy global endpoint (s3.amazonaws.com) - aws-cli v2's
     # bundled botocore is regional-only there, and the CLI pins the classic
     # engine to regional the same way (its us_east_1_regional_endpoint
     # override, clientfactory), so the CRT lane must serialize with the same
@@ -732,7 +732,7 @@ def _serializer_config(client: S3Client) -> Any:
       ``user_agent``, which freezes the header in its legacy form -
       ``app/<id>`` (``sdk_ua_app_id`` / ``AWS_SDK_UA_APP_ID``) and
       ``cfg/retry-mode`` dropped, ``Botocore/<v>`` doubled, where the classic
-      requests and aws's CRT ones carry them (measured). What the caller
+      requests and aws-cli's CRT ones carry them (measured). What the caller
       supplied, which botocore keeps aside, goes back in its place.
     - what the serializer's session can fill in: a key the ``s3`` dict leaves
       out, a fips / dualstack flag left unset, and an app id the client has

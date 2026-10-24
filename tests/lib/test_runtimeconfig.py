@@ -2,7 +2,7 @@
 
 The parsing matrix is aws-cli ``tests/unit/customizations/s3/
 test_transferconfig.py`` translated (their ``InvalidConfigError`` escapes to
-the aws general handler = rc 255; ours is the library class of the same name,
+the aws-cli general handler = rc 255; ours is the library class of the same name,
 which the CLI's exit-code mapping sends to the same 255). The added classes pin
 what the port owns beyond the aws-cli file: the refusal of empty and invalid
 values, and the scoped-config read.
@@ -152,7 +152,7 @@ class TestRuntimeConfig:
 
 
 class TestRejectedValues:
-    """Values the parser refuses (each exits 255 on aws)."""
+    """Values the parser refuses (each exits 255 on `aws`)."""
 
     def test_invalid_size_is_rejected(self) -> None:
         with pytest.raises(InvalidConfigError):
@@ -162,7 +162,7 @@ class TestRejectedValues:
         # A `preferred_transfer_client =` line is present-empty, not unset: it
         # must reach the choices validation rather than fall back to auto -
         # which would silently flip the engine on an optimized host (the
-        # b935265 / 51e7831 empty-string family). Measured identical on aws
+        # b935265 / 51e7831 empty-string family). Measured identical on `aws`
         # (rc 255).
         with pytest.raises(InvalidConfigError):
             build_config_with(preferred_transfer_client="")
@@ -199,7 +199,7 @@ class TestLoadScopedS3Config:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # A `key =` line is present-empty: it must survive into the scope so
-        # the validation rejects it like aws (rc 255), not vanish into the
+        # the validation rejects it like aws-cli (rc 255), not vanish into the
         # defaults through a truthy guard.
         self._write(
             tmp_path,
@@ -218,7 +218,7 @@ class TestLoadScopedS3Config:
     def test_unknown_keys_are_ignored(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # aws carries them into its runtime config and reads none of them, so
+        # aws-cli carries them into its runtime config and reads none of them, so
         # dropping them here is the same run (measured: rc 0 on both).
         self._write(tmp_path, monkeypatch, "[default]\ns3 =\n  unknown_key = x\n")
         assert runtimeconfig.load_scoped_s3_config(self._config()) == {}

@@ -248,7 +248,7 @@ cases are:
   `/`, so `"data/a.txt"` gives `"data/"`, and `""` when the key contains no
   `/` at all, so `"a.txt"` gives `""`. A `/` that directly follows another, or
   opens the key, is not counted twice: `"a//b"` gives `"a/"` and `"/b"` gives
-  `""`, so both entries are matched as `"/b"` — the relative key aws is left
+  `""`, so both entries are matched as `"/b"` — the relative key aws-cli is left
   with after joining a pattern onto its root with `os.path.join`, which adds
   no second `/`. On Windows that join takes a backslash for a separator too,
   so a parent ending in one is returned as is: `"a\\/b"` gives `"a\\"`, and the

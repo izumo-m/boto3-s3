@@ -1,8 +1,8 @@
-"""``boto3_s3_cli.checksumdefault`` - aws's default request checksum on the
+"""``boto3_s3_cli.checksumdefault`` - aws-cli's default request checksum on the
 CLI's clients.
 
-aws v2's bundled botocore defaults to CRC64NVME where pip botocore defaults to
-CRC32; the CLI names aws's value where botocore would have stamped its own
+aws-cli v2's bundled botocore defaults to CRC64NVME where pip botocore defaults to
+CRC32; the CLI names aws-cli's value where botocore would have stamped its own
 (the transfer options of an upload run, and a ``provide-client-params``
 handler for every other request), and only where botocore can compute it.
 """
@@ -104,9 +104,9 @@ class TestRegister:
 
     def test_when_required_client_stamps_only_the_checksum_required_operations(self) -> None:
         # botocore's own order: a `requestChecksumRequired` operation gets the
-        # default under either setting (aws's bundled botocore stamps CRC64NVME
+        # default under either setting (aws-cli's bundled botocore stamps CRC64NVME
         # on a `when_required` `website`, measured on the wire against the
-        # pinned aws 2.36.40; pip botocore would stamp its CRC32 there), the
+        # pinned aws-cli 2.36.40; pip botocore would stamp its CRC32 there), the
         # others only under when_supported.
         client = _client(request_checksum_calculation="when_required")
         checksumdefault.register(client)
@@ -144,7 +144,7 @@ _CRT = SimpleNamespace(preferred_transfer_client="crt")
 
 class TestUploadDefault:
     def test_only_an_upload_run_gets_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # aws sends no algorithm on a copy's CopyObject / UploadPartCopy and a
+        # aws-cli sends no algorithm on a copy's CopyObject / UploadPartCopy and a
         # download writes nothing, so the transfer default is locals3's alone.
         monkeypatch.setattr(checksumdefault, "default_algorithm", lambda _client: "CRC64NVME")
         client = _fake_client("when_supported")
@@ -154,10 +154,10 @@ class TestUploadDefault:
 
     @pytest.mark.skipif(not _CAN_COMPUTE, reason="this botocore cannot compute CRC64NVME")
     def test_the_crt_engine_keeps_the_default_under_when_required(self) -> None:
-        # aws's CRT module has CRC64NVME written in as its fallback and never
+        # aws-cli's CRT module has CRC64NVME written in as its fallback and never
         # reads request_checksum_calculation - only its classic manager is
         # gated on when_supported - so a when_required CRT upload still trails
-        # CRC64NVME (measured on the wire against the pinned aws 2.36.40,
+        # CRC64NVME (measured on the wire against the pinned aws-cli 2.36.40,
         # single-part and multipart) while the same classic upload sends none.
         client = _client(request_checksum_calculation="when_required")
         assert transferargs.default_upload_checksum(client, "locals3", _CRT) == "CRC64NVME"

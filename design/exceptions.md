@@ -36,10 +36,10 @@ Boto3S3Error                # root. The supertype of all library errors. Inherit
 +-- AccessDeniedError       # S3 403 / local PermissionError
 +-- NotFoundError           # S3 404 (NoSuchKey/NoSuchBucket) / local FileNotFoundError (e.g. a missing source path)
 +-- ValidationError         # invalid argument / precondition / state
-|   `-- InvalidValueError   # refinement: a value failing post-parse conversion (aws's bare int() -> its
+|   `-- InvalidValueError   # refinement: a value failing post-parse conversion (aws-cli's bare int() -> its
 |                           #   general handler, rc 255 - not the rc-252 usage path)
 +-- TransportError          # network / local I/O failure (connection, timeout, OSError)
-+-- ConfigurationError      # credentials / region missing or unresolvable (aws's dedicated handlers, rc 253)
++-- ConfigurationError      # credentials / region missing or unresolvable (aws-cli's dedicated handlers, rc 253)
 |   `-- InvalidConfigError  # refinement: config present but invalid/unusable - aws-cli's InvalidConfigError
 |                           #   counterpart (bad [s3] value, unusable profile, partial credentials; rc 255)
 +-- CancelledError          # caller-initiated cancellation (CancelToken.cancel()).
@@ -47,7 +47,7 @@ Boto3S3Error                # root. The supertype of all library errors. Inherit
 `-- BatchError              # aggregate: a batch operation's failure rollup (counts only; the sample failure rides on __cause__; section 4)
 ```
 
-The two **refining subclasses** exist for the CLI's exit codes: aws reports
+The two **refining subclasses** exist for the CLI's exit codes: aws-cli reports
 those failures through its *general* exception handler (rc 255), while
 plain `ValidationError` / `ConfigurationError` map to the dedicated 252 / 253.
 `exit_code_for` keys on the subclass before the parent (section 5). Library
@@ -170,7 +170,7 @@ taxonomy ([`storage.md`](./storage.md) section 2).
 | local `FileNotFoundError` / a missing source path | `NotFoundError` |
 | a local path the OS calls refuse before the filesystem is asked (an embedded NUL's `ValueError`, a lone surrogate's `UnicodeEncodeError`), on `LocalStorage`'s own calls (`get_fileinfo`, `open`, a recursive download's destination directory); a single transfer's local file fails the item with the base `Boto3S3Error`, and an upload source with such a name is a missing source (`NotFoundError`) | `ValidationError` |
 | connection failure / timeout / a body ending short of its `Content-Length` (botocore's `IncompleteReadError` under urllib3 1.x, a broken stream under urllib3 2; both measured, 1.x at the SDK floor and on a current SDK; on the classic engine's download, s3transfer retries the read and raises `RetriesExceededError`, "Max Retries Exceeded", once its attempts run out); a local-I/O `OSError` caught on boto3-s3's own paths (incl. a failed `makedirs`) | `TransportError` |
-| a transfer item's local file failing inside either engine - s3transfer's `OSError` (aws's message survives verbatim, e.g. `[Errno 21] Is a directory`), awscrt's `AWS_ERROR_NO_PERMISSION` / `AWS_ERROR_FILE_INVALID_PATH` / `AWS_ERROR_FILE_*_FAILURE` / `AWS_ERROR_NO_SPACE` (`transfer.Transferrer._local_failure`) | the local rows above, naming the file in `key` with no `bucket` |
+| a transfer item's local file failing inside either engine - s3transfer's `OSError` (aws-cli's message survives verbatim, e.g. `[Errno 21] Is a directory`), awscrt's `AWS_ERROR_NO_PERMISSION` / `AWS_ERROR_FILE_INVALID_PATH` / `AWS_ERROR_FILE_*_FAILURE` / `AWS_ERROR_NO_SPACE` (`transfer.Transferrer._local_failure`) | the local rows above, naming the file in `key` with no `bucket` |
 | a CRT engine network or server failure, by awscrt's error name (`sdkerrors.crt_error_name`: an `AwsCrtError`'s, or the `RuntimeError` `<code> (<name>): ...` a request awscrt refuses synchronously raises): `AWS_IO_SOCKET_*` / `AWS_IO_DNS_*` / `AWS_IO_TLS_*`, a closed connection, a first-byte timeout, S3's `SlowDown` / internal error the CRT client gave up retrying | `TransportError` |
 | `NoCredentialsError` / `NoRegionError` | `ConfigurationError` |
 | `MissingDependencyException` from a request/signing path (awscrt absent where SigV4a is required - an MRAP target) | `ConfigurationError` |
@@ -207,7 +207,7 @@ of an item's local file): `FileNotFoundError` -> `NotFoundError`,
 and a path the OS calls refuse (`ValueError`) -> `ValidationError`.
 
 One local failure never reaches a category at all: the post-download `utime`
-stamp. `transfer.py` re-words its EPERM into aws's "attempting to modify the
+stamp. `transfer.py` re-words its EPERM into aws-cli's "attempting to modify the
 utime" text, but the caller catches every exception from the stamp (Windows can
 raise `OverflowError` / `ValueError` there too) and folds only the message into
 a WARNED record, whose `error` is a base `Boto3S3Error` like every other
@@ -348,7 +348,7 @@ class BatchError(Boto3S3Error):
   listing's and the single-source HEAD's requests capturing what botocore
   raised outside its own family the same way (the
   CLI's transfer-family commands turn an enumeration failure into rc 1, while
-  `cp`'s missing local source is rc 255 as on aws; cli.md section 6).
+  `cp`'s missing local source is rc 255 as on `aws`; cli.md section 6).
 - `OpOutcome.DRYRUN` is the report for an item a dry run *would* have acted on
   (transferred or deleted); the item's mutating API call does not occur
   (enumeration and HeadObject still run) and it does not affect rc (an
@@ -368,8 +368,8 @@ outright rather than by skipping pairs one at a time.
 
 ## 5. exit code mapping (CLI)
 
-The CLI turns this hierarchy into aws-compatible exit codes. What the codes mean
-and which one wins is specified in
+The CLI turns this hierarchy into aws-cli-compatible exit codes. What the codes
+mean and which one wins is specified in
 [`exit-codes.md`](../docs/cli/exit-codes.md); how the mapping is built - and
 which command families bypass `exit_code_for` with a local catch - is in
 [`cli.md`](./cli.md) section 6.

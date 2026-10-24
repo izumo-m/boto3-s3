@@ -151,7 +151,7 @@ class TestUnsortedListingSync:
         ]
 
     def test_unsorted_s3_destination_deletes_a_key_the_source_has(self, tmp_path: Path) -> None:
-        # aws's loss shape from the destination side: the merge uploads a.txt,
+        # aws-cli's loss shape from the destination side: the merge uploads a.txt,
         # then drains the destination as orphans and deletes a.txt as well -
         # a key the source still holds.
         src = tmp_path / "src"

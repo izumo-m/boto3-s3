@@ -128,14 +128,14 @@ s3.sync("./site", "s3://my-bucket/site/")        # upload
 s3.sync("s3://my-bucket/site/", "./site")        # download
 s3.sync("s3://src/data/", "s3://dest/data/")     # S3-to-S3
 
-s3.sync("./site", "s3://my-bucket/site/", delete_filter=True)   # aws's --delete
+s3.sync("./site", "s3://my-bucket/site/", delete_filter=True)   # aws-cli's --delete
 ```
 
 It asks one question per entry, and each has its own argument: create an entry
 that is new (`create_filter`), overwrite one present on both sides
 (`update_filter`), delete one the source no longer has (`delete_filter`). The
-defaults are exactly `aws s3 sync`, and `create_filter` is a knob aws does not
-expose.
+defaults are exactly `aws s3 sync`, and `create_filter` is a knob aws-cli does
+not expose.
 
 Unlike `aws s3 sync`, updates can be decided by **content** rather than size and
 timestamp — either against S3's ETag or against the checksum S3 already stores:

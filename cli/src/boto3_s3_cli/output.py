@@ -30,7 +30,7 @@ def uni_write(stream: TextIO, text: str) -> None:
     On a console/codepage that cannot encode the text (a non-ASCII key on a
     cp932 or ``ascii`` stream), re-encode with the stream's encoding and
     ``errors='replace'`` rather than raising - one unencodable key must never
-    abort a listing or a delete run mid-way (aws prints the line with ``?``
+    abort a listing or a delete run mid-way (aws-cli prints the line with ``?``
     substitutions and completes). Flushes like ``uni_print`` does. Every
     stdout line that can carry a key/path goes through here; stderr needs no
     fallback (Python opens it with ``errors='backslashreplace'``) but using
@@ -85,8 +85,8 @@ def human_readable_size(size: float) -> str:
     """Format a byte count like aws-cli's ``--human-readable`` (base-2 units).
 
     Accepts a float so the transfer progress display can feed it byte-per-
-    second rates (aws renders both through one helper, ``utils.py``). One
-    unreachable-range deviation: past EiB aws's suffix loop falls through and
+    second rates (aws-cli renders both through one helper, ``utils.py``). One
+    unreachable-range deviation: past EiB aws-cli's suffix loop falls through and
     returns ``None`` (rendering ``None``); this keeps counting in EiB - a
     total below 1 EiB (millions of max-size objects) never gets there.
     """
@@ -143,7 +143,7 @@ def format_entry(info: FileInfo, *, recursive: bool, human_readable: bool) -> st
         # aws-cli ListCommand._display_page: ``Prefix.split('/')[-2]`` - the last
         # path component of the common prefix, which always ends with the
         # delimiter ``/``. A prefix ending in ``//`` yields an empty component
-        # rendered ``PRE /`` (matching aws), where ``rstrip`` would wrongly keep
+        # rendered ``PRE /`` (matching aws-cli), where ``rstrip`` would wrongly keep
         # the parent ("PRE a/").
         name = info.key.split("/")[-2]
         return f"{'PRE':>{_PRE_WIDTH}} {name}/"

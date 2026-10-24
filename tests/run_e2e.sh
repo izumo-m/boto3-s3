@@ -21,9 +21,10 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.." # repo root
 
-# Prefer the pinned aws in the project venv (scripts/install-awscli.sh) for the
-# script's own aws calls too, so they match the aws the suite runs (uv run puts
-# .venv/bin on PATH). Falls back to the host aws when the venv has none.
+# Prefer the pinned `aws` in the project venv (scripts/install-awscli.sh) for
+# the script's own `aws` calls too, so they match the `aws` the suite runs (uv
+# run puts .venv/bin on PATH). Falls back to the host `aws` when the venv has
+# none.
 PATH="$PWD/.venv/bin:$PATH"
 
 export AWS_REGION="$BOTO3_S3_E2E_REGION"

@@ -73,9 +73,9 @@ class CpCommand(Command):
         src_location: object
         dest_location: object
         if src == "-":
-            # The destination key reproduces aws's quirk of appending the
+            # The destination key reproduces aws-cli's quirk of appending the
             # source's basename - literally "-" - when the dest takes the source
-            # name. A missing stdin stays aws's in-flight fatal (rc 1): the check
+            # name. A missing stdin stays aws-cli's in-flight fatal (rc 1): the check
             # lives in StdioStorage.open, reached inside the transfer below.
             src_location = StdioStorage()
             plan = plan_transfer(
@@ -91,10 +91,10 @@ class CpCommand(Command):
         else:
             src_location, dest_location = transferargs.resolve_locations(args, ctx, head)
 
-        # The stream route consults no filter (aws applies none to a stream).
+        # The stream route consults no filter (aws-cli applies none to a stream).
         item_filter = None if is_stream else filters.compile_filter(args.filters)
         transfer_config = transferargs.build_transfer_engine(ctx, s3, client, paths_type=paths_type)
-        # aws validates --case-conflict against S3 Express while building the
+        # aws-cli validates --case-conflict against S3 Express while building the
         # run's instructions, past the transfer manager.
         case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="cp")
         options = transferargs.build_transfer_options(
@@ -105,7 +105,7 @@ class CpCommand(Command):
             ),
         )
         if args.recursive and paths_type == "s3local":
-            # The dir_op half of aws's _validate_path_args, once every check
+            # The dir_op half of aws-cli's _validate_path_args, once every check
             # above has passed (transferargs.create_local_dest_dir).
             transferargs.create_local_dest_dir(dest, operation="cp")
         # Streams force the errors-only printer (aws-cli is_stream rule):
@@ -115,12 +115,12 @@ class CpCommand(Command):
         )
 
         def run_cp() -> None:
-            # Both conversions fail in-pipeline like aws: --expected-size is
+            # Both conversions fail in-pipeline like aws-cli: --expected-size is
             # a bare int() at submit time, stdin resolves when first needed.
-            # aws only ever converts --expected-size on the streaming-upload
+            # aws-cli only ever converts --expected-size on the streaming-upload
             # route (UploadStreamRequestSubmitter); on every other route the
             # value is untouched and ignored, so a non-integer there stays
-            # rc 0 - and a dryrun never converts either (aws branches to the
+            # rc 0 - and a dryrun never converts either (aws-cli branches to the
             # dryrun record before building the live subscribers, so
             # `cp - s3://b/k --expected-size abc --dryrun` is rc 0, measured).
             expected_size = None

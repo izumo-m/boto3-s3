@@ -24,7 +24,7 @@ class TestIdentifyType:
         assert transferargs.identify_type("s3://bucket/key") == "s3"
 
     def test_bare_bucket_is_local(self) -> None:
-        # Only the literal scheme marks S3 (aws identify_type); a bare
+        # Only the literal scheme marks S3 (aws-cli identify_type); a bare
         # "bucket/key" is a local path for cp purposes.
         assert transferargs.identify_type("bucket/key") == "local"
 
@@ -75,7 +75,7 @@ _OUTPOSTS_AP = (
 
 
 class TestNormalizeS3Path:
-    """aws's ``_normalize_s3_trailing_slash`` on one argument."""
+    """aws-cli's ``_normalize_s3_trailing_slash`` on one argument."""
 
     @pytest.mark.parametrize(
         ("path", "expected"),
@@ -116,7 +116,7 @@ class TestNormalizeS3Path:
 class TestNormalizedPathsAreUsed:
     """The commands build their locations from the normalized path, so an
     Outposts access point closed with ":" reads as the key "/" (measured:
-    aws lists under "/" and heads "/")."""
+    aws-cli lists under "/" and heads "/")."""
 
     def test_rm_recursive_lists_under_the_key_slash(self) -> None:
         from tests.utils.harness import run_recorded
@@ -143,7 +143,7 @@ class TestNormalizedPathsAreUsed:
 
 
 class TestRefusedArnsLeaveNothingBehind:
-    """aws refuses the unsupported ARNs right after the path-type check, so a
+    """aws-cli refuses the unsupported ARNs right after the path-type check, so a
     recursive download to a new directory stops before the directory exists."""
 
     def test_no_download_directory_is_created(
@@ -160,7 +160,7 @@ class TestRefusedArnsLeaveNothingBehind:
 
 
 class TestParamfile:
-    """aws applies file:// (text) / fileb:// (binary) paramfile resolution to s3 args."""
+    """aws-cli applies file:// (text) / fileb:// (binary) paramfile resolution to s3 args."""
 
     def test_text_file_prefix_loads_contents(self, tmp_path: Path) -> None:
         p = tmp_path / "ct.txt"
@@ -198,7 +198,7 @@ class TestParamfile:
             )
 
     def test_fileb_on_a_string_option_is_a_param_validation(self, tmp_path: Path) -> None:
-        # No bytes can be a string value: refused unread (rc 252, as aws's
+        # No bytes can be a string value: refused unread (rc 252, as aws-cli's
         # botocore type check ends).
         p = tmp_path / "ct.bin"
         p.write_bytes(b"hi\n")
@@ -208,7 +208,7 @@ class TestParamfile:
 
 
 class TestGrantsParamfile:
-    """A lone --grants file:// / fileb:// is refused unread (aws loads it and
+    """A lone --grants file:// / fileb:// is refused unread (aws-cli loads it and
     parses the text character by character - a bug not copied); a longer
     list or a prefix-less value stays a list, and every grant must have the
     permission=grantee shape with a known permission."""
@@ -227,7 +227,7 @@ class TestGrantsParamfile:
         assert args.grants == ["read=id=CANONICAL"]
 
     def test_multi_element_list_is_never_unwrapped(self, tmp_path: Path) -> None:
-        # aws only unwraps a length-1 list, so a second element keeps the
+        # aws-cli only unwraps a length-1 list, so a second element keeps the
         # whole thing a verbatim list - a file:// there included, which is
         # then a literal grant: refused for its shape, its file never read.
         p = tmp_path / "g.txt"
@@ -263,7 +263,7 @@ class TestGrantsParamfile:
 
 class TestMetadataParamfile:
     """A whole-value --metadata paramfile: file:// text feeds the shorthand
-    parse; fileb:// is refused unread (252; aws crashes in its parser)."""
+    parse; fileb:// is refused unread (252; aws-cli crashes in its parser)."""
 
     def test_whole_value_file_prefix_feeds_the_shorthand(self, tmp_path: Path) -> None:
         p = tmp_path / "m.txt"
@@ -288,7 +288,7 @@ class TestMetadataParamfile:
     ) -> None:
         p = tmp_path / "k.bin"
         p.write_bytes(b"\xff\xfe\x00\x01")  # not valid UTF-8
-        # Pin the decode to UTF-8 (aws's compat_open knob): the locale default
+        # Pin the decode to UTF-8 (aws-cli's compat_open knob): the locale default
         # elsewhere may be a codec that decodes any byte (cp1252 on Windows).
         monkeypatch.setenv("AWS_CLI_FILE_ENCODING", "utf-8")
         with pytest.raises(ValidationError) as excinfo:
@@ -302,7 +302,7 @@ class TestMetadataParamfile:
     def test_tilde_and_var_are_expanded(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # aws expands ~ and $VARs in the paramfile path (expandvars(expanduser)).
+        # aws-cli expands ~ and $VARs in the paramfile path (expandvars(expanduser)).
         (tmp_path / "ct.txt").write_text("text/x-home")
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows expanduser reads this, not HOME
@@ -321,7 +321,7 @@ class TestMetadataParamfile:
     def test_aws_cli_file_encoding_is_honored(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # aws's compat_open uses AWS_CLI_FILE_ENCODING; a latin-1 file with a
+        # aws-cli's compat_open uses AWS_CLI_FILE_ENCODING; a latin-1 file with a
         # non-ASCII byte decodes under that encoding (it would fail under UTF-8).
         p = tmp_path / "ct.txt"
         p.write_bytes("caf\xe9".encode("latin-1"))  # 0xe9, invalid UTF-8
@@ -334,10 +334,10 @@ class TestMetadataParamfile:
 
 class TestExpressCaseConflictWarning:
     def test_warning_rides_uni_write(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # The standing S3 Express warning has no trailing newline (aws's
+        # The standing S3 Express warning has no trailing newline (aws-cli's
         # measured byte shape), so it must ride the uni_print port - write plus
         # flush. A raw stderr.write sits in a block-buffered redirect until
-        # process exit, inverting aws's output order.
+        # process exit, inverting `aws`'s output order.
         writes: list[tuple[object, str]] = []
         monkeypatch.setattr(output, "uni_write", lambda stream, text: writes.append((stream, text)))
         args = argparse.Namespace(case_conflict="warn", recursive=True)
@@ -354,8 +354,8 @@ class TestExpressCaseConflictWarning:
     def test_directory_bucket_and_its_access_point_take_the_branch(
         self, src: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # aws takes this branch for --x-s3 only. An access point of a directory
-        # bucket lists the same keys just as unordered, and under aws its keys
+        # aws-cli takes this branch for --x-s3 only. An access point of a directory
+        # bucket lists the same keys just as unordered, and under aws-cli its keys
         # then pair wrongly - skip dropped objects that conflicted with nothing
         # (measured on real S3) - so the access point takes it here too.
         writes: list[str] = []
@@ -417,7 +417,7 @@ class TestBuildPrinter:
         assert transferargs.build_printer(self._args(only_show_errors=True), 0)._only_show_errors
 
     def test_progress_frequency_floors_at_the_repaint_minimum(self) -> None:
-        # --progress-frequency 0 (aws's default) is raised to the repaint
+        # --progress-frequency 0 (aws-cli's default) is raised to the repaint
         # floor; a larger value wins (aws-cli-option-handling.md section 6).
         assert transferargs.build_printer(self._args(), 0)._frequency == pytest.approx(0.1)
         assert transferargs.build_printer(self._args(), 5)._frequency == pytest.approx(5.0)

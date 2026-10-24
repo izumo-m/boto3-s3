@@ -93,20 +93,20 @@ _COMMAND_TABLE: dict[str, tuple[str, str, str]] = {
 # positional (none of our parsers register numeric option strings), so it
 # reaches an option as a value and the subcommand scan must not skip it as an
 # option. Up to 3.13 the pattern was anchored (`^-\d+$|^-\d*\.\d+$`), which
-# classifies `-1x` as option-like; aws's official distribution bundles 3.14, so
+# classifies `-1x` as option-like; aws-cli's official distribution bundles 3.14, so
 # pinning 3.14's form here keeps the classification off the host Python
 # version. `_ParamValidationArgumentParser` installs it for argparse itself and
 # `_find_command_token` mirrors it; the two must stay the same pattern.
 _NEGATIVE_NUMBER_RE = re.compile(r"-\.?\d")
 
 # aws-cli's top-level usage block (its argparser.py USAGE + HELP_BLURB),
-# collapsed onto our flatter hierarchy: boto3-s3 IS `aws s3`, so what aws calls
-# the subcommand is our only level - aws's `<command> <subcommand>` metavar
+# collapsed onto our flatter hierarchy: boto3-s3 IS `aws s3`, so what aws-cli calls
+# the subcommand is our only level - aws-cli's `<command> <subcommand>` metavar
 # pair collapses to `<subcommand>`, and its *first* help line (`aws help`, the
 # level above us) has no counterpart here, while `aws <command> help` is our
 # `boto3-s3 help` and `aws <command> <subcommand> help` our
 # `boto3-s3 <subcommand> help`. Every parse error closes with it, a
-# subcommand's own parse included, exactly as aws hands one shared USAGE
+# subcommand's own parse included, exactly as aws-cli hands one shared USAGE
 # constant to its main, service and leaf parsers alike.
 _TOP_LEVEL_USAGE = (
     "boto3-s3 [options] <subcommand> [parameters]\n"
@@ -116,38 +116,38 @@ _TOP_LEVEL_USAGE = (
     "  boto3-s3 <subcommand> help\n"
 )
 
-# aws's missing-subcommand report (its command layer's usage error): the usage
+# aws-cli's missing-subcommand report (its command layer's usage error): the usage
 # line alone - no help blurb - plus a second line that carries its own
 # `[ERROR]` prefix inside the message, which is why the prefix appears twice.
 _TOO_FEW_ARGUMENTS = (
     "usage: boto3-s3 [options] <subcommand> [parameters]\nboto3-s3: [ERROR]: too few arguments"
 )
 
-# The usage of aws's first-pass parser, which reads `--profile` and `--debug`
+# The usage of aws-cli's first-pass parser, which reads `--profile` and `--debug`
 # ahead of everything else, so a failure on either closes with it instead of
 # the top-level block (`_GlobalsArgumentParser`).
 _FIRST_PASS_USAGE = "usage: boto3-s3 [--profile PROFILE] [--debug]\n"
 
-# aws's codec override for its error reports: an unknown codec named there
+# aws-cli's codec override for its error reports: an unknown codec named there
 # stops the run (`_dispatch`), a known one re-encodes the reports
 # (`textencoding.prepare_error_report`).
 _OUTPUT_ENCODING_ENV_VAR = textencoding.OUTPUT_ENCODING_ENV_VAR
 
 
 def _configuration_report(exc: BaseException) -> tuple[str, str] | None:
-    """aws's envelope code and message for an rc-253 failure aws reports.
+    """aws-cli's envelope code and message for an rc-253 failure aws-cli reports.
 
-    aws gives each rc-253 failure it can meet on this surface a handler of
+    aws-cli gives each rc-253 failure it can meet on this surface a handler of
     its own (errorhandler.py), and each names a fixed code - the handler's,
     not the exception's class name. Two take botocore's exceptions and append
     a hint to botocore's text: `NoCredentials` after a `. ` separator, the
     text ending without a period, and `NoRegion` after a bare space, the text
-    ending with one. The hints name aws's own `aws login` and `aws configure`
-    as aws writes them: both tools read the same config files, so the advice
+    ending with one. The hints name aws-cli's own `aws login` and `aws configure`
+    as aws-cli writes them: both tools read the same config files, so the advice
     holds (docs/cli/aws-differences.md). The third, `Configuration`, takes
-    the `ConfigurationError` aws raises for an unknown
+    the `ConfigurationError` aws-cli raises for an unknown
     `cli_timestamp_format`, whose counterpart here is
-    `clientfactory.UnknownTimestampFormatError`; its message is aws's as it
+    `clientfactory.UnknownTimestampFormatError`; its message is aws-cli's as it
     stands. `Pager` belongs to the output pager, which this CLI does not
     implement.
 
@@ -155,7 +155,7 @@ def _configuration_report(exc: BaseException) -> tuple[str, str] | None:
     builders keep as `__cause__` (`sdkerrors.s3_errors`, `clientfactory`), or
     by the exception itself where one escaped untranslated, never by matching
     the message text. Returns `None` for every other rc-253 failure: those
-    are this CLI's own (an absent awscrt, an SDK floor shortfall), aws cannot
+    are this CLI's own (an absent awscrt, an SDK floor shortfall), aws-cli cannot
     reach them, and they stay bare.
     """
     # Imported here, on a path where the session has already loaded the SDK,
@@ -177,21 +177,21 @@ def _configuration_report(exc: BaseException) -> tuple[str, str] | None:
 def _write_error(message: object, *, rc: int | None = None) -> None:
     """Write one CLI error report to stderr, with the envelope *rc* calls for.
 
-    aws renders the reports of its rc-252 and rc-253 handlers in its default
+    aws-cli renders the reports of its rc-252 and rc-253 handlers in its default
     enhanced form, `An error occurred (<code>): <message>`: `ParamValidation`
     for every usage error - argparse failures, unknown options and a plain
     `ValidationError` alike - and the three codes `_configuration_report`
     supplies at 253. Every other report is the message alone: an rc-254
     `ClientError` already carries `An error occurred (<Code>) when calling
-    ...` in its own text, aws's general rc-255 handler formats nothing, and
-    the rc-253 failures aws cannot reach have no code to name. The form does
+    ...` in its own text, aws-cli's general rc-255 handler formats nothing, and
+    the rc-253 failures aws-cli cannot reach have no code to name. The form does
     not follow `--cli-error-format` (design/aws-cli-option-handling.md section
     2.1).
 
-    The envelope goes on before the strip, as aws's formatter strips the
+    The envelope goes on before the strip, as aws-cli's formatter strips the
     whole enveloped message; stripping keeps a message that ends with a
     newline - the usage block of a parse error - from surfacing as a
-    trailing blank line. The report is written in the encoding aws writes
+    trailing blank line. The report is written in the encoding aws-cli writes
     its reports in (`textencoding.prepare_error_report`).
     """
     text = str(message)
@@ -217,11 +217,11 @@ def _write_error(message: object, *, rc: int | None = None) -> None:
 
 
 def _invalid_choice_message(value: object, choices: Iterable[object]) -> str:
-    """aws's report for an off-list value (its `CLIArgParser._check_value`).
+    """aws-cli's report for an off-list value (its `CLIArgParser._check_value`).
 
     `Found invalid choice '<value>'` - a trailing newline of its own included,
     which is what puts an extra blank line ahead of the usage block - followed
-    by the close matches of the choice list, if any (difflib, aws's cutoff
+    by the close matches of the choice list, if any (difflib, aws-cli's cutoff
     0.8: `lss` offers `ls` while `web` offers nothing).
     """
     message = [f"Found invalid choice '{value}'\n"]
@@ -235,15 +235,15 @@ def _invalid_choice_message(value: object, choices: Iterable[object]) -> str:
 class _ParamValidationArgumentParser(argparse.ArgumentParser):
     """Parse and report failures the aws-cli way: its report, its token counts.
 
-    The counterpart of aws's `CLIArgParser`, which every one of its parsers is
+    The counterpart of aws-cli's `CLIArgParser`, which every one of its parsers is
     built on: one error shape for all of them, plus what decides which
-    command lines are accepted - the dash-led token classification of aws's
+    command lines are accepted - the dash-led token classification of aws-cli's
     bundled Python (`_negative_number_matcher`) and, through
     `_match_argument`, the token consumption that interpreter performs for
     the options marked `aws_nargs`. A failure is a usage error (rc 252)
     reported as ``<message>\\n\\n<usage>`` in one ``[ERROR]`` report, so the
     usage lands after a blank line inside it; an off-list value's message is
-    aws's (`_check_value`). The usage is each parser's ``usage`` argument:
+    aws-cli's (`_check_value`). The usage is each parser's ``usage`` argument:
     the collapsed top-level block (`_TOP_LEVEL_USAGE`) for the two parsers
     the dispatch parses with.
     """
@@ -254,15 +254,15 @@ class _ParamValidationArgumentParser(argparse.ArgumentParser):
 
         argparse consults this attribute in `_parse_optional` to decide whether
         a token that matches no option string is option-like or a plain
-        positional, and 3.14 loosened it (`_NEGATIVE_NUMBER_RE`). Since aws
-        runs on 3.14, `--storage-class -1x` is aws's invalid choice, not its
+        positional, and 3.14 loosened it (`_NEGATIVE_NUMBER_RE`). Since aws-cli
+        runs on 3.14, `--storage-class -1x` is aws-cli's invalid choice, not its
         missing value, and pinning the pattern reproduces that from our 3.10
         floor up. A property rather than a plain attribute because argparse's
         own `__init__` assigns the host Python's matcher over any class
         attribute; the setter below absorbs that assignment.
 
         The pin covers the `_parse_optional` classification in every parser
-        the dispatch builds, matching aws, where the one interpreter decides
+        the dispatch builds, matching aws-cli, where the one interpreter decides
         for its whole `CLIArgParser` family alike. argparse's other use of the
         matcher stays the host Python's: the gate that switches the
         classification off once a registered option string itself looks like a
@@ -281,9 +281,9 @@ class _ParamValidationArgumentParser(argparse.ArgumentParser):
         """Discard argparse's own assignment; the pinned pattern is the answer."""
 
     def _check_value(self, action: argparse.Action, value: object) -> None:
-        """Reject an off-list value with aws's message (`_invalid_choice_message`).
+        """Reject an off-list value with aws-cli's message (`_invalid_choice_message`).
 
-        aws overrides the same hook. ``_check_value`` is private argparse API.
+        aws-cli overrides the same hook. ``_check_value`` is private argparse API.
         """
         if action.choices is None or value in action.choices:
             return
@@ -299,9 +299,9 @@ class _ParamValidationArgumentParser(argparse.ArgumentParser):
         what this hook reproduces. So ``--exclude '-foo*'`` is a pattern and
         ``mb --tags -k -v`` a tag pair, while a missing token still reports
         the count and ``--`` never becomes a value (its class is neither) -
-        all as aws behaves. Before 3.12 only ``A`` counted, so the same
-        declarations reported a missing value; aws's official distribution
-        bundles 3.14, and the marker (``aws_nargs``, the count aws declares)
+        all as aws-cli behaves. Before 3.12 only ``A`` counted, so the same
+        declarations reported a missing value; aws-cli's official distribution
+        bundles 3.14, and the marker (``aws_nargs``, the count aws-cli declares)
         keeps that outcome off the host Python version. The marker is read
         duck-typed: importing the filters here would drag in
         ``boto3_s3.globsieve``, and the informational exits may reach no
@@ -313,7 +313,7 @@ class _ParamValidationArgumentParser(argparse.ArgumentParser):
         raises the ambiguous-abbreviation error - it runs over the whole token
         stream before any consumption, so a value that ambiguously
         abbreviates one of the command's own options (``--exclude --ss``) is
-        rejected there while aws, and our 3.12+ runs, take it as the value.
+        rejected there while aws-cli, and our 3.12+ runs, take it as the value.
         design/cli.md section 2 records that as the residual it is.
 
         ``_match_argument`` is private argparse API, the same kind of hook as
@@ -323,7 +323,7 @@ class _ParamValidationArgumentParser(argparse.ArgumentParser):
         if isinstance(count, int):
             if re.match(f"[AO]{{{count}}}", arg_strings_pattern):
                 return count
-            # argparse's report for the count aws declares (`nargs=<count>`).
+            # argparse's report for the count aws-cli declares (`nargs=<count>`).
             raise argparse.ArgumentError(
                 action, f"expected {count} argument{'' if count == 1 else 's'}"
             )
@@ -335,9 +335,9 @@ class _ParamValidationArgumentParser(argparse.ArgumentParser):
 
 
 def _find_command_token(tokens: list[str]) -> int:
-    """Locate the subcommand in the post-globals token stream, aws style.
+    """Locate the subcommand in the post-globals token stream, aws-cli style.
 
-    aws's command layers assume an unknown optional consumes no value
+    aws-cli's command layers assume an unknown optional consumes no value
     (``SubCommandArgParser._remove_subcommand``): the first positional-looking
     token names the subcommand, everything else stays in place for the leaf
     parser. Positional-looking follows argparse's classification - not
@@ -396,7 +396,7 @@ def _top_level_parser() -> tuple[
     placeholder - so `_build_stage1_parser` and `build_parser` render the same
     top-level page by construction; each fills the slot with its own entries.
 
-    ``add_help=False`` everywhere in the tree: like aws, the only way to a help
+    ``add_help=False`` everywhere in the tree: like aws-cli, the only way to a help
     page is the ``help`` token, so no parser declares a help option and none
     renders one.
     """
@@ -427,9 +427,9 @@ def _build_stage1_parser() -> argparse.ArgumentParser:
 
 
 class _GlobalsArgumentParser(_ParamValidationArgumentParser):
-    """The globals parser, closing a ``--profile`` / ``--debug`` failure as aws does.
+    """The globals parser, closing a ``--profile`` / ``--debug`` failure as aws-cli does.
 
-    aws parses those two in a first pass of their own (``FirstPassGlobalArgParser``)
+    aws-cli parses those two in a first pass of their own (``FirstPassGlobalArgParser``)
     whose usage line lists only them; every other global fails in its main
     parser, under the top-level block.
     """
@@ -442,23 +442,23 @@ class _GlobalsArgumentParser(_ParamValidationArgumentParser):
 
 
 def _build_globals_parser() -> _ParamValidationArgumentParser:
-    """Globals-only parser for the aws-shaped top-level pass (``_dispatch``).
+    """Globals-only parser for the aws-cli-shaped top-level pass (``_dispatch``).
 
-    aws parses the top-level globals over the *full* argv first
+    aws-cli parses the top-level globals over the *full* argv first
     (``MainArgParser.parse_known_args``) and *removes* them: the command
     layers only ever see that parse's remainder. This parser is therefore the
     dispatcher's real tokenizer, not a probe - a global is recognized on
     either side of the subcommand, with argparse prefix abbreviation
     (``--e`` resolves to ``--endpoint-url`` even where a command option like
     ``--expires-in`` shares the prefix, because this parse runs first -
-    measured), and even between a command option and its value (aws accepts
+    measured), and even between a command option and its value (`aws` accepts
     ``presign --expires-in --region us-east-1 120``). The parse also settles
     two outcomes on the spot: a global that fails to parse (invalid choice,
     missing value, an ambiguous abbreviation) and a parse-time ``--version``.
     ``add_help=False`` leaves ``-h`` / ``--help`` in the remainder as the
-    unrecognized options they are on aws (measured: ``s3 ls -h`` is ``Unknown
+    unrecognized options they are on `aws` (measured: ``s3 ls -h`` is ``Unknown
     options: -h``). A failure here closes with the top-level usage block, like
-    aws, whose main parser and command layers share one usage string.
+    aws-cli, whose main parser and command layers share one usage string.
     """
     parser = _GlobalsArgumentParser(prog="boto3-s3", add_help=False, usage=_TOP_LEVEL_USAGE)
     globalargs.add_common_arguments(parser)
@@ -487,11 +487,11 @@ def _build_command_parse_parser(name: str, command: Command) -> argparse.Argumen
     """The parser stage 2 actually parses with: the command's own args only.
 
     The globals were all consumed by the top-level pass (either side of the
-    subcommand), so like aws's leaf parser this one does not know them - a
+    subcommand), so like aws-cli's leaf parser this one does not know them - a
     global-looking token that reaches stage 2, which only a dropped leading
-    ``--`` can produce, is rejected as unknown exactly like aws (measured:
+    ``--`` can produce, is rejected as unknown exactly like aws-cli (measured:
     ``s3 -- presign --region us-east-2 s3://b/k`` reports ``Unknown options:
-    --region,s3://b/k``). It carries the same top-level usage block aws builds
+    --region,s3://b/k``). It carries the same top-level usage block aws-cli builds
     its leaf parser with, so a usage error here closes with that block; the
     command's whole option surface stays on its help page, which
     ``_build_command_parser`` renders.
@@ -539,7 +539,7 @@ def _enable_debug_logging() -> None:
     from boto3_s3.masking import SecretMaskingFilter
 
     for name in _DEBUG_LOGGERS:
-        # Idempotent, like aws's set_stream_logger (it removes its named
+        # Idempotent, like aws-cli's set_stream_logger (it removes its named
         # handler before re-adding): the library's boto3-faithful
         # set_stream_logger appends unconditionally, so drop the previously
         # attached masking handlers first or a second call doubles every line.
@@ -558,7 +558,7 @@ def exit_code_for(exc: Boto3S3Error) -> int:
     the library category - aws-cli treats every error that reached the server
     as a client error, even ones our taxonomy files under ``ValidationError``.
     ``InvalidValueError`` / ``InvalidConfigError`` refine their parents back to
-    the general 255: aws routes those failures (a post-parse ``int()``, a bad
+    the general 255: aws-cli routes those failures (a post-parse ``int()``, a bad
     ``[s3]`` value, an unusable profile) through its general handler, not the
     dedicated 252 / 253 ones.
     """
@@ -568,7 +568,7 @@ def exit_code_for(exc: Boto3S3Error) -> int:
 
     if isinstance(exc.__cause__, ClientError):
         return _CLIENT_ERROR_RC
-    # The refining subclasses come first: aws reports a post-parse value
+    # The refining subclasses come first: aws-cli reports a post-parse value
     # failure or a bad config through its *general* handler (255), even
     # though the taxonomy files them under Validation / Configuration.
     if isinstance(exc, (InvalidValueError, InvalidConfigError)):
@@ -604,8 +604,8 @@ def _exit_code_for_unexpected(exc: BaseException) -> int:
         ParamValidationError,
     )
 
-    # Only NoCredentials / NoRegion are 253 (aws errorhandler.py dedicated
-    # handlers). PartialCredentialsError has no aws handler ->
+    # Only NoCredentials / NoRegion are 253 (aws-cli errorhandler.py dedicated
+    # handlers). PartialCredentialsError has no aws-cli handler ->
     # GeneralExceptionHandler -> 255, so it must fall through here, not map to 253.
     if isinstance(exc, (NoCredentialsError, NoRegionError)):
         return _CONFIGURATION_ERROR_RC
@@ -625,7 +625,7 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
     ``AssertionError`` - an internal bug - and a command-raised
     ``SystemExit``, whose orderly exit is honored) - argparse's ``SystemExit`` is
     absorbed downstream so usage errors map to aws-cli's 252, not argparse's 2,
-    and a Ctrl-C mirrors aws's ``InterruptExceptionHandler``: a bare
+    and a Ctrl-C mirrors aws-cli's ``InterruptExceptionHandler``: a bare
     newline on stdout and rc 130 (128+SIGINT), never a traceback. The
     standard streams are flushed before the code is returned
     (`_settle_std_streams`), so the code is the one the process ends with.
@@ -650,7 +650,7 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
         # An internal-invariant violation, kept loud (see `_run_command`).
         raise
     except Exception as exc:
-        # The rest of that chain: whatever escapes aws's driver - not only a
+        # The rest of that chain: whatever escapes aws-cli's driver - not only a
         # command - reaches its entry point's handlers and is reported there,
         # never as a traceback. A command's failures are settled inside
         # `_run_command`; this is the same mapping for the dispatcher's own
@@ -741,7 +741,7 @@ def _main(argv: list[str] | None, ctx: Context | None) -> int:
 def _dispatch(argv: list[str], ctx: Context) -> int:
     """Parse ``argv`` in two stages and run the matched subcommand.
 
-    Stage 1 is aws's own shape: the globals parser consumes the globals off
+    Stage 1 is aws-cli's own shape: the globals parser consumes the globals off
     the full argv (either side of the subcommand) and everything below only
     ever sees its remainder; ``_find_command_token`` then locates the
     subcommand in that remainder without touching the other tokens. Its
@@ -751,27 +751,27 @@ def _dispatch(argv: list[str], ctx: Context) -> int:
     Stage 2 imports just the matched command's module (rb also pulls in rm,
     its --force engine), builds its real parser, and parses the remainder
     minus the subcommand token into the globals pass's namespace. Once the
-    subcommand is determined the SDK may load - the aws-clidriver-shaped lazy
+    subcommand is determined the SDK may load - the aws-cli clidriver-shaped lazy
     command table.
     """
-    # aws reads `~/.aws/cli/alias` here; this CLI does not
+    # aws-cli reads `~/.aws/cli/alias` here; this CLI does not
     # (docs/cli/aws-differences.md).
     #
-    # aws-shaped top-level pass: aws parses the globals over the full argv
+    # aws-cli-shaped top-level pass: aws-cli parses the globals over the full argv
     # (MainArgParser.parse_known_args) and REMOVES them before any
     # command-layer parsing. argparse's ``--`` handling does the rest and is
-    # identical on every supported Python (enumerated 3.10 vs aws's bundled
+    # identical on every supported Python (enumerated 3.10 vs aws-cli's bundled
     # 3.14): nothing after the first ``--`` is consumed as a global, and the
     # marker stays in the remainder for stage 2's parse to honor - except a
-    # leading ``--``, which aws's very first parse uses up against its service
+    # leading ``--``, which aws-cli's very first parse uses up against its service
     # token (``aws s3`` always precedes it; measured: ``s3 -- help`` pages
     # while ``s3 --region us-east-2 -- help`` is an invalid choice 'help', and
     # ``s3 -- presign --expires-in 120 s3://b/k`` re-reads the option at the
     # leaf, rc 0). Ours has no service token, so the equivalent is dropping
     # the marker off a ``--``-led argv after the parse. An exactly-['help']
-    # remainder is aws's help-token rule: the top-level help page, rc 0 -
+    # remainder is aws-cli's help-token rule: the top-level help page, rc 0 -
     # globals around the token are already stripped, so
-    # `help --region us-east-1` still pages (aws does too). A global that
+    # `help --region us-east-1` still pages (`aws` does too). A global that
     # fails to parse, and a parse-time --version, end the run right here,
     # written by the parser itself: the report through `_write_error` like
     # every other one, the version line by its action. A zero exit can only
@@ -781,7 +781,7 @@ def _dispatch(argv: list[str], ctx: Context) -> int:
     except SystemExit as exc:
         return 0 if not exc.code else _PARAM_VALIDATION_ERROR_RC
     tokens = remainder[1:] if argv[:1] == ["--"] else remainder
-    # aws refuses an unknown AWS_CLI_OUTPUT_ENCODING codec before any command
+    # aws-cli refuses an unknown AWS_CLI_OUTPUT_ENCODING codec before any command
     # runs (rc 255); a known one sets the error reports' encoding
     # (`textencoding.prepare_error_report`).
     output_encoding = os.environ.get(_OUTPUT_ENCODING_ENV_VAR)
@@ -813,7 +813,7 @@ def _print_help(parser: argparse.ArgumentParser) -> None:
 
 
 def _unknown_options_message(tokens: list[str]) -> str:
-    """aws's report for tokens no parser placed (its customizations command
+    """aws-cli's report for tokens no parser placed (its customizations command
     layer joins them with "," and no space; two ported aws-cli tests read it)."""
     return f"Unknown options: {','.join(tokens)}"
 
@@ -821,7 +821,7 @@ def _unknown_options_message(tokens: list[str]) -> str:
 def _resolve_command(tokens: list[str], head: argparse.Namespace, ctx: Context) -> int:
     """Pick the subcommand out of the globals-free token stream and run it.
 
-    aws's ``s3`` command does this: the help token first, then the first
+    aws-cli's ``s3`` command does this: the help token first, then the first
     positional-looking token as the subcommand name, looked up in its command
     table.
     """
@@ -832,7 +832,7 @@ def _resolve_command(tokens: list[str], head: argparse.Namespace, ctx: Context) 
     index = _find_command_token(tokens)
     if index < 0:
         # No subcommand token at all: whatever is left is an unknown option
-        # (aws: `s3 --bogus`), and with nothing left it is aws's bare
+        # (`aws`: `s3 --bogus`), and with nothing left it is aws-cli's bare
         # missing-subcommand usage error, which carries no help blurb
         # (measured: `s3` and `s3 --`).
         leftovers = [token for token in tokens if token != "--"]
@@ -840,14 +840,14 @@ def _resolve_command(tokens: list[str], head: argparse.Namespace, ctx: Context) 
         _write_error(message, rc=_PARAM_VALIDATION_ERROR_RC)
         return _PARAM_VALIDATION_ERROR_RC
     name = tokens[index]
-    # aws's subcommand extraction (SubCommandArgParser._remove_subcommand):
+    # aws-cli's subcommand extraction (SubCommandArgParser._remove_subcommand):
     # only the matched token leaves the stream; an option-like token ahead of
     # it - `s3 --expires-in=120 presign s3://b/k` parses, measured - and
     # everything behind it flow to the leaf parser in their original order,
     # where an unknown one is rejected with the leaf's own wording.
     stage2_tokens = tokens[:index] + tokens[index + 1 :]
     if name not in _COMMAND_TABLE:
-        # aws checks the name with a positional whose choices are its command
+        # aws-cli checks the name with a positional whose choices are its command
         # table, so the report is that positional's parse error: named after
         # its dest - a bare `subcommand`, where the help page displays
         # `<subcommand>` - and closed with the top-level usage block.
@@ -866,11 +866,11 @@ def _run_command(
     """Stage 2: build the matched subcommand's parser, parse, and run it."""
     command = _load_command(name)()
     if stage2_tokens == ["help"]:
-        # aws's help-token rule at the subcommand level (its ArgTableArgParser
+        # aws-cli's help-token rule at the subcommand level (its ArgTableArgParser
         # special-cases an exactly-['help'] remainder): the command's help
         # page, rc 0 - even where a normal parse would fail or run a listing.
         # The globals are already stripped, so a `help` wrapped in globals
-        # still pages (aws: `s3 presign help --region us-east-1` pages).
+        # still pages (`aws`: `s3 presign help --region us-east-1` pages).
         _print_help(_build_command_parser(name, command))
         return 0
     # The top-level pass's namespace carries every parsed global (either side
@@ -885,7 +885,7 @@ def _run_command(
         return 0 if not exc.code else _PARAM_VALIDATION_ERROR_RC
     if extras:
         # What the leaf parse could not place (exercised by the ported
-        # test_errors_out_with_extra_arguments). aws's command layer raises it
+        # test_errors_out_with_extra_arguments). aws-cli's command layer raises it
         # as a plain message: no usage block.
         _write_error(_unknown_options_message(extras), rc=_PARAM_VALIDATION_ERROR_RC)
         return _PARAM_VALIDATION_ERROR_RC
@@ -917,7 +917,7 @@ def _run_command(
         # (a failure is reported, not a traceback - design/overview.md
         # section 3).
         # KeyboardInterrupt / SystemExit are BaseException, not Exception, so
-        # they still propagate - a Ctrl-C reaches main's aws-shaped backstop
+        # they still propagate - a Ctrl-C reaches main's aws-cli-shaped backstop
         # (a bare newline + rc 130, no traceback).
         rc = _exit_code_for_unexpected(exc)
         _write_error(exc, rc=rc)

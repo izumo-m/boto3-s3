@@ -70,7 +70,7 @@ class TransportError(Boto3S3Error):
 class ConfigurationError(Boto3S3Error):
     """Required configuration is missing or unresolvable.
 
-    Raised plainly for the failures aws gives dedicated handlers (rc 253):
+    Raised plainly for the failures aws-cli gives dedicated handlers (rc 253):
     unresolvable credentials / region - and for an environment lacking a
     required capability (an SDK floor shortfall; awscrt absence on the paths
     that translate it, e.g. an MRAP target's SigV4a signing or an explicit
@@ -86,7 +86,7 @@ class InvalidConfigError(ConfigurationError):
     """A configuration value is present but invalid or unusable.
 
     The counterpart of aws-cli's ``InvalidConfigError``: a bad ``[s3]``
-    config value, an unusable profile, partial credentials. aws reports
+    config value, an unusable profile, partial credentials. aws-cli reports
     these through its general exception handler (rc 255) - unlike the
     unresolvable credentials / region pair, whose dedicated handlers exit
     253 (plain ``ConfigurationError`` here). The CLI's exit-code

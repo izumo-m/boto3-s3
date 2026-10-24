@@ -5,12 +5,12 @@ which keeps only whole seconds. Against an endpoint that reports a sub-second
 `LastModified` (MinIO and other S3-compatible servers; real S3 lists whole
 seconds) the difference is user-visible: a stamp that kept the fraction matches
 the object exactly, so `--exact-timestamps` converges here and re-downloads on
-aws forever.
+aws-cli forever.
 
 Oracle for the expected stamp: the procedure of
 probes/synctime/p03-stamp-then-exact-timestamps.sh (a recursive `cp` from
 MinIO), where a listing `LastModified` of 2026-09-06T00:31:01.491000+00:00 left
-aws 2.36.40 with `stat -c %.9Y` = 1788654661.000000000. The epoch second is
+aws-cli 2.36.40 with `stat -c %.9Y` = 1788654661.000000000. The epoch second is
 `date -u -d 2026-09-06T00:31:01Z +%s`.
 """
 

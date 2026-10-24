@@ -119,7 +119,7 @@ class TestRmFilterRoot:
             ("a.txt", False, ""),  # top-level key roots at bucket
             ("data/a.txt", False, "data/"),  # parent "directory"
             ("data/", False, "data/"),  # explicit marker target roots at itself
-            # aws joins the pattern onto the parent with os.path.join, which adds
+            # aws-cli joins the pattern onto the parent with os.path.join, which adds
             # no second "/" after a parent already ending in one, so the entry
             # is matched as "/b" - never as "b" under an "a//" root.
             ("a//b", False, "a/"),
@@ -137,7 +137,7 @@ class TestRmFilterRoot:
     @pytest.mark.parametrize(
         ("key", "expected"),
         [
-            # On Windows aws's ntpath.join takes a parent's trailing backslash
+            # On Windows aws-cli's ntpath.join takes a parent's trailing backslash
             # for a separator, so a\\/b is matched as /b under a\\.
             ("a\\/b", "a\\"),
             ("a\\//b", "a\\/"),
@@ -152,10 +152,10 @@ class TestRmFilterRoot:
 
 
 class TestRmFilterBases:
-    """What a filter is matched against, where it differs from aws on purpose or by host."""
+    """What a filter is matched against, where it differs from aws-cli on purpose or by host."""
 
     def test_glob_characters_in_the_target_are_literal(self) -> None:
-        # aws joins `*` onto the base `b/f[1]/` and reads `[1]` as a character
+        # aws-cli joins `*` onto the base `b/f[1]/` and reads `[1]` as a character
         # class, so `--exclude '*'` matches nothing there and every object is
         # deleted (measured on 2.36.40; aws-cli #7330, #5452). The base is
         # taken literally here: everything is excluded (docs/cli/aws-differences.md).
@@ -169,7 +169,7 @@ class TestRmFilterBases:
     def test_windows_backslash_ending_target_is_matched_as_aws_does(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Simulated Windows: aws joins patterns flush onto `b/pre\\`, matching
+        # Simulated Windows: aws-cli joins patterns flush onto `b/pre\\`, matching
         # the entry pre\\/x as /x; the record and the Prefix keep their forms.
         monkeypatch.setattr(producers, "_JOIN_SEPARATORS", ("/", "\\"))
         monkeypatch.setattr(globsieve, "_WINDOWS", True)
@@ -209,9 +209,9 @@ class TestRmFilterBases:
 
 class TestRmSingleKey:
     def test_doubled_slash_key_gets_the_verdict_aws_gives_it(self) -> None:
-        # Under rm s3://b/a//b aws matches the entry as "/b" (the pattern is
+        # Under rm s3://b/a//b aws-cli matches the entry as "/b" (the pattern is
         # os.path.join-ed onto root "a/"): --exclude b keeps it, and
-        # --exclude '*' --include b drops it (pinned aws 2.36.40, dryrun).
+        # --exclude '*' --include b drops it (pinned aws-cli 2.36.40, dryrun).
         kept = _rm(
             "s3://b/a//b", _FakeS3Client(), dryrun=True, filter=globsieve.compile([Exclude("b")])
         )
@@ -234,7 +234,7 @@ class TestRmSingleKey:
         assert [(r.compare_key, r.outcome) for r in results] == [("a.txt", OpOutcome.SUCCEEDED)]
 
     def test_result_carries_src_info_and_storage(self) -> None:
-        # The deleted object rides through on src / src_info / src_storage (aws's
+        # The deleted object rides through on src / src_info / src_storage (aws-cli's
         # delete result shape is src=path, dest=None), so an app can identify and
         # re-reach exactly what was removed.
         client = _FakeS3Client()
@@ -268,7 +268,7 @@ class TestRmSingleKey:
     def test_the_single_key_is_reported_as_it_was_written(self) -> None:
         # aws-cli's single-object route hands the argument through, so an
         # Outposts access-point key set off with ":" prints with its colon:
-        # `(dryrun) delete: s3://<arn>:k` (measured against the pinned aws
+        # `(dryrun) delete: s3://<arn>:k` (measured against the pinned `aws`
         # 2.36.40, offline). A listed key is always `bucket/key`.
         arn = "arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-1/accesspoint/ap"
         results = _rm(f"s3://{arn}:k", _FakeS3Client(), dryrun=True)
@@ -298,7 +298,7 @@ class TestRmSingleKey:
 
     def test_a_delete_that_dies_without_a_response_fails(self) -> None:
         # aws-cli's task loses it with no line at rc 0 (measured against the
-        # pinned aws through a 127.0.0.1 server that closes every connection);
+        # pinned `aws` through a 127.0.0.1 server that closes every connection);
         # a failure is not reported as a success, so it fails here.
         dead = ConnectionClosedError(endpoint_url="http://h/")
         client = _FakeS3Client(delete_object_error=dead)
@@ -478,7 +478,7 @@ class TestRmRecursive:
         assert client.delete_objects_calls == []
 
     def test_listing_failure_propagates_as_category_error(self) -> None:
-        # Pre-item failures are "fatal" (aws rc 1): the category error passes
+        # Pre-item failures are "fatal" (`aws` rc 1): the category error passes
         # through untouched, not wrapped in BatchError.
         client = _FakeS3Client(list_error=client_error("NoSuchBucket", 404, "ListObjectsV2"))
         with pytest.raises(NotFoundError):
@@ -501,7 +501,7 @@ class TestRmRecursive:
 
 class TestRmBucketRootSweep:
     def test_only_folder_markers_are_deleted(self) -> None:
-        # aws parity: keyless non-recursive rm lists everything but deletes
+        # aws-cli parity: keyless non-recursive rm lists everything but deletes
         # only zero-byte "/"-terminated markers, at any depth.
         client = _FakeS3Client(
             [{"Contents": [_obj("m1/", 0), _obj("m2/sub/", 0), _obj("keep/x", 3), _obj("z", 0)]}]
@@ -523,7 +523,7 @@ class TestRmBucketRootSweep:
     def test_an_outposts_access_point_closed_with_a_colon_reads_as_the_key_slash(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # aws's rm appends "/" to a keyless argument and re-reads it; the
+        # aws-cli's rm appends "/" to a keyless argument and re-reads it; the
         # Outposts pattern eats the ":" before it, so "...:accesspoint/ap:"
         # names the key "/" (measured: prefix "/" recursive, a blind delete of
         # "/" otherwise) - never the whole access point. A string argument
@@ -547,7 +547,7 @@ class TestRmBucketRootSweep:
 
 class TestRmTargetValidation:
     def test_service_root_is_rejected(self) -> None:
-        # aws reaches the API with Bucket="" and fails botocore validation
+        # aws-cli reaches the API with Bucket="" and fails botocore validation
         # (rc 1 fatal); the library rejects it up front instead of listing
         # buckets.
         client = _FakeS3Client()
@@ -627,7 +627,7 @@ class TestCrtEngine:
         assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED]
 
     def test_a_single_key_whose_delete_dies_fails(self, built: list[Any]) -> None:
-        # aws's CRT client reports it: `delete failed: ... AWS_IO_SOCKET_CLOSED`,
+        # aws-cli's CRT client reports it: `delete failed: ... AWS_IO_SOCKET_CLOSED`,
         # rc 1 (measured with preferred_transfer_client = crt).
         awscrt_exceptions = pytest.importorskip("awscrt.exceptions")
         client = _FakeS3Client(delete_object_error=awscrt_exceptions.from_code(1051))

@@ -1,6 +1,6 @@
 """What the config files do to a run (design/cli.md section 6).
 
-botocore reads aws's config and credentials files when a command opens its
+botocore reads aws-cli's config and credentials files when a command opens its
 session, and that read is where a broken setting stops the run:
 
 - a file that is not valid INI fails the command with botocore's
@@ -76,7 +76,7 @@ class TestUnparseableConfigFile:
         self, config: Path, argv: list[str], capsys: pytest.CaptureFixture[str]
     ) -> None:
         # They open no session, so a broken config file never reaches them
-        # (aws reads the config first and fails them too; the difference is
+        # (aws-cli reads the config first and fails them too; the difference is
         # accepted, design/cli.md section 6).
         config.write_text("[[[broken\n")
         assert cli.main(argv) == 0
@@ -89,7 +89,7 @@ class TestInvalidTimestampFormat:
     def test_it_fails_the_run(self, config: Path, capsys: pytest.CaptureFixture[str]) -> None:
         config.write_text("[default]\ncli_timestamp_format = bogus\n")
         assert cli.main(_PRESIGN) == 253
-        # aws's own report, through its Configuration handler's envelope.
+        # aws-cli's own report, through its Configuration handler's envelope.
         assert capsys.readouterr().err == (
             "boto3-s3: [ERROR]: An error occurred (Configuration): Unknown "
             'cli_timestamp_format value: bogus, valid values are "wire" or "iso8601"\n'
@@ -114,7 +114,7 @@ class TestInvalidTimestampFormat:
     @pytest.mark.parametrize("value", ["", "WIRE"], ids=["empty", "wrong-case"])
     def test_an_empty_or_wrong_case_value_is_refused(self, config: Path, value: str) -> None:
         # An empty value is a value, not an absent key, and the comparison is
-        # case-sensitive (both measured on aws).
+        # case-sensitive (both measured on `aws`).
         config.write_text(f"[default]\ncli_timestamp_format = {value}\n")
         assert cli.main(_PRESIGN) == 253
 
@@ -161,7 +161,7 @@ class TestWhichProfileTheFormatsComeFrom:
         assert capsys.readouterr().err == ""
 
     def test_an_empty_flag_leaves_the_env_chain_in_force(self, config: Path) -> None:
-        # aws's truthy guard: `--profile ""` binds nothing, so the default
+        # aws-cli's truthy guard: `--profile ""` binds nothing, so the default
         # section still decides.
         config.write_text("[default]\ncli_timestamp_format = bogus\n")
         assert cli.main(["--profile", "", *_PRESIGN]) == 253
@@ -185,7 +185,7 @@ class TestInvalidBinaryFormat:
     def test_an_explicit_flag_never_consults_the_config(
         self, config: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws reads `--cli-binary-format` first; argparse already restricted
+        # aws-cli reads `--cli-binary-format` first; argparse already restricted
         # the flag to the valid choices, so a broken config value is never
         # read (measured on aws: the run proceeds).
         config.write_text("[default]\ncli_binary_format = bogus\n")
@@ -202,7 +202,7 @@ class TestInvalidBinaryFormat:
 
     @pytest.mark.parametrize("value", ["", "Base64"], ids=["empty", "wrong-case"])
     def test_an_empty_or_wrong_case_value_is_refused(self, config: Path, value: str) -> None:
-        # An empty value is a value, and aws's lookup is case-sensitive (both
+        # An empty value is a value, and aws-cli's lookup is case-sensitive (both
         # measured on aws: rc 255).
         config.write_text(f"[default]\ncli_binary_format = {value}\n")
         assert cli.main(_PRESIGN) == 255
@@ -211,7 +211,7 @@ class TestInvalidBinaryFormat:
 class TestUnknownOutputEncoding:
     """An unknown `AWS_CLI_OUTPUT_ENCODING` codec ends the run at rc 255.
 
-    aws refuses such a codec before any command runs.
+    aws-cli refuses such a codec before any command runs.
     """
 
     @pytest.mark.parametrize("argv", [["ls", "s3://bucket/p/"], ["help"]], ids=["listing", "help"])
@@ -225,7 +225,7 @@ class TestUnknownOutputEncoding:
         assert "AWS_CLI_OUTPUT_ENCODING" in captured.err
 
     def test_an_empty_value_is_an_unknown_codec(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # aws tests `in os.environ`, not truthiness: the empty string reaches
+        # aws-cli tests `in os.environ`, not truthiness: the empty string reaches
         # the codec lookup and fails it (measured).
         monkeypatch.setenv("AWS_CLI_OUTPUT_ENCODING", "")
         assert cli.main(["help"]) == 255
@@ -250,9 +250,9 @@ _ERROR_FORMATS = ["enhanced", "legacy", "json", "yaml", "text", "table"]
 
 
 class TestTheErrorFormatIsAcceptedAndIgnored:
-    """`--cli-error-format` takes aws's values, which change nothing here.
+    """`--cli-error-format` takes aws-cli's values, which change nothing here.
 
-    aws re-renders its error reports by the value; this command keeps its
+    aws-cli re-renders its error reports by the value; this command keeps its
     one-line reports whatever it is (docs/cli/aws-differences.md section 3).
     """
 
@@ -274,7 +274,7 @@ class TestTheErrorFormatIsAcceptedAndIgnored:
 class TestCliHistoryIsNotRead:
     """`cli_history` reaches nothing here (docs/cli/aws-differences.md section 2).
 
-    aws records the run in a history database when the selected profile
+    aws-cli records the run in a history database when the selected profile
     enables it. This command has no history mechanism, so every value is
     inert.
     """

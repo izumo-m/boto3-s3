@@ -109,7 +109,7 @@ class TestDownloadIoQueueDepth:
     def test_default_is_the_depth_aws_runs_at(self) -> None:
         # s3transfer defaults the download IO queue to 1000 and aws-cli runs
         # there (no [s3] key maps to it); boto3 alone dials it to 100, which
-        # would give a slow disk a tenth of aws's readahead.
+        # would give a slow disk a tenth of aws-cli's readahead.
         if not hasattr(Boto3TransferConfig, "DEFAULTS"):
             pytest.skip("installed boto3 predates the DEFAULTS table the default rides")
         config = TransferConfig()

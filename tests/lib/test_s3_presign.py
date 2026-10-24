@@ -261,7 +261,7 @@ class TestPresignEndpointRegion:
     def test_shapes_botocore_already_exempts_are_unchanged(self) -> None:
         # dualstack and an explicit addressing style never set the flag; a
         # DNS-incompatible name forces path style, which botocore's own
-        # handler already excludes. All three match aws before and after.
+        # handler already excludes. All three match aws-cli before and after.
         dualstack = self._client("eu-west-1", s3={"use_dualstack_endpoint": True})
         assert (
             self._host(S3().presign(S3Storage("s3://bkt/k", client=dualstack)))

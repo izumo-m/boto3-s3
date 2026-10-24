@@ -85,7 +85,7 @@ The e2e suite runs `boto3-s3` and the real `aws` command against a local S3
 server (RustFS, the dev stack) and compares their behavior:
 
 ```bash
-scripts/install-awscli.sh    # pin aws to the reference source version — idempotent
+scripts/install-awscli.sh    # pin aws-cli to the reference source version — idempotent
 scripts/compose-up.sh        # start the dev stack, wait for its buckets
 source scripts/dev-env.sh    # point AWS tooling and the e2e gate at it
 uv run pytest tests/cli/e2e  # run the comparison suite

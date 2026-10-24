@@ -32,7 +32,7 @@ class MbScenario(BaseScenario):
 
     # True => the scenario bucket already exists when the command runs.
     pre_create: bool = False
-    # True => compare the bucket's tag set after the run between aws and
+    # True => compare the bucket's tag set after the run between `aws` and
     # ours, live only. endpoint-fidelity T12: real S3 applies
     # CreateBucketConfiguration.Tags while moto and the dev stack ignore it,
     # so a golden of the tag set could not serve both a real-S3 capture and
@@ -68,11 +68,11 @@ SCENARIOS: tuple[MbScenario, ...] = (
         expected_stderr_tokens_aws=("directory bucket",),
     ),
     # --- quirks ----------------------------------------------------------------
-    # aws mb silently drops the key part (split_s3_bucket_key keeps the
+    # `aws s3 mb` silently drops the key part (split_s3_bucket_key keeps the
     # bucket); the end state pins that the bucket exists with no objects.
     MbScenario("mb_key_dropped", ("mb", f"s3://{BUCKET_TOKEN}/some/key")),
     # The tags ride CreateBucketConfiguration.Tags; capture_tags compares the
-    # resulting tag set between aws and ours (endpoint-fidelity T12).
+    # resulting tag set between `aws` and ours (endpoint-fidelity T12).
     MbScenario(
         "mb_tags",
         ("mb", f"s3://{BUCKET_TOKEN}", "--tags", "Key1", "Value1"),

@@ -8,9 +8,9 @@ section 7.2), where 3.10 and 3.11 send ``CONNECT host:port HTTP/1.0`` with no
 ``Host`` at all. urllib3 carries its own copy of the old shape for the releases
 whose stdlib predates the fix, so a newer urllib3 does not move it either.
 
-aws-cli's official distribution runs on a frozen CPython 3.14, so aws always
+aws-cli's official distribution runs on a frozen CPython 3.14, so aws-cli always
 sends the new shape. Against a proxy that answers 400 to a ``Host``-less
-CONNECT - the conforming reading - every aws command therefore succeeds and
+CONNECT - the conforming reading - every `aws` command therefore succeeds and
 every command here failed, on the host interpreters this package supports.
 Pinning the new shape puts one CONNECT on the wire across all of them, the way
 `boto3_s3.mimetable` pins the bundled interpreter's MIME tables.
@@ -48,7 +48,7 @@ def pin_connect_request() -> None:
 
     Every precondition is a reason to decline quietly rather than to fail: no
     urllib3, no tunnel opener to replace, an opener that no longer writes the
-    old request line (an interpreter that already sends aws's shape - and this
+    old request line (an interpreter that already sends aws-cli's shape - and this
     module's own replacement, so a second call is a no-op), or a stdlib without
     the header reader the replacement uses. A future urllib3 or CPython that
     stops matching leaves the pin dormant instead of breaking the tunnel.

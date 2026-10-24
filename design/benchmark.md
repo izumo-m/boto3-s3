@@ -24,7 +24,7 @@ Two comparison axes, by design:
 scripts/compose-up.sh                  # dev S3 stack (same as the e2e suite)
 source scripts/bench-env.sh            # the lane's interpreter + environment
 uv sync --all-packages --locked        # provisions .venv-bench on first use
-scripts/install-awscli.sh              # pinned aws -> .venv-bench/bin/aws
+scripts/install-awscli.sh              # pinned aws-cli -> .venv-bench/bin/aws
 source scripts/dev-env.sh              # endpoint + credentials env
 uv run python -m benchmarks run        # both modes, classic engine
 ```
@@ -50,7 +50,7 @@ only when the first S3 call fails.
 
 The lane runs on Python 3.14, the interpreter the pinned aws-cli bundles
 (`aws --version` prints it). With both sides on one interpreter the E2E
-differential compares two tools; boto3-s3 on the 3.10 floor against aws on
+differential compares two tools; boto3-s3 on the 3.10 floor against aws-cli on
 3.14 would fold the interpreter generations into every ratio. Development
 stays on the floor (`.python-version`; CONTRIBUTING.md), so the lane has an
 environment of its own: `scripts/bench-env.sh` points uv at `.venv-bench`,
@@ -103,10 +103,10 @@ The CRT engine is E2E-only: it bypasses botocore's HTTP layer, so the
 `before-send` stub never sees its requests. Both modes pin
 `preferred_transfer_client` through `AWS_CONFIG_FILE` (the test suite's
 mechanism); `--engine both` adds a CRT pass over the transfer scenarios for
-aws and boto3-s3 alike. On the CRT lane the harness passes `--endpoint-url`
+aws-cli and boto3-s3 alike. On the CRT lane the harness passes `--endpoint-url`
 explicitly to both sides - the same workaround as the e2e CRT tests
-(`test_crt_parity.py`), because aws's CRT client reads `use_ssl` from the CLI
-argument only and an env-only `AWS_ENDPOINT_URL_S3` makes it dial TLS to the
+(`test_crt_parity.py`), because aws-cli's CRT client reads `use_ssl` from the
+CLI argument only and an env-only `AWS_ENDPOINT_URL_S3` makes it dial TLS to the
 dev stack's http endpoint (`AWS_IO_SOCKET_CLOSED`).
 
 A scenario that fails (unexpected rc, verification mismatch) is skipped and
@@ -213,9 +213,9 @@ The in-process `inproc_sync_changed_20k` gets the same shape from the stub:
 The single-object rows measure two different things depending on the link.
 Against the dev stack on localhost a 64 MB object moves in a few hundredths of a
 second, so `cp_upload_large` / `cp_download_large` there are the CPU cost of
-multipart orchestration, not throughput - and on the CRT lane the aws side can
-finish inside its own startup constant, which the report renders as `-`. For a
-throughput figure the object has to be large enough to outlast startup by a
+multipart orchestration, not throughput - and on the CRT lane the aws-cli side
+can finish inside its own startup constant, which the report renders as `-`. For
+a throughput figure the object has to be large enough to outlast startup by a
 clear margin: `--large-transfer-mb` sizes both modes' large rows, and the EC2
 lane defaults it to 1024 for that reason. Read the 64 MB rows as overhead
 rows, not as the project's transfer speed.
@@ -251,8 +251,8 @@ machine environment - are kept in [benchmarks/RESULTS.md](../benchmarks/RESULTS.
 which survives the git-ignored results directory.
 
 Flag rules (`--threshold`, default 1.10): an E2E work scenario flags when
-`(net ratio now) / (net ratio baseline)` exceeds the threshold - the aws side
-is the same-run control, so this survives cross-run host noise; without a
+`(net ratio now) / (net ratio baseline)` exceeds the threshold - the aws-cli
+side is the same-run control, so this survives cross-run host noise; without a
 baseline the ratio itself must exceed it. Startup probes and in-process
 scenarios flag on `median now / median baseline`.
 

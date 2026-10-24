@@ -15,15 +15,15 @@ matches is included. A pattern is Python's ``fnmatch``: ``*`` and ``?`` match
 ``/`` too, ``[seq]`` is a character class, there is no escape character, and
 the whole path must match.
 
-aws joins every pattern onto its side's base (its ``rootdir``) with
+aws-cli joins every pattern onto its side's base (its ``rootdir``) with
 ``os.path.join`` and matches the entry's full path against the result. The
 verdict depends on three values of the entry alone, so the compiled filter
 needs no base and works for every operation, on both sides of a ``sync`` and
 inside the caller's own predicate:
 
-- R, the entry's path below aws's base: its ``compare_key``. The library
+- R, the entry's path below aws-cli's base: its ``compare_key``. The library
   stamps it so on every entry it hands to a filter.
-- F, the full path aws matches: a ``LocalFileInfo``'s ``key`` (the absolute
+- F, the full path aws-cli matches: a ``LocalFileInfo``'s ``key`` (the absolute
   path), ``bucket/key`` for an ``S3FileInfo``, none for any other entry.
 - D, the drive or UNC share of F in its native spelling (Windows only; ``""``
   on the S3 side).
@@ -34,17 +34,17 @@ result does not depend on the Python running here. Where the join keeps the
 base, the pattern is matched against R; where it drops the base, against F:
 
 - relative (no drive, no root): against R. The base is taken literally,
-  where aws reads glob characters in it (a deliberate difference);
+  where aws-cli reads glob characters in it (a deliberate difference);
 - POSIX ``/x``, Windows ``C:\x`` and ``\\server\share\x``: against F;
 - Windows ``\x`` (a root without a drive): ``D + \x`` against F;
 - Windows ``C:x`` (a drive without a root): against R as ``x`` when the drive
   is D, compared case-insensitively as ``ntpath.join`` compares; otherwise as
   written against F (so on Windows ``*:*`` matches every drive-letter path,
   every S3 key that holds a ``:``, and every key under an access point or
-  Outposts ARN, whose ``bucket/key`` starts with ``arn:`` - as on aws). A
+  Outposts ARN, whose ``bucket/key`` starts with ``arn:`` - as on aws-cli). A
   bare ``C:`` on drive C: is the empty pattern.
 
-aws matches both strings through ``normcase``: byte-exact on POSIX, where
+aws-cli matches both strings through ``normcase``: byte-exact on POSIX, where
 ``\`` is an ordinary character; on Windows lower-cased by the operating
 system's own table and with ``/`` turned into ``\``, so the two separators are
 one, in an S3 key as in a pattern (``normcase``).

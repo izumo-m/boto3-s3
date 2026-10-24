@@ -1,6 +1,6 @@
-"""Unit tests for boto3_s3_cli.textencoding: the encoding aws uses, and where it applies.
+"""Unit tests for boto3_s3_cli.textencoding: the encoding aws-cli uses, and where it applies.
 
-aws decides its text encoding from the locale whatever Python's UTF-8 mode
+aws-cli decides its text encoding from the locale whatever Python's UTF-8 mode
 says (measured against the pinned aws-cli on Linux C.UTF-8 / C / POSIX /
 ja_JP.EUC-JP and Windows cp932): UTF-8 under a C or POSIX ``LC_CTYPE``, the
 locale's own encoding otherwise, the ANSI code page on Windows. These pin that
@@ -34,7 +34,7 @@ class TestTextEncoding:
         assert textencoding.text_encoding() == "UTF-8"
 
     def test_otherwise_the_locales_own_encoding(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Read past UTF-8 mode: aws runs in the locale's encoding.
+        # Read past UTF-8 mode: aws-cli runs in the locale's encoding.
         monkeypatch.setattr(sys, "platform", "linux")
         monkeypatch.setattr(locale, "setlocale", lambda category: "ja_JP.EUC-JP")
         monkeypatch.setattr(locale, "nl_langinfo", lambda item: "EUC-JP", raising=False)
@@ -94,7 +94,7 @@ class TestStdStreams:
         monkeypatch.setattr(textencoding, "text_encoding", lambda: "EUC-JP")
         monkeypatch.setattr(locale, "setlocale", lambda category: "ja_JP.EUC-JP")
         textencoding.configure_std_streams()
-        # aws's stdout is strict there, so uni_write's '?' takes over.
+        # `aws`'s stdout is strict there, so uni_write's '?' takes over.
         assert (out.encoding, out.errors) == ("euc_jp", "strict")
         assert (err.encoding, err.errors) == ("euc_jp", "backslashreplace")
 
@@ -103,7 +103,7 @@ class TestStdStreams:
         monkeypatch.setattr(sys, "stdout", out)
         monkeypatch.setattr(sys, "stderr", None)
         monkeypatch.setattr(textencoding, "text_encoding", lambda: "UTF-8")
-        # The error handler aws's stdout takes depends on the host locale; pin it.
+        # The error handler `aws`'s stdout takes depends on the host locale; pin it.
         monkeypatch.setattr(textencoding, "_stdout_errors", lambda: "surrogateescape")
         textencoding.configure_std_streams()
         assert (out.encoding, out.errors) == ("utf-8", "surrogateescape")

@@ -121,7 +121,7 @@ class TestSyncUpload:
         ]
 
     def test_detect_symlink_loops_reaches_the_local_walk(self, tmp_path: Path) -> None:
-        # The opt-in cycle guard (default off = aws parity) flows through sync's
+        # The opt-in cycle guard (default off = aws-cli parity) flows through sync's
         # local-side walk too, not just cp/mv's.
         src = tmp_path / "src"
         _write(src, "a.txt", b"x")
@@ -474,14 +474,14 @@ class TestSyncUpload:
         client, calls = make_recording_client([])
         with pytest.raises(NotFoundError) as excinfo:
             S3().sync(missing, S3Storage("s3://bucket/p", client=client))
-        # aws's bare RuntimeError -> rc 255; NotFoundError with no ClientError
+        # aws-cli's bare RuntimeError -> rc 255; NotFoundError with no ClientError
         # cause maps to the same general rc.
         assert excinfo.value.__cause__ is None
         assert missing in str(excinfo.value)
         assert calls == []
 
     def test_a_file_source_is_refused_before_anything_runs(self, tmp_path: Path) -> None:
-        # The walk would skip `file/` as missing: aws warns, runs on an empty
+        # The walk would skip `file/` as missing: aws-cli warns, runs on an empty
         # source and exits 2 (its --delete then empties the destination).
         # Here the run stops before it starts, like a missing source, and
         # nothing is listed or deleted.
@@ -496,7 +496,7 @@ class TestSyncUpload:
     @pytest.mark.skipif(os.name == "nt", reason="a directory symlink needs privileges there")
     def test_a_symlink_root_not_followed_is_refused(self, tmp_path: Path) -> None:
         # Under follow_symlinks=False the walk skips a symlink root without a
-        # word: aws runs on an empty source and exits 0, its --delete
+        # word: aws-cli runs on an empty source and exits 0, its --delete
         # emptying the destination. Refused here, not followed.
         target = tmp_path / "real"
         _write(target, "a.txt", b"xx")
@@ -821,7 +821,7 @@ class TestSyncDownload:
     def test_directory_bucket_source_is_rejected_before_dest_dir_creation(
         self, tmp_path: Path, bucket: str
     ) -> None:
-        # The rejection guards the source side too, before any listing. aws
+        # The rejection guards the source side too, before any listing. aws-cli
         # creates the destination directory first and then fails validation
         # (measured; design/sync.md section 6); here the directory is created
         # only once every set-up check has passed, so the refusal leaves none.
@@ -988,9 +988,9 @@ class TestSyncDownload:
 
 
 class TestSyncFilesystemRoot:
-    """A local side at the filesystem root: aws matches its walk as `/bin/x`.
+    """A local side at the filesystem root: aws-cli matches its walk as `/bin/x`.
 
-    aws walks from ``local_format``'s ``abspath`` plus a separator and joins the
+    aws-cli walks from ``local_format``'s ``abspath`` plus a separator and joins the
     patterns onto ``abspath(path)``, which already ends in one; both of sync's
     local sides show the filter that form, and keep their records' own keys.
     """
@@ -1014,7 +1014,7 @@ class TestSyncFilesystemRoot:
             on_result=results.append,
         )
         assert seen == ["/bin/x", "/etc/y"]
-        # `bin/*` misses `/bin/x` on aws too: both are uploaded.
+        # `bin/*` misses `/bin/x` on `aws` too: both are uploaded.
         assert sorted(r.compare_key for r in results) == ["bin/x", "etc/y"]
 
     def test_a_root_destination_side(self) -> None:

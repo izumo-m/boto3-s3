@@ -47,7 +47,7 @@ def validate_query(args: argparse.Namespace) -> None:
     and it is loaded only when ``--query`` is actually present.
 
     Every failure of the compile is that 252, not just the ``JMESPathError``
-    family, as aws's ``_resolve_query`` catches bare ``Exception``.
+    family, as aws-cli's ``_resolve_query`` catches bare ``Exception``.
     """
     value = getattr(args, "query", None)
     if value is None:
@@ -187,7 +187,7 @@ def add_common_arguments(
         default=flag,
         help="send requests without credentials",
     )
-    # Not argparse type=int on purpose: aws coerces these in a post-parse session
+    # Not argparse type=int on purpose: aws-cli coerces these in a post-parse session
     # handler (globalargs._resolve_timeout), so a non-integer value raises there
     # and exits 255 - not the parse-time 252 a type=int would give. The session
     # and client builders coerce them (clientfactory).
@@ -246,7 +246,7 @@ def add_common_arguments(
         default=value,
         help="validated, then ignored: errors always use the default format",
     )
-    # Recognized for parity; consumed by no command - aws s3's own blob
+    # Recognized for parity; consumed by no command - `aws s3`'s own blob
     # argument (cp --sse-c-key) ignores it too (verbatim pass-through with
     # fileb:// file loading; option-handling section 2).
     ignored.add_argument(
@@ -265,7 +265,7 @@ def add_common_arguments(
         help="show the boto3-s3-cli, boto3-s3, Python and SDK versions, then exit",
     )
 
-    # aws's interactive auto-prompt pair (section 3): accepted, so a command
+    # aws-cli's interactive auto-prompt pair (section 3): accepted, so a command
     # line carrying either still runs, and ignored - there is no prompt.
     parser.add_argument(
         "--cli-auto-prompt",

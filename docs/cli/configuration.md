@@ -175,7 +175,7 @@ alias lsr='boto3-s3 ls --recursive'
 ## 6. Cached temporary credentials
 
 Credentials fetched for an `assume_role` / web-identity / SSO profile are cached
-in `~/.aws/cli/cache`, aws's own directory and file format, so consecutive
+in `~/.aws/cli/cache`, aws-cli's own directory and file format, so consecutive
 commands do not repeat the `AssumeRole` call and an `mfa_serial` profile asks
 for a code once rather than on every invocation. The cache is shared with
 `aws`: either command reuses what the other fetched. An `sso-session` token

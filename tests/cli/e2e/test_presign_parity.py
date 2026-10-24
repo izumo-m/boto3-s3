@@ -3,7 +3,7 @@
 The ls-suite contract (read-only, one shared seeding, golden persist/check
 before the live diff) plus a presign-only third layer: for ``fetch=True``
 scenarios both sides' URLs are actually GET - the endpoint accepting our
-signature like it accepts aws's is parity the URL string alone cannot
+signature like it accepts aws-cli's is parity the URL string alone cannot
 prove. Status must match; on 200 the bodies must match too (404 bodies
 carry per-request IDs and are not compared).
 """
@@ -88,7 +88,7 @@ def test_presign_parity(scenario: PresignScenario, bucket: str, s3_client: Any) 
             )
             pytest.fail(f"[{scenario.name}] stdout parity broken:\n{diff}")
         # The normalizer folds the environment-default scope region to <REGION>
-        # (endpoint policy step 1), so a same-run aws<->ours equality on the raw
+        # (endpoint policy step 1), so a same-run `aws`<->ours equality on the raw
         # region keeps it under test - the two CLIs must sign with one scope.
         assert presign_scope_region(ours_result.stdout) == presign_scope_region(
             aws_result.stdout

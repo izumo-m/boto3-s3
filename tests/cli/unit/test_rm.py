@@ -93,7 +93,7 @@ class TestOutputMatrix:
         assert (result.rc, result.stdout) == (0, "")
 
     def test_only_show_errors_still_prints_dryrun(self) -> None:
-        # aws quirk: OnlyShowErrorsResultPrinter does not override
+        # aws-cli quirk: OnlyShowErrorsResultPrinter does not override
         # the dryrun line.
         result, calls = run_recorded([], ["rm", "s3://b/k", "--dryrun", "--only-show-errors"])
         assert (result.rc, result.stdout) == (0, "(dryrun) delete: s3://b/k\n")
@@ -125,7 +125,7 @@ class TestOutputMatrix:
         assert (result.rc, result.stdout, result.stderr) == (0, "", "")
 
     def test_quiet_silences_failure_lines_but_not_rc(self) -> None:
-        # aws --quiet builds no result printer at all: even failure/fatal
+        # aws-cli under --quiet builds no result printer at all: even failure/fatal
         # lines vanish while the rc stays 1.
         client = _RaisingDeleteClient(client_error("NoSuchBucket", 404, "DeleteObject"))
         result = run_cli_in_process(["rm", "s3://b/k", "--quiet"], ctx=client_ctx(client))
@@ -143,7 +143,7 @@ class TestDeletePrinterEncoding:
     def test_unencodable_key_prints_with_replacements(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # The success line goes through uni_write (aws's uni_print): a
+        # The success line goes through uni_write (aws-cli's uni_print): a
         # non-ASCII key on an ascii-encoding stdout is '?'-replaced instead
         # of raising UnicodeEncodeError out of the deleter-worker callback
         # and killing the run.
@@ -171,10 +171,10 @@ class TestDeletePrinterEncoding:
 class TestDeletePrinterWriteFailures:
     """A line that cannot be written at all is dropped, never raised.
 
-    aws prints its result lines from the ResultProcessor thread, whose
+    `aws` prints its result lines from the ResultProcessor thread, whose
     ``_process_result`` logs a raising handler at debug level and carries on, so
     an unwritable stdout leaves the run's outcome untouched: measured on the
-    pinned aws, `aws s3 rm s3://b/k 1>&-` exits 0 in silence with the object
+    pinned `aws`, `aws s3 rm s3://b/k 1>&-` exits 0 in silence with the object
     deleted.
     """
 
@@ -183,7 +183,7 @@ class TestDeletePrinterWriteFailures:
         self, monkeypatch: pytest.MonkeyPatch, outcome: OpOutcome
     ) -> None:
         # None is the stdout a closed fd 1 leaves behind; the stderr side (the
-        # failure line) gets the same treatment in aws's result thread.
+        # failure line) gets the same treatment in aws-cli's result thread.
         monkeypatch.setattr(sys, "stdout", None)
         monkeypatch.setattr(sys, "stderr", None)
         printer = _DeletePrinter(quiet=False, only_show_errors=False)
@@ -208,7 +208,7 @@ class TestDeletePrinterWriteFailures:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Every key of a recursive run is still deleted with stdout unwritable -
-        # aws's result thread never touches the delete pipeline (measured: 200
+        # aws-cli's result thread never touches the delete pipeline (measured: 200
         # objects, --page-size 10, 0 remaining under a closed stdout).
         class _Enospc(io.StringIO):
             def write(self, text: str) -> int:
@@ -260,11 +260,11 @@ class TestExitCodeShape:
 
     def test_a_request_error_outside_botocore_is_a_per_key_failure(self) -> None:
         # What the delete request raises is that key's failure whatever its
-        # type: aws's per-key DeleteObject runs as an s3transfer task, whose
+        # type: aws-cli's per-key DeleteObject runs as an s3transfer task, whose
         # any-exception capture turns an S3 Express CreateSession reply
         # without Credentials (KeyError) or a redirect loop (RecursionError)
         # into a `delete failed:` line at rc 1 (measured against the pinned
-        # aws through a 127.0.0.1 fake, for the recursive form too). The
+        # aws-cli through a 127.0.0.1 fake, for the recursive form too). The
         # span's own `fatal error:` (below) is for what escapes the pipeline,
         # not this.
         client = _RaisingDeleteClient(KeyError("Credentials"))
@@ -275,7 +275,7 @@ class TestExitCodeShape:
 
     def test_listing_failure_is_rc_1_fatal_not_254(self) -> None:
         # ls maps a server ClientError to 254; rm must report rc 1 with a
-        # "fatal error:" line instead (aws transfer-command convention).
+        # "fatal error:" line instead (aws-cli transfer-command convention).
         client = _RaisingPaginatorClient(client_error("NoSuchBucket", 404, "ListObjectsV2"))
         result = run_cli_in_process(
             ["rm", "s3://b-no-such/", "--recursive"], ctx=client_ctx(client)
@@ -286,7 +286,7 @@ class TestExitCodeShape:
 
     def test_an_unclassified_run_error_is_rc_1_fatal(self) -> None:
         # rm's span reports by exception *position*, not by type: whatever the
-        # operation raises is one `fatal error:` line at rc 1, because aws runs
+        # operation raises is one `fatal error:` line at rc 1, because aws-cli runs
         # rm inside the same result recorder cp/mv/sync use - here an
         # exception from outside the library's taxonomy, raised by the listing.
         result, _ = run_recorded(
@@ -324,7 +324,7 @@ class TestExitCodeShape:
             )
 
     def test_mid_run_ctrl_c_is_rc_1_cancelled_like_aws(self) -> None:
-        # aws's shared result machinery converts a Ctrl-C after the operation
+        # aws-cli's shared result machinery converts a Ctrl-C after the operation
         # starts into a cancelled run: rc 1 with one `cancelled: ctrl-c
         # received` line (measured mid-rm on the pinned 2.36.40), never the
         # dispatcher backstop's 130, which stays for the pre-pipeline spans.
@@ -374,7 +374,7 @@ class TestExitCodeShape:
     )
     def test_a_path_with_no_bucket_is_a_usage_error(self, argv: list[str]) -> None:
         # Refused before the client is built or anything is listed or sent.
-        # aws sends Bucket="" onward: a single delete fails per key (rc 1) or,
+        # aws-cli sends Bucket="" onward: a single delete fails per key (rc 1) or,
         # under --dryrun, prints its line (rc 0); a listing is fatal (rc 1).
         result = run_cli_in_process(argv, ctx=unused_ctx())
         assert result.rc == 252, argv
@@ -413,7 +413,7 @@ class TestFilterWiring:
 
 
 class TestParamfileAndQuery:
-    """aws expands the positional file:// at parse time and compiles --query
+    """aws-cli expands the positional file:// at parse time and compiles --query
     there too; a bad reference / expression is its 252 before any request."""
 
     def test_positional_file_reference_is_expanded(self, tmp_path: Any) -> None:
@@ -447,7 +447,7 @@ class TestAppendFilterAction:
         assert args.filters == [Include("a"), Exclude("b"), Include("c")]
 
     def test_a_dash_led_pattern_reaches_the_filter_list(self) -> None:
-        # Through the parser the dispatch really parses with: aws's nargs=1
+        # Through the parser the dispatch really parses with: aws-cli's nargs=1
         # consumption, reproduced by the parser base class, makes the token a
         # pattern rather than a missing value or a positional.
         parser = cli._build_command_parse_parser("rm", cli._load_command("rm")())

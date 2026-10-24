@@ -205,7 +205,7 @@ class TestValidateSamePaths:
         assert s3control.calls[0]["Name"] == "my-ap-s3alias"
 
     def test_s3express_access_point_is_resolved(self) -> None:
-        # aws neither warns about nor resolves --xa-s3, and on real S3 the move
+        # aws-cli neither warns about nor resolves --xa-s3, and on real S3 the move
         # of an access point's key onto its directory bucket's same key copies
         # the object onto itself and then deletes it. Resolved here like an
         # alias, so the flag refuses it.
@@ -305,7 +305,7 @@ class TestValidateSamePaths:
         assert "AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS environment variable to true" in err
 
     def test_warning_prints_even_under_quiet(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # aws writes it straight to stderr during validation, outside the
+        # aws-cli writes it straight to stderr during validation, outside the
         # result printer --quiet silences.
         ctx, _, _, _, _ = _resolver_ctx(bucket="unused", responses=[_head_response(), {}, {}])
         rc = cli.main(["mv", f"s3://{_AP_ARN}/k.txt", "s3://other/k.txt", "--quiet"], ctx=ctx)

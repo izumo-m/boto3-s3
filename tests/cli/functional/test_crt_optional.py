@@ -1,7 +1,7 @@
 """Degradation contract for installs without awscrt (design/transfer.md section 9).
 
 The dev environment is always CRT-present (the dev dependency group installs
-``botocore[crt]`` so the parity tiers run under aws v2's condition), while
+``botocore[crt]`` so the parity tiers run under aws-cli v2's condition), while
 the dists leave CRT to the opt-in ``crt`` extra - so the awscrt-less install
 needs its own pin. botocore freezes ``HAS_CRT`` (and the checksum registry
 derived from it) at import time, which makes the absence impossible to fake
@@ -81,7 +81,7 @@ with mock_aws():
         assert result.rc == 0, (algorithm, result.rc, result.stderr)
 
     # Pure-Python signers are the no-awscrt default: the build_client pin is
-    # a no-op and presign keeps aws v2's parameter order.
+    # a no-op and presign keeps aws-cli v2's parameter order.
     result = run_cli_in_process(["presign", "s3://crt-less-bucket/plain.txt"])
     assert result.rc == 0, (result.rc, result.stderr)
     url = result.stdout.strip()

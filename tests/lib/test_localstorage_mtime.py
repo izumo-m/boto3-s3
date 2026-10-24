@@ -65,7 +65,7 @@ _CASES = [
     ("UTC", 253402300800, None),
     ("UTC", -62135596800, _UTC_MIN),
     ("UTC", -62135596801, None),
-    # aws-cli falls back to the epoch for these (measured on aws 2.36.40): the
+    # aws-cli falls back to the epoch for these (measured on aws-cli 2.36.40): the
     # local wall clock leaves datetime's range, UTC does not.
     ("Asia/Tokyo", 253402300799, _UTC_MAX_SECOND),
     ("America/New_York", -62135596800, _UTC_MIN),

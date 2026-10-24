@@ -48,12 +48,12 @@ _UNRESOLVED: Final = _RegionUnresolved.TOKEN
 
 
 def _pin_python_sigv4_signers() -> None:
-    """Keep the symmetric-SigV4 signers pure-Python, as aws v2 does.
+    """Keep the symmetric-SigV4 signers pure-Python, as aws-cli v2 does.
 
     Stock botocore swaps ``v4`` / ``v4-query`` / ``s3v4`` / ``s3v4-query`` to
     CRT-backed signers whenever awscrt is importable - true once the ``crt``
     extra (it backs the CRT checksum algorithms, ``cp --checksum-algorithm
-    CRC32C`` ...) or any co-installed package brings awscrt in. aws v2's
+    CRC32C`` ...) or any co-installed package brings awscrt in. aws-cli v2's
     bundled botocore instead hard-pins the pure-Python classes for those
     four, reserving CRT for the asymmetric SigV4a family (aws-cli's
     ``awscli/botocore/auth.py`` ``AUTH_TYPE_MAPS``). The difference is
@@ -86,25 +86,25 @@ def _open_botocore_session(args: argparse.Namespace) -> BotocoreSession:
     asked for this profile explicitly" and drops the environment credential
     provider for it (``create_credential_resolver``'s ``disable_env_vars``), so
     promoting the env-named profile would turn ``AWS_PROFILE=x`` plus
-    ``AWS_ACCESS_KEY_ID`` - a routine CI shape that works under aws - into
+    ``AWS_ACCESS_KEY_ID`` - a routine CI shape that works under `aws` - into
     "Unable to locate credentials". Redeclaring the profile config variable
-    restores aws's env order (stock botocore reads ``AWS_DEFAULT_PROFILE``
+    restores aws-cli's env order (stock botocore reads ``AWS_DEFAULT_PROFILE``
     first, botocore #1725) without that promotion.
 
-    ``retry_mode`` / ``max_attempts`` are redeclared with the defaults aws v2's
+    ``retry_mode`` / ``max_attempts`` are redeclared with the defaults aws-cli v2's
     bundled botocore hard-codes (``standard`` / 3, where stock botocore
     declares ``legacy`` and no cap). Declaring them on the *session* is what
-    puts every client it builds on aws's retry posture - not just the ones this
+    puts every client it builds on aws-cli's retry posture - not just the ones this
     module builds, but the STS / SSO clients the credential chain creates for
     itself, which a per-client ``Config`` never reaches (measured: a failing
-    ``AssumeRole`` is attempted 3 times under aws and was attempted 5 here).
+    ``AssumeRole`` is attempted 3 times under `aws` and was attempted 5 here).
     The ``[s3]`` regional pin (`_pin_regional_s3_endpoint`) and the timeouts in
     the session default client config (`_default_client_config`) reach the same
     clients for the same reason.
 
     Finally the two output-format settings are checked
     (`_reject_unknown_cli_formats`) and the temporary-credential providers get
-    their on-disk cache (`_inject_credential_cache`), the last things aws does
+    their on-disk cache (`_inject_credential_cache`), the last things aws-cli does
     to a session before running a command.
     """
     import botocore.session
@@ -129,7 +129,7 @@ def _open_botocore_session(args: argparse.Namespace) -> BotocoreSession:
     return session
 
 
-# The values aws's `cli_timestamp_format` and `cli_binary_format`
+# The values aws-cli's `cli_timestamp_format` and `cli_binary_format`
 # customizations accept; the comparison is exact and case-sensitive.
 _TIMESTAMP_FORMATS = ("wire", "iso8601")
 _BINARY_FORMATS = ("base64", "raw-in-base64-out")
@@ -138,16 +138,16 @@ _BINARY_FORMATS = ("base64", "raw-in-base64-out")
 class UnknownTimestampFormatError(ConfigurationError):
     """An unknown ``cli_timestamp_format`` in the selected profile (rc 253).
 
-    aws raises its own ``ConfigurationError`` for it, the one failure on this
+    aws-cli raises its own ``ConfigurationError`` for it, the one failure on this
     surface its ``ConfigurationErrorHandler`` reports, so the report carries
     that handler's ``Configuration`` code (`cli._configuration_report`).
     """
 
 
 def _reject_unknown_cli_formats(session: BotocoreSession, args: argparse.Namespace) -> None:
-    """Stop on a ``cli_timestamp_format`` / ``cli_binary_format`` aws refuses.
+    """Stop on a ``cli_timestamp_format`` / ``cli_binary_format`` aws-cli refuses.
 
-    aws checks both settings in the selected profile when its session starts,
+    aws-cli checks both settings in the selected profile when its session starts,
     so a value it does not accept stops every command: rc 253 for the
     timestamp format, rc 255 for the binary format (design/cli.md section 6).
     This CLI uses neither value for anything else - its listings print the
@@ -180,15 +180,15 @@ def _reject_unknown_cli_formats(session: BotocoreSession, args: argparse.Namespa
 
 
 def _check_every_client(session: BotocoreSession) -> None:
-    """Hold every client the session builds to aws's empty CA bundle check.
+    """Hold every client the session builds to aws-cli's empty CA bundle check.
 
-    aws's bundled botocore refuses, in every ``create_client``, a CA bundle that
+    aws-cli's bundled botocore refuses, in every ``create_client``, a CA bundle that
     resolves to an empty or whitespace-only value (`_reject_empty_ca_bundle`).
     `_create_client` supplies it for the clients this module builds, but the
     SDK builds others from the same session - the credential chain's STS, SSO
     and sso-oidc clients, the CRT engine's request serializer - and those took
     an empty ``AWS_CA_BUNDLE`` beside a valid ``--ca-bundle`` as "verification
-    off", fetching credentials over unverified TLS where aws stops (measured:
+    off", fetching credentials over unverified TLS where aws-cli stops (measured:
     rc 255 for ``ls``, a failed item for ``cp``, rc 0 here). So the session's
     own ``create_client`` runs the check on what it built, resolving the
     trust source the way botocore does when the caller names none: the
@@ -197,7 +197,7 @@ def _check_every_client(session: BotocoreSession) -> None:
     it was handed then. Each client it returns carries the library's
     `CA_BUNDLE_ENVIRONMENT_VETTED` mark, so the library's own guess at the
     environment (made for a client a caller hands it) stands down: the check
-    here already ran where aws runs it, and the guess would refuse runs aws
+    here already ran where aws-cli runs it, and the guess would refuse runs aws-cli
     completes.
     """
     import inspect
@@ -226,7 +226,7 @@ def _check_every_client(session: BotocoreSession) -> None:
 class _RegionalS3Section:
     """The profile's ``[s3]`` section with ``us_east_1_regional_endpoint`` pinned.
 
-    aws v2's bundled botocore dropped that key from its ``[s3]`` table outright
+    aws-cli v2's bundled botocore dropped that key from its ``[s3]`` table outright
     - us-east-1 is regional there, always - so ``legacy`` from
     ``AWS_S3_US_EAST_1_REGIONAL_ENDPOINT`` or the config key decides nothing on
     that side. The installed botocore still reads it, and dropping the key
@@ -254,7 +254,7 @@ class _RegionalS3Section:
         deepcopy of whatever the config store holds. A wrapper answering only
         ``provide()`` therefore failed *every* command at rc 255 with
         ``'_RegionalS3Section' object has no attribute 'set_default_provider'``
-        where aws - whose bundled botocore has no defaults modes at all -
+        where aws-cli - whose bundled botocore has no defaults modes at all -
         simply ran (measured for every valid mode, config key and env var
         alike). Delegating leaves botocore's own bookkeeping intact; `provide`
         pins the value whatever the write says.
@@ -277,23 +277,23 @@ def _pin_regional_s3_endpoint(session: BotocoreSession) -> None:
 
 
 def _default_client_config(args: argparse.Namespace) -> Any:
-    """The session default client config aws's startup handlers build.
+    """The session default client config aws-cli's startup handlers build.
 
-    aws's globalargs resolves ``--cli-read-timeout`` / ``--cli-connect-timeout``
+    aws-cli's globalargs resolves ``--cli-read-timeout`` / ``--cli-connect-timeout``
     into the session's default client config (``_resolve_timeout`` ->
     ``_update_default_client_config``), defaulting both to botocore's 60s, so
     every client created from that session inherits them - the credential
     chain's own STS / SSO clients included. Without that, a stalled STS ran to
-    botocore's default here while aws gave up on the flag's budget (measured:
+    botocore's default here while aws-cli gave up on the flag's budget (measured:
     ``--cli-read-timeout 2`` against an STS stalling 8s is rc 255 and a read
-    timeout on aws, and was rc 254 with the server's own error here).
+    timeout on `aws`, and was rc 254 with the server's own error here).
 
-    ``--no-sign-request`` lands in the very same config, from aws's
+    ``--no-sign-request`` lands in the very same config, from aws-cli's
     ``no_sign_request`` handler, and that placement is load-bearing twice
     over. It reaches the clients botocore builds for itself, so an unsigned
     run that still resolves credentials sends an *unsigned* ``AssumeRole``
     (measured: with a working assume-role profile,
-    ``cp --no-sign-request --sse aws:kms`` has aws call STS unsigned and then
+    ``cp --no-sign-request --sse aws:kms`` has aws-cli call STS unsigned and then
     sign the upload with what it got back). And being the session *default*
     is what lets a per-client ``signature_version`` beat it, which is how
     ``--sse aws:kms`` restores signing (`_signature_version_pin`).
@@ -319,11 +319,11 @@ def _default_client_config(args: argparse.Namespace) -> Any:
 
 
 def _credential_cache_dir() -> str:
-    """The directory aws caches assumed-role / SSO credentials in.
+    """The directory aws-cli caches assumed-role / SSO credentials in.
 
-    Literally aws's own ``~/.aws/cli/cache`` (its ``CACHE_DIR``), so the two
+    Literally aws-cli's own ``~/.aws/cli/cache`` (its ``CACHE_DIR``), so the two
     tools share one cache: credentials fetched under either are reused by the
-    other for as long as they are valid. aws freezes the expansion at import
+    other for as long as they are valid. aws-cli freezes the expansion at import
     time; expanding per call is the same answer for a process whose ``HOME``
     does not move, and it keeps the directory testable.
     """
@@ -331,22 +331,22 @@ def _credential_cache_dir() -> str:
 
 
 def _inject_credential_cache(session: BotocoreSession) -> None:
-    """Persist assumed-role / web-identity / SSO credentials across runs, as aws does.
+    """Persist assumed-role / web-identity / SSO credentials across runs, as aws-cli does.
 
     botocore caches the temporary credentials these three providers fetch in a
     plain dict, which dies with the process: every invocation would re-call
     ``AssumeRole``, and an ``mfa_serial`` profile would prompt for a code
     every time - fatal (rc 255 on the ``getpass`` EOF) in any non-interactive
-    run. aws's two ``session-initialized`` handlers replace that dict with a
+    run. aws-cli's two ``session-initialized`` handlers replace that dict with a
     ``JSONFileCache`` over `_credential_cache_dir`; do the same to every session
-    this module opens, which is aws's timing too (its event fires after the
+    this module opens, which is aws-cli's timing too (its event fires after the
     driver has bound ``--profile``, so the provider chain this reaches is built
     for the run's own profile).
 
     The SSO token the ``sso-session`` provider refreshes is written back to
     ``~/.aws/sso/cache`` the same way - the installed botocore writes it
-    through a temporary file and ``os.replace``, so a cache aws can write
-    (an unwritable directory over a writable entry) failed here, one aws
+    through a temporary file and ``os.replace``, so a cache aws-cli can write
+    (an unwritable directory over a writable entry) failed here, one aws-cli
     cannot (a read-only entry) succeeded here, and the entry's mode changed
     (measured) - by building that cache from the same class.
     """
@@ -368,7 +368,7 @@ def _inject_credential_cache(session: BotocoreSession) -> None:
 def _serialize_cache_entry(value: Any) -> Any:
     """Render for `json.dumps` what it cannot render itself: a ``datetime``.
 
-    aws never reaches this case - its ``cli_timestamp_format`` handler makes
+    aws-cli never reaches this case - its ``cli_timestamp_format`` handler makes
     the response parser return timestamps as ISO-8601 *strings*, so a
     credential's ``Expiration`` is already text by the time the cache stores it
     and lands in the file verbatim (``2026-08-13T10:23:54+09:00``). This CLI
@@ -376,8 +376,8 @@ def _serialize_cache_entry(value: Any) -> Any:
     renders one with ``strftime('%Y-%m-%dT%H:%M:%S%Z')``, whose ``%Z`` for an
     offset-carrying ``datetime.timezone`` is the literal ``UTC+09:00`` - which
     dateutil reads back with POSIX's inverted sign, leaving the entry looking
-    valid for hours after it expired (for this CLI and for any aws sharing the
-    directory). ``isoformat()`` is the text aws stores, byte for byte.
+    valid for hours after it expired (for this CLI and for any aws-cli sharing the
+    directory). ``isoformat()`` is the text aws-cli stores, byte for byte.
     """
     if isinstance(value, datetime):
         return value.isoformat()
@@ -386,13 +386,13 @@ def _serialize_cache_entry(value: Any) -> Any:
 
 @cache
 def _credential_cache_class() -> type[Any]:
-    """botocore's ``JSONFileCache`` with aws's write, built on first use.
+    """botocore's ``JSONFileCache`` with aws-cli's write, built on first use.
 
     The installed botocore writes an entry through ``tempfile.mkstemp`` +
-    ``os.replace``; the botocore aws ships opens the *final* path directly
+    ``os.replace``; the botocore aws-cli ships opens the *final* path directly
     (``O_WRONLY | O_CREAT``, mode 0600, then truncate). The difference is only
     visible when the write fails, which is exactly when it is read: an
-    unwritable ``~/.aws/cli/cache`` makes aws report the cache entry's own
+    unwritable ``~/.aws/cli/cache`` makes aws-cli report the cache entry's own
     name, stable across runs, where this CLI reported a random
     ``tmpXXXXXXXX.tmp`` (rc 255 on both).
 
@@ -458,8 +458,8 @@ def _construction_errors() -> Generator[None, None, None]:
     Opening a session and building a client can raise raw botocore errors
     (``ProfileNotFound`` for a bad ``--profile``, credential or region
     resolution failures); left raw they would fall to the dispatcher's
-    generic chain, losing aws's 253 / 255 split (design/cli.md section 6).
-    aws has dedicated handlers for ``NoCredentialsError`` / ``NoRegionError``
+    generic chain, losing aws-cli's 253 / 255 split (design/cli.md section 6).
+    aws-cli has dedicated handlers for ``NoCredentialsError`` / ``NoRegionError``
     (-> `ConfigurationError`, 253); every other botocore error
     (``ProfileNotFound``, ``PartialCredentialsError``, ...) falls to its
     ``GeneralExceptionHandler`` (-> 255) - `InvalidConfigError`, which
@@ -511,14 +511,14 @@ def build_s3(args: argparse.Namespace) -> S3:
     config and IMDS are all fixed by then. `_bind_region` puts it on the
     session so the clients *botocore* builds resolve it too.
 
-    A run on the CRT engine needs that answer: aws hands its region chain's
+    A run on the CRT engine needs that answer: aws-cli hands its region chain's
     answer to the CRT client, and with none the run stops before it starts,
     `--dryrun` included, where botocore would give the client the
     ``aws-global`` pseudo-region and the CRT would sign every request for it.
     The check sits at the engine's construction slot
     (`S3.materialize_crt_engine`, which every transfer command and ``rm``
     call there) and raises botocore's own missing-region error, kept as the
-    cause so the report is aws's ``NoRegion`` one, rc 253.
+    cause so the report is aws-cli's ``NoRegion`` one, rc 253.
     """
     from boto3_s3 import S3
 
@@ -546,13 +546,13 @@ def build_s3(args: argparse.Namespace) -> S3:
 
     # reusable_after_interrupt=False: Ctrl-C is process-fatal in the CLI, so an
     # operation's unwind must not wait for an in-flight listing page pull
-    # (aws dies immediately); the library default keeps waiting.
+    # (aws-cli dies immediately); the library default keeps waiting.
     # endpoint_url: build_client already applies it to every client this S3
     # hands out (the client() override), so the S3-level copy only feeds the
     # CRT lane's explicit-endpoint pin (design/crt.md) - without it, an
     # --endpoint-url under an AWS domain (a VPC interface endpoint) would be
     # dropped by the host heuristic and the CRT would re-resolve to public S3.
-    # crt_allow_lockless=True: aws documents an explicit 'crt' preference as
+    # crt_allow_lockless=True: aws-cli documents an explicit 'crt' preference as
     # the way to make concurrently running processes use the CRT client, and
     # its factory builds the CRT client whether or not it got the
     # cross-process lock (a lock it does get still marks the slot for 'auto'
@@ -569,7 +569,7 @@ def build_s3(args: argparse.Namespace) -> S3:
     # stream) and uploads with no credentials at all, rc 0. Deriving the mode
     # from the client instead signed those requests here (design/crt.md
     # section 4).
-    # filename_encoding: the encoding aws reads and writes local names with
+    # filename_encoding: the encoding aws-cli reads and writes local names with
     # in this environment, whatever Python's own choice (textencoding).
     return CliS3(
         session=session,
@@ -585,7 +585,7 @@ def _resolve_region(explicit: str | None, session: BotocoreSession) -> str | Non
     """The region to build a client in: the *explicit* value, else the chain.
 
     The *explicit* value is ``--region`` - and it wins
-    whenever it was supplied at all, the empty string included. aws's s3
+    whenever it was supplied at all, the empty string included. aws-cli's s3
     commands hand ``parsed_globals.region`` straight to ``create_client``, so
     ``--region ""`` reaches the S3 client as itself and fails construction
     there on both tools (rc 255). What the
@@ -607,17 +607,17 @@ def _region_chain(session: BotocoreSession) -> str | None:
     ``IMDSRegionProvider`` for smart-defaults, so a bare client would resolve a
     *different* region whenever ``AWS_REGION`` is the only source, or on an EC2
     host with no region configured. The env vars are present-wins, an empty value
-    included (``AWS_REGION=`` -> ``""``, which aws signs with and this CLI walked
+    included (``AWS_REGION=`` -> ``""``, which aws-cli signs with and this CLI walked
     past). Only the CLI corrects this; the library
     (``S3.client``'s ``boto3.client`` fallback) keeps stock botocore order on
-    purpose - the same library=boto3 / CLI=aws split as the profile chain.
+    purpose - the same library=boto3 / CLI=aws-cli split as the profile chain.
 
     A ``BadIMDSRequestError`` reads as no region. aws-cli carries its own copy
     of botocore's region fetcher for exactly one added catch: botocore's
     swallows only the retries-exceeded failure, so a metadata service that
     rejects the token request outright - anything answering at the IMDS address
     that is not EC2's service - escapes as that error and fails the whole
-    invocation (rc 255) where aws logs it and walks on with an unresolved
+    invocation (rc 255) where aws-cli logs it and walks on with an unresolved
     region.
     """
     # Import the providers only when region resolution needs them.
@@ -649,9 +649,9 @@ def _region_chain(session: BotocoreSession) -> str | None:
 def _bind_region(
     botocore_session: BotocoreSession, args: argparse.Namespace, resolved: str | None
 ) -> None:
-    """Bind onto the session the region aws's own chain answers.
+    """Bind onto the session the region aws-cli's own chain answers.
 
-    aws installs its region chain as the session's own ``region`` config
+    aws-cli installs its region chain as the session's own ``region`` config
     provider and binds a truthy ``--region`` at the head of it
     (``_update_config_chain`` / ``_handle_top_level_args``), so every client
     built from that session resolves the chain's answer - including the clients
@@ -661,22 +661,22 @@ def _bind_region(
     whose only region source was ``--region`` or ``AWS_REGION`` signed
     ``AssumeRole`` against the global STS endpoint - a different partition
     under ``cn-*`` / ``us-gov-*`` - or failed outright with ``NoRegion``
-    (measured: rc 253 where aws exits 0).
+    (measured: rc 253 where `aws` exits 0).
 
     What binds is not what the client is built with. Only a *truthy*
-    ``--region`` heads aws's chain, so a falsy ``--region ""`` leaves the rest
+    ``--region`` heads aws-cli's chain, so a falsy ``--region ""`` leaves the rest
     of the chain to answer for the session while the empty string still reaches
     the S3 client as its own ``region_name`` (`_resolve_region`): measured,
-    ``--region ""`` with ``AWS_REGION=eu-west-1`` has aws sign ``AssumeRole``
+    ``--region ""`` with ``AWS_REGION=eu-west-1`` has aws-cli sign ``AssumeRole``
     in eu-west-1 where this CLI exited 253 with ``NoRegion`` and called STS not
     at all. An ``AWS_REGION=`` that is present but empty is the chain's own
-    answer and binds as itself - aws signs with an empty region scope, where
+    answer and binds as itself - aws-cli signs with an empty region scope, where
     this CLI walked on to ``AWS_DEFAULT_REGION`` and the profile and signed in
-    a region aws never used.
+    a region aws-cli never used.
 
     A client built for another region binds nothing - only the builder that
     opened the session does, so ``--source-region``'s client leaves the
-    credential chain in the run's own region, as aws's source client does.
+    credential chain in the run's own region, as aws-cli's source client does.
 
     *resolved* is the answer `_resolve_region` already computed for
     ``args.region``, so the chain - whose last link is the IMDS probe - is
@@ -706,7 +706,7 @@ def _resolve_verify(args: argparse.Namespace, botocore_session: BotocoreSession)
     (botocore's ``EndpointCreator._get_verify_value``, present-wins so an empty
     value stops the chain as itself rather than falling through). An empty or
     whitespace-only value that reaches the client is then rejected at build time
-    like aws v2 (`_reject_empty_ca_bundle`), not read as "verification off".
+    like aws-cli v2 (`_reject_empty_ca_bundle`), not read as "verification off".
     Nothing set lands on the bundle botocore would have used at request time -
     certifi's, or botocore's own ``cacert.pem`` where certifi is absent, which
     is why this asks ``get_cert_path`` rather than importing certifi.
@@ -751,20 +751,20 @@ def build_service_client(
     only the profile session, the caller's region choice (the source side
     passes ``--source-region``, the destination ``--region``, sts none),
     and the resolved TLS ``verify`` setting (`_resolve_verify`) - no endpoint
-    override. A caller's ``None`` is left to the session, as there: aws binds
+    override. A caller's ``None`` is left to the session, as there: aws-cli binds
     its region chain's answer into the session at startup, a truthy typed
     ``--region`` at its head, so a ``create_client`` with no ``region_name``
     lands on that answer - which `build_s3` bound, or `_bind_region` binds
     here onto a session this builder opened itself. ``--region ""`` is the
     corner that tells them apart: it never binds, so the source and sts
     clients resolve the rest of the chain while the destination's s3control,
-    handed the flag itself, fails on the empty region (measured). aws likewise resolves
+    handed the flag itself, fails on the empty region (measured). aws-cli likewise resolves
     ``--cli-read-timeout`` / ``--cli-connect-timeout`` into the *session*
     default client config at startup, so ``from_session``'s ``create_client``
     inherits them; fold the same timeouts into this client's ``Config``.
     ``--no-sign-request`` and the retry posture arrive through the session
     itself (`_default_client_config`, `_open_botocore_session`), which is
-    where aws puts them too, so this client is created through the shared
+    where aws-cli puts them too, so this client is created through the shared
     `_create_client`.
     """
     # Deferred like build_client: only a command that opts into path
@@ -779,7 +779,7 @@ def build_service_client(
         botocore_session = session._session  # pyright: ignore[reportPrivateUsage]
         if opened_here:
             _bind_region(botocore_session, args, _resolve_region(args.region, botocore_session))
-        # aws's startup handlers thread the timeouts through the session
+        # aws-cli's startup handlers thread the timeouts through the session
         # default config that from_session's create_client inherits
         # (build_client mirrors the same); the UNSIGNED signature arrives
         # through that config too, so this client never names one - which is
@@ -799,8 +799,8 @@ def _cli_timeouts(args: argparse.Namespace) -> dict[str, Any]:
     """The ``Config`` fields of the timeout flags given: aws-cli's ``_resolve_timeout``.
 
     ``--cli-read-timeout`` / ``--cli-connect-timeout`` arrive as raw strings
-    (see globalargs.add_common_arguments) and are coerced aws-style
-    (`_coerce_cli_timeout`), read before connect - the order aws registers its
+    (see globalargs.add_common_arguments) and are coerced aws-cli-style
+    (`_coerce_cli_timeout`), read before connect - the order aws-cli registers its
     two handlers in. A flag not given names no field, leaving the session's
     default (`_default_client_config`).
     """
@@ -815,7 +815,7 @@ def _cli_timeouts(args: argparse.Namespace) -> dict[str, Any]:
 def _coerce_cli_timeout(value: str) -> int | None:
     """aws-cli's ``_resolve_timeout`` coercion: ``int(value)``, then ``0`` -> ``None``.
 
-    aws applies this in a post-parse session handler, so a non-integer value
+    aws-cli applies this in a post-parse session handler, so a non-integer value
     raises a bare ``ValueError`` that reaches its general handler (rc 255), not
     the rc 252 of an argparse/usage error - the same path ``--page-size`` already
     takes. Translate that failure to ``InvalidValueError`` (-> 255) for parity
@@ -853,7 +853,7 @@ def _includes_endpoint_auth_path(args: argparse.Namespace) -> bool:
     `is_outpost_alias_path` require precisely because a transfer positional
     could be a local file ending in ``--x-s3`` or ``--op-s3``. Without this,
     the SigV4 pin would stay on and the URL would sign plain SigV4 with no
-    `CreateSession` - unusable against the directory bucket, where aws
+    `CreateSession` - unusable against the directory bucket, where aws-cli
     (resolving the auth scheme off the final Bucket, not the input notation)
     signs ``sigv4-s3express``; an Outposts alias would likewise get a
     symmetric signature its SigV4a endpoint rejects.
@@ -896,16 +896,16 @@ def _signature_version_pin(args: argparse.Namespace) -> str | None:
     bundled botocore has no S3 SigV2 (hmacv1 "s3"-family signers) left - only
     the generic query-protocol "v2" - while stock botocore still downgrades
     *presigned URLs* to SigV2 in regions that accept it (a default us-east-1
-    client). Pin SigV4 so every command - visibly, presign's URLs - matches aws
+    client). Pin SigV4 so every command - visibly, presign's URLs - matches aws-cli
     v2. (The other half of that divergence, us-east-1 resolving to the legacy
     global endpoint, is pinned on the session instead:
     `_pin_regional_s3_endpoint`.) The pinned name is the generic ``v4``, the
-    one aws's endpoint resolution hands its requests: botocore keeps a
+    one aws-cli's endpoint resolution hands its requests: botocore keeps a
     requested name as the request's ``auth_type``, and its own
     ``choose-signer`` handler turns ``v4`` into the S3 signer (``s3v4``) and
     answers there, while an ``s3v4`` there is passed by and left to whatever
     handler comes next. Every ``choose-signer`` handler also sees ``v4`` /
-    ``v4-query``, as on aws.
+    ``v4-query``, as on `aws`.
 
     None when the command targets an MRAP ARN, an S3 Outposts access point
     (ARN or ``--op-s3`` alias), or an S3 Express directory bucket
@@ -914,20 +914,20 @@ def _signature_version_pin(args: argparse.Namespace) -> str | None:
     asymmetric SigV4a (the MRAP and Outposts shapes) / ``sigv4-s3express``
     (with `CreateSession` credentials) - a pinned ``s3v4`` (or ``v4``) matches
     all those scheme names up to the first dash and silently signs a plain
-    SigV4 request instead. aws v2's bundled botocore pins only the symmetric
+    SigV4 request instead. aws-cli v2's bundled botocore pins only the symmetric
     families (`_pin_python_sigv4_signers`) and leaves the resolutions alive.
     With awscrt absent, a SigV4a target (MRAP or Outposts) surfaces botocore's
     own MissingDependencyException (-> ConfigurationError, 253) instead of a
     silently mis-signed SigV4 request.
 
-    None for an anonymous run (``--no-sign-request``) too: aws leaves UNSIGNED
+    None for an anonymous run (``--no-sign-request``) too: aws-cli leaves UNSIGNED
     where its startup handler put it - the session default client config
     (`_default_client_config`) - and that is what must reach the client; a
     per-client ``signature_version``, this pin included, beats it in
     botocore's merge.
 
     ``s3v4`` under ``--sse aws:kms`` (`_requests_kms_signing`), the exception
-    to both stand-downs: it is the one case for which aws names a per-client
+    to both stand-downs: it is the one case for which aws-cli names a per-client
     ``signature_version`` - its ``ClientFactory.create_client`` passes
     ``Config(signature_version='s3v4')`` whatever the target. botocore merges
     the per-client config on top of the session's, so that one case signs,
@@ -935,17 +935,17 @@ def _signature_version_pin(args: argparse.Namespace) -> str | None:
     unsigned run stays anonymous. Measured without credentials:
     ``cp``/``mv``/``sync``/``cp s3://.. s3://..`` with
     ``--no-sign-request --sse aws:kms`` are rc 1 ``Unable to locate
-    credentials`` and send nothing under aws (this CLI uploaded anonymously,
-    rc 0), and a broken ``source_profile`` under the same flags is aws's
+    credentials`` and send nothing under `aws` (this CLI uploaded anonymously,
+    rc 0), and a broken ``source_profile`` under the same flags is aws-cli's
     rc 255 profile report; ``--sse AES256`` and ``--sse-c AES256`` upload
     anonymously on both. An MRAP, Outposts or S3 Express target signs plain
     SigV4 there too, with or without ``--no-sign-request`` (measured offline
-    on the pinned aws: ``AWS4-HMAC-SHA256`` with the client's region in the
+    on the pinned `aws`: ``AWS4-HMAC-SHA256`` with the client's region in the
     scope, where the resolution would have chosen SigV4a /
-    ``sigv4-s3express``). That pin keeps aws's own ``s3v4``, and with it the
+    ``sigv4-s3express``). That pin keeps aws-cli's own ``s3v4``, and with it the
     ``auth_type`` botocore's handler passes by.
 
-    This governs the *botocore* client alone, which is aws's own split: its
+    This governs the *botocore* client alone, which is aws-cli's own split: its
     CRT factory reads ``--no-sign-request`` directly and never the client, so
     the same KMS run transfers anonymously on the CRT lane. `build_s3`
     declares that separately (``crt_sign_requests``).
@@ -958,10 +958,10 @@ def _signature_version_pin(args: argparse.Namespace) -> str | None:
 
 
 def _requests_kms_signing(args: argparse.Namespace) -> bool:
-    """Whether aws would hand this run's S3 clients ``signature_version='s3v4'``.
+    """Whether aws-cli would hand this run's S3 clients ``signature_version='s3v4'``.
 
-    aws's ``ClientFactory.create_client`` does so for ``--sse aws:kms`` and
-    nothing else - aws's own exact string, so ``aws:kms:dsse`` does not - and
+    aws-cli's ``ClientFactory.create_client`` does so for ``--sse aws:kms`` and
+    nothing else - aws-cli's own exact string, so ``aws:kms:dsse`` does not - and
     for the source client of an S3-to-S3 copy as for the destination's.
     ``--sse`` belongs to the transfer family alone, hence the ``getattr``.
     """
@@ -986,7 +986,7 @@ def build_client(
     ``Config``; ``--no-verify-ssl`` and ``--ca-bundle`` head
     the ``verify`` chain (`_resolve_verify`, always resolved to an explicit
     value so both transfer engines trust the same roots). Every client also
-    carries aws's S3 error-message rewriter (`s3errormsg`). The client is
+    carries aws-cli's S3 error-message rewriter (`s3errormsg`). The client is
     handed to the library through ``S3Storage`` - the library never rebuilds
     connection settings itself.
 
@@ -1041,7 +1041,7 @@ def _create_client(session: Boto3Session, service: str, **kwargs: Any) -> Any:
     Every client this CLI hands out is created here, which is what makes this
     the place the CONNECT pin goes on (`proxytunnel`): an HTTPS proxy sees the
     tunnel request the *host interpreter* writes, and only 3.12 and later write
-    aws's.
+    aws-cli's.
     """
     from boto3_s3_cli import proxytunnel
 
@@ -1052,9 +1052,9 @@ def _create_client(session: Boto3Session, service: str, **kwargs: Any) -> Any:
 
 
 def _reject_empty_ca_bundle(verify: Any) -> None:
-    """Reject an empty or whitespace-only CA bundle, like aws v2 (>= 2.36.6).
+    """Reject an empty or whitespace-only CA bundle, like aws-cli v2 (>= 2.36.6).
 
-    aws refuses an empty or whitespace-only ``ca_bundle`` / ``AWS_CA_BUNDLE`` /
+    aws-cli refuses an empty or whitespace-only ``ca_bundle`` / ``AWS_CA_BUNDLE`` /
     ``REQUESTS_CA_BUNDLE`` / ``--ca-bundle`` value outright at client
     construction (its bundled botocore's ``EndpointCreator._validate_verify_value``)
     rather than silently turning TLS verification off. The installed botocore

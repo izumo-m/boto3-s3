@@ -2,7 +2,7 @@
 
 Same contract as ``test_mb_parity``; rb scenarios additionally seed objects
 into the pre-created sibling bucket. The headline scenario is
-``rb_force_nonexistent``: the inner rm fails, aws raises RuntimeError into
+``rb_force_nonexistent``: the inner rm fails, aws-cli raises RuntimeError into
 its general handler, and **both** sides must exit 255.
 """
 

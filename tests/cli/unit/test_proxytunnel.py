@@ -1,14 +1,14 @@
 """Unit tests for boto3_s3_cli.proxytunnel (the CONNECT request's shape).
 
 The oracle is the pinned aws-cli, measured against a recording proxy that
-answers 400 to a ``Host``-less CONNECT: aws opens its tunnel with
+answers 400 to a ``Host``-less CONNECT: aws-cli opens its tunnel with
 
     CONNECT 127.0.0.1:PORT HTTP/1.1
     Host: 127.0.0.1:PORT
 
 and, when the proxy URL carries credentials, with ``Proxy-Authorization``
 ahead of that generated ``Host``. Before the pin this CLI sent
-``CONNECT 127.0.0.1:PORT HTTP/1.0`` with no ``Host`` (aws rc 0 / ours rc 255,
+``CONNECT 127.0.0.1:PORT HTTP/1.0`` with no ``Host`` (`aws` rc 0 / ours rc 255,
 ``Failed to connect to proxy URL``) on every host interpreter older than 3.12
 - the shape those interpreters, and the copy urllib3 carries for them, still
 write.
@@ -280,7 +280,7 @@ class TestTheReplacementRequest:
 
     @pytest.mark.parametrize("held", ["::1", "[::1]"])
     def test_an_ipv6_literal_is_bracketed_in_the_request_line_only(self, held: str) -> None:
-        # What aws sends (measured through a recording proxy:
+        # What aws-cli sends (measured through a recording proxy:
         # `CONNECT [::1]:8443 HTTP/1.1` / `Host: ::1:8443`): brackets on the
         # request target, none in the generated Host. urllib3 hands set_tunnel
         # the literal bracketed and the port separately; set_tunnel strips the
@@ -308,7 +308,7 @@ class TestTheReplacementRequest:
         """The replacement against the opener it stands in for.
 
         From 3.12 on the interpreter's own ``set_tunnel`` + ``_tunnel`` write
-        aws's request, so on those hosts they are the oracle for the bytes
+        aws-cli's request, so on those hosts they are the oracle for the bytes
         the replacement puts on the wire below 3.12.
         """
         real = http.client.HTTPConnection("proxy.invalid", 8080)

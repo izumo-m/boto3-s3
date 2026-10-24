@@ -1501,7 +1501,7 @@ class LocalStorage(Storage):
 
         aws-cli splits first and joins the basename back on, so an in-tree
         path always carries a directory prefix (``./a.txt``, ``../x/a.txt``) -
-        the form aws prints in transfer result lines and warnings. Where no
+        the form ``aws`` prints in transfer result lines and warnings. Where no
         relative path exists (different Windows drives), the absolute path is
         returned instead of raising.
         """
@@ -1565,7 +1565,7 @@ class LocalStorage(Storage):
         self._detect_symlink_loops = detect_symlink_loops
         self._enumerate_all_entries = enumerate_all_entries
         # A library-only durability knob for this local backend as a *destination*
-        # (default off = aws parity). When set, a ``mv`` whose download lands here
+        # (default off = aws-cli parity). When set, a ``mv`` whose download lands here
         # fsyncs the file (and its parent directory) before deleting the S3 source,
         # closing the window where aws-cli / s3transfer delete the durable S3 copy
         # while the download is still only in the page cache. Read by the transfer
@@ -1641,7 +1641,7 @@ class LocalStorage(Storage):
     def _single_filter_root(self) -> str:
         """aws-cli's ``_get_local_root`` for this location as a single (non-``dir_op``) source.
 
-        The base aws joins ``--exclude`` / ``--include`` patterns onto:
+        The base aws-cli joins ``--exclude`` / ``--include`` patterns onto:
         ``abspath(dirname(path))`` of the path as typed - so ``d`` roots at
         the working directory, while ``d/``, ``.`` and ``../`` root at the
         location itself and ``..`` at the working directory below it -
@@ -2035,7 +2035,7 @@ class LocalStorage(Storage):
         return LocalFileInfo(
             key=path.replace(os.sep, "/"),
             # A directory target carries its real kind (the FileInfo contract;
-            # the transfer routes still hand it through to fail like aws).
+            # the transfer routes still hand it through to fail like aws-cli).
             kind=FileKind.DIRECTORY if is_directory else FileKind.FILE,
             size=size,
             mtime=mtime,

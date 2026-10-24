@@ -12,9 +12,9 @@ _TWO_PATH_FORMS = "<LocalPath> <S3Uri> or <S3Uri> <LocalPath> or <S3Uri> <S3Uri>
 
 
 def single_uri_usage(command: str) -> str:
-    """aws's usage error for ``rm``'s single ``<S3Uri>`` - rc 252.
+    """aws-cli's usage error for ``rm``'s single ``<S3Uri>`` - rc 252.
 
-    Only aws's ``CommandParameters`` path (rm, and the transfer family via
+    Only aws-cli's ``CommandParameters`` path (rm, and the transfer family via
     ``two_path_usage``) leads with the ``usage:`` line; ``mb`` / ``rb`` raise
     the bare form (``bare_single_uri_usage``).
     """
@@ -22,7 +22,7 @@ def single_uri_usage(command: str) -> str:
 
 
 def bare_single_uri_usage() -> str:
-    """aws's ``mb`` / ``rb`` path rejection: no ``usage:`` line - rc 252.
+    """aws-cli's ``mb`` / ``rb`` path rejection: no ``usage:`` line - rc 252.
 
     aws-cli's ``MbCommand`` / ``RbCommand`` raise
     ``ParamValidationError("<S3Uri>\\nError: Invalid argument type")``
@@ -32,12 +32,12 @@ def bare_single_uri_usage() -> str:
 
 
 def two_path_usage(command: str) -> str:
-    """aws's usage error for a two-path transfer command (cp / mv / sync) - rc 252."""
+    """aws-cli's usage error for a two-path transfer command (cp / mv / sync) - rc 252."""
     return f"usage: boto3-s3 {command} {_TWO_PATH_FORMS}\nError: Invalid argument type"
 
 
 def param_error(name: str, message: object) -> str:
-    """aws's ``ParamError`` text: an argument that failed to parse (252).
+    """aws-cli's ``ParamError`` text: an argument that failed to parse (252).
 
     ``Error parsing parameter '<name>': <message>`` (aws-cli's
     ``argprocess.ParamError``). *name* is the option's ``--flag`` form or the
@@ -51,6 +51,6 @@ def invalid_bucket_name_message(name: str = "") -> str:
 
     A path that names no bucket at all (``s3://``, ``s3:///k``;
     ``base.refuse_bucketless``), and a ``website`` name the bucket/key split
-    would disturb - where aws lets botocore refuse the name, or sends it.
+    would disturb - where aws-cli lets botocore refuse the name, or sends it.
     """
     return f'Invalid bucket name "{name}"'

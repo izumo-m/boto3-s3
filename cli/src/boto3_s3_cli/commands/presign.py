@@ -24,9 +24,9 @@ class PresignCommand(Command):
     def configure(self, parser: argparse.ArgumentParser) -> None:
         """Add the ``presign``-specific arguments to its subparser."""
         parser.add_argument("path", help="the object to sign a URL for")
-        # No type=int: a non-integer must exit 255 like aws's bare int()
+        # No type=int: a non-integer must exit 255 like aws-cli's bare int()
         # conversion (parse_integer_option, commands/base.py). Not
-        # range-validated either: aws signs any value (0 / negative / over
+        # range-validated either: aws-cli signs any value (0 / negative / over
         # S3's 604800 maximum); S3 rejects only when the URL is *used*.
         parser.add_argument(
             "--expires-in",

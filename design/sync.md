@@ -32,15 +32,15 @@ dest listing -- filter (visibility) --+        |
   for local entries, `Prefix`-relative for S3 entries), so it
   prunes the source and destination identically (symmetric); an entry excluded
   this way is "nonexistent" on **both** sides and is thus protected from
-  `--delete` (aws's "files excluded by filters are excluded from deletion"),
+  `--delete` (aws-cli's "files excluded by filters are excluded from deletion"),
   except where a side's relative path carries a leading `/` (a local side at a
   filesystem root, a Windows S3 base ending in `\`; design/globsieve.md
-  section 5): there a name-led pattern prunes the other side only, as on aws. A
-  **root-anchored** (absolute) pattern instead matches each side's full path, so
-  it prunes **per-side** - the same per-side roots aws gets from joining the
-  pattern onto `src_rootdir` / `dst_rootdir` (an absolute pattern matching only
-  the source leaves the destination visible, so `--delete` still removes it).
-  A `GlobFilter` expresses both in one filter because it matches a relative
+  section 5): there a name-led pattern prunes the other side only, as on `aws`.
+  A **root-anchored** (absolute) pattern instead matches each side's full path,
+  so it prunes **per-side** - the same per-side roots aws-cli gets from joining
+  the pattern onto `src_rootdir` / `dst_rootdir` (an absolute pattern matching
+  only the source leaves the destination visible, so `--delete` still removes
+  it). A `GlobFilter` expresses both in one filter because it matches a relative
   pattern against `compare_key` and an absolute one against the full path
   (globsieve.md section 2); the CLI passes the same `GlobFilter`. Folder markers
   (size 0, trailing `/`) are dropped from the S3 side here; the local walk never
@@ -50,14 +50,14 @@ dest listing -- filter (visibility) --+        |
   during the walk).
 - **Pair-decision layer** (after merge, per pair): every decision that
   looks at both sides - size / timestamp / ETag, etc. - lives here. The default
-  is aws-compatible, and this is the only layer an application swaps.
+  is aws-cli-compatible, and this is the only layer an application swaps.
 
 ## 2. Components
 
 | module | role |
 |---|---|
 | `comparator.py` | `Comparator` (pure pairing: merge-joins two key-ascending streams and emits every *entry* as one `MergedPair` shape - `SrcOnlyPair` / `SyncPair` / `DestOnlyPair`, telling by type which sides hold it; makes no decision), the pair types, `PairFilter` (the update judgment) and `MergedPairFilter` (one judgment for all three shapes, section 11), `all_of` / `any_of` (visibility combinators). No SDK import |
-| `awsclicompare.py` | `AwsCliComparison`, the aws-compatible size + last-modified default (aws-cli's sync strategies plus `compare_time`, reading `pair.transfer_type`). No SDK import |
+| `awsclicompare.py` | `AwsCliComparison`, the aws-cli-compatible size + last-modified default (aws-cli's sync strategies plus `compare_time`, reading `pair.transfer_type`). No SDK import |
 | `S3.sync` in `s3.py` | orchestration: route classification -> pre-validation (src missing 255 / dest dir creation) -> build both-side entry streams (visibility applied) -> pairing -> copy decision -> item builder + gate shared with cp -> `Transferrer` submit; delete decision -> delete lane. The rollup is a `BatchError` combining transfer + delete |
 | `synclanes.py` | the three lanes: each lane's filter resolved to a decision (shapes and `pair_filter` conflicts refused before anything is resolved), and the pair loop that routes each pair to its lane, with pooled decisions in flight (`run_sync_pairs`). Nothing else uses it |
 | `SyncDeletes` in `synclanes.py` | delete lane: an S3 dest uses `S3Deleter` (batch, lazily created on the first submit), a local or custom dest uses a synchronous `Storage.delete(info)` on the calling thread (`LocalStorage.delete` is an `os.remove`, the shape of aws-cli's `LocalDeleteRequestSubmitter`). dryrun emits only a DRYRUN record. Emits with a display endpoint (`s3://bucket/key` / native path) on the `OpResult` |
@@ -91,20 +91,21 @@ has its own filter deciding whether to act on the entry: **create** a new one
 `DestOnlyPair`).
 `create_filter` and `delete_filter` are the two membership knobs (create / delete) -
 duals of each other, and the reason `create_filter` has no `aws` counterpart is that
-aws hard-codes "always create" (`file_not_at_dest`); `update_filter` is the
-overwrite judgment for the intersection. The aws `sync` equivalent is the default
-of all three (`create_filter=True` / `update_filter=None` / `delete_filter=False`).
-A value outside a lane's shapes - `None` on `create_filter` / `delete_filter`
-(the slip `update_filter`'s default invites), an integer - is refused with
-`ValidationError` before anything is resolved (`reject_lane_filter_shapes`),
-the eager-refusal rule `pair_filter`'s `ParallelFilter` check follows
-(section 11): it would otherwise pass the `is True` / `is False` tests, list
-both sides, submit the new entries and only then die as a mid-run `TypeError`.
-`filter` is separate: it is **visibility** (`FileFilter = Callable[[FileInfo],
-bool]`, e.g. `GlobFilter`), applied per side *before* pairing to narrow which
-entries are in scope. `create_filter` / `delete_filter` are `FileFilter`s over the
-one side their lane has; `update_filter` is the copy decision over an update
-pair (`PairFilter = Callable[[SyncPair], bool]`, True = copy).
+aws-cli hard-codes "always create" (`file_not_at_dest`); `update_filter` is the
+overwrite judgment for the intersection. The aws-cli `sync` equivalent is the
+default of all three (`create_filter=True` / `update_filter=None` /
+`delete_filter=False`). A value outside a lane's shapes - `None` on
+`create_filter` / `delete_filter` (the slip `update_filter`'s default invites),
+an integer - is refused with `ValidationError` before anything is resolved
+(`reject_lane_filter_shapes`), the eager-refusal rule `pair_filter`'s
+`ParallelFilter` check follows (section 11): it would otherwise pass the `is
+True` / `is False` tests, list both sides, submit the new entries and only then
+die as a mid-run `TypeError`. `filter` is separate: it is **visibility**
+(`FileFilter = Callable[[FileInfo], bool]`, e.g. `GlobFilter`), applied per side
+*before* pairing to narrow which entries are in scope. `create_filter` /
+`delete_filter` are `FileFilter`s over the one side their lane has;
+`update_filter` is the copy decision over an update pair (`PairFilter =
+Callable[[SyncPair], bool]`, True = copy).
 
 - The pair types (`MergedPair = SrcOnlyPair | SyncPair | DestOnlyPair`, what
   `Comparator.compare` yields) tell by type which sides hold the entry:
@@ -135,9 +136,10 @@ pair (`PairFilter = Callable[[SyncPair], bool]`, True = copy).
   entry, `False` none, a `FileFilter` only those it keeps (matched against the
   source `FileInfo` / compare key, the same shape as `rm`'s `filter`). aws-cli
   fills this slot with `MissingFileSync` (a hard-coded "always transfer", which
-  the `True` default matches); the filter forms add a scope aws has no flag for.
+  the `True` default matches); the filter forms add a scope aws-cli has no flag
+  for.
 - `update_filter` is the update (both-sides) copy decision, a single strategy
-  (it does not compose): `None` (default) is the aws size + last-modified
+  (it does not compose): `None` (default) is the aws-cli size + last-modified
   judgment, equivalently `AwsCliComparison()` (it reads the direction from
   `pair.transfer_type`, so it works across routes); `True` re-copies every
   update, `False` none (additive-only: existing destinations are left as-is);
@@ -157,11 +159,11 @@ pair (`PairFilter = Callable[[SyncPair], bool]`, True = copy).
   `update_filter`, and sync keeps it decision-only - no `IfNoneMatch` on the
   wire (unlike cp / mv). `S3.sync(no_overwrite=True)` works because it rides the
   shared `TransferOptions`.
-- `delete_filter` is the orphan (destination-only) lane (aws `--delete`): `False`
-  (default) deletes nothing, `True` deletes every orphan, and a `FileFilter`
-  deletes only the orphans it keeps - matched against the orphan's `FileInfo` /
-  compare key, the same shape as `rm`'s `filter` (the delete lane is rm over the
-  orphans).
+- `delete_filter` is the orphan (destination-only) lane (aws-cli `--delete`):
+  `False` (default) deletes nothing, `True` deletes every orphan, and a
+  `FileFilter` deletes only the orphans it keeps - matched against the orphan's
+  `FileInfo` / compare key, the same shape as `rm`'s `filter` (the delete lane
+  is rm over the orphans).
 - `pair_filter` is the one-hook alternative to the three lanes above (section
   11): one `MergedPairFilter` judging every merged pair, whatever its shape, in
   one serial compare-key-ordered stream. It **replaces** the lanes, so it is
@@ -209,7 +211,7 @@ mtime rule (full float precision; `delta = dest.mtime - src.mtime`):
   (aws-cli's strategy override order; a same-size, different-mtime
   download runs).
 - a pair missing either mtime or size is treated as "different" (falls to the
-  copy side). aws's listing always carries both, so this never happens on an
+  copy side). aws-cli's listing always carries both, so this never happens on an
   input `aws s3` handles (the permissive reading of a library building block).
 
 ## 5. The execution side of transfer and delete
@@ -227,12 +229,12 @@ mtime rule (full float precision; `delta = dest.mtime - src.mtime`):
   read-ahead** (`ScanOptions.read_ahead`, [`storage.md`](./storage.md)
   section 2): the lane
   removes files while that same walk is still running, so the walk must see its
-  own deletions - aws walks its destination lazily and interleaves its deletes
-  the same way, which is why a tree that aliases itself through a symlinked
-  directory deletes the file once there and never lists it under the second
-  name. The other sides keep the page-ahead overlap - a source walk is not
-  mutated by the run, and an S3 destination's orphans ride the batched deleter
-  rather than being removed as the listing advances. The output is
+  own deletions - aws-cli walks its destination lazily and interleaves its
+  deletes the same way, which is why a tree that aliases itself through a
+  symlinked directory deletes the file once there and never lists it under the
+  second name. The other sides keep the page-ahead overlap - a source walk is
+  not mutated by the run, and an S3 destination's orphans ride the batched
+  deleter rather than being removed as the listing advances. The output is
   `delete: <endpoint>` (no `to` clause; the library emits the `s3://bucket/key`
   endpoint for an S3 dest and the full native path for a local dest - matching
   section 2 - which the CLI then renders cwd-relative) / `(dryrun) delete: ...`.
@@ -312,11 +314,11 @@ mtime rule (full float precision; `delta = dest.mtime - src.mtime`):
 ## 7. Known divergences (recorded only)
 
 - **delete batching and output timing**: the batch is finalized all at once on
-  flush. That matches aws on the **success path** - final state, line set and rc
-  all agree, as with the rm precedent - and only there: a listing that dies
-  mid-run leaves aws having already deleted everything it enumerated, while the
-  unsent buffer here is abandoned ([`deleter.md`](./deleter.md) section 4 for
-  the bound and the reason).
+  flush. That matches aws-cli on the **success path** - final state, line set
+  and rc all agree, as with the rm precedent - and only there: a listing that
+  dies mid-run leaves aws-cli having already deleted everything it enumerated,
+  while the unsent buffer here is abandoned ([`deleter.md`](./deleter.md)
+  section 4 for the bound and the reason).
 - **restored glacier**: because sync decides from the listing, `Restore` is not
   visible, so even a restored object is skip-warned - this is identical to
   aws-cli's behavior (they too look at the listing's response_data).

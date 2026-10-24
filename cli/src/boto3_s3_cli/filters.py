@@ -6,9 +6,9 @@ last-match-wins semantics, so the interleaved command-line order is
 significant: ``--exclude '*' --include '*.txt'`` keeps only ``.txt`` while
 the reverse keeps nothing. ``AppendFilterAction`` preserves that order as
 ``Exclude`` / ``Include`` rules, and ``compile_filter`` hands them to the
-library's ``globsieve``, which owns aws's matching: each side's base, the
+library's ``globsieve``, which owns aws-cli's matching: each side's base, the
 absolute and Windows drive forms, the Windows fold, and the single-source
-forms (the operations show a filter each entry as aws matches it).
+forms (the operations show a filter each entry as aws-cli matches it).
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ class AppendFilterAction(argparse.Action):
     The aws-cli ``AppendFilter`` equivalent: both options share ``dest``
     (``filters``) so the rule order is exactly the command-line order.
 
-    aws declares both options with ``nargs=1``, so the following token is
+    aws-cli declares both options with ``nargs=1``, so the following token is
     taken as the pattern however it looks (``--exclude '-foo*'``).
     ``aws_nargs`` marks that count - the same marker ``mb``'s ``--tags``
     carries for its pair of tokens - and the parser base class
@@ -34,10 +34,10 @@ class AppendFilterAction(argparse.Action):
     ``_match_argument`` hook. ``nargs`` itself stays unspecified: the action
     then keeps receiving a plain string, and a real ``nargs=1`` would consume
     a dash-led token only on Python 3.12+, so it is the hook rather than the
-    declaration that makes the behavior aws's on every supported version.
+    declaration that makes the behavior aws-cli's on every supported version.
     """
 
-    # The count aws declares; not an argparse attribute.
+    # The count aws-cli declares; not an argparse attribute.
     aws_nargs: ClassVar[int] = 1
 
     def __call__(

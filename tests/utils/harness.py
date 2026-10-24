@@ -29,7 +29,7 @@ _SUBPROCESS_TIMEOUT = 60.0
 
 def default_checksum_algorithm() -> str:
     """The ``ChecksumAlgorithm`` a CLI upload names when ``--checksum-algorithm``
-    is absent: aws's CRC64NVME where the installed botocore can compute it
+    is absent: aws-cli's CRC64NVME where the installed botocore can compute it
     (``boto3_s3_cli.checksumdefault``), else pip botocore's own default, which
     s3transfer stamps on a classic upload. Tests that record upload requests
     compare against this rather than a literal so they hold on both stacks."""
@@ -99,7 +99,7 @@ def unused_ctx() -> Context:
 
     Only the parse layer qualifies (``--query``, the paramfile loads, the
     integer coercions, the profile resolution). Every command builds its client
-    right after that, at aws's own slot, so a check that fires later needs
+    right after that, at aws-cli's own slot, so a check that fires later needs
     `built_client_ctx` instead."""
     from boto3_s3_cli.commands.base import Context
 
@@ -112,7 +112,7 @@ def unused_ctx() -> Context:
 def built_client_ctx() -> Context:
     """A ``Context`` for paths that build the client and then fail without using it.
 
-    The counterpart of `unused_ctx` for every check past aws's client-build
+    The counterpart of `unused_ctx` for every check past aws-cli's client-build
     slot - the path-type gates, the onto-itself guard, the checksum / SSE-C
     pairings, the missing local source, an unwalkable source root. The
     factory hands out a recording client scripted with nothing, so the
@@ -148,8 +148,8 @@ def _run_subprocess(
     #
     # PYTHONUTF8=1 moves the error reports to UTF-8, the encoding the capture
     # below decodes, on both tools: the pinned aws.exe and the CLI read it back
-    # for those reports alone (aws's frozen interpreter ignores it). Everything
-    # else either writes - result lines, warnings - keeps the encoding aws
+    # for those reports alone (aws-cli's frozen interpreter ignores it). Everything
+    # else either writes - result lines, warnings - keeps the encoding aws-cli
     # uses: UTF-8 on a UTF-8 Linux host, the host's codepage on Windows (cp932
     # and cp1252 measured on two hosts), where non-ASCII result lines come back
     # as U+FFFD from both tools alike. PYTHONIOENCODING moves neither. The
@@ -338,7 +338,7 @@ def normalize_ls_stdout(stdout: str, *, bucket: str) -> list[str]:
     changes - in particular the lines are **not sorted** (``ls`` output order
     is deterministic and itself parity-relevant) and no line is dropped (the
     blank line before the ``--summarize`` footer is part of the contract).
-    ``splitlines()`` absorbs ``\\r\\n`` from aws on Windows.
+    ``splitlines()`` absorbs ``\\r\\n`` from `aws` on Windows.
     """
     lines: list[str] = []
     for line in stdout.splitlines():
@@ -371,7 +371,7 @@ def normalize_rm_stdout(stdout: str, *, bucket: str) -> list[str]:
 def normalize_cp_stdout(stdout: str, *, bucket: str) -> list[str]:
     """Normalize ``cp`` stdout for golden storage / cross-run comparison.
 
-    aws prints progress with the carriage-return rewrite protocol - no isatty
+    `aws` prints progress with the carriage-return rewrite protocol - no isatty
     gate, so piped stdout carries ``Completed ...`` segments joined by ``\\r``
     and result lines right-padded over them. Per physical line, the segment
     after the last ``\\r`` (what a terminal would leave visible) is kept,
@@ -540,7 +540,7 @@ def presign_scope_region(stdout: str) -> str | None:
     """The raw credential-scope region of a presign URL (or ``None``).
 
     Reads the region segment out of ``X-Amz-Credential`` on the first URL
-    line, before any masking - the e2e same-run check compares aws's against
+    line, before any masking - the e2e same-run check compares `aws`'s against
     ours so the region the two CLIs sign with must be identical even though
     the normalizer folds the environment default away.
     """
@@ -723,7 +723,7 @@ def assert_stderr_tokens(
     carries environment-dependent content (endpoint hosts, request ids,
     timings), so e2e probes stable tokens (error codes, option names) rather
     than comparing bytes. The byte-level criterion (design/testing.md section
-    9) is carried by the unit tier, whose expectations are the pinned aws's own
+    9) is carried by the unit tier, whose expectations are the pinned `aws`'s own
     measured bytes.
 
     ``require_empty`` additionally asserts *stderr* is exactly empty - the one

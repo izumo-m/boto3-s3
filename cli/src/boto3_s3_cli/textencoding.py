@@ -46,7 +46,7 @@ def text_encoding() -> str:
 
     aws-cli's ``compat.getpreferredencoding`` without the
     ``AWS_CLI_FILE_ENCODING`` override (that one is ``file://``'s alone): UTF-8
-    when the ``LC_CTYPE`` locale is ``C`` or ``POSIX`` (aws applies PEP 540
+    when the ``LC_CTYPE`` locale is ``C`` or ``POSIX`` (aws-cli applies PEP 540
     itself, its frozen build lacking the interpreter's), otherwise the
     locale's own encoding - read past Python's UTF-8 mode, which ``aws``
     never runs in (what ``locale.getencoding()`` returns on 3.11+: the

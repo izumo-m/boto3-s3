@@ -1,4 +1,4 @@
-"""The `Content-Type` an upload guesses: aws's table, not the host interpreter's.
+"""The `Content-Type` an upload guesses: aws-cli's table, not the host interpreter's.
 
 aws-cli's official distribution is frozen against CPython 3.14, so that
 interpreter's MIME table is the answer boto3-s3 has to reproduce on every
@@ -6,7 +6,7 @@ supported host - `boto3_s3.mimetable` carries it. The rows below are the
 extensions where a host table disagrees with 3.14's in one direction or the
 other, so at least one of them is load-bearing on any given interpreter.
 
-Oracle: the type aws 2.36.40 actually stored, read back with HeadObject after
+Oracle: the type aws-cli 2.36.40 actually stored, read back with HeadObject after
 `cp` to MinIO (probes/wire/probe_content_type.py, and every candidate extension
 at once in probes/fixA/p2-all-extension-content-type.py).
 """
@@ -30,7 +30,7 @@ class TestFrozenTable:
     """The frozen layers alone, host augmentation neutralized.
 
     `_mime_types` deliberately overlays the Windows registry and the host's
-    mime.types on top of the frozen table (aws's lazy `mimetypes.init` does
+    mime.types on top of the frozen table (aws-cli's lazy `mimetypes.init` does
     the same), so a host that happens to map one of these extensions - the
     GitHub Windows runner's registry maps `.cjs` - would flip the row without
     any parity being wrong. The fixture pins the cache to a db built from the
@@ -81,10 +81,10 @@ class _NtPathOs:
 class TestAlgorithmPin:
     """The guess runs CPython 3.14's algorithm whatever interpreter hosts it.
 
-    aws's bundled 3.14 splits a file path with the host's ``os.path``;
+    aws-cli's bundled 3.14 splits a file path with the host's ``os.path``;
     interpreters before 3.13 split every name with ``posixpath``, so on
     Windows a name that is all extension (``C:\\d\\.json``) kept ``.json``
-    and went up typed where aws sends it untyped (measured against aws.exe
+    and went up typed where `aws` sends it untyped (measured against aws.exe
     under Python 3.10, 8 of 12 names).
     """
 
@@ -173,13 +173,13 @@ class TestAlgorithmPin:
 class TestUnreadableOverlay:
     """A knownfiles entry that exists but cannot be read fails the item, not the run.
 
-    aws guesses the type inside s3transfer's queued subscriber, so an
+    aws-cli guesses the type inside s3transfer's queued subscriber, so an
     `OSError` from `mimetypes.init` reading `/etc/mime.types` is that item's
     `upload failed: ... [Errno 13] Permission denied: '/etc/mime.types'` and
     the run goes on - every item fails the same way, and a sync still
     deletes. Raised out of the submit loop, it ended the run as one
     `fatal error:` and leaked a bare `PermissionError` from the library
-    (measured against aws 2.36.40 in a mount namespace, 2026-10-06).
+    (measured against aws-cli 2.36.40 in a mount namespace, 2026-10-06).
     """
 
     @pytest.fixture(autouse=True)
@@ -253,7 +253,7 @@ class TestUnreadableOverlay:
             assert [c.operation for c in calls] == ["PutObject", "PutObject"]
 
     def test_a_stream_source_never_reads_the_overlay(self) -> None:
-        # A stream has no name to guess from, and aws's stream submitter
+        # A stream has no name to guess from, and aws-cli's stream submitter
         # attaches no guessing subscriber at all: the upload goes through,
         # untyped, whatever state the host's mime.types is in.
         import io
@@ -280,7 +280,7 @@ class TestHostOverlays:
     def test_a_local_mime_types_file_still_applies(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # aws reads the host's mime.types on top of its frozen table, so pinning
+        # aws-cli reads the host's mime.types on top of its frozen table, so pinning
         # the table must not cost that: a local file both adds extensions and
         # overrides the frozen answer.
         local = tmp_path / "mime.types"

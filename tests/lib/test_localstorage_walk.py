@@ -5,7 +5,7 @@ the byte-order sort (``foo.txt`` before ``foo/bar`` - the appended-separator
 trick), depth-first interleaving, the warn-and-skip battery, the silent symlink
 skip, and the invalid-timestamp epoch fallback. The single-path
 point op (``LocalStorage.get_fileinfo``) is covered separately, including the
-deliberate absence of a directory check (aws fails later at open - rc 1
+deliberate absence of a directory check (aws-cli fails later at open - rc 1
 ``[Errno 21]``) and the existence-check contract (absent -> ``None``, no warning).
 """
 
@@ -321,7 +321,7 @@ class TestDirectoryChangedBeforeItsDescent:
     longer a directory falls to the file-stat path, whose ``os.stat`` raises and
     warns through the battery, and unreadable warns through the recursion's own
     ``should_ignore_file``. Either way it is one warning, and the walk continues
-    (rc 2). Measured against the pinned aws (a directory swapped mid-walk under
+    (rc 2). Measured against the pinned `aws` (a directory swapped mid-walk under
     ``cp --recursive --dryrun``): one warning for the replaced, the removed and
     the chmod'd shape, every remaining entry still transferred. cp / mv / sync
     share this walk, so all three inherit the behaviour.
@@ -357,7 +357,7 @@ class TestDirectoryChangedBeforeItsDescent:
         # aws-cli's should_ignore_file runs again at the top of each descent
         # and, not following symlinks, strips the separator to test the name
         # itself - so the link is dropped silently, never followed. Measured
-        # against the pinned aws (--no-follow-symlinks, the directory swapped
+        # against the pinned `aws` (--no-follow-symlinks, the directory swapped
         # for a link right after its parent's scan): only the other entries
         # are listed, rc 0; ours followed the link into the other tree.
         keys, warnings, walker = self._swapped(
@@ -437,7 +437,7 @@ class TestLeafBecameADirectoryBeforeItsTurn:
     name in its descent loop, so a file replaced by a directory after its parent's
     ``listdir`` is descended and the new children are transferred - addressed by
     the bare name the leaf sorted under, since the separator was appended only to
-    names that were directories at scan time. Measured against the pinned aws (a
+    names that were directories at scan time. Measured against the pinned `aws` (a
     file swapped for a directory holding ``child.txt`` while the walk was inside an
     earlier sibling): ``cp --recursive``, ``mv --recursive`` and ``sync`` all exit 0
     having uploaded ``mmm.txt/child.txt``, and ``--dryrun`` previews that key,
@@ -627,7 +627,7 @@ class TestLeafVanishedBeforeItsTurn:
     The third shape of the mid-walk race: aws-cli takes every leaf's stats in its
     descent loop (``_safely_get_file_stats``), so a name deleted after its
     parent's ``listdir`` fails there, runs the warning battery, and is skipped -
-    the file never enters the transfer stream. Measured against the pinned aws (a
+    the file never enters the transfer stream. Measured against the pinned `aws` (a
     leaf deleted while the walk was inside an earlier sibling): ``cp --recursive``
     warns and exits 2, with nothing uploaded for that name, and ``--dryrun`` previews the same
     skip. Without the re-stat the stale record was submitted and the upload
@@ -747,7 +747,7 @@ class TestLeafRewrittenBeforeItsTurn:
 
     aws-cli reads every leaf's size and timestamp in its descent loop, never at
     scan time, so what it transfers - and what ``sync`` compares - is the file as
-    of the moment it is emitted. Measured against the pinned aws (an 8-byte leaf
+    of the moment it is emitted. Measured against the pinned `aws` (an 8-byte leaf
     rewritten to 120 bytes while the walk was inside an earlier sibling):
     ``cp --recursive`` and ``mv --recursive`` both put a 120-byte object, rc 0,
     where the scan-time size put an 8-byte truncation of it.
@@ -853,7 +853,7 @@ class TestLeafRewrittenBeforeItsTurn:
         # aws-cli never sees the scan-time stamp - its only stat is the one at
         # the leaf's turn - so a timestamp that became representable by then
         # is just the file's timestamp: no warning, rc 0 (measured on the
-        # pinned aws with the same mutation; ours warned and exited 2, while
+        # pinned `aws` with the same mutation; ours warned and exited 2, while
         # stamping the healed value the warning said it would not).
         _make_tree(tmp_path, "aaa.txt", "mmm.txt")
         target = tmp_path / "mmm.txt"
@@ -1684,7 +1684,7 @@ class TestGetFileinfo:
             locked.chmod(0o755)
 
     def test_directory_is_returned_without_a_type_check(self, tmp_path: Path) -> None:
-        # aws parity: no type check, so a directory source yields a FileInfo and
+        # aws-cli parity: no type check, so a directory source yields a FileInfo and
         # fails later at open ([Errno 21], rc 1). Its kind still reflects the
         # entry (the FileInfo contract), so a filter can tell it apart.
         info = LocalStorage(str(tmp_path)).get_fileinfo()
@@ -1719,7 +1719,7 @@ class TestGetFileinfo:
         self, tmp_path: Path, follow: bool, suffix: str
     ) -> None:
         # local_format's trailing separator, which should_ignore_file removes
-        # from a no-follow directory before it warns (measured on aws).
+        # from a no-follow directory before it warns (measured on `aws`).
         locked = tmp_path / "locked"
         locked.mkdir()
         locked.chmod(0)
@@ -2043,7 +2043,7 @@ class TestStatResultAndSymlink:
 
 class TestEmptyPath:
     def test_validate_rejects_the_empty_string(self, tmp_path: Path) -> None:
-        # "" is not a location: os.path.exists("") is False and aws refuses
+        # "" is not a location: os.path.exists("") is False and aws-cli refuses
         # it, but os.path.abspath("") is the working directory - so an
         # operation onto "" silently worked in the working directory (a
         # sync with delete_filter deleted its files). validate is the

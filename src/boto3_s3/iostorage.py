@@ -99,13 +99,13 @@ class _WriteOnly:
     can report ``seekable()`` (a regular file) while ``>>`` opened it
     ``O_APPEND``, where every write lands at the end regardless of the seeked
     position - a seek-based parallel download would then interleave chunks in
-    completion order. aws always streams stdout sequentially, so this view
+    completion order. aws-cli always streams stdout sequentially, so this view
     does too.
 
-    The process stream is read per write, like aws's ``bytes_print``, and
+    The process stream is read per write, like aws-cli's ``bytes_print``, and
     nothing is held from ``open`` time: a process without a stdout therefore
     fails on the ``write`` itself, from inside the transfer, which reports it
-    as that item's failure the way aws does - not as a precondition of
+    as that item's failure the way aws-cli does - not as a precondition of
     starting one. An empty object, which writes nothing, fails the same way
     at ``close``, as on aws.
 
@@ -113,7 +113,7 @@ class _WriteOnly:
     closes its writer as the item settles (`transfer._CloseFileobj`), so a
     stdout that cannot take the bytes it still buffers - a full disk, a
     reader that left the pipe - fails the item, and a ``mv`` keeps its
-    source. aws's writer has no ``close`` and leaves those bytes for the
+    source. aws-cli's writer has no ``close`` and leaves those bytes for the
     interpreter's flush at exit, where a failure can no longer reach the item.
     The bytes a failed flush refused stay in the process stream's buffer, and
     the interpreter tries them again at exit (exit status 120): the process's
@@ -128,7 +128,7 @@ class _WriteOnly:
         stdout: Any = sys.stdout
         if stdout is None:
             # No stdout fails the item whatever the object held: an empty one
-            # writes nothing, so this is where it fails, with the error aws's
+            # writes nothing, so this is where it fails, with the error aws-cli's
             # writer meets on its write (a non-empty one already failed there).
             self.write(b"")
             return
@@ -449,7 +449,7 @@ class StdioStorage(IOStorage):
 
     A source ``open("rb")`` reads ``sys.stdin.buffer`` (forced non-seekable); a
     destination ``open("wb")`` writes ``sys.stdout.buffer`` through a
-    write-only view (`_WriteOnly`, aws's ``StdoutBytesWriter``), so a
+    write-only view (`_WriteOnly`, aws-cli's ``StdoutBytesWriter``), so a
     download always streams sequentially even when stdout is redirected to
     a seekable file; the transfer's ``close`` of that view flushes
     ``sys.stdout.buffer`` without closing it, so a stdout that cannot take
@@ -458,7 +458,7 @@ class StdioStorage(IOStorage):
     picks up a redirected ``sys.stdin`` / ``sys.stdout``.
 
     A process without a ``sys.stdin`` fails the ``open`` with
-    ``ValidationError`` (aws's ``StdinMissingError``, the same sentence), and
+    ``ValidationError`` (aws-cli's ``StdinMissingError``, the same sentence), and
     the error carries no operation name - the operation that invoked the
     storage fills it in (a direct call leaves it ``None``). Stdout has no such
     check, again like aws: a missing one surfaces from the writer's first
@@ -485,7 +485,7 @@ class StdioStorage(IOStorage):
                 # open).
                 raise ValidationError("stdin is required for this operation, but is not available.")
             return cast("BinaryIO", _NonSeekable(getattr(stdin, "buffer", stdin)))
-        # No stdout counterpart to the guard above: aws checks stdin only, and
+        # No stdout counterpart to the guard above: aws-cli checks stdin only, and
         # its stdout writer dereferences the process stream per write, so a
         # process without one fails the item instead of the run.
         return cast("BinaryIO", _WriteOnly())

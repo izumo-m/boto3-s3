@@ -88,7 +88,7 @@ maintaining high functional compatibility.
   deliberate functional deviation is settled: S3 objects are deleted in
   batches ([`deleter.md`](./deleter.md)) where aws-cli deletes one key per
   request; batching is not to be traded back for per-key deletes. The CRT
-  transfer engine is held to aws's CRT mode on the same terms
+  transfer engine is held to aws-cli's CRT mode on the same terms
   ([`crt.md`](./crt.md)). The CLI has no interactive auto-prompt.
 - **Compatibility target**: the pinned aws-cli release the code is ported
   against, together with the boto3 / botocore / s3transfer / awscrt releases
@@ -211,7 +211,7 @@ maintaining high functional compatibility.
   belong to that method, so they cannot be paired with another. Where a
   combination cannot be designed away, raise vs ignore is decided per case and
   discussed beforehand (the library may fail loud where aws-cli is silent; the
-  CLI follows aws's exit code meanings).
+  CLI follows aws-cli's exit code meanings).
 - **Versioning**: `boto3-s3` and `boto3-s3-cli` are versioned independently.
 - Changes that might break functional compatibility with aws-cli are not
   undertaken unilaterally; discuss them beforehand.
@@ -259,7 +259,8 @@ Markdown links inside each half resolve relatively and need no prefix.
 - [`transfer.md`](./transfer.md) - the design of the transfer engine
   (`Transferrer` / `S3.cp` / `S3.mv`).
 - [`crt.md`](./crt.md) - the design of the CRT transfer engine mode
-  (`preferred_transfer_client`, library = boto3-faithful / CLI = aws-faithful).
+  (`preferred_transfer_client`, library = boto3-faithful / CLI =
+  aws-cli-faithful).
 - [`sync.md`](./sync.md) - the design of `S3.sync` (two-layer pipeline,
   comparator, the per-lane `create_filter` / `update_filter` / `delete_filter`
   axis).

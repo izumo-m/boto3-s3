@@ -6,7 +6,7 @@ and the ``@=`` paramfile operator
 (triangulated against the aws-cli awscli/shorthand.py).
 
 What a map of strings cannot hold - a list, a nested map, a JSON array or a
-non-string JSON value, bytes from ``@=fileb://`` - aws parses and then rejects;
+non-string JSON value, bytes from ``@=fileb://`` - aws-cli parses and then rejects;
 here it is refused while parsing. Either way it is a usage error (252).
 """
 
@@ -58,7 +58,7 @@ class TestParseMapOption:
         assert _parse("k='a,b',j=c") == {"k": "a,b", "j": "c"}
 
     def test_trailing_whitespace_after_quoted_value(self) -> None:
-        # aws's _csv_value consumes whitespace after the value before its
+        # aws-cli's _csv_value consumes whitespace after the value before its
         # EOF/comma check (verified against the pinned aws-cli: rc 0). The
         # newline form is the natural shape of a file:// paramfile that keeps
         # its trailing newline.
@@ -83,9 +83,9 @@ class TestParseMapOption:
 
 
 class TestCsvSecondValueProbe:
-    """aws's ``_csv_value`` second-value probe and its backtracking.
+    """aws-cli's ``_csv_value`` second-value probe and its backtracking.
 
-    An empty segment between pairs is absorbed, a trailing comma is aws's
+    An empty segment between pairs is absorbed, a trailing comma is aws-cli's
     ``'<second>'`` parse error, and a second value that does parse would build
     a csv list, which is refused. Accepted inputs differentially verified
     against the pinned aws-cli."""
@@ -93,7 +93,7 @@ class TestCsvSecondValueProbe:
     def test_empty_segment_between_pairs_is_absorbed(self) -> None:
         # The failed probe backtracks only to the nearest ',', so the empty
         # segment vanishes and both pairs parse (measured rc 0 on the pinned
-        # aws where the plain pair loop errored 252).
+        # aws-cli where the plain pair loop errored 252).
         assert _parse("a=b,,c=d") == {"a": "b", "c": "d"}
 
     def test_empty_segment_with_whitespace_is_absorbed(self) -> None:
@@ -107,7 +107,7 @@ class TestCsvSecondValueProbe:
 
     def test_backtrack_lands_inside_an_escaped_comma(self) -> None:
         # The probe consumes the escaped comma "\," as its second value; when
-        # the following '=' fails the csv-list extension, aws backtracks to
+        # the following '=' fails the csv-list extension, aws-cli backtracks to
         # the nearest ',' - the one INSIDE the escape - and the pair loop
         # re-reads "a=aa" from there.
         assert _parse(r"-=,\,a=aa") == {"-": "", "a": "aa"}
@@ -124,7 +124,7 @@ class TestCsvSecondValueProbe:
     @pytest.mark.parametrize("value", ["a=b,c", "a=b,c,d=e", "a=b, c"])
     def test_csv_list_is_refused(self, value: str) -> None:
         # A second value that parses would form a csv list, which a map of
-        # strings cannot hold (aws parses it, then rejects it - 252 too).
+        # strings cannot hold (aws-cli parses it, then rejects it - 252 too).
         with pytest.raises(ValidationError, match="A value cannot be a list"):
             _parse(value)
 
@@ -132,7 +132,7 @@ class TestCsvSecondValueProbe:
 class TestNonScalarShapes:
     """The grammar's list and hash constructs, refused where they start.
 
-    aws parses ``k=[a,b]`` and ``k={a=b}`` - they are legal shorthand - and
+    aws-cli parses ``k=[a,b]`` and ``k={a=b}`` - they are legal shorthand - and
     only then discovers that a map of strings cannot hold them; both end at
     252.
     """
@@ -148,7 +148,7 @@ class TestNonScalarShapes:
     def test_opening_bracket_inside_a_value_stays_scalar(self) -> None:
         # The list / hash dispatch looks only at the first character of the
         # value, so an opening bracket further in is an ordinary character.
-        # The closing ones are not: they fall outside aws's value character
+        # The closing ones are not: they fall outside aws-cli's value character
         # class and end the value, which is why `k=x[y]z` is a parse error.
         assert _parse("k=a[b") == {"k": "a[b"}
         assert _parse("k=a{b,j=c") == {"k": "a{b", "j": "c"}
@@ -156,7 +156,7 @@ class TestNonScalarShapes:
 
 
 class TestAtEqualsParamfile:
-    """The ``@=`` operator (aws grammar ``key "@=" [file-optional-values]``):
+    """The ``@=`` operator (aws-cli grammar ``key "@=" [file-optional-values]``):
     ``file://`` loads text, a prefix-less value passes through (verified
     against the pinned aws-cli: ``--metadata a@=file://f`` parses and
     transfers), and ``fileb://`` bytes are refused."""
@@ -183,7 +183,7 @@ class TestAtEqualsParamfile:
 
     def test_missing_paramfile_is_the_options_parse_error(self, tmp_path: Path) -> None:
         # A file named on the command line that cannot be read is a usage
-        # error naming the option (252), as for any other argument - aws's
+        # error naming the option (252), as for any other argument - aws-cli's
         # shorthand parser alone loads it outside that handler (255 there).
         with pytest.raises(ValidationError) as excinfo:
             _parse(f"a@=file://{tmp_path}/no-such-file")
@@ -196,7 +196,7 @@ class TestAtEqualsParamfile:
     ) -> None:
         ref = tmp_path / "val.bin"
         ref.write_bytes(b"\xff\xfe\x00bin")
-        # Pin the decode to UTF-8 (aws's compat_open knob): the locale default
+        # Pin the decode to UTF-8 (aws-cli's compat_open knob): the locale default
         # elsewhere may be a codec that decodes any byte (cp1252 on Windows).
         monkeypatch.setenv("AWS_CLI_FILE_ENCODING", "utf-8")
         with pytest.raises(ValidationError) as excinfo:
@@ -247,7 +247,7 @@ class TestJsonDecodeFailure:
 
 class TestParseMapOptionErrors:
     def test_duplicate_key_rejected(self) -> None:
-        # Silent last-write-wins was the bug; aws rejects with rc 252, and the
+        # Silent last-write-wins was the bug; aws-cli rejects with rc 252, and the
         # report names the option and the repeated key.
         with pytest.raises(ValidationError) as excinfo:
             _parse("k=1,k=2")
@@ -261,7 +261,7 @@ class TestParseMapOptionErrors:
 
     def test_leading_comma_rejected(self) -> None:
         # An empty key NOT followed by "=" still fails, through _expect, as
-        # aws's `--metadata ",foo=1"` does (rc 252).
+        # aws-cli's `--metadata ",foo=1"` does (rc 252).
         _assert_parse_error(",foo=1")
 
 

@@ -5,7 +5,7 @@ aws-cli converts every timestamp an S3 response carries to the local zone as it
 reads the response, and for a single source it does so in `_list_single_object`
 - a slot the listing routes never pass through. A stamp the local calendar
 cannot hold therefore ends a single-object `cp` / `mv` there, before any bytes
-move (measured against the pinned aws through a 127.0.0.1 fake serving a
+move (measured against the pinned `aws` through a 127.0.0.1 fake serving a
 year-9999 `Last-Modified` under `TZ=Asia/Tokyo`: rc 1 for `cp s3://bkt/k ./f`,
 for its `--dryrun`, and for `mv --dryrun s3://bkt/k s3://bkt2/k`). Here the
 UTC value is kept and the run goes on (docs/cli/aws-differences.md).
@@ -62,7 +62,7 @@ class TestSingleObjectHeadRaisingOutsideTheBotoFamily:
 @_needs_tzset
 class TestSingleObjectStampRepresentability:
     def test_a_single_download_transfers(self, tmp_path: Path) -> None:
-        # aws dies at the HEAD in this zone; the stamp is a valid UTC value,
+        # aws-cli dies at the HEAD in this zone; the stamp is a valid UTC value,
         # so the download goes on and the entry keeps it as it came.
         client, calls = make_recording_client(
             [head_response(LastModified=_FAR_FUTURE), get_response()]
@@ -98,7 +98,7 @@ class TestSingleObjectStampRepresentability:
         assert [r.outcome for r in results] == [OpOutcome.DRYRUN]
 
     def test_a_single_delete_never_asks_for_the_stamp(self) -> None:
-        # aws's `_list_single_object` returns `{'Size': None, 'LastModified':
+        # aws-cli's `_list_single_object` returns `{'Size': None, 'LastModified':
         # None}` for a delete without contacting S3, so the blind single delete
         # has no stamp to reject: it succeeds against an object whose
         # LastModified would have killed every other command.

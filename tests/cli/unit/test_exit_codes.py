@@ -41,7 +41,7 @@ from boto3_s3_cli.commands.base import Context
 from tests.utils.fakes3 import MTIME, client_error
 from tests.utils.harness import built_client_ctx, unused_ctx
 
-# The top-level usage block every parse error closes with: aws's own under the
+# The top-level usage block every parse error closes with: aws-cli's own under the
 # program-name mapping, with its `<command> <subcommand>` level collapsed onto
 # our single one (cli._TOP_LEVEL_USAGE).
 _USAGE_BLOCK = (
@@ -108,7 +108,7 @@ class TestExitCodeFor:
         assert cli.exit_code_for(Boto3S3Error("unexpected")) == 255
 
     def test_refining_subclasses_map_to_255_not_their_parents_rc(self) -> None:
-        # aws routes post-parse value failures and bad config through its
+        # aws-cli routes post-parse value failures and bad config through its
         # general handler (255); the refining subclasses must NOT inherit
         # ValidationError's 252 / ConfigurationError's 253.
         assert cli.exit_code_for(InvalidValueError("invalid literal for int()")) == 255
@@ -233,7 +233,7 @@ class TestMainExitCodes:
         ("error", "expected_rc", "cause"),
         [
             (NoCredentialsError(), 253, "credentials"),
-            # PartialCredentialsError has no dedicated aws handler -> the general
+            # PartialCredentialsError has no dedicated aws-cli handler -> the general
             # 255, NOT 253 (only NoCredentials / NoRegion are 253).
             (
                 PartialCredentialsError(provider="env", cred_var="aws_secret_access_key"),
@@ -370,7 +370,7 @@ class TestMainExitCodes:
     def test_keyboard_interrupt_exits_130_with_a_bare_newline(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws's InterruptExceptionHandler: Ctrl-C is a bare newline on stdout
+        # aws-cli's InterruptExceptionHandler: Ctrl-C is a bare newline on stdout
         # and rc 130 (128+SIGINT), never a traceback (measured on the pinned aws-cli).
         # KeyboardInterrupt is a BaseException, so it passes _run_command's
         # handlers and reaches main's backstop.
@@ -395,7 +395,7 @@ class TestMainExitCodes:
         # The cancelled-run conversion (transferargs.finish_transfer, rc 1)
         # covers only the pipeline span of the transfer family; a Ctrl-C in
         # client construction is still the dispatcher backstop's 130 with the
-        # bare newline, like aws's InterruptExceptionHandler.
+        # bare newline, like aws-cli's InterruptExceptionHandler.
         (tmp_path / "a.txt").write_bytes(b"x")
 
         def factory(_args: Any) -> Any:
@@ -418,7 +418,7 @@ class TestClientCreationExitCodes:
     def test_unknown_profile_exits_255_without_traceback(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # ProfileNotFound is a BotoCoreError, not credentials/region -> aws's
+        # ProfileNotFound is a BotoCoreError, not credentials/region -> aws-cli's
         # GeneralExceptionHandler (255). It must not crash with a traceback.
         rc = cli.main(["ls", "s3://bucket/p/", "--profile", "boto3_s3_no_such_profile_xyz"])
         err = capsys.readouterr().err
@@ -435,11 +435,11 @@ class TestClientCreationExitCodes:
 
 
 class TestGlobalResolutionFailures:
-    """``--query`` and ``--endpoint-url`` report like aws's handler chain even
+    """``--query`` and ``--endpoint-url`` report like aws-cli's handler chain even
     when they raise something other than a shaped usage error.
 
-    aws resolves both inside that chain, so a raw exception from one of them
-    is one `[ERROR]` line and one of aws's codes - never a traceback with rc 1,
+    aws-cli resolves both inside that chain, so a raw exception from one of them
+    is one `[ERROR]` line and one of aws-cli's codes - never a traceback with rc 1,
     which the exit-code charter forbids (design/overview.md section 3). Both
     inputs below settle before any request is sent.
     """
@@ -448,7 +448,7 @@ class TestGlobalResolutionFailures:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # The unbalanced bracket makes urlsplit raise a bare ValueError, which
-        # aws reports through its general handler: rc 255 (measured; the same
+        # aws-cli reports through its general handler: rc 255 (measured; the same
         # value in AWS_ENDPOINT_URL_S3 already agreed, because there botocore
         # raises it below the command-level backstop).
         rc = cli.main(["ls", "s3://bucket/p/", "--endpoint-url", "http://[::1:9000"])
@@ -460,7 +460,7 @@ class TestGlobalResolutionFailures:
     def test_a_query_too_deep_to_compile_is_the_param_validation_252(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws's `_resolve_query` catches bare `Exception`, so an expression that
+        # aws-cli's `_resolve_query` catches bare `Exception`, so an expression that
         # exhausts the interpreter's stack is a usage error too (measured: rc
         # 252), reported against the option.
         query = "!" * 2000
@@ -473,15 +473,15 @@ class TestGlobalResolutionFailures:
 
 class TestUnresolvedConfigReports:
     """Credentials or a region that cannot be resolved stop the run at rc 253
-    with aws's envelope and hint.
+    with aws-cli's envelope and hint.
 
     Measured against the pinned aws-cli with an isolated HOME and no
-    credentials configured. The leading blank line aws prints before each
+    credentials configured. The leading blank line `aws` prints before each
     report, and the program name, are class-1 rules of the parity
     normalization (design/testing.md section 9). The hint keeps naming the
-    `aws` tool because those are the words aws writes and both tools read the
+    `aws` tool because those are the words aws-cli writes and both tools read the
     same config files (docs/cli/aws-differences.md). Every other botocore
-    failure is aws's general rc 255.
+    failure is aws-cli's general rc 255.
     """
 
     def test_no_credentials_is_enveloped_with_the_login_hint(
@@ -511,7 +511,7 @@ class TestUnresolvedConfigReports:
         )
 
     def test_partial_credentials_is_255(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # aws has no handler for it -> its general one: rc 255 (measured with
+        # aws-cli has no handler for it -> its general one: rc 255 (measured with
         # AWS_ACCESS_KEY_ID alone), naming the missing variable.
         ctx = Context(
             client_factory=lambda _args: _RaisingClient(  # pyright: ignore[reportArgumentType]
@@ -526,16 +526,16 @@ class TestTopLevelErrorText:
     """The subcommand-decision and globals-parse reports, byte for byte.
 
     Every assertion here is the pinned aws-cli's own stderr under one fixed
-    mapping: ``aws [options] s3`` -> ``boto3-s3 [options]``, aws's
+    mapping: ``aws [options] s3`` -> ``boto3-s3 [options]``, aws-cli's
     ``<command> <subcommand>`` hierarchy collapsed onto our single level (this
-    command *is* ``aws s3``), and the ``aws:`` prefix renamed. aws opens each
+    command *is* ``aws s3``), and the ``aws:`` prefix renamed. aws-cli opens each
     report with a blank line; ours does not, as on every other error path.
     """
 
     def test_no_arguments_reports_too_few_arguments(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws's bare missing-subcommand error: the usage line with no help
+        # aws-cli's bare missing-subcommand error: the usage line with no help
         # blurb, and a second line whose prefix is part of the message.
         assert cli.main([]) == 252
         assert capsys.readouterr().err == (
@@ -558,7 +558,7 @@ class TestTopLevelErrorText:
     def test_invalid_subcommand_reports_the_usage_block(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws names the positional after its dest, so the report says a bare
+        # aws-cli names the positional after its dest, so the report says a bare
         # `subcommand` even though the help page displays `<subcommand>`. The
         # message carries a newline of its own, which is the second blank line.
         assert cli.main(["foobar"]) == 252
@@ -571,7 +571,7 @@ class TestTopLevelErrorText:
     def test_invalid_subcommand_suggests_close_matches(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws offers the close matches of its command table (difflib, cutoff
+        # aws-cli offers the close matches of its command table (difflib, cutoff
         # 0.8) between the message and the block.
         assert cli.main(["lss"]) == 252
         assert capsys.readouterr().err == (
@@ -585,9 +585,9 @@ class TestTopLevelErrorText:
     def test_invalid_subcommand_suggestions_keep_aws_similarity_cutoff(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws's cutoff is 0.8: `web` is too far from `website` to be offered
-        # (measured - aws prints no suggestion for it either), so a looser
-        # cutoff here would add a block aws does not print.
+        # aws-cli's cutoff is 0.8: `web` is too far from `website` to be offered
+        # (measured - `aws` prints no suggestion for it either), so a looser
+        # cutoff here would add a block aws-cli does not print.
         assert cli.main(["web"]) == 252
         assert capsys.readouterr().err == (
             "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
@@ -640,14 +640,14 @@ class TestTopLevelErrorText:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # Behind `--` the token is data, so the dispatch reports it as an
-        # unknown option (measured on aws).
+        # unknown option (measured on `aws`).
         assert cli.main(["--", "--profile"]) == 252
         assert capsys.readouterr().err == (
             "boto3-s3: [ERROR]: An error occurred (ParamValidation): Unknown options: --profile\n"
         )
 
     def test_unknown_options_carry_no_usage_block(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # aws reports unknown options from its command layers, which raise a
+        # aws-cli reports unknown options from its command layers, which raise a
         # plain message - the block belongs to the parsers only.
         assert cli.main(["--bogus"]) == 252
         assert capsys.readouterr().err == (
@@ -662,7 +662,7 @@ class TestTopLevelErrorText:
 class TestSubcommandParseErrorText:
     """A subcommand's own parse failures, byte for byte.
 
-    aws hands the same usage string to its leaf parser as to its main and
+    aws-cli hands the same usage string to its leaf parser as to its main and
     service ones, so a leaf failure closes with the identical guidance block
     rather than the command's generated option list. Every assertion is the
     pinned aws-cli's own stderr under this file's fixed mapping.
@@ -691,7 +691,7 @@ class TestSubcommandParseErrorText:
     def test_invalid_choice_suggestions_precede_the_usage_block(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws's own order for this value: STANDARD_IA then STANDARD. The blank
+        # aws-cli's own order for this value: STANDARD_IA then STANDARD. The blank
         # lines are the message elements' own trailing newlines.
         assert cli.main(["cp", "--storage-class", "STANDARD_I", "s3://b/k", "s3://b2/"]) == 252
         assert capsys.readouterr().err == (
@@ -708,7 +708,7 @@ class TestSubcommandParseErrorText:
         self, option: str, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # The contrast to TestCountedOptionTokens below: only the marked
-        # options swallow a dash-led token. aws declares every other option
+        # options swallow a dash-led token. aws-cli declares every other option
         # without a count, so the token stays an option there and the value is
         # missing (measured per option).
         assert cli.main(["cp", option, "--exclude", "x", "s3://a/", "s3://b/"]) == 252
@@ -720,10 +720,10 @@ class TestSubcommandParseErrorText:
 
 
 class TestCountedOptionTokens:
-    """aws's count-declared options take their tokens however those look.
+    """aws-cli's count-declared options take their tokens however those look.
 
     ``--exclude`` / ``--include`` are declared with one token and ``mb``'s
-    ``--tags`` with two, and the Python aws ships on then hands them dash-led
+    ``--tags`` with two, and the Python aws-cli ships on then hands them dash-led
     tokens as readily as plain ones;
     ``_ParamValidationArgumentParser._match_argument`` reproduces that count
     from the ``aws_nargs`` marker. A swallowed token stops being a positional,
@@ -760,7 +760,7 @@ class TestCountedOptionTokens:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # argparse classifies `-1` as a plain token rather than an option, so
-        # the hook's count applies to a token it would have taken anyway; aws
+        # the hook's count applies to a token it would have taken anyway; aws-cli
         # lands on the same synopsis failure as the dash-led cases (measured).
         assert cli.main(["sync", "--exclude", "-1", "a", "b"], ctx=built_client_ctx()) == 252
         assert "Invalid argument type" in capsys.readouterr().err
@@ -768,7 +768,7 @@ class TestCountedOptionTokens:
     def test_a_following_double_dash_is_not_a_pattern(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # `--` is argparse's positional marker, not a token: aws reports the
+        # `--` is argparse's positional marker, not a token: aws-cli reports the
         # missing value here, so the hook must leave that classification be.
         assert cli.main(["sync", "--exclude", "--", "a", "b"]) == 252
         assert "argument --exclude: expected 1 argument" in capsys.readouterr().err
@@ -783,8 +783,8 @@ class TestCountedOptionTokens:
     def test_a_two_token_option_short_of_tokens_reports_the_count(
         self, argv: list[str], capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # `mb --tags` is aws's two-token declaration: one token left, or a
-        # `--` among them, is short either way (aws rejects each argv here
+        # `mb --tags` is aws-cli's two-token declaration: one token left, or a
+        # `--` among them, is short either way (aws-cli rejects each argv here
         # too, measured; the token patterns are TestCountedOptionMarker's).
         assert cli.main(argv) == 252
         assert "argument --tags: expected 2 arguments" in capsys.readouterr().err
@@ -830,7 +830,7 @@ class TestCountedOptionMarker:
     @pytest.mark.parametrize("pattern", ["O", "OA"])
     def test_an_unmarked_option_keeps_argparse_s_own_matching(self, pattern: str) -> None:
         # The mutant guard for the marker check: without it every option would
-        # start swallowing option-like tokens, which aws does not do.
+        # start swallowing option-like tokens, which aws-cli does not do.
         parser = cli._ParamValidationArgumentParser(add_help=False)
         action = parser.add_argument("--storage-class")
         with pytest.raises(argparse.ArgumentError):
@@ -842,7 +842,7 @@ class TestNegativeNumberClassification:
 
     Python 3.14 loosened argparse's negative-number matcher from a whole-token
     number to a prefix (`-1x` and `-.5x` now classify as plain tokens, not as
-    options), and aws's official distribution runs on 3.14, so its parse
+    options), and aws-cli's official distribution runs on 3.14, so its parse
     consumes such a token as the following option's value. The parser pins
     3.14's pattern on every supported Python; without the pin our 3.10 floor
     would report the value as missing. Every ``main`` outcome below is the
@@ -863,7 +863,7 @@ class TestNegativeNumberClassification:
     def test_an_int_option_takes_it_and_fails_the_conversion(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws lets the ValueError out of its own int conversion, so the run
+        # aws-cli lets the ValueError out of its own int conversion, so the run
         # ends at the general-error code, naming the value.
         assert cli.main(["ls", "--page-size", "-1x", "s3://a/"]) == 255
         assert "-1x" in capsys.readouterr().err
@@ -874,7 +874,7 @@ class TestNegativeNumberClassification:
     ) -> None:
         # The boundary the loosened pattern draws: a digit must follow the
         # dash (one optional dot aside), so these keep reporting the missing
-        # value on aws too.
+        # value on `aws` too.
         assert cli.main(["cp", "--storage-class", value, "s3://a/k", "s3://b/k"]) == 252
         assert "argument --storage-class: expected one argument" in capsys.readouterr().err
 
@@ -950,14 +950,14 @@ class TestOptionValueResolution:
     """How a single option value is resolved before the run: the paramfile
     expansion (a bad reference is 252), the integer coercion (255), and the
     ``--metadata`` map (252). Measured against the pinned aws-cli, except the
-    paramfile uses aws mishandles, which are refused at 252 here."""
+    paramfile uses aws-cli mishandles, which are refused at 252 here."""
 
     _MISSING = "/nonexistent_src_for_option_value_test.txt"
 
     def test_expected_size_readable_fileb_is_a_param_validation_252(self, tmp_path: Path) -> None:
-        # --expected-size is a string-model option in aws (no cli_type_name),
+        # --expected-size is a string-model option in aws-cli (no cli_type_name),
         # NOT part of the integer-family expansion: a readable fileb:// is
-        # refused like on any string option (252; aws's botocore type check
+        # refused like on any string option (252; aws-cli's botocore type check
         # ends the same), where the integer helper would run int(b'5') and
         # proceed.
         blob = tmp_path / "size.bin"
@@ -966,12 +966,12 @@ class TestOptionValueResolution:
         assert rc == 252
 
     def test_page_size_paramfile_reference_is_expanded(self) -> None:
-        # aws paramfile-expands even the string-typed integer options: a bad
+        # aws-cli paramfile-expands even the string-typed integer options: a bad
         # file:// reference on --page-size is its 252, not the int()'s 255.
         assert cli.main(["ls", "s3://b", "--page-size", "file:///no/x"]) == 252
 
     def test_metadata_fileb_shorthand_value_is_a_usage_error(self, tmp_path: Path) -> None:
-        # a@=fileb://... loads real bytes; aws rejects the non-string map value
+        # a@=fileb://... loads real bytes; aws-cli rejects the non-string map value
         # at parse time (252) - it must not reach the transfer (rc 1). The file
         # exists, so the 252 cannot be the missing-paramfile one.
         blob = tmp_path / "v.bin"
@@ -984,7 +984,7 @@ class TestOptionValueResolution:
     ) -> None:
         # Like the whole-value case below: a file named on the command line
         # that cannot be read is 252 wherever it is named, for either prefix.
-        # (aws's shorthand parser loads it outside the handler that names the
+        # (aws-cli's shorthand parser loads it outside the handler that names the
         # option, so there it reaches the general handler at 255.)
         for ref in ("file:///no/x", "fileb:///no/x"):
             assert cli.main(["cp", self._MISSING, "s3://b/k", "--metadata", f"a@={ref}"]) == 252
@@ -999,8 +999,8 @@ class TestOptionValueResolution:
     def test_whole_value_metadata_fileb_existing_is_252(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws loads the bytes, then crashes indexing them in its map shorthand
-        # parser (255) - an aws bug not copied: refused as a usage error.
+        # aws-cli loads the bytes, then crashes indexing them in its map shorthand
+        # parser (255) - an aws-cli bug not copied: refused as a usage error.
         blob = tmp_path / "m.bin"
         blob.write_bytes(b"k=v")
         rc = cli.main(["cp", self._MISSING, "s3://b/k", "--metadata", f"fileb://{blob}"])
@@ -1011,8 +1011,8 @@ class TestOptionValueResolution:
     def test_positional_fileb_is_refused_on_every_command(
         self, command: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws breaks a different way on each command (252, 255, or rm deleting
-        # the decoded path) - an aws bug not copied: one 252 everywhere, with
+        # aws-cli breaks a different way on each command (252, 255, or rm deleting
+        # the decoded path) - an aws-cli bug not copied: one 252 everywhere, with
         # nothing read or sent.
         ref = tmp_path / "path.bin"
         ref.write_bytes(b"s3://bucket/key")
@@ -1026,8 +1026,8 @@ class TestOptionValueResolution:
     def test_lone_grants_paramfile_is_refused(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws loads it and parses the text as grants one character at a time
-        # (rc 1 in flight) - an aws bug not copied.
+        # aws-cli loads it and parses the text as grants one character at a time
+        # (rc 1 in flight) - an aws-cli bug not copied.
         ref = tmp_path / "g.txt"
         ref.write_text("read=uri=http://acs.amazonaws.com/groups/global/AllUsers")
         rc = cli.main(
@@ -1037,7 +1037,7 @@ class TestOptionValueResolution:
         assert "Error parsing parameter '--grants'" in capsys.readouterr().err
 
     def test_free_string_option_fileb_is_a_param_validation_252(self, tmp_path: Path) -> None:
-        # A fileb:// on a string-typed option is refused unread (252; aws's
+        # A fileb:// on a string-typed option is refused unread (252; aws-cli's
         # botocore type check ends the same), not a transfer.
         blob = tmp_path / "ct.bin"
         blob.write_bytes(b"hi")
@@ -1048,7 +1048,7 @@ class TestOptionValueResolution:
 
 
 class TestRecursiveDestDirCreation:
-    """aws pre-creates the s3local dir_op destination during validation
+    """aws-cli pre-creates the s3local dir_op destination during validation
     (its ``_validate_path_args``), so a creation failure is rc 255 - not the
     pipeline's rc 1. sync always did this; cp/mv --recursive share it now."""
 
@@ -1071,7 +1071,7 @@ class TestRecursiveDestDirCreation:
 
 
 class TestHelpToken:
-    """aws's parser turns an exactly-``['help']`` token list into the help
+    """aws-cli's parser turns an exactly-``['help']`` token list into the help
     page (rc 0) at every level - its ``ArgTableArgParser`` special case.
     Measured on the pinned aws-cli: ``s3 help`` and ``s3 ls help`` are 0, and
     ``s3 help foo`` is 252."""
@@ -1088,7 +1088,7 @@ class TestHelpToken:
     def test_subcommand_help_token(self, name: str, capsys: pytest.CaptureFixture[str]) -> None:
         # The token is now the only route to a help page, so every entry in the
         # command table is pinned - including the ones whose normal parse would
-        # fail on missing positionals (measured: all nine are rc 0 on aws).
+        # fail on missing positionals (measured: all nine are rc 0 on `aws`).
         assert cli.main([name, "help"]) == 0
         out = capsys.readouterr().out
         assert out.startswith(f"usage: boto3-s3 {name}")
@@ -1100,7 +1100,7 @@ class TestHelpToken:
         assert cli.main(["help", "foo"]) == 252
 
     def test_help_token_with_trailing_globals(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # The top-level pass strips globals on either side, so aws pages here
+        # The top-level pass strips globals on either side, so `aws` pages here
         # (measured: `s3 help --region us-east-1` and
         # `s3 presign help --region us-east-1 --no-cli-pager` are both 0).
         assert cli.main(["help", "--region", "us-east-1"]) == 0
@@ -1164,7 +1164,7 @@ class TestHelpOptionsAreUnknownOptions:
     def test_version_wins_in_either_order(
         self, argv: list[str], capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # `--version` is a real option here and on aws, and its parse-time
+        # `--version` is a real option here and on `aws`, and its parse-time
         # action fires before the unknown options are ever collected.
         assert cli.main(argv) == 0
         captured = capsys.readouterr()
@@ -1182,7 +1182,7 @@ class TestHelpOptionsAreUnknownOptions:
     def test_dash_dash_h_abbreviates_to_human_readable(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # Measured: `s3 ls --h` runs (aws resolves the abbreviation against
+        # Measured: `s3 ls --h` runs (aws-cli resolves the abbreviation against
         # `--human-readable`); with `-h` gone nothing shadows it here either.
         client = _OnePageClient(size=2048)
         rc = cli.main(
@@ -1210,16 +1210,16 @@ def _presign_ctx(client: _RecordingPresignClient) -> Context:
 class TestTopLevelGlobalsStripping:
     """The aws-shaped token flow (measured on the pinned aws-cli 2.36.40).
 
-    aws parses and REMOVES the globals over the full argv first, locates the
+    aws-cli parses and REMOVES the globals over the full argv first, locates the
     subcommand among the survivors (unknown optionals assumed valueless), and
     hands every other token to the leaf parser in original order. The first
     ``--`` protects what follows from the globals pass and the leaf re-honors
-    it - except a leading ``--``, which aws's first parse uses up against its
+    it - except a leading ``--``, which aws-cli's first parse uses up against its
     service token, so the tail is re-read as options downstream.
     """
 
     def test_global_prefix_wins_over_command_option_prefix(self) -> None:
-        # aws resolves `--e` against the globals alone (its first parse runs
+        # aws-cli resolves `--e` against the globals alone (its first parse runs
         # before any command parser), never reporting the `--endpoint-url` /
         # `--expires-in` ambiguity a merged parser would see. Measured rc 0
         # with the URL built on https://example.com.
@@ -1245,7 +1245,7 @@ class TestTopLevelGlobalsStripping:
         assert client.calls == [({"Bucket": "b", "Key": "k"}, 120)]
 
     def test_double_dash_before_subcommand(self) -> None:
-        # Measured rc 0: the leading `--` is consumed by aws's first parse
+        # Measured rc 0: the leading `--` is consumed by aws-cli's first parse
         # (its service token always precedes it), so the subcommand still
         # resolves.
         client = _RecordingPresignClient()
@@ -1313,7 +1313,7 @@ class TestClosedStandardStreams:
 class TestTheEntryPointBackstop:
     """Nothing the dispatcher itself raises leaves as a traceback.
 
-    aws's entry point hands whatever escapes its driver to its handler chain;
+    aws-cli's entry point hands whatever escapes its driver to its handler chain;
     a command's failures are settled in `_run_command`, and `main` applies
     the same mapping to the dispatcher's own steps.
     """

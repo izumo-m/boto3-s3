@@ -474,7 +474,7 @@ class TestXmlIncompatibleFallback:
         # reported failed though it was deleted, and the CR key deleted though
         # it was refused. On the per-key route the CR key's failure is its own
         # (aws-cli's shape: `delete failed: s3://b/p/k^Mx ...` for that key
-        # alone, measured against the pinned aws 2.36.40 through a 127.0.0.1
+        # alone, measured against the pinned aws-cli 2.36.40 through a 127.0.0.1
         # fake).
         denied = _client_error("AccessDenied", 403, "DeleteObject")
         fake = _FakeS3Client(single_script=[denied])
@@ -628,8 +628,8 @@ class TestResults:
     # DeleteObject per key, so botocore's retry policy covers them; a per-key
     # entry of a 200 DeleteObjects response is beyond that policy's reach, and
     # the key is sent again on the per-key route instead. Measured against the
-    # pinned aws (2.36.40) through a 127.0.0.1 fake answering one key's first
-    # delete with InternalError, AWS_MAX_ATTEMPTS=3: aws sends that key's
+    # pinned `aws` (2.36.40) through a 127.0.0.1 fake answering one key's first
+    # delete with InternalError, AWS_MAX_ATTEMPTS=3: aws-cli sends that key's
     # DELETE twice, prints its `delete:` line and exits 0.
     @pytest.mark.parametrize(
         "code", ["InternalError", "SlowDown", "ServiceUnavailable", "RequestTimeout"]
@@ -703,7 +703,7 @@ class TestResults:
     def test_a_transient_request_level_failure_is_resent_per_key(self) -> None:
         # botocore spent the batch request's attempts; each of aws-cli's
         # per-key requests has its own (measured: a server failing the first
-        # three deletes with InternalError leaves aws deleting both keys at
+        # three deletes with InternalError leaves aws-cli deleting both keys at
         # rc 0), so each key goes out again and takes that request's outcome.
         fake = _FakeS3Client(
             script=[_client_error("InternalError", 500)],
@@ -963,7 +963,7 @@ class TestResults:
         # type: botocore reading an S3 Express CreateSession reply without
         # Credentials (KeyError), a redirect loop (RecursionError). aws-cli's
         # per-key DeleteObject runs as an s3transfer task, which records any of
-        # them as that key's failure at rc 1 (measured against the pinned aws
+        # them as that key's failure at rc 1 (measured against the pinned `aws`
         # 2.36.40 through a 127.0.0.1 fake) - so the deleter sends each key of the request on its
         # own, as it does for any failed batch, instead of re-raising from
         # flush() / close(); here each key's request fails the same way.
@@ -1017,8 +1017,8 @@ class TestResults:
     def test_a_batch_that_dies_without_a_response_resends_each_key(self) -> None:
         # aws-cli sends one DeleteObject per key, so a dead batch call says
         # nothing about them: each key goes out on that per-key route, where
-        # aws's own outcome is decided (measured: a batch past
-        # --cli-read-timeout, the per-key deletes answering at once - aws
+        # aws-cli's own outcome is decided (measured: a batch past
+        # --cli-read-timeout, the per-key deletes answering at once - aws-cli
         # deletes and reports all three, and so does the resend).
         fake = _FakeS3Client(
             script=[ReadTimeoutError(endpoint_url="http://h/")],
@@ -1187,7 +1187,7 @@ class TestCrtRoute:
     def test_a_batch_that_dies_sends_each_key_on_its_own(self, built: list[Any]) -> None:
         # The CRT client spent the batch's attempts; aws-cli's per-key
         # requests each have attempts of their own (measured: a server
-        # dropping the first six deletes leaves aws at rc 0), so each key
+        # dropping the first six deletes leaves aws-cli at rc 0), so each key
         # goes out again as its own DeleteObject on the CRT client.
         awscrt_exceptions = pytest.importorskip("awscrt.exceptions")
         fake = _FakeS3Client(script=[awscrt_exceptions.from_code(1051)], single_script=[{}, {}])

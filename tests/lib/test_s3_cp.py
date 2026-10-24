@@ -139,7 +139,7 @@ class TestUploadRoute:
         self, tmp_path: Path, op: str
     ) -> None:
         # A recursive source is walked as a directory, and the walk skips a
-        # file root (aws warns and exits 2 with nothing done); here the run
+        # file root (aws-cli warns and exits 2 with nothing done); here the run
         # stops before it starts, like a missing source.
         src = tmp_path / "a.txt"
         src.write_bytes(b"x")
@@ -157,7 +157,7 @@ class TestUploadRoute:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # `lsub/../d` is sub/d to the kernel, which admits it, and <cwd>/d to
-        # the walk, which finds nothing there: aws warns "File does not
+        # the walk, which finds nothing there: aws-cli warns "File does not
         # exist." and exits 2. Refused here before the run.
         (tmp_path / "sub" / "other").mkdir(parents=True)
         (tmp_path / "sub" / "d").mkdir()
@@ -200,7 +200,7 @@ class TestUploadRoute:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # `lsub/../x` is sub/x to the kernel (lsub -> sub/other) and <cwd>/x
-        # to os.path.abspath, which folds `..` lexically. aws's pre-check asks
+        # to os.path.abspath, which folds `..` lexically. aws-cli's pre-check asks
         # the kernel and admits the source; its generator then looks for the
         # lexical form and warns "File does not exist." - rc 2 (measured).
         # Ours tested abspath up front and refused it: fatal error, rc 1.
@@ -226,7 +226,7 @@ class TestUploadRoute:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # `lsub/../x/` is the directory sub/x to the kernel, which admits it,
-        # and the file <cwd>/x/ to aws's generator, which a file does not
+        # and the file <cwd>/x/ to aws-cli's generator, which a file does not
         # take: "Skipping file <cwd>/x/. File does not exist.", rc 2
         # (measured), where the lexical form without the separator would
         # upload <cwd>/x.
@@ -269,7 +269,7 @@ class TestUploadRoute:
     def test_an_empty_local_path_is_rejected_before_anything_runs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # aws refuses "" on either side (rc 255); the library used to resolve
+        # aws-cli refuses "" on either side (rc 255); the library used to resolve
         # it to the working directory and run there.
         monkeypatch.chdir(tmp_path)
         (tmp_path / "a.txt").write_bytes(b"x")
@@ -375,7 +375,7 @@ class TestUploadRoute:
         assert [call.params["Key"] for call in calls] == ["tree/a.txt", "tree/a/inner.txt"]
 
     def test_detect_symlink_loops_reaches_the_local_walk(self, tmp_path: Path) -> None:
-        # The opt-in cycle guard (default off = aws parity) is configured on the
+        # The opt-in cycle guard (default off = aws-cli parity) is configured on the
         # LocalStorage source and reaches the local recursive walk.
         (tmp_path / "a.txt").write_bytes(b"x")
         (tmp_path / "loop").symlink_to(tmp_path)  # a directory cycle
@@ -480,7 +480,7 @@ class TestUploadRoute:
     ) -> None:
         # aws-cli's local_format gives a directory source a trailing separator,
         # so its last component - the name a prefix destination appends - is
-        # empty: aws shows "d/ to s3://b/p/", not "./d to s3://b/p/d".
+        # empty: `aws` shows "d/ to s3://b/p/", not "./d to s3://b/p/d".
         src = tmp_path / "adir"
         src.mkdir()
         client, calls = make_recording_client([])
@@ -741,9 +741,9 @@ class TestFilters:
         assert [call.params["Key"] for call in calls] == ["t/large.txt"]
 
     def test_single_s3_source_is_filtered_too(self, tmp_path: Path) -> None:
-        # aws applies --exclude/--include on the single-object routes as well
+        # aws-cli applies --exclude/--include on the single-object routes as well
         # (its filter stage runs regardless of dir_op): the source is still
-        # resolved (HeadObject, like aws's file generator) but an excluded
+        # resolved (HeadObject, like aws-cli's file generator) but an excluded
         # object transfers nothing - no GetObject, no local file, rc 0.
         drop = globsieve.compile([Exclude("*")])
         client, calls = make_recording_client([head_response()])
@@ -765,7 +765,7 @@ class TestFilters:
         [
             # aws-cli matches a single object relative to its parent, and the
             # parent of `a//b` is `a/`: the entry is `/b`, not `b` (measured
-            # on the pinned aws for cp and mv alike).
+            # on the pinned `aws` for cp and mv alike).
             ("a//b", ("-b",), True),
             ("a//b", ("-*", "+b"), False),
             ("a//b", ("-?b",), False),
@@ -811,7 +811,7 @@ class TestFilters:
     @pytest.mark.parametrize(
         ("source", "patterns", "kept", "relative", "full"),
         [
-            # Measured on aws 2.36.40 (cp --dryrun, Linux): aws matches the
+            # Measured on aws-cli 2.36.40 (cp --dryrun, Linux): aws-cli matches the
             # source in its local_format form, a directory with a trailing
             # separator, against patterns joined onto abspath(dirname(path)).
             ("d/", ("-d/",), True, "", "c2/sub/d/"),
@@ -851,7 +851,7 @@ class TestFilters:
         full: str,
     ) -> None:
         # The record keeps the absolute path and its basename (the source and
-        # the destination name); the filter is shown aws's form of both.
+        # the destination name); the filter is shown aws-cli's form of both.
         sub = tmp_path / "c2" / "sub"
         (sub / "d").mkdir(parents=True)
         (sub / "d" / "f").write_bytes(b"x")
@@ -883,7 +883,7 @@ class TestFilters:
     @pytest.mark.parametrize(
         ("pattern", "kept"),
         [
-            # aws matches the walk of a filesystem root as `/bin/x`: a
+            # aws-cli matches the walk of a filesystem root as `/bin/x`: a
             # relative `bin/*` misses it, a leading `*` reaches it.
             ("bin/*", ["bin/x", "etc/y"]),
             ("*bin/*", ["etc/y"]),
@@ -915,7 +915,7 @@ class TestFilters:
         assert [r.compare_key for r in results] == kept
 
     def test_the_case_conflict_pre_walk_of_a_filesystem_root(self) -> None:
-        # The gate's destination walk meets the run's filter as aws's reverse
+        # The gate's destination walk meets the run's filter as aws-cli's reverse
         # generator does, each entry matched below the root as `/bin/x`.
         seen: list[str | None] = []
 
@@ -936,7 +936,7 @@ class TestFilters:
         assert seen == ["/bin/x"]
 
     def test_nested_s3_to_s3_patterns_do_not_cross(self) -> None:
-        # aws joins every pattern onto both sides' bases and applies both to
+        # aws-cli joins every pattern onto both sides' bases and applies both to
         # every entry, so `x*` joined onto the destination `bucket/data/backup`
         # excludes the source entry data/backup/x1.txt. Each entry here meets
         # its own side's patterns only, so it is copied (a decided difference,
@@ -963,7 +963,7 @@ class TestFilters:
     def test_windows_backslash_ending_prefix_matches_entries_as_aws_does(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # On Windows aws's ntpath.join reads a prefix typed ending in a
+        # On Windows aws-cli's ntpath.join reads a prefix typed ending in a
         # backslash as ending in a separator and joins patterns flush: the
         # entry pre\/x is matched as /x (simulated here). The record keeps x.
         monkeypatch.setattr(producers, "_JOIN_SEPARATORS", ("/", "\\"))
@@ -1043,7 +1043,7 @@ class TestDownloadRoute:
         self, tmp_path: Path
     ) -> None:
         # A bare `s3://` (service root) as a non-recursive source rides the
-        # keyless listing branch like any keyless source: aws reaches
+        # keyless listing branch like any keyless source: aws-cli reaches
         # ListObjectsV2, whose Bucket="" dies at botocore's client-side
         # Invalid-bucket validation (measured with --debug on the pinned aws:
         # the failure fires at before-parameter-build.s3.ListObjectsV2) - the
@@ -1072,7 +1072,7 @@ class TestDownloadRoute:
         # aws-cli's Outposts access-point pattern takes ":" between the ARN and
         # the key and keeps printing the location as typed: `cp f.txt
         # s3://<arn>:dir/ --dryrun` previews `upload: ./f.txt to
-        # s3://<arn>:dir/f.txt` (measured against the pinned aws 2.36.40,
+        # s3://<arn>:dir/f.txt` (measured against the pinned aws-cli 2.36.40,
         # offline). The request still takes the ARN as Bucket and `dir/f.txt`
         # as Key; a single source reports its own spelling the same way.
         arn = "arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-1/accesspoint/ap"
@@ -1105,7 +1105,7 @@ class TestDownloadRoute:
         # `my_ap` is no access point name: aws-cli's pattern stops at `my` and
         # reads `_ap` as the key, sends that split, and prints the location as
         # typed: `cp f s3://<arn>/my_ap --dryrun` previews `upload: ./f to
-        # s3://<arn>/my_ap` (measured against the pinned aws 2.36.40, offline).
+        # s3://<arn>/my_ap` (measured against the pinned aws-cli 2.36.40, offline).
         base = "arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-1/accesspoint/"
         source = tmp_path / "f.txt"
         source.write_bytes(b"x")
@@ -1172,7 +1172,7 @@ class TestDownloadRoute:
         ]
 
     def test_keyless_non_recursive_source_transfers_nothing(self, tmp_path: Path) -> None:
-        # `cp s3://bucket .`: aws lists the bucket and exact-matches nothing
+        # `cp s3://bucket .`: aws-cli lists the bucket and exact-matches nothing
         # (rc 0, silent). The listing itself is observable when ListBucket is
         # denied, so it must not be optimized away.
         client, calls = make_recording_client([{}])
@@ -1236,10 +1236,10 @@ class TestDownloadRoute:
         assert not (tmp_path / "secret").exists()
 
     def test_recursive_download_to_existing_file_dest_empty_source(self, tmp_path: Path) -> None:
-        # aws skips the dest makedirs when the path already exists, so a
+        # aws-cli skips the dest makedirs when the path already exists, so a
         # recursive download to an existing FILE with an empty source listing
         # transfers nothing and leaves the file intact - not a FileExistsError
-        # crash up front (which would mismatch aws's rc 0).
+        # crash up front (which would mismatch `aws`'s rc 0).
         dest = tmp_path / "out"
         dest.write_bytes(b"keep")
         client, calls = make_recording_client([{}])  # empty ListObjectsV2 page
@@ -1632,7 +1632,7 @@ class TestStreamRoutes:
     def test_a_stream_download_names_a_keyless_source_as_the_bucket_root(
         self, uri: str, shown: str
     ) -> None:
-        # aws prints the source as its argument normalization left it
+        # `aws` prints the source as its argument normalization left it
         # (measured: `cp s3://b - --dryrun` is `download: s3://b/ to -`).
         client, _ = make_recording_client([])
         results: list[OpResult] = []
@@ -1696,7 +1696,7 @@ class TestStreamRoutes:
     def test_missing_stdin_is_attributed_to_cp(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # StdioStorage.open names no operation of its own (it serves cp and mv
         # alike), so the eager open on this route stamps cp. Only stdin has a
-        # precondition (aws's StdinMissingError); a missing stdout surfaces as
+        # precondition (aws-cli's StdinMissingError); a missing stdout surfaces as
         # a per-item write failure instead - pinned in test_iostorage.py.
         client, calls = make_recording_client([])
         monkeypatch.setattr("sys.stdin", None)
@@ -1710,7 +1710,7 @@ class TestStreamRoutes:
         # The stream route honors cancel_token like the non-stream route: a
         # pre-cancelled token raises before the fileobj is opened or submitted,
         # so nothing transfers and a side-effecting stream stays untouched
-        # (cancel_token is a library extension, no aws parity at stake).
+        # (cancel_token is a library extension, no aws-cli parity at stake).
         class _SpyIO(IOStorage):
             def __init__(self, stream: Any) -> None:
                 super().__init__(stream)
@@ -1864,7 +1864,7 @@ class TestCaseConflictGate:
         # past `a.txt` while pairing `b.txt`, so `a.txt` finds no partner and
         # meets the conflict check against the file it would overwrite -
         # skipped, where a lookup by name would have copied it (measured
-        # against the pinned aws 2.36.40 on a fake endpoint).
+        # against the pinned aws-cli 2.36.40 on a fake endpoint).
         out = tmp_path / "out"
         out.mkdir()
         (out / "a.txt").write_bytes(b"old")
@@ -2040,7 +2040,7 @@ class TestCaseConflictGate:
         return gate, transferrer
 
     def test_case_gate_scan_reads_the_dest_storage_config(self, tmp_path: Path) -> None:
-        # aws builds the case-conflict reverse enumeration with the run's
+        # aws-cli builds the case-conflict reverse enumeration with the run's
         # follow_symlinks parameter (rgen_kwargs), so the membership scan honors
         # the destination storage's config: a --no-follow-symlinks destination
         # excludes the symlinked twin that a default destination includes.
@@ -2055,7 +2055,7 @@ class TestCaseConflictGate:
 
     @skip_if_chmod_is_inert
     def test_case_gate_scan_warns_into_the_rollup_and_filters(self, tmp_path: Path) -> None:
-        # aws's reverse enumeration shares the result queue (its walk warnings
+        # aws-cli's reverse enumeration shares the result queue (its walk warnings
         # count toward rc 2) and passes the --exclude/--include filters; the
         # membership scan does the same: the unreadable file warns through the
         # transferrer and the filtered-out entry stays out of the set.

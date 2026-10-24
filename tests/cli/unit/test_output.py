@@ -3,7 +3,7 @@
 Every timestamp expectation here is a line the pinned aws-cli actually printed
 for the same response and the same ``TZ`` (captured against a fake S3 that can
 serve a chosen ``LastModified`` / ``CreationDate``, which no real endpoint
-allows), so the assertions are aws bytes rather than a second implementation of
+allows), so the assertions are `aws` bytes rather than a second implementation of
 the same formatting.
 """
 
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 _MTIME = dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc)
 
-# The listing timestamp is rendered in the *local* zone, so pinning aws's bytes
+# The listing timestamp is rendered in the *local* zone, so pinning `aws`'s bytes
 # means pinning the zone. Windows has no ``time.tzset``, and without it a
 # changed ``TZ`` never reaches the C library the conversion reads.
 needs_tzset = pytest.mark.skipif(
@@ -42,7 +42,7 @@ def local_zone(zone: str) -> Generator[None, None, None]:
         os.environ["TZ"] = zone
         time.tzset()
         # A zone the host has no tzdata entry for silently degrades to UTC,
-        # which would compare our output against the wrong aws bytes.
+        # which would compare our output against the wrong `aws` bytes.
         if zone != "UTC" and time.tzname[0] in {"UTC", "GMT"}:
             pytest.skip(f"host has no tzdata entry for {zone}")
         yield
@@ -148,7 +148,7 @@ class TestFormatEntry:
         assert line == f"{'PRE':>30} sub/"
 
     def test_directory_double_slash_matches_aws(self) -> None:
-        # aws renders an empty last component (Prefix.split('/')[-2]); a prefix
+        # aws-cli renders an empty last component (Prefix.split('/')[-2]); a prefix
         # ending in '//' is "PRE /", not rstrip's "PRE a/".
         assert (
             output.format_entry(
@@ -181,9 +181,9 @@ class TestFormatEntry:
 
 
 class TestListingTimestamp:
-    """The 19-column stamp: aws's zone conversion and its field-built padding.
+    """The 19-column stamp: aws-cli's zone conversion and its field-built padding.
 
-    aws converts with dateutil's ``tzlocal``, which snapshots the offsets in
+    aws-cli converts with dateutil's ``tzlocal``, which snapshots the offsets in
     effect *now* (``time.timezone`` / ``time.altzone``) and looks the DST flag up
     per instant. So in a zone whose rules changed, an object older than the
     change is rendered with today's offset - while a zone that still observes DST
@@ -194,7 +194,7 @@ class TestListingTimestamp:
     summer lines wrong.
     """
 
-    # (TZ, LastModified served, aws's line) for a 1-byte object listed
+    # (TZ, LastModified served, `aws`'s line) for a 1-byte object listed
     # non-recursively, so the name column is the key's basename.
     @needs_tzset
     @pytest.mark.parametrize(
@@ -222,7 +222,7 @@ class TestListingTimestamp:
             line = output.format_entry(info, recursive=False, human_readable=False)
         assert line == expected
 
-    # (key, size, LastModified served, aws's line), TZ=UTC. A year below 1000
+    # (key, size, LastModified served, `aws`'s line), TZ=UTC. A year below 1000
     # is left-justified into 19 columns so the size column never moves.
     @needs_tzset
     @pytest.mark.parametrize(
@@ -260,7 +260,7 @@ class TestListingTimestamp:
             line = output.format_entry(info, recursive=False, human_readable=True)
         assert line == expected
 
-    # Bucket lines carry CreationDate through the same aws helper, so both the
+    # Bucket lines carry CreationDate through the same aws-cli helper, so both the
     # zone conversion and the padding show up in the all-buckets listing.
     @needs_tzset
     @pytest.mark.parametrize(

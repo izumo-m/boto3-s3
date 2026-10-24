@@ -79,7 +79,7 @@ class MvCommand(Command):
 
         item_filter = filters.compile_filter(args.filters)
         transfer_config = transferargs.build_transfer_engine(ctx, s3, client, paths_type=paths_type)
-        # aws validates --case-conflict against S3 Express while building the
+        # aws-cli validates --case-conflict against S3 Express while building the
         # run's instructions, past the transfer manager.
         case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="mv")
         options = transferargs.build_transfer_options(
@@ -90,7 +90,7 @@ class MvCommand(Command):
             ),
         )
         if args.recursive and paths_type == "s3local":
-            # The dir_op half of aws's _validate_path_args, once every check
+            # The dir_op half of aws-cli's _validate_path_args, once every check
             # above has passed (transferargs.create_local_dest_dir).
             transferargs.create_local_dest_dir(dest, operation="mv")
         printer = transferargs.build_printer(args, head.progress_frequency)
@@ -117,7 +117,7 @@ class MvCommand(Command):
         """The mv s3->s3 validation block (aws-cli's ``_validate_path_args`` head).
 
         Always: the textual onto-itself guard on the keyless-normalized URIs
-        (the form aws prints - ``mv s3://b/k s3://b`` reports ``s3://b/``),
+        (the form aws-cli prints - ``mv s3://b/k s3://b`` reports ``s3://b/``),
         ``--recursive`` included. When validation is on (the flag, or the
         env variable set to ``true`` case-insensitively - aws-cli's
         ``ensure_boolean``, so ``TRUE`` / ``True`` count too, any other value
@@ -125,11 +125,11 @@ class MvCommand(Command):
         through ``S3PathResolver`` - the source-side s3control client in
         ``--source-region``, the destination's in ``--region``, sts with no
         per-client choice; an unset choice is left to the session's region,
-        as aws's ``from_session`` clients inherit theirs (a truthy typed
+        as aws-cli's ``from_session`` clients inherit theirs (a truthy typed
         ``--region``, else the region chain) - and every resolved pair
         runs the same guard, still reporting the *original* URIs. When validation
         is off, the two keys match, and a side looks access-point-shaped,
-        aws's standing warning
+        aws-cli's standing warning
         goes to stderr and the move proceeds (non-matching keys return before
         the warning branch).
 

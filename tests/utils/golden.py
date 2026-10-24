@@ -2,7 +2,7 @@
 
 A golden records what the **real aws-cli** did for one scenario against a
 real S3-compatible endpoint (rc + normalized stdout). The e2e suite writes
-them under ``UPDATE_GOLDENS=1`` and verifies them against the live aws binary
+them under ``UPDATE_GOLDENS=1`` and verifies them against the live `aws` binary
 otherwise (drift detection); the functional (moto) suite replays the same
 scenario through boto3-s3 and compares against the stored golden.
 
@@ -12,9 +12,9 @@ The record shape::
      "stdout_lines": [...], "aws_version": "aws-cli/2.x ..."}
 
 Destructive commands (``rm``) additionally record ``remaining_keys`` - the
-bucket's end state after the aws run, with the seeded layout as the start
+bucket's end state after the `aws` run, with the seeded layout as the start
 state - because their stdout is normalized *sorted* (delete-line order is
-nondeterministic in aws); the end state pins what the sort relaxes. The ``ls``
+nondeterministic in aws-cli); the end state pins what the sort relaxes. The ``ls``
 capture passes no ``remaining_keys``, so it persists as ``null`` and is not
 compared.
 Bucket-lifecycle commands (``mb`` / ``rb``) further record ``bucket_exists``

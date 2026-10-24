@@ -4,7 +4,7 @@
 #
 # Usage (from repo root):
 #   scripts/compose-up.sh          # start the stack, wait for bucket init
-#   source scripts/dev-env.sh      # point AWS tooling (aws / boto3-s3) at it
+#   source scripts/dev-env.sh      # point AWS tooling (`aws` / boto3-s3) at it
 #   uv run pytest tests/cli/e2e    # run the e2e parity suite
 #   scripts/compose.sh down        # tear down (any compose subcommand works)
 #

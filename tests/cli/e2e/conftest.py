@@ -29,7 +29,7 @@ Credentials, region and endpoint come from the env alone (``scripts/dev-env.sh``
 or ``tests/run_e2e.sh``, which exports a profile's credentials and drops
 ``AWS_PROFILE``); ``~`` points at a throwaway directory for the whole suite,
 probe included, so neither tool reads the developer's ``~/.aws`` and the pinned
-aws does not write its session database there.
+aws-cli does not write its session database there.
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ def _isolated_home() -> Generator[None, None, None]:
     """Point ``~`` at a throwaway directory for the duration.
 
     Both tools read ``~/.aws/config`` and ``~/.aws/credentials`` (and the
-    pinned aws ``~/.aws/cli/alias``), and the pinned aws writes
+    pinned `aws` ``~/.aws/cli/alias``), and the pinned `aws` writes
     ``~/.aws/cli/cache/session.db`` on every command that builds a client
     (``--version`` alone does not). Against the developer's home, the host's
     settings would steer both sides of every comparison and each run would
@@ -258,7 +258,7 @@ _SIBLING_SERIAL = itertools.count(1)
 
 
 def _sibling_buckets(s3_client: Any, bucket_name: str, kind: str) -> Iterator[tuple[str, str]]:
-    """Two buckets the lifecycle (mb/rb) tests own outright: aws's, then ours.
+    """Two buckets the lifecycle (mb/rb) tests own outright: aws-cli's, then ours.
 
     The main bucket must stay existing and empty, so those suites work on
     siblings derived from it (the ``BOTO3_S3_E2E_BUCKET`` opt-in covers the

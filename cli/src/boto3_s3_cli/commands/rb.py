@@ -48,13 +48,13 @@ class RbCommand(Command):
         Exit-code shape (aws-cli RbCommand): usage errors - a non-``s3://``
         path, a path that names no bucket, a key part on a bucket, a rejected
         ARN form - exit 252 via ``main``. ``--force`` runs a full ``rm
-        --recursive`` first; a failure there is rc 255 (aws raises
+        --recursive`` first; a failure there is rc 255 (aws-cli raises
         RuntimeError into the general handler) and the bucket delete is not
         attempted. Every failure of delete_bucket is rc
         1 with one ``remove_bucket failed:`` line. The success line is past
         that catch: the bucket is gone by then, so a stdout that cannot take
         the line is lost output (rc 255 with the error, like every command's),
-        and a process without a stdout (``1>&-``) keeps rc 0 - where aws's
+        and a process without a stdout (``1>&-``) keeps rc 0 - where aws-cli's
         catch spans the line and reports the removed bucket as an rb failure.
         A client-construction
         failure (a bad ``--profile``, partial credentials, an empty region)
@@ -63,11 +63,11 @@ class RbCommand(Command):
         expand_positional_paramfile(args, "path", name="path", operation="rb")
         target: str = args.path
         if not target.startswith("s3://"):
-            # aws rb: S3 paths only -> rc 252.
+            # aws-cli's rb: S3 paths only -> rc 252.
             raise ValidationError(usage.bare_single_uri_usage(), operation="rb")
 
         # A path that names no bucket (`s3://`, `s3:///k`) is a usage error
-        # (252), --force or not: aws sends Bucket="" and reports an rb failure
+        # (252), --force or not: aws-cli sends Bucket="" and reports an rb failure
         # (rc 1), or with --force runs the inner rm first and ends at 255.
         bucket_part = target[len("s3://") :].partition("/")[0]
         refuse_bucketless(bucket_part, operation="rb")
@@ -76,7 +76,7 @@ class RbCommand(Command):
         client = s3.client()
 
         # Rejected ARN forms -> 252 from S3Storage.validate (deferred from the now
-        # non-raising construction); a key on the bucket is aws's post-split
+        # non-raising construction); a key on the bucket is aws-cli's post-split
         # key check, also a usage error (252).
         storage = S3Storage(target, client=client)
         storage.validate()
@@ -87,7 +87,7 @@ class RbCommand(Command):
             )
 
         if args.force and self._force_rm(target, args, ctx, s3) != 0:
-            # aws raises RuntimeError into its general handler, which prints the
+            # aws-cli raises RuntimeError into its general handler, which prints the
             # 'aws: [ERROR]:'-prefixed line; route it as an InvalidValueError so
             # main emits the matching 'boto3-s3: [ERROR]:' prefix -> rc 255
             # (the inner rm already streamed its own failure output: per-key
@@ -100,20 +100,20 @@ class RbCommand(Command):
             output.write_stderr(output.format_remove_bucket_failed(target, exc) + "\n")
             return 1
         # The bucket is gone from here, so the line is outside the failure
-        # catch (aws's spans it, reporting a removed bucket as failed).
+        # catch (aws-cli's spans it, reporting a removed bucket as failed).
         output.write_result_line(output.format_remove_bucket(storage.bucket))
         return 0
 
     @staticmethod
     def _force_rm(target: str, args: argparse.Namespace, ctx: Context, s3: S3) -> int:
-        """Run the inner ``rm --recursive``, mirroring aws's ``RbCommand._force``.
+        """Run the inner ``rm --recursive``, mirroring aws-cli's ``RbCommand._force``.
 
         The rm parser fills the rm-only defaults; rb's parsed namespace seeds
         the parse so the rm-side validations read the invocation's globals
-        (aws hands its parsed_globals to a fresh RmCommand the same way) -
+        (aws-cli hands its parsed_globals to a fresh RmCommand the same way) -
         the client itself comes from the shared S3 below, built from those
         same globals. The inner run shares rb's `S3` (`Context.with_s3`) exactly as
-        aws's ``RmCommand(self._session)`` shares the one CLI session - a
+        aws-cli's ``RmCommand(self._session)`` shares the one CLI session - a
         second session would resolve credentials again (a
         ``credential_process`` / MFA flow re-prompting, possibly under a
         different identity than the final ``DeleteBucket``). Caveat: argparse

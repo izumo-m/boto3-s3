@@ -459,7 +459,7 @@ class TestOpenDownloadRoute:
         assert store == {"a.txt": b"payload"}
 
     def test_single_download_is_filtered_too(self) -> None:
-        # The open route mirrors the built-in one: aws filters the
+        # The open route mirrors the built-in one: aws-cli filters the
         # single-object case as well - the excluded object is headed but
         # never fetched, and the backend is never opened.
         store: dict[str, bytes] = {}
@@ -507,7 +507,7 @@ class TestOpenDownloadRoute:
         assert store == {"a.txt": b"AAA", "sub/b.txt": b"BBB"}
 
     def test_keyless_non_recursive_source_writes_nothing(self) -> None:
-        # `cp s3://bucket mem-dest`: aws lists the bucket and exact-matches
+        # `cp s3://bucket mem-dest`: aws-cli lists the bucket and exact-matches
         # nothing. The listing is issued like the built-in download route
         # (test_s3_cp.py pins the same shape) - a denied/failing ListBucket
         # must stay observable, not be optimized to a silent rc 0.
@@ -848,7 +848,7 @@ class TestDeferredOpen:
 
     def test_writer_close_without_write_commits_an_empty_object(self) -> None:
         # The zero-byte-download shape: no chunk ever arrives, close still
-        # materializes the empty object (aws writes the empty local file).
+        # materializes the empty object (aws-cli writes the empty local file).
         store: dict[str, bytes] = {}
         backend = _MemStorage(store)
         producers._DeferredWriter(backend, "k", 0).close()

@@ -230,7 +230,7 @@ class TransferItem:
     # replaces dest_path on downloads. Streams get no directory creation and
     # no mtime stamp, and a download without size+etag lets s3transfer probe
     # the object itself - a HeadObject under the default
-    # response_checksum_validation ("when_supported"), the aws stream wire
+    # response_checksum_validation ("when_supported"), the aws-cli stream wire
     # shape; a "when_required" client takes s3transfer's first-chunk GET
     # probe instead.
     src_fileobj: Any = None
@@ -340,7 +340,7 @@ def _is_cancellation(
     """A future outcome meaning "revoked", not "failed".
 
     Classic s3transfer settles cancelled futures with its own
-    ``CancelledError`` (``FatalError`` on aws's fatal path is a subclass):
+    ``CancelledError`` (``FatalError`` on aws-cli's fatal path is a subclass):
     revoked when the coordinator says so (``revoked``, `_future_revoked`),
     a failure when a task raised that type itself - a caller's stream throwing
     it, nobody having ordered a cancel. The library's own `CancelledError` is
@@ -615,7 +615,7 @@ def _set_file_utime(path: str, timestamp: float) -> None:
     """Set a file's atime/mtime (aws-cli's ``set_file_utime``).
 
     A permission failure (EPERM - typically a file owned by another user) is
-    re-worded the way aws words it, so the resulting warning carries
+    re-worded the way aws-cli words it, so the resulting warning carries
     aws-cli's "attempting to modify the utime" text; every other error keeps
     its own message.
     """
@@ -639,7 +639,7 @@ def _mime_types() -> mimetypes.MimeTypes:
     Assembled the way ``mimetypes.init`` assembles the module-level one, with
     one substitution: the built-in tables come from ``mimetable`` (frozen
     CPython 3.14) rather than from the running interpreter, because the guess
-    has to be the one aws makes and aws's official distribution is frozen
+    has to be the one aws-cli makes and aws-cli's official distribution is frozen
     against 3.14. The host-side overlays stay live and keep ``init``'s order -
     the Windows registry first, then whichever ``knownfiles`` exist - so local
     mime.types edits reach both tools alike. Built on first use, and only then:
@@ -665,30 +665,30 @@ def _mime_types() -> mimetypes.MimeTypes:
 
 
 def _guess_content_type(path: str) -> str | None:
-    """The ``Content-Type`` aws guesses for *path*: CPython 3.14's ``guess_type``.
+    """The ``Content-Type`` aws-cli guesses for *path*: CPython 3.14's ``guess_type``.
 
     The tables are frozen (`_mime_types`) and so is the algorithm, a port of
     3.14's ``MimeTypes.guess_file_type``: the name is a file path, split with
-    the host's ``os.path`` after its drive is removed. aws guesses on an
+    the host's ``os.path`` after its drive is removed. aws-cli guesses on an
     absolute local path, which never takes ``guess_type``'s URL branch (a
     scheme-like prefix of two or more characters), so only the file branch is
     ported, and an open-route name (a custom source's ``compare_key``) is read
     as a file name too. The interpreter aws-cli bundles runs exactly that,
     while a host interpreter before 3.13 split every name with
     ``posixpath``, so on Windows ``C:\\d\\.json`` kept ``.json`` as its
-    extension and went up as ``application/json`` where aws sends the name
+    extension and went up as ``application/json`` where aws-cli sends the name
     untyped - it is all extension to ``ntpath`` (measured 2026-10-06 against
     aws.exe: 8 of 12 names differed under Python 3.10). Strict (IANA-only)
     matching, like aws.
 
     The guess can raise ``UnicodeDecodeError`` on Windows when a registry MIME
     entry is in an undecodable encoding (bpo-9291) - here from the registry read
-    the first call performs, where aws takes it from its own lazy
+    the first call performs, where aws-cli takes it from its own lazy
     ``mimetypes.init``. Any other failure to load the host overlays - an
     ``OSError`` from a ``knownfiles`` entry that exists but cannot be read -
     propagates, and the submit records it as the item's failure, where
-    aws's queued subscriber lets it land; the store stays unbuilt, so every
-    later item retries and fails the same way, as aws's does.
+    aws-cli's queued subscriber lets it land; the store stays unbuilt, so every
+    later item retries and fails the same way, as aws-cli's does.
     """
     try:
         return _guess_file_type(_mime_types(), os.path.splitdrive(path)[1])
@@ -947,7 +947,7 @@ class Warner:
     engine funnel their warnings through the same emitter instead of the walk
     reaching into the transfer engine for one. Only WARNED counts: warnings
     count independently of files (``warned > 0`` alone maps to exit code 2,
-    aws rc model), and the count is thread-safe because a walk worker and a
+    aws-cli rc model), and the count is thread-safe because a walk worker and a
     transfer worker can warn at once; a NOTICE is display-only. The transfer
     run's ``Transferrer`` builds one from its result context and exposes it as
     ``Transferrer.warner``.
@@ -988,7 +988,7 @@ class Warner:
     def notice(self, body: str, *, info: FileInfo | None = None) -> None:
         """Emit display-only advisory text (no counts, no exit-code effect).
 
-        aws prints the case-conflict messages straight to stderr, bypassing
+        aws-cli prints the case-conflict messages straight to stderr, bypassing
         its result recorder - they look like warnings but never count as
         them. The full text (its ``warning: `` prefix included) rides on
         ``OpResult.error``; ``info`` is as for `warn`.
@@ -1053,7 +1053,7 @@ class Transferrer:
     Use as a context manager around the submission loop: ``__exit__`` shuts
     the manager down - waiting for in-flight transfers on a clean exit, and
     **cancelling accepted work on any exception** except a graceful cancel
-    (aws's manager context cancels everything still pending when a fatal
+    (aws-cli's manager context cancels everything still pending when a fatal
     escapes the submission loop - measured: a mid-listing fatal leaves the
     queued transfers unrun and prints only the one fatal line). The exception
     is a `CancelledError` backed by a graceful `CancelToken`: a graceful
@@ -1247,7 +1247,7 @@ class Transferrer:
     ) -> None:
         """Drain submitted work, cancelling it when the exit requires that.
 
-        Any exception cancels the accepted transfers, like aws's manager
+        Any exception cancels the accepted transfers, like aws-cli's manager
         context (its ``__exit__`` cancels with ``FatalError(str(exc))`` on a
         fatal and ``CancelledError`` on Ctrl-C; measured live: a fatal
         mid-listing leaves every queued transfer unrun). The one drain-on-
@@ -1255,11 +1255,11 @@ class Transferrer:
         cancellation is *defined* as draining accepted work (exceptions.md),
         and the watcher thread keeps a mid-drain escalation to immediate
         effective. The cancelling shutdown is delegated to the manager's own
-        ``__exit__`` - aws's actual path - because s3transfer's public
+        ``__exit__`` - aws-cli's actual path - because s3transfer's public
         ``shutdown()`` forwards its arguments shifted (``(cancel, cancel,
         cancel_msg)``), which would cancel a pending coordinator with the
         message as the exception *class*. ``__exit__`` exists on both engines;
-        the classic one cancels with aws's exception shape
+        the classic one cancels with aws-cli's exception shape
         (``FatalError(str(exc))``, Ctrl-C's plain ``CancelledError``), so a
         classic ``CANCELLED`` record names the fatal that revoked it. The CRT
         manager's cancel surfaces awscrt's ``AWS_ERROR_S3_CANCELED``, which
@@ -1623,17 +1623,17 @@ class Transferrer:
                 # compare_key, the name its S3 key derives from (the basename
                 # for a single source), or from the destination key when a
                 # single source's entry names nothing. A stream item carries no
-                # src_info and stays guess-free (no filename, aws parity) - its
+                # src_info and stays guess-free (no filename, aws-cli parity) - its
                 # empty name never opens the store below, so an overlay the
                 # host cannot read is no concern of a stream upload, exactly as
-                # aws's stream submitter, which attaches no guessing subscriber.
+                # aws-cli's stream submitter, which attaches no guessing subscriber.
                 name = item.compare_key or item.dest_key or ""
         if name:
             try:
                 guessed = _guess_content_type(name)
             except OSError as exc:
                 # A host overlay the guess reads failed to load (a mime.types
-                # that exists but cannot be read, say). aws guesses inside
+                # that exists but cannot be read, say). aws-cli guesses inside
                 # s3transfer's queued subscriber, so the error fails that
                 # item - `upload failed: ... [Errno 13] Permission denied:
                 # '/etc/mime.types'` - and the run goes on, a sync's deletes
@@ -1695,7 +1695,7 @@ class Transferrer:
         subscribers.append(_StampMtime(item, self._stamp_mtime))
         if self._is_move:
             # Durability barrier before the source delete (LocalStorage(fsync=True),
-            # a library-only opt-in; off by default = aws parity). Only a real local
+            # a library-only opt-in; off by default = aws-cli parity). Only a real local
             # destination path can be fsynced - a stream / custom (open-route) dest
             # owns its own durability, so item.dest_fileobj downloads are excluded.
             if (
@@ -1848,7 +1848,7 @@ class Transferrer:
         backend object on an upload, a single DeleteObject on the source
         bucket's client for a download or a copy, with ``RequestPayer``
         forwarded like every other request. Each delete raises in the library
-        taxonomy with the source's own key - an OS error keeps the message aws
+        taxonomy with the source's own key - an OS error keeps the message ``aws``
         prints (``move failed: ... [Errno 13] ...``) - so the record never
         attributes it to the destination that copied fine.
         """
@@ -2212,7 +2212,7 @@ class Transferrer:
         if self._options.get("no_overwrite") and _is_conditional_write_rejection(exc):
             # --no-overwrite's IfNoneMatch rejection: the object already
             # exists, which is the asked-for outcome - a silent skip, not a
-            # failure (aws-cli DoneResultSubscriber; rc stays 0). aws skips
+            # failure (aws-cli DoneResultSubscriber; rc stays 0). aws-cli skips
             # every PreconditionFailed whatever the request was; any other 412
             # fails the item here (docs/cli/aws-differences.md).
             with self._lock:
@@ -2261,7 +2261,7 @@ class Transferrer:
         Permission denied`` for a download into a directory it cannot write),
         the CRT engine reporting it under awscrt's name - so the failure takes
         the category the library's own file paths give it
-        (`translate_os_error`), its message (aws's words) as it is, and names
+        (`translate_os_error`), its message (aws-cli's words) as it is, and names
         the file in ``key`` with no ``bucket`` (design/exceptions.md section
         2.1), not the object. botocore's own errors that are also ``OSError``
         (``SSLError``) are the request's; so is an ``OSError`` naming some
@@ -2734,7 +2734,7 @@ class _FsyncDest:
     """Fsync a ``mv`` download's destination file before its S3 source is deleted.
 
     A library-only durability step, opt-in via ``LocalStorage(fsync=True)`` (off
-    by default = aws parity). s3transfer finalizes a filename download with a
+    by default = aws-cli parity). s3transfer finalizes a filename download with a
     temp-file write + ``os.rename`` and never fsyncs, so aws-cli / s3transfer
     delete the durable S3 source while the downloaded bytes may still be only in
     the page cache - a crash between the two loses the move outright. Placed
@@ -2812,7 +2812,7 @@ class _KeepRenameFailure:
     the destination, a name too long to create, on Windows a file another
     process holds open - is handed to the coordinator's ``set_exception``,
     which ignores it once the transfer is done: the item read as a success, a
-    ``mv`` deleted its source, and nothing was written (aws's outcome as
+    ``mv`` deleted its source, and nothing was written (aws-cli's outcome as
     well, measured). Installed when the transfer is queued, this makes that
     late ``set_exception`` an override, so every subscriber after it - the
     stamp, the source delete, the completion - sees the failure. Guarded on
@@ -2900,7 +2900,7 @@ class _DeleteSource(_PostTransferWrite):
     ``_CaseConflictCleanup`` allowed in between (aws-cli's own order) - so a
     deletion failure can flip the already-settled future via
     ``set_exception`` (s3transfer accepts the post-done override) and
-    ``_Completion`` then records aws's ``move failed`` outcome. A failed
+    ``_Completion`` then records aws-cli's ``move failed`` outcome. A failed
     transfer leaves the source untouched. A delete cut short by an interrupt
     is stored too: whether it reached the service is unknown, so the item
     must not be recorded as moved.
@@ -2972,9 +2972,9 @@ class _CaseConflictCleanup:
     still in flight. Without it the set keeps every key ever admitted, and a later
     item whose name differs only by case is wrongly judged to conflict with an
     already-finished download (skipped, or - in ``error`` mode - a spurious
-    failure) instead of being let through as aws does. Detecting an in-flight twin
+    failure) instead of being let through as aws-cli does. Detecting an in-flight twin
     relies on the submit loop running ahead of completions (a non-blocking,
-    threaded manager - aws runs at ``max_concurrent_requests=1`` and still detects;
+    threaded manager - aws-cli runs at ``max_concurrent_requests=1`` and still detects;
     a fully synchronous NonThreadedExecutor completes each item before the next is
     judged, so the set would always be empty).
     """
@@ -3163,7 +3163,8 @@ class _CopyCompletions:
 
 
 class _SetAnnotations(_PostTransferWrite):
-    """`copy-props all`: carry S3 object annotations onto a multipart copy (aws subscriber port).
+    """`copy-props all`: carry S3 object annotations onto a multipart copy
+    (aws-cli subscriber port).
 
     A single-part CopyObject carries annotations server-side (the directive
     default is COPY), so nothing is sent - aws-cli's wire behavior. A
@@ -3425,7 +3426,7 @@ class _TempfileAnnotationStore:
 
 
 class _SetMetadataDirectiveProps:
-    """Carry source metadata into a multipart copy (aws subscriber port).
+    """Carry source metadata into a multipart copy (aws-cli subscriber port).
 
     A single-part CopyObject inherits metadata via S3's default
     ``MetadataDirective=COPY``; the multipart path (CreateMultipartUpload +
@@ -3499,7 +3500,7 @@ def _allow_inline_mpu_tagging() -> None:
     destination rollback when the tagging write fails), which would silently
     strip the header and force every small tag set through the post-copy
     PutObjectTagging fallback: a wire divergence, and a failure-timing one
-    (aws fails at create and keeps the source where tagging is denied).
+    (aws-cli fails at create and keeps the source where tagging is denied).
     Removed EAFP-style: the table is process-shared, so two threads building
     their first manager concurrently could both pass a membership check and
     the loser's ``remove`` would raise; catching ``ValueError`` instead also
@@ -3512,7 +3513,7 @@ def _allow_inline_mpu_tagging() -> None:
 
 
 class _SetTags(_PostTransferWrite):
-    """Carry source tags into a multipart copy (aws subscriber port).
+    """Carry source tags into a multipart copy (aws-cli subscriber port).
 
     Single-part copies inherit tags via ``TaggingDirective=COPY``; multipart
     copies read GetObjectTagging from the source and either inline the

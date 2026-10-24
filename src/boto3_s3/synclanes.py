@@ -548,7 +548,7 @@ class SyncDeletes:
         # through the backend's own Storage.delete(info), sharing the local
         # counters. A backend error is mapped into the library taxonomy (the same
         # translate the byte-moving delete path uses), so every result carries a
-        # Boto3S3Error and the message aws prints survives; the catch is broad.
+        # Boto3S3Error and the message `aws` prints survives; the catch is broad.
         # Only the display form differs: a local orphan reads as a native path,
         # a custom one through the backend's own rendering.
         display = (

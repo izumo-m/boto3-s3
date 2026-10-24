@@ -7,14 +7,14 @@ cases cover S3 deletion at the CLI boundary: both CLIs delete on their CRT
 client, aws-cli one ``DeleteObject`` per key and boto3-s3 in ``DeleteObjects``
 batches (design/crt.md section 6); download sync-delete covers the local
 deletion both CLIs perform. The lane is differential - no goldens - and asserts that our
-CRT-configured mode agrees with aws's on rc, stdout, the bucket end state, the
+CRT-configured mode agrees with aws-cli's on rc, stdout, the bucket end state, the
 local destination and source trees, and the download mtime.
 
 Gated twice: the e2e ``BOTO3_S3_E2E_BUCKET`` opt-in (conftest) and an
 ``awscrt`` import check here (the CRT manager needs it).
 
-endpoint-fidelity T2: against a custom endpoint (the http dev stack) the aws
-side needs an explicit ``--endpoint-url``: aws's CRT client reads ``use_ssl``
+endpoint-fidelity T2: against a custom endpoint (the http dev stack) the aws-cli
+side needs an explicit ``--endpoint-url``: aws-cli's CRT client reads ``use_ssl``
 from the CLI argument only, so an env-only ``AWS_ENDPOINT_URL_S3`` makes it
 dial TLS to an http endpoint and fail.
 Our client derives the endpoint from the resolved boto3 client, so

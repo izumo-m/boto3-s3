@@ -122,7 +122,7 @@ SCENARIOS: tuple[PresignScenario, ...] = (
         ("presign", f"s3://{BUCKET_TOKEN}/presign/basic.txt", "--expires-in", "604801"),
     ),
     # A non-integer dies in the CLI's own int() conversion -> rc 255 on both
-    # sides (aws's bare int() escapes to its general handler).
+    # sides (aws-cli's bare int() escapes to its general handler).
     PresignScenario(
         "presign_expires_nonint",
         ("presign", f"s3://{BUCKET_TOKEN}/presign/basic.txt", "--expires-in", "abc"),

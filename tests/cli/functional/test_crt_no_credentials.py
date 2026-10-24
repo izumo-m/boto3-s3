@@ -53,7 +53,7 @@ def _run_cli(tmp_path: Path, engine: str, source: Path) -> subprocess.CompletedP
     )
     # Every AWS_* variable goes, so the root conftest's fake credentials (and
     # any the host exports) cannot resolve; what is put back is only the
-    # isolation. Region comes from the config file, like the aws measurement.
+    # isolation. Region comes from the config file, like the `aws` measurement.
     env = {key: value for key, value in os.environ.items() if not key.startswith("AWS_")}
     env.update(
         {

@@ -2,11 +2,11 @@
 
 The rb exit-code shape (aws-cli RbCommand): usage errors - a non-s3 path, a
 key part, rejected ARN forms - are 252; a ``--force`` whose inner ``rm
---recursive`` fails is rc **255** (aws raises RuntimeError into the general
+--recursive`` fails is rc **255** (aws-cli raises RuntimeError into the general
 handler) without attempting the bucket delete; everything after delete_bucket
 starts is rc 1 with one ``remove_bucket failed:`` line. The wrapping is by
 return code only: an exception out of the inner rm - its own rc-255 report -
-escapes unwrapped, exactly as aws's does.
+escapes unwrapped, exactly as aws-cli's does.
 """
 
 from __future__ import annotations
@@ -76,7 +76,7 @@ class TestOutput:
         assert [(c.operation, c.params) for c in calls] == [("DeleteBucket", {"Bucket": "b"})]
 
     def test_trailing_slash_only_is_accepted(self) -> None:
-        # "s3://b/" has an empty key, which passes aws's key check too.
+        # "s3://b/" has an empty key, which passes aws-cli's key check too.
         result, calls = run_recorded([{}], ["rb", "s3://b/"])
         assert (result.rc, result.stdout) == (0, "remove_bucket: b\n")
         assert calls[0].params == {"Bucket": "b"}
@@ -90,7 +90,7 @@ class TestUsageErrors:
         assert rc == 252
         err = capsys.readouterr().err
         assert "<S3Uri>\nError: Invalid argument type" in err
-        assert "usage:" not in err  # rb raises aws's bare form, like mb
+        assert "usage:" not in err  # rb raises aws-cli's bare form, like mb
 
     @pytest.mark.parametrize("argv", [["rb", "s3://b/key"], ["rb", "s3://b/key", "--force"]])
     def test_key_part_is_252(self, argv: list[str], capsys: pytest.CaptureFixture[str]) -> None:
@@ -99,7 +99,7 @@ class TestUsageErrors:
         assert "valid bucket name only" in capsys.readouterr().err
 
     def test_positional_missing_paramfile_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # aws expands the positional file:// at parse time. Names it 'path'.
+        # aws-cli expands the positional file:// at parse time. Names it 'path'.
         rc = cli.main(["rb", "file:///no/x"], ctx=unused_ctx())
         assert rc == 252
         assert "Error parsing parameter 'path': Unable to load paramfile" in capsys.readouterr().err
@@ -148,7 +148,7 @@ class TestPostStartErrors:
     def test_a_success_line_stdout_cannot_take_is_lost_output(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # The bucket was removed, so it is not reported as an rb failure (aws's
+        # The bucket was removed, so it is not reported as an rb failure (aws-cli's
         # catch spans the line and does: rc 1, `remove_bucket failed:`); the
         # lost line is reported as lost output, 255.
         class _FullStdout(io.StringIO):
@@ -177,7 +177,7 @@ class TestPostStartErrors:
     @pytest.mark.parametrize("uri", ["s3://", "s3:///k"])
     @pytest.mark.parametrize("force", [[], ["--force"]], ids=["plain", "force"])
     def test_a_path_with_no_bucket_is_a_usage_error(self, uri: str, force: list[str]) -> None:
-        # Refused before the client is built (252), --force or not: aws sends
+        # Refused before the client is built (252), --force or not: aws-cli sends
         # Bucket="" and reports an rb failure at rc 1, or with --force runs
         # the inner rm first and ends at 255.
         result = run_cli_in_process(["rb", uri, *force], ctx=unused_ctx())
@@ -213,11 +213,11 @@ class TestForce:
     def test_an_inner_rm_255_escapes_unwrapped(
         self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # aws's RbCommand._force wraps a nonzero *return code* in its
+        # aws-cli's RbCommand._force wraps a nonzero *return code* in its
         # RuntimeError; an exception out of the inner rm - its own rc-255
         # report - propagates to the outer handler untouched, so
         # `remove_bucket failed:` never appears. Measured on the pinned aws-cli
-        # with an invalid [s3] value, which the inner rm now reads like aws's.
+        # with an invalid [s3] value, which the inner rm now reads like aws-cli's.
         config = tmp_path / "config"
         config.write_text(
             "[default]\nregion = us-east-1\ns3 =\n  preferred_transfer_client = bogus\n"
@@ -231,7 +231,7 @@ class TestForce:
         assert calls == []
 
     def test_force_shares_rb_session_and_keeps_rm_defaults(self) -> None:
-        # The inner rm runs on rb's own S3 (Context.with_s3) exactly as aws
+        # The inner rm runs on rb's own S3 (Context.with_s3) exactly as aws-cli
         # hands its one CLI session to RmCommand(self._session): every client
         # the force flow builds comes from rb's namespace - a second session
         # would resolve credentials again (credential_process / MFA

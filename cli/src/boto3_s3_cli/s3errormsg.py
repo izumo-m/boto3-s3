@@ -41,7 +41,7 @@ ENABLE_SIGV4_MSG = (
 def register(client: S3Client) -> None:
     """Attach the rewriter to one S3 client.
 
-    aws registers the handler on its session, so every S3 client it creates
+    aws-cli registers the handler on its session, so every S3 client it creates
     carries it; registering per client is the same reach here, because
     `clientfactory.build_client` is the CLI's only S3 client builder.
     """
@@ -60,7 +60,7 @@ def enhance_error_msg(parsed: dict[str, Any] | None, **kwargs: Any) -> None:
     elif _is_permanent_redirect_message(parsed):
         endpoint = parsed["Error"]["Endpoint"]
         message: str = parsed["Error"]["Message"]
-        # aws drops the message's final character - the period ending "Please
+        # aws-cli drops the message's final character - the period ending "Please
         # send all future requests to this endpoint." - so the endpoint reads
         # as its continuation.
         parsed["Error"]["Message"] = f"{message[:-1]}: {endpoint}\n{REGION_ERROR_MSG}"

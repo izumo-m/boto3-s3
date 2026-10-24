@@ -201,7 +201,7 @@ class ScanOptions:
     ``StorageCapability.SORTABLE_SCAN`` MUST honor
     ``sort=True``; the built-ins ignore the flag and always sort (S3's listing is
     byte-ordered - except S3 Express directory buckets, whose unordered
-    listings are why ``sync`` rejects them - and the local walk sorts for aws
+    listings are why ``sync`` rejects them - and the local walk sorts for aws-cli
     parity), so it costs nothing for
     them. A custom backend whose sort is expensive may stream natural order when
     ``sort=False`` and pay the sort only for ``sync``.
@@ -234,7 +234,7 @@ class ScanOptions:
     for a consumer that **mutates the container it is enumerating**, where a page
     read early would describe state that consumer has since changed. ``sync
     --delete`` sets it on the local destination walk for exactly that reason: the
-    walk must see the orphans it has already deleted as gone (aws lists its
+    walk must see the orphans it has already deleted as gone (aws-cli lists its
     destination lazily too, so a file reached through one path and deleted is
     never listed again under another - a symlinked self-alias names one file
     twice). It costs the enumeration's I/O overlap, so leave it on everywhere
@@ -356,7 +356,7 @@ class OpOutcome(enum.Enum):
     ``DRYRUN`` reports an item a dry run *would* have acted on - its mutating
     API call does not occur (enumeration and the single-object HeadObject
     still run) and the exit code is unaffected. ``NOTICE`` carries display-only
-    text on ``error`` (aws prints some advisories - the case-conflict
+    text on ``error`` (aws-cli prints some advisories - the case-conflict
     messages - straight to stderr without counting them as warnings); it
     never affects counts or the exit code, and may precede the same item's
     real outcome. ``CANCELLED`` reports an accepted item revoked before it

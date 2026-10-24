@@ -49,8 +49,8 @@ from boto3_s3.exceptions import (
 )
 
 # The unresolvable credentials/region pair keeps the plain ConfigurationError
-# (aws's dedicated rc-253 handlers); the present-but-unusable configuration
-# family below refines to InvalidConfigError (aws's general handler, rc 255) -
+# (aws-cli's dedicated rc-253 handlers); the present-but-unusable configuration
+# family below refines to InvalidConfigError (aws-cli's general handler, rc 255) -
 # the same split point as the CLI's clientfactory (design/exceptions.md section
 # 3). Membership differs: the factory's construction-scoped catch maps every
 # other BotoCoreError to InvalidConfigError, while this general translator

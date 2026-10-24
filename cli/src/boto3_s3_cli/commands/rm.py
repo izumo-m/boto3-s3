@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 class _DeletePrinter:
-    """Stream per-item ``OpResult``s as aws-style delete lines.
+    """Stream per-item ``OpResult``s as aws-cli-style delete lines.
 
     Invoked from ``S3Deleter``'s worker thread on the batched path, so the
     streams are looked up via ``sys`` on every call (never bound early) -
@@ -38,11 +38,11 @@ class _DeletePrinter:
     Suppression matrix (aws-cli builds *no* result
     printer at all under ``--quiet``): ``--quiet`` silences success, failure,
     and dryrun lines alike; ``--only-show-errors`` silences successes but
-    still prints dryrun lines (aws's ``OnlyShowErrorsResultPrinter`` does not
+    still prints dryrun lines (aws-cli's ``OnlyShowErrorsResultPrinter`` does not
     override ``_print_dry_run``).
 
     A line that cannot be written at all is dropped with a debug log and never
-    escapes, aws's ``ResultProcessor._process_result`` shape: the deletes have
+    escapes, aws-cli's ``ResultProcessor._process_result`` shape: the deletes have
     already happened by then, so an unwritable stdout must leave the run's
     outcome alone.
     """
@@ -72,9 +72,9 @@ class _DeletePrinter:
         if result.outcome is OpOutcome.FAILED:
             output.write_stderr(output.format_delete_failed(location, result.error) + "\n")
         elif result.outcome is OpOutcome.DRYRUN:
-            # uni_write (aws's uni_print): an unencodable key on a narrow
+            # uni_write (aws-cli's uni_print): an unencodable key on a narrow
             # console/pipe encoding must not raise out of the deleter worker
-            # and kill the run - aws prints it with replacements and finishes.
+            # and kill the run - aws-cli prints it with replacements and finishes.
             output.uni_write(sys.stdout, output.format_delete(location, dryrun=True) + "\n")
         elif not self._only_show_errors:
             output.uni_write(sys.stdout, output.format_delete(location, dryrun=False) + "\n")
@@ -116,7 +116,7 @@ class RmCommand(Command):
         non-``s3://`` path, a path that names no bucket, a rejected ARN
         form - exit 252 via ``main``, but
         every failure after the operation starts is rc 1 whatever its type
-        (rm is an ``S3TransferCommand`` in aws too, so its execution span sits
+        (rm is an ``S3TransferCommand`` in aws-cli too, so its execution span sits
         inside the same result recorder cp / mv / sync's does - one rule,
         ``transferargs.report_failed_run``, derives the code of both):
         per-key failures
@@ -132,21 +132,21 @@ class RmCommand(Command):
         page_size = resolve_integer_option(args, "page_size", operation="rm")
         target: str = args.paths
         if not target.startswith("s3://"):
-            # aws check_path_type: rm takes S3 paths only -> rc 252.
+            # aws-cli's check_path_type: rm takes S3 paths only -> rc 252.
             raise ValidationError(usage.single_uri_usage("rm"), operation="rm")
-        # Next in aws's add_paths: the refused ARN forms (252) and the keyless
+        # Next in aws-cli's add_paths: the refused ARN forms (252) and the keyless
         # trailing "/" whose re-read gives an Outposts "...:accesspoint/ap:"
         # the key "/". A path that names no bucket is refused here too (252).
         target = transferargs.normalize_s3_path(target, operation="rm")
 
         s3 = ctx.s3(args)
         client = s3.client()
-        # rm is an S3TransferCommand in aws, so it reads and validates [s3] and
+        # rm is an S3TransferCommand in aws-cli, so it reads and validates [s3] and
         # builds a transfer manager exactly like cp, before anything is
         # deleted. The deletes ride the engine but the library builds it later
         # - with the deleter, or just before a single key's request
         # (design/crt.md sections 4 and 6) - so its construction failures are
-        # brought forward here, where they stop the run as they do on aws.
+        # brought forward here, where they stop the run as they do on `aws`.
         transfer_config = transferargs.build_transfer_engine(ctx, s3, client, paths_type="s3")
 
         storage = transferargs.build_s3_storage(target, client=client, page_size=page_size)
@@ -161,12 +161,12 @@ class RmCommand(Command):
                 dryrun=args.dryrun,
                 request_payer=args.request_payer,
                 on_result=printer,
-                # The engine aws would carry these deletes on, which decides
+                # The engine aws-cli would carry these deletes on, which decides
                 # the client they ride and its retry policy.
                 transfer_config=transfer_config,
             )
         except BaseException as exc:
-            # By position rather than by type: aws's rm runs inside the same
+            # By position rather than by type: aws-cli's rm runs inside the same
             # `CommandResultRecorder` cp/mv/sync do, which turns whatever
             # escapes the pipeline into its closing line at rc 1 - a mid-run
             # Ctrl-C included (measured mid-rm, 2.36.40), never the

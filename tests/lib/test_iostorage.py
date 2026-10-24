@@ -116,7 +116,7 @@ class TestNonSeekableSource:
     calls ``tell`` / ``seek`` whenever both exist: a POSIX pipe answers
     ``OSError(ESPIPE)`` (the upload failed ``[Errno 29] Illegal seek``), and a
     Windows pipe answers with meaningless positions and stored a truncated
-    object as a success. Hiding everything but ``read`` - stdin's view, aws's
+    object as a success. Hiding everything but ``read`` - stdin's view, aws-cli's
     ``NonSeekableStream`` - sends both engines down their buffered path.
     """
 
@@ -534,7 +534,7 @@ class TestStdioStorage:
         assert excinfo.value.operation is None
 
     def test_write_reads_stdout_per_write(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # aws's bytes_print dereferences sys.stdout on every write, so nothing
+        # aws-cli's bytes_print dereferences sys.stdout on every write, so nothing
         # is captured at open time: a stdout swapped after the open (a
         # redirect_stdout around a library call) receives the bytes.
         first, second = _Stdio(), _Stdio()
@@ -621,7 +621,7 @@ class TestStreamDownloadWithABrokenStdout:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Nothing is written, but there is nowhere it could have gone: the
-        # writer's close fails the item with the error a write meets, as aws's
+        # writer's close fails the item with the error a write meets, as aws-cli's
         # writer fails it (measured, rc 1 with the same line).
         monkeypatch.setattr("sys.stdout", None)
         client, _calls = make_recording_client([head_response(ContentLength=0), get_response(b"")])
@@ -639,7 +639,7 @@ class TestStreamDownloadWithABrokenStdout:
         assert isinstance(error.__cause__, AttributeError)
 
     def test_no_stdout_at_all_fails_the_item(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # aws checks stdin before starting a transfer but never stdout, so this
+        # aws-cli checks stdin before starting a transfer but never stdout, so this
         # is a per-item failure rather than a run-killing precondition (measured,
         # rc 1): the writer's own write fails, the open having succeeded.
         monkeypatch.setattr("sys.stdout", None)

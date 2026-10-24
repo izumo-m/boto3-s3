@@ -25,7 +25,7 @@ already knows which subcommand it invoked, so the record only needs to say
 | `outcome` | `SUCCEEDED` / `FAILED` / `WARNED` / `SKIPPED` / `DRYRUN` / `NOTICE` / `CANCELLED`. |
 | `bytes_transferred` | bytes moved, on `SUCCEEDED`; 0 for a delete, an advisory, and every non-`SUCCEEDED` transfer record (a failure reports 0 even when bytes landed - e.g. an `mv` whose transfer succeeded but whose source delete failed). |
 | `error` | a `Boto3S3Error` on a failure; the advisory text on `WARNED` / `NOTICE`. Always the library taxonomy (every path translates into it), never a raw exception. |
-| `src` / `dest` | display endpoints (`s3://bucket/key` or a native path) for aws's `verb: src to dest` line. A single-endpoint op (delete) sets `src` only. |
+| `src` / `dest` | display endpoints (`s3://bucket/key` or a native path) for aws-cli's `verb: src to dest` line. A single-endpoint op (delete) sets `src` only. |
 | `src_info` / `dest_info` | the operation's listing entries (`FileInfo`). |
 | `src_storage` / `dest_storage` | the two sides' `Storage` backends. |
 | `extra_info` | the result object's S3 response metadata: `{"ETag": ...}` by default, plus the full write / read / delete responses under `"write"` / `"read"` / `"delete"` when the operation ran with `capture_response=True`. |
@@ -39,11 +39,11 @@ the **other**, so they always agree within a side:
 - `dest` (display) ↔ `dest_info` (entry) ↔ `dest_storage` (backend)
 
 The **source side** is the object being acted on: the source of a transfer, or
-the object a delete removes (aws models a delete as `src`=path, `dest`=None - so
-a delete fills the `src_*` trio and leaves `dest_*` empty). The **destination
-side** is where a transfer writes; `dest_info` is populated only by `sync` (the
-pre-existing object the copy compared against) - `cp` / `mv` populate no
-`dest_info` (their normal path never lists the destination; the
+the object a delete removes (aws-cli models a delete as `src`=path,
+`dest`=None - so a delete fills the `src_*` trio and leaves `dest_*` empty). The
+**destination side** is where a transfer writes; `dest_info` is populated only
+by `sync` (the pre-existing object the copy compared against) - `cp` / `mv`
+populate no `dest_info` (their normal path never lists the destination; the
 `--case-conflict` gate's membership pre-scan is internal and stamps nothing),
 so they carry `dest` / `dest_storage` but no `dest_info`.
 
@@ -115,7 +115,7 @@ timeout) carries `response = None`, and s3transfer's callback runner swallows
 the `AttributeError` that follows, so the item prints no line and the run
 exits 0 (measured on cp / mv / recursive cp / rm against a 127.0.0.1 server
 closing every connection; under the CRT engine an `mv` download whose source
-delete dies this way hangs aws instead). That is a failure reported as a
+delete dies this way hangs `aws` instead). That is a failure reported as a
 success, which [`overview.md`](./overview.md) section 3 does not copy. The
 record cannot say whether S3 acted before the response was lost - an object
 may have been written, copied or deleted all the same - and its error, with
@@ -139,8 +139,8 @@ transfer items like this:
 `rm`'s blind single-key delete (one request, no engine) sends its request on
 the calling thread. An interrupt landing while it is out leaves at once: the
 item is `CANCELLED` and the interrupt is raised to the caller, as for an item
-abandoned mid-flight. aws sends it on a transfer-manager worker whose shutdown
-waits for it and prints its line; that wait is not copied
+abandoned mid-flight. aws-cli sends it on a transfer-manager worker whose
+shutdown waits for it and prints its line; that wait is not copied
 ([`aws-differences.md`](../docs/cli/aws-differences.md)).
 
 On the CRT engine, a revocation surfaces as awscrt's `AWS_ERROR_S3_CANCELED`
@@ -210,7 +210,7 @@ aws-cli cancels the same transfer set (measured against the pinned aws-cli)
 but reports it differently: one `fatal error:` line, with the cancelled items
 dropped from its output and its counts entirely. The per-item `CANCELLED`
 records are the library's deliberately richer surface; the CLI maps them back
-to aws's silence.
+to aws-cli's silence.
 
 ## `extra_info` (result metadata)
 

@@ -1,12 +1,12 @@
 r"""Unit tests for `boto3_s3.globsieve`: aws-cli's ``--exclude`` / ``--include`` engine.
 
-The engine decides from an entry's R (``compare_key``), F (the full path aws
+The engine decides from an entry's R (``compare_key``), F (the full path aws-cli
 matches) and D (F's drive); these tests drive it through ``included`` on plain
 strings and through the ``FileFilter`` call. The host model (POSIX or Windows
 path rules and fold) is bound at compile time from ``globsieve._WINDOWS``,
 which the ``windows`` / ``posix`` fixtures set, so the Windows rules run on
 any host through the ``ntpath`` port. Expectations come from three places:
-the cases measured against aws 2.36.40 (``TestMeasured``), the cases moved
+the cases measured against aws-cli 2.36.40 (``TestMeasured``), the cases moved
 from the CLI's former engine (case and separator folding, ``LCMapStringEx``),
 and a fuzz against a verbatim port of aws-cli's ``filters.py``
 (``TestAgainstAwsFilter``).
@@ -103,7 +103,7 @@ class TestRules:
 
 
 class TestDecision:
-    """aws's ``Filter.call``: in order, the last matching pattern decides."""
+    """aws-cli's ``Filter.call``: in order, the last matching pattern decides."""
 
     def test_no_rules_keep_everything(self) -> None:
         assert _kept([], "anything", "/x/anything") is True
@@ -168,7 +168,7 @@ class TestFileFilter:
 
     @pytest.mark.usefixtures("windows")
     def test_an_s3_entry_matches_a_glob_drive_pattern_on_windows(self) -> None:
-        # aws joins `*:*` onto the S3 base as another drive: the pattern as
+        # aws-cli joins `*:*` onto the S3 base as another drive: the pattern as
         # written, matched against bucket/key.
         storage = S3Storage("s3://bkt/pre/")
         keep = globsieve.compile([Exclude("*:*")])
@@ -255,7 +255,7 @@ class TestCaseFolding:
 
     @pytest.mark.usefixtures("windows")
     def test_windows_filter_is_case_insensitive(self) -> None:
-        # aws normcases both sides on Windows, so `*.TXT` matches `a.txt`.
+        # aws-cli normcases both sides on Windows, so `*.TXT` matches `a.txt`.
         assert _kept(self._RULES, "a.txt", None) is True
         assert _kept(self._RULES, "a.TXT", None) is True
         assert _kept(self._RULES, "a.log", None) is False
@@ -480,7 +480,7 @@ class TestAgainstPython314:
 
 
 class TestAbsoluteForms:
-    r"""How each form of pattern joins onto a base, as aws's ``os.path.join``.
+    r"""How each form of pattern joins onto a base, as aws-cli's ``os.path.join``.
 
     Entries: a local tree on drive C: (base ``C:\base\d``), one on a UNC share
     (``\\srv\share\base\d``), and an S3 prefix (``bkt/pre/``). Each row lists
@@ -574,14 +574,14 @@ class TestAbsoluteForms:
         assert keep.included("top", "bkt/top") is True
 
 
-# ----- cases measured against aws 2.36.40 ------------------------------------------------
+# ----- cases measured against aws-cli 2.36.40 ------------------------------------------------
 
 
 class TestMeasured:
     """Pinned outcomes of ``aws s3 cp --dryrun`` (2.36.40, Linux and Windows).
 
-    Each entry is given as the library stamps it: R is aws's path below its
-    base (``None`` where the entry is not under it), F the full path aws
+    Each entry is given as the library stamps it: R is aws-cli's path below its
+    base (``None`` where the entry is not under it), F the full path aws-cli
     matches, ending in a separator for a directory source.
     """
 
@@ -910,7 +910,7 @@ class _AwsFilter:
 
 @dataclass(frozen=True)
 class _Entry:
-    """One entry as aws sees it (``src`` / ``src_type``) and as the library stamps it."""
+    """One entry as aws-cli sees it (``src`` / ``src_type``) and as the library stamps it."""
 
     aws: _AwsFileInfo
     relative: str
@@ -958,7 +958,7 @@ _S3_OTHER = ("s3://other/dst", "dst/")
 _NT_NAME_CHARS = ("a", "b", "x", "A", ".", "-", " ", "[", "]", "!")
 _POSIX_NAME_CHARS = (*_NT_NAME_CHARS, _BS, ":", "*", "?")
 _S3_KEY_CHARS = (*_POSIX_NAME_CHARS, "/")
-# What a single key's parent - aws's base - is made of: no glob character,
+# What a single key's parent - aws-cli's base - is made of: no glob character,
 # and no backslash, which ntpath.join would read as the base's separator.
 _S3_PLAIN_CHARS = ("a", "b", "x", "A", ".", "-", " ", ":")
 
@@ -972,9 +972,9 @@ def _local_entries(rng: random.Random, os: _Os, base: str, count: int) -> list[_
     entries: list[_Entry] = []
     for _ in range(count):
         parts = [_text(rng, name_chars, 1, 3) for _ in range(rng.randint(1, 3))]
-        # aws walks from local_format's abspath plus a separator, which doubles
+        # aws-cli walks from local_format's abspath plus a separator, which doubles
         # the separator of a filesystem root (`//bin/x`); the library's walk
-        # keys the same, and its view of a root walk adds the leading `/` aws's
+        # keys the same, and its view of a root walk adds the leading `/` aws-cli's
         # join onto the root leaves (producers.local_walk_filter).
         native = base + os.sep + os.sep.join(parts)
         relative = ("/" if base.endswith(os.sep) else "") + "/".join(parts)
@@ -1064,7 +1064,7 @@ class _Operation:
 
 
 def _operations(rng: random.Random, os: _Os) -> list[_Operation]:
-    """One of each shape aws runs a filter in, over random bases and entries."""
+    """One of each shape aws-cli runs a filter in, over random bases and entries."""
     local_bases = _NT_LOCAL_BASES if os.windows else _POSIX_LOCAL_BASES
     local = rng.choice(local_bases)
     s3, prefix = rng.choice(_S3_BASES)
@@ -1073,7 +1073,7 @@ def _operations(rng: random.Random, os: _Os) -> list[_Operation]:
     s3_side = _s3_entries(rng, s3, prefix, 4)
     other_side = _s3_entries(rng, other, other_prefix, 2)
     # Single-object sources: a local file, an S3 key (its R is the key below
-    # aws's parent, as the library's single-object view stamps it).
+    # aws-cli's parent, as the library's single-object view stamps it).
     file_name = _text(rng, _NT_NAME_CHARS, 1, 3)
     joint = "" if local.endswith(os.sep) else os.sep
     file_native = local + joint + file_name
@@ -1109,9 +1109,9 @@ class TestAgainstAwsFilter:
 
     The bases hold no glob characters and do not nest, so neither deliberate
     difference applies (a base taken literally, nested s3->s3 prefixes). Each
-    entry's verdict must equal aws's with only its own side's joined
-    patterns; with both sides' (aws applies the source's and the
-    destination's to every entry), it must equal aws's too, except where a
+    entry's verdict must equal aws-cli's with only its own side's joined
+    patterns; with both sides' (aws-cli applies the source's and the
+    destination's to every entry), it must equal aws-cli's too, except where a
     Windows rooted or drive-relative pattern joined onto the S3 side - which
     has no drive, so it keeps the pattern as written - also reaches the
     local side's entries. That cross-side reach is the same one the nested

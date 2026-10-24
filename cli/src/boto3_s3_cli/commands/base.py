@@ -44,7 +44,7 @@ class Context:
     ``service_client_factory`` does the same for the non-S3 clients ``mv``'s
     path validation needs (``None``: ``clientfactory.build_service_client``
     on the command's session). ``transfer_config``
-    overrides the transfer engine's defaults (aws-equivalent 8 MiB
+    overrides the transfer engine's defaults (aws-cli-equivalent 8 MiB
     threshold/chunk); tests inject ``TransferConfig(use_threads=False, ...)``
     to make multipart call order deterministic against canned clients.
     """
@@ -86,7 +86,7 @@ class Context:
     def with_s3(self, s3: S3) -> Context:
         """A view of this context whose ``s3`` always returns *s3*.
 
-        ``rb --force``'s session-sharing seam: aws hands its one CLI session
+        ``rb --force``'s session-sharing seam: aws-cli hands its one CLI session
         to the inner rm (``RmCommand(self._session)``), so the inner run must
         not build a second session - a ``credential_process`` helper would run
         twice, an MFA / assume-role flow would prompt twice, and the object
@@ -132,21 +132,21 @@ def parse_integer_option(value: object, *, operation: str) -> int | None:
     ``--page-size abc`` exits 255, not 252. argparse's
     ``type=int`` would turn the same mistake into a usage error (252), so
     integer options are declared without it and converted here at ``run()``
-    start, before the client factory builds anything (aws fails at parse
+    start, before the client factory builds anything (aws-cli fails at parse
     time, before its client exists). ``None`` (the option not given) passes
-    through unconverted, like aws's unset-integer handling.
+    through unconverted, like aws-cli's unset-integer handling.
     """
     if value is None:
         return None
     if isinstance(value, int):  # an argparse integer default, already converted
         return value
     # argparse hands us a str, a fileb:// paramfile hands us bytes; both go
-    # straight into int() the way aws does. int() coerces str and bytes alike.
+    # straight into int() the way aws-cli does. int() coerces str and bytes alike.
     text = value if isinstance(value, (str, bytes)) else str(value)
     try:
         return int(text)
     except ValueError as exc:
-        # InvalidValueError: main() maps it to 255 (aws's general handler),
+        # InvalidValueError: main() maps it to 255 (aws-cli's general handler),
         # not ValidationError's 252.
         raise InvalidValueError(str(exc), operation=operation) from exc
 
@@ -156,12 +156,12 @@ def _expand_string_paramfile(
 ) -> None:
     """Load a paramfile reference on a string-typed ``args.<dest>`` in place.
 
-    Shared body of the string option and positional helpers below. aws expands
+    Shared body of the string option and positional helpers below. aws-cli expands
     references at parse time, so a missing ``file://`` reference is the load
     252; a ``file://`` yields text, and a ``fileb://`` is refused unread
     (`paramfile.load_text_argument`). A value without a prefix (or a
     non-string, e.g. an integer default) is untouched. *name* is the argument
-    name aws reports in the load failure.
+    name aws-cli reports in the load failure.
     """
     value = getattr(args, dest, None)
     if isinstance(value, str):
@@ -169,9 +169,9 @@ def _expand_string_paramfile(
 
 
 def expand_option_paramfile(args: argparse.Namespace, option: str, *, operation: str) -> None:
-    """aws's parse-time paramfile expansion for a string-typed plain option (252).
+    """aws-cli's parse-time paramfile expansion for a string-typed plain option (252).
 
-    aws expands paramfile references on every plain option during argument
+    aws-cli expands paramfile references on every plain option during argument
     parsing, so a bad reference is its ParamValidation 252. Runs in place; a
     value without a prefix (or a non-string) is untouched. For an integer
     option use ``resolve_integer_option``, whose loaded bytes feed
@@ -183,12 +183,12 @@ def expand_option_paramfile(args: argparse.Namespace, option: str, *, operation:
 
 
 def resolve_integer_option(args: argparse.Namespace, option: str, *, operation: str) -> int | None:
-    """aws's ``integer`` option: its paramfile expanded, then the bare ``int()``.
+    """aws-cli's ``integer`` option: its paramfile expanded, then the bare ``int()``.
 
-    aws loads the paramfile at parse time, before the coercion, so a missing
+    aws-cli loads the paramfile at parse time, before the coercion, so a missing
     reference is the load 252 *before* the coercion's 255 (measured:
     ``--page-size file:///no/x`` exits 252). Unlike the string helper it keeps
-    ``fileb://`` bytes rather than rejecting them: aws feeds them to ``int()``
+    ``fileb://`` bytes rather than rejecting them: aws-cli feeds them to ``int()``
     too (``--page-size fileb://<5>`` succeeds, ``<abc>`` fails 255 with a
     ``b'abc'`` repr). A value without a prefix falls through into ``int()``;
     ``parse_integer_option`` performs the coercion. The loaded value replaces
@@ -204,13 +204,13 @@ def resolve_integer_option(args: argparse.Namespace, option: str, *, operation: 
 def expand_positional_paramfile(
     args: argparse.Namespace, dest: str, *, name: str, operation: str
 ) -> None:
-    """aws's parse-time paramfile expansion for a path positional, ``file://`` only.
+    """aws-cli's parse-time paramfile expansion for a path positional, ``file://`` only.
 
     A ``file://`` reference loads the path as text (a missing or undecodable
     file is the load 252). A ``fileb://`` one is refused at 252 without being
-    read (`paramfile.load_text_argument`): aws loads the bytes into the path, and
+    read (`paramfile.load_text_argument`): aws-cli loads the bytes into the path, and
     each command then mishandles them its own way - a crash on ls and
-    website, a delete of the decoded path on rm - an aws bug this CLI does
+    website, a delete of the decoded path on rm - an aws-cli bug this CLI does
     not copy (docs/cli/aws-differences.md section 2). *name* is the argument
     name the report carries.
     """
@@ -220,7 +220,7 @@ def expand_positional_paramfile(
 def refuse_bucketless(bucket: str, *, operation: str | None = None) -> None:
     """Refuse an S3 path that names no bucket (252).
 
-    aws has no such check: it sends ``Bucket=""`` toward the API, and each
+    aws-cli has no such check: it sends ``Bucket=""`` toward the API, and each
     command fails wherever that first bites - a fatal error (rc 1) at a
     listing or a single object's lookup, every upload or copy failing on its
     own, a ``--dryrun`` upload or single ``rm`` reporting success at rc 0, an
@@ -242,7 +242,7 @@ def add_page_size_argument(parser: argparse.ArgumentParser) -> None:
     a negative value is the server's
     InvalidArgument -> rc 254 from ls, but rc 1 from rm and the transfer
     family, whose post-start errors are uniformly 1 - design/cli.md sections
-    5.2 / 6). No ``type=int``: a non-integer must exit 255 like aws's bare
+    5.2 / 6). No ``type=int``: a non-integer must exit 255 like aws-cli's bare
     ``int()`` conversion, not argparse's 252 (``parse_integer_option``
     converts at ``run()`` start). The default is ``None`` like aws-cli's,
     which sends **no** ``MaxKeys`` / ``MaxBuckets`` on the wire (the server

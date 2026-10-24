@@ -8,7 +8,7 @@ aws-cli parity facts asserted here (aws-cli MbCommand / RbCommand,
 - ``tags`` become ``CreateBucketConfiguration.Tags`` with order and
   duplicate keys preserved (the server rejects duplicates, not the library);
 - both operations use only the bucket of the target - a key part is ignored
-  (the library is permissive; the CLI layer owns aws's strict path checks);
+  (the library is permissive; the CLI layer owns aws-cli's strict path checks);
 - single-call operations raise category errors directly, never BatchError.
 """
 
@@ -149,7 +149,7 @@ class TestMb:
         assert (exc_info.value.operation, exc_info.value.bucket) == ("mb", "demo-an")
 
     def test_key_part_is_ignored(self) -> None:
-        # Same as aws mb: split_s3_bucket_key keeps the bucket, drops the key.
+        # Same as `aws s3 mb`: split_s3_bucket_key keeps the bucket, drops the key.
         client = _FakeBucketClient()
         S3().mb(S3Storage("s3://bucket/some/key", client=client))
         assert client.create_calls == [{"Bucket": "bucket"}]
@@ -210,7 +210,7 @@ class TestRb:
         assert client.delete_calls == [{"Bucket": "bucket"}]
 
     def test_key_part_is_ignored(self) -> None:
-        # Library leniency (the CLI rejects a key with rc 252, aws parity).
+        # Library leniency (the CLI rejects a key with rc 252, aws-cli parity).
         client = _FakeBucketClient()
         S3().rb(S3Storage("s3://bucket/key", client=client))
         assert client.delete_calls == [{"Bucket": "bucket"}]

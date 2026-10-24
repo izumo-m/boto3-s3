@@ -1,12 +1,12 @@
 """The CRT engine reached with no region at all (design/crt.md section 4).
 
-aws hands the CRT client its own region chain's answer, and with nothing
+aws-cli hands the CRT client its own region chain's answer, and with nothing
 configured there is none, so its CRT run stops before it starts. botocore would
 instead give the *botocore* client the ``aws-global`` pseudo-region, which the
 CRT client would sign every request for. The CLI stops a CRT run with no
 resolved region at the engine's construction slot - before any request, so
 every transfer command reports it, ``--dryrun`` and ``--quiet`` included, and
-so does ``rm``, whose deletes ride the engine - with aws's missing-region
+so does ``rm``, whose deletes ride the engine - with aws-cli's missing-region
 report (its ``NoRegion`` envelope and hint) at rc 253.
 
 The runs need a real subprocess, with no ``AWS_*`` variable of the host's or

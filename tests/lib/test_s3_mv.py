@@ -36,7 +36,7 @@ class TestStreams:
     S3 source). A stream source cannot satisfy the move contract (a move
     deletes its source), and a recursive stream destination would concatenate
     every object into one stream - both are rejected up front. The CLI rejects
-    ``-`` for mv on either side outright (aws parity, tests/cli/unit/test_mv.py).
+    ``-`` for mv on either side outright (aws-cli parity, tests/cli/unit/test_mv.py).
     """
 
     def test_stream_destination_downloads_then_deletes_source(self) -> None:
@@ -80,7 +80,7 @@ class TestStreams:
     def test_missing_stdout_fails_the_item_attributed_to_mv(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # A stream destination has no stdout precondition (aws guards stdin
+        # A stream destination has no stdout precondition (aws-cli guards stdin
         # only), so a missing stdout fails at the writer's first write inside
         # the transfer - a per-item failure, not a pre-flight raise. The
         # storage names no operation, so the run fills its own - "mv" here,
@@ -149,7 +149,7 @@ class TestSamePathGuard:
 
     def test_recursive_is_not_exempt(self) -> None:
         # The aws-cli's faithful false positive: no key would map onto
-        # itself, but aws rejects it anyway (rc 252).
+        # itself, but aws-cli rejects it anyway (rc 252).
         self._assert_guard("s3://b/d", "s3://b/", recursive=True)
 
     def test_different_buckets_pass(self) -> None:
@@ -258,7 +258,7 @@ class TestUploadMove:
     def test_recursive_upload_move_keeps_the_emptied_source_directories(
         self, tmp_path: Path
     ) -> None:
-        # aws removes only the moved files, never the directories they leave
+        # aws-cli removes only the moved files, never the directories they leave
         # empty behind (design/transfer.md) - a recursive local mv is not rmdir.
         src_root = tmp_path / "tree"
         sub = src_root / "sub"
@@ -309,7 +309,7 @@ class TestDownloadMove:
         assert [result.transfer_type for result in results] == [TransferType.MOVE]
 
     def test_filtered_single_source_is_neither_moved_nor_deleted(self, tmp_path: Path) -> None:
-        # aws filters the single-object routes too: an excluded mv source
+        # aws-cli filters the single-object routes too: an excluded mv source
         # must not transfer - and, crucially, must not be deleted.
 
         drop = globsieve.compile([Exclude("*")])
@@ -396,7 +396,7 @@ class TestDownloadMove:
         assert ops(calls) == ["HeadObject", "GetObject", "DeleteObject"]
         assert (excinfo.value.succeeded, excinfo.value.failed) == (0, 1)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
-        # The bytes still arrived (aws ditto): only the move failed - and a
+        # The bytes still arrived (aws-cli ditto): only the move failed - and a
         # non-SUCCEEDED result reports zero bytes regardless (design/opresult.md).
         assert results[0].bytes_transferred == 0
         assert (tmp_path / "out.txt").read_bytes() == b"payload"

@@ -24,7 +24,7 @@ AGGREGATES: list[type[ex.Boto3S3Error]] = [
 ]
 
 # Refining subclasses: a category narrowed for the CLI's exit-code mapping
-# (aws's general handler cases), still caught as their parent category.
+# (aws-cli's general handler cases), still caught as their parent category.
 REFINEMENTS: dict[type[ex.Boto3S3Error], type[ex.Boto3S3Error]] = {
     ex.InvalidValueError: ex.ValidationError,
     ex.InvalidConfigError: ex.ConfigurationError,

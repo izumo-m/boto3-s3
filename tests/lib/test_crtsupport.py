@@ -246,7 +246,7 @@ class TestCreateCrtTransferManager:
         }
         # The client's own Config rides along so the serializer's nested
         # client keeps the caller's endpoint/addressing settings (the CLI's
-        # us-east-1 regional pin included - aws v2's bundled botocore is
+        # us-east-1 regional pin included - aws-cli v2's bundled botocore is
         # regional-only there, stock botocore is not), with the `s3` keys it
         # leaves out pinned to botocore's defaults (`_serializer_config`).
         assert serializer_config.signature_version == client.meta.config.signature_version
@@ -371,7 +371,7 @@ class TestCreateCrtTransferManager:
     def test_lockless_opt_in_keeps_auto_respecting_the_lock(
         self, stubs: CrtStubs, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # aws's own auto resolution answers classic when another process holds
+        # aws-cli's own auto resolution answers classic when another process holds
         # the lock; the opt-in is scoped to an explicit 'crt' preference.
         monkeypatch.setattr(s3transfer_crt, "acquire_crt_s3_process_lock", lambda name: None)
         manager = crtsupport.create_crt_transfer_manager(
@@ -386,7 +386,7 @@ class TestCreateCrtTransferManager:
         self, stubs: CrtStubs, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # A singleton built under the explicit-'crt' opt-in holds no lock; a
-        # later 'auto' (or default-posture) request keeps aws's lock semantics
+        # later 'auto' (or default-posture) request keeps aws-cli's lock semantics
         # - classic while another process holds it - instead of inheriting the
         # opt-in through the process singleton (design/crt.md section 6).
         monkeypatch.setattr(s3transfer_crt, "acquire_crt_s3_process_lock", lambda name: None)
@@ -425,7 +425,7 @@ class TestCreateCrtTransferManager:
     ) -> None:
         # Once the contending process releases the lock, a lock-respecting
         # request re-acquires it and the singleton serves every later request
-        # (aws's auto runs CRT whenever the lock is obtainable).
+        # (aws-cli's auto runs CRT whenever the lock is obtainable).
         monkeypatch.setattr(s3transfer_crt, "acquire_crt_s3_process_lock", lambda name: None)
         assert (
             crtsupport.create_crt_transfer_manager(
@@ -814,7 +814,7 @@ class TestCrtSigningPosture:
     def test_a_declared_unsigned_run_omits_the_provider_on_a_signing_client(
         self, stubs: CrtStubs
     ) -> None:
-        # The `--no-sign-request --sse aws:kms` shape: the client signs (aws
+        # The `--no-sign-request --sse aws:kms` shape: the client signs (aws-cli
         # gives it s3v4 too) and the CRT lane must still be anonymous.
         assert crtsupport.create_crt_transfer_manager(
             FakeClient(),  # pyright: ignore[reportArgumentType]
@@ -825,7 +825,7 @@ class TestCrtSigningPosture:
         assert "crt_credentials_provider" not in kwargs
 
     def test_a_declared_unsigned_run_never_resolves_credentials(self, stubs: CrtStubs) -> None:
-        # aws uploads anonymously at rc 0 with no credentials configured, so
+        # aws-cli uploads anonymously at rc 0 with no credentials configured, so
         # the declaration must short-circuit ahead of the credential lookup -
         # not merely drop what it returns.
         class CountingClient(FakeClient):
@@ -846,7 +846,7 @@ class TestCrtSigningPosture:
     ) -> None:
         # Nothing signs, so there is no identity to compare and the
         # absent-credentials gate (boto3's classic fallback) must not fire -
-        # aws is rc 0 here, credentials or not.
+        # `aws` is rc 0 here, credentials or not.
         assert crtsupport.create_crt_transfer_manager(
             FakeClient(creds=None),  # pyright: ignore[reportArgumentType]
             None,
@@ -1019,7 +1019,7 @@ class TestSerializerConfig:
         # handed on verbatim it read as a caller-supplied one and froze the
         # header in botocore's legacy form - no `app/<id>`, no
         # `cfg/retry-mode`, `Botocore/<v>` twice - where classic's requests
-        # and aws's CRT ones carry them (measured).
+        # and aws-cli's CRT ones carry them (measured).
         import botocore.session
 
         monkeypatch.setenv("AWS_SDK_UA_APP_ID", "myapp")

@@ -103,7 +103,7 @@ class TestLs:
         assert cli.main(["ls", "s3://bucket"], ctx=ctx) == 0
 
     def test_non_integer_page_size_exits_255(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # aws converts integer options with a bare int(); the ValueError hits
+        # aws-cli converts integer options with a bare int(); the ValueError hits
         # its *general* handler -> 255, not argparse's usage error 252. The
         # conversion fails before the client factory runs.
         def factory(_args: Any) -> Any:
@@ -127,7 +127,7 @@ class TestLsAllBuckets:
         out = capsys.readouterr().out
         assert rc == 0
         assert client.paginator_names == ["list_buckets"]
-        # aws's bytes for this CreationDate under TZ=UTC: no size column.
+        # `aws`'s bytes for this CreationDate under TZ=UTC: no size column.
         assert out.splitlines() == ["2026-01-02 03:04:05 alpha", "2026-01-02 03:04:05 beta"]
 
     def test_bare_s3_uri_lists_buckets(self) -> None:
@@ -182,7 +182,7 @@ class TestLsAllBuckets:
 
 
 class TestListingTimestampEndToEnd:
-    """The stamp aws prints, asserted through the whole ``ls`` path.
+    """The stamp `aws` prints, asserted through the whole ``ls`` path.
 
     ``test_output`` pins the formatter; these pin that the value reaching it is
     the response's own timestamp, for both listing kinds. Each expectation is a
@@ -194,7 +194,7 @@ class TestListingTimestampEndToEnd:
     def test_object_line_in_a_zone_whose_rules_changed(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # Mexico abolished DST in 2022-10, so aws renders this 2022-07 object at
+        # Mexico abolished DST in 2022-10, so aws-cli renders this 2022-07 object at
         # today's -6 rather than the -5 in force back then.
         page = {"Contents": [{"Key": "stamps/stamp", "Size": 1, "LastModified": _at("2022-07-01")}]}
         ctx, _ = _fake_ctx([page])
@@ -205,7 +205,7 @@ class TestListingTimestampEndToEnd:
     @needs_tzset
     def test_bucket_lines_pad_a_short_year(self, capsys: pytest.CaptureFixture[str]) -> None:
         # A CreationDate below year 1000 keeps the name column where a
-        # four-digit one puts it (aws left-justifies the stamp into 19 columns).
+        # four-digit one puts it (aws-cli left-justifies the stamp into 19 columns).
         page = {
             "Buckets": [
                 {"Name": "y0999", "CreationDate": _at("0999-06-15")},
@@ -227,7 +227,7 @@ class TestListingTimestampEndToEnd:
         # The library reads the stamp as UTC and lists it; the line renders
         # local time, which year 9999 plus a positive offset cannot hold, so
         # ls stops at that entry with the error at 255 - the lines ahead of it
-        # already printed (aws stops there too, as its own conversion fails).
+        # already printed (aws-cli stops there too, as its own conversion fails).
         last = dt.datetime(9999, 12, 31, 23, 0, tzinfo=dt.timezone.utc)
         page = {
             "Contents": [
@@ -267,7 +267,7 @@ class TestGlobalOptionPosition:
 
 
 class TestRecognizedExtraGlobals:
-    """The remaining aws s3 ls globals: --version, --cli-binary-format, --output off."""
+    """The remaining `aws s3 ls` globals: --version, --cli-binary-format, --output off."""
 
     def test_version_lists_all_components_on_one_line(
         self, capsys: pytest.CaptureFixture[str]
@@ -295,8 +295,8 @@ class TestRecognizedExtraGlobals:
 
 
 class TestParamfileExpansion:
-    """aws paramfile-expands the positional and the bucket-listing filters at
-    parse time (rc 252 on a bad reference), naming the argument as aws does."""
+    """aws-cli paramfile-expands the positional and the bucket-listing filters at
+    parse time (rc 252 on a bad reference), naming the argument as aws-cli does."""
 
     def test_positional_file_reference_is_expanded(self, tmp_path: Any) -> None:
         # Expands to a key prefix that matches nothing -> rc 1, proving the
@@ -333,7 +333,7 @@ class TestParamfileExpansion:
         assert "Error parsing parameter '--bucket-region'" in capsys.readouterr().err
 
     def test_bucket_name_prefix_reference_is_expanded(self, tmp_path: Path) -> None:
-        # aws paramfile-expands --bucket-name-prefix: a file:// reference
+        # aws-cli paramfile-expands --bucket-name-prefix: a file:// reference
         # forwards the file's contents as the Prefix.
         ref = tmp_path / "prefix.txt"
         ref.write_text("al")
@@ -354,7 +354,7 @@ class TestParamfileExpansion:
         assert "Error parsing parameter '--page-size'" in capsys.readouterr().err
 
     def test_page_size_fileb_digits_coerce_to_int(self, tmp_path: Any) -> None:
-        # aws feeds the loaded bytes to int() (b"5" -> 5), so a readable
+        # aws-cli feeds the loaded bytes to int() (b"5" -> 5), so a readable
         # digit fileb:// drives a normal listing with the coerced page size.
         ref = tmp_path / "n.bin"
         ref.write_bytes(b"5")
@@ -364,7 +364,7 @@ class TestParamfileExpansion:
 
 
 class TestQueryValidation:
-    """aws compiles --query at parse time; a bad JMESPath is its 252
+    """aws-cli compiles --query at parse time; a bad JMESPath is its 252
     (globalargs.validate_query)."""
 
     def test_invalid_query_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
@@ -404,7 +404,7 @@ class TestScanInterruptPolicy:
 class TestTimestampFormat:
     """`cli_timestamp_format` is validated, but neither value moves this output.
 
-    On aws the setting swaps botocore's timestamp parser for one that keeps the
+    On aws-cli the setting swaps botocore's timestamp parser for one that keeps the
     wire string (`wire`) or hands back an ISO-8601 string (`iso8601`), and its
     `s3` customization then re-parses whichever it got with a general date
     parser before rendering local time - so both settings, and the unset

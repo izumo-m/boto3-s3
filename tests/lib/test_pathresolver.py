@@ -2,7 +2,7 @@
 
 A faithful port of aws-cli's ``S3PathResolver`` with injected clients; these
 tests pin the dispatch (which path shape talks to which API) and the error
-translation that keeps a ClientError cause (CLI rc 254 - aws exits 254 when
+translation that keeps a ClientError cause (CLI rc 254 - `aws` exits 254 when
 GetCallerIdentity fails during validation).
 """
 
@@ -115,7 +115,7 @@ class TestHasUnderlyingS3Path:
         assert has_underlying_s3_path(f"s3://{_MRAP_ARN}/k.txt")
         assert has_underlying_s3_path("s3://my-alias-s3alias/k.txt")
         assert has_underlying_s3_path("s3://my-outpost-alias--op-s3/k.txt")
-        # An S3 Express access point: aws's test misses it, and a same-key move
+        # An S3 Express access point: aws-cli's test misses it, and a same-key move
         # onto its directory bucket deletes the object on real S3.
         assert has_underlying_s3_path("s3://my-ap--use1-az4--xa-s3/k.txt")
 
@@ -154,7 +154,7 @@ class TestIsMrapPath:
         ],
     )
     def test_every_alias_spelling_botocore_signs_sigv4a(self, alias: str) -> None:
-        # Measured against aws 2.36.40: `presign arn:aws:s3::<account>:
+        # Measured against aws-cli 2.36.40: `presign arn:aws:s3::<account>:
         # accesspoint/<alias>/key` answers AWS4-ECDSA-P256-SHA256 with
         # X-Amz-Region-Set=* for each of these. The aws-cli resolver regex
         # above accepts only the first two, which is why the gate reads the
@@ -190,7 +190,7 @@ class TestIsMrapPath:
 class TestIsOutpostPath:
     def test_only_the_outpost_arn_shape_matches(self) -> None:
         # The second SigV4a stand-down shape: an Outposts access point resolves
-        # to asymmetric SigV4a, measured against aws 2.36.40 (its presign signs
+        # to asymmetric SigV4a, measured against aws-cli 2.36.40 (its presign signs
         # AWS4-ECDSA-P256-SHA256). An Outposts access point *alias* is a plain
         # bucket name rather than an ARN, so this probe does not answer for it -
         # `is_outpost_alias_path` does.
@@ -221,7 +221,7 @@ class TestIsOutpostPath:
         ],
     )
     def test_every_arn_spelling_botocore_signs_sigv4a(self, resource: str) -> None:
-        # Measured against aws 2.36.40: each of these presigns
+        # Measured against aws-cli 2.36.40: each of these presigns
         # AWS4-ECDSA-P256-SHA256 with a region-less credential scope.
         arn = f"arn:aws:s3-outposts:us-west-2:123456789012:{resource}"
         assert is_outpost_path(f"s3://{arn}/k.txt")
@@ -282,7 +282,7 @@ class TestIsOutpostAliasPath:
         ],
     )
     def test_every_alias_spelling_botocore_signs_sigv4a(self, alias: str) -> None:
-        # Measured against aws 2.36.40: each of these presigns
+        # Measured against aws-cli 2.36.40: each of these presigns
         # AWS4-ECDSA-P256-SHA256 with a region-less credential scope and
         # X-Amz-Region-Set=*.
         assert is_outpost_alias_path(f"s3://{alias}/k.txt")
@@ -304,7 +304,7 @@ class TestIsOutpostAliasPath:
         ],
     )
     def test_names_outside_the_branch_keep_the_pin(self, bucket: str) -> None:
-        # Measured against aws 2.36.40: each of these presigns plain
+        # Measured against aws-cli 2.36.40: each of these presigns plain
         # AWS4-HMAC-SHA256, so dropping the pin would diverge.
         assert not is_outpost_alias_path(f"s3://{bucket}/k.txt")
 
@@ -324,7 +324,7 @@ class TestIsOutpostAliasPath:
         ],
     )
     def test_shapes_the_branch_refuses_never_claim_sigv4a(self, bucket: str) -> None:
-        # aws resolves no endpoint at all for these (the alias branch raises
+        # aws-cli resolves no endpoint at all for these (the alias branch raises
         # rather than falling through to the plain-bucket rules), so the pin is
         # unobservable - but the probe still answers the question it is asked.
         assert not is_outpost_alias_path(f"s3://{bucket}/k.txt")
@@ -356,7 +356,7 @@ class TestIsS3ExpressAccessPointPath:
         # The endpoint rules sign an access point of a directory bucket
         # (accessPointSuffix --xa-s3) sigv4-s3express like the bucket itself,
         # so the CLI's pin must stand down for it too - measured: with the pin
-        # left on, ours sent a plain SigV4 ListObjectsV2 where aws first dials
+        # left on, ours sent a plain SigV4 ListObjectsV2 where `aws` first dials
         # CreateSession and signs with the session's scope.
         assert is_s3express_accesspoint_path("s3://myap--use1-az4--xa-s3/k.txt")
         assert is_s3express_accesspoint_path("s3://myap--use1-az4--xa-s3")
@@ -374,7 +374,7 @@ class TestIsS3ExpressAccessPointPath:
 class TestResolve:
     @pytest.mark.parametrize("which", ["s3control", "sts"])
     def test_a_client_with_an_empty_ca_bundle_is_refused(self, which: str) -> None:
-        # aws refuses the pair when it builds them; the resolver refuses a
+        # aws-cli refuses the pair when it builds them; the resolver refuses a
         # caller-built one at construction, before any request.
         from types import SimpleNamespace
 
@@ -436,7 +436,7 @@ class TestResolve:
 
     def test_s3express_access_point_resolves_like_an_alias(self) -> None:
         # GetAccessPoint takes an S3 Express access point's name and answers
-        # with its directory bucket (measured on real S3); aws does not
+        # with its directory bucket (measured on real S3); aws-cli does not
         # resolve this shape at all.
         s3control = _FakeS3Control(bucket="dir--use1-az4--x-s3")
         sts = _FakeSts(account="999988887777")
@@ -508,7 +508,7 @@ class TestResolve:
         assert s3control.calls == []
 
     def test_client_errors_translate_with_the_cause_kept(self) -> None:
-        # The CLI maps a kept ClientError cause to rc 254 - what aws exits
+        # The CLI maps a kept ClientError cause to rc 254 - what `aws` exits
         # when the validation calls themselves fail.
         sts = _FakeSts(error=client_error("InvalidClientTokenId", 403, "GetCallerIdentity"))
         resolver = S3PathResolver(s3control_client=_FakeS3Control(), sts_client=sts)
@@ -519,7 +519,7 @@ class TestResolve:
 
     def test_whatever_else_the_request_raised_is_the_base_error(self) -> None:
         # A refreshing credential_process whose program is gone raises
-        # outside botocore's family; aws prints the text.
+        # outside botocore's family; `aws` prints the text.
         s3control = _FakeS3Control(
             error=FileNotFoundError(errno.ENOENT, "No such file or directory", "/bin/helper")
         )

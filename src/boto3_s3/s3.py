@@ -125,11 +125,11 @@ def rm_filter_root(key: str, *, recursive: bool) -> str:
     patterns resolve relative to this prefix, and the recursive listing uses
     it as the ``Prefix``. Always empty or ending in a separator.
 
-    aws joins the pattern onto that parent with ``os.path.join``, which adds
+    aws-cli joins the pattern onto that parent with ``os.path.join``, which adds
     no separator after a parent that already ends in one, so the parent of
     ``a//b`` is ``a/`` (the entry is matched as ``/b``, not ``b``) and the
     parent of ``/b`` is ``""``; the same rule here keeps a glob's verdict on
-    such keys identical to aws's. On Windows a backslash is such a
+    such keys identical to aws-cli's. On Windows a backslash is such a
     separator too: a non-recursive parent ending in one is returned as is,
     and a recursive target typed ending in one keeps its ``/``-terminated
     ``Prefix`` while its entries are shown to the filter with a leading
@@ -384,7 +384,7 @@ def _check_local_source_exists(storage: LocalStorage, *, operation: str) -> None
     # symlinked directory, which the lexical abspath would refuse - ours
     # admits (a single source; a recursive one is then vetted by
     # `_check_local_source_root`), and the generator warns like aws-cli's. The message keeps
-    # the raw form, like aws echoing the user-typed path.
+    # the raw form, like `aws` echoing the user-typed path.
     if not storage.exists():
         raise NotFoundError(
             f"The user-provided path {storage.path} does not exist.", operation=operation
@@ -400,7 +400,7 @@ def _check_local_source_root(storage: LocalStorage, *, operation: str) -> None:
     (``file/`` does not exist), a special or unreadable path, or a symlink
     under ``follow_symlinks=False``. aws-cli skips such a root - with a
     warning, or silently for the symlink - and runs on an empty source, so a
-    ``sync`` with deletes then empties the destination (measured on aws
+    ``sync`` with deletes then empties the destination (measured on ``aws``
     2.36.40 under ``--dryrun``: a file source warns and exits 2, a symlink
     root exits 0). Here the run stops before it starts instead, like a missing
     source (`_check_local_source_exists`), and nothing is listed, sent or
@@ -557,7 +557,7 @@ class S3:
     the interrupt can keep calling operations. ``False``: the app treats
     Ctrl-C as process-fatal, so the unwind may abandon a scan's daemon
     prefetch worker instead of waiting out an in-flight listing page pull
-    (the CLI's setting - aws dies immediately on Ctrl-C). Either way the
+    (the CLI's setting - ``aws`` dies immediately on Ctrl-C). Either way the
     interrupt itself is re-raised, never converted or swallowed - on the CRT
     engine too, whose manager would discard one landing in its transfer
     drain (design/crt.md section 6). The posture scopes to
@@ -585,7 +585,7 @@ class S3:
     provider on ``--no-sign-request`` alone and never reads the client, so
     ``--no-sign-request --sse aws:kms`` - where the per-client
     ``signature_version`` restores signing for botocore - still transfers
-    anonymously on aws's CRT lane while its classic lane signs. Only the CLI
+    anonymously on aws-cli's CRT lane while its classic lane signs. Only the CLI
     distribution sets it (design/crt.md section 4).
 
     ``filename_encoding`` is handed to every ``LocalStorage`` `resolve` builds
@@ -783,7 +783,7 @@ class S3:
         arguments, after ``_normalize_s3_trailing_slash``
         (``S3Storage.normalize_s3_uri``): a keyless URI is the bucket root.
         That changes the location for one spelling - an Outposts access point
-        ARN set off with ``:`` and no key (``.../accesspoint/ap:``), which aws
+        ARN set off with ``:`` and no key (``.../accesspoint/ap:``), which aws-cli
         reads as the key ``/``.
         """
         if isinstance(loc, Storage):
@@ -948,14 +948,14 @@ class S3:
 
         The route follows the resolved pair: local->S3 upload, S3->local
         download, S3->S3 copy, or the open route pairing a custom ``Storage``
-        with S3 (local->local is rejected, like aws). Path
+        with S3 (local->local is rejected, like aws-cli). Path
         shapes - what an existing-directory or trailing-slash destination
         means, which side's name wins, where ``--exclude`` / ``--include``
         patterns root - reproduce aws-cli's ``FileFormat`` rules
         (`boto3_s3.transferplan`); ``recursive`` is the aws-cli ``dir_op``.
         Bytes move through `boto3_s3.transfer.Transferrer`
         (s3transfer; multipart per ``transfer_config``, defaults matching
-        aws). Per-item parity behaviors carried over: local walk warnings
+        aws-cli). Per-item parity behaviors carried over: local walk warnings
         (unreadable / special / broken-symlink files are skipped with a
         warning), GLACIER / DEEP_ARCHIVE sources skipped with a warning on
         download/copy unless forced (``ignore_glacier_warnings`` skips
@@ -967,16 +967,16 @@ class S3:
         `copy_props` (including the library-only `annotation_copy_mode` for
         multipart `copy_props=ALL` staging), and a single S3 source resolved
         by HeadObject - a
-        404 raises ``NotFoundError`` with aws's rewritten ``Key "..." does
+        404 raises ``NotFoundError`` with aws-cli's rewritten ``Key "..." does
         not exist`` message. A keyless non-recursive S3 source matches
-        nothing and transfers nothing (aws lists and discards; the listing
+        nothing and transfers nothing (aws-cli lists and discards; the listing
         is issued here too, so its failure - NoSuchBucket, a denied
         ListBucket - stays observable instead of a silent rc 0).
 
         ``filter`` keeps an item in the operation (rm's contract): a
         ``FileFilter`` predicate over the item's ``FileInfo``, whose
         ``compare_key`` is stamped relative to aws-cli's base (the source
-        directory or S3 ``Prefix``; a single source is shown aws's own form,
+        directory or S3 ``Prefix``; a single source is shown aws-cli's own form,
         design/globsieve.md section 5) - a `GlobFilter` matches that key (a
         relative pattern) or the full path (an absolute one: a local entry's
         ``key``, an S3 entry's ``bucket/key``) while a richer
@@ -1000,8 +1000,8 @@ class S3:
         (`_cp_stream` sets it as the upload item ``size_hint``, which the
         engine applies to a stream it cannot size - a non-seekable one - and
         ignores for a seekable stream it sizes itself) and is ignored on the
-        non-stream routes, exactly like aws's ``--expected-size`` (which
-        applies to its non-seekable stdin alone). aws documents the option as
+        non-stream routes, exactly like aws-cli's ``--expected-size`` (which
+        applies to its non-seekable stdin alone). aws-cli documents the option as
         needed above 50 GB (with the default 8 MiB parts a hint-less stream
         runs out of parts above ~84 GB), but on the classic engine the hint
         decides the upload's shape at any size - a stream is sent as a single
@@ -1017,7 +1017,7 @@ class S3:
         CLI derives exit code 2 from its warned count). Failures *before*
         any item work - an unreadable destination, the missing-source check
         - raise directly: a missing local source raises ``NotFoundError``
-        (aws's pre-pipeline rc 255 shape - no ``ClientError`` cause, so the
+        (aws-cli's pre-pipeline rc 255 shape - no ``ClientError`` cause, so the
         CLI maps it to the general rc).
         """
         _validate_transfer_options(options, operation="cp")
@@ -1153,7 +1153,7 @@ class S3:
             # ensure_directory does both on the construction-time anchor
             # (consistent with the plan if the process chdir'd since). An
             # existing *file* written without a trailing separator counts as
-            # existing: it skips makedirs and fails per item like aws (rc 1)
+            # existing: it skips makedirs and fails per item like aws-cli (rc 1)
             # instead of crashing up front, and an empty listing transfers
             # nothing and exits 0. (sync's guard is the same call, not gated on
             # recursive.)
@@ -1163,7 +1163,7 @@ class S3:
                 except (OSError, ValueError) as exc:
                     raise translate_os_error(exc, operation=operation, key=None) from exc
             # After the Transferrer: the gate's destination membership scan
-            # warns into the shared rollup (aws's reverse enumeration shares
+            # warns into the shared rollup (aws-cli's reverse enumeration shares
             # the result queue) and applies the run's filter, like any side's
             # walk.
             case_gate = producers.cp_case_gate(
@@ -1271,14 +1271,14 @@ class S3:
         """One streaming transfer: an ``IOStorage`` on exactly one side.
 
         The other side must be S3 (a non-S3 peer is the "stream on one side"
-        error); its key is taken verbatim (the CLI owns aws's ``-``-basename
+        error); its key is taken verbatim (the CLI owns aws-cli's ``-``-basename
         naming quirk). The stream's fileobj comes from ``IOStorage.open`` and is
         handed straight to ``s3transfer``. Uploads carry ``expected_size`` as the
         multipart sizing hint of a stream the engine cannot size (without it the
         engine buffers up to the threshold and decides; a seekable stream is
         sized by the engine and the hint is ignored); downloads provide neither
         size nor etag, so s3transfer
-        probes the object with a HeadObject - the aws stream wire shape. Streams
+        probes the object with a HeadObject - the aws-cli stream wire shape. Streams
         are single items: the glacier / parent-ref gates do not apply; displays
         render as ``-``. A ``cancel_token`` already cancelled raises
         ``CancelledError`` before the fileobj is opened or submitted, matching the
@@ -1347,7 +1347,7 @@ class S3:
                 src_bucket=storage.bucket,
                 src_key=storage.key,
                 dest_fileobj=dest_fileobj,
-                # aws prints the source as its argument normalization left it:
+                # `aws` prints the source as its argument normalization left it:
                 # a keyless one is the bucket root, "s3://b/" (or "s3:///").
                 src_display=storage.normalized_uri(),
                 dest_display="-",
@@ -1424,14 +1424,14 @@ class S3:
         object; one DeleteObject per object otherwise, ``request_payer``
         forwarded). A failed, skipped, or dry-run item
         keeps its source; a deletion failure turns that item into the
-        failure aws prints as ``move failed`` (the bytes already arrived).
+        failure ``aws`` prints as ``move failed`` (the bytes already arrived).
         Filters prune both the transfer and the deletion. A stream
         (``IOStorage``) can be the destination of a single-object move -
         the bytes land on the stream, then the S3 source is deleted - but
         not a recursive one (a stream is a single endpoint) and never the
         source (a move deletes its source, which a stream cannot be); both
         raise ``ValidationError``. The CLI rejects ``-`` for mv on either
-        side outright (aws parity). Emptied
+        side outright (aws-cli parity). Emptied
         local source directories are left behind like aws.
 
         Moving an object onto itself (same URI, or a ``/``-terminated
@@ -1480,7 +1480,7 @@ class S3:
             )
         if isinstance(src_storage, S3Storage) and isinstance(dest_storage, S3Storage):
             if src_storage.same_path_as(dest_storage):
-                # aws words the error with the keyless-normalized URIs
+                # aws-cli words the error with the keyless-normalized URIs
                 # (`mv s3://b/k s3://b` reports `s3://b/`).
                 raise ValidationError(
                     f"Cannot mv a file onto itself: {src_storage.normalized_uri()} "
@@ -1523,7 +1523,7 @@ class S3:
     ) -> None:
         """Recursively synchronize ``src`` into ``dest`` (``aws s3 sync``).
 
-        Always recursive (no single-file sync, aws parity) over the three
+        Always recursive (no single-file sync, aws-cli parity) over the three
         built-in transfer routes plus the open route (a custom ``Storage``
         paired with S3); a local->local pair raises ``ValidationError``. The
         pipeline has two layers:
@@ -1532,16 +1532,16 @@ class S3:
           the sides meet by the single ``filter``, a
           `FileFilter` applied to each side's `compare_key` (directory-relative
           for local entries, ``Prefix``-relative for S3 entries) - so it prunes
-          the source and destination **symmetrically** (matching aws, which evaluates
+          the source and destination **symmetrically** (matching aws-cli, which evaluates
           ``--exclude`` / ``--include`` against both sides). Folder markers
           (zero-byte ``/``-terminated objects) never surface on either side -
           sync neither transfers nor deletes them. Because pruning is
           symmetric, an excluded key is invisible on *both* sides and is thus
-          neither transferred nor deleted (aws's "files excluded by filters
+          neither transferred nor deleted (aws-cli's "files excluded by filters
           are excluded from deletion"). The exception is a side whose
           relative path the filter sees with a leading ``/`` (a local side
           rooted at a filesystem root, a Windows S3 base ending in a backslash,
-          as on aws): a name-led relative pattern then hides a key on the
+          as on aws-cli): a name-led relative pattern then hides a key on the
           other side only, which can leave it to ``delete_filter``. Per-lane narrowing
           belongs in the pair layer below (``create_filter`` / ``update_filter``
           / ``delete_filter``).
@@ -1553,14 +1553,14 @@ class S3:
           an orphan. ``create_filter`` and ``delete_filter`` are the two
           membership knobs (create / delete) - duals of each other;
           ``update_filter`` is the overwrite judgment for the intersection. The
-          aws equivalent is the default of all three:
+          aws-cli equivalent is the default of all three:
 
           - ``create_filter`` - the **new** (`SrcOnlyPair`) entries: ``True``
             (default) copies every one, ``False`` none, a
             `FileFilter` only those it keeps (matched
             against the source ``FileInfo`` / compare key, the same shape as
-            ``rm``'s ``filter``). aws hard-codes "always create"
-            (``file_not_at_dest``), so this knob has no aws counterpart.
+            ``rm``'s ``filter``). aws-cli hard-codes "always create"
+            (``file_not_at_dest``), so this knob has no aws-cli counterpart.
           - ``update_filter`` - the **update** (`SyncPair`) pairs: ``None``
             (default) is the aws-cli size + last-modified judgment, equivalently
             ``AwsCliComparison()`` - tune it with
@@ -1574,7 +1574,7 @@ class S3:
             strategy reads ``pair.src`` / ``pair.dest`` directly.
           - ``delete_filter`` - the **orphan** (`DestOnlyPair`) entries:
             ``False`` (default) deletes nothing, ``True`` deletes every one
-            (aws ``--delete``), a `FileFilter` only those
+            (aws-cli's ``--delete``), a `FileFilter` only those
             it keeps (same shape as ``rm``'s ``filter``).
 
           Any lane's filter may be wrapped in
@@ -1626,13 +1626,13 @@ class S3:
         API call (both sides' listings still run).
         Local listing warnings (unreadable / vanished / special files,
         invalid timestamps) surface from **both** sides as WARNED records,
-        exactly like aws walking both trees.
+        exactly like aws-cli walking both trees.
 
-        A missing local source directory raises (aws's ``The user-provided
+        A missing local source directory raises (aws-cli's ``The user-provided
         path ... does not exist.``); a local destination directory is
         created up front even when nothing transfers. An S3 Express
         directory bucket or one of its access points on either side is
-        then rejected (aws's ``Cannot use sync command with a directory
+        then rejected (aws-cli's ``Cannot use sync command with a directory
         bucket.``): its unordered listings would break the sorted
         merge-join. Item failures -
         transfer and delete alike - aggregate into one ``BatchError`` with
@@ -1918,11 +1918,11 @@ class S3:
         it selects the CRT engine (`crt_delete_sender`, with this instance's
         CRT postures). That client's retry policy and error text are the
         deletes'. A delete that dies without any response fails its key on
-        either client, where aws's classic client loses it with no line.
+        either client, where aws-cli's classic client loses it with no line.
         """
         text = os.fspath(target) if isinstance(target, (str, os.PathLike)) else None
         if isinstance(text, str):
-            # A string reads as aws s3 rm reads its argument - the same
+            # A string reads as `aws s3 rm` reads its argument - the same
             # keyless normalization `resolve` applies for cp / mv / sync - with
             # the scheme this operation lets a caller omit put back first, so
             # both spellings name the same location. Anything else is left to
@@ -2027,7 +2027,7 @@ class S3:
         """The ``ScanOptions.filter`` for rm's enumerating paths.
 
         The scan stamps each entry's ``Prefix``-relative ``compare_key``, so a
-        glob/user filter reads it directly - shown aws's own form of it where
+        glob/user filter reads it directly - shown aws-cli's own form of it where
         the typed ``base_key`` makes the two differ
         (`producers.s3_listing_filter`). The keyless sweep additionally
         restricts to folder markers (marker test first, then the user filter -
@@ -2057,7 +2057,7 @@ class S3:
         cancel_token: CancelToken | None,
         transfer_config: TransferConfig | None,
     ) -> None:
-        """The blind single-key path (no listing; aws ``_list_single_object``).
+        """The blind single-key path (no listing; aws-cli's ``_list_single_object``).
 
         No scan runs here, so the entry's ``compare_key`` (its key relative to
         the prefix returned by `rm_filter_root`, what a glob filter matches) is
@@ -2099,12 +2099,12 @@ class S3:
         except AssertionError:
             raise  # a test double's guard or an invariant, never a request outcome
         except Exception as exc:
-            # The single key is still one batch item (aws counts it as a task
+            # The single key is still one batch item (aws-cli counts it as a task
             # failure -> "delete failed:" + rc 1), so aggregate rather than
             # re-raising the category error. Whatever the request raised is
             # that failure - the delete's own translated error, or anything
             # else botocore threw from inside the call, wrapped by
-            # request_failure the way the deleter wraps it (aws's task records
+            # request_failure the way the deleter wraps it (aws-cli's task records
             # both alike). A request that died without any response is no
             # exception: aws-cli's classic task loses it with no line at rc 0,
             # which is not copied (design/opresult.md).
@@ -2130,7 +2130,7 @@ class S3:
             # An interrupt (Ctrl-C, a request to exit) leaves at once: the item
             # is CANCELLED, as an interrupted transfer item is, and the
             # interrupt reaches the caller. The request may still complete on
-            # the server; aws waits for it and prints its line, which is not
+            # the server; `aws` waits for it and prints its line, which is not
             # copied (docs/cli/aws-differences.md).
             _emit_result(
                 on_result,
@@ -2168,7 +2168,7 @@ class S3:
 
         ``target`` is an ``"s3://bucket"`` URI string (scheme optional) or an
         ``S3Storage``; a key part is ignored - aws-cli's ``mb`` also keeps
-        only the bucket of its path (the CLI layer owns aws's strict path
+        only the bucket of its path (the CLI layer owns aws-cli's strict path
         checks). The request is shaped the way aws-cli shapes it:
         ``LocationConstraint`` is the client's region unless that is
         ``us-east-1`` (sending it for us-east-1 is an error), a bucket name
@@ -2309,7 +2309,7 @@ class S3:
 
         ``target`` is an ``"s3://bucket"`` URI string (scheme optional) or an
         ``S3Storage``; a key part is ignored - the library is permissive, the
-        CLI layer owns aws's strict path handling (aws passes the key *as
+        CLI layer owns aws-cli's strict path handling (aws-cli passes the key *as
         part of the bucket name* and lets botocore reject it). The request is
         shaped the way aws-cli shapes it: ``--index-document`` becomes
         ``IndexDocument.Suffix``, ``--error-document`` becomes

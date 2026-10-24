@@ -1,6 +1,6 @@
 # Endpoint fidelity
 
-Compatibility means boto3-s3 behaves like aws against real S3 (the policy is
+Compatibility means boto3-s3 behaves like aws-cli against real S3 (the policy is
 [`overview.md`](./overview.md) section 3). Running the suite against real S3
 every time costs too much, so the e2e tier runs both CLIs against a local S3
 server, the dev stack (RustFS, `scripts/compose.dev.yaml`), with occasional
@@ -55,7 +55,7 @@ G14 changes no test - the e2e sync scenarios shift times by a day - but a
 behavior that depends on it (`sync --exact-timestamps` converging) looks
 different on the dev stack than on real S3. G17 matters because botocore
 puts the flexible checksum into an aws-chunked trailer only over https, so
-some failure paths differ by transport, and because aws's CRT client takes
+some failure paths differ by transport, and because aws-cli's CRT client takes
 `use_ssl` from the command line only.
 
 ## 2. Test-side changes
@@ -71,7 +71,7 @@ a comment, or in a scenario's `frozen_golden` text - so
 `git grep -n "endpoint-fidelity T"` lists every site (T16, a rule, has
 none). The forms a change takes:
 
-- `diff_only` - no golden; only the live aws-vs-ours comparison runs, rc
+- `diff_only` - no golden; only the live aws-cli-vs-ours comparison runs, rc
   included.
 - `frozen_golden` - the committed golden matches real S3 and moto but not
   the dev stack, so the e2e tier neither rewrites nor drift-checks it; the
@@ -86,13 +86,13 @@ none). The forms a change takes:
 | T3 | sibling bucket names never end in `-an` | `e2e/conftest.py` (`_sibling_buckets`) | - | keep on every endpoint until account-regional BucketNamespace semantics are verified |
 | T4 | every mb/rb scenario and side gets a sibling bucket of its own, never re-created under the same name; bucket existence is read from ListBuckets, and a bucket the account does not own is never named in a request before it exists; after a successful mb or rb the end state is read once the listing agrees (20 s at most) | `e2e/conftest.py` (`_sibling_buckets`), `test_mb_parity` / `test_rb_parity` (`_prepare`, `_settle`), `harness.bucket_exists` / `force_delete_bucket` / `settle_bucket_existence`, `run_e2e.sh` cleanup | G13 | needed on real S3; harmless elsewhere |
 | T5 | `cp_upload_acl_public_read` / `cp_upload_grants_uri` are `diff_only` | `cp_scenarios.py` | G11 | stays while real S3 and moto disagree on ACLs for a new bucket |
-| T6 | the aws-side stderr token for a directory uploaded without `--recursive` is only `upload failed`: the cause after it is `Is a directory` over http, `Need to rewind the stream ...` over https | `cp_upload_dir_no_recursive` / `_exclude` in `cp_scenarios.py` | G17 | none: the token holds on every transport |
+| T6 | the aws-cli-side stderr token for a directory uploaded without `--recursive` is only `upload failed`: the cause after it is `Is a directory` over http, `Need to rewind the stream ...` over https | `cp_upload_dir_no_recursive` / `_exclude` in `cp_scenarios.py` | G17 | none: the token holds on every transport |
 | T7 | `cp_no_overwrite_copy_exists` / `mv_no_overwrite_copy_exists` are `diff_only` | `cp_scenarios.py`, `mv_scenarios.py` | G12 | stays while moto ignores the condition |
 | T8 | `website_error_only` / `website_no_options` are `diff_only` | `website_scenarios.py` | G1 | stays while moto stores a configuration without an IndexDocument |
 | T9 | `cp_upload_storage_class_glacier` is `diff_only`; the glacier gate shapes run on moto | `cp_scenarios.py`; `TestCpGlacierOnMoto`, `TestMvGlacierOnMoto`, `TestSyncGlacierOnMoto` | G2 | the scenario can carry a golden on an endpoint that accepts GLACIER; keep the gate shapes on moto (restores take hours on real S3) |
 | T10 | `cp_copy_props_all_multipart` is live-only | `cp_scenarios.py` | G3 | stays live-only: moto has no annotations either |
 | T11 | `mb_existing` is `diff_only` and checks no stderr tokens | `mb_scenarios.py` | G4 | stays: the outcome depends on the region |
-| T12 | `mb_tags` compares the tag set between aws and ours only; no golden records a tag set | `mb_scenarios.py` | G5 | stays while moto ignores the tags |
+| T12 | `mb_tags` compares the tag set between aws-cli and ours only; no golden records a tag set | `mb_scenarios.py` | G5 | stays while moto ignores the tags |
 | T13 | no e2e reaches an access point: `mv --validate-same-s3-paths` has no scenario, `ls_accesspoint_arn` is `diff_only` | `mv_scenarios.py`, `ls_scenarios.py` | G6 | real S3 could host an access point for `mv` (needs permissions and a cost estimate); `ls_accesspoint_arn` stays `diff_only` (a foreign ARN fails differently per endpoint) |
 | T14 | `cp_copy_props_none` probes only `Metadata`, leaving the default `ContentType` unchecked | `cp_scenarios.py` | - | the dev stack and moto both answer `binary/octet-stream`; check real S3, then probe `ContentType` too |
 | T15 | the dev stack itself: server and release, keys, us-east-1, the SSE-S3 master key, the readiness wait, the container name, the golden-regeneration hint, the benchmark guard | `scripts/compose.dev.yaml`, `compose-up.sh`, `dev-env.sh` / `.cmd`, `golden.py`, `benchmarks/awsenv.py` | - | rewrite for the new server; re-run the section 1 probes |
@@ -104,7 +104,7 @@ throwaway CloudServer 9.5.0 (`S3BACKEND=mem`), which accepts such keys
 (section 3), served keys with `..`, `.`, and `\` segments: ones that climb
 out of the prefix, ones that stay inside it, and ones that name the
 destination or its parent. `cp --recursive` and `sync` downloaded them side
-by side with the pinned aws on Linux and with `aws.exe` on Windows (this
+by side with the pinned `aws` on Linux and with `aws.exe` on Windows (this
 command on Python 3.10 and 3.14). Exit codes, output, and the downloaded
 tree matched on both systems. On Windows the `\` forms that climb out are
 skipped like the `/` ones, and on neither system was anything written
@@ -116,7 +116,7 @@ the negative page-size scenarios (the reason is moto, which raises
 presign normalization (path-style URLs, `<ENDPOINT>`, `<REGION>`, and the
 session token dropped from golden comparisons), which every endpoint needs
 because capture and replay differ in host form and credentials; the
-sorted rm lines, whose order comes from aws's parallel completion;
+sorted rm lines, whose order comes from aws-cli's parallel completion;
 nonexistent bucket names derived from the run's bucket (`<bucket>-no-such`),
 which stay absent on real S3 too because `run_e2e.sh` randomizes the base;
 the us-east-1 branch of `harness.create_bucket_in_region`, which is real
@@ -158,7 +158,7 @@ probes and the e2e suite side by side. The goldens had been captured on
 | XXHASH and SHA512 checksums | `pgsty/minio` accepts; Silo rejects (`InvalidArgument`) | accepted, as real S3 | rejected |
 | Default Content-Type (G15) | `binary/octet-stream`, as real S3 | guessed from the key | none |
 | `CreateBucketConfiguration.Tags` (G5) | ignored | ignored | rejected (`MalformedXML`) |
-| aws's CRT client, download | works | works | writes no file |
+| aws-cli's CRT client, download | works | works | writes no file |
 | `REDUCED_REDUNDANCY` upload | works | works | leaves no object |
 | e2e, 248 tests | `pgsty/minio` 248 passed; Silo 247 (the XXHASH64 rejection) | 244 passed; 3 failures were answers matching real S3 (G4, G12 twice), 1 was G15 | 238 passed, 10 failed: 3 as on RustFS, 7 answers further from real S3 |
 
@@ -168,7 +168,7 @@ honor `If-Match` on DeleteObject, where `pgsty/minio` deleted anyway;
 neither CLI sends it.
 
 CloudServer drops out: without conditional PutObject the `--no-overwrite`
-scenarios prove nothing, and aws's CRT downloads fail against it. RustFS
+scenarios prove nothing, and aws-cli's CRT downloads fail against it. RustFS
 answers as real S3 does on more surfaces than Silo and is further on two
 (G9, G15), so it became the dev stack. It is pinned to 1.0.2 because its 1.0
 release (2026-09-16) is recent.

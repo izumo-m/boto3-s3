@@ -9,7 +9,7 @@ everything the transfer pipeline raises is rc 1 (``<kind> failed:`` per
 item, one ``fatal error:`` for run-killers - a non-integer
 ``--expected-size`` and a missing stdin included), and a warnings-only run
 exits 2. The case-conflict advisories are uncounted NOTICEs that print
-even under --quiet (aws's direct stderr prints).
+even under --quiet (aws-cli's direct stderr prints).
 """
 
 from __future__ import annotations
@@ -145,7 +145,7 @@ class TestUsageErrors:
         assert "Unable to load paramfile" in capsys.readouterr().err
 
     def test_plain_sse_c_key_passes_through_verbatim(self, tmp_path: Path) -> None:
-        # aws sends an arbitrary key string to the server untouched
+        # aws-cli sends an arbitrary key string to the server untouched
         # (no base64 decoding) - a malformed key is never a usage error.
         src = tmp_path / "a.txt"
         src.write_bytes(b"x")
@@ -172,7 +172,7 @@ class TestUsageErrors:
     def test_a_malformed_grant_is_refused_before_the_run(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str], direction: str
     ) -> None:
-        # A usage error on every route: aws finds it only as it maps the
+        # A usage error on every route: aws-cli finds it only as it maps the
         # first upload or copy (an in-flight fatal error, rc 1), and never on
         # a download, which maps no grants.
         local = tmp_path / "a.txt"
@@ -204,7 +204,7 @@ class TestUsageErrors:
         paths: list[str],
         dryrun: list[str],
     ) -> None:
-        # aws sends Bucket="" onward: each upload fails on its own (rc 1), a
+        # aws-cli sends Bucket="" onward: each upload fails on its own (rc 1), a
         # dryrun upload prints its line at rc 0, and a download or listing is
         # a fatal error (rc 1).
         local = tmp_path / "a.txt"
@@ -265,7 +265,7 @@ class TestPipelineErrors:
         # aws-cli's `_list_single_object` reads ContentLength and LastModified
         # by subscript, so a HEAD without one ends the run like an incomplete
         # listing entry does: a fatal error at rc 1 (measured against the
-        # pinned aws through a 127.0.0.1 fake). ETag is read with a default
+        # pinned `aws` through a 127.0.0.1 fake). ETag is read with a default
         # there, so its absence transfers.
         ctx, calls = _recording_ctx([head])
         rc = cli.main(["cp", "s3://b/a", str(tmp_path / "x")], ctx=ctx)
@@ -535,7 +535,7 @@ class TestStreaming:
     def test_stdin_upload_to_prefix_appends_the_dash_basename(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # aws's stream destination naming appends the source's
+        # aws-cli's stream destination naming appends the source's
         # basename - literally "-" - when the destination takes the name.
         monkeypatch.setattr("sys.stdin", _StdinShim(b"x"))
         ctx, calls = _recording_ctx([{}])
@@ -556,7 +556,7 @@ class TestStreaming:
         # The hint must reach the engine: a stream cannot be sized up front,
         # so only --expected-size can push it over the multipart threshold
         # (default 8 MiB). The actual bytes stay tiny - the decision is made
-        # from the hint alone, exactly aws's use of expected-size.
+        # from the hint alone, exactly aws-cli's use of expected-size.
         monkeypatch.setattr("sys.stdin", _StdinShim(b"foo\n"))
         ctx, calls = _recording_ctx([{"UploadId": "u"}, {"ETag": '"p1"'}, {}])
         rc = cli.main(
@@ -572,7 +572,7 @@ class TestStreaming:
     def test_expected_size_non_integer_is_a_fatal_error(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws converts with a bare int() at submit time -> rc 1
+        # aws-cli converts with a bare int() at submit time -> rc 1
         # ("fatal error: invalid literal ..."), not the parse-time 255.
         monkeypatch.setattr("sys.stdin", _StdinShim(b"x"))
         ctx, _ = _recording_ctx([])
@@ -584,7 +584,7 @@ class TestStreaming:
     def test_expected_size_non_integer_dryrun_stays_zero(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # A dryrun never reaches the submit-time int(): aws branches to the
+        # A dryrun never reaches the submit-time int(): aws-cli branches to the
         # dryrun record before building the live subscribers (measured:
         # `cp - s3://b/k --expected-size abc --dryrun` is rc 0).
         monkeypatch.setattr("sys.stdin", _StdinShim(b"x"))
@@ -601,7 +601,7 @@ class TestStreaming:
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        # aws wraps the whole pipeline in CommandResultRecorder.__exit__, which
+        # aws-cli wraps the whole pipeline in CommandResultRecorder.__exit__, which
         # converts ANY escaping exception into "fatal error: ..." rc 1 (e.g. a
         # RecursionError from a pathologically deep tree). The run-span catch
         # must be that broad - the dispatcher's 255 is for pre-pipeline errors.
@@ -623,7 +623,7 @@ class TestStreaming:
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        # A Ctrl-C inside the pipeline span is aws's cancelled run - rc 1
+        # A Ctrl-C inside the pipeline span is aws-cli's cancelled run - rc 1
         # with one `cancelled: ctrl-c received` line (measured mid-sync on
         # the pinned 2.36.40), never the dispatcher backstop's 130, which
         # stays for the pre-pipeline spans (test_exit_codes). The rc is the
@@ -648,7 +648,7 @@ class TestStreaming:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         # --quiet suppresses the cancelled line like the fatal-error line
-        # (aws attaches no result printer under --quiet); the rc stays 1.
+        # (aws-cli attaches no result printer under --quiet); the rc stays 1.
         (tmp_path / "a.txt").write_bytes(b"x")
 
         def interrupt(*_args: object, **_kwargs: object) -> object:
@@ -664,7 +664,7 @@ class TestStreaming:
     def test_expected_size_non_integer_ignored_off_the_stream_route(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        # aws only converts --expected-size on the streaming-upload route; on a
+        # aws-cli only converts --expected-size on the streaming-upload route; on a
         # plain (non-stream) upload the value is untouched and ignored, so a
         # non-integer must not abort the transfer (rc 0, PutObject still issued).
         monkeypatch.chdir(tmp_path)
@@ -933,7 +933,7 @@ class TestCaseConflict:
     def test_notice_prints_even_under_quiet(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws prints these advisories with a direct uni_print that bypasses
+        # `aws` prints these advisories with a direct uni_print that bypasses
         # the (absent, under --quiet) result printer.
         monkeypatch.chdir(tmp_path)
         ctx, _ = _recording_ctx(
@@ -971,7 +971,7 @@ class TestS3ExpressCaseConflict:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # The rejection fires before any request: the recording client must
-        # stay uncalled, and the destination directory is not created (aws
+        # stay uncalled, and the destination directory is not created (aws-cli
         # creates it before this check and leaves it behind).
         monkeypatch.chdir(tmp_path)
         ctx, calls = _recording_ctx([])
@@ -1010,7 +1010,7 @@ class TestS3ExpressCaseConflict:
         captured = capsys.readouterr()
         assert rc == 0
         assert "warning: Recursive copies/moves" in captured.err
-        # aws emits this via uni_print with NO trailing newline (measured); the
+        # `aws` emits this via uni_print with NO trailing newline (measured); the
         # warning is the only thing on stderr for this empty listing.
         assert captured.err.endswith("s3-case-insensitivity.html.")
         assert [c.operation for c in calls] == ["ListObjectsV2"]

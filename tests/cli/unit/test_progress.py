@@ -1,6 +1,6 @@
 """``TransferPrinter``: aws-style result lines, the ``\\r`` protocol, suppression.
 
-The printable shapes are pinned against aws's output: result
+The printable shapes are pinned against `aws`'s output: result
 lines render local sides cwd-relative (``./a.txt``), progress statements are
 left-justified over the previous one and end with ``\\r``, and a following
 result line blots the progress out with padding before its newline.
@@ -54,8 +54,8 @@ def _progress(key: str, done: int, total: int | None) -> TransferProgress:
 
 @skip_without_pthread_kill
 class TestFinishInterrupted:
-    """A Ctrl-C landing in finish() - past the run, where aws's recorder waits
-    for its printer thread - escapes once the printer is done (measured: aws
+    """A Ctrl-C landing in finish() - past the run, where aws-cli's recorder waits
+    for its printer thread - escapes once the printer is done (measured: `aws`
     writes every queued line and exits 130)."""
 
     def _slow_printer(self, monkeypatch: pytest.MonkeyPatch, count: int) -> TransferPrinter:
@@ -118,7 +118,7 @@ class TestFinishInterrupted:
     ) -> None:
         # Whatever the run ended with, the interrupt is the dispatcher's 130
         # (and its newline) rather than the run span's rc 1 - after the run's
-        # own closing line, which aws's printer thread still writes (measured:
+        # own closing line, which aws-cli's printer thread still writes (measured:
         # a mid-run Ctrl-C and one in the drain print `cancelled:` and exit
         # 130).
         from boto3_s3 import BatchError
@@ -167,7 +167,7 @@ class TestResultLines:
         assert capsys.readouterr().out == f"upload: .{os.sep}a.txt to s3://b/k\n"
 
     def test_stream_token_renders_verbatim(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # The stream endpoint token "-" is not a local path: aws prints
+        # The stream endpoint token "-" is not a local path: `aws` prints
         # `upload: - to s3://...`, never a cwd-relative `<cwd>/-`.
         with TransferPrinter() as printer:
             printer.on_result(_result(OpOutcome.SUCCEEDED, src="-", dest="s3://b/k"))
@@ -204,7 +204,7 @@ class TestResultLines:
         assert (captured.out, captured.err) == ("", "")
 
     def test_cancelled_is_silent(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # aws surfaces only the run's single fatal line for a cancellation
+        # aws-cli surfaces only the run's single fatal line for a cancellation
         # (measured live: a fatal mid-listing prints zero per-item lines for
         # the cancelled set).
         with TransferPrinter() as printer:
@@ -215,7 +215,7 @@ class TestResultLines:
     def test_records_after_a_cancelled_one_still_print(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws's ResultProcessor goes silent after the first error result, so
+        # aws-cli's ResultProcessor goes silent after the first error result, so
         # a failure settling after the cancel there is never shown. Every
         # outcome is reported here: a failure line keeps its cause, and a
         # success that completed (an mv whose source is gone) keeps its line.
@@ -241,7 +241,7 @@ class TestResultLines:
         # A queued-then-cancelled transfer closes its meter share like a
         # failed one, so the byte progress still reaches the expected total -
         # through the failed-bytes counter, which the meter displays but the
-        # transfer speed leaves out (aws's split).
+        # transfer speed leaves out (aws-cli's split).
         with TransferPrinter() as printer:
             printer.on_progress(_progress("a", 0, 10))  # queued
             printer.on_result(_result(OpOutcome.CANCELLED, key="a", error=RuntimeError("fatal")))
@@ -308,7 +308,7 @@ class TestCarriageReturnProtocol:
     def test_padding_holds_the_longest_statement_since_the_last_result(
         self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # aws records the *padded* width (results.py: len(statement) - 1 of an
+        # aws-cli records the *padded* width (results.py: len(statement) - 1 of an
         # already-padded statement), so once a statement shrinks - here
         # "1000 Bytes" becoming "1.0 KiB" - the width stays at the longest one
         # painted since the last result line, and the result line is padded to
@@ -337,7 +337,7 @@ class TestCarriageReturnProtocol:
     def test_unknown_size_grows_the_expected_total_with_the_bytes(
         self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # With no known total, aws grows the expected total with the bytes as
+        # With no known total, aws-cli grows the expected total with the bytes as
         # they arrive (_update_ongoing_transfer_size_if_unknown), keeping the
         # meter in byte form with done == expected. Unreachable from the CLI
         # today (its only sizeless route is streaming, which paints nothing),
@@ -354,7 +354,7 @@ class TestCarriageReturnProtocol:
     def test_size_known_mid_transfer_tops_up_the_expected_total(
         self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # aws tops the expected total up by total - progressed once a size
+        # aws-cli tops the expected total up by total - progressed once a size
         # arrives mid-transfer, so the per-delta additions are not counted
         # twice and the denominator lands on the true sum.
         clock = iter([0.0, 1.0, 2.0, 4.0])
@@ -376,7 +376,7 @@ class TestCarriageReturnProtocol:
     def test_omitted_total_after_a_known_size_adds_nothing(
         self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # aws gates the unknown-size additions on the *stored* size
+        # aws-cli gates the unknown-size additions on the *stored* size
         # (_update_ongoing_transfer_size_if_unknown runs only while it is
         # None), so a notification that omits an already-known total must not
         # grow the expected total again.
@@ -396,7 +396,7 @@ class TestCarriageReturnProtocol:
     def test_speed_is_not_computed_from_a_zero_elapsed_clock(
         self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # aws recomputes the rate only on a strictly-later timestamp
+        # aws-cli recomputes the rate only on a strictly-later timestamp
         # (ResultRecorder guards `result.timestamp > self.start_time`), so a
         # coarse clock's first paint shows the initial 0 Bytes/s. Dividing by
         # a clamped epsilon instead would paint a nonsense multi-GiB/s figure
@@ -415,7 +415,7 @@ class TestCarriageReturnProtocol:
     def test_notice_prints_raw_and_leaves_the_meter_width(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws uni_prints the case-conflict advisories straight to stderr,
+        # aws-cli uni_prints the case-conflict advisories straight to stderr,
         # bypassing its printer: they are neither padded to the meter's width
         # nor allowed to reset it, so the next result line still blots the
         # meter out.
@@ -438,7 +438,7 @@ class TestCarriageReturnProtocol:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # A cp/mv upload/copy 412-skipped under --no-overwrite is queued
-        # (on_queued counts it), then SKIPPED. The meter must reconcile it (aws
+        # (on_queued counts it), then SKIPPED. The meter must reconcile it (aws-cli
         # subtracts files_skipped) so "remaining" reaches 0 and _inflight clears.
         with TransferPrinter() as printer:
             for key in ("a", "b"):
@@ -464,7 +464,7 @@ class TestCarriageReturnProtocol:
         # sync's deletes ride on_result alone (no queue-time progress signal),
         # so each terminal joins the expected total as it finishes - the
         # meter's "remaining" stays non-negative and the file total counts
-        # deletes, as aws's queued delete results do.
+        # deletes, as aws-cli's queued delete results do.
         with TransferPrinter() as printer:
             printer.on_progress(_progress("c", 0, 10))  # one real, queued transfer
             for key in ("d1", "d2", "d3"):
@@ -543,7 +543,7 @@ class TestPrinterThread:
         self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # A closed pipe (BrokenPipeError on write) must not kill the drain,
-        # and drops only the lines bound for it: aws's ResultProcessor goes on
+        # and drops only the lines bound for it: aws-cli's ResultProcessor goes on
         # past each handler's failure, so the failure line stderr can still
         # take is written (measured: stdout at /dev/full, a closed pipe or
         # fd 1 closed). The rc inputs - counted on the worker side - are
@@ -617,7 +617,7 @@ class TestProgressAccounting:
     def test_speed_anchors_at_first_progress_not_construction(
         self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # aws anchors the transfer-speed denominator at the first queued result,
+        # aws-cli anchors the transfer-speed denominator at the first queued result,
         # not at printer construction (results.py _record_queued_result).
         # Construction reads no clock; the first on_progress sets the anchor, and
         # the speed uses (paint_time - first_progress_time).
@@ -639,7 +639,7 @@ class TestProgressAccounting:
         # A run whose tail records are SKIPPED (cp/mv --no-overwrite 412 skips
         # paint nothing and do not reset the padding) would leave the last
         # \r-terminated meter on screen. finish() blots it out with a blank
-        # padded line ending in \r (aws _clear_progress_if_no_more_expected...).
+        # padded line ending in \r (aws-cli _clear_progress_if_no_more_expected...).
         with TransferPrinter() as printer:
             printer.on_progress(_progress("a", 0, 10))  # queued
             printer.on_progress(_progress("b", 0, 10))  # queued
@@ -656,10 +656,10 @@ class TestProgressAccounting:
     def test_failed_backfills_untransferred_remainder(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws adds a failed file's untransferred remainder to the meter
+        # aws-cli adds a failed file's untransferred remainder to the meter
         # (bytes_failed_to_transfer) so byte progress still reaches the expected
         # total. a failed at 3/10 contributes its missing 7 bytes - kept in its
-        # own counter, since aws displays it but keeps it out of the speed.
+        # own counter, since aws-cli displays it but keeps it out of the speed.
         with TransferPrinter() as printer:
             printer.on_progress(_progress("a", 0, 10))  # queued
             printer.on_progress(_progress("b", 0, 10))  # queued

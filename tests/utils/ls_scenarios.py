@@ -73,7 +73,7 @@ SCENARIOS: tuple[LsScenario, ...] = (
         _TREE,
     ),
     LsScenario("ls_page_size", ("ls", f"s3://{BUCKET_TOKEN}/pg/", "--page-size", "5"), _PAGED),
-    # Key given but nothing matches -> rc 1 (aws _check_no_objects).
+    # Key given but nothing matches -> rc 1 (aws-cli _check_no_objects).
     LsScenario("ls_empty_prefix", ("ls", f"s3://{BUCKET_TOKEN}/no-such-prefix/")),
     # Bucket given without key -> rc 0 even when empty.
     LsScenario("ls_bucket_empty", ("ls", f"s3://{BUCKET_TOKEN}")),
@@ -106,7 +106,7 @@ SCENARIOS: tuple[LsScenario, ...] = (
         expected_stderr_tokens_aws=("InvalidArgument",),
     ),
     # A non-integer page size dies in the CLI's own int() conversion -> rc
-    # 255 on both sides (aws's bare int() escapes to its *general* handler,
+    # 255 on both sides (aws-cli's bare int() escapes to its *general* handler,
     # not the 252 usage path). No server contact, so it
     # replays on moto unchanged.
     LsScenario(

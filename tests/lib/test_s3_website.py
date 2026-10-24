@@ -6,7 +6,7 @@ aws-cli parity facts asserted here (aws-cli WebsiteCommand,
 - ``--index-document`` -> ``IndexDocument.Suffix``, ``--error-document`` ->
   ``ErrorDocument.Key``; unset ones are omitted, and with neither set an
   **empty** configuration is sent (the server rejects it, not the client);
-- the library uses only the bucket of the target (permissive; aws's
+- the library uses only the bucket of the target (permissive; aws-cli's
   pass-the-key-as-bucket-name 252 is the CLI layer's job);
 - no local catch: a single-call operation raising category errors directly,
   never BatchError - NoSuchBucket maps to NotFoundError with the
@@ -76,13 +76,13 @@ class TestWebsite:
         }
 
     def test_neither_sends_empty_configuration(self) -> None:
-        # aws sends the empty dict and lets the server reject it.
+        # aws-cli sends the empty dict and lets the server reject it.
         client = _FakeWebsiteClient()
         S3().website(_storage("s3://bucket", client))
         assert client.calls == [{"Bucket": "bucket", "WebsiteConfiguration": {}}]
 
     def test_key_part_is_ignored(self) -> None:
-        # Permissive library: only the bucket is used; aws's strict path
+        # Permissive library: only the bucket is used; aws-cli's strict path
         # handling (key folded into the bucket name -> 252) is CLI-layer.
         client = _FakeWebsiteClient()
         S3().website(_storage("s3://bucket/some/key", client), index_document="i.html")

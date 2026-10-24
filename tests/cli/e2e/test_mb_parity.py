@@ -5,7 +5,7 @@ bucket of its own in the same start state (absent, or pre-created), runs,
 and is compared on rc (unconditionally - exit-code charter,
 design/overview.md section 3), sorted stdout (each side's bucket name
 masked), the end state ``(bucket_exists, remaining_keys)``, the tag set
-where the scenario asks, and stable stderr tokens. Goldens record the aws
+where the scenario asks, and stable stderr tokens. Goldens record the aws-cli
 side, end state included.
 """
 

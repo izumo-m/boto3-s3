@@ -6,7 +6,7 @@ plus a ``seed`` layout for the non-empty cases.
 
 Charter note (design/overview.md section 3): the exit code is compared for *every*
 scenario, unconditionally. rb's shape: usage errors (no scheme, a key part)
-are 252; a ``--force`` whose inner rm fails is **255** (aws's RuntimeError
+are 252; a ``--force`` whose inner rm fails is **255** (aws-cli's RuntimeError
 into the general handler); everything after delete_bucket starts is rc 1
 (``remove_bucket failed:``), never 254.
 """
@@ -42,7 +42,7 @@ class RbScenario(BaseScenario):
 
 SCENARIOS: tuple[RbScenario, ...] = (
     RbScenario("rb_basic", ("rb", f"s3://{BUCKET_TOKEN}"), pre_create=True),
-    # A trailing-slash-only URI has an empty key and passes aws's key check.
+    # A trailing-slash-only URI has an empty key and passes aws-cli's key check.
     RbScenario("rb_trailing_slash", ("rb", f"s3://{BUCKET_TOKEN}/"), pre_create=True),
     # --- usage errors (rc 252) -----------------------------------------------
     RbScenario(
@@ -82,7 +82,7 @@ SCENARIOS: tuple[RbScenario, ...] = (
         pre_create=True,
         seed=_TREE,
     ),
-    # The inner rm fails (NoSuchBucket on the listing) -> rc 255 with aws's
+    # The inner rm fails (NoSuchBucket on the listing) -> rc 255 with aws-cli's
     # fixed sentence; the bucket delete is never attempted.
     RbScenario(
         "rb_force_nonexistent",

@@ -70,7 +70,7 @@ logger = logging.getLogger(__name__)
 # the cap on read parts buffered for the disk writer). s3transfer defaults it
 # to 1000 and aws-cli runs there - no ``[s3]`` key maps to it - while boto3
 # alone dials the same default down to 100, which would leave a slow disk
-# holding a tenth of aws's readahead. The buffered ceiling is this count x
+# holding a tenth of aws-cli's readahead. The buffered ceiling is this count x
 # ``io_chunksize`` (~256 MiB at the default 256 KiB) across the manager's
 # downloads - one shared io executor serves them all - and is reached only when
 # the disk lags the network; pass ``max_io_queue=100`` for boto3's ceiling.

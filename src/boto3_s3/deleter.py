@@ -596,7 +596,7 @@ class S3Deleter:
             # outcome - a delete or a failure (a wrong bucket fails every key).
             # Measured: a
             # server failing the first three deletes with InternalError, or
-            # with Throttling, leaves aws deleting both keys of a two-key run
+            # with Throttling, leaves aws-cli deleting both keys of a two-key run
             # at rc 0, and a single 429 fails one key and deletes the other.
             # The re-send goes out whatever the retry policy - the batch was
             # no key's own request - so a key gets more attempts than aws-cli

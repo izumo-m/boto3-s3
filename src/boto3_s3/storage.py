@@ -335,7 +335,7 @@ class Storage(abc.ABC):
         natural order.
         The built-ins always sort - S3's listing is byte-ordered (preserved across
         pages; S3 Express directory buckets are the exception, and ``sync``
-        rejects them for it), the local walk sorts for aws parity - so they
+        rejects them for it), the local walk sorts for aws-cli parity - so they
         ignore the flag.
         ``key`` itself is the full, ``/``-separated identifier; stamp its relative
         form as ``compare_key`` on every entry this producer yields.
@@ -427,7 +427,7 @@ class Storage(abc.ABC):
         - present -> a ``FileInfo`` whose ``compare_key`` is the
           entry's basename (``kind`` reflects the entry: a local directory
           target resolves as a DIRECTORY-kind entry that a transfer later
-          fails on, like aws - and, looked up as the location itself
+          fails on, like aws-cli - and, looked up as the location itself
           (``key=""``), named as aws-cli names it, with a trailing separator,
           so its ``compare_key`` is ``""``);
         - **definitively absent** (an S3 ``404``, a local ``ENOENT`` / ``ENOTDIR``)

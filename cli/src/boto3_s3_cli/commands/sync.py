@@ -21,7 +21,7 @@ class SyncCommand(Command):
     def configure(self, parser: argparse.ArgumentParser) -> None:
         """Add the ``sync`` arguments: the shared transfer surface without
         ``--recursive`` / ``--expected-size`` (sync is inherently recursive
-        and has no streaming form - aws rejects both as unknown options),
+        and has no streaming form - aws-cli rejects both as unknown options),
         plus the strategy flags."""
         transferargs.add_transfer_arguments(parser, include_recursive=False)
         parser.add_argument(
@@ -49,7 +49,7 @@ class SyncCommand(Command):
         non-recursive cp commands" - cp-worded even here), the checksum /
         SSE-C pairings 252, and an S3 Express directory bucket or one of
         its access points on either side 252 ("Cannot use sync command with
-        a directory bucket."; aws refuses the bucket only). A missing local
+        a directory bucket."; aws-cli refuses the bucket only). A missing local
         source, and one whose root the walk would skip (a file, an
         unreadable directory, a symlink under ``--no-follow-symlinks``),
         exit 255; the
@@ -66,7 +66,7 @@ class SyncCommand(Command):
         if any(transferargs.lists_unordered(path) for path in (src, dest)):
             # aws-cli's _validate_not_s3_express_bucket_for_sync: directory-bucket
             # listings are not lexicographic, so sync rejects them outright.
-            # aws tests only the --x-s3 suffix and so runs a sync through an
+            # aws-cli tests only the --x-s3 suffix and so runs a sync through an
             # access point of a directory bucket (--xa-s3), whose listing is
             # just as unordered: --delete then removes destination keys the
             # source has too. That is refused here as well (a deliberate
@@ -84,7 +84,7 @@ class SyncCommand(Command):
 
         # One filter applied to both sides by S3.sync (design/sync.md section
         # 1): each side's entries carry their path below that side's base, as
-        # aws joins every pattern onto each side's rootdir.
+        # aws-cli joins every pattern onto each side's rootdir.
         item_filter = filters.compile_filter(args.filters)
         transfer_config = transferargs.build_transfer_engine(ctx, s3, client, paths_type=paths_type)
         # After the engine is resolved: the upload checksum default is the
@@ -97,7 +97,7 @@ class SyncCommand(Command):
             ),
         )
         if head.dest_type == "local":
-            # The s3local destination aws's _validate_path_args creates, once
+            # The s3local destination aws-cli's _validate_path_args creates, once
             # every check above has passed (transferargs.create_local_dest_dir).
             transferargs.create_local_dest_dir(dest, operation="sync")
         printer = transferargs.build_printer(args, head.progress_frequency)

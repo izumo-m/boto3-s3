@@ -250,7 +250,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         # Both flags given, same size, local older: --size-only alone would skip
         # (equal size), but --exact-timestamps wins over --size-only, so the skew
         # triggers a download. The tree shows the remote body, distinguishing the
-        # two strategies' order (aws registers SizeOnly before ExactTimestamps, so
+        # two strategies' order (aws-cli registers SizeOnly before ExactTimestamps, so
         # the latter is applied last and wins).
         local_src={"dest/same.txt": b"zz\n"},
         local_mtimes={"dest/same.txt": -_DAY},
@@ -292,7 +292,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         # The dest walk warns (file-as-directory), then each download fails
         # with ENOTDIR; failures win the rc (1). On Windows the failure is
         # ENOENT instead (file-as-directory opens answer [Errno 2] there),
-        # and aws's warning line is not pinned - only its failure is.
+        # and aws-cli's warning line is not pinned - only its failure is.
         expected_stderr_tokens_ours=("File does not exist.", "Not a directory")
         if os.name != "nt"
         else ("File does not exist.", "[Errno 2]"),

@@ -71,7 +71,7 @@ class TestUsageErrors:
         capsys: pytest.CaptureFixture[str],
         paths: list[str],
     ) -> None:
-        # Before any listing, --dryrun or not: aws finds it only as it maps
+        # Before any listing, --dryrun or not: aws-cli finds it only as it maps
         # the first upload or copy, a fatal error at rc 1 (and rc 0 when
         # nothing needs transferring).
         monkeypatch.chdir(tmp_path)
@@ -87,7 +87,7 @@ class TestUsageErrors:
             ["sync", "s3://mybucket--use1-az4--x-s3/p", "s3://plain/p"],
             ["sync", "s3://plain/p", "s3://mybucket--use1-az4--x-s3/p"],
             ["sync", "s3://mybucket--use1-az4--x-s3", "dl"],
-            # An access point of a directory bucket: aws runs it (its test is
+            # An access point of a directory bucket: aws-cli runs it (its test is
             # --x-s3 only) and --delete then loses objects; refused here.
             ["sync", "s3://myap--use1-az4--xa-s3/p", "s3://plain/p"],
             ["sync", "s3://myap--use1-az4--xa-s3", "dl"],
@@ -100,7 +100,7 @@ class TestUsageErrors:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # chdir: aws (and this CLI, faithfully) pre-creates a local dest dir
+        # chdir: aws-cli (and this CLI, faithfully) pre-creates a local dest dir
         # during validation, before the directory-bucket rejection - keep the
         # "dl" byproduct out of the repo working tree.
         monkeypatch.chdir(tmp_path)
@@ -127,7 +127,7 @@ class TestGeneralErrors:
         assert str(missing) in capsys.readouterr().err
 
     def test_dest_dir_creation_failure_is_255(self, tmp_path: Path) -> None:
-        # aws creates the s3local dest dir during validation (before run); an
+        # aws-cli creates the s3local dest dir during validation (before run); an
         # OSError there is rc 255, not the transfer pipeline's rc 1. The dest's
         # parent is a regular file, so makedirs raises NotADirectoryError with
         # the built client still untouched.
@@ -149,7 +149,7 @@ class TestGeneralErrors:
     def test_a_file_as_a_directory_source_stops_the_run(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str], argv: list[str]
     ) -> None:
-        # The walk would skip the root, leaving an empty source - aws warns
+        # The walk would skip the root, leaving an empty source - aws-cli warns
         # (rc 2) and a sync --delete then empties the destination. Here the
         # run stops before it starts, like a missing source: nothing listed,
         # sent or deleted.
@@ -164,7 +164,7 @@ class TestGeneralErrors:
     def test_a_symlink_root_not_followed_stops_the_run(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws skips the root in silence (rc 0) and a --delete empties the
+        # aws-cli skips the root in silence (rc 0) and a --delete empties the
         # destination; here the run stops before anything is deleted.
         real = tmp_path / "real"
         real.mkdir()
@@ -219,7 +219,7 @@ class TestGeneralErrors:
         assert "cannot be walked as a directory" in capsys.readouterr().err
 
     def test_a_refused_run_leaves_no_destination_directory(self, tmp_path: Path) -> None:
-        # aws creates the destination in the middle of its validation and
+        # aws-cli creates the destination in the middle of its validation and
         # leaves it behind when a later check refuses the run (here an SSE-C
         # pairing a download cannot use); it is created only once every check
         # has passed.

@@ -5,7 +5,7 @@
 #
 #   source scripts/bench-env.sh
 #   uv sync --all-packages --locked    # provisions .venv-bench on first use
-#   scripts/install-awscli.sh          # pinned aws -> .venv-bench/bin
+#   scripts/install-awscli.sh          # pinned `aws` -> .venv-bench/bin
 #   source scripts/dev-env.sh
 #   uv run python -m benchmarks run
 #

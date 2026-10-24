@@ -243,7 +243,7 @@ class TestAliasedLocalDestination:
             transfer_config=_SERIAL,
             on_result=results.append,
         )
-        # aws deletes the file under whichever path the walk reaches first and
+        # aws-cli deletes the file under whichever path the walk reaches first and
         # never lists the other: one record, no failure, no walk warning.
         first = min(alias, "real")
         assert [(r.transfer_type, r.outcome) for r in results] == [

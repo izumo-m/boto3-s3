@@ -19,11 +19,11 @@ from boto3_s3_cli.commands.base import (
 
 
 class _AppendTagsAction(argparse.Action):
-    """Append one ``KEY VALUE`` pair, carrying aws's token count as a marker.
+    """Append one ``KEY VALUE`` pair, carrying aws-cli's token count as a marker.
 
     Stock ``append`` behavior (the value stays argparse's own shape - a list
     of two-item lists, which ``run`` unpacks as pairs) plus ``aws_nargs``:
-    aws declares TAGS with a token count, so both tokens are taken however
+    aws-cli declares TAGS with a token count, so both tokens are taken however
     they look (``mb --tags -k -v`` tags the bucket ``-k=-v``). The parser base
     class reads the marker and reproduces that on every supported Python
     (``cli._ParamValidationArgumentParser._match_argument``), which stock
@@ -31,7 +31,7 @@ class _AppendTagsAction(argparse.Action):
     token still fails the parse (252).
     """
 
-    # The count aws declares; not an argparse attribute.
+    # The count aws-cli declares; not an argparse attribute.
     aws_nargs: ClassVar[int] = 2
 
     def __call__(
@@ -74,25 +74,25 @@ class MbCommand(Command):
         path, a path that names no bucket, an S3 Express (``--x-s3``) bucket,
         a rejected ARN form - exit
         252 via ``main``; every failure of the create is rc 1 with one
-        ``make_bucket failed:`` line (aws catches every create_bucket
+        ``make_bucket failed:`` line (aws-cli catches every create_bucket
         exception locally, even request-time credential errors). The success
         line is past that catch: the bucket exists by then, so a stdout that
         cannot take the line is lost output (rc 255 with the error, like every
         command's), and a process without a stdout (``1>&-``) keeps rc 0 -
-        where aws's catch spans the line and reports the created bucket as an
+        where aws-cli's catch spans the line and reports the created bucket as an
         mb failure. The key part
-        of the path is silently dropped, exactly like aws. A client-construction
+        of the path is silently dropped, exactly like aws-cli. A client-construction
         failure (a bad ``--profile``, partial credentials, an empty region)
         reaches main's exit-code mapping (config -> 253, other botocore -> 255).
         """
         expand_positional_paramfile(args, "path", name="path", operation="mb")
         target: str = args.path
         if not target.startswith("s3://"):
-            # aws mb: S3 paths only -> rc 252.
+            # aws-cli's mb: S3 paths only -> rc 252.
             raise ValidationError(usage.bare_single_uri_usage(), operation="mb")
 
         # A path that names no bucket (`s3://`, `s3:///k`) is a usage error
-        # (252), where aws sends Bucket="" and reports an mb failure (rc 1).
+        # (252), where aws-cli sends Bucket="" and reports an mb failure (rc 1).
         bucket_part = target[len("s3://") :].partition("/")[0]
         refuse_bucketless(bucket_part, operation="mb")
 
@@ -100,13 +100,13 @@ class MbCommand(Command):
         client = s3.client()
 
         # Rejected ARN forms (S3 Object Lambda / Outposts bucket) raise
-        # ValidationError from S3Storage.validate -> rc 252, matching aws (the
+        # ValidationError from S3Storage.validate -> rc 252, matching aws-cli (the
         # check is deferred from the now non-raising construction).
         storage = S3Storage(target, client=client)
         storage.validate()
         if storage.bucket.endswith("--x-s3"):
             # botocore is_s3express_bucket on the ARN-aware bucket, ordered like
-            # aws (split_s3_bucket_key's ARN rejection runs first, inside
+            # aws-cli (split_s3_bucket_key's ARN rejection runs first, inside
             # validate); a slash-form accesspoint ARN whose name ends --x-s3 is
             # caught here where a naive partition on the first "/" would miss it.
             raise ValidationError("Cannot use mb command with a directory bucket.", operation="mb")
@@ -117,6 +117,6 @@ class MbCommand(Command):
             output.write_stderr(output.format_make_bucket_failed(target, exc) + "\n")
             return 1
         # The bucket exists from here, so the line is outside the failure
-        # catch (aws's spans it, reporting a created bucket as failed).
+        # catch (aws-cli's spans it, reporting a created bucket as failed).
         output.write_result_line(output.format_make_bucket(storage.bucket))
         return 0

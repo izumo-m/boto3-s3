@@ -88,8 +88,8 @@ class LsCommand(Command):
             line = output.format_entry(
                 info, recursive=args.recursive, human_readable=args.human_readable
             )
-            # uni_write (aws's uni_print): an unencodable key on a narrow
-            # console/pipe encoding must not abort the listing mid-way - aws
+            # uni_write (aws-cli's uni_print): an unencodable key on a narrow
+            # console/pipe encoding must not abort the listing mid-way - aws-cli
             # prints it with replacements and finishes rc 0.
             output.uni_write(sys.stdout, line + "\n")
             if info.kind is FileKind.FILE:

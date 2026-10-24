@@ -55,14 +55,14 @@ class TestCommandTable:
 
     def test_help_displays_the_subcommand_placeholder(self) -> None:
         # The displayed name is `<subcommand>`, matching what this command's
-        # level is called in aws (`aws s3 <subcommand>`).
+        # level is called in aws-cli (`aws s3 <subcommand>`).
         for parser in (cli._build_stage1_parser(), cli.build_parser()):
             help_text = parser.format_help()
             assert "<subcommand> ...\n" in help_text
             assert "<command>" not in help_text
 
     def test_no_parser_declares_a_help_option(self) -> None:
-        # Like aws, the `help` token is the only route to a help page: no
+        # Like aws-cli, the `help` token is the only route to a help page: no
         # parser carries a help option, so no usage line shows `[-h]` and no
         # option list shows `-h, --help`. Both trees' subparsers are covered
         # too, and the declared options are checked alongside the rendered

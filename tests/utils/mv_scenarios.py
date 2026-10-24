@@ -139,7 +139,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         mtime_key=("d/a.txt", "dest/out.txt"),
     ),
     CpScenario(
-        # aws filters a SINGLE-object mv too: the excluded source is neither
+        # aws-cli filters a SINGLE-object mv too: the excluded source is neither
         # transferred nor deleted - the bucket end state (golden) proves the
         # object survived, and dest/ stays empty. Guards the single-source
         # filter lane (an excluded mv source being deleted was the hazard).

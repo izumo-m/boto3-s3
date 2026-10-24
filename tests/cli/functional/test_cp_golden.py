@@ -169,7 +169,7 @@ class TestCpGlacierOnMoto:
 class TestEmptyCaBundleVariable:
     """An empty ``AWS_CA_BUNDLE`` beside a valid ``--ca-bundle``, as ``aws s3`` answers it.
 
-    aws refuses the variable only when it builds a client that reads it - an
+    aws-cli refuses the variable only when it builds a client that reads it - an
     assumed role's STS, SSO, the CRT serializer - so a static-credential run
     completes. The CLI checks every client its sessions build at that point,
     and marks them so the library's own guess at the environment, made for a

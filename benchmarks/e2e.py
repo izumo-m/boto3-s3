@@ -103,7 +103,7 @@ class E2EScenario:
     tmpfs-backed storage bounded. `verify` runs on both warmup results only -
     it guards against a run that silently did no work, which would otherwise
     record fake-fast timings. `top_level` marks argv for the program itself
-    (``--version``), where aws takes no ``s3`` token. `payload_bytes` is what
+    (``--version``), where `aws` takes no ``s3`` token. `payload_bytes` is what
     one invocation moves (transfer scenarios only); the report turns it into
     throughput.
     """
@@ -240,7 +240,7 @@ def _write_engine_config(workroot: Path, engine: str) -> Path:
 
     Same mechanism as the e2e test suite: pinning ``preferred_transfer_client``
     explicitly keeps the host's ``~/.aws/config`` tuning out and makes the
-    engine an explicit benchmark dimension for aws and boto3-s3 alike.
+    engine an explicit benchmark dimension for aws-cli and boto3-s3 alike.
     """
     config = workroot / f"aws-config-{engine}"
     config.write_text(f"[default]\ns3 =\n  preferred_transfer_client = {engine}\n")
@@ -253,7 +253,7 @@ def _invoke(
     """Run one side once: (wall-clock seconds, outcome, peak RSS in bytes or None)."""
     argv = scenario.make_argv(env, side)
     if env.engine == "crt" and not scenario.top_level:
-        # aws's CRT client reads use_ssl from the CLI argument only, so an
+        # aws-cli's CRT client reads use_ssl from the CLI argument only, so an
         # env-only AWS_ENDPOINT_URL_S3 makes it dial TLS to the dev stack's http
         # endpoint and fail (AWS_IO_SOCKET_CLOSED). Same workaround as the
         # e2e CRT parity lane (endpoint-fidelity T2): pass --endpoint-url
@@ -444,7 +444,7 @@ def build_scenarios(quick: bool, *, large_mb: int = DEFAULT_LARGE_MB) -> list[E2
         E2EScenario(
             name="startup_minimal",
             dimensions={},
-            # Both CLIs exit 1 on an empty listing (aws parity); accept 0 too
+            # Both CLIs exit 1 on an empty listing (aws-cli parity); accept 0 too
             # so the probe never breaks on an endpoint that differs there.
             ok_rcs=frozenset({0, 1}),
             make_argv=lambda env, _side: ["ls", env.s3_url(env.s3_prefix("nothing"))],

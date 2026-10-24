@@ -194,14 +194,14 @@ def _parse_s3_uri(uri: str) -> tuple[str, str]:
     listing), and ``"s3:///k"`` parses to an empty bucket. Access-point ARNs
     (plain and Outposts) stay whole in ``bucket`` - the ARN name may itself
     contain ``/`` (aws-cli's ``find_bucket_key``, ported as
-    ``S3Storage.split_bucket_key``; aws's own splitter first *blocks* the
+    ``S3Storage.split_bucket_key``; aws-cli's own splitter first *blocks* the
     unsupported ARN forms - ``block_unsupported_resources`` - and otherwise
     rejects nothing, while ours accepts everything and defers that same
     rejection to ``validate``).
     The strict checks - the
-    unsupported S3 Object Lambda / Outposts *bucket* ARN forms (aws's uniform
+    unsupported S3 Object Lambda / Outposts *bucket* ARN forms (aws-cli's uniform
     parse-time 252), and a key with
-    no bucket (whose aws handling varies per command - design/cli.md) - are
+    no bucket (whose aws-cli handling varies per command - design/cli.md) - are
     deferred to ``S3Storage.validate``, so construction
     itself never raises.
     """
@@ -215,7 +215,7 @@ def _parse_s3_uri(uri: str) -> tuple[str, str]:
 # it), and boto3-s3-cli on every client its sessions build: those sessions
 # hold each client the SDK builds behind them - the credential chain's STS
 # and SSO clients, the CRT request serializer - to the CA bundle check at the
-# point aws runs it, so checking the environment again would refuse runs aws
+# point aws-cli runs it, so checking the environment again would refuse runs `aws`
 # completes (static credentials beside a valid --ca-bundle).
 CA_BUNDLE_ENVIRONMENT_VETTED = "_boto3_s3_ca_bundle_environment_vetted"
 
@@ -244,7 +244,7 @@ def reject_empty_ca_bundle(client: Any, *, check_environment: bool = False) -> N
     *check_environment* is for a client the caller built and handed over,
     which may carry an explicit ``verify`` while those credential clients
     still resolve the chain: an empty or whitespace-only ``AWS_CA_BUNDLE``,
-    first in the chain, is refused as well. This is stricter than aws, which
+    first in the chain, is refused as well. This is stricter than aws-cli, which
     refuses it only when it builds a client that reads the value - those
     credential clients, the CRT engine's request serializer - so a static
     credential on the classic engine passes there. ``REQUESTS_CA_BUNDLE`` and a profile's
@@ -252,7 +252,7 @@ def reject_empty_ca_bundle(client: Any, *, check_environment: bool = False) -> N
     depends on the session the client came from, which it does not name. A
     client marked `CA_BUNDLE_ENVIRONMENT_VETTED` skips the environment: one
     `S3.client()` built, whose own value already answers for it, and one
-    boto3-s3-cli built, whose sessions check every client at aws's point.
+    boto3-s3-cli built, whose sessions check every client at aws-cli's point.
     """
     verify = getattr(
         getattr(getattr(client, "_endpoint", None), "http_session", None), "_verify", None
@@ -565,7 +565,7 @@ class S3Storage(Storage):
 
     @staticmethod
     def split_bucket_key(path: str) -> tuple[str, str]:
-        """Split a scheme-less S3 path into ``(bucket, key)`` (aws ``find_bucket_key``).
+        """Split a scheme-less S3 path into ``(bucket, key)`` (aws-cli's ``find_bucket_key``).
 
         Access-point ARNs (plain and Outposts) are recognized so the ARN - whose
         name may contain ``/`` - stays whole in ``bucket``. No validation happens
@@ -597,7 +597,7 @@ class S3Storage(Storage):
 
         aws-cli's ``_normalize_s3_trailing_slash``: a bucket-only URI with no
         trailing slash (``s3://bucket``, including a keyless access-point ARN)
-        reads as the bucket root ``s3://bucket/`` - the form aws validates and
+        reads as the bucket root ``s3://bucket/`` - the form aws-cli validates and
         prints. A bare ``s3://`` (service root) stays as is, and - like aws-cli's
         ``startswith('s3://')`` guard - a path that does not start with the scheme
         is returned unchanged (never sliced blindly). For raw strings only (the
@@ -652,7 +652,7 @@ class S3Storage(Storage):
         ``_normalize_s3_trailing_slash``), derived from the held state with no
         string round-trip: a keyless bucket reads as the bucket root
         ``s3://bucket/``, and the service root as ``s3:///`` however it was
-        typed. The form aws validates and prints - ``mv``'s same-path error
+        typed. The form aws-cli validates and prints - ``mv``'s same-path error
         shows it.
         """
         return _S3_SCHEME + self._normalized_path()
@@ -795,7 +795,7 @@ class S3Storage(Storage):
         """Reject the malformed resource forms the strict checks cover.
 
         Deferred from construction (``Storage.validate``): S3 Object Lambda
-        and Outposts *bucket* ARNs (s3api / s3control territory; aws's uniform
+        and Outposts *bucket* ARNs (s3api / s3control territory; aws-cli's uniform
         parse-time 252), and a key with no bucket (``"s3:///k"``; the CLI
         handles a bucket-less path itself before calling this). The library
         calls this before an operation and the CLI where its command checks
@@ -1167,7 +1167,7 @@ class S3Storage(Storage):
         ``AccessDeniedError`` and leaves it as it was. Missing parent
         directories are created.
 
-        Nothing stamps the local file's mtime - that is the transfer lanes' aws
+        Nothing stamps the local file's mtime - that is the transfer lanes' aws-cli
         parity behavior; here the caller holds the returned ``S3FileInfo`` and
         decides. That info describes the object as ``get_fileinfo``'s does: the
         full key, ``ContentLength`` as ``size``, ``LastModified`` as ``mtime``,

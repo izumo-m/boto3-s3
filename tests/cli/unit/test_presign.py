@@ -4,7 +4,7 @@ The rc shape is unlike every other subcommand (design/cli.md section 6): pure
 client-side computation means 1 and 254 cannot happen - 0 on success, 252 for
 a path that names no bucket (refused before signing), botocore's client-side
 parameter validation (an empty key) and usage errors, 255 for a non-integer
-``--expires-in`` (aws's bare ``int()`` conversion escapes to its general
+``--expires-in`` (aws-cli's bare ``int()`` conversion escapes to its general
 handler).
 """
 
@@ -60,7 +60,7 @@ class TestPresign:
         assert client.calls[0][2] == 120
 
     def test_negative_expires_in_passes_through(self) -> None:
-        # No range validation anywhere: aws signs -1 and S3 rejects at use.
+        # No range validation anywhere: aws-cli signs -1 and S3 rejects at use.
         client = _FakePresignClient()
         assert cli.main(["presign", "s3://b/k", "--expires-in", "-1"], ctx=client_ctx(client)) == 0
         assert client.calls[0][2] == -1
@@ -77,7 +77,7 @@ class TestPresignExitCodeShape:
     def test_the_crt_signers_refusal_is_255(self, capsys: pytest.CaptureFixture[str]) -> None:
         # An MRAP ARN signs SigV4a through the CRT signer, which refuses
         # --expires-in 0 / negative with a bare AssertionError; the library
-        # reports it as the value's failure, and aws's code for a refused
+        # reports it as the value's failure, and aws-cli's code for a refused
         # value is its general handler's 255.
         rc = cli.main(
             ["presign", "s3://b/k", "--expires-in", "0"], ctx=client_ctx(_RefusingSignerClient())
@@ -88,7 +88,7 @@ class TestPresignExitCodeShape:
         assert "expires_in" in err
 
     def test_non_integer_expires_in_exits_255(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # aws converts integer options with a bare int(); the ValueError hits
+        # aws-cli converts integer options with a bare int(); the ValueError hits
         # its *general* handler -> 255, before any client.
         def factory(_args: Any) -> Any:
             raise AssertionError("client factory must not be called")
@@ -109,7 +109,7 @@ class TestPresignExitCodeShape:
     def test_a_path_with_no_bucket_is_refused_before_signing(
         self, path: str, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # Refused before signing as a path that names no bucket; aws signs
+        # Refused before signing as a path that names no bucket; aws-cli signs
         # with Bucket="" (+ Key="k") and botocore refuses the empty name, 252
         # too.
         rc = cli.main(["presign", path], ctx=_real_client_ctx())
@@ -135,7 +135,7 @@ class TestPresignExitCodeShape:
 
 
 class TestPresignParamfileAndQuery:
-    """aws expands the positional path file:// at parse time and compiles
+    """aws-cli expands the positional path file:// at parse time and compiles
     --query there; a bad reference / expression is its 252 before any signing."""
 
     def test_positional_file_reference_is_expanded(self, tmp_path: Any) -> None:

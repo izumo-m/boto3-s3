@@ -134,7 +134,7 @@ def scan_walk_source(
     )
 
 
-# S3's multipart ceiling: 10000 parts x 5 GiB. aws warns (without skipping)
+# S3's multipart ceiling: 10000 parts x 5 GiB. aws-cli warns (without skipping)
 # for larger uploads; the size string is aws-cli's rendered constant
 # (human_readable_size(MAX_UPLOAD_SIZE)).
 _MAX_UPLOAD_SIZE = 5 * 1024**3 * 10000
@@ -391,7 +391,7 @@ class _DestinationMerge:
 class CaseConflictGate:
     """The ``--case-conflict`` decision for recursive downloads.
 
-    aws builds this from sync machinery (a destination listing paired by a
+    aws-cli builds this from sync machinery (a destination listing paired by a
     comparator): a source file the comparator pairs with a destination entry
     - the same compare key, **exact same case** - always transfers
     (``AlwaysSync`` - cp overwrites); everything else runs the conflict check
@@ -400,7 +400,7 @@ class CaseConflictGate:
     destination path exists (on a case-insensitive filesystem a
     case-variant satisfies ``os.path.exists``; an exact-case file that
     appeared after the membership pre-scan trips it on any filesystem). The
-    messages are aws's verbatim, emitted as uncounted NOTICE records (aws
+    messages are aws-cli's verbatim, emitted as uncounted NOTICE records (aws-cli
     prints them straight to stderr, bypassing its warned count).
     """
 
@@ -489,7 +489,7 @@ def upload_items(
     subclass that overrides ``scan`` is honored; a single (non-dir_op) source is
     a point op walked directly (the local analog of ``head_single`` - no
     directory check, so a directory source becomes an item the engine fails
-    with [Errno 21] Is a directory, rc 1, as aws fails it). The recursive listing
+    with [Errno 21] Is a directory, rc 1, as aws-cli fails it). The recursive listing
     stamps each entry's ``compare_key`` and applies ``item_filter`` inside the
     scan (``scan_pages``' contract); the single source, having no scan filter, is
     filtered here.
@@ -596,7 +596,7 @@ def single_object_filter_root(key: str) -> str:
 
     aws-cli's ``filters._get_s3_root`` for a non-``dir_op`` source: the key's
     parent directory, empty for a bucket-root key, and a folder-marker key
-    its own root. aws joins the pattern onto that parent with
+    its own root. aws-cli joins the pattern onto that parent with
     ``os.path.join``, which adds no separator after a parent that already
     ends in one, so the parent of ``a//b`` is ``a/`` (the entry is matched as
     ``/b``, not ``b``) and the parent of ``/b`` is ``""``. On Windows a
@@ -616,8 +616,8 @@ def s3_listing_filter(item_filter: FileFilter, base_key: str) -> FileFilter:
     """``item_filter`` as aws-cli applies it to a recursive listing of ``base_key``.
 
     A listing stamps each entry's key relative to its ``/``-normalized
-    ``Prefix``, which is aws's relative path for every base but one: on
-    Windows a key typed ending in a backslash, where aws's ``os.path.join``
+    ``Prefix``, which is aws-cli's relative path for every base but one: on
+    Windows a key typed ending in a backslash, where aws-cli's ``os.path.join``
     takes that backslash for a separator and joins the patterns flush, so it
     matches ``s3://b/pre\\`` + ``pre\\/x`` as ``/x``. The filter is shown a
     copy carrying that form there (the record keeps its own, which names the
@@ -631,9 +631,9 @@ def s3_listing_filter(item_filter: FileFilter, base_key: str) -> FileFilter:
 def local_walk_filter(item_filter: FileFilter, storage: Storage) -> FileFilter:
     """``item_filter`` as aws-cli applies it to a recursive walk of ``storage``.
 
-    A walk stamps each entry's path below its root, which is aws's relative
+    A walk stamps each entry's path below its root, which is aws-cli's relative
     path for every local root but a filesystem root (``/``, ``D:\\``,
-    ``\\\\srv\\share\\``): aws walks from ``local_format``'s ``abspath`` plus a
+    ``\\\\srv\\share\\``): aws-cli walks from ``local_format``'s ``abspath`` plus a
     separator, so its entries read ``//bin/x``, and joins the patterns onto
     ``abspath(path)``, which already ends in that separator - matching the
     entry as ``/bin/x``. The filter is shown a copy carrying that form there
@@ -805,7 +805,7 @@ def download_item_from_info(
         return None
     if options.get("no_overwrite") and local_path_exists(plan.dest, dest):
         # aws-cli's _warn_if_file_exists_with_no_overwrite: a silent
-        # skip (debug-level only on the aws side; rc stays 0).
+        # skip (debug-level only on the aws-cli side; rc stays 0).
         transferrer.skip(item)
         return None
     return item
@@ -876,10 +876,10 @@ def _list_objects(
         )
     if not src_storage.key:
         # Keyless non-recursive source (`cp s3://bucket .`, or a custom
-        # destination): aws lists the bucket and exact-matches nothing -> zero
+        # destination): aws-cli lists the bucket and exact-matches nothing -> zero
         # items, rc 0. The listing is issued, not skipped, because its failure
         # (notably NoSuchBucket / AccessDenied) is observable. A bucketless
-        # service root (`cp s3://`) takes this branch too: aws reaches
+        # service root (`cp s3://`) takes this branch too: aws-cli reaches
         # ListObjectsV2, whose empty Bucket dies at botocore's client-side
         # Invalid-bucket validation (measured, --debug: the failure fires at
         # before-parameter-build.s3.ListObjectsV2).
@@ -902,7 +902,7 @@ def _list_objects(
     )
     if item_filter is None:
         return infos
-    # aws applies --exclude/--include to the single-object routes too (its
+    # aws-cli applies --exclude/--include to the single-object routes too (its
     # filter pipeline stage runs regardless of dir_op); the recursive branch
     # filters inside the scan. An excluded mv source must not transfer - and
     # must not be deleted.
@@ -961,7 +961,7 @@ def head_single(
 ) -> Iterator[FileInfo]:
     """Resolve a single S3 source by HeadObject (aws-cli's `_list_single_object`).
 
-    A bare 404 is rewritten to a message naming the missing key (aws's
+    A bare 404 is rewritten to a message naming the missing key (aws-cli's
     ``Key "..." does not exist``); a copy source is headed with the
     copy-source SSE-C parameters. Like aws-cli's filegenerator, the HEAD
     carries ``ChecksumMode=ENABLED`` when the client resolves checksum
@@ -976,7 +976,7 @@ def head_single(
     # aws-cli's filegenerator sends ChecksumMode=ENABLED on the single-source
     # HeadObject whenever the client resolves checksum validation to
     # 'when_supported' (the botocore default since checksums GA), so the HEAD
-    # request matches aws even without an explicit --checksum-mode. setdefault
+    # request matches aws-cli even without an explicit --checksum-mode. setdefault
     # keeps an explicit mode; getattr guards botocore floors predating the knob.
     if getattr(client.meta.config, "response_checksum_validation", None) == "when_supported":
         params.setdefault("ChecksumMode", "ENABLED")
@@ -987,7 +987,7 @@ def head_single(
         # aws-cli's filegenerator rewrites only the bare HTTP-404 HeadObject
         # miss (`Error.Code == '404'` - HeadObject has no body, so S3 sends
         # the bare status). An endpoint that names a code (NoSuchBucket over
-        # HTTP 404) surfaces as-is in aws, so the translation passes through
+        # HTTP 404) surfaces as-is in aws-cli, so the translation passes through
         # untouched here too. Duck-typed: this module never imports botocore,
         # and a translated cause always carries the ClientError's dict.
         raw_response = getattr(exc.__cause__, "response", None)
@@ -1366,10 +1366,10 @@ def cp_case_gate(
 
     The destination tree is enumerated up front (through ``plan.dest.scan``),
     in the byte order sync's merge walks it, and the gate merges each source
-    key against that listing as it arrives - aws's reverse file generator +
+    key against that listing as it arrives - aws-cli's reverse file generator +
     comparator, step for step (`_DestinationMerge`), so a source listing out
-    of key order pairs, and mis-pairs, as aws's does. That reverse enumeration
-    is a full walk of the destination side: aws
+    of key order pairs, and mis-pairs, as aws-cli's does. That reverse enumeration
+    is a full walk of the destination side: aws-cli
     builds it with the run's ``follow_symlinks`` parameter, routes its
     warnings into the shared result queue (they count toward rc 2), and runs
     the ``--exclude`` / ``--include`` filters over it - so the membership scan
@@ -1379,7 +1379,7 @@ def cp_case_gate(
     stamped ``compare_key`` is the membership key. Scoped to
     ``s3local`` (a local-filesystem destination - the gate exists for
     case-insensitive filesystems but runs for every local destination
-    without probing the filesystem's case behavior, matching aws); a custom
+    without probing the filesystem's case behavior, matching aws-cli); a custom
     ``s3open`` destination owns its own key space, so it never scans the
     custom side here.
     """
@@ -1437,13 +1437,13 @@ def sync_entries(
     """One side's ``(compare_key, info)`` stream, visibility applied.
 
     A local side walks in aws-cli byte order with its warnings routed to
-    the transfer rollup (both sides warn, aws parity); an S3 side is the
+    the transfer rollup (both sides warn, aws-cli parity); an S3 side is the
     shared anchored listing (folder markers dropped). Each side reads its own
     source-config from its storage (a local side's ``follow_symlinks``, an S3
     side's ``page_size`` / ``fetch_owner``) via ``default_scan_options``, so both
     the source and the destination listing honor the storage each was built with.
     aws-cli likewise threads its listing knobs (page size, symlink policy)
-    onto the destination side; ``fetch_owner`` is ours alone - aws's transfer
+    onto the destination side; ``fetch_owner`` is ours alone - aws-cli's transfer
     path fetches no owner. Both sides'
     producers stamp ``compare_key`` (the merge-join axis), so ``item_filter`` reads
     it and the pair key is taken from it.
@@ -1456,7 +1456,7 @@ def sync_entries(
     (a symlinked directory aliasing its target), and a walk running ahead of the
     deletes would hand out the second path after the first delete already
     unlinked the file - an ENOENT delete failure, or the walk's own "File does
-    not exist." warning, where aws (which walks lazily and interleaves its
+    not exist." warning, where aws-cli (which walks lazily and interleaves its
     deletes) simply never lists it. The other sides keep the overlap: a source
     walk is not mutated by the run, an S3 destination's orphans go to the batched
     deleter and its listing is a server-side snapshot either way, and a custom

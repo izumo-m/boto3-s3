@@ -1,19 +1,19 @@
-"""aws's default request checksum, reproduced on the CLI's own clients.
+"""aws-cli's default request checksum, reproduced on the CLI's own clients.
 
-aws v2 ships a botocore whose ``DEFAULT_CHECKSUM_ALGORITHM`` is ``CRC64NVME``;
+aws-cli v2 ships a botocore whose ``DEFAULT_CHECKSUM_ALGORITHM`` is ``CRC64NVME``;
 pip botocore's is ``CRC32``. Neither tool's own code picks the algorithm:
 botocore stamps its default on every request whose operation names a
 ``ChecksumAlgorithm`` member (PutObject, UploadPart, PutObjectAnnotation,
 DeleteObjects, the bucket configuration puts) when the client's
 ``request_checksum_calculation`` is ``when_supported`` - the default - and
 the caller named none; s3transfer copies the same constant into an upload's
-arguments (its ``set_default_checksum_algorithm``), and aws's bundled
+arguments (its ``set_default_checksum_algorithm``), and aws-cli's bundled
 s3transfer has ``CRC64NVME`` written into its CRT module where pip's has
 ``CRC32``. So ``aws s3 cp`` leaves CRC64NVME full-object checksums on what it
 uploads and sends CRC64NVME on a delete or a bucket put, where a client left
 to pip botocore's default would send CRC32.
 
-The CLI reproduces aws's value in two places, both on the CLI side - the
+The CLI reproduces aws-cli's value in two places, both on the CLI side - the
 library keeps boto3's defaults (design/crt.md section 1):
 
 - `default_algorithm` / `crt_default_algorithm` feed the transfer options of
@@ -31,7 +31,7 @@ its botocore's default. The value applies only where botocore can compute it
 where botocore would have stamped a default at all (a ``when_required`` client
 sends one only on the operations that require a checksum - a delete batch, a
 bucket configuration put - and none on a classic-engine upload, on either
-tool; a presigned request gets none). The CRT engine is the exception: aws's
+tool; a presigned request gets none). The CRT engine is the exception: aws-cli's
 CRT module carries CRC64NVME as its own fallback and never reads the setting,
 so a CRT upload names it under either value (`crt_default_algorithm`).
 
@@ -45,12 +45,12 @@ from __future__ import annotations
 
 from typing import Any
 
-# aws v2's bundled botocore ``DEFAULT_CHECKSUM_ALGORITHM``.
+# aws-cli v2's bundled botocore ``DEFAULT_CHECKSUM_ALGORITHM``.
 AWS_DEFAULT_CHECKSUM_ALGORITHM = "CRC64NVME"
 
 
 def _computable_default() -> str | None:
-    """aws's default where the installed botocore can compute it, else None
+    """aws-cli's default where the installed botocore can compute it, else None
     (no awscrt, or one too old; botocore's own registry is the authority on
     that, so it is read rather than re-derived)."""
     from botocore import httpchecksum
@@ -62,7 +62,7 @@ def _computable_default() -> str | None:
 
 
 def default_algorithm(client: Any) -> str | None:
-    """aws's default for this client's classic-engine uploads, or None where
+    """aws-cli's default for this client's classic-engine uploads, or None where
     botocore would send no default checksum on a PutObject
     (``request_checksum_calculation`` other than ``when_supported``, or a
     botocore that predates the setting) or cannot compute CRC64NVME. The
@@ -75,13 +75,13 @@ def default_algorithm(client: Any) -> str | None:
 
 
 def crt_default_algorithm() -> str | None:
-    """aws's default for a CRT-engine upload: CRC64NVME whatever the client's
-    ``request_checksum_calculation`` says. aws's bundled s3transfer has the
+    """aws-cli's default for a CRT-engine upload: CRC64NVME whatever the client's
+    ``request_checksum_calculation`` says. aws-cli's bundled s3transfer has the
     constant written into its CRT module as the fallback for an upload that
     names no algorithm, and that module never consults the setting - only
     the classic manager's ``_add_operation_defaults`` is gated on
     ``when_supported`` - so a ``when_required`` CRT upload still trails a
-    CRC64NVME on aws (measured on the wire, single-part and multipart) where
+    CRC64NVME on `aws` (measured on the wire, single-part and multipart) where
     pip s3transfer's CRT module would trail its own CRC32. None where
     botocore cannot compute it: no awscrt, or `BOTO_DISABLE_CRT` hiding it
     from botocore (the CRT engine still runs then, and trails CRC32)."""
@@ -89,7 +89,7 @@ def crt_default_algorithm() -> str | None:
 
 
 def register(client: Any) -> None:
-    """Attach aws's default to one S3 client (`clientfactory.build_client`).
+    """Attach aws-cli's default to one S3 client (`clientfactory.build_client`).
 
     Stamps the algorithm on any request whose caller left the operation's
     ``requestAlgorithmMember`` unset and where botocore would then stamp its
@@ -99,7 +99,7 @@ def register(client: Any) -> None:
     falls back to for a large tag set) gets one
     under either ``request_checksum_calculation`` setting, every other one
     only under ``when_supported`` - so the CLI's deletes, bucket puts and annotation
-    writes carry what aws's do (a ``when_required`` ``website`` sends
+    writes carry what aws-cli's do (a ``when_required`` ``website`` sends
     CRC64NVME on both tools, measured). An explicit value
     (``--checksum-algorithm``, or the transfer default) is left alone.
     """

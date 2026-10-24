@@ -32,7 +32,7 @@ class WebsiteCommand(Command):
         """Put the website configuration and return an ``aws s3``-style exit code.
 
         Exit-code shape (design/cli.md section 6): no local catch - unlike
-        mb/rb, aws's WebsiteCommand lets PutBucketWebsite exceptions reach
+        mb/rb, aws-cli's WebsiteCommand lets PutBucketWebsite exceptions reach
         its general handler chain, so server rejections (NoSuchBucket, an
         endpoint refusing the configuration) are rc **254** through main's
         ClientError-cause mapping; a path that names no bucket is refused
@@ -41,7 +41,7 @@ class WebsiteCommand(Command):
         defaults to us-east-1), while client construction's botocore failures
         - a bad ``--profile``, partial credentials - are 255.
         """
-        # aws expands a paramfile on the positional, then indexes the value as
+        # aws-cli expands a paramfile on the positional, then indexes the value as
         # though it were still a one-element list, so its first character
         # becomes the bucket (a file holding "s3://mybucket" configures
         # bucket "s"), and a fileb:// one crashes. Neither is copied: both
@@ -56,10 +56,10 @@ class WebsiteCommand(Command):
                 ),
                 operation="website",
             )
-        # Both document options are expanded at parse time, as on aws.
+        # Both document options are expanded at parse time, as on `aws`.
         expand_option_paramfile(args, "index_document", operation="website")
         expand_option_paramfile(args, "error_document", operation="website")
-        # aws's _get_bucket_name: strip an optional s3://, strip ONE trailing
+        # aws-cli's _get_bucket_name: strip an optional s3://, strip ONE trailing
         # slash, then pass the remainder verbatim as the bucket name (no
         # key split - "b/k" fails botocore's bucket regex -> 252).
         if path.startswith("s3://"):
@@ -73,7 +73,7 @@ class WebsiteCommand(Command):
         # unsupported ARNs) before the rejection below.
         storage = transferargs.build_s3_storage(f"s3://{path}", client=client)
         if storage.bucket != path:
-            # aws hands the whole remainder to PutBucketWebsite as the Bucket
+            # aws-cli hands the whole remainder to PutBucketWebsite as the Bucket
             # and lets botocore's name regex reject it (rc 252). S3Storage
             # splits it instead, which would hide that rejection, so a
             # remainder the split did not keep whole as the bucket is refused
@@ -83,7 +83,7 @@ class WebsiteCommand(Command):
             # the split eats as the key separator. Every other name botocore
             # refuses - a slash-free bad one - survives the split intact and
             # is refused by botocore at the request. An accesspoint ARN is the
-            # whole bucket and passes through, exactly like aws.
+            # whole bucket and passes through, exactly like aws-cli.
             raise ValidationError(
                 usage.invalid_bucket_name_message(path),
                 operation="website",

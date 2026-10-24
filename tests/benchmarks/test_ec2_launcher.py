@@ -173,7 +173,7 @@ class TestUserData:
         assert "-T /var/log/bench-userdata.log" in finish
         assert "-T /run/bench-done" in finish
         assert "trap 'RC=\"failed-at-line-$LINENO\"' ERR" in script
-        # Ubuntu provisioning: apt with a lock timeout, unzip for the aws zip,
+        # Ubuntu provisioning: apt with a lock timeout, unzip for the aws-cli zip,
         # background updaters silenced first; no dnf anywhere.
         assert "dnf" not in script
         assert "apt-get -o DPkg::Lock::Timeout=300 -q install -y unzip" in script

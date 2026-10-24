@@ -58,18 +58,19 @@ botocore, Python or S3 wrote, is not.
 
 **Do not parse the console output.** Not because the wording differs:
 result lines, warnings and the error messages `aws`'s own code writes are
-aws's own (a few that `aws` words wrongly or misleadingly aside), with this command's name substituted for `aws` — the error prefix
+aws-cli's own (a few that `aws` words wrongly or misleadingly aside), with
+this command's name substituted for `aws` — the error prefix
 is `boto3-s3: [ERROR]:`, and usage lines and the help commands a usage error
-suggests read `boto3-s3 <subcommand>` where aws's read `aws s3 <subcommand>`
+suggests read `boto3-s3 <subcommand>` where `aws`'s read `aws s3 <subcommand>`
 (or `aws <command> <subcommand>`). The advice a message gives keeps naming the
-`aws` commands aws names: a missing-credentials report ends `You can
+`aws` commands aws-cli names: a missing-credentials report ends `You can
 configure credentials by running "aws login".`, a missing-region one points at
 `aws configure`, and the region advice `aws` adds to some of S3's messages at
 `aws s3api get-bucket-location`. This command has none of them, but both tools
 read the same config and credentials files, so following the advice fixes the
-run either way. That is exactly what makes parsing fragile: the wording is aws's
-to change, and it does change from one `aws` release to the next. Four of
-section 2's entries cover the text that differs on purpose — the progress
+run either way. That is exactly what makes parsing fragile: the wording is
+aws-cli's to change, and it does change from one `aws` release to the next. Four
+of section 2's entries cover the text that differs on purpose — the progress
 display, help pages and `--debug` traces, the `--version` line, and the
 history warning `aws` writes and this command has not. Text that botocore, Python or S3
 writes is reported as they write it, so it can read differently where their
@@ -211,9 +212,10 @@ that say outright that the run comes out differently, listed in section 1.
   where here it joins them as it completes. The numbers painted are exact
   either way, and the final counts agree.
 - **Help pages and `--debug` traces.** Help pages are laid out by this
-  command's own parser, not by aws's documentation renderer; the options, their
-  values and their meanings are the same, the typography is not. Credentials
-  appearing in `--debug` traces are masked here — `aws` prints them in full.
+  command's own parser, not by aws-cli's documentation renderer; the options,
+  their values and their meanings are the same, the typography is not.
+  Credentials appearing in `--debug` traces are masked here — `aws` prints them
+  in full.
 - **Output that cannot be written.** `aws` hands a help page to a pager
   process and exits 0 whatever becomes of it, while this command writes the
   page itself, so a page that cannot be written (`help > /dev/full`, or a
@@ -531,7 +533,7 @@ that say outright that the run comes out differently, listed in section 1.
   anything happens. This command loads none: the section is ignored, a broken
   entry is no error, and no plugin's handler runs.
 - **User-Agent.** Requests identify themselves as the installed
-  `Boto3`/`Botocore`, not as `aws-cli`, and carry none of aws's command
+  `Boto3`/`Botocore`, not as `aws-cli`, and carry none of aws-cli's command
   metadata (`md/command#s3.ls` and the like). Visible only to the server and
   in `--debug` traces; anything keying on the aws-cli User-Agent (bucket
   policies, access-log analytics) will classify these requests differently.

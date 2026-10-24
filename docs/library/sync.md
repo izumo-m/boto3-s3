@@ -44,7 +44,7 @@ callable receives a **pair** and returns whether to copy. `None` — the default
 means the `aws s3` rule. `True` re-copies everything, `False` never overwrites
 (additive only). Note that `None` and `False` are not the same thing.
 
-`create_filter` is the knob `aws s3` does not have: aws always creates.
+`create_filter` is the knob `aws s3` does not have: aws-cli always creates.
 
 ## 2. The default overwrite rule
 

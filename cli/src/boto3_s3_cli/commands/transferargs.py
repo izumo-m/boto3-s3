@@ -78,7 +78,7 @@ _STORAGE_CLASS_CHOICES = [
     "GLACIER_IR",
 ]
 
-# The free-string transfer options that take aws's paramfile resolution
+# The free-string transfer options that take aws-cli's paramfile resolution
 # (``expand_option_paramfile``). Each is a string-typed server parameter, so a
 # ``file://`` reference sends the file text and a ``fileb://`` one is refused
 # (252). The choices-validated options (acl / storage_class / sse / ... ) can't
@@ -115,7 +115,7 @@ def add_transfer_arguments(
     ``TRANSFER_ARGS`` + the metadata/copy-props/case-conflict/no-overwrite
     extras all three carry). ``--expected-size`` is cp-only (mv and sync
     reject streams); ``--recursive`` is cp/mv-only (sync is inherently
-    recursive, and aws rejects the flag as an unknown option there)."""
+    recursive, and aws-cli rejects the flag as an unknown option there)."""
     parser.add_argument("paths", nargs=2, help="source and destination location")
     parser.add_argument(
         "--dryrun",
@@ -213,7 +213,7 @@ def add_transfer_arguments(
         help="do not display transfer progress",
     )
     # No type=int (parse_integer_option converts at run() start -> 255
-    # like aws's bare int(), not argparse's 252).
+    # like aws-cli's bare int(), not argparse's 252).
     parser.add_argument(
         "--progress-frequency", default=0, help="minimum seconds between progress redraws"
     )
@@ -248,7 +248,7 @@ def add_transfer_arguments(
     )
     if include_expected_size:
         # No type=int: a non-integer fails the bare int() at submit time like
-        # aws (an in-pipeline fatal, rc 1 - not 255).
+        # aws-cli (an in-pipeline fatal, rc 1 - not 255).
         parser.add_argument(
             "--expected-size",
             help="size in bytes of a streamed upload, so multipart can be planned",
@@ -292,10 +292,10 @@ def add_transfer_arguments(
 
 
 def identify_type(path: str) -> str:
-    """``"s3"`` iff the path starts with ``s3://`` - the only S3 marker aws knows.
+    """``"s3"`` iff the path starts with ``s3://`` - the only S3 marker aws-cli knows.
 
     The same ``s3://`` test as aws-cli's ``FileFormat.identify_type`` (only the
-    classification rule is ported; aws also strips the prefix and returns a
+    classification rule is ported; aws-cli also strips the prefix and returns a
     ``(type, path)`` tuple). String classification is the CLI layer's job (the
     library planner receives resolved ``Storage`` objects and never re-parses a
     path).
@@ -317,9 +317,9 @@ def resolve_paramfile_values(args: argparse.Namespace, *, operation: str) -> tup
     ``expand_option_paramfile``). ``build_transfer_options`` consumes the
     resolved values verbatim.
     """
-    # The SSE-C key blobs take aws's paramfile on both prefixes: a ``fileb://``
+    # The SSE-C key blobs take aws-cli's paramfile on both prefixes: a ``fileb://``
     # loads raw bytes, a ``file://`` text, and anything else passes through
-    # verbatim - aws sends an arbitrary ``--sse-c-key`` string to the server
+    # verbatim - aws-cli sends an arbitrary ``--sse-c-key`` string to the server
     # untouched (no base64 decoding, rc 1 from the endpoint), so a malformed
     # key is *not* a usage error.
     if args.sse_c_key is not None:
@@ -333,7 +333,7 @@ def resolve_paramfile_values(args: argparse.Namespace, *, operation: str) -> tup
         expand_option_paramfile(args, option, operation=operation)
     progress_frequency = resolve_integer_option(args, "progress_frequency", operation=operation)
     # --progress-frequency's argparse default is 0, so its unset-None branch is
-    # unreachable; --page-size's default is None (nothing sent, aws parity).
+    # unreachable; --page-size's default is None (nothing sent, aws-cli parity).
     assert progress_frequency is not None
     page_size = resolve_integer_option(args, "page_size", operation=operation)
     return page_size, progress_frequency
@@ -342,18 +342,18 @@ def resolve_paramfile_values(args: argparse.Namespace, *, operation: str) -> tup
 def _resolve_grants(args: argparse.Namespace, *, operation: str) -> None:
     """Refuse a lone ``--grants`` paramfile reference, and a malformed grant (252).
 
-    aws unwraps a one-element list before its paramfile hook, so ``--grants
+    aws-cli unwraps a one-element list before its paramfile hook, so ``--grants
     file://g`` loads the file and its grant parser then walks the text
-    character by character (bytes int by int) - an aws bug this CLI does not
+    character by character (bytes int by int) - an aws-cli bug this CLI does not
     copy (docs/cli/aws-differences.md section 2). The reference is refused
     without being read. A multi-element ``--grants`` or a prefix-less value
     stays the list argparse produced, a ``file://`` element there a literal
-    grant as on aws.
+    grant as on `aws`.
 
     Each grant must then be ``<permission>=<grantee>`` with a known
     permission - the library's own check (``requestparams.validate_grants``),
     made here before the run, on every route, so a malformed value is a
-    command-line error naming the option. aws checks it only as it maps the
+    command-line error naming the option. aws-cli checks it only as it maps the
     first upload or copy - an in-flight fatal error after any deletes already
     sent, rc 0 when nothing needs transferring, never on a download. (The
     library makes the same check at the start of its operations, inside the
@@ -386,7 +386,7 @@ def resolve_metadata_option(args: argparse.Namespace, *, operation: str) -> None
 
     A ``file://`` whole-value reference loads the map text (252 on a missing
     file). A ``fileb://`` one is refused at 252 without being read
-    (``paramfile.load_text_argument``): aws loads the bytes and then crashes in
+    (``paramfile.load_text_argument``): aws-cli loads the bytes and then crashes in
     its shorthand parser (rc 255), and no bytes can be a map
     (docs/cli/aws-differences.md section 2).
     """
@@ -423,7 +423,7 @@ def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) ->
     the two integer coercions (``resolve_paramfile_values``: a bad paramfile
     is 252, a bad ``int()`` 255), the ``--metadata`` resolution (252,
     paramfile + shorthand) and cp's ``--expected-size`` paramfile (252) -
-    then the local-local pair gate (252) and aws's
+    then the local-local pair gate (252) and aws-cli's
     ``_normalize_s3_trailing_slash`` over both paths (``normalize_s3_path``:
     the refused ARN forms, 252, then the keyless trailing ``/``; the returned
     paths are the normalized ones), and last the S3 client build. Only this
@@ -433,7 +433,7 @@ def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) ->
     page_size, progress_frequency = resolve_paramfile_values(args, operation=operation)
     resolve_metadata_option(args, operation=operation)
     # cp-only (``--expected-size``); a no-op where the attribute is absent.
-    # A *string*-typed option in aws (no cli_type_name, unlike --page-size),
+    # A *string*-typed option in aws-cli (no cli_type_name, unlike --page-size),
     # so a fileb:// is refused (252) where the integer helper would run
     # int(b'5') and proceed. The stream route's int() coercion still runs at
     # submit time.
@@ -443,7 +443,7 @@ def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) ->
     dest_type = identify_type(dest)
     if src_type == "local" and dest_type == "local":
         raise ValidationError(usage.two_path_usage(operation), operation=operation)
-    # aws's add_paths runs _normalize_s3_trailing_slash right after the
+    # aws-cli's add_paths runs _normalize_s3_trailing_slash right after the
     # path-type check.
     src = normalize_s3_path(src, operation=operation)
     dest = normalize_s3_path(dest, operation=operation)
@@ -463,9 +463,9 @@ def classify_paths(args: argparse.Namespace, ctx: Context, *, operation: str) ->
 
 
 def normalize_s3_path(path: str, *, operation: str) -> str:
-    """One path argument as aws's ``_normalize_s3_trailing_slash`` leaves it.
+    """One path argument as aws-cli's ``_normalize_s3_trailing_slash`` leaves it.
 
-    aws runs this over cp / mv / sync / rm's paths right after the path-type
+    aws-cli runs this over cp / mv / sync / rm's paths right after the path-type
     check. Its ``find_bucket_key`` refuses the S3 Object Lambda and Outposts
     *bucket* ARNs first (rc 252, before a download directory is created), then a
     keyless ``s3://`` path gains the trailing ``/`` that makes it the bucket
@@ -498,7 +498,7 @@ def local_storage(path: str, *, follow_symlinks: bool = True) -> LocalStorage:
 
 
 def local_path_exists(path: str) -> bool:
-    """aws's missing-source probe (``os.path.exists``) on a command-line path.
+    """aws-cli's missing-source probe (``os.path.exists``) on a command-line path.
 
     The path is the CLI's text; the OS gets its own form of it
     (`textencoding.os_path`), and a name the encoding cannot represent names
@@ -514,7 +514,7 @@ def validate_streaming_paths(head: TransferPaths, *, recursive: bool, operation:
     """aws-cli's ``_validate_streaming_paths``: whether the run streams (252 if it may not).
 
     A ``-`` on either side is a stream, and only a non-recursive ``cp``
-    streams: anywhere else aws refuses it, with a message that names cp
+    streams: anywhere else aws-cli refuses it, with a message that names cp
     whatever the command (``mv`` and ``sync`` included).
     """
     if head.src != "-" and head.dest != "-":
@@ -532,7 +532,7 @@ def check_local_source(
 ) -> None:
     """aws-cli's missing-source check (``_validate_path_args``), then the walk's root check.
 
-    A local source that does not exist stops the run (aws's bare
+    A local source that does not exist stops the run (aws-cli's bare
     ``RuntimeError``, rc 255; a `NotFoundError` without a ``ClientError``
     cause maps to the same 255). A ``-`` source is a stream, not a path, and
     is not probed. A *recursive* run (``cp`` / ``mv`` ``--recursive``, every
@@ -559,7 +559,7 @@ def refuse_unwalkable_source(src: str, *, follow_symlinks: bool, operation: str)
     decides (``LocalFileGenerator.should_ignore_file`` on the root with a
     trailing separator): a file, a special or unreadable path, a path whose
     ``..`` after a symlinked directory names nothing, or a symlink under
-    ``--no-follow-symlinks``. aws skips such a root - with a warning, or in
+    ``--no-follow-symlinks``. aws-cli skips such a root - with a warning, or in
     silence for the symlink - and runs on an empty source, so a ``sync
     --delete`` then empties the destination. Here the run stops before it
     starts, like a missing source (`NotFoundError`, 255), before anything is
@@ -598,17 +598,17 @@ def refuse_unwalkable_source(src: str, *, follow_symlinks: bool, operation: str)
 
 
 def create_local_dest_dir(dest: str, *, operation: str) -> None:
-    """Pre-create the ``s3local`` destination directory (aws's ``_validate_path_args``).
+    """Pre-create the ``s3local`` destination directory (aws-cli's ``_validate_path_args``).
 
-    aws creates the destination whenever the operation is a ``dir_op``
+    aws-cli creates the destination whenever the operation is a ``dir_op``
     (``cp``/``mv`` ``--recursive`` and every ``sync``) - before the pipeline,
     so it is there even when nothing transfers, and a creation failure is the
     pre-pipeline rc 255, not the pipeline's rc 1. Pre-creating it outside
     ``finish_transfer``'s catch keeps that shape (the library still ensures
     the dir for direct callers; this makes it a no-op there). The commands
-    call it after every check of their own, where aws creates it in the middle
+    call it after every check of their own, where aws-cli creates it in the middle
     of its validation: a run refused before it starts leaves nothing behind.
-    The bare ``exists`` test then bare ``makedirs`` mirror aws; every
+    The bare ``exists`` test then bare ``makedirs`` mirror aws-cli; every
     ``translate_os_error`` category maps to the same rc 255. The path is the
     CLI's text, handed to the OS in its own form (`textencoding.os_path`).
     """
@@ -620,7 +620,7 @@ def create_local_dest_dir(dest: str, *, operation: str) -> None:
         textencoding.name_files_as_text(exc)
         raise translate_os_error(exc, operation=operation, key=None) from exc
     except ValueError as exc:
-        # A name the CLI's encoding cannot represent (aws's own makedirs
+        # A name the CLI's encoding cannot represent (aws-cli's own makedirs
         # fails the same way): the pre-pipeline 255 all the same.
         raise translate_os_error(exc, operation=operation, key=None) from exc
 
@@ -631,7 +631,7 @@ def validate_checksum_paths_type(
     """aws-cli's ``_validate_path_args``'s checksum/path-format pairing (252).
 
     ``--checksum-algorithm`` shapes what gets *written* (uploads, copies);
-    ``--checksum-mode`` validates what gets *read* (downloads). aws rejects
+    ``--checksum-mode`` validates what gets *read* (downloads). aws-cli rejects
     the wrong pairing for cp and mv alike.
     """
     if getattr(args, "checksum_algorithm", None) and paths_type not in ("locals3", "s3s3"):
@@ -689,12 +689,12 @@ def resolve_case_conflict(
     """The effective ``--case-conflict`` mode (aws-cli S3 Express branch).
 
     Conflicts cannot be detected on an S3 Express directory bucket
-    (listings are not lexicographic), so aws rejects ``skip`` / ``error``
+    (listings are not lexicographic), so aws-cli rejects ``skip`` / ``error``
     there (252), prints a standing warning for ``warn``, and runs the
     transfer without the comparator - modeled here by downgrading the
-    mode to ``ignore`` after the message. aws takes that branch for the
+    mode to ``ignore`` after the message. aws-cli takes that branch for the
     ``--x-s3`` suffix only; a source named through an access point of a
-    directory bucket (``--xa-s3``) lists just as unordered, and under aws
+    directory bucket (``--xa-s3``) lists just as unordered, and under `aws`
     its keys pair wrongly with the destination's - ``skip`` drops objects
     that conflict with nothing (measured on real S3) - so it takes the
     branch here too (docs/cli/aws-differences.md). ``recursive`` overrides
@@ -714,12 +714,12 @@ def resolve_case_conflict(
             "Valid values: `warn`, `ignore`.",
             operation=operation,
         )
-    # aws emits this via ``uni_print`` with no trailing newline (measured: the
+    # aws-cli emits this via ``uni_print`` with no trailing newline (measured: the
     # message ends at ``...html.`` and the next stderr output concatenates);
     # uni_write (under `output.write_stderr`) is that port - same bytes plus
     # the flush that keeps the newline-less warning from sitting in a
     # block-buffered stderr (a redirected run) until process exit, behind
-    # output aws prints after it.
+    # output `aws` prints after it.
     output.write_stderr(
         "warning: Recursive copies/moves from an S3 Express directory "
         "bucket to a case-insensitive local filesystem may result in "
@@ -735,7 +735,7 @@ def resolve_case_conflict(
 def lists_unordered(path: str) -> bool:
     """Whether *path* lists in no lexicographic order: a directory bucket or its access point.
 
-    aws special-cases an S3 Express directory bucket (``--x-s3``) wherever a
+    aws-cli special-cases an S3 Express directory bucket (``--x-s3``) wherever a
     step relies on ordered listings - sync, the ``--case-conflict`` check -
     and tests that suffix only. An access point of a directory bucket
     (``--xa-s3``) lists just as unordered, so it counts here too (a
@@ -745,17 +745,17 @@ def lists_unordered(path: str) -> bool:
 
 
 def default_upload_checksum(client: Any, paths_type: str, transfer_config: Any) -> str | None:
-    """aws's default request checksum for the uploads a run makes, else None.
+    """aws-cli's default request checksum for the uploads a run makes, else None.
 
-    Only an upload run (``locals3``) gets one: by default aws sends no
+    Only an upload run (``locals3``) gets one: by default aws-cli sends no
     checksum algorithm on a copy's CopyObject / UploadPartCopy (measured
-    against the pinned aws; an explicit ``--checksum-algorithm`` reaches them
+    against the pinned `aws`; an explicit ``--checksum-algorithm`` reaches them
     on both tools through the request mapping), and a download writes
     nothing. The value is `checksumdefault`'s, chosen by the engine
     *transfer_config* resolves to (`resolve_transfer_config`; the same
     `crtsupport.selects_crt` test the engine applies): the CRT engine's
     default holds whatever ``request_checksum_calculation`` says, the classic
-    engine's only under ``when_supported`` - aws's own split, measured on
+    engine's only under ``when_supported`` - aws-cli's own split, measured on
     the wire.
     """
     if paths_type != "locals3":
@@ -774,8 +774,8 @@ def build_transfer_options(
     """Translate parsed flags into the library's ``TransferOptions``.
 
     ``default_checksum_algorithm`` (`default_upload_checksum`) stands in for
-    an absent ``--checksum-algorithm`` the way aws's bundled botocore default
-    does for aws: named here, it reaches both transfer engines through the
+    an absent ``--checksum-algorithm`` the way aws-cli's bundled botocore default
+    does for aws-cli: named here, it reaches both transfer engines through the
     options, where the library would otherwise leave each engine to pip
     s3transfer's own CRC32.
     """
@@ -808,7 +808,7 @@ def build_transfer_options(
         if value is not None:
             # Paramfiles and shorthand are already resolved in place -
             # `classify_paths` runs at the head of every cp/mv/sync
-            # (aws resolves them at parse time), so the values here are
+            # (aws-cli resolves them at parse time), so the values here are
             # consumed verbatim.
             options[option] = value  # type: ignore[literal-required]
     if args.checksum_algorithm is None and default_checksum_algorithm is not None:
@@ -907,7 +907,7 @@ def resolve_transfer_config(ctx: Context, s3: S3, *, paths_type: str) -> Any:
 
     ``ctx.transfer_config`` (a test's determinism lever) supplies the settings
     it sets; the rest come from the profile's ``[s3]`` section of the exact
-    session bound to *s3*, and the engine is picked as aws picks it
+    session bound to *s3*, and the engine is picked as aws-cli picks it
     (`S3.resolve_transfer_config`). The first half of `build_transfer_engine`.
     """
     return s3.resolve_transfer_config(ctx.transfer_config, copy=paths_type == "s3s3")
@@ -916,12 +916,12 @@ def resolve_transfer_config(ctx: Context, s3: S3, *, paths_type: str) -> Any:
 def build_transfer_engine(
     ctx: Context, s3: S3, client: S3Client, *, paths_type: str
 ) -> TransferConfig:
-    """aws's ``_get_transfer_manager`` slot: ``[s3]`` read, then the engine built.
+    """aws-cli's ``_get_transfer_manager`` slot: ``[s3]`` read, then the engine built.
 
     Every command that has the slot calls it there - cp, mv, sync and rm:
     after the path validations, before anything the run itself does. The
     config comes from `resolve_transfer_config` (an invalid ``[s3]`` value
-    is 255) and is returned for the run. aws then builds the manager
+    is 255) and is returned for the run. aws-cli then builds the manager
     (``TransferManagerFactory.create_transfer_manager``) before it decides
     anything about the run, so a CRT selection pays its whole construction
     there - the cross-process lock and ``create_s3_crt_client`` - even for a
@@ -945,7 +945,7 @@ def build_printer(
     """The shared ``TransferPrinter`` wiring.
 
     ``only_show_errors`` ORs into the flag for cp's stream rule (a streaming
-    download owns stdout for the object bytes, so aws forces the errors-only
+    download owns stdout for the object bytes, so aws-cli forces the errors-only
     printer); mv/sync pass nothing.
     """
     return TransferPrinter(
@@ -958,28 +958,28 @@ def build_printer(
 
 
 def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], None]) -> int:
-    """Run the library call and derive the aws exit code (design/cli.md section 6).
+    """Run the library call and derive the `aws` exit code (design/cli.md section 6).
 
     Everything the pipeline raises is rc 1: ``BatchError`` after per-item
     ``failed`` lines, a ``KeyboardInterrupt`` as one ``cancelled: ctrl-c
     received`` line, anything else run-killing as one ``fatal error:`` line -
     any exception type except ``AssertionError`` (an internal-invariant bug,
     re-raised loudly like the dispatcher does) and ``SystemExit`` (an orderly
-    exit request, honored - a deliberate divergence from aws's recorder,
+    exit request, honored - a deliberate divergence from aws-cli's recorder,
     which suppresses even that; the taxonomy special-cases only
-    KeyboardInterrupt), matching aws's
+    KeyboardInterrupt), matching aws-cli's
     ``CommandResultRecorder.__exit__``,
     which converts whatever escapes the pipeline span into an ``ErrorResult``
-    (aws's ``CtrlCResult`` is minted separately - its ``DoneResultSubscriber``
+    (aws-cli's ``CtrlCResult`` is minted separately - its ``DoneResultSubscriber``
     on a ``CancelledError`` - and our cancelled line renders that same shape;
     so e.g. a ``RecursionError`` from a
-    pathologically deep tree is aws's ``fatal error`` rc 1, never the
+    pathologically deep tree is aws-cli's ``fatal error`` rc 1, never the
     dispatcher's 255, and a mid-run Ctrl-C is never its 130). A clean run exits 2
     when only warnings accumulated, else 0. The printer's rendering thread
     outlives ``run()`` only by its drain: every queued line is written (and
     precedes a ``fatal error:`` line) before the exit code is derived.
 
-    That drain is past aws's recorder span too - its recorder's shutdown,
+    That drain is past aws-cli's recorder span too - its recorder's shutdown,
     waiting for its printer thread - so a Ctrl-C landing there is not
     converted: it reaches the dispatcher's 130 (and its newline) once the
     printer has written what was queued (``TransferPrinter.finish``),
@@ -993,7 +993,7 @@ def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], 
             except BaseException as exc:  # classified below, once every line is out
                 error = exc
     except KeyboardInterrupt:
-        # From the drain: aws's printer thread still writes the run's own
+        # From the drain: aws-cli's printer thread still writes the run's own
         # closing line - it is a queued result there - before the 130
         # (measured: a mid-run Ctrl-C, then one in the drain, prints
         # `cancelled: ctrl-c received` and exits 130).
@@ -1007,12 +1007,12 @@ def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], 
 
 
 def report_failed_run(error: BaseException, *, quiet: bool) -> int:
-    """aws's ``CommandResultRecorder`` on a run span that raised *error*: rc 1.
+    """aws-cli's ``CommandResultRecorder`` on a run span that raised *error*: rc 1.
 
     The span's closing line (`_closing_line`) goes to stderr unless *quiet*,
     and the run exits 1 - `finish_transfer`'s verdict once its printer has
     drained, and ``rm``'s, whose run span sits inside the same recorder on
-    aws (rm is an ``S3TransferCommand`` there too). An ``AssertionError`` -
+    aws-cli (rm is an ``S3TransferCommand`` there too). An ``AssertionError`` -
     an internal-invariant violation, a bug - is re-raised instead, surfacing
     loudly like the dispatcher's own re-raise (cli.py): masking it as a fatal
     error would also blunt the test doubles' unexpected-call guards.
@@ -1035,11 +1035,11 @@ def _closing_line(error: BaseException) -> str | None:
 
     ``BatchError`` has none - its per-item failure lines were already
     streamed by the printer. A ``KeyboardInterrupt`` inside the pipeline span
-    is a cancelled run, not the dispatcher's 130: aws's result machinery
+    is a cancelled run, not the dispatcher's 130: aws-cli's result machinery
     swallows the interrupt (``CommandResultRecorder.__exit__``), the shutdown
     cancels the accepted transfers, and the printer emits one ``cancelled:
     ctrl-c received`` line at rc 1 (measured mid-sync and mid-rm, 2.36.40);
-    the per-item CANCELLED records stay silent like aws's (progress.py
+    the per-item CANCELLED records stay silent like aws-cli's (progress.py
     ``_prints``), and the pre-pipeline spans keep the 130 backstop. Anything
     else that killed the run is one ``fatal error:`` line.
     """

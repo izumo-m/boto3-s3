@@ -124,18 +124,18 @@ class CpScenario(BaseScenario):
     # Directories created with an explicit mode (workdir-relative -> mode),
     # e.g. a read-only parent for the uncreatable-destination scenario.
     local_dirs: Mapping[str, int] = field(default_factory=dict)
-    # The outcome is racy on a case-insensitive destination (aws's warn text:
+    # The outcome is racy on a case-insensitive destination (aws-cli's warn text:
     # "may result in ... race conditions between concurrent downloads"): the
     # twin downloads commit through s3transfer's Windows rename, a remove
     # followed by a rename, and when the two interleave one fails with
     # [WinError 183] (rc 1); a twin whose file the other just removed cannot
     # be stamped (rc 2). Both tools share that code path and both lose the
-    # race - measured on a Windows host over 150 runs each: aws 67 times at
+    # race - measured on a Windows host over 150 runs each: `aws` 67 times at
     # rc 1 and 3 at rc 2, ours 2 and 1. On such a filesystem there is no
     # stable behavior to diff or record: e2e holds ours to the range the
     # race allows (rc 0 / 1 / 2) plus its stderr tokens, and the golden tiers
     # stand down (no capture, no replay). This is the one carve-out from the
-    # unconditional-rc charter note above - where aws itself is
+    # unconditional-rc charter note above - where `aws` itself is
     # nondeterministic, no defined rc exists to match.
     undefined_on_case_insensitive_dest: bool = False
 
@@ -375,7 +375,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         local_src=_SRC_BIG,
     ),
     CpScenario(
-        # aws checks the raw path up front (rc 255, their bare RuntimeError
+        # aws-cli checks the raw path up front (rc 255, their bare RuntimeError
         # class), before any client work.
         name="cp_upload_src_missing",
         argv=("cp", "src/nope.txt", f"s3://{BUCKET_TOKEN}/x"),
@@ -388,7 +388,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         name="cp_upload_dir_no_recursive",
         argv=("cp", "src", f"s3://{BUCKET_TOKEN}/x"),
         local_src=_SRC_SINGLE,
-        # ours synthesizes EISDIR on every host. endpoint-fidelity T6: aws's
+        # ours synthesizes EISDIR on every host. endpoint-fidelity T6: aws-cli's
         # cause differs by host and transport - EISDIR at open on POSIX over
         # http, ENOENT on Windows (opening "src\" fails there), "Need to
         # rewind the stream" over https - so its token is the common prefix.
@@ -396,11 +396,11 @@ SCENARIOS: tuple[CpScenario, ...] = (
         expected_stderr_tokens_aws=("upload failed",),
     ),
     CpScenario(
-        # A filter on that same doomed upload matches aws's local_format form
+        # A filter on that same doomed upload matches aws-cli's local_format form
         # of the source - `<abspath>/`, trailing separator - not the bare
         # path: `--exclude src` does not exclude it, so the run still reaches
         # the directory and fails at rc 1 like the unfiltered scenario.
-        # endpoint-fidelity T6: the aws token as in the unfiltered scenario.
+        # endpoint-fidelity T6: the `aws` token as in the unfiltered scenario.
         name="cp_upload_dir_no_recursive_exclude",
         argv=("cp", "src", f"s3://{BUCKET_TOKEN}/x", "--exclude", "src"),
         local_src=_SRC_SINGLE,
@@ -450,7 +450,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         expected_stderr_tokens_aws=("Invalid argument type",),
     ),
     CpScenario(
-        # aws pre-creates the s3local --recursive destination during
+        # aws-cli pre-creates the s3local --recursive destination during
         # validation, so an uncreatable directory is the pre-pipeline rc 255,
         # not the pipeline's rc 1. diff_only: the outcome depends on the
         # runner's privileges (root creates anything), so the two CLIs are
@@ -470,7 +470,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         mtime_key=("d/a.txt", "dest/out.bin"),
     ),
     CpScenario(
-        # aws applies --exclude/--include to a SINGLE-object cp too: the
+        # aws-cli applies --exclude/--include to a SINGLE-object cp too: the
         # excluded object never transfers (rc 0, dest stays empty). Guards
         # the single-source filter lane (producers.py, 2026-07 review).
         name="cp_download_single_exclude_all",
@@ -563,7 +563,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         diff_only=True,
     ),
     CpScenario(
-        # `cp s3://bucket .`: aws lists and exact-matches nothing -> rc 0,
+        # `cp s3://bucket .`: aws-cli lists and exact-matches nothing -> rc 0,
         # nothing transferred.
         name="cp_keyless_nonrecursive",
         argv=("cp", f"s3://{BUCKET_TOKEN}", "."),
@@ -685,7 +685,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         stdin=b"streamed golden body\n",
     ),
     CpScenario(
-        # aws converts with a bare int() at submit time -> fatal rc 1.
+        # aws-cli converts with a bare int() at submit time -> fatal rc 1.
         name="cp_stream_expected_size_nonint",
         argv=("cp", "-", f"s3://{BUCKET_TOKEN}/stream.txt", "--expected-size", "abc"),
         stdin=b"x",

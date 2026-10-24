@@ -2,7 +2,7 @@
 
 The rc shape (design/cli.md section 6): **no local catch** - unlike mb/rb,
 server rejections keep their ClientError cause and exit 254 through main;
-botocore's client-side parameter validation and aws's
+botocore's client-side parameter validation and aws-cli's
 fold-the-key-into-the-bucket-name rejection are 252; success prints
 nothing at all.
 """
@@ -49,7 +49,7 @@ class TestWebsite:
         )
         captured = capsys.readouterr()
         assert rc == 0
-        assert (captured.out, captured.err) == ("", "")  # aws prints nothing on success
+        assert (captured.out, captured.err) == ("", "")  # `aws` prints nothing on success
         assert client.calls == [
             {
                 "Bucket": "bucket",
@@ -85,7 +85,7 @@ class TestWebsite:
         }
 
     def test_no_options_sends_empty_configuration(self) -> None:
-        # aws sends the empty dict; the server, not the client, rejects it.
+        # aws-cli sends the empty dict; the server, not the client, rejects it.
         client = _FakeWebsiteClient()
         rc = cli.main(["website", "s3://bucket"], ctx=client_ctx(client))
         assert rc == 0
@@ -110,7 +110,7 @@ class TestWebsite:
         assert client.calls[0]["Bucket"] == "bucket"
 
     def test_accesspoint_arn_passes_as_bucket(self) -> None:
-        # aws sends the whole ARN as the Bucket (block_unsupported_resources
+        # aws-cli sends the whole ARN as the Bucket (block_unsupported_resources
         # only rejects Object Lambda / Outposts bucket ARNs).
         arn = "arn:aws:s3:us-west-2:123456789012:accesspoint/endpoint"
         client = _FakeWebsiteClient()
@@ -125,7 +125,7 @@ class TestWebsite:
 
 class TestWebsiteExitCodeShape:
     def test_key_part_is_param_validation_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # aws folds "b/some/key" into the Bucket parameter and botocore's
+        # aws-cli folds "b/some/key" into the Bucket parameter and botocore's
         # name regex rejects it -> 252; we reject the same shapes ourselves.
         client = _FakeWebsiteClient()
         rc = cli.main(
@@ -137,7 +137,7 @@ class TestWebsiteExitCodeShape:
         assert client.calls == []
 
     def test_double_trailing_slash_is_252(self) -> None:
-        # "s3://b//" strips one slash -> Bucket "b/" fails aws's regex; the
+        # "s3://b//" strips one slash -> Bucket "b/" fails aws-cli's regex; the
         # leftover slash must not be silently dropped on our side.
         client = _FakeWebsiteClient()
         assert (
@@ -149,7 +149,7 @@ class TestWebsiteExitCodeShape:
         assert client.calls == []
 
     def test_empty_uri_names_no_bucket_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # Refused before the request as a path that names no bucket (aws lets
+        # Refused before the request as a path that names no bucket (aws-cli lets
         # botocore's parameter validation refuse the empty name, 252 too).
         rc = cli.main(["website", "s3://", "--index-document", "i.html"], ctx=_real_client_ctx())
         assert rc == 252
@@ -158,7 +158,7 @@ class TestWebsiteExitCodeShape:
     def test_a_bucketless_key_is_refused_as_naming_no_bucket(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # website does not split: aws takes the whole scheme-stripped
+        # website does not split: aws-cli takes the whole scheme-stripped
         # remainder "/k" as the bucket name and rejects it (measured, 252).
         # Here the path names no bucket and is refused as such, at 252 too.
         client = _FakeWebsiteClient()
@@ -171,7 +171,7 @@ class TestWebsiteExitCodeShape:
     def test_an_outposts_access_point_closed_with_a_colon_is_refused(
         self, sep: str, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws passes "...accesspoint/ap:" whole as the Bucket and botocore's
+        # aws-cli passes "...accesspoint/ap:" whole as the Bucket and botocore's
         # name check refuses it (rc 252, no request; measured). The split
         # here eats the ":" as the key separator and would leave a keyless
         # access point to configure.
@@ -213,7 +213,7 @@ class TestWebsiteExitCodeShape:
 
 
 class TestWebsiteParamfileAndQuery:
-    """aws expands both document options via file:// at parse time and
+    """aws-cli expands both document options via file:// at parse time and
     compiles --query there; a bad reference / expression is its 252 before the
     request is built. A paramfile positional is refused (252)."""
 
@@ -233,9 +233,9 @@ class TestWebsiteParamfileAndQuery:
     def test_positional_paramfile_is_refused(
         self, prefix: str, tmp_path: Any, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws takes the first character of a file:// text as the bucket (a
+        # aws-cli takes the first character of a file:// text as the bucket (a
         # file holding "s3://mybucket" configures bucket "s") and crashes on
-        # fileb:// bytes - an aws bug not copied: both are refused unread.
+        # fileb:// bytes - an aws-cli bug not copied: both are refused unread.
         ref = tmp_path / "u.txt"
         ref.write_text("s3://mybucket")
         rc = cli.main(["website", f"{prefix}{ref}"], ctx=unused_ctx())

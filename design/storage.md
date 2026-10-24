@@ -126,9 +126,9 @@ front only when the declaration is honest:
   — the single-entry counterpart of `scan` (a single source, or an existence
   check). `key=""` is the location itself; `None` means "no entry to hand the
   engine" (`LocalStorage`: an absent path, a `follow_symlinks=False` symlink,
-  or a special / unreadable file after the aws-style warn-and-skip - but a
+  or a special / unreadable file after the aws-cli-style warn-and-skip - but a
   directory *is* returned, with no type check, and fails later at `open` the
-  way aws fails). Whether a symlink is followed is `LocalStorage`'s own
+  way aws-cli fails). Whether a symlink is followed is `LocalStorage`'s own
   `follow_symlinks` config, read from the storage like every scan (not a
   parameter here). `enumerate_all_entries` does not apply: the point query
   always uses those single-file rules.
@@ -175,7 +175,7 @@ A few more members come with working defaults a custom backend normally keeps:
   Ctrl-C as process-fatal. The application declares the posture once, on
   `S3(reusable_after_interrupt=…)`; every scan an operation starts receives it
   through this field, and only a direct `Storage.scan` caller sets it here
-  itself. The CLI's `S3` declares `False`, matching aws's immediate death on
+  itself. The CLI's `S3` declares `False`, matching aws-cli's immediate death on
   Ctrl-C. It scopes to the interrupt alone: every other exit — exhaustion, an
   early break, `SystemExit` (`sys.exit()` requests an orderly termination),
   an ordinary exception — always waits (`concurrency.prefetch`). The interrupt
@@ -190,7 +190,7 @@ A few more members come with working defaults a custom backend normally keeps:
   `FileInfo.key` / `compare_key` contract is `/`-separated.
 - **`format(*, dir_op) -> (root, use_src_name)`** — how this side enters a
   transfer plan (the per-side half of aws-cli's `FileFormat.format`, resolved
-  polymorphically; `S3Storage` / `LocalStorage` override it with aws's
+  polymorphically; `S3Storage` / `LocalStorage` override it with aws-cli's
   `s3_format` / `local_format` on their own held state). The default is the
   open-route rule. The root is `""`: a custom backend encapsulates its own
   location, its `open` receives `compare_key`, which addresses an entry relative
@@ -275,7 +275,7 @@ backend's entries in whatever order `scan` yields them (they never pass
 `ScanOptions(sort=True)`), so a plain `SCAN` side needs no ordering guarantee
 at all. The byte-order promise is likewise scoped to the recursive listing
 `sync` performs: a non-recursive (delimiter) listing keeps its native shape -
-`S3Storage`'s pages emit a page's common prefixes before its objects, aws
+`S3Storage`'s pages emit a page's common prefixes before its objects, aws-cli
 `ls`'s order. A recursive custom *destination* of `cp` / `mv` needs no `SCAN`
 either - only `sync` lists a destination. The exact per-route gates are in
 [`sync.md`](./sync.md) / [`transfer.md`](./transfer.md).
@@ -501,7 +501,8 @@ spanning both would file a broken stream as a local failure.
   upload's type from its name is the transfer lanes' aws-cli behavior
   (`guess_mime_type`), not this lane's.
 - no local mtime stamping after a download: it exists so the transfer lanes
-  match aws, and here the caller holds the returned `S3FileInfo` and decides.
+  match aws-cli, and here the caller holds the returned `S3FileInfo` and
+  decides.
 - **`cp` / `mv` / `sync` do not use them**, so compatibility with aws-cli is
   untouched: the transfer engine, its gates (glacier, `--no-overwrite`,
   case-conflict) and the CLI do not depend on them.

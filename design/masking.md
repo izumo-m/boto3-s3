@@ -73,9 +73,9 @@ in the `http.client` wire dump (verified against live botocore).
 These all go through Python `logging`, so a **`logging.Filter` attached to the
 handler** can capture and mask all of them. The `http.client` wire dump
 (`send: b'...'`) appears only when `http.client.HTTPConnection.debuglevel >= 1`,
-but neither botocore, nor aws, nor this project raises debuglevel, so it does not
-appear under `--debug`. We therefore do not handle a monkeypatch of `http.client`
-(it would be a no-op).
+but neither botocore, nor aws-cli, nor this project raises debuglevel, so it does
+not appear under `--debug`. We therefore do not handle a monkeypatch of
+`http.client` (it would be a no-op).
 
 ## 3. Design
 

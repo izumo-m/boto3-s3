@@ -10,7 +10,7 @@ flagged) on raw medians, since startup growth is its own regression class.
 
 Flag rules (threshold defaults to 1.10):
 - E2E work scenario with a baseline: ``(ratio now) / (ratio baseline)`` over
-  the threshold - the aws side is the same-run control, so this survives
+  the threshold - the aws-cli side is the same-run control, so this survives
   host noise between runs. Without a baseline: the ratio itself.
 - Startup probes and in-process scenarios: median now / median baseline over
   the threshold (in-process runs are network-free and deterministic enough

@@ -131,8 +131,8 @@ for its keys - a batch past the read timeout, an endpoint that drops only the
 batch call, a flaky connection that ran through the one batch request's
 attempts while each of aws-cli's per-key requests has attempts of its own
 (measured on the CRT engine: a server dropping the first six deletes of two
-keys leaves aws deleting both at rc 0) - so every key of it goes out again on
-the per-key route of the same client, whatever the retry policy, and takes
+keys leaves aws-cli deleting both at rc 0) - so every key of it goes out again
+on the per-key route of the same client, whatever the retry policy, and takes
 that request's outcome. A key can so get more attempts than aws-cli gives
 it, never fewer. The same holds for a batch request that failed in any other
 way (below). A per-key
@@ -202,15 +202,15 @@ versioned bucket) cannot be mapped back to submission order.
   own, so each goes out again as its own `DeleteObject` on the same client
   and takes that request's outcome; later batches still run. Measured on the
   classic engine with two keys: a server failing the first three deletes
-  with `InternalError`, or with `Throttling`, leaves aws deleting both at
+  with `InternalError`, or with `Throttling`, leaves aws-cli deleting both at
   rc 0, and so does this; a missing bucket fails both keys on both tools, in
-  aws's own `DeleteObject` words; a single 429 fails one key on aws and none
-  here. The re-send goes out whatever the retry policy, since the batch was
+  aws-cli's own `DeleteObject` words; a single 429 fails one key on `aws` and
+  none here. The re-send goes out whatever the retry policy, since the batch was
   no key's own request - so a key can get more attempts than aws-cli gives
   it, never fewer - and a key the run is abandoned before re-sending gets no
-  record (measured on the classic engine: Ctrl-C with aws's per-key requests
-  still queued prints no line for them; aws's CRT manager instead swallows an
-  interrupt in its drain and sends them all, a difference recorded in
+  record (measured on the classic engine: Ctrl-C with aws-cli's per-key requests
+  still queued prints no line for them; aws-cli's CRT manager instead swallows
+  an interrupt in its drain and sends them all, a difference recorded in
   aws-differences.md).
 - **the request raising outside the boto family** (botocore reading a
   response that lacks an element it needs - an S3 Express `CreateSession`
@@ -247,7 +247,7 @@ that - so a key never gets fewer attempts than aws-cli gives it.
   missing key, and `DeleteObjects` likewise reports no error), and per-key
   success and failure are preserved. The equivalence bounds the *success* path:
   when the producing listing/comparison dies mid-run (both sides exit nonzero),
-  the partial S3 state differs - aws has already issued a per-key delete for
+  the partial S3 state differs - aws-cli has already issued a per-key delete for
   everything enumerated, while the body exception here abandons the unsent
   buffer (up to `batch_size - 1` entries; `close(flush=False)`, consistent
   with the fatal-cancel contract in [`opresult.md`](./opresult.md)). It also
@@ -284,7 +284,7 @@ that - so a key never gets fewer attempts than aws-cli gives it.
   Stopping the lines at the signal instead needs a SIGINT hook that must not
   take the printer's lock, must stay out of an ignored SIGINT, and must not
   apply under the CRT engine (whose manager swallows the interrupt and goes
-  on reporting on aws) - tried and withdrawn as not worth that machinery, so
+  on reporting on `aws`) - tried and withdrawn as not worth that machinery, so
   the extra lines are an accepted batching difference.
 - Failure messages are unified to the full `str(ClientError)`
   (`An error occurred (...) ...`), the same shape as the string aws-cli emits on
@@ -320,8 +320,8 @@ Each of the following lives outside this component:
   local or custom (`s3open`) sync destination has no deleter either, so
   routing only the S3-destination case through this flag would leave two
   emission points instead of one. The CLI's e2e comparison tests pin those
-  records' ordering against aws, so the flag is offered to direct consumers (who
-  otherwise hand-roll the same record shape) and the orchestrators are left
+  records' ordering against aws-cli, so the flag is offered to direct consumers
+  (who otherwise hand-roll the same record shape) and the orchestrators are left
   alone.
 - **The `CancelToken` machinery** - shared infrastructure
   ([`exceptions.md`](./exceptions.md) section 3); how the deleter reacts to a

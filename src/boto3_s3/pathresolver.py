@@ -14,7 +14,7 @@ whose same-key move onto its directory bucket deletes the object on real S3
 
 Following the library's connection model, the resolver takes its
 ``s3control`` and ``sts`` clients from the caller (build them with the
-region/verify/profile wiring of your choice - aws builds the s3control
+region/verify/profile wiring of your choice - aws-cli builds the s3control
 client in the path's region and the sts client without one); the pure
 string probes - ``has_underlying_s3_path`` / ``is_mrap_path`` /
 ``is_outpost_path`` / ``is_outpost_alias_path`` / ``is_s3express_path`` - are
@@ -58,8 +58,8 @@ def has_underlying_s3_path(path: str) -> bool:
 
     True for the three ARN shapes above, for the access-point alias
     suffixes (``-s3alias``, Outposts ``--op-s3``) and for an S3 Express
-    access point (``--xa-s3``, which aws's test misses). Pure string
-    inspection - this is what gates aws's "may resolve to same underlying s3
+    access point (``--xa-s3``, which aws-cli's test misses). Pure string
+    inspection - this is what gates aws-cli's "may resolve to same underlying s3
     object(s)" warning when validation is off.
     """
     bucket, _key = _split_bucket_key(path)
@@ -192,7 +192,7 @@ def is_s3express_accesspoint_path(path: str) -> bool:
     stand-down applies as for `is_s3express_path`. It is a separate probe
     because aws-cli's own ``is_s3express_bucket`` tests only ``--x-s3``. The
     places built on that test - the ``sync`` rejection and the
-    ``--case-conflict`` branch - take this suffix too, where aws does not:
+    ``--case-conflict`` branch - take this suffix too, where aws-cli does not:
     an access point lists its directory bucket's keys in the same unordered
     way, which those places exist to keep from the sorted pairing. The
     ``s3://`` scheme is required for the same reason as there.
@@ -301,7 +301,7 @@ class S3PathResolver:
 
         An MRAP fans out to one path per region; everything else resolves to
         a single path. The Outposts access point *alias* cannot be resolved
-        (no API exists) and raises aws's usage-shaped error; a plain bucket
+        (no API exists) and raises aws-cli's usage-shaped error; a plain bucket
         path comes back unchanged.
         """
         bucket, key = _split_bucket_key(path)
@@ -392,7 +392,7 @@ class S3PathResolver:
     def _request() -> Any:
         """Report whatever one s3control / sts request raised as a ``Boto3S3Error``.
 
-        `sdkerrors.s3_request`, keeping ``__cause__``: aws lets the raw
+        `sdkerrors.s3_request`, keeping ``__cause__``: aws-cli lets the raw
         ClientError escape to its generic 254 handler (a failing
         GetCallerIdentity exits 254), and anything else botocore raises inside
         the request - a refreshing ``credential_process`` whose program is

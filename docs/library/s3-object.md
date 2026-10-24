@@ -39,15 +39,16 @@ S3(session=None, *, endpoint_url=None, config=None,
   application already holds the cross-process CRT slot. `False` (the default)
   silently selects the classic engine, boto3's rule; `True` builds the CRT
   client regardless, which is what `aws s3` does for processes that run at
-  the same time. `"auto"` respects the lock either way. Only reproducing aws's behavior needs it.
+  the same time. `"auto"` respects the lock either way. Only reproducing
+  aws-cli's behavior needs it.
 - **`crt_sign_requests`** — whether the CRT transfer engine signs its
   requests. `None` (the default) derives the answer from the built client,
   boto3's rule. An explicit `False` builds the CRT client with no credentials
   provider (nothing is resolved, every CRT request goes out anonymous);
-  `True` forces a provider. Only reproducing `aws s3` needs it — aws's CRT
+  `True` forces a provider. Only reproducing `aws s3` needs it — aws-cli's CRT
   factory decides from its own `sign_request` flag and never from the client,
   which is how `--no-sign-request --sse aws:kms` transfers anonymously on
-  aws's CRT engine while its classic engine signs.
+  aws-cli's CRT engine while its classic engine signs.
 - **`filename_encoding`** — the encoding of local file names on POSIX, for
   every `LocalStorage` built from a string path. `None` (the default) is
   Python's file system encoding. It has no effect on Windows, and an unknown

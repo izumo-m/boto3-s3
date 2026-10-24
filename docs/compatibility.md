@@ -56,7 +56,7 @@ botocore can only compute through it — **`CRC32C`, `CRC64NVME`, and the
 
 Missing awscrt fails only the features that need it, and nothing else changes.
 
-The CLI's default request checksum is aws's `CRC64NVME` when the installed
+The CLI's default request checksum is aws-cli's `CRC64NVME` when the installed
 botocore can compute it (boto3 1.36 or later with awscrt 0.23.4 or later);
 otherwise botocore's own default stands — `CRC32` from boto3 1.36 on, and
 below it no default checksum at all (an upload carries `Content-MD5`). The

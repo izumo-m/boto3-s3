@@ -130,7 +130,7 @@ class TestWiring:
     def test_invalid_s3_config_value_exits_255_through_main(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # An invalid [s3] value exits 255 through main, like aws, naming the
+        # An invalid [s3] value exits 255 through main, like aws-cli, naming the
         # setting (the library's report itself is tests/lib's). The error is
         # raised parsing [s3] before any API call, so it propagates to main's
         # general handler regardless of the recording client.
@@ -162,7 +162,7 @@ def _config_ctx(
 
 
 class TestRmReadsTheRuntimeConfig:
-    """``rm`` is an ``S3TransferCommand`` in aws, so it reads ``[s3]`` like cp.
+    """``rm`` is an ``S3TransferCommand`` in aws-cli, so it reads ``[s3]`` like cp.
 
     Measured on the pinned aws-cli: an invalid ``[s3]`` value is 255 for every
     ``rm`` form. The read comes before rm's routes split, so the single delete
@@ -201,17 +201,17 @@ class TestRmReadsTheRuntimeConfig:
 
 
 class TestCrtEngineConstructionSlot:
-    """The transfer manager is built where aws builds it, ``rm`` included.
+    """The transfer manager is built where aws-cli builds it, ``rm`` included.
 
-    aws's ``_get_transfer_manager`` runs right after the ``[s3]`` read and
+    aws-cli's ``_get_transfer_manager`` runs right after the ``[s3]`` read and
     before anything about the run is decided, so a CRT selection pays the whole
     construction even for a ``--dryrun``, and even for ``rm``, whose deletes
     ride it but build it later (design/crt.md sections 4 and 6). A
     construction failure therefore stops the run before it starts; the rows
     below use a CA bundle awscrt cannot parse (its ``RuntimeError``), which the
-    library reports as an ``InvalidConfigError`` - rc 255, aws's general
+    library reports as an ``InvalidConfigError`` - rc 255, aws-cli's general
     handler. And with no region resolved, the CLI stops a CRT run at the same
-    slot without building anything (rc 253, aws's missing-region report).
+    slot without building anything (rc 253, aws-cli's missing-region report).
 
     awscrt is faked here (the suite must run without it, and a real CRT client
     would hold the host-wide process lock for the rest of the session).
@@ -318,7 +318,7 @@ class TestCrtEngineConstructionSlot:
     def test_an_s3s3_route_never_reaches_the_engine(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, crt_constructions: list[Any]
     ) -> None:
-        # aws's _compute_transfer_client_type forces classic for s3s3 (the CRT
+        # aws-cli's _compute_transfer_client_type forces classic for s3s3 (the CRT
         # manager has no copy), so the construction is not attempted at all.
         config_file = tmp_path / "config"
         config_file.write_text(self._CRT)
