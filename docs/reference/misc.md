@@ -522,8 +522,7 @@ stay separate because the AWS CLI's own `is_s3express_bucket` tests only the
 bucket suffix, while this project's `sync` rejection and `--case-conflict`
 branch take both) —
 so a caller that pins a symmetric
-`signature_version` on its client (as the `boto3-s3` command does) can stand
-that pin down for them. They test what botocore's endpoint rules test rather
+`signature_version` on its client can stand that pin down for them. They test what botocore's endpoint rules test rather
 than the ARN spellings above: an MRAP is an `s3` access-point ARN with an
 empty region field, and the alias probe reads the fixed-width slices the rules
 read. The suffix probes, `is_outpost_alias_path`, `is_s3express_path` and

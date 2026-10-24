@@ -469,11 +469,11 @@ that say outright that the run comes out differently, listed in section 1.
   point `myap` and the key `_x`, also spelled `accesspoint/myap/_x`).
   `aws` compares its two arguments as text, takes
   `mv s3://<arn>:k s3://<arn>/k` (or the two spellings of a cut-short name) for
-  a move between two objects and sends it — onto itself. This command recognizes the one object and stops: after the
-  same "may resolve to same underlying s3 object(s)" warning `aws` prints, it
-  ends with `fatal error: Cannot mv a file onto itself: ...` and exit code 1.
-  (A `mv` whose two arguments are the same text is refused earlier, as a usage
-  error with exit code 252, on both tools.)
+  a move between two objects and sends it — onto itself. This command
+  recognizes the one object and refuses the move before it starts, without
+  the "may resolve to same underlying s3 object(s)" warning `aws` prints:
+  `Cannot mv a file onto itself: ...`, a usage error with exit code 252 — the
+  report both tools give a `mv` whose two arguments are the same text.
 - **An S3 Express access point is treated as its directory bucket by `sync`
   and `--case-conflict`, and as an access point alias by `mv`.** `aws`
   refuses `sync` on an S3 Express

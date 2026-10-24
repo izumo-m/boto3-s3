@@ -410,10 +410,11 @@ class TestMainExitCodes:
 
 
 class TestClientCreationExitCodes:
-    """Client construction (build_client) runs the real boto3 session, which
-    raises raw botocore errors. They must reach the exit-code mapping instead of
-    escaping main() as an uncaught traceback (the binding charter, overview.md
-    section 3). These exercise the real build_client - no injected Context."""
+    """Client construction (``clientfactory.build_s3``, `S3.from_aws_cli`) runs
+    the real boto3 session, which raises raw botocore errors. They must reach the
+    exit-code mapping instead of escaping main() as an uncaught traceback (the
+    binding charter, overview.md section 3). These exercise the real build - no
+    injected Context."""
 
     def test_unknown_profile_exits_255_without_traceback(
         self, capsys: pytest.CaptureFixture[str]

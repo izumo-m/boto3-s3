@@ -112,16 +112,14 @@ def build_s3(args: argparse.Namespace) -> S3:
     session starts (`_reject_unknown_cli_formats`).
     """
     prepare_process()
-    s3 = _cli_s3_class().from_aws_cli(
-        **from_aws_cli_arguments(args), reusable_after_interrupt=False
-    )
+    s3 = cli_s3_class().from_aws_cli(**from_aws_cli_arguments(args), reusable_after_interrupt=False)
     assert s3.session is not None  # from_aws_cli opened it
     _reject_unknown_cli_formats(s3.session._session, args)  # pyright: ignore[reportPrivateUsage]
     return s3
 
 
 @cache
-def _cli_s3_class() -> type[S3]:
+def cli_s3_class() -> type[S3]:
     """The command's `S3`: the library's, its S3 clients carrying `s3errormsg`.
 
     aws-cli registers its S3 error-message rewriter on its session, so it rides

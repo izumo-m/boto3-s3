@@ -16,7 +16,12 @@ from typing import TYPE_CHECKING, Any, ClassVar
 # These exception names do not themselves import the AWS SDK.
 from boto3_s3 import InvalidValueError, ValidationError
 from boto3_s3_cli import paramfile, usage
-from boto3_s3_cli.clientfactory import build_s3, from_aws_cli_arguments, prepare_process
+from boto3_s3_cli.clientfactory import (
+    build_s3,
+    cli_s3_class,
+    from_aws_cli_arguments,
+    prepare_process,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -67,18 +72,24 @@ class Context:
         if self._s3_factory is not None:
             return self._s3_factory(args)
 
-        from boto3_s3 import S3
-
         client_factory = self._client_factory
         service_client_factory = self._service_client_factory
-        if client_factory is None:
+        if client_factory is None and service_client_factory is None:
             return build_s3(args)
 
-        class InjectedClientS3(S3):
+        # The command's own S3 class, so what is not injected stays the
+        # command's (aws-cli's error-message rewriter on its S3 clients).
+        base = cli_s3_class()
+
+        class InjectedClientS3(base):
             def client(self) -> S3Client:
+                if client_factory is None:
+                    return super().client()
                 return _stand_in(client_factory(args), self, args.region)
 
             def source_client(self, region: str) -> S3Client:
+                if client_factory is None:
+                    return super().source_client(region)
                 # The namespace a source client is built from: the region
                 # named, without --endpoint-url (aws-cli's ClientFactory).
                 source_args = argparse.Namespace(**vars(args))

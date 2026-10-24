@@ -82,8 +82,8 @@ def is_mrap_path(path: str) -> bool:
     describe the aliases AWS hands out today, not what the endpoint rules
     test. An MRAP request must be signed with asymmetric SigV4a (its region
     set is `*`), which an explicit symmetric `signature_version` in the client
-    config would suppress - callers that pin one (the CLI's always-SigV4 pin)
-    use this to stand down for MRAP targets.
+    config would suppress - a caller that pins one can use this to stand down
+    for MRAP targets.
     """
     arn = _parse_arn_bucket(_split_bucket_key(path)[0])
     if arn is None:
@@ -142,8 +142,8 @@ def is_outpost_alias_path(path: str) -> bool:
     is required: a local path can plausibly end in ``--op-s3``. A resolved
     alias endpoint carries the same asymmetric SigV4a as the Outposts ARN
     (region set `*`), which an explicit symmetric `signature_version` would
-    suppress - callers that pin one (the CLI's always-SigV4 pin) stand down
-    for it exactly as they do for `is_outpost_path`.
+    suppress - a caller that pins one stands down for it exactly as for
+    `is_outpost_path`.
     """
     if not path.startswith("s3://"):
         return False
@@ -172,9 +172,8 @@ def is_s3express_path(path: str) -> bool:
     may be local paths and a local name can plausibly end in ``--x-s3``
     (an MRAP ARN shape cannot). A directory-bucket request must be signed
     ``sigv4-s3express`` with `CreateSession` credentials, which an explicit
-    `signature_version` in the client config would suppress - callers that
-    pin one (the CLI's always-SigV4 pin) use this to stand down, like
-    `is_mrap_path` for SigV4a.
+    `signature_version` in the client config would suppress - a caller that
+    pins one can use this to stand down, like `is_mrap_path` for SigV4a.
     """
     if not path.startswith("s3://"):
         return False

@@ -36,18 +36,17 @@ Adaptation rules (on top of the mb port's - see
 - Time freezing: the aws-cli mocks ``time.time`` and
   ``datetime.datetime.utcnow``; runtime botocore signs through one seam,
   ``get_current_datetime``, so patching it reproduces the aws-cli's
-  signatures bit-for-bit. With awscrt installed (the dev dependency group
-  pulls in ``botocore[crt]``; the dist leaves CRT to the opt-in ``crt``
-  extra) botocore swaps in its CRT signers, whose module holds
-  a second binding of that seam - both are patched, honoring the CRT
-  callers' ``remove_tzinfo=False`` (SigV4 itself is deterministic, so both
-  signer families yield the aws-cli's exact signatures).
+  signatures bit-for-bit. ``presign`` signs with botocore's pure-Python
+  ``S3SigV4QueryAuth`` whether or not awscrt is installed, so the seam's
+  ``botocore.auth`` binding is the one that matters.
 - The aws-cli signs with its harness credentials (``access_key`` /
   ``secret_key``) through aws v2's bundled botocore - SigV4-only and
-  us-east-1-regional. The client factory rebuilds ``build_client``'s pinned
-  base Config (s3v4 + regional us-east-1) with those fixed credentials, and
-  the aws-cli's config-file fixtures (``enable_sigv4_from_config_file`` /
-  ``enable_addressing_mode_in_config``) become client-Config equivalents.
+  us-east-1-regional. The client factory builds a client with those fixed
+  credentials on the regional us-east-1 endpoint the aws-cli assembly
+  (``S3.from_aws_cli``) gives its own, naming no signature version as it
+  names none, and the aws-cli's config-file fixtures
+  (``enable_sigv4_from_config_file`` / ``enable_addressing_mode_in_config``)
+  become client-Config equivalents.
 """
 
 from __future__ import annotations
@@ -59,7 +58,6 @@ from unittest import mock
 from urllib.parse import urlsplit
 
 import boto3
-from botocore.compat import HAS_CRT
 from botocore.config import Config
 
 from boto3_s3_cli.commands.base import Context
@@ -78,10 +76,10 @@ def _frozen_clock(remove_tzinfo: bool = True) -> datetime.datetime:
     return FROZEN_DATETIME.replace(tzinfo=datetime.timezone.utc)
 
 
-# build_client's pinned base (clientfactory.py): SigV4 always, us-east-1 regional.
+# The aws-cli assembly's base (S3.from_aws_cli): us-east-1 regional, no signature named.
 _BASE_S3: dict[str, Any] = {"us_east_1_regional_endpoint": "regional"}
-_DEFAULT_CONFIG = Config(signature_version="s3v4", s3=_BASE_S3)
-_PATH_STYLE_CONFIG = Config(signature_version="s3v4", s3={**_BASE_S3, "addressing_style": "path"})
+_DEFAULT_CONFIG = Config(s3=_BASE_S3)
+_PATH_STYLE_CONFIG = Config(s3={**_BASE_S3, "addressing_style": "path"})
 
 
 def _get_presigned_url_for_cmd(argv: list[str], *, config: Config = _DEFAULT_CONFIG) -> str:
@@ -99,10 +97,6 @@ def _get_presigned_url_for_cmd(argv: list[str], *, config: Config = _DEFAULT_CON
         stack.enter_context(
             mock.patch("botocore.auth.get_current_datetime", side_effect=_frozen_clock)
         )
-        if HAS_CRT:
-            stack.enter_context(
-                mock.patch("botocore.crt.auth.get_current_datetime", side_effect=_frozen_clock)
-            )
         result = run_cli_in_process(argv, ctx=Context(client_factory=factory))
     assert result.rc == 0, result.stderr
     return result.stdout.strip()
@@ -192,9 +186,9 @@ class TestPresignCommand:
         )
 
     def test_handles_sigv4(self) -> None:
-        # aws-cli enables sigv4 via a config file; aws v2 (and build_client's
-        # pinned base) already signs v4, so the default config is the
-        # equivalent - the expectation is identical to test_generates_a_url.
+        # aws-cli enables sigv4 via a config file; aws v2 already signs v4,
+        # and presign here signs v4 for any client, so the expectation is
+        # identical to test_generates_a_url.
         stdout = _get_presigned_url_for_cmd(
             ["presign", "s3://bucket/key"], config=Config(signature_version="s3v4", s3=_BASE_S3)
         )

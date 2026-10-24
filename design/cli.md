@@ -350,10 +350,10 @@ numbers in the bold item labels below are that document's.
   library via `S3Storage(uri, client=...)` (the library does not rebuild the
   connection settings). The trust source is resolved twice, as aws-cli
   resolves it for its two clients. Every botocore client gets aws-cli's
-  `verify_ssl` parameter (`_client_verify`: `--no-verify-ssl` -> `False`, else
+  `verify_ssl` parameter (`awsclisession.client_verify`: `--no-verify-ssl` -> `False`, else
   `--ca-bundle`, else `None`), and botocore walks the rest: the `ca_bundle`
   config variable, `REQUESTS_CA_BUNDLE`, its default bundle. The CRT client
-  gets aws-cli's CRT factory resolution (`_crt_verify`, as
+  gets aws-cli's CRT factory resolution (`awsclisession.crt_verify`, as
   `CrtClientOptions.verify`): the same flags, then the `ca_bundle` config
   variable read off the session, then botocore's bundled `cacert.pem` -
   never `REQUESTS_CA_BUNDLE` or certifi ([`crt.md`](./crt.md)). An empty or
@@ -399,7 +399,7 @@ numbers in the bold item labels below are that document's.
      `ScopedConfigProvider` / `IMDSRegionProvider`); an empty `AWS_REGION=`
      therefore selects the empty region too -> the same `Invalid endpoint` failure
      as aws-cli (rc 255), not a fall-through to `AWS_DEFAULT_REGION`. The
-     chain's answer is then **bound onto the session** (`_bind_region`), because
+     chain's answer is then **bound onto the session** (`awsclisession.bind_region`), because
      handing each client a
      `region_name` never reached the STS client the assume-role /
      web-identity providers create for themselves: an assume-role profile whose

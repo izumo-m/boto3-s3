@@ -1486,6 +1486,36 @@ class TestS3ErrorMsgRegistration:
         )
 
 
+class TestContextSeams:
+    def test_a_service_client_factory_alone_is_used(self) -> None:
+        # Without a client_factory the S3 clients stay the command's own, the
+        # rewriter included, and only the non-S3 clients are injected.
+        from boto3_s3_cli.commands.base import Context
+
+        injected = object()
+        asked: list[tuple[str, str | None]] = []
+
+        def service_factory(service: str, _args: Any, *, region: str | None = None) -> Any:
+            asked.append((service, region))
+            return injected
+
+        s3 = Context(service_client_factory=service_factory).s3(_parse(["--region", "us-east-1"]))
+        assert s3.service_client("sts") is injected
+        assert s3.service_client("s3control", region="eu-west-1") is injected
+        assert asked == [("sts", None), ("s3control", "eu-west-1")]
+        parsed: dict[str, Any] = {
+            "Error": {"Code": "PermanentRedirect", "Message": "m", "Endpoint": "e"}
+        }
+        s3.client().meta.events.emit(
+            "after-call.s3.ListObjectsV2",
+            http_response=None,
+            parsed=parsed,
+            model=None,
+            context={},
+        )
+        assert parsed["Error"]["Message"].endswith(s3errormsg.REGION_ERROR_MSG)
+
+
 class TestChecksumDefaultRegistration:
     def test_every_built_client_names_aws_default_where_botocore_would(self) -> None:
         # aws-cli's bundled botocore stamps CRC64NVME on a DeleteObjects that names

@@ -111,7 +111,8 @@ def _make_context(responder: stubs.S3Responder) -> Context:
     One session is shared (its loader cache keeps repeat client builds cheap,
     as in any long-lived process); a fresh client is built per CLI invocation,
     like the production path (``clientfactory.build_s3``) the injection
-    replaces. The
+    replaces; the command's `S3` around it still opens its own session per
+    invocation (``S3.from_aws_cli``), as in production. The
     session is the library's tuned `boto3_s3.session()` - the production CLI
     installs the same fast timestamp parser on every session it builds, so
     the injected context must measure the same configuration.

@@ -43,7 +43,7 @@ def register(client: S3Client) -> None:
 
     aws-cli registers the handler on its session, so every S3 client it creates
     carries it; registering per client is the same reach here, because the
-    command's `S3` (`clientfactory._cli_s3_class`) registers it in `client()`
+    command's `S3` (`clientfactory.cli_s3_class`) registers it in `client()`
     and `source_client()`, the only places it builds an S3 client.
     """
     client.meta.events.register("after-call.s3", enhance_error_msg)

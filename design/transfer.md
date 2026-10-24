@@ -758,8 +758,9 @@ dest-existence check for download. We ported the same three faces:
   (section 2)**: even with the classic engine, CRT-family algorithms are
   computed with awscrt. Whether to switch the transfer engine itself to CRT is
   decided by `preferred_transfer_client` (section 2 / [`crt.md`](./crt.md)), and
-  SigV4 signing (cli.md section 4 - for symmetry, SigV4 is pinned to pure-Python) is not
-  switched even when the CRT engine is in use.
+  the botocore client's request signing (awscrt's signers when awscrt is
+  importable, as botocore picks them; `presign` always signs pure-Python,
+  cli.md section 4) does not change with the transfer engine.
 
 ## 10. SDK version differences (not matched)
 
