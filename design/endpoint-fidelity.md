@@ -24,7 +24,7 @@ newer one has not been checked against these rows until the probes are re-run;
 The real-S3 column is measured where marked *measured* - by the real-AWS
 runs of `tests/run_e2e.sh` in ap-northeast-1 (2026-10-15: 237 of 248 e2e
 tests passed, all 11 failures test-side; 2026-10-17, after the section 2
-fixes: 248 of 248) plus probes from those days - and is S3's documented
+fixes: 248 of 248) plus probes from those days and from 2026-10-25 - and is S3's documented
 behavior otherwise; a row marked *unverified*
 has never been checked against real S3. The moto column matters because
 goldens replay on moto: a golden captured on one endpoint only works if moto
@@ -34,7 +34,7 @@ section 2; the table doubles as the probe checklist for a new endpoint.
 | # | Surface | Dev stack (RustFS 1.0.3) | Real S3 | moto | Section 2 |
 |---|---|---|---|---|---|
 | G1 | PutBucketWebsite without an IndexDocument (error document only, or empty) | rejected, `MalformedXML` | rejected (`InvalidArgument`; the error-document-only shape *unverified*) | stored | T8 |
-| G2 | `--storage-class GLACIER` | `InvalidStorageClass`, rc 1 | accepted, rc 0 | accepted | T9 |
+| G2 | `--storage-class` other than STANDARD and REDUCED_REDUNDANCY (STANDARD_IA, ONEZONE_IA, INTELLIGENT_TIERING, GLACIER_IR, GLACIER, DEEP_ARCHIVE) | `InvalidStorageClass`, rc 1 | accepted, rc 0 (*measured*) | accepted | T9 |
 | G3 | Object annotations | ListObjectAnnotations `NotImplemented` | supported | not supported | T10 |
 | G4 | CreateBucket on a bucket you own | succeeds (us-east-1 rule) | us-east-1 succeeds; other regions `BucketAlreadyOwnedByYou` | us-east-1 rule | T11 |
 | G5 | `CreateBucketConfiguration.Tags` | accepted and ignored (empty tag set) | applied (*measured*) | ignored | T12 |
@@ -43,7 +43,7 @@ section 2; the table doubles as the probe checklist for a new endpoint.
 | G8 | Zero-byte PUT | the next PutObject with a body on the same pooled connection waits for the client's read timeout (HEAD, GET, and listings do not) | unaffected | unaffected | T1 |
 | G9 | GetObjectAttributes, COMPOSITE checksum | value with the `-N` suffix, as HeadObject | general purpose buckets omit the suffix there (HeadObject has it); S3 Express directory buckets add it (*measured*) | - | none |
 | G10 | UploadPartCopy (multipart copy) | destination carries no checksum | destination carries a CRC64NVME FULL_OBJECT checksum (*measured*) | - | none |
-| G11 | PutObject with a canned ACL or grant, new bucket | accepted, rc 0 | new buckets have ACLs disabled (BucketOwnerEnforced): rejected, rc 1 on both CLIs (*measured*) | accepted | T5 |
+| G11 | PutObject with a canned ACL or grant, new bucket | accepted, rc 0 | new buckets have ACLs disabled (BucketOwnerEnforced): a grant or a canned ACL other than `private` and `bucket-owner-full-control` is rejected (`AccessControlListNotSupported`), rc 1 on both CLIs; those two are accepted (*measured*) | accepted | T5 |
 | G12 | CopyObject with `If-None-Match: *` onto an existing key | honored, as real S3 | honored: neither CLI copies (*measured*) | condition ignored, the copy overwrites | T7 |
 | G13 | Bucket create and delete as HeadBucket sees them | immediate | lags behind ListBuckets: a name queried before it existed answers 404 for about 30 s after the create; a bucket that held objects answers 200 for over 2 minutes after `rb --force`; a delete and re-create under one name can answer `BucketAlreadyOwnedByYou`. ListBuckets reflects a create and a delete at once (*measured*) | immediate | T4 |
 | G14 | `LastModified` in listings | sub-second | whole seconds | - | none |
@@ -51,13 +51,25 @@ section 2; the table doubles as the probe checklist for a new endpoint.
 | G16 | HeadObject checksum of a PutObject with the default checksum | the CRC32 value without `ChecksumType` | `ChecksumType: FULL_OBJECT` alongside the value | - | none |
 | G17 | Transport of the dev stack (a setup property, not server behavior) | http | https | in-process | T2, T6 |
 | G18 | ListBuckets with a `Prefix` | the prefix is ignored: every bucket is listed | only the matching buckets | - | none |
+| G19 | Object ACL stored by a PutObject with a grant, on a bucket that allows ACLs (BucketOwnerPreferred) | not stored: GetObjectAcl answers the owner's FULL_CONTROL alone, whatever was sent | the grants sent (*measured*) | the grants sent | none |
+| G20 | ETag of an SSE-S3 object | differs on every write of the same bytes and is not the MD5 of the content, single PUT and multipart alike | the MD5 of the content (a multipart object: the MD5 of the part MD5s with `-N`), the same on every write (*measured*; an SSE-C or SSE-KMS object's ETag differs on every write on both) | the MD5 of the content | none |
+| G21 | ListObjectsV2 entry of a multipart object under SSE-S3 or SSE-C | no ETag | the ETag HeadObject answers (*measured*) | - | none |
+| G22 | `--sse aws:kms` | refused, `InvalidRequest` ("SSE-KMS requires a configured and running KMS service": the compose file configures none), rc 1 | accepted with the `aws/s3` key (*measured*) | accepted | none |
+| G23 | SSE-C on a new bucket | accepted | refused, `AccessDenied` ("this bucket has blocked upload requests that specify ... SSE-C"): new buckets block SSE-C (`BlockedEncryptionTypes`) until a PutBucketEncryption lifts it (*measured*) | - | none |
+| G24 | Anonymous PutObject sent aws-chunked with an unsigned trailer (`STREAMING-UNSIGNED-PAYLOAD-TRAILER`, as the CRT engine sends it), where a bucket policy allows anonymous writes | refused, `UnexpectedContent`, rc 1 | accepted: both CLIs' anonymous CRT uploads succeed (*measured*) | - | none |
+| G25 | DeleteObjects naming a key that holds a control character (U+0001), Quiet or not | deletes the key, then answers `InternalError` ("XML response contains a control character") | refuses the request as `MalformedXML`; the key stays (*measured*) | - | none |
 
 G14 changes no test - the e2e sync scenarios shift times by a day - but a
 behavior that depends on it (`sync --exact-timestamps` converging) looks
 different on the dev stack than on real S3. G17 matters because botocore
 puts the flexible checksum into an aws-chunked trailer only over https, so
 some failure paths differ by transport, and because aws-cli's CRT client takes
-`use_ssl` from the command line only.
+`use_ssl` from the command line only. G23 matters to a real-S3 run of the e2e
+suite: `tests/run_e2e.sh` creates a new bucket, so a scenario that uploads
+with SSE-C would need the block lifted first (none does today). G25 shows in
+no CLI run - aws-cli deletes one key per request, and the deleter sends a key
+XML cannot carry in a `DeleteObject` of its own (deleter.md) - only in a
+probe that batches such a key.
 
 ## 2. Test-side changes
 
