@@ -427,8 +427,8 @@ it itself for a backend that has not declared it filters
 runs, and a backend's listing stamps `FileInfo.compare_key` as part of its own
 contract, so a [`GlobFilter`](./filters.md#globfilter) matches the relative key
 directly and a richer predicate can reach the entry's backend. This slot
-carries the item filter of `cp` / `mv` / `rm` and `sync`'s visibility layer,
-where each side's listing is pruned independently before the pairs are formed —
+carries the item filter of `cp` / `mv` / `rm` / `ls` and `sync`'s visibility
+layer, where each side's listing is pruned independently before the pairs are formed —
 which is why an entry a filter removed from the destination listing is not a
 candidate for `sync`'s delete lane at all. The operations compose their own
 conditions with the caller's predicate: an S3 transfer source additionally

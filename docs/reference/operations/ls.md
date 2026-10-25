@@ -30,6 +30,7 @@ def ls(
     *,
     on_entry: ListingCallback,
     recursive: bool = False,
+    filter: FileFilter | None = None,
     request_payer: str | None = None,
     bucket_name_prefix: str | None = None,
     bucket_region: str | None = None,
@@ -75,14 +76,13 @@ spent in it is time the listing is not consumed. An exception it raises
 propagates out of `ls` unchanged, after the listing has been closed.
 
 `ls` emits nothing to `on_result` — it has no such parameter, no `dryrun`, and
-no `BatchError`: a listing has no per-item outcomes to report. It also filters
-nothing. There is no `filter=` parameter, and every entry the listing returns
-reaches `on_entry`, zero-byte `/`-terminated folder-marker keys included; only
-a cancellation, an error, or an exception from `on_entry` cuts the delivery
-short. Narrow a listing by choosing a longer prefix, by discarding entries
-inside the callback, or by overriding `S3Storage.scan_pages` on a subclass you
-pass as `target` — `ls` consumes that producer, so what it omits or enriches is
-what `ls` delivers.
+no `BatchError`: a listing has no per-item outcomes to report. Every entry the
+listing returns that `filter` keeps reaches `on_entry`, zero-byte
+`/`-terminated folder-marker keys included; only a cancellation, an error, or
+an exception from `on_entry` or `filter` cuts the delivery short. Besides
+`filter`, a listing narrows by a longer prefix, or by overriding
+`S3Storage.scan_pages` on a subclass you pass as `target` — `ls` consumes that
+producer, so what it omits or enriches is what `ls` delivers.
 
 Entries from an object listing are `S3FileInfo` instances. `key` is the full S3
 key, or the full prefix for a `DIRECTORY` entry, and `compare_key` is that key
@@ -104,6 +104,43 @@ one level: `Delimiter='/'` is sent, so each sub-"directory" arrives as a single
 every key under the prefix arrives as a `FILE` entry. `recursive` is ignored at
 the service root, where nothing is nested.
 
+`filter` decides which entries reach `on_entry`: a `FileFilter`
+([`../filters.md`](../filters.md)), a predicate over the entry's `FileInfo`
+returning `True` to deliver the entry and `False` to drop it silently. `None`
+(the default) delivers every entry. It is offered every entry the listing
+produces — the `DIRECTORY` entries of a non-recursive listing and the `BUCKET`
+entries at the service root as well as `FILE` entries — and is shown the same
+`FileInfo` that `on_entry` would receive. A relative
+[`GlobFilter`](../filters.md#globfilter) pattern therefore matches the
+`compare_key` described above: the key with the target's key removed as typed,
+or the bucket name (`Include("prod-*")` after `Exclude("*")` keeps the buckets
+whose names start with `prod-`). Two consequences follow:
+
+- `Exclude("tmp/*")` also drops the common prefix `tmp/`, because `*` matches
+  the empty string; `[Exclude("*"), Include("*.log")]` drops every `DIRECTORY`
+  entry along with the other files. To keep the directories, wrap the
+  compiled glob `keep`:
+  `filter=lambda e: e.kind is FileKind.DIRECTORY or keep(e)`.
+- `DIRECTORY` and `BUCKET` entries carry no `size`, and `DIRECTORY` entries no
+  `mtime`, so a predicate that reads them must allow for `None`.
+
+A recursive `rm`, `cp` or `mv` appends a `/` to a target key that lacks one
+([`rm_filter_root`](./rm.md#rm_filter_root)), while `ls` takes the key as
+typed. For a target that ends in `/`, a recursive `ls` therefore shows the
+filter each key with the same `compare_key` those operations show it, so one
+filter keeps the same keys in all four (`cp` and `mv` also skip zero-byte
+`/`-terminated folder markers, which `ls` lists). For a target that does not,
+`ls` also lists the keys that merely begin with it, and the `compare_key` of a
+key below it starts with `/` (`s3://bucket/pre` offers `pre/a` as `/a`).
+
+On an object listing the predicate runs page by page on the listing's prefetch
+worker thread, as it does on the other operations' enumerating paths, so it
+must be thread-safe, and a slow one throttles the listing; a target
+`S3Storage` that seeds `read_ahead=False` in its `default_scan_options` runs
+it on the calling thread instead. On the bucket listing, which has no worker,
+it runs on the calling thread. An absolute pattern never matches a `BUCKET`
+entry, which has no `bucket/key` path ([`../filters.md`](../filters.md#globfilter)).
+
 `request_payer` is passed through as the `ListObjectsV2` `RequestPayer` value
 and is not validated by the library — the service decides. `None` sends the
 parameter not at all. It is ignored at the service root.
@@ -118,9 +155,11 @@ bucket listing either filters or fails.
 
 `cancel_token` accepts a `CancelToken` shared with anything else that holds it
 (see [`../results.md`](../results.md)). It is consulted once before the listing
-starts, again before and after every `on_entry` call, and — for an object
-listing — by the page producer between page pulls, so cancelling from inside
-the callback takes effect at the next entry boundary. A cancellation stops
+starts, again before and after every `on_entry` call, by the page producer
+between page pulls on an object listing, and on a filtered bucket listing
+after `filter` has decided on each bucket — so cancelling from inside the callback
+or the filter takes effect at the next entry boundary, even while `filter`
+rejects every remaining entry. A cancellation stops
 delivery, closes the listing, and then raises `CancelledError`; entries already
 delivered stand, and a cancel that arrives after the last entry still ends the
 call with `CancelledError` rather than a normal return. Both `CancelMode`
@@ -193,6 +232,9 @@ raises them unnamed (the object listing is shared with the recursive forms of
   translator cannot classify.
 
 An exception raised by `on_entry` is not translated, wrapped, or suppressed.
+Neither is one raised by `filter`, except for one detail: the predicate runs
+inside the listing's pull, so a `Boto3S3Error` it lets out with `operation`
+unset arrives with `operation="ls"`, the same exception object otherwise.
 
 ## boto3_s3.ls
 

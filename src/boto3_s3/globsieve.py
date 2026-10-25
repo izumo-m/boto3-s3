@@ -22,9 +22,13 @@ needs no base and works for every operation, on both sides of a ``sync`` and
 inside the caller's own predicate:
 
 - R, the entry's path below aws-cli's base: its ``compare_key``. The library
-  stamps it so on every entry it hands to a filter.
+  stamps it so on every entry it hands to a filter (``ls``, which has no
+  aws-cli counterpart, stamps its own listing's: the key below the target as
+  typed, or a bucket's name).
 - F, the full path aws-cli matches: a ``LocalFileInfo``'s ``key`` (the absolute
-  path), ``bucket/key`` for an ``S3FileInfo``, none for any other entry.
+  path), ``bucket/key`` for an ``S3FileInfo``, none for any other entry or for
+  a ``BUCKET``-kind one (``ls`` at the service root), which has no bucket to
+  join its name onto.
 - D, the drive or UNC share of F in its native spelling (Windows only; ``""``
   on the S3 side).
 
@@ -73,7 +77,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from boto3_s3.exceptions import ValidationError
-from boto3_s3.types import LocalFileInfo, S3FileInfo
+from boto3_s3.types import FileKind, LocalFileInfo, S3FileInfo
 
 if TYPE_CHECKING:
     from boto3_s3.s3storage import S3Storage
@@ -411,7 +415,8 @@ class GlobFilter:
     entry is kept, deciding from its R, F and D as the module docstring
     describes: R is ``compare_key``, F is the ``key`` of a ``LocalFileInfo``
     or ``bucket/key`` of an ``S3FileInfo`` (read from its ``storage``), and
-    any other entry - or an ``S3FileInfo`` without a ``storage`` - has no F,
+    any other entry - or an ``S3FileInfo`` without a ``storage`` or of
+    ``BUCKET`` kind - has no F,
     so only patterns matched against R apply to it. An entry whose
     ``compare_key`` is ``None`` is matched by the full-path patterns alone.
     Both values are what the library stamps on every entry it hands to a
@@ -474,7 +479,11 @@ class GlobFilter:
         if self._uses_full:
             if isinstance(info, LocalFileInfo):
                 full = info.key
-            elif isinstance(info, S3FileInfo) and info.storage is not None:
+            elif (
+                isinstance(info, S3FileInfo)
+                and info.storage is not None
+                and info.kind is not FileKind.BUCKET
+            ):
                 full = f"{cast('S3Storage', info.storage).bucket}/{info.key}"
         return self.included(info.compare_key, full)
 

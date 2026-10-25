@@ -1,6 +1,6 @@
 # Filters
 
-The `filter=` parameter of `cp` / `mv` / `rm` / `sync` takes a `FileFilter`, and
+The `filter=` parameter of `cp` / `mv` / `rm` / `sync` / `ls` takes a `FileFilter`, and
 `GlobFilter` — compiled from `Exclude` / `Include` rules — is the `aws s3`-style
 include/exclude implementation of one. The narrative treatment is
 [`../library/filters.md`](../library/filters.md); the engine's derivation from
@@ -14,19 +14,20 @@ from `boto3_s3.globsieve`; `compile` and `normcase` are public under
 ## FileFilter
 
 A per-entry predicate: it receives the entry's `FileInfo` and returns whether
-the entry takes part in the operation. `True` keeps it, `False` skips it.
+the entry takes part in the operation — for `ls`, whether it is listed. `True`
+keeps it, `False` skips it.
 
 ```python
 FileFilter = Callable[[FileInfo], bool]
 ```
 
 A skipped entry does not take part and no `OpResult` is emitted for it — it is
-absent from the run rather than reported as a skip. See
+absent from the run rather than reported as a skip; an entry `ls` skips never
+reaches `on_entry`. See
 [`results.md`](./results.md) for `OpResult` and `FileInfo`.
 
-**Where it is accepted.** `cp`, `mv`, `rm` and `sync` each take a single
-`filter` parameter ([`operations/README.md`](./operations/README.md)). `ls` has
-no `filter` parameter. `sync` additionally accepts a `FileFilter` for its
+**Where it is accepted.** `cp`, `mv`, `rm`, `sync` and `ls` each take a single
+`filter` parameter ([`operations/README.md`](./operations/README.md)). `sync` additionally accepts a `FileFilter` for its
 `create_filter` and `delete_filter` lanes, which run after pairing and receive
 the `FileInfo` of the one side that lane owns
 ([`operations/sync.md`](./operations/sync.md)). The predicate is also the
@@ -39,9 +40,14 @@ the base the AWS CLI joins `--exclude` / `--include` patterns onto, so a
 [`GlobFilter`](#globfilter) decides as `aws s3` does. On the enumerating paths
 that is the listing's relative key: for a local entry the key relative to the
 directory being enumerated, for an S3 entry the key with the listing's `Prefix`
-removed. On the single-entry paths the predicate is shown a copy of the entry in
-the AWS CLI's form where the record's own differs, and the record handed on is
-unchanged (it names the destination):
+removed. `ls`, whose filter has no `aws s3` counterpart to follow, shows the
+predicate each entry exactly as it delivers it — its `Prefix` is the target
+key as typed, a common prefix arrives as a `DIRECTORY` entry, and a bucket at
+the service root carries its name as `compare_key`
+([`operations/ls.md`](./operations/ls.md)). On the single-entry paths the
+predicate is shown a copy of the entry in the AWS CLI's form where the
+record's own differs, and the record handed on is unchanged (it names the
+destination):
 
 - a single S3 object (`cp` / `mv`, and `rm`'s blind single key) carries the key
   relative to its parent as [`rm_filter_root`](./operations/rm.md#rm_filter_root)
@@ -77,9 +83,9 @@ at all, so only `key`, `compare_key` and `storage` are set and `size` / `mtime`
 **Where it runs.** On the enumerating paths — a recursive `cp` / `mv`, the
 local destination pre-walk a recursive S3-to-local `cp` / `mv` performs when
 `case_conflict` is anything but `ignore`, `rm`'s recursive delete and its
-bucket-root folder-marker sweep, and each side of `sync` — the predicate is
-evaluated page by page on the enumeration's prefetch worker thread, overlapped
-with the listing I/O — except where the scan runs without read-ahead
+bucket-root folder-marker sweep, each side of `sync`, and `ls`'s object
+listing — the predicate is evaluated page by page on the enumeration's
+prefetch worker thread, overlapped with the listing I/O — except where the scan runs without read-ahead
 ([`ScanOptions.read_ahead`](./options.md#scanoptions) `False`: a local `sync`
 destination while the delete lane is on, or a backend that seeds it), where it
 runs on the thread that called the operation. It must therefore be
@@ -90,15 +96,17 @@ pre-walk hands the predicate destination-side entries during a `cp` or `mv`,
 and an entry it excludes is not counted as an existing destination key by that
 gate ([`options.md`](./options.md)). On the single-object paths — a
 non-recursive `cp` / `mv`, `rm`'s blind single-key delete — it is applied
-inline on the calling thread. An exception raised by the predicate is re-raised
-on the consumer side of the enumeration (after entries already queued) and
-propagates out of the operation call. One detail on the enumerating paths: the
+inline on the calling thread, and so it is on `ls`'s bucket listing, which has
+no worker. An exception raised by the predicate is re-raised on the consumer
+side of the enumeration (after entries already queued) and propagates out of
+the operation call. One detail on the enumerating paths: the
 predicate runs inside the listing, and the operation puts its name on a
 listing failure that carries none — so a `Boto3S3Error` the predicate lets out
 with `operation` unset (from a storage call of its own, say) arrives with
 `operation` set to the operation's name, the same exception object otherwise.
-A non-recursive `cp` / `mv` sets it the same way; from `rm`'s blind single-key
-delete, and from `on_result` / `on_entry`, it arrives as raised.
+A non-recursive `cp` / `mv` and `ls`'s bucket listing set it the same way;
+from `rm`'s blind single-key delete, and from `on_result` / `on_entry`, it
+arrives as raised.
 
 **Where it does not apply.** `cp`'s stream route — an `IOStorage` on either
 side — has no listing to prune, and `filter` is not consulted on it. `mv` has
@@ -204,7 +212,8 @@ against the result. The filter reproduces that from three values of the entry:
 R, its path below that base, which is `info.compare_key`; F, the full path the
 AWS CLI matches — the `key` of a `LocalFileInfo` (the absolute path) or
 `bucket/key` for an `S3FileInfo` (the bucket read from its `storage`), and
-none for any other entry; and D, the drive or UNC share of F (Windows only,
+none for any other entry or for a `BUCKET` entry, which `ls` lists at the
+service root with no bucket to join its name onto; and D, the drive or UNC share of F (Windows only,
 empty on the S3 side). A pattern the join appends to the base is matched
 against R, and one the join puts in place of the base against F:
 

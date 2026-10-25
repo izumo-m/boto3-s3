@@ -1,15 +1,16 @@
 # Filtering which items take part
 
 `cp` / `mv` / `rm` / `sync` take a `filter=` that decides which items the
-operation acts on. It has one shape everywhere: a callable taking the entry's
-`FileInfo` and returning whether to keep it.
+operation acts on, and `ls` takes one that decides which entries it lists. It
+has one shape everywhere: a callable taking the entry's `FileInfo` and
+returning whether to keep it.
 
 ```python
 FileFilter = Callable[[FileInfo], bool]     # True = act on it, False = skip
 ```
 
 A skipped item is skipped silently — no record reaches `on_result`, matching
-`aws s3`. `ls` takes no `filter=` argument.
+`aws s3` — and an entry `ls` skips never reaches `on_entry`.
 
 ## 1. Glob patterns
 
@@ -108,7 +109,33 @@ decides *which entries take part at all*; `create_filter`, `update_filter` and
 `delete_filter` decide *what to do* with the entries that did. See
 [`sync.md`](./sync.md).
 
-## 5. The pattern engine on its own
+## 5. `filter` in `ls`
+
+`ls` offers its `filter` every entry it would deliver: besides the objects, the
+common prefixes of a non-recursive listing (`DIRECTORY` entries, whose
+`compare_key` ends in `/`) and, at the service root, the buckets (whose
+`compare_key` is the bucket name). A glob therefore drops directories too:
+
+```python
+from boto3_s3 import Exclude, FileKind, Include, globsieve
+
+keep = globsieve.compile([Exclude("*"), Include("*.log")])
+# Every .log object under app/.
+s3.ls("s3://bucket/app/", recursive=True, filter=keep, on_entry=print)
+# One level: the .log objects, and every sub-prefix.
+s3.ls("s3://bucket/app/", filter=lambda e: e.kind is FileKind.DIRECTORY or keep(e), on_entry=print)
+# The buckets whose names start with prod-.
+s3.ls(filter=globsieve.compile([Exclude("*"), Include("prod-*")]), on_entry=print)
+```
+
+For a target that ends in `/`, a recursive `ls` matches each key as a
+recursive `rm` / `cp` / `mv` of the same target does, so it shows which keys
+the same filter selects there. The predicate runs on the listing's prefetch
+worker for an object listing, as section 3 describes, and on the calling
+thread for the bucket listing. The [reference](../reference/operations/ls.md)
+has the details.
+
+## 6. The pattern engine on its own
 
 A compiled filter also decides on plain strings, for matching paths outside an
 operation:

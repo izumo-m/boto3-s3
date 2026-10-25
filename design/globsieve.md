@@ -58,7 +58,8 @@ three values of the entry alone:
 - **R**, the entry's path below aws-cli's base: `FileInfo.compare_key`;
 - **F**, the full path aws-cli matches: a `LocalFileInfo`'s `key` (the absolute
   path, `/`-separated), `bucket/key` for an `S3FileInfo` (the bucket read from
-  its `storage`), none for any other entry;
+  its `storage`), none for any other entry or for a `BUCKET`-kind one (`ls` at
+  the service root, which has no bucket to join the name onto);
 - **D**, the drive or UNC share of F in its native spelling (Windows only;
   empty on the S3 side, whose path has none).
 
@@ -66,7 +67,7 @@ So the compiled filter needs no base, and one object serves every operation,
 both sides of a `sync`, `sync`'s decision filters and the caller's own
 predicate. What it relies on is the stamping contract of section 5: every
 entry the library hands to a filter carries aws-cli's R in `compare_key` and
-aws-cli's F in `key`.
+aws-cli's F in `key`, except on `ls`, whose filter has no aws-cli counterpart.
 
 At compile time each pattern is split into drive, root and rest with a port
 of Python 3.14's `ntpath.splitroot` (`_splitroot`; aws-cli bundles 3.14, and
@@ -145,7 +146,8 @@ replacing it.
 ## 5. The stamping contract: what each route shows a filter
 
 Every entry the library hands to a filter carries aws-cli's R in `compare_key`
-and, for a local or S3 entry, aws-cli's F in `key` / `bucket/key`. Where the
+and, for a local or S3 entry, aws-cli's F in `key` / `bucket/key`; `ls` has no
+aws-cli counterpart and shows its own entries (last row). Where the
 record the operation keeps differs from that (its `compare_key` names the
 destination and pairs `sync`'s sides), the filter is shown a copy (a *view*)
 and the record is handed on unchanged.
@@ -157,6 +159,7 @@ and the record is handed on unchanged.
 | Single S3 object (`cp` / `mv` source, `rm`'s blind delete) | the key below `single_object_filter_root` (aws-cli's parent; `a//b` is `/b`, and on Windows `a\/b` is `/b`) - a view on `cp` / `mv` (`_filter_single_s3_source`), the stamped record on `rm` |
 | Single local source (`cp` / `mv` upload) | a view (`_filter_single_local_source`): `key` is aws-cli's `local_format` path (`/`-separated, a trailing `/` for a directory or a path typed with one), `compare_key` the part below `abspath(dirname(path as typed))` - `d` is `d/`; `d/`, `.` and `../` are `""`; a bare `..` lies outside and gets `None`, so only full-path patterns apply |
 | A custom backend's entry | whatever the backend stamps; it has no F, so only relative patterns apply (and a drive-relative pattern, which needs D, never does) |
+| `ls` (object listing, recursive or not; bucket listing) | the record's own: the key below the target key as typed (no `/` appended, so no view), a common prefix as a `DIRECTORY` entry, and at the service root the bucket's name, a `BUCKET` entry with no F |
 
 The single local view is what keeps `cp d s3://b/k --exclude d` transferring
 (and failing on the directory, rc 1) while `--exclude 'd/'` excludes it (rc 0),
@@ -182,7 +185,7 @@ Both are in docs/cli/aws-differences.md.
 
 ## 7. Where the filter runs
 
-`cp`, `mv`, `rm` and `sync` take one `filter: FileFilter | None`
+`cp`, `mv`, `rm`, `sync` and `ls` take one `filter: FileFilter | None`
 (`FileFilter = Callable[[FileInfo], bool]`, `True` = include). A recursive
 side applies it as `ScanOptions.filter`: the backend's `scan_pages` stamps
 `compare_key` and runs the predicate on the listing's prefetch worker, page by
@@ -191,7 +194,14 @@ page (or on the consuming thread where the scan runs without read-ahead;
 the predicate must be thread-safe and cheap. The local backend applies it
 inside the walk, after aws-cli's vetting, so an excluded file still emits the
 warnings aws-cli would. The single-object routes apply it inline on the calling
-thread. `ls` takes no filter.
+thread. `ls` has no aws-cli counterpart for the filter, so it shows the
+predicate exactly what it delivers. Its object listing applies it as
+`ScanOptions.filter`, recursive or not, so the `DIRECTORY` entries of a
+non-recursive listing are offered too, with the `compare_key` relative to the
+key as typed (`ls` appends no `/`, so no aws-cli-form view is substituted). Its
+bucket listing has no scan: `ls` sieves the bucket entries inline on the
+calling thread, inside the pull, so a predicate's unnamed error is attributed
+to `ls` as on the object listing.
 
 **`sync`** prunes each side's listing with the one filter before pairing (its
 visibility layer). A relative pattern prunes both sides alike, except where a

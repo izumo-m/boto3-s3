@@ -187,7 +187,7 @@ class ScanOptions:
     push the predicate to its source (a REST listing filtering server-side) or
     wrap its raw pages with ``storage.sieve_pages``; the built-ins run it on the
     prefetch worker, page by page. It carries the item filter of ``rm`` / ``cp``
-    / ``mv``, and sync's *visibility* layer: each side's listing is pruned
+    / ``mv`` / ``ls``, and sync's *visibility* layer: each side's listing is pruned
     independently (its own ``--exclude`` / ``--include`` matching space) before the
     comparator pairs the streams - which is exactly why filtered-out destination
     entries are protected from ``--delete`` (an entry a producer does not return
@@ -653,10 +653,11 @@ ResultCallback = Callable[[OpResult], None]
 ListingCallback = Callable[[FileInfo], None]
 
 # A per-entry filter used across operations (``rm`` / ``cp`` / ``mv`` / ``sync``
-# visibility, and ``sync``'s ``create_filter`` / ``delete_filter`` lanes): a
+# visibility, the entries ``ls`` delivers, and ``sync``'s ``create_filter`` /
+# ``delete_filter`` lanes): a
 # predicate over the ``FileInfo`` returning True to keep the entry. The operation
-# stamps ``info.compare_key`` (aws-cli's --exclude/--include matching space)
-# before consulting it, so a glob predicate matches
+# stamps ``info.compare_key`` (aws-cli's --exclude/--include matching space;
+# for ``ls``, its own listing's relative key) before consulting it, so a glob predicate matches
 # ``compare_key`` (and an absolute pattern the full path: a local ``key``, an S3
 # ``bucket/key``) while a richer predicate can decide on ``size`` / ``mtime`` /
 # ``storage_class`` / ``key``, or reach the entry's backend through ``info.storage``

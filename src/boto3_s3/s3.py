@@ -230,6 +230,24 @@ def _attributed_entries(entries: Iterable[_T], operation: str) -> Iterator[_T]:
         yield entry
 
 
+def _sieve_buckets(
+    buckets: Iterator[FileInfo], keep: FileFilter, cancel_token: CancelToken | None
+) -> Iterator[FileInfo]:
+    """``ls``'s ``filter`` over the bucket listing, which has no scan to apply it.
+
+    The predicate runs inside the pull, where the object listing's producer
+    runs it too, so `_attributed_entries` names what it raises the same way.
+    `cancel_token` is checked after each entry, before the next pull: while
+    the predicate rejects bucket after bucket, no entry reaches the delivery
+    loop's own check, and the listing would otherwise run on to its end.
+    """
+    for info in buckets:
+        if keep(info):
+            yield info
+        if cancel_token is not None and cancel_token.cancelled:
+            return
+
+
 def _validate_storage(storage: Storage, *, operation: str) -> None:
     """Run ``Storage.validate`` and attribute its failure to ``operation``.
 
@@ -1060,6 +1078,7 @@ class S3:
         *,
         on_entry: ListingCallback,
         recursive: bool = False,
+        filter: FileFilter | None = None,
         request_payer: str | None = None,
         bucket_name_prefix: str | None = None,
         bucket_region: str | None = None,
@@ -1087,6 +1106,16 @@ class S3:
         raises ``ValidationError``. The target is validated eagerly. Entries are
         delivered in listing order to `on_entry` on the calling thread.
 
+        `filter` is consulted for every entry before `on_entry` sees it -
+        ``DIRECTORY`` and ``BUCKET`` entries included - with the same
+        ``FileInfo`` `on_entry` would receive, so a glob matches the
+        ``Prefix``-relative ``compare_key`` (a bucket's name at the service
+        root). The object listing runs it as ``ScanOptions.filter``, on the
+        prefetch worker (on the calling thread for a storage seeding
+        ``read_ahead=False``); the bucket listing, which has no worker, runs
+        it on the calling thread inside the same pull (`_sieve_buckets`), so
+        what it raises is attributed alike.
+
         `cancel_token` may be cancelled from `on_entry` or another thread.
         Cancellation stops entry delivery, drops prefetched pages, waits for a
         page request already in progress, reclaims the prefetch worker (the
@@ -1106,11 +1135,14 @@ class S3:
         storage.get_client()
         if not storage.bucket:
             items = storage.list_buckets(name_prefix=bucket_name_prefix, region=bucket_region)
+            if filter is not None:
+                items = _sieve_buckets(items, filter, cancel_token)
         else:
             items = storage.scan(
                 replace(
                     storage.default_scan_options(),
                     recursive=recursive,
+                    filter=filter,
                     request_payer=request_payer,
                     reusable_after_interrupt=self._reusable_after_interrupt,
                 ),

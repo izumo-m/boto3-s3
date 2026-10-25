@@ -177,7 +177,7 @@ documented where it is owned:
   progress ([`../results.md`](../results.md)). `rm` moves no bytes and has none.
 - `capture_response: bool` on `cp` / `mv` / `rm` / `sync` — what a successful
   record's `extra_info` carries ([`../results.md`](../results.md)).
-- `filter: FileFilter | None` on `cp` / `mv` / `rm` / `sync`
+- `filter: FileFilter | None` on `cp` / `mv` / `rm` / `sync` / `ls`
   ([`../filters.md`](../filters.md)), and, on `cp` / `mv` / `sync`, the
   `transfer_config` argument plus the `**options` transfer options
   ([`../options.md`](../options.md)); `rm` takes `transfer_config` too, for its

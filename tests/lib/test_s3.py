@@ -24,8 +24,10 @@ from boto3_s3 import (
     CancelledError,
     CancelToken,
     CrtClientOptions,
+    Exclude,
     FileInfo,
     FileKind,
+    Include,
     InvalidConfigError,
     IOStorage,
     LocalStorage,
@@ -36,6 +38,7 @@ from boto3_s3 import (
     SyncPair,
     TransferConfig,
     ValidationError,
+    globsieve,
 )
 from tests.utils.fakes3 import client_error, listing
 from tests.utils.recorder import make_recording_client
@@ -180,6 +183,231 @@ class TestLsRouting:
     def test_key_without_bucket_raises_eagerly(self) -> None:
         with pytest.raises(ValidationError):
             S3().ls("s3:///key", on_entry=lambda _info: None)
+
+
+def _object(key: str) -> dict[str, Any]:
+    return {"Key": key, "Size": 1, "LastModified": _MTIME}
+
+
+def _bucket(name: str) -> dict[str, Any]:
+    return {"Name": name, "CreationDate": _MTIME}
+
+
+class TestLsFilter:
+    """``filter`` is offered every entry ``on_entry`` would receive, on both listings."""
+
+    def test_recursive_listing_keeps_what_the_glob_keeps(self) -> None:
+        client = _FakeS3Client(
+            [{"Contents": [_object("p/a.log"), _object("p/b.txt"), _object("p/sub/c.log")]}]
+        )
+        keep = globsieve.compile([Exclude("*"), Include("*.log")])
+        infos: list[FileInfo] = []
+        S3().ls(
+            S3Storage("s3://b/p/", client=client),
+            recursive=True,
+            filter=keep,
+            on_entry=infos.append,
+        )
+        assert [info.key for info in infos] == ["p/a.log", "p/sub/c.log"]
+
+    def test_directory_entries_are_offered_too(self) -> None:
+        # "tmp/*" also matches the common prefix "tmp/" ('*' matches nothing).
+        client = _FakeS3Client(
+            [
+                {
+                    "CommonPrefixes": [{"Prefix": "p/keep/"}, {"Prefix": "p/tmp/"}],
+                    "Contents": [_object("p/tmp.txt")],
+                }
+            ]
+        )
+        infos: list[FileInfo] = []
+        S3().ls(
+            S3Storage("s3://b/p/", client=client),
+            filter=globsieve.compile([Exclude("tmp/*")]),
+            on_entry=infos.append,
+        )
+        assert [(info.key, info.kind) for info in infos] == [
+            ("p/keep/", FileKind.DIRECTORY),
+            ("p/tmp.txt", FileKind.FILE),
+        ]
+
+    def test_the_filter_sees_the_compare_key_on_entry_gets(self) -> None:
+        # ls takes its key verbatim as the Prefix (no "/" appended, unlike a
+        # recursive rm), and the filter is shown that listing's own entries.
+        client = _FakeS3Client([{"Contents": [_object("p/a"), _object("p-x")]}])
+        offered: list[str | None] = []
+
+        def record(info: FileInfo) -> bool:
+            offered.append(info.compare_key)
+            return True
+
+        delivered: list[FileInfo] = []
+        S3().ls(
+            S3Storage("s3://b/p", client=client),
+            recursive=True,
+            filter=record,
+            on_entry=delivered.append,
+        )
+        assert offered == ["/a", "-x"]
+        assert [info.compare_key for info in delivered] == offered
+
+    def test_bucket_listing_is_filtered_by_name(self) -> None:
+        client = _FakeS3Client([{"Buckets": [_bucket("prod-a"), _bucket("dev-b")]}])
+        infos: list[FileInfo] = []
+        S3().ls(
+            S3Storage("s3://", client=client),
+            filter=globsieve.compile([Exclude("*"), Include("prod-*")]),
+            on_entry=infos.append,
+        )
+        assert [(info.key, info.kind) for info in infos] == [("prod-a", FileKind.BUCKET)]
+
+    @pytest.mark.parametrize(
+        ("target", "page", "on_caller"),
+        [
+            ("s3://b/p/", {"Contents": [_object("p/a")]}, False),
+            ("s3://", {"Buckets": [_bucket("alpha")]}, True),
+        ],
+        ids=["objects-on-prefetch-worker", "buckets-on-calling-thread"],
+    )
+    def test_where_the_filter_runs(
+        self, target: str, page: dict[str, Any], on_caller: bool
+    ) -> None:
+        threads: list[threading.Thread] = []
+
+        def record(_info: FileInfo) -> bool:
+            threads.append(threading.current_thread())
+            return True
+
+        S3().ls(
+            S3Storage(target, client=_FakeS3Client([page])),
+            filter=record,
+            on_entry=lambda _info: None,
+        )
+        assert len(threads) == 1
+        assert (threads[0] is threading.current_thread()) is on_caller
+
+    @pytest.mark.parametrize(
+        ("target", "page"),
+        [
+            ("s3://b/p/", {"Contents": [_object("p/a")]}),
+            ("s3://", {"Buckets": [_bucket("alpha")]}),
+        ],
+        ids=["objects", "buckets"],
+    )
+    def test_an_unnamed_error_from_the_filter_is_attributed_to_ls(
+        self, target: str, page: dict[str, Any]
+    ) -> None:
+        error = NotFoundError("the predicate's own lookup failed")
+
+        def refuse(_info: FileInfo) -> bool:
+            raise error
+
+        delivered: list[FileInfo] = []
+        with pytest.raises(NotFoundError) as exc_info:
+            S3().ls(
+                S3Storage(target, client=_FakeS3Client([page])),
+                filter=refuse,
+                on_entry=delivered.append,
+            )
+        assert exc_info.value is error
+        assert error.operation == "ls"
+        assert delivered == []
+
+    @pytest.mark.parametrize(
+        ("target", "page"),
+        [
+            ("s3://b/p/", {"Contents": [_object("p/a")]}),
+            ("s3://", {"Buckets": [_bucket("alpha")]}),
+        ],
+        ids=["objects", "buckets"],
+    )
+    def test_a_foreign_error_from_the_filter_passes_unchanged(
+        self, target: str, page: dict[str, Any]
+    ) -> None:
+        error = ValueError("not the library's")
+
+        def refuse(_info: FileInfo) -> bool:
+            raise error
+
+        with pytest.raises(ValueError) as exc_info:
+            S3().ls(
+                S3Storage(target, client=_FakeS3Client([page])),
+                filter=refuse,
+                on_entry=lambda _info: None,
+            )
+        assert exc_info.value is error
+
+    def test_an_absolute_pattern_never_matches_a_bucket(self) -> None:
+        # A bucket entry has no bucket/key path for a full-path pattern to match.
+        client = _FakeS3Client([{"Buckets": [_bucket("alpha"), _bucket("beta")]}])
+        infos: list[FileInfo] = []
+        S3().ls(
+            S3Storage("s3://", client=client),
+            filter=globsieve.compile([Exclude("/*")]),
+            on_entry=infos.append,
+        )
+        assert [info.key for info in infos] == ["alpha", "beta"]
+
+    def test_a_cancel_from_on_entry_stops_a_filtered_object_listing(self) -> None:
+        # The filter rejects every page after the first; the listing must
+        # still stop at a page boundary rather than run to its end.
+        released = threading.Event()
+        pulled: list[int] = []
+
+        class _Paginator:
+            def paginate(self, **_kwargs: Any) -> Any:
+                def pages() -> Any:
+                    for i in range(200):
+                        pulled.append(i)
+                        if i == 2:
+                            assert released.wait(5.0)
+                        yield {"Contents": [_object(f"p/{i:03}")]}
+
+                return pages()
+
+        class _Client(_FakeS3Client):
+            def get_paginator(self, _name: str) -> Any:
+                return _Paginator()
+
+        token = CancelToken()
+
+        def stop(_info: FileInfo) -> None:
+            token.cancel()
+            released.set()
+
+        with pytest.raises(CancelledError):
+            S3().ls(
+                S3Storage("s3://b/p/", client=_Client([])),
+                recursive=True,
+                filter=lambda info: info.key == "p/000",
+                on_entry=stop,
+                cancel_token=token,
+            )
+        assert len(pulled) <= 3
+
+    def test_a_cancel_stops_a_filtered_bucket_listing_between_entries(self) -> None:
+        pulled: list[int] = []
+
+        def pages() -> Any:
+            for i in range(200):
+                pulled.append(i)
+                yield {"Buckets": [_bucket(f"b{i:03}")]}
+
+        token = CancelToken()
+
+        def reject_and_cancel(info: FileInfo) -> bool:
+            if info.key == "b001":
+                token.cancel()
+            return False
+
+        with pytest.raises(CancelledError):
+            S3().ls(
+                S3Storage("s3://", client=_FakeS3Client(cast("list[dict[str, Any]]", pages()))),
+                filter=reject_and_cancel,
+                on_entry=lambda _info: None,
+                cancel_token=token,
+            )
+        assert len(pulled) == 2
 
 
 class TestUnknownTransferOption:
