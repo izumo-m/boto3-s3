@@ -3,7 +3,8 @@
 # Run the e2e / CRT parity suite against a REAL S3 bucket.
 #
 # Creates a unique, empty bucket, runs `pytest tests/cli/e2e`, and ALWAYS
-# force-removes the bucket (plus the mb/rb siblings) on exit. The largest object
+# force-removes the bucket (plus the mb/rb siblings and the workers' own
+# buckets, all named "<bucket>-*") on exit. The largest object
 # the suite transfers is 9 MiB (multipart coverage); everything else is tiny.
 #
 # Required env (dedicated to e2e, so nothing leaks from your normal shell):
@@ -13,6 +14,12 @@
 # Extra args are forwarded to pytest, e.g.:
 #   BOTO3_S3_E2E_PROFILE=myprofile BOTO3_S3_E2E_REGION=ap-northeast-1 \
 #       tests/run_e2e.sh -k cp -x
+#
+# The scenarios run on parallel workers (`-n auto`: BOTO3_S3_E2E_WORKERS, else
+# half the CPUs, at most 4, or one on a host awscrt calls CRT-optimized -
+# tests/cli/e2e/conftest.py); each worker works in a bucket of its own,
+# "<bucket>-gw<n>", swept up on exit with the siblings.
+# Pass `-n 0` to run in one process.
 #
 set -euo pipefail
 
@@ -47,8 +54,9 @@ export BOTO3_S3_E2E_BUCKET="boto3s3-e2e-${suffix}"
 bucket="$BOTO3_S3_E2E_BUCKET"
 
 # endpoint-fidelity T4: the mb/rb tests give every scenario and side a
-# sibling of its own, "<bucket>-<kind><nnn>-<side>", and remove it after the
-# test; this sweeps up any a crashed test left behind.
+# sibling of its own, "<bucket>-<kind><nnn>-<side>" (on a worker, of the
+# worker's bucket), and remove it after the test; this sweeps up any a crashed
+# test or worker left behind, the workers' own buckets included.
 cleanup() {
     echo "--- cleanup: force-remove test buckets ---"
     local siblings
@@ -72,5 +80,5 @@ echo "--- account=$(aws sts get-caller-identity --query Account --output text) \
 region=${AWS_REGION} bucket=${bucket} ---"
 aws s3 mb "s3://${bucket}"
 
-echo "--- uv run pytest tests/cli/e2e ${*} ---"
-uv run pytest tests/cli/e2e "$@"
+echo "--- uv run pytest tests/cli/e2e -n auto ${*} ---"
+uv run pytest tests/cli/e2e -n auto "$@"

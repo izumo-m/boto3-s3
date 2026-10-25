@@ -85,12 +85,16 @@ The e2e suite runs `boto3-s3` and the real `aws` command against a local S3
 server (RustFS, the dev stack) and compares their behavior:
 
 ```bash
-scripts/install-awscli.sh    # pin aws-cli to the reference source version — idempotent
-scripts/compose-up.sh        # start the dev stack, wait for its buckets
-source scripts/dev-env.sh    # point AWS tooling and the e2e gate at it
-uv run pytest tests/cli/e2e  # run the comparison suite
-scripts/compose.sh down      # tear the stack down
+scripts/install-awscli.sh            # pin aws-cli to the reference source version — idempotent
+scripts/compose-up.sh                # start the dev stack, wait for its buckets
+source scripts/dev-env.sh            # point AWS tooling and the e2e gate at it
+uv run pytest tests/cli/e2e -n auto  # run the comparison suite
+scripts/compose.sh down              # tear the stack down
 ```
+
+`-n auto` runs the suite on parallel workers: half the CPUs, at most four, or
+as many as `BOTO3_S3_E2E_WORKERS` says (the count applies when the command
+names `tests/cli/e2e`, as here). Leave it out to run in one process.
 
 Goldens are the recorded real-aws behavior that the in-process suite replays.
 Regenerate them against a clean dev stack with `UPDATE_GOLDENS=1 uv run pytest

@@ -594,8 +594,9 @@ def create_bucket_in_region(client: Any, bucket: str) -> None:
     ``IllegalLocationConstraintException``, so any other region must be passed
     as ``CreateBucketConfiguration.LocationConstraint``; us-east-1 (the region
     the dev stack reports) forbids the field and takes the plain form. The mb/rb parity
-    suites pre-create their sibling bucket through here so their run_e2e.sh
-    lane works in any region.
+    suites pre-create their sibling bucket through here, and each xdist worker
+    of the e2e suite its own bucket, so their run_e2e.sh lane works in any
+    region.
     """
     region = client.meta.region_name
     if region and region != "us-east-1":
@@ -611,7 +612,8 @@ def force_delete_bucket(client: Any, bucket: str) -> None:
     """Purge *bucket* and delete it; a missing bucket is a no-op.
 
     The bucket-lifecycle suites (mb/rb) clear their sibling buckets with this
-    before and after each test (the e2e fixtures). A bucket the account does
+    before and after each test, and each xdist worker its own bucket before
+    and after its run (the e2e fixtures). A bucket the account does
     not own is left untouched without a request naming it
     (endpoint-fidelity T4: see `bucket_exists`).
     """

@@ -186,10 +186,11 @@ goldens additionally record `bucket_exists` (the scenario bucket's existence
 after the run; `remaining_keys` is `null` when it is gone), their stdout
 shares rm's sorted normalization (no timestamps; `rb --force` interleaves
 nondeterministically ordered delete lines), and they run against
-**sibling** buckets derived from the suite's main bucket - the e2e main
-bucket must stay existing and empty. The `mb_buckets` / `rb_buckets`
+**sibling** buckets derived from the bucket the scenarios run in (the
+suite's main bucket, or under xdist a worker's own - section 4), which must
+stay existing and empty. The `mb_buckets` / `rb_buckets`
 fixtures hand each scenario two fresh names, one per side
-(`<main>-mb007-aws` / `<main>-mb007-ours`), and force-delete both around the
+(`<bucket>-mb007-aws` / `<bucket>-mb007-ours`), and force-delete both around the
 test: real S3 lags behind a delete and re-create under one name, so no name
 is used twice in a run. Whether a bucket exists is read from ListBuckets,
 not HeadBucket: on real S3, HeadBucket answers from a cache that can trail
@@ -340,7 +341,8 @@ zip's self-contained `dist/` and symlinking
 `.venv/bin/aws` (it installs no Python package, so the env is untouched, and a
 matching install is reused rather than re-downloaded).
 
-e2e safety contract: at collection time the suite probes that the `aws`
+e2e safety contract: before any test runs (at collection, or under xdist in
+the controller as the session starts) the suite probes that the `aws`
 binary exists and that the bucket is reachable and **empty** of current
 objects (`list_objects_v2`; a versioned bucket's noncurrent versions / delete
 markers are not probed - the harness buckets are unversioned), refusing to run
@@ -348,6 +350,40 @@ against a populated bucket. Tests restore emptiness with a full-bucket purge
 (`delete_under("")` between the two sides' runs and at the end - safe because
 of that empty-bucket gate), and the `bucket` fixture asserts emptiness before
 and after every test.
+
+**Parallel runs** (`-n auto`, pytest-xdist; `tests/run_e2e.sh` always passes
+it). Each worker runs its scenarios in a bucket of its own, `<main>-gw<n>`
+(`<main>` being the env's `BOTO3_S3_E2E_BUCKET`), created as the worker
+enters the suite and force-deleted, without looking inside (as the mb/rb
+siblings are), as it leaves: the empty-before-and-after rule and the
+scenarios that work on the bucket root (`rm s3://<bucket> --recursive`,
+`ls s3://<bucket>`) rule out sharing one bucket, or splitting it by key
+prefix. The mb/rb siblings then derive from the worker's bucket, so
+`run_e2e.sh`'s `<main>-*` sweep covers both. The env's bucket is only
+probed. The gate and the probe run once in the xdist controller before any
+worker starts: a `pytest.exit` on a worker reads to xdist as a crashed
+worker, which it replaces in a loop without showing why. Where the e2e
+conftest loads too late for the controller (the whole suite,
+`uv run pytest -n auto`, with the env set), each worker probes and fails its
+e2e items with the reason instead. `ls_all_buckets` drops the `<main>-*`
+lines from both sides' listings, since other workers create and remove
+those buckets between the two CLIs' runs.
+
+The cross-process CRT lock does not reach the CRT lane: in both CLIs it
+decides only how `auto` resolves, and the lane names `crt`. It does reach the
+other scenarios on a host awscrt calls optimized for the CRT (some EC2
+types), where `auto` resolves to the CRT engine only while no other process
+of that CLI holds the lock, so `-n auto` starts one worker there - as the
+venv's awscrt judges the host, whose list can trail the one the pinned
+aws-cli bundles. Elsewhere it starts half the CPUs' worth, at most four (or
+xdist's own `PYTEST_XDIST_AUTO_NUM_WORKERS`); `BOTO3_S3_E2E_WORKERS`
+overrides both rules. They apply to a run that names `tests/cli/e2e`, whose
+conftest is then loaded in time; `-n auto` over the whole suite gets xdist's
+own count. The suite is CPU-bound and stops gaining early on the dev stack:
+on a 14-CPU laptop it took 207 s in one process, 108 s on 4 workers and 91 s
+on 10 or 14, with the CPU time the tests use growing with every worker
+(`tests/cli/e2e/conftest.py`, measured 2026-10-25). Each worker adds about
+230 MiB at its peak.
 
 **Payload-size budget** (the suite must stay cheap against real AWS): a
 scenario uses the smallest payload that exercises its behavior - byte-scale
@@ -497,9 +533,6 @@ resolve-every-symbol case guards the three-way `__all__` / `TYPE_CHECKING` /
 
 ## 7. Known limitations
 
-- **xdist** (not configured): the e2e tier shares one bucket with an
-  empty-before/after invariant, so it runs serially (the other tiers would be
-  xdist-safe).
 - **moto fidelity**: moto raises an internal `IndexError` for `MaxKeys=-1`
   instead of S3's `InvalidArgument`, so `ls_page_size_negative` and
   `rm_page_size_negative` are `diff_only` (e2e only). Scenarios that hit
@@ -615,7 +648,8 @@ for the dev stack (section 4).
    which skips itself without the variables, as on Linux. `cmd.exe`'s own
    messages arrive in the console's OEM code page; pytest's summary is ASCII.
    Never run the Windows and Linux e2e suites at the same time - the
-   bucket-empty invariant (section 4) is shared.
+   bucket-empty invariant (section 4) is shared, and under xdist each run's
+   workers would force-delete the other's same-named worker buckets.
 
 7. **Regenerate the Windows goldens** when the reference `aws.exe` moves or a
    cp/mv/sync scenario changes. The copy must hold the current POSIX base
