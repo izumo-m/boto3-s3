@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A single-key `rm` interrupted by Ctrl-C reports the item `CANCELLED` and raises at once instead of waiting for the delete, and a local file time only the local zone cannot hold is read as its UTC value instead of the epoch with a warning.
 - Removed `TransferConfig`'s `should_stream` / `disk_throughput` / `direct_io` (they had no effect; the `[s3]` keys are still accepted), the walk's `crosses_full_path_boundary` and `sym_depth`, and `boto3_s3.transfer`'s two SDK-floor probes from its exports.
 - `S3` and `LocalStorage` take a `filename_encoding` that fixes how local file names turn into keys and back on Linux and macOS, whatever Python's own default (`None` keeps it); `LocalStorage.os_path` / `text_path` convert a path between the two forms.
+- A cancel, Ctrl-C or early stop of a run with a selective `filter` no longer waits for the listing to reach the next entry the filter keeps; `sieve_pages` now yields a page the filter empties.
 - `s3_errors` and `translate_boto_error` moved from `boto3_s3.s3storage` to the new `boto3_s3.sdkerrors`.
 - `Transferrer` takes the CRT engine settings as one `crt=` value in place of `session`, `crt_endpoint`, `crt_allow_lockless` and `crt_sign_requests`.
 - `S3` and `S3Deleter` take the CRT engine's own client settings as one `CrtClientOptions` (`crt=`) in place of `crt_allow_lockless` / `crt_sign_requests`, and it can also name the CRT client's TLS trust source (`verify`); the CRT engine now signs exactly when the client does.

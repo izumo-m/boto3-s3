@@ -87,7 +87,9 @@ def prefetch(
     the consumer's next pull, after any items already queued. On context exit the
     worker is signalled to stop and joined; unread chunks are dropped. A
     `cancel_token` stops the producer before its next page pull; a pull already
-    in progress finishes, but its returned page is discarded.
+    in progress finishes, but its returned page is discarded. An empty chunk is
+    not queued, so a source that yields one per filtered-out page lets the
+    worker stop between those pages at no queue cost.
 
     ``reusable_after_interrupt`` narrows the exit wait for the Ctrl-C unwind: when
     ``False`` and the context is unwinding on a ``KeyboardInterrupt`` - seen
@@ -140,7 +142,11 @@ def prefetch(
                     break
                 if _stopping():
                     break
-                _put(chunk)
+                # An empty chunk (a page a filter emptied) still came back
+                # from its own pull, so the stop check above ran; it carries
+                # nothing for the consumer.
+                if chunk:
+                    _put(chunk)
         except BaseException as exc:  # re-raised on the consumer side
             error.append(exc)
         finally:

@@ -62,18 +62,20 @@ _InfoT = TypeVar("_InfoT", bound="FileInfo")
 def sieve_pages(
     pages: Iterator[Sequence[_InfoT]], keep: Callable[[FileInfo], bool]
 ) -> Iterator[list[_InfoT]]:
-    """Apply ``keep`` to each page; drop pages sieved empty (a ``scan_pages`` helper).
+    """Apply ``keep`` to each page, one sieved page per raw page (a ``scan_pages`` helper).
 
     The building block a ``Storage.scan_pages`` implementation uses to honor
     ``options.filter`` when it cannot push the predicate to the source: wrap the
     raw page stream with it. Lazy, so ``prefetch``'s worker drives it - the
-    predicate runs on the worker thread and excluded entries (and pages emptied
-    by it) never enter the hand-off queue.
+    predicate runs on the worker thread and excluded entries never enter the
+    hand-off queue. A page the predicate empties is still yielded, empty: a
+    selective filter can reject page after page, and each pull must return
+    after one raw page so the scan's stop and cancel checks run between pages
+    instead of after the next kept entry (or the whole listing). ``prefetch``
+    keeps empty pages out of its queue.
     """
     for page in pages:
-        kept = [info for info in page if keep(info)]
-        if kept:
-            yield kept
+        yield [info for info in page if keep(info)]
 
 
 def _pull_pages(
@@ -319,7 +321,8 @@ class Storage(abc.ABC):
         / design/globsieve.md). Such a backend either wraps its raw pages with
         ``sieve_pages`` or (e.g. a REST listing) translates ``options.filter``
         into a server-side query; one that does not declare it leaves the
-        filter to ``scan``.
+        filter to ``scan``. A page the filter empties should still be yielded,
+        empty, so the scan can stop between pages (``sieve_pages``).
 
         ``options.recursive`` normally walks every transferable entry beneath the
         prefix (all ``FILE`` kind, no directory grouping); a backend-specific

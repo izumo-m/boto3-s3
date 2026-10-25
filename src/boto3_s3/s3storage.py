@@ -885,7 +885,8 @@ class S3Storage(Storage):
     @override
     def scan_pages(self, options: ScanOptions) -> Iterator[list[S3FileInfo]]:
         """Yield one ``list[S3FileInfo]`` per ``ListObjectsV2`` page (paginated;
-        a page the filter empties entirely is skipped, not yielded empty).
+        a page the filter empties entirely is yielded empty, so the scan can
+        stop between pages).
 
         Object listing only - the openable-entity enumeration ``scan`` promises
         (aws-cli's ``_list_all_objects``). ``options.recursive`` omits

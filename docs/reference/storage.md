@@ -178,7 +178,9 @@ Two things happen between the producer and the consumer. Each entry whose
 need not stamp it; this runs ahead of the filter, so a predicate always sees
 the producing backend. Then, unless the class declares
 `scan_pages_filters`, `options.filter` is applied page by page on the prefetch
-worker; a page emptied by the predicate is dropped rather than yielded empty.
+worker. A page the predicate empties is not handed to the consumer, but its
+pull returns, so a stop or a cancel takes effect between pages even when a
+selective filter rejects page after page.
 
 `ScanOptions(read_ahead=False)` ([`./options.md`](./options.md)) drops the
 overlap: each page is pulled on the calling thread when the consumer reaches
@@ -196,7 +198,10 @@ A backend that declares `scan_pages_filters` applies `options.filter` here and
 returns the pages already filtered: whatever this producer omits is simply
 absent downstream. It either wraps its raw pages with
 `boto3_s3.storage.sieve_pages` or translates the predicate into a server-side
-query. A backend that does not declare it leaves the filter to `scan`.
+query. A page the predicate empties should still be yielded, empty, as
+`sieve_pages` does: otherwise one pull runs on until the next kept entry, and
+a stop or a cancel waits for it. A backend that does not declare it leaves the
+filter to `scan`.
 
 `options.recursive` normally walks every transferable entry beneath the
 location, all of `FileKind.FILE` with no directory grouping; a backend-specific
@@ -935,8 +940,8 @@ lists through the storage instance it was handed rather than rebuilding one.
 set, is forwarded. `options.page_size` becomes the paginator's page size.
 
 `options.filter` is applied here: the raw pages are sieved client-side before
-being yielded, and a page the predicate empties is skipped rather than yielded
-empty. This is also the override seam — filter or enrich each page, then defer
+being yielded, and a page the predicate empties is yielded empty, so the scan
+can stop between pages. This is also the override seam — filter or enrich each page, then defer
 to `super().scan_pages(options)` — and the work runs on `scan`'s prefetch
 worker.
 

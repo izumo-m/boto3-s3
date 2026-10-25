@@ -1613,6 +1613,17 @@ class TestScanPagesAreScandirAligned:
         assert len(pages) == 1
         assert [info.compare_key for info in pages[0]] == ["a.txt", "sub/"]
 
+    def test_a_page_the_filter_empties_is_yielded_empty(self, tmp_path: Path) -> None:
+        # One page per file-run still, so the scan can stop between the runs a
+        # selective filter rejects (storage.sieve_pages).
+        _make_tree(tmp_path, "a.txt", "z.txt", "sub/b.txt")
+        options = LocalScanOptions(recursive=True, filter=lambda info: info.compare_key == "z.txt")
+        pages = [
+            [info.compare_key for info in page]
+            for page in LocalStorage(str(tmp_path)).scan_pages(options)
+        ]
+        assert pages == [[], [], ["z.txt"]]
+
 
 class TestGetFileinfo:
     """``LocalStorage.get_fileinfo`` - the single-path point op (no walk)."""

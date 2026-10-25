@@ -22,7 +22,7 @@ import time
 from collections.abc import Generator, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import boto3
 import pytest
@@ -39,6 +39,7 @@ from boto3_s3 import (
     S3,
     AccessDeniedError,
     Boto3S3Error,
+    CancelToken,
     ConfigurationError,
     FileInfo,
     FileKind,
@@ -384,25 +385,49 @@ class TestScanFilter:
 
     def test_scan_pages_returns_filtered(self) -> None:
         # The producer applies options.filter itself (returns filtered pages);
-        # a page emptied by the filter is dropped, not yielded empty.
+        # a page emptied by the filter is yielded empty.
         pages = [{"Contents": [_obj("prefix/a.txt"), _obj("prefix/b.log")]}]
         storage, _ = _storage(pages)
         options = S3ScanOptions(recursive=True, filter=lambda info: info.key.endswith(".txt"))
         result = list(storage.scan_pages(options))
         assert [[fi.key for fi in page] for page in result] == [["prefix/a.txt"]]
-        # a filter excluding everything yields no pages at all
         storage2, _ = _storage(pages)
-        assert (
-            list(storage2.scan_pages(S3ScanOptions(recursive=True, filter=lambda _i: False))) == []
-        )
+        assert list(
+            storage2.scan_pages(S3ScanOptions(recursive=True, filter=lambda _i: False))
+        ) == [[]]
 
-    def test_sieve_drops_emptied_pages(self) -> None:
-        # sieve_pages (the helper a producer wraps its raw pages with): a page
-        # whose every entry is excluded is dropped, not yielded empty, so it
-        # never occupies a prefetch queue slot.
+    def test_sieve_yields_emptied_pages_empty(self) -> None:
+        # sieve_pages (the helper a producer wraps its raw pages with): one
+        # sieved page per raw page, so each pull returns after one raw page.
         pages = iter([[FileInfo(key="a.log")], [FileInfo(key="b.txt")]])
         out = list(sieve_pages(pages, lambda info: info.key.endswith(".txt")))
-        assert [[fi.key for fi in page] for page in out] == [["b.txt"]]
+        assert [[fi.key for fi in page] for page in out] == [[], ["b.txt"]]
+
+    def test_a_cancel_lands_between_filtered_out_pages(self) -> None:
+        # A selective filter empties page after page. The cancel must still
+        # stop the listing at the next page boundary, not after the next kept
+        # entry - here the end of a 200-page listing.
+        released = threading.Event()
+        pulled: list[int] = []
+
+        def pages() -> Iterator[dict[str, Any]]:
+            for i in range(200):
+                pulled.append(i)
+                if i == 2:
+                    assert released.wait(5.0)
+                yield {"Contents": [_obj(f"prefix/{i:03}")]}
+
+        storage, _ = _storage(cast("list[dict[str, Any]]", pages()))
+        token = CancelToken()
+        entries = storage.scan(
+            S3ScanOptions(recursive=True, filter=lambda info: info.key == "prefix/000"),
+            cancel_token=token,
+        )
+        assert next(entries).key == "prefix/000"
+        token.cancel()
+        released.set()
+        assert list(entries) == []
+        assert len(pulled) <= 3
 
     def test_predicate_runs_on_the_prefetch_worker(self) -> None:
         threads: set[str] = set()

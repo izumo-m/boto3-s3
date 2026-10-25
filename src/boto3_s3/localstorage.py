@@ -623,9 +623,9 @@ class LocalFileGenerator:
             if item_filter is None:
                 yield page
                 continue
-            kept = [info for info in page if item_filter(info)]
-            if kept:
-                yield kept
+            # Yielded even when emptied, so the scan can stop between pages
+            # (`storage.sieve_pages`).
+            yield [info for info in page if item_filter(info)]
 
     def walk_dir(
         self,
