@@ -1,8 +1,8 @@
 # Which `boto3` version each feature needs
 
-**`boto3` 1.43.31 or newer has everything but `MD5`, which `botocore` cannot
-compute (below).** Four of the entries below additionally need the `crt`
-extra.
+**`boto3` 1.43.31 or newer has everything but `checksum_algorithm` = `MD5`,
+which `botocore` cannot compute (below).** Five of the entries below
+additionally need the `crt` extra.
 
 If you cannot upgrade, the table says what each feature needs; below the version
 listed, that feature is not supported. Unless its row says otherwise, a feature
@@ -38,6 +38,7 @@ bound, so a newer `boto3` is picked up as it is.
 | `checksum_algorithm` = `SHA512` | boto3 >= 1.42.94 |
 | `checksum_algorithm` = `MD5` | not usable: the S3 model lists it, but `botocore` cannot compute it, so an upload with it fails per item on the classic engine; on the CRT engine the run stops with `ValidationError` before anything is recorded |
 | `checksum_algorithm` = the `XXHASH` family | boto3 >= 1.42.94, plus the `crt` extra |
+| `ChecksumComparison` on an object stored with `SHA512`, `MD5` or an `XXHASH` checksum | boto3 >= 1.42.94, plus the `crt` extra for an upload or download of an `XXHASH` object (S3-to-S3 compares the stored values). Without them nothing is refused: such an object is copied on every run (an older boto3's `GetObjectAttributes` does not parse those checksums, so the object reads as carrying none) |
 | S3 object annotations (GA 2026-06) | boto3 >= 1.43.31 |
 | `copy_props=ALL` / `--copy-props all` | boto3 >= 1.43.31 |
 | `checksum_algorithm` = `CRC32C` | any supported boto3, plus the `crt` extra |
@@ -52,7 +53,11 @@ are not listed.
 independent things: the CRT transfer engine, and the checksum algorithms
 botocore can only compute through it — **`CRC32C`, `CRC64NVME`, and the
 `XXHASH` family**. The classic engine needs it for those too. `CRC32`, `SHA1`,
-`SHA256` and `SHA512` are pure Python and never need it.
+`SHA256` and `SHA512` are pure Python and never need it. On an upload or
+download `ChecksumComparison` hashes the local side with the object's
+algorithm: `XXHASH` through awscrt only, so without it such an object is copied
+on every run, while `CRC32C` and `CRC64NVME` fall back to bundled pure-Python
+code (slowly; its `pure_max_size` can cap them).
 
 Missing awscrt fails only the features that need it, and nothing else changes.
 

@@ -58,6 +58,7 @@ section 2; the table doubles as the probe checklist for a new endpoint.
 | G23 | SSE-C on a new bucket | accepted | refused, `AccessDenied` ("this bucket has blocked upload requests that specify ... SSE-C"): new buckets block SSE-C (`BlockedEncryptionTypes`) until a PutBucketEncryption lifts it (*measured*) | - | none |
 | G24 | Anonymous PutObject sent aws-chunked with an unsigned trailer (`STREAMING-UNSIGNED-PAYLOAD-TRAILER`, as the CRT engine sends it), where a bucket policy allows anonymous writes | refused, `UnexpectedContent`, rc 1 | accepted: both CLIs' anonymous CRT uploads succeed (*measured*) | - | none |
 | G25 | DeleteObjects naming a key that holds a control character (U+0001), Quiet or not | deletes the key, then answers `InternalError` ("XML response contains a control character") | refuses the request as `MalformedXML`; the key stays (*measured*) | - | none |
+| G26 | An object uploaded with a `SHA512`, `MD5` or `XXHASH64` / `XXHASH3` / `XXHASH128` checksum, single PUT or multipart | accepted, but stored without it: `GetObjectAttributes` returns no checksum (a multipart object: `ChecksumType: COMPOSITE` and no value) | stored: `FULL_OBJECT` for a single PUT, `COMPOSITE` (the algorithm over the part digests) for a multipart one (*measured*) | stored for a single PUT (but `MD5`: none); a multipart object's `COMPOSITE` value is SHA256's whatever the algorithm | none |
 
 G14 changes no test - the e2e sync scenarios shift times by a day - but a
 behavior that depends on it (`sync --exact-timestamps` converging) looks
@@ -69,7 +70,9 @@ suite: `tests/run_e2e.sh` creates a new bucket, so a scenario that uploads
 with SSE-C would need the block lifted first (none does today). G25 shows in
 no CLI run - aws-cli deletes one key per request, and the deleter sends a key
 XML cannot carry in a `DeleteObject` of its own (deleter.md) - only in a
-probe that batches such a key.
+probe that batches such a key. G26 means `ChecksumComparison` copies every
+such object on the dev stack, and a test of it there or on moto cannot
+stand in for real S3 (`test_checksumcompare` serves the responses itself).
 
 ## 2. Test-side changes
 

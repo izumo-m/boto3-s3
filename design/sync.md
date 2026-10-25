@@ -427,7 +427,9 @@ strategy in `ParallelFilter` (section 10) to run those concurrently.
   (docs/compatibility.md).
 - **Indeterminate -> copy.** An object with no native checksum, a mismatched
   algorithm or kind across an s3->s3 pair, an unknown algorithm, a CRC32C / CRC64NVME
-  checksum beyond `pure_max_size` when `awscrt` is unavailable, or any
+  checksum beyond `pure_max_size` when `awscrt` is unavailable or an XXHASH one
+  without `awscrt` (these two on upload / download only: an s3->s3 pair
+  computes nothing), or any
   `GetObjectAttributes` **`ClientError`** (a 404, a denied
   `s3:GetObjectAttributes`, an SSE-C object that needs a key) is treated as
   differing - the strategy never skips on an indeterminate compare. So is a
@@ -439,15 +441,28 @@ strategy in `ParallelFilter` (section 10) to run those concurrently.
   (silently "copy everything" would mask a broken environment).
 - **`check_size`** (default on) treats a known size mismatch as differing before
   any call or hash - a shortcut, and for s3->s3 a guard against a CRC collision.
-- **Checksum backends.** `crc32` (zlib) and `sha1` / `sha256` (hashlib) are
-  always available. `crc32c` / `crc64nvme` use **`awscrt`** when installed (a C
+- **Checksum backends.** `crc32` (zlib) and `sha1` / `sha256` / `sha512`
+  (hashlib) are always available. `md5` (hashlib) is built as a non-security
+  use, and reads as uncomputable where even that is refused (a strict FIPS
+  build). `crc32c` / `crc64nvme` use **`awscrt`** when installed (a C
   path ~1000x faster, the same one S3 uses) and fall back to a bundled
   pure-Python implementation otherwise (~15-20 MiB/s) - on a par with the awscrt
   extra elsewhere (crt.md section 6): without it these still work, just slowly.
   Because that fallback is slow, **`pure_max_size`** caps it: above the cap, with
   no `awscrt`, a `crc32c` / `crc64nvme` object reads as indeterminate (copy)
   rather than being hashed (an unknown size counts as above the cap - the
-  bound is hard). `None` (default) never caps.
+  bound is hard). `None` (default) never caps. The XXHASH family
+  (`xxhash64` / `xxhash3` / `xxhash128`) has no fallback - a pure-Python
+  XXH3 would be both large and too slow to be worth it - so it is computed
+  through awscrt's `XXHash` (0.31.2 and later, the version botocore gates
+  them on) or reads as indeterminate. On a multipart object S3 stores SHA512,
+  MD5 and the XXHASH family as `COMPOSITE` only (S3's user guide), so
+  for these the part-by-part path is the multipart one. botocore's S3 model
+  carries their `GetObjectAttributes` members from 1.42.94 (absent in
+  1.42.93, read from the published wheels); below it such an object reads as
+  carrying no checksum. Measured on real S3 (2026-10-25): an object of each of
+  the five, single PUT and two-part multipart, compared equal to its local
+  file, and a one-byte change to each was copied.
 - **The S3 side's endpoint.** Each S3 entry's `storage` is the `S3Storage` its
   side was listed through, and its client + bucket are what
   `GetObjectAttributes` uses, so a cross-account s3->s3 sync reaches each side

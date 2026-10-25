@@ -89,9 +89,10 @@ these run concurrently.
 whose two sides used different algorithms or kinds (on S3-to-S3, often an
 object and its own copy — see
 [`ChecksumComparison`](../reference/comparator.md#checksumcomparison) for when a
-copy stays comparable), an unknown algorithm, or a
-`GetObjectAttributes` that fails with a client error such as a 404, a denied
-permission, or an SSE-C object (no customer key is sent).
+copy stays comparable), an unknown algorithm, an `XXHASH` checksum on an
+upload or download without `awscrt`, or a `GetObjectAttributes` that fails
+with a client error such as a 404, a denied permission, or an SSE-C object (no
+customer key is sent).
 
 **One class of failure is not per-object.** A missing credential, an unreachable
 endpoint or a timeout aborts the whole sync rather than being treated as
@@ -103,7 +104,9 @@ only without `awscrt`: the `CRC32C` and `CRC64NVME` algorithms then fall back to
 a pure-Python implementation that is roughly a thousand times slower, so this
 caps how large an object it will attempt — above the cap the object is treated
 as indeterminate and copied. The default, `None`, never caps. Installing the
-`crt` extra removes the concern.
+`crt` extra removes the concern. It is also what an upload or download needs
+to compare an object with an `XXHASH` checksum, which has no pure-Python
+fallback (S3-to-S3 compares the stored values and needs neither).
 
 ## 4. Running the decisions in parallel
 

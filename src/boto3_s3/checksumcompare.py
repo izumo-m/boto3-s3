@@ -35,18 +35,26 @@ hash on every upload / download pair - an s3-to-s3 pair instead costs one
 GetObjectAttributes per side and reads no bytes (the size pre-check still
 skips differing sizes for free).
 
-Checksum computation. ``crc32`` (zlib) and ``sha1`` / ``sha256`` (hashlib) are
-always available. ``crc32c`` / ``crc64nvme`` use ``awscrt`` when it is installed
-(a C path ~1000x faster than Python and the same one S3 uses) and fall back to a
-bundled pure-Python slicing-by-8 implementation otherwise (~15-20 MiB/s). Because
-that fallback is slow, the ``pure_max_size`` arg can cap it: above the cap, with no
-``awscrt``, a ``crc32c`` / ``crc64nvme`` object is treated as indeterminate
-(copied) rather than hashed.
+Checksum computation. ``crc32`` (zlib) and ``sha1`` / ``sha256`` / ``sha512``
+(hashlib) are always available, and so is ``md5`` (hashlib, built as a
+non-security use) wherever hashlib builds it. ``crc32c`` / ``crc64nvme`` use
+``awscrt`` when it is installed (a C path ~1000x faster than Python and the same
+one S3 uses) and fall back to a bundled pure-Python slicing-by-8 implementation
+otherwise (~15-20 MiB/s). Because that fallback is slow, the ``pure_max_size``
+arg can cap it: above the cap, with no ``awscrt``, a ``crc32c`` / ``crc64nvme``
+object is treated as indeterminate (copied) rather than hashed. ``xxhash64`` /
+``xxhash3`` / ``xxhash128`` have no fallback: they compute through ``awscrt``
+(0.31.2 or later, botocore's own gate) or not at all.
 
-Caveats. An object with **no** native checksum, an unknown algorithm, or a
-``crc32c`` / ``crc64nvme`` checksum beyond ``pure_max_size`` when ``awscrt`` is
-unavailable is treated as differing (copied) - the strategy never skips on an
-indeterminate comparison. An upload / download comparison reads the
+Caveats. An object with **no** native checksum or an unknown algorithm is
+treated as differing (copied) - the strategy never skips on an indeterminate
+comparison. So is, on an upload / download (an s3-to-s3 pair computes
+nothing), a ``crc32c`` / ``crc64nvme`` checksum beyond ``pure_max_size`` when
+``awscrt`` is unavailable, an ``xxhash*`` checksum without ``awscrt``, or an
+``md5`` one hashlib refuses to build (a strict FIPS build).
+The SHA512 / MD5 / XXHASH members are in botocore's S3 model from 1.42.94;
+under an older one ``GetObjectAttributes`` parses none of them, so such an
+object reads as carrying no checksum. An upload / download comparison reads the
 **readable** (non-S3) side through its ``Storage.open`` on whatever thread
 drives the ``update_filter`` lane (``sync``'s calling thread, or a pool worker
 under ``ParallelFilter``) - any backend, not just a
@@ -82,6 +90,11 @@ _ALGO_BY_KEY = {
     "ChecksumCRC64NVME": "crc64nvme",
     "ChecksumSHA1": "sha1",
     "ChecksumSHA256": "sha256",
+    "ChecksumSHA512": "sha512",
+    "ChecksumMD5": "md5",
+    "ChecksumXXHASH64": "xxhash64",
+    "ChecksumXXHASH3": "xxhash3",
+    "ChecksumXXHASH128": "xxhash128",
 }
 
 # S3's ceiling on an object's parts: part numbers run from 1 to 10,000.
@@ -110,9 +123,11 @@ class ChecksumComparison(ContentComparison):
     returned ``ObjectParts`` sizes for a ``COMPOSITE`` one. An s3-to-s3 (COPY)
     pair compares the two objects' stored checksums directly (both via
     ``GetObjectAttributes``; no bytes read). A missing checksum, a mismatched or
-    unknown algorithm, or a ``crc32c`` / ``crc64nvme`` checksum beyond
-    ``pure_max_size`` when ``awscrt`` is unavailable is treated as differing
-    (copy), so it never skips on an indeterminate comparison. It is a replacement
+    unknown algorithm, or - on an upload / download, the pairs that compute -
+    a checksum it cannot compute locally (`_can_compute`: ``crc32c`` /
+    ``crc64nvme`` beyond ``pure_max_size`` without ``awscrt``, ``xxhash*``
+    without ``awscrt``, ``md5`` where hashlib refuses it) is treated as
+    differing (copy), so it never skips on an indeterminate comparison. It is a replacement
     ``update_filter=`` strategy, selected instead of the size+time default.
 
     The S3 client and bucket for each S3 side come from that entry's
@@ -223,7 +238,7 @@ class _RemoteChecksum:
     ``part_sizes`` the part byte sizes when they were asked for.
     """
 
-    algorithm: str  # crc32 / crc32c / crc64nvme / sha1 / sha256
+    algorithm: str  # one of _ALGO_BY_KEY's names
     value: str
     composite: bool
     part_count: str | None
@@ -364,15 +379,20 @@ def _part_sizes(
 def _can_compute(algorithm: str, size: int | None, pure_max_size: int | None) -> bool:
     """Whether we can compute ``algorithm`` locally for an object of ``size``.
 
-    ``crc32`` / ``sha1`` / ``sha256`` always. ``crc32c`` / ``crc64nvme`` always
-    with ``awscrt``; without it the bundled pure-Python path can, but
-    ``pure_max_size`` may cap it (a larger - or unknown-size - object reads as
-    indeterminate -> copy; the cap is a hard bound on the slow fallback, so a
-    size it cannot check counts as above it).
-    Any other (future) algorithm is uncomputable.
+    ``crc32`` always, and the hashlib algorithms whenever hashlib builds them
+    (a FIPS build may refuse ``md5``). ``xxhash*`` only with an ``awscrt``
+    that has them. ``crc32c`` / ``crc64nvme`` always with ``awscrt``; without
+    it the bundled pure-Python path can, but ``pure_max_size`` may cap it (a
+    larger - or unknown-size - object reads as indeterminate -> copy; the cap
+    is a hard bound on the slow fallback, so a size it cannot check counts as
+    above it). Any other (future) algorithm is uncomputable.
     """
-    if algorithm in ("crc32", "sha1", "sha256"):
+    if algorithm == "crc32":
         return True
+    if algorithm in _HASHLIB_ALGOS:
+        return _hashlib_builds(algorithm)
+    if algorithm in _CRT_XXHASHES:
+        return _xxhash_factory(algorithm) is not None
     if algorithm not in _CRT_CRCS:
         return False
     if _crc_has_awscrt(algorithm):
@@ -437,15 +457,53 @@ class _IntCrc:
         return self._v.to_bytes(self._width, "big")
 
 
+class _CrtXXHash:
+    """A hashlib-shaped wrapper over an awscrt ``XXHash`` (``finalize`` as ``digest``)."""
+
+    __slots__ = ("_hash",)
+
+    def __init__(self, xxhash: Any) -> None:
+        self._hash = xxhash
+
+    def update(self, chunk: bytes) -> None:
+        self._hash.update(chunk)
+
+    def digest(self) -> bytes:
+        return self._hash.finalize()
+
+
 def _new_hasher(algorithm: str) -> Any | None:
     """A fresh incremental hasher (``.update(bytes)`` / ``.digest() -> bytes``)."""
     if algorithm == "crc32":
         return _IntCrc(zlib.crc32, 4)
-    if algorithm in ("sha1", "sha256"):
-        return hashlib.new(algorithm)
+    if algorithm in _HASHLIB_ALGOS:
+        return _hashlib_new(algorithm)
+    if algorithm in _CRT_XXHASHES:
+        factory = _xxhash_factory(algorithm)
+        return None if factory is None else _CrtXXHash(factory())
     if algorithm in _CRT_CRCS:
         return _IntCrc(*_crc_backend(algorithm))
     return None
+
+
+def _hashlib_new(algorithm: str) -> Any:
+    # A checksum, not a security use: a FIPS build refuses a plain md5.
+    return hashlib.new(algorithm, usedforsecurity=False)
+
+
+@functools.cache
+def _hashlib_builds(algorithm: str) -> bool:
+    try:
+        _hashlib_new(algorithm)
+    except ValueError:
+        return False
+    return True
+
+
+def _xxhash_factory(name: str) -> Callable[[], Any] | None:
+    """awscrt's constructor for the ``xxhash*`` ``name``, or ``None`` without one."""
+    xxhash = getattr(_awscrt_checksums(), "XXHash", None)
+    return getattr(xxhash, _CRT_XXHASHES[name], None)
 
 
 def _crc_backend(name: str) -> tuple[Callable[[bytes, int], int], int]:
@@ -550,6 +608,17 @@ _CRT_CRCS: dict[str, tuple[int, Callable[[bytes, int], int]]] = {
     "crc32c": (4, _pure_crc32c),
     "crc64nvme": (8, _pure_crc64nvme),
 }
+
+# The XXHASH family, computed only by awscrt (its ``XXHash``, 0.31.2 and
+# later): name -> that class's constructor.
+_CRT_XXHASHES = {
+    "xxhash64": "new_xxhash64",
+    "xxhash3": "new_xxhash3_64",
+    "xxhash128": "new_xxhash3_128",
+}
+
+# The algorithms hashlib computes.
+_HASHLIB_ALGOS = ("md5", "sha1", "sha256", "sha512")
 
 
 __all__ = ["ChecksumComparison"]

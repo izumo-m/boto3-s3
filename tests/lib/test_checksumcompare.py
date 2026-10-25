@@ -28,8 +28,9 @@ import base64
 import errno
 import hashlib
 import io
+import types
 import zlib
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, BinaryIO, ClassVar, Literal, cast
 
@@ -74,8 +75,10 @@ def _b64(raw: bytes) -> str:
 _DATA = b"0123456789abcdef" * 64
 _GOLDEN: dict[str, str] = {
     "crc32": _b64(zlib.crc32(_DATA).to_bytes(4, "big")),
+    "md5": _b64(hashlib.md5(_DATA).digest()),
     "sha1": _b64(hashlib.sha1(_DATA).digest()),
     "sha256": _b64(hashlib.sha256(_DATA).digest()),
+    "sha512": _b64(hashlib.sha512(_DATA).digest()),
 }
 _KEY_OF = {
     "crc32": "ChecksumCRC32",
@@ -83,10 +86,31 @@ _KEY_OF = {
     "crc64nvme": "ChecksumCRC64NVME",
     "sha1": "ChecksumSHA1",
     "sha256": "ChecksumSHA256",
+    "sha512": "ChecksumSHA512",
+    "md5": "ChecksumMD5",
+    "xxhash64": "ChecksumXXHASH64",
+    "xxhash3": "ChecksumXXHASH3",
+    "xxhash128": "ChecksumXXHASH128",
 }
 if _crt is not None:
     _GOLDEN["crc32c"] = _b64(_crt.crc32c(_DATA).to_bytes(4, "big"))
     _GOLDEN["crc64nvme"] = _b64(_crt.crc64nvme(_DATA).to_bytes(8, "big"))
+
+# awscrt's one-shot XXHASH functions (its XXHash class, 0.31.2 and later); the
+# XXHASH goldens and the tests that need them skip without it.
+_XXHASH = getattr(_crt, "XXHash", None)
+_XXHASH_ONE_SHOT: dict[str, Callable[[bytes], bytes]] = (
+    {}
+    if _XXHASH is None
+    else {
+        "xxhash64": _XXHASH.compute_xxhash64,
+        "xxhash3": _XXHASH.compute_xxhash3_64,
+        "xxhash128": _XXHASH.compute_xxhash3_128,
+    }
+)
+for _name, _fn in _XXHASH_ONE_SHOT.items():
+    _GOLDEN[_name] = _b64(_fn(_DATA))
+_needs_xxhash = pytest.mark.skipif(_XXHASH is None, reason="awscrt with XXHash not installed")
 
 
 # -- fakes ---------------------------------------------------------------------
@@ -276,10 +300,10 @@ class TestWholeObject:
         )
         assert _upload_filter(client)(pair) is True
 
-    @pytest.mark.parametrize("algorithm", ["crc32", "crc32c", "crc64nvme", "sha1", "sha256"])
+    @pytest.mark.parametrize("algorithm", list(_KEY_OF))
     def test_each_algorithm_matches(self, tmp_path: Path, algorithm: str) -> None:
         if algorithm not in _GOLDEN:
-            pytest.skip("awscrt not installed")
+            pytest.skip("awscrt (with this algorithm) not installed")
         p = _write(tmp_path)
         client = _FakeClient({"obj": _full(algorithm, _GOLDEN[algorithm])})
         pair = _pair(
@@ -405,6 +429,120 @@ class TestCompositeForms:
         resp = _composite_resp("sha256", value, _PARTS)
         del resp["Checksum"]["ChecksumType"]
         assert self._upload(tmp_path, resp) is False
+
+
+# -- SHA512 / MD5 / the XXHASH family -------------------------------------------
+
+
+def _one_shot(algorithm: str) -> Callable[[bytes], bytes]:
+    if algorithm in _XXHASH_ONE_SHOT:
+        return _XXHASH_ONE_SHOT[algorithm]
+    return lambda data: hashlib.new(algorithm, data).digest()
+
+
+def _bare_composite(algorithm: str, data: bytes, sizes: list[int]) -> str:
+    """The bare COMPOSITE digest - ALGO over the parts' raw ALGO digests."""
+    digest = _one_shot(algorithm)
+    combined = b""
+    off = 0
+    for s in sizes:
+        combined += digest(data[off : off + s])
+        off += s
+    return _b64(digest(combined))
+
+
+class TestNewerAlgorithms:
+    """The algorithms S3 stores only as COMPOSITE on a multipart object.
+
+    A multipart object carrying SHA512, MD5 or an XXHASH checksum has it as a
+    COMPOSITE one (S3 offers no FULL_OBJECT form for them), so each is pinned
+    on that path as well as the whole-file one above.
+    """
+
+    @pytest.fixture
+    def _no_awscrt(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(cf, "_awscrt_checksums", lambda: None)
+
+    @pytest.fixture
+    def _fresh_hashlib_probe(self) -> Iterator[None]:
+        # _hashlib_builds caches per algorithm; a test that makes hashlib
+        # refuse one must not leave its verdict behind.
+        cf._hashlib_builds.cache_clear()  # pyright: ignore[reportPrivateUsage]
+        yield
+        cf._hashlib_builds.cache_clear()  # pyright: ignore[reportPrivateUsage]
+
+    def _upload(self, tmp_path: Path, resp: Any, data: bytes = _DATA) -> bool:
+        p = _write(tmp_path, data)
+        pair = _pair(
+            TransferType.UPLOAD,
+            src=local_info(native_key(p), size=len(data)),
+            dest=_s3(size=len(data)),
+        )
+        return _upload_filter(_FakeClient({"obj": resp}), check_size=False)(pair)
+
+    @pytest.mark.parametrize("algorithm", ["sha512", "md5", "xxhash64", "xxhash3", "xxhash128"])
+    def test_composite_matches_and_tells_changed_content(
+        self, tmp_path: Path, algorithm: str
+    ) -> None:
+        if algorithm.startswith("xxhash") and _XXHASH is None:
+            pytest.skip("awscrt with XXHash not installed")
+        resp = _composite_resp(algorithm, _bare_composite(algorithm, _DATA, _PARTS), _PARTS)
+        assert self._upload(tmp_path, resp) is False
+        assert self._upload(tmp_path, resp, b"X" + _DATA[1:]) is True
+
+    @pytest.mark.parametrize("algorithm", ["xxhash64", "xxhash3", "xxhash128"])
+    def test_xxhash_without_awscrt_copies_without_reading(
+        self, tmp_path: Path, algorithm: str, _no_awscrt: None
+    ) -> None:
+        # No pure-Python fallback: indeterminate -> copy. The local path does
+        # not exist, proving no read happened.
+        client = _FakeClient({"obj": _full(algorithm, "irrelevant")})
+        pair = _pair(
+            TransferType.UPLOAD,
+            src=local_info(native_key(tmp_path / "nope"), size=10),
+            dest=_s3(size=10),
+        )
+        assert _upload_filter(client)(pair) is True
+        assert _can_compute(algorithm, 10, pure_max_size=None) is False
+
+    @pytest.mark.parametrize("algorithm", ["xxhash64", "xxhash3", "xxhash128"])
+    def test_xxhash_on_an_awscrt_without_xxhash_copies(
+        self, monkeypatch: pytest.MonkeyPatch, algorithm: str
+    ) -> None:
+        # awscrt 0.23 - 0.31.1: a checksums module with the CRCs, no XXHash.
+        old = types.SimpleNamespace(crc32c=lambda *_: 0, crc64nvme=lambda *_: 0)
+        monkeypatch.setattr(cf, "_awscrt_checksums", lambda: old)
+        assert _can_compute(algorithm, 10, pure_max_size=None) is False
+
+    def test_md5_refused_by_hashlib_copies_without_reading(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _fresh_hashlib_probe: None
+    ) -> None:
+        # A FIPS build that refuses md5 even for a non-security use.
+        def refuse(algorithm: str) -> Any:
+            raise ValueError(f"unsupported hash type {algorithm}")
+
+        monkeypatch.setattr(cf, "_hashlib_new", refuse)
+        client = _FakeClient({"obj": _full("md5", _GOLDEN["md5"])})
+        pair = _pair(
+            TransferType.UPLOAD,
+            src=local_info(native_key(tmp_path / "nope"), size=10),
+            dest=_s3(size=10),
+        )
+        assert _upload_filter(client)(pair) is True
+
+    @_needs_xxhash
+    @pytest.mark.parametrize(
+        ("algorithm", "empty_digest"),
+        [
+            # The XXH64 / XXH3-64 / XXH3-128 values of empty input, seed 0, in
+            # the canonical (big-endian) form xxHash's own spec gives them.
+            ("xxhash64", "ef46db3751d8e999"),
+            ("xxhash3", "2d06800538d394c2"),
+            ("xxhash128", "99aa06d3014798d86001c324468d497f"),
+        ],
+    )
+    def test_xxhash_digest_is_the_canonical_form(self, algorithm: str, empty_digest: str) -> None:
+        assert _whole_b64(io.BytesIO(b""), algorithm) == _b64(bytes.fromhex(empty_digest))
 
 
 # -- s3 -> s3 (COPY) -----------------------------------------------------------
@@ -867,11 +1005,16 @@ class TestHelperUnits:
         assert got == _composite_golden(_DATA, list(sizes), "crc32c").rsplit("-", 1)[0]
 
     def test_can_compute_always_for_stdlib(self) -> None:
-        for algo in ("crc32", "sha1", "sha256"):
+        for algo in ("crc32", "md5", "sha1", "sha256", "sha512"):
+            assert _can_compute(algo, 10**12, pure_max_size=1) is True
+
+    @_needs_xxhash
+    def test_can_compute_xxhash_with_awscrt_whatever_the_cap(self) -> None:
+        for algo in ("xxhash64", "xxhash3", "xxhash128"):
             assert _can_compute(algo, 10**12, pure_max_size=1) is True
 
     def test_can_compute_unknown_algorithm(self) -> None:
-        assert _can_compute("xxhash64", None, None) is False
+        assert _can_compute("blake3", None, None) is False
 
     def test_can_compute_unknown_size_counts_as_above_the_cap(
         self, monkeypatch: pytest.MonkeyPatch

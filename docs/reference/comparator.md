@@ -557,8 +557,8 @@ is reached only when `awscrt` is not installed. An object of one of those two
 algorithms whose size is above the cap — or whose size is unknown, which the
 cap counts as above it — is treated as indeterminate and copied instead of
 being hashed. `None`, the default, never caps. It affects nothing else:
-`crc32`, `sha1` and `sha256` always compute, and so do `crc32c` / `crc64nvme`
-when `awscrt` is present.
+`crc32`, `sha1`, `sha256`, `sha512` and (wherever `hashlib` builds it) `md5`
+always compute, and so do `crc32c` / `crc64nvme` when `awscrt` is present.
 
 `request_payer` is forwarded as the `RequestPayer` parameter of every
 `GetObjectAttributes` call, including the `ObjectParts` continuation pages;
@@ -604,9 +604,13 @@ download of that object is copied on every run (two S3 sides that both send
 it bare still compare equal).
 
 **What reads as indeterminate**, and is therefore copied rather than skipped:
-an object carrying no native checksum; an algorithm outside `crc32`, `crc32c`,
-`crc64nvme`, `sha1` and `sha256`; a `crc32c` / `crc64nvme` object past
-`pure_max_size` with no `awscrt`; a `COMPOSITE` object whose part listing
+an object carrying no native checksum; an algorithm outside the ten S3 names
+(`crc32`, `crc32c`, `crc64nvme`, `sha1`, `sha256`, `sha512`, `md5`,
+`xxhash64`, `xxhash3`, `xxhash128`); a `crc32c` / `crc64nvme` object past
+`pure_max_size` with no `awscrt`, an `xxhash64` / `xxhash3` / `xxhash128`
+object with no `awscrt`, and an `md5` object where `hashlib` refuses MD5 even
+for a non-security use (a strict FIPS build) — these three on an upload or
+download only, since an S3-to-S3 pair computes nothing; a `COMPOSITE` object whose part listing
 would not end (a continuation marker that does not move past the page it came
 with, or runs past S3's 10,000-part ceiling); two S3 sides whose
 stored checksums use different algorithms or are of different kinds; a
@@ -616,9 +620,16 @@ digests would not otherwise see; and any `ClientError` from a
 SSE-C object (no customer key is sent), a failure part way through the
 pagination. A per-object rejection never aborts the run.
 
-Checksum computation is `zlib` for `crc32` and `hashlib` for `sha1` / `sha256`.
-`crc32c` and `crc64nvme` use `awscrt` when it is installed and a bundled
-pure-Python implementation otherwise, which is what `pure_max_size` bounds.
+Checksum computation is `zlib` for `crc32` and `hashlib` for `md5` / `sha1` /
+`sha256` / `sha512`. `crc32c` and `crc64nvme` use `awscrt` when it is installed
+and a bundled pure-Python implementation otherwise, which is what
+`pure_max_size` bounds. The `XXHASH` family has no such fallback: it is
+computed through `awscrt` (0.31.2 or later) or not at all. On a multipart
+object S3 stores `sha512`, `md5` and the `XXHASH` family as `COMPOSITE` only,
+so these are hashed part by part. boto3 1.42.94 is the first whose S3 model
+carries these checksums; under an older one `GetObjectAttributes` parses none
+of them, so such an object reads as carrying no checksum
+([`../compatibility.md`](../compatibility.md)).
 
 Raises, from a call: a `BotoCoreError` from `GetObjectAttributes` — absent
 credentials, an unreachable endpoint, a read timeout — is not a per-object
