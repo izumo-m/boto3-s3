@@ -22,7 +22,7 @@ services:
   s3:
     # Pinned: design/endpoint-fidelity.md records how this release answers
     # differently from real S3, and a new release needs its probes re-run.
-    image: rustfs/rustfs:1.0.2
+    image: rustfs/rustfs:1.0.3
     environment:
       RUSTFS_ACCESS_KEY: devadmin
       RUSTFS_SECRET_KEY: devadmin

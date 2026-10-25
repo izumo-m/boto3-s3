@@ -15,8 +15,9 @@ how the dev stack's server was chosen (section 3).
 
 Every known way the dev stack answers differently from real S3, plus the
 places where moto does and a golden is affected. The dev stack column is the
-observed behavior of RustFS 1.0.2 (`rustfs/rustfs:1.0.2`, image revision
-`2b243d86`), probed on 2026-10-17. The compose file pins that release, so a
+observed behavior of RustFS 1.0.3 (`rustfs/rustfs:1.0.3`, image revision
+`331fb896`): probed on 1.0.2 on 2026-10-17 and again on 1.0.3, which keeps
+1.0.2's server code, on 2026-10-25. The compose file pins that release, so a
 newer one has not been checked against these rows until the probes are re-run;
 `docker exec boto3-s3-dev-s3-1 rustfs --version` prints the running one.
 
@@ -30,7 +31,7 @@ goldens replay on moto: a golden captured on one endpoint only works if moto
 answers the same way. The last column points to the test-side changes in
 section 2; the table doubles as the probe checklist for a new endpoint.
 
-| # | Surface | Dev stack (RustFS 1.0.2) | Real S3 | moto | Section 2 |
+| # | Surface | Dev stack (RustFS 1.0.3) | Real S3 | moto | Section 2 |
 |---|---|---|---|---|---|
 | G1 | PutBucketWebsite without an IndexDocument (error document only, or empty) | rejected, `MalformedXML` | rejected (`InvalidArgument`; the error-document-only shape *unverified*) | stored | T8 |
 | G2 | `--storage-class GLACIER` | `InvalidStorageClass`, rc 1 | accepted, rc 0 | accepted | T9 |
