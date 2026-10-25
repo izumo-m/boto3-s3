@@ -803,7 +803,13 @@ dest-existence check for download. We ported the same three faces:
   the multipart threshold) and the difference is observable only under actual
   corruption, which no test lane can produce. It comes only from the
   s3transfer that runs - an SDK version difference (overview.md section 3) -
-  so it is not matched.
+  so it is not matched. boto/s3transfer#418 (open since 2026-09-14) ports the
+  feature. Once a pip s3transfer release carries it, the library must hand
+  s3transfer the expected checksum from `S3FileInfo.head`, as aws-cli's
+  `ProvideFullObjectChecksumSubscriber` does: the library provides the size
+  and the ETag, which suppresses s3transfer's own HeadObject, so s3transfer
+  would otherwise find no expected value and validate nothing. This entry and
+  its counterpart in cli.md then go.
 - Under `response_checksum_validation = when_required` (env
   `AWS_RESPONSE_CHECKSUM_VALIDATION` or the config key; not the default), pip
   s3transfer (0.19) skips the sizing HeadObject and opens every classic
