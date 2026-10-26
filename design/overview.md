@@ -144,11 +144,13 @@ maintaining high functional compatibility.
   secret or silently turn a protection off, the library and the CLI do not
   match it. For example, credentials are masked in debug logs
   ([`masking.md`](./masking.md)), where aws-cli prints them; nor does a
-  report print the content of a file a value was read from, where aws-cli
-  prints the bytes a `fileb://` value read when botocore refuses them for a
-  text option - a file's content may be a secret. Such a deviation is a
-  functional difference and is written down in
-  [`aws-differences.md`](../docs/cli/aws-differences.md).
+  report print the bytes a `fileb://` value read, where aws-cli prints them
+  when botocore refuses them for a text option - a binary file may hold a
+  key or a certificate, and no option takes its bytes as text. Such a
+  deviation is a functional difference and is written down in
+  [`aws-differences.md`](../docs/cli/aws-differences.md). A `file://` value
+  is not covered: it is the option's own text, written there by the user
+  for that option, and a report shows it as aws-cli's does.
 - **Messages**: a warning or an error message is compared with aws-cli's in
   two parts, so that the same difference is judged the same way wherever it
   is found. Messages are compared by running the pinned `aws` under the same
