@@ -88,7 +88,8 @@ as given, with its own client.
 | --- | --- |
 | `"s3://bucket/key"` | an `S3Storage` using this instance's client |
 | `"./local/path"` | a `LocalStorage` |
-| `"bucket/key"` to `ls` / `rm` / `mb` / `rb` / `presign` / `website` | an `S3Storage` — these accept a missing `s3://` prefix |
+| `"bucket/key"` to `ls` / `rm` / `mb` / `rb` / `presign` | an `S3Storage` — these accept a missing `s3://` prefix |
+| `"bucket"` or `"s3://bucket"` to `website` | the bucket name, read whole as `aws s3 website` reads its argument |
 | `S3Storage(uri, client=...)` | itself, with the client you gave it |
 | `IOStorage(stream)` / `StdioStorage()` | itself, as one side of a `cp` (the other side must be S3) |
 

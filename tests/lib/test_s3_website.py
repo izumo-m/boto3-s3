@@ -6,8 +6,10 @@ aws-cli parity facts asserted here (aws-cli WebsiteCommand,
 - ``--index-document`` -> ``IndexDocument.Suffix``, ``--error-document`` ->
   ``ErrorDocument.Key``; unset ones are omitted, and with neither set an
   **empty** configuration is sent (the server rejects it, not the client);
-- the library uses only the bucket of the target (permissive; aws-cli's
-  pass-the-key-as-bucket-name 252 is the CLI layer's job);
+- a string target names the bucket the way aws-cli's ``_get_bucket_name``
+  reads its argument - ``s3://`` and one trailing ``/`` off, the unsupported
+  ARN families refused, the rest the bucket name whole - so botocore takes
+  or refuses the name as on aws-cli; an ``S3Storage`` target names its bucket;
 - no local catch: a single-call operation raising category errors directly,
   never BatchError - NoSuchBucket maps to NotFoundError with the
   ClientError kept as ``__cause__``.
@@ -20,7 +22,15 @@ from typing import Any
 import pytest
 from botocore.exceptions import ParamValidationError
 
-from boto3_s3 import S3, BatchError, Boto3S3Error, NotFoundError, S3Storage, ValidationError
+from boto3_s3 import (
+    S3,
+    BatchError,
+    Boto3S3Error,
+    InvalidConfigError,
+    NotFoundError,
+    S3Storage,
+    ValidationError,
+)
 from tests.utils.fakes3 import client_error
 
 
@@ -81,9 +91,8 @@ class TestWebsite:
         S3().website(_storage("s3://bucket", client))
         assert client.calls == [{"Bucket": "bucket", "WebsiteConfiguration": {}}]
 
-    def test_key_part_is_ignored(self) -> None:
-        # Permissive library: only the bucket is used; aws-cli's strict path
-        # handling (key folded into the bucket name -> 252) is CLI-layer.
+    def test_an_s3storage_target_names_its_bucket(self) -> None:
+        # An S3Storage is used as given: its bucket, whatever key it carries.
         client = _FakeWebsiteClient()
         S3().website(_storage("s3://bucket/some/key", client), index_document="i.html")
         assert client.calls[0]["Bucket"] == "bucket"
@@ -141,3 +150,120 @@ class TestWebsiteErrors:
         with pytest.raises(ValidationError) as excinfo:
             S3().website(S3Storage("s3://", client=client))
         assert isinstance(excinfo.value.__cause__, ParamValidationError)
+
+
+class TestStringTarget:
+    """A string names the bucket as aws-cli's website argument does."""
+
+    @staticmethod
+    def _s3() -> tuple[S3, list[str]]:
+        # A real botocore client, answered locally: botocore's own checks run,
+        # and the URL of a request it sends is recorded.
+        import io
+
+        import boto3
+        from botocore.awsrequest import AWSResponse
+
+        session = boto3.session.Session(
+            aws_access_key_id="x", aws_secret_access_key="y", region_name="us-east-1"
+        )
+        urls: list[str] = []
+
+        def answer(request: Any, **_kwargs: Any) -> AWSResponse:
+            urls.append(request.url)
+            response = AWSResponse(request.url, 200, {}, None)
+
+            class _Raw(io.BytesIO):
+                def stream(self, *_args: Any, **_kwargs: Any) -> Any:
+                    yield b""
+
+            response.raw = _Raw(b"")
+            return response
+
+        # On the session: every client S3 builds from it carries the handler.
+        session.events.register("before-send.s3", answer)
+        return S3(session=session), urls
+
+    @pytest.mark.parametrize(
+        ("target", "name"),
+        [
+            ("s3://bucket/some/key", "bucket/some/key"),
+            ("s3://bucket//", "bucket/"),
+            ("s3:///k", "/k"),
+            ("s3://", ""),
+            ("bad!name", "bad!name"),
+        ],
+    )
+    def test_the_whole_rest_is_the_bucket_name(self, target: str, name: str) -> None:
+        # Never split into a bucket and a key: botocore refuses the whole name
+        # before any request, in its own words (measured on the pinned aws).
+        s3, urls = self._s3()
+        with pytest.raises(ValidationError) as excinfo:
+            s3.website(target, index_document="i.html")
+        assert str(excinfo.value).startswith(
+            f'Parameter validation failed:\nInvalid bucket name "{name}": Bucket name must match'
+        )
+        assert isinstance(excinfo.value.__cause__, ParamValidationError)
+        assert excinfo.value.operation == "website"
+        assert urls == []
+
+    @pytest.mark.parametrize(
+        ("target", "message"),
+        [
+            (
+                "s3://arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/ol/x",
+                "s3 commands do not support S3 Object Lambda resources",
+            ),
+            (
+                "arn:aws:s3-outposts:us-west-2:123456789012:outpost/op-01234567890123456/bucket/bk",
+                "s3 commands do not support Outpost Bucket ARNs",
+            ),
+        ],
+    )
+    def test_the_unsupported_arn_families_are_refused(self, target: str, message: str) -> None:
+        s3, urls = self._s3()
+        with pytest.raises(ValidationError, match=message) as excinfo:
+            s3.website(target, index_document="i.html")
+        assert excinfo.value.operation == "website"
+        assert urls == []
+
+    def test_a_malformed_arn_is_botocores_to_refuse(self) -> None:
+        # Outside the unsupported families' patterns (no region), so it reaches
+        # botocore, which refuses it as aws-cli's run shows.
+        s3, urls = self._s3()
+        with pytest.raises(ValidationError, match="Invalid ARN: bucket ARN is missing a region"):
+            s3.website("s3://arn:aws:s3-object-lambda::123456789012:accesspoint/ol")
+        assert urls == []
+
+    @pytest.mark.parametrize(
+        ("target", "host"),
+        [
+            ("s3://bucket/", "bucket.s3.amazonaws.com"),
+            ("bucket", "bucket.s3.amazonaws.com"),
+            (
+                "arn:aws:s3:us-east-1:123456789012:accesspoint/ap",
+                "ap-123456789012.s3-accesspoint.us-east-1.amazonaws.com",
+            ),
+        ],
+    )
+    def test_a_name_botocore_takes_is_sent(self, target: str, host: str) -> None:
+        s3, urls = self._s3()
+        s3.website(target, index_document="i.html")
+        assert len(urls) == 1
+        assert f"//{host}/" in urls[0]
+
+    def test_an_empty_aws_ca_bundle_is_refused_beside_an_overridden_client(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A client an overridden `client()` returns is vetted as one handed to
+        # an S3Storage is: an empty AWS_CA_BUNDLE is refused before the request.
+        fake = _FakeWebsiteClient()
+
+        class _S3(S3):
+            def client(self) -> Any:
+                return fake
+
+        monkeypatch.setenv("AWS_CA_BUNDLE", "")
+        with pytest.raises(InvalidConfigError, match="Invalid CA bundle"):
+            _S3().website("s3://bucket", index_document="i.html")
+        assert fake.calls == []

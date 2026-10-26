@@ -40,7 +40,8 @@ that contract applies follows the split above.
 an `s3://` string is an S3 location and a scheme-less `"bucket/key"` is a local
 relative path to them. `ls`, `rm`, `mb`, `rb`, `presign` and `website` resolve
 their single `target` themselves and read it as S3 whether or not it carries
-the scheme, with no local fallback.
+the scheme, with no local fallback; `website` reads a string as a bucket name
+whole, as `aws s3 website` does ([`website.md`](./website.md)).
 
 Four consequences are the operations' own:
 
@@ -55,7 +56,8 @@ Four consequences are the operations' own:
   ([`../../library/custom-storage.md`](../../library/custom-storage.md)) that
   does implement it is expanded like any other path-like value and read as an
   S3 target instead.
-- Accepting the scheme-less form is deliberate leniency: the library is more
+- `ls`, `presign` and `website` accept the scheme-less form as `aws s3`
+  does. On `rm`, `mb` and `rb` it is deliberate leniency: the library is more
   permissive than `aws s3`, and the strict path rejections belong to the
   command layer ([`../../library/README.md`](../../library/README.md)).
 

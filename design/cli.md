@@ -851,26 +851,18 @@ and, on success, **outputs nothing** and is rc 0. The only options are
 WebsiteConfiguration is sent as-is** (it passes client-side validation; rejection
 is the server's responsibility = same as aws-cli).
 
-Path handling follows the same procedure as aws-cli's `_get_bucket_name`:
-`s3://` is optional -> strip **exactly one trailing slash** -> treat the whole
-remainder as the bucket name. Because aws-cli **keeps a key (`s3://b/some/key`)
-folded into the bucket name** and lets botocore's name regex reject it (rc 252),
-the CLI side refuses the same names with a `ValidationError` naming the
-*unsplit* remainder. Only the remainders whose rejection the split would
-otherwise hide need that - every remainder the split does not keep whole as the
-bucket: whatever `S3Storage` read as a key, the `/` left after stripping
-(`s3://b//`), and an Outposts access point closed with `:`
-(`.../accesspoint/ap:`), whose `:` the split eats as the key separator. A path
-that names no bucket (`s3://`, `s3:///k`) is refused before that by
-`build_s3_storage` (252, as on every command; aws-cli rejects the name `/k` or
-the empty name, 252 too). Every other name botocore refuses - a slash-free bad
-one (`b@d`, `s3://b b`) - survives the split unchanged and rides on to
-PutBucketWebsite, where botocore refuses it. So website has **two** 252 sources
-for a bad bucket name: the one raised here (`usage.invalid_bucket_name_message`,
-`Invalid bucket name "<name>"`), and botocore's at the request. An accesspoint
-ARN passes through
-entirely as `Bucket` (aws-cli's `block_unsupported_resources` rejects only
-Object Lambda / Outposts bucket ARNs = same as `S3Storage`'s parsing).
+Path handling is aws-cli's `_get_bucket_name`, which the library's
+`S3.website` applies to a string target: `s3://` is optional -> strip
+**exactly one trailing slash** -> refuse the unsupported ARN families
+(`block_unsupported_resources`: Object Lambda, an Outposts *bucket*; aws-cli's
+own text, 252) -> the whole remainder is the bucket name, **never split into a
+bucket and a key**. The command hands the path to the library as it is. A
+remainder botocore does not take - a key folded into the name
+(`s3://b/some/key`), the `/` left by `s3://b//`, the empty name of `s3://`,
+`/k` from `s3:///k`, an Outposts access point closed with `:`, a malformed
+ARN - is botocore's refusal at the request (`Invalid bucket name ...`,
+`Invalid ARN: ...`; 252), exactly as on aws-cli. An access point ARN is a
+bucket name botocore takes, and passes through as `Bucket`.
 
 rc forms: **0 / 252 / 253 / 254 / 255** (because, unlike mb / rb, there is no
 local catch: a server rejection - `NoSuchBucket`, an endpoint that does not

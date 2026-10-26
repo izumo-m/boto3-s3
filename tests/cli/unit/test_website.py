@@ -124,66 +124,88 @@ class TestWebsite:
 
 
 class TestWebsiteExitCodeShape:
-    def test_key_part_is_param_validation_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # aws-cli folds "b/some/key" into the Bucket parameter and botocore's
-        # name regex rejects it -> 252; we reject the same shapes ourselves.
-        client = _FakeWebsiteClient()
-        rc = cli.main(
-            ["website", "s3://bucket/some/key", "--index-document", "i.html"],
-            ctx=client_ctx(client),
-        )
+    @pytest.mark.parametrize(
+        ("path", "name"),
+        [
+            ("s3://bucket/some/key", "bucket/some/key"),
+            ("s3://bucket//", "bucket/"),
+            ("s3:///k", "/k"),
+            ("s3://", ""),
+            # An Outposts access point closed with a ":" (both separators).
+            (
+                "s3://arn:aws:s3-outposts:us-west-2:123456789012:outpost/"
+                "op-01234567890123456/accesspoint/ap:",
+                "arn:aws:s3-outposts:us-west-2:123456789012:outpost/"
+                "op-01234567890123456/accesspoint/ap:",
+            ),
+            (
+                "s3://arn:aws:s3-outposts:us-west-2:123456789012:outpost:"
+                "op-01234567890123456:accesspoint:ap:",
+                "arn:aws:s3-outposts:us-west-2:123456789012:outpost:"
+                "op-01234567890123456:accesspoint:ap:",
+            ),
+        ],
+    )
+    def test_the_whole_name_is_botocores_to_refuse_252(
+        self, path: str, name: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws-cli strips s3:// and one trailing slash and hands the rest to
+        # PutBucketWebsite whole; botocore's name check refuses it before any
+        # request (252, measured) - the name the report quotes is that rest.
+        rc = cli.main(["website", path, "--index-document", "i.html"], ctx=_real_client_ctx())
         assert rc == 252
-        assert "Invalid bucket name" in capsys.readouterr().err
-        assert client.calls == []
-
-    def test_double_trailing_slash_is_252(self) -> None:
-        # "s3://b//" strips one slash -> Bucket "b/" fails aws-cli's regex; the
-        # leftover slash must not be silently dropped on our side.
-        client = _FakeWebsiteClient()
         assert (
-            cli.main(
-                ["website", "s3://bucket//", "--index-document", "i.html"], ctx=client_ctx(client)
-            )
-            == 252
-        )
-        assert client.calls == []
+            "An error occurred (ParamValidation): Parameter validation failed:\n"
+            f'Invalid bucket name "{name}": Bucket name must match the regex'
+        ) in capsys.readouterr().err
 
-    def test_empty_uri_names_no_bucket_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # Refused before the request as a path that names no bucket (aws-cli lets
-        # botocore's parameter validation refuse the empty name, 252 too).
-        rc = cli.main(["website", "s3://", "--index-document", "i.html"], ctx=_real_client_ctx())
-        assert rc == 252
-        assert 'Invalid bucket name ""' in capsys.readouterr().err
-
-    def test_a_bucketless_key_is_refused_as_naming_no_bucket(
-        self, capsys: pytest.CaptureFixture[str]
+    @pytest.mark.parametrize(
+        ("name", "message"),
+        [
+            (
+                "arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/ol/x",
+                "s3 commands do not support S3 Object Lambda resources",
+            ),
+            (
+                "arn:aws:s3-outposts:us-west-2:123456789012:outpost/op-01234567890123456/bucket/bk",
+                "s3 commands do not support Outpost Bucket ARNs",
+            ),
+        ],
+    )
+    def test_an_unsupported_arn_is_refused_before_the_request(
+        self, name: str, message: str, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # website does not split: aws-cli takes the whole scheme-stripped
-        # remainder "/k" as the bucket name and rejects it (measured, 252).
-        # Here the path names no bucket and is refused as such, at 252 too.
-        client = _FakeWebsiteClient()
-        rc = cli.main(["website", "s3:///k", "--index-document", "i.html"], ctx=client_ctx(client))
-        assert rc == 252
-        assert 'Invalid bucket name ""' in capsys.readouterr().err
-        assert client.calls == []
-
-    @pytest.mark.parametrize("sep", ["/", ":"])
-    def test_an_outposts_access_point_closed_with_a_colon_is_refused(
-        self, sep: str, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # aws-cli passes "...accesspoint/ap:" whole as the Bucket and botocore's
-        # name check refuses it (rc 252, no request; measured). The split
-        # here eats the ":" as the key separator and would leave a keyless
-        # access point to configure.
-        name = (
-            f"arn:aws:s3-outposts:us-west-2:123456789012:outpost{sep}"
-            f"op-01234567890123456{sep}accesspoint{sep}ap:"
-        )
+        # aws-cli refuses the unsupported resource itself (measured, 252).
         client = _FakeWebsiteClient()
         rc = cli.main(["website", f"s3://{name}", "--index-document", "i"], ctx=client_ctx(client))
         assert rc == 252
-        assert f'"{name}"' in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert message in err
+        assert "Parameter validation failed" not in err
         assert client.calls == []
+
+    @pytest.mark.parametrize(
+        ("name", "message"),
+        [
+            # No region: outside the unsupported Object Lambda pattern, so
+            # botocore resolves it and refuses it (measured on the pinned aws).
+            (
+                "arn:aws:s3-object-lambda::123456789012:accesspoint/ol",
+                "Invalid ARN: bucket ARN is missing a region",
+            ),
+            (
+                "arn:aws:s3:us-west-2:123456789012:accesspoint:ap1/x"
+                ":s3-object-lambda::123456789012:accesspoint/ol",
+                "Invalid ARN: The ARN may only contain a single resource component",
+            ),
+        ],
+    )
+    def test_a_malformed_arn_is_botocores_to_refuse(
+        self, name: str, message: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = cli.main(["website", f"s3://{name}", "--index-document", "i"], ctx=_real_client_ctx())
+        assert rc == 252
+        assert message in capsys.readouterr().err
 
     def test_extra_positional_is_unknown_options_252(
         self, capsys: pytest.CaptureFixture[str]

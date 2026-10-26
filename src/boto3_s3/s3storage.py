@@ -495,6 +495,31 @@ def _preserve_destination_mode(path: str, temp_path: str) -> None:
         os.chmod(temp_path, stat_module.S_IMODE(existing.st_mode))
 
 
+def refuse_unsupported_resource(path: str) -> None:
+    """Refuse the ARN families the S3 commands do not take.
+
+    aws-cli's ``block_unsupported_resources``. *path* is a location without
+    its ``s3://`` scheme. An S3 Object Lambda
+    access point (s3api territory) and an Outposts *bucket* ARN (s3control
+    territory) are a ``ValidationError`` in aws-cli's words, carrying the
+    whole ARN as ``bucket``; every other form passes, an access point ARN
+    included - botocore takes one as a bucket name - and so does a malformed
+    ARN these patterns do not match, which botocore refuses when it is used.
+    """
+    object_lambda = _S3_OBJECT_LAMBDA_ARN_RE.match(path)
+    if object_lambda is not None:
+        raise ValidationError(
+            "s3 commands do not support S3 Object Lambda resources. Use s3api commands instead.",
+            bucket=object_lambda["bucket"],
+        )
+    outpost_bucket = _S3_OUTPOST_BUCKET_ARN_RE.match(path)
+    if outpost_bucket is not None:
+        raise ValidationError(
+            "s3 commands do not support Outpost Bucket ARNs. Use s3control commands instead.",
+            bucket=outpost_bucket["bucket"],
+        )
+
+
 class S3Storage(Storage):
     """An S3 bucket/prefix as one side of a transfer.
 
@@ -804,27 +829,14 @@ class S3Storage(Storage):
         the API as a cryptic botocore error. Idempotent.
 
         The rejections carry what identifies the offending location: the whole
-        ARN for the two ARN forms - taken from the match here, not from
-        ``bucket``, which holds only the part before the first ``/`` for any
-        ARN family the splitters above do not recognize - and the orphaned key
+        ARN for the two ARN forms (`refuse_unsupported_resource`, from its
+        match, not from ``bucket``, which holds only the part before the first
+        ``/`` for any ARN family the splitters above do not recognize) - and the orphaned key
         for the bucket-less form. ``operation`` stays unset: the storage does
         not know which operation is about to use it, and the operation layer
         fills it in (``s3._validate_storage``).
         """
-        rest = self._uri.partition("://")[2]
-        object_lambda = _S3_OBJECT_LAMBDA_ARN_RE.match(rest)
-        if object_lambda is not None:
-            raise ValidationError(
-                "s3 commands do not support S3 Object Lambda resources. "
-                "Use s3api commands instead.",
-                bucket=object_lambda["bucket"],
-            )
-        outpost_bucket = _S3_OUTPOST_BUCKET_ARN_RE.match(rest)
-        if outpost_bucket is not None:
-            raise ValidationError(
-                "s3 commands do not support Outpost Bucket ARNs. Use s3control commands instead.",
-                bucket=outpost_bucket["bucket"],
-            )
+        refuse_unsupported_resource(self._uri.partition("://")[2])
         if not self._bucket and self._key:
             raise ValidationError(
                 f"s3:// URL has a key but no bucket: {self._uri!r}", key=self._key
@@ -1387,5 +1399,6 @@ def held_client(storage: S3Storage) -> Any | None:
 __all__ = [
     "CA_BUNDLE_ENVIRONMENT_VETTED",
     "S3Storage",
+    "refuse_unsupported_resource",
     "s3express_unsupported_reason",
 ]

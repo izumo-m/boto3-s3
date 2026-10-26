@@ -80,12 +80,12 @@ SCENARIOS: tuple[WebsiteScenario, ...] = (
         expected_stderr_tokens_ours=("Invalid bucket name",),
         expected_stderr_tokens_aws=("Invalid bucket name",),
     ),
-    # No bucket: refused before the request here, by botocore's parameter
-    # validation on `aws` - 252 on both.
+    # No bucket: botocore's name check refuses the empty name before the
+    # request - 252 on both, in botocore's words.
     WebsiteScenario(
         "website_empty_uri",
         ("website", "s3://", "--index-document", "index.html"),
-        expected_stderr_tokens_ours=('Invalid bucket name ""',),
+        expected_stderr_tokens_ours=("Parameter validation failed",),
         expected_stderr_tokens_aws=("Parameter validation failed",),
     ),
     WebsiteScenario(

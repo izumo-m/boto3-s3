@@ -71,6 +71,7 @@ from boto3_s3.s3storage import (
     CA_BUNDLE_ENVIRONMENT_VETTED,
     S3Storage,
     held_client,
+    refuse_unsupported_resource,
     reject_empty_ca_bundle,
     s3express_unsupported_reason,
 )
@@ -1163,11 +1164,13 @@ class S3:
     def _resolve_s3_target(self, target: Location, *, operation: str) -> S3Storage:
         """Resolve the single ``Location`` of an S3-only op to a validated ``S3Storage``.
 
-        The shared seam of ``ls`` / ``rm`` / ``mb`` / ``rb`` / ``presign`` /
-        ``website``. An ``S3Storage`` is used verbatim; a ``PathLike`` is expanded
-        via ``os.fspath`` (honoring the ``Location`` os.PathLike[str] contract,
-        like `resolve` does), and any other non-string - a non-S3 ``Storage``,
-        which carries no ``__fspath__`` - falls through to the ``ValidationError``.
+        The shared seam of ``ls`` / ``rm`` / ``mb`` / ``rb`` / ``presign``, and
+        of ``website`` for an ``S3Storage`` target (a string one names the
+        bucket whole, `_website_bucket_name`). An ``S3Storage`` is used
+        verbatim; a ``PathLike`` is expanded via ``os.fspath`` (honoring the
+        ``Location`` os.PathLike[str] contract, like `resolve` does), and any
+        other non-string - a non-S3 ``Storage``, which carries no
+        ``__fspath__`` - falls through to the ``ValidationError``.
         Unlike `resolve`, these ops are lenient about the ``s3://`` scheme (a bare
         ``"bucket/key"`` or the ``"s3://"`` service root both work) and a non-s3
         string is never a local fallback; the built ``S3Storage`` carries this
@@ -2697,28 +2700,65 @@ class S3:
     ) -> None:
         """Set the bucket website configuration with ``aws s3 website`` semantics.
 
-        ``target`` is an ``"s3://bucket"`` URI string (scheme optional) or an
-        ``S3Storage``; a key part is ignored - the library is permissive, the
-        CLI layer owns aws-cli's strict path handling (aws-cli passes the key *as
-        part of the bucket name* and lets botocore reject it). The request is
-        shaped the way aws-cli shapes it: ``--index-document`` becomes
-        ``IndexDocument.Suffix``, ``--error-document`` becomes
-        ``ErrorDocument.Key``, unset ones are omitted - and with neither set
-        an **empty** configuration is sent, leaving the rejection to the
-        server, exactly like aws. An empty bucket fails botocore's
-        client-side parameter validation -> `ValidationError`. A
-        single-call operation: failures raise their category error directly,
-        never ``BatchError`` (design/exceptions.md section 4).
+        A string ``target`` (or a path-like) names the bucket the way aws-cli's
+        ``WebsiteCommand._get_bucket_name`` reads its argument: an ``s3://``
+        prefix and one trailing ``/`` come off, the unsupported ARN families
+        are refused (`refuse_unsupported_resource`), and the rest is the
+        bucket name whole - never split into a bucket and a key. A name
+        botocore does not take (``"bucket/some/key"``, ``""``, a malformed
+        ARN) fails its client-side check -> `ValidationError`, in botocore's
+        words, as on aws-cli; an access point ARN is a bucket name botocore
+        takes. An ``S3Storage`` target names its bucket and is used as given,
+        with its own client. The request is shaped the way aws-cli shapes it:
+        ``--index-document`` becomes ``IndexDocument.Suffix``,
+        ``--error-document`` becomes ``ErrorDocument.Key``, unset ones are
+        omitted - and with neither set an **empty** configuration is sent,
+        leaving the rejection to the server, exactly like aws. A single-call
+        operation: failures raise their category error directly, never
+        ``BatchError`` (design/exceptions.md section 4).
         """
-        storage = self._resolve_s3_target(target, operation="website")
+        if isinstance(target, S3Storage):
+            storage = self._resolve_s3_target(target, operation="website")
+            bucket = storage.bucket
+            client = storage.get_client()  # built ahead of the request's attribution, like mb
+        else:
+            if isinstance(target, os.PathLike):
+                target = os.fspath(target)
+            if not isinstance(target, str):
+                raise ValidationError(
+                    "website accepts an 's3://...' URI string or an S3Storage",
+                    operation="website",
+                )
+            # The client first, as aws-cli builds it before reading the name.
+            client = self.client()
+            # Vetted as a client handed to an S3Storage is (`S3Storage.get_client`).
+            with s3_errors(operation=None):
+                reject_empty_ca_bundle(client, check_environment=True)
+            bucket = _website_bucket_name(target)
+            with _attributed_to("website"):
+                refuse_unsupported_resource(bucket)
+            reason = s3express_unsupported_reason(bucket)
+            if reason is not None:
+                raise ConfigurationError(reason, operation="website", bucket=bucket)
         config: WebsiteConfigurationTypeDef = {}
         if index_document is not None:
             config["IndexDocument"] = {"Suffix": index_document}
         if error_document is not None:
             config["ErrorDocument"] = {"Key": error_document}
-        client = storage.get_client()  # built ahead of the request's attribution, like mb
-        with _single_request("website", bucket=storage.bucket):
-            client.put_bucket_website(Bucket=storage.bucket, WebsiteConfiguration=config)
+        with _single_request("website", bucket=bucket):
+            client.put_bucket_website(Bucket=bucket, WebsiteConfiguration=config)
+
+
+def _website_bucket_name(target: str) -> str:
+    """aws-cli's ``WebsiteCommand._get_bucket_name``: the bucket a website argument names.
+
+    An ``s3://`` prefix and one trailing ``/`` come off; the rest is the name.
+    """
+    if target.startswith("s3://"):
+        target = target[len("s3://") :]
+    if target.endswith("/"):
+        target = target[:-1]
+    return target
 
 
 # The request-context key `_sigv4_presign` marks a presign it signs itself

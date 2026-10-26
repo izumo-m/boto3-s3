@@ -6,7 +6,6 @@ import argparse
 
 from boto3_s3 import ValidationError
 from boto3_s3_cli import usage
-from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import Command, Context, expand_option_paramfile
 
 
@@ -35,7 +34,8 @@ class WebsiteCommand(Command):
         mb/rb, aws-cli's WebsiteCommand lets PutBucketWebsite exceptions reach
         its general handler chain, so server rejections (NoSuchBucket, an
         endpoint refusing the configuration) are rc **254** through main's
-        ClientError-cause mapping; a path that names no bucket is refused
+        ClientError-cause mapping; a bucket name botocore does not take, an
+        empty one included, and the unsupported ARN families are refused
         before the request (252); credentials that cannot be located
         are 253 at the request (a missing region is no failure: the client
         defaults to us-east-1), while client construction's botocore failures
@@ -59,37 +59,12 @@ class WebsiteCommand(Command):
         # Both document options are expanded at parse time, as on `aws`.
         expand_option_paramfile(args, "index_document", operation="website")
         expand_option_paramfile(args, "error_document", operation="website")
-        # aws-cli's _get_bucket_name: strip an optional s3://, strip ONE trailing
-        # slash, then pass the remainder verbatim as the bucket name (no
-        # key split - "b/k" fails botocore's bucket regex -> 252).
-        if path.startswith("s3://"):
-            path = path[len("s3://") :]
-        if path.endswith("/"):
-            path = path[:-1]
-
-        s3 = ctx.s3(args)
-        client = s3.client()
-        # build_s3_storage makes the path refusals (no bucket, the
-        # unsupported ARNs) before the rejection below.
-        storage = transferargs.build_s3_storage(f"s3://{path}", client=client)
-        if storage.bucket != path:
-            # aws-cli hands the whole remainder to PutBucketWebsite as the Bucket
-            # and lets botocore's name regex reject it (rc 252). S3Storage
-            # splits it instead, which would hide that rejection, so a
-            # remainder the split did not keep whole as the bucket is refused
-            # here from the unsplit path: whatever S3Storage read as a key
-            # ("b/some/key"), "b//", whose leftover slash the split would
-            # silently drop, and an Outposts ".../accesspoint/ap:", whose ":"
-            # the split eats as the key separator. Every other name botocore
-            # refuses - a slash-free bad one - survives the split intact and
-            # is refused by botocore at the request. An accesspoint ARN is the
-            # whole bucket and passes through, exactly like aws-cli.
-            raise ValidationError(
-                usage.invalid_bucket_name_message(path),
-                operation="website",
-            )
-        s3.website(
-            storage,
+        # The library reads the path as aws-cli's _get_bucket_name does - the
+        # s3:// prefix and one trailing slash off, the unsupported ARNs refused,
+        # the rest the bucket name whole - so a name botocore does not take is
+        # refused at the request in botocore's words (252), as on aws-cli.
+        ctx.s3(args).website(
+            path,
             index_document=args.index_document,
             error_document=args.error_document,
         )
