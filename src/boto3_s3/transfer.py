@@ -89,7 +89,7 @@ from s3transfer.futures import NonThreadedExecutor
 from s3transfer.manager import TransferManager
 from s3transfer.upload import UploadSubmissionTask
 
-from boto3_s3 import crtsupport, mimetable, requestparams, transferconfig
+from boto3_s3 import crtsupport, mimetable, requestparams, signingreads, transferconfig
 from boto3_s3.exceptions import (
     AccessDeniedError,
     Boto3S3Error,
@@ -1185,6 +1185,9 @@ class Transferrer:
         self._crt = crt if crt is not None else crtsupport.CrtPostures()
         self._manager: Any = None
         self._capture: _ResponseCapture | None = None
+        # Whether the classic engine's client is watched for a body read that
+        # fails while awscrt signs it (`signingreads`), so __exit__ removes it.
+        self._signing_reads_kept = False
         self._lock = threading.Lock()
         self._futures_lock = threading.Lock()
         self._futures: set[Any] = set()
@@ -1311,6 +1314,8 @@ class Transferrer:
                 # unregister with stragglers in flight than to leave the handlers
                 # feeding its stores forever on a longer-lived client.
                 self._capture.unregister(self._client)
+            if self._signing_reads_kept:
+                signingreads.unregister(self._client)
         # A Ctrl-C the CRT drain swallowed reaches the caller as the classic
         # manager's re-raise does: ahead of anything noted, and in place of
         # the exception that folded the run when it landed in that fold's
@@ -1922,6 +1927,13 @@ class Transferrer:
             manager = self._create_crt_manager()
             if manager is None:
                 manager = self._create_classic_manager()
+                # botocore signs the classic engine's requests, with awscrt's
+                # signer when awscrt is importable: a part or file read failing
+                # while it signs reaches the item as the read's own exception,
+                # not as awscrt's AWS_ERROR_UNKNOWN and a traceback on stderr
+                # (`signingreads`). The CRT engine signs in awscrt's own client.
+                # Removed in __exit__ after the manager shuts down.
+                self._signing_reads_kept = signingreads.register(self._client)
             # Transfer-time breadcrumb: names the engine actually built for
             # this run (CRTTransferManager vs the classic TransferManager),
             # after any CRT->classic fallback. Lets --debug distinguish a real

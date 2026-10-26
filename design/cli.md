@@ -476,9 +476,13 @@ numbers in the bold item labels below are that document's.
      lets CRT handle only the asymmetric SigV4a family. The library's `presign`
      signs a symmetric SigV4 URL with the pure-Python signer per call
      (`boto3_s3.s3._sigv4_presign`), leaving botocore's process-wide table alone; the
-     requests themselves sign with whichever signer the table holds, which
-     differs only in an error or an unusual environment (awscrt's refuses an
-     empty region, and adds a lowercase `host` header) and is not compensated.
+     requests themselves sign with whichever signer the table holds. Where
+     awscrt's signer would hide a failure - a body read that raises while it
+     signs, which it reports as its own `AWS_ERROR_UNKNOWN` after writing a
+     traceback - the library keeps the read's exception from it
+     (transfer.md section 9); the other differences (awscrt's signer refuses
+     an empty region, and adds a lowercase `host` header) show only in an
+     error or an unusual environment and are not compensated.
      Asymmetric SigV4a (MRAP ARNs
      and the like) is a domain where botocore itself requires awscrt: with the
      `crt` extra, the CRT signer handles it just as in aws-cli v2 (measured: an

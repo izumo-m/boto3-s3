@@ -20,6 +20,7 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
 | `transfer.py` | `Transferrer`: the transfer engine proper that drives the classic / CRT transfer manager (the subject of this document). With `is_move` it deletes the source and reports MOVE (section 11). Engine selection is in section 2 / [`crt.md`](./crt.md) |
 | `transferconfig.py` | The public `TransferConfig` = a subclass of boto3's that adds the CRT tuning field `target_bandwidth` and `annotation_temp_dir` ([`crt.md`](./crt.md) section 2) |
 | `crtsupport.py` | CRT engine resolution (a faithful port of boto3 `boto3/crt.py` plus refinements). `should_use_crt` / `create_crt_transfer_manager` / lock, and `create_crt_request_sender` for the deletes on the same engine (`crtrequest.py`). The design is in [`crt.md`](./crt.md) |
+| `signingreads.py` | Keeps a request body's read failure away from awscrt's request signer, which would write a traceback and report its own `AWS_ERROR_UNKNOWN`: registered on botocore's public `before-sign` / `request-created` events of the classic engine's client for a run, and around `S3Storage.put_file`'s request (section 9) |
 | `pathresolver.py` | A port of aws-cli's `S3PathResolver` (resolves access point ARN / alias / MRAP to the real bucket; the s3control / sts client is injected). The building block for `S3.mv(validate_same_s3_paths=True)` (`S3._check_underlying_paths`) |
 | `comparator.py` | sync's pairing and the building blocks for its decisions (`Comparator` / the `MergedPair` pair shapes / `PairFilter` / combinators). The design is in [`sync.md`](./sync.md) |
 | `S3.cp` / `S3.mv` / `S3.sync` in `s3.py` | orchestration: path classification -> pre-validation -> enumeration -> gates (glacier / parent-ref / dryrun) -> submit -> `BatchError` aggregation (cp / mv share `_run_transfer`). mv adds a same-path guard and `is_move` ahead of that. sync forks the enumeration into two streams, inserts pair decisions in between, and shares the per-info item builder and the gates with cp |
@@ -761,6 +762,22 @@ dest-existence check for download. We ported the same three faces:
   the botocore client's request signing (awscrt's signers when awscrt is
   importable, as botocore picks them; `presign` signs symmetric SigV4
   pure-Python, cli.md section 4) does not change with the transfer engine.
+  awscrt's signer reads the request body itself wherever the payload is
+  signed (a plain-HTTP endpoint above all), and a read that raises there - a
+  disk error, the exception s3transfer's part reader raises to stop the
+  other parts of an upload that already failed, a Ctrl-C landing in the read
+  - would reach awscrt, which writes the traceback to stderr and fails the
+  request with its own `AWS_ERROR_UNKNOWN`, the exception gone. aws-cli's
+  pure-Python signer lets the exception out of the signing. So the classic
+  engine's client (for the run) and `put_file`'s one request are watched
+  (`signingreads`, on botocore's public `before-sign` and `request-created`
+  events): what a read raises while the request is signed is kept from the
+  signer, and right after the signing the request's own body is put back and
+  the kept exception raised - from the signing step, as the pure-Python
+  signer's comes, so the request is neither sent nor retried, an interrupt
+  cancels its item as anywhere else, and awscrt writes nothing. A body that
+  reads cleanly is signed and sent unchanged, as its own object (measured:
+  the signature, the headers and the bytes match an unwatched request).
 
 ## 10. SDK version differences (not matched)
 

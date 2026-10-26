@@ -177,7 +177,13 @@ one (awscrt fails the request on the first it does not handle itself, such as
 a `BlockingIOError`), and when that is the request's outcome the item fails
 with it instead, as on the classic engine: a `Boto3S3Error` the stream raised
 is recorded as it is, anything else becomes the base error with it on
-`__cause__`. A classic threaded
+`__cause__`. On the classic engine botocore signs each request, with awscrt's
+signer when awscrt is importable, and that signer reads the body wherever it
+signs the payload (a plain-HTTP endpoint above all): what a read raises there, an
+interrupt included, is kept from it (`signingreads`) and raised on the
+signing thread once the signing is done, so the item fails with the read's
+own exception, or is `CANCELLED` with the interrupt re-raised (transfer.md
+section 9). A classic threaded
 download's sink raising an interrupt is settled on its IO worker (`_TaskGuard`): the
 item is `CANCELLED` and the interrupt re-raised.
 The classic engine settles every revoked item with s3transfer's

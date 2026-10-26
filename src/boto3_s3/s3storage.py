@@ -47,6 +47,7 @@ from typing_extensions import override
 from boto3_s3.exceptions import NotFoundError, ValidationError
 from boto3_s3.localstorage import is_special_file, translate_os_error
 from boto3_s3.sdkerrors import client_build_error, s3_errors, s3_request
+from boto3_s3.signingreads import kept_signing_read_failures
 from boto3_s3.storage import Storage, StorageCapability, sieve_pages
 from boto3_s3.types import (
     FileInfo,
@@ -1275,9 +1276,11 @@ class S3Storage(Storage):
             except OSError as exc:
                 raise translate_os_error(exc, operation=_PUT_FILE_OPERATION, key=source) from exc
             with s3_request(operation=_PUT_FILE_OPERATION, bucket=self._bucket, key=target_key):
-                response = self.get_client().put_object(
-                    Bucket=self._bucket, Key=target_key, Body=stream
-                )
+                client = self.get_client()
+                # A read failing while awscrt signs the body fails the request
+                # with the read's own error (`signingreads`).
+                with kept_signing_read_failures(client):
+                    response = client.put_object(Bucket=self._bucket, Key=target_key, Body=stream)
         etag = response.get("ETag")
         return S3FileInfo(
             key=target_key,
