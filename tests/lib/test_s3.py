@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import boto3
+import botocore.exceptions as botocore_exceptions
 import pytest
 from botocore.config import Config
 from botocore.exceptions import ClientError, ProfileNotFound
@@ -39,6 +40,7 @@ from boto3_s3 import (
     TransferConfig,
     ValidationError,
     globsieve,
+    sdkerrors,
 )
 from tests.utils.fakes3 import client_error, listing
 from tests.utils.recorder import make_recording_client
@@ -816,6 +818,78 @@ class TestClientSeam:
             with pytest.raises(InvalidConfigError) as exc_info:
                 build()
             assert isinstance(exc_info.value.__cause__, AttributeError)
+
+    @pytest.mark.parametrize(
+        ("lines", "cause"),
+        [
+            ("retry_mode = bogus", "InvalidRetryModeError"),
+            ("max_attempts = -1", "InvalidMaxRetryAttemptsError"),
+            ("s3 =\n    addressing_style = bogus", "InvalidS3AddressingStyleError"),
+            (
+                "s3 =\n    us_east_1_regional_endpoint = bogus",
+                "InvalidS3UsEast1RegionalEndpointConfigError",
+            ),
+            ("sts_regional_endpoints = bogus", "InvalidSTSRegionalEndpointsConfigError"),
+            ("defaults_mode = bogus", "InvalidDefaultsMode"),
+            ("ec2_metadata_service_endpoint = bogus", "InvalidIMDSEndpointError"),
+            ("ec2_metadata_service_endpoint_mode = bogus", "InvalidIMDSEndpointModeError"),
+            pytest.param(
+                "request_checksum_calculation = bogus",
+                "InvalidChecksumConfigError",
+                marks=pytest.mark.skipif(
+                    not hasattr(botocore_exceptions, "InvalidChecksumConfigError"),
+                    reason="botocore before 1.36 has no checksum settings",
+                ),
+            ),
+            ("[default", "ConfigParseError"),
+        ],
+    )
+    def test_a_config_botocore_refuses_maps_to_invalid_config_error(
+        self, lines: str, cause: str, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # botocore refuses these while it builds any client, each with an
+        # error of its own directly under BotoCoreError.
+        config = tmp_path / "config"
+        config.write_text(f"[default]\nregion = us-east-1\n{lines}\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        monkeypatch.delenv("AWS_PROFILE", raising=False)
+        for build in (lambda: S3().client(), lambda: S3Storage("s3://b/").get_client()):
+            with pytest.raises(InvalidConfigError) as exc_info:
+                build()
+            assert type(exc_info.value.__cause__).__name__ == cause
+
+    @pytest.mark.parametrize(
+        ("config", "target", "cause"),
+        [
+            (
+                Config(use_fips_endpoint=True, s3={"use_accelerate_endpoint": True}),
+                "s3://b/k",
+                "UnsupportedS3ConfigurationError",
+            ),
+            (
+                Config(s3={"use_arn_region": False}),
+                "s3://arn:aws:s3:us-west-2:123456789012:accesspoint/ap/k",
+                "UnsupportedS3AccesspointConfigurationError",
+            ),
+        ],
+        ids=["accelerate-with-fips", "access-point-of-another-region"],
+    )
+    def test_a_setting_the_endpoint_rules_refuse_for_the_target_is_invalid_config(
+        self, config: Config, target: str, cause: str
+    ) -> None:
+        # S3's endpoint rules refuse these when a request names its target,
+        # and botocore names them configuration errors.
+        with pytest.raises(InvalidConfigError) as exc_info:
+            S3(config=config).presign(target)
+        assert type(exc_info.value.__cause__).__name__ == cause
+
+    def test_s3_controls_configuration_error_is_invalid_config(self) -> None:
+        # mv's path check asks S3 Control about an access point ARN, whose
+        # endpoint rules refuse the same settings.
+        exc = botocore_exceptions.UnsupportedS3ControlConfigurationError(msg="dual-stack")
+        error = sdkerrors.translate_boto_error(exc, operation="mv")
+        assert type(error) is InvalidConfigError
+        assert str(error) == str(exc)
 
     def test_a_credential_process_that_cannot_run_maps_to_invalid_config_error(
         self, monkeypatch: pytest.MonkeyPatch

@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A single local source that is a directory is now named as `aws s3` names it in its result and warnings (a trailing separator, and no name appended to a prefix destination), and `LocalStorage.get_fileinfo()` finds a file typed with a trailing separator absent, as `aws s3` does.
 - A request that dies without any response (a connection closed, a read timeout) now fails its item instead of leaving no record.
 - A classic download that gave up retrying a body read now fails with `TransportError` instead of the base `Boto3S3Error`.
+- A config file botocore cannot parse, a setting value it refuses (`retry_mode`, `addressing_style`, `defaults_mode`, ...) and a setting S3's endpoint rules refuse for the target now raise `InvalidConfigError` instead of the base `Boto3S3Error`.
 - A multipart copy whose post-copy tag write and its cleanup delete both fail is now reported as failed, so `mv` keeps its source, and a Ctrl-C in a copy's post-copy writes under `use_threads=False` now cancels the item.
 - A download to `StdioStorage` now flushes standard output when it finishes, so a stdout that cannot take the bytes fails the item, and `mv` keeps its source, instead of the process failing at exit; a process without a stdout fails it even for an empty object.
 - On an SDK too old for them, `mb`'s tags and `-an` bucket names and `ls`'s bucket filters now raise `ValidationError` (botocore's own parameter check) instead of `ConfigurationError`.

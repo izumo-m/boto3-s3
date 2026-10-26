@@ -23,15 +23,26 @@ from typing import Any
 from botocore.exceptions import (
     BotoCoreError,
     ClientError,
+    ConfigParseError,
     EndpointConnectionError,
     HTTPClientError,
     IncompleteReadError,
+    InvalidDefaultsMode,
+    InvalidIMDSEndpointError,
+    InvalidIMDSEndpointModeError,
+    InvalidRetryConfigurationError,
+    InvalidS3AddressingStyleError,
+    InvalidS3UsEast1RegionalEndpointConfigError,
+    InvalidSTSRegionalEndpointsConfigError,
     MissingDependencyException,
     NoCredentialsError,
     NoRegionError,
     ParamValidationError,
     PartialCredentialsError,
     ProfileNotFound,
+    UnsupportedS3AccesspointConfigurationError,
+    UnsupportedS3ConfigurationError,
+    UnsupportedS3ControlConfigurationError,
 )
 from botocore.exceptions import ConnectionError as BotoConnectionError
 from botocore.exceptions import InvalidConfigError as BotocoreInvalidConfigError
@@ -55,17 +66,41 @@ from boto3_s3.exceptions import (
 # 3). Membership differs: the factory's construction-scoped catch maps every
 # other BotoCoreError to InvalidConfigError, while this general translator
 # lists only the known config shapes and keeps anything unlisted at the base.
-# botocore's own InvalidConfigError family is one of those shapes: a
-# source_profile loop, a missing services section, an empty CA bundle
-# (`reject_empty_ca_bundle`).
+# The shapes: botocore's own InvalidConfigError family (a source_profile loop,
+# a missing services section, an empty CA bundle - `reject_empty_ca_bundle`);
+# a config file botocore cannot parse; a setting whose value it refuses while
+# it builds any client (retry_mode / max_attempts, addressing_style,
+# us_east_1_regional_endpoint, sts_regional_endpoints, defaults_mode, the IMDS
+# endpoint and its mode, the checksum settings); and the settings S3's
+# endpoint rules refuse for a request's target (Accelerate with FIPS, an access
+# point ARN of another region while use_arn_region is off, or of another
+# partition), which botocore itself names configuration errors.
 _UNRESOLVED_CONFIG_ERRORS: tuple[type[BaseException], ...] = (
     NoCredentialsError,
     NoRegionError,
 )
+try:
+    from botocore.exceptions import InvalidChecksumConfigError
+except ImportError:  # Back-compat shim: botocore before 1.36 (floor 1.31) has no checksum settings
+    _checksum_config_errors: tuple[type[BaseException], ...] = ()
+else:
+    _checksum_config_errors = (InvalidChecksumConfigError,)
 _INVALID_CONFIG_ERRORS: tuple[type[BaseException], ...] = (
     PartialCredentialsError,
     ProfileNotFound,
     BotocoreInvalidConfigError,
+    ConfigParseError,
+    InvalidRetryConfigurationError,
+    InvalidS3AddressingStyleError,
+    InvalidS3UsEast1RegionalEndpointConfigError,
+    InvalidSTSRegionalEndpointsConfigError,
+    InvalidDefaultsMode,
+    InvalidIMDSEndpointError,
+    InvalidIMDSEndpointModeError,
+    UnsupportedS3ConfigurationError,
+    UnsupportedS3AccesspointConfigurationError,
+    UnsupportedS3ControlConfigurationError,
+    *_checksum_config_errors,
 )
 # Both halves of botocore's transport tree: ConnectionError (endpoint /
 # connect-timeout / proxy) and HTTPClientError (read timeout, a closed
@@ -172,8 +207,10 @@ def translate_boto_error(
     credentials/region and a missing optional dependency
     (``MissingDependencyException`` - awscrt absent where SigV4a signing needs
     it) to ``ConfigurationError``, a present-but-unusable
-    profile, partial credentials or botocore's own ``InvalidConfigError``
-    family to the ``InvalidConfigError`` refinement,
+    profile, partial credentials, botocore's own ``InvalidConfigError``
+    family, a config file or a setting value botocore refuses, and a setting
+    S3's endpoint rules refuse for the target (``_INVALID_CONFIG_ERRORS``) to
+    the ``InvalidConfigError`` refinement,
     and ``ParamValidationError`` (client-side validation - no HTTP happened)
     to ``ValidationError``, which aws-cli files under its usage rc. A CRT
     network or server failure is a ``TransportError`` by its awscrt name

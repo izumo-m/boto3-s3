@@ -293,7 +293,13 @@ a size, a rate), for a config key that names a section where a value is
 expected, for botocore's `ProfileNotFound`, `PartialCredentialsError` and
 `InvalidConfigError` (a `source_profile` loop, say), and for any other botocore
 failure to read the config file while the library reads AWS configuration (a
-`ConfigParseError`, say). It is also the class for a
+`ConfigParseError`, say). It is the class too for a setting value botocore
+refuses while it builds a client (`retry_mode`, `max_attempts`,
+`addressing_style`, `us_east_1_regional_endpoint`, `sts_regional_endpoints`,
+`defaults_mode`, the EC2 instance metadata endpoint and its mode, the checksum
+settings), and for settings S3's endpoint rules refuse for a request's target
+(Accelerate with FIPS, an access point ARN of another region while
+`use_arn_region` is off, or of another partition). It is also the class for a
 malformed `endpoint_url` — one passed to `S3`, or one taken from
 `AWS_ENDPOINT_URL` / `AWS_ENDPOINT_URL_S3` when a default client is built —
 and for a malformed or empty region, both of which botocore rejects with a
