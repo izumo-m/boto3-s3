@@ -125,18 +125,22 @@ class CpScenario(BaseScenario):
     # e.g. a read-only parent for the uncreatable-destination scenario.
     local_dirs: Mapping[str, int] = field(default_factory=dict)
     # The outcome is racy on a case-insensitive destination (aws-cli's warn text:
-    # "may result in ... race conditions between concurrent downloads"): the
-    # twin downloads commit through s3transfer's Windows rename, a remove
-    # followed by a rename, and when the two interleave one fails with
+    # "may result in ... race conditions between concurrent downloads"): on
+    # aws the twin downloads commit through s3transfer's Windows rename, a
+    # remove followed by a rename, and when the two interleave one fails with
     # [WinError 183] (rc 1); a twin whose file the other just removed cannot
-    # be stamped (rc 2). Both tools share that code path and both lose the
-    # race - measured on a Windows host over 150 runs each: `aws` 67 times at
-    # rc 1 and 3 at rc 2, ours 2 and 1. On such a filesystem there is no
-    # stable behavior to diff or record: e2e holds ours to the range the
-    # race allows (rc 0 / 1 / 2) plus its stderr tokens, and the golden tiers
-    # stand down (no capture, no replay). This is the one carve-out from the
-    # unconditional-rc charter note above - where `aws` itself is
-    # nondeterministic, no defined rc exists to match.
+    # be stamped (rc 2). Measured on a Windows host: `aws` 67 of 150 runs at
+    # rc 1 and 3 at rc 2. Ours commits with one replace
+    # (`transfer._ReplacingOSUtils`), which leaves the remove-rename gap
+    # out - 449 of 450 runs at rc 0, one at rc 2 - but the twins still
+    # overwrite one another, and a replace that lands while the other twin
+    # stamps the file can still be refused and fall back to the two steps.
+    # On such a filesystem there is no stable aws behavior to diff or
+    # record: e2e holds ours to the range the race allows (rc 0 / 1 / 2)
+    # plus its stderr tokens, and the golden tiers stand down (no capture,
+    # no replay). This is the one carve-out from the unconditional-rc charter
+    # note above - where `aws` itself is nondeterministic, no defined rc
+    # exists to match.
     undefined_on_case_insensitive_dest: bool = False
 
 

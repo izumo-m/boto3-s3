@@ -388,10 +388,24 @@ chain:
   Downloaded <path> but was unable to update the last modified time. <err>`;
   `path` appears twice) mirrors aws-cli's `ProvideLastModifiedTimeSubscriber` via
   `create_warning`.
-- Parent-dir creation is the subscriber from section 3. The fact that s3transfer
-  performs a filename-specified download via a temp file + rename is also
-  identical to aws-cli (it matches automatically because it is the same
-  library).
+- Parent-dir creation is the subscriber from section 3. s3transfer writes a
+  filename-specified download to a temp file and renames it into place, as on
+  aws-cli, but the classic engine's manager is built with `_ReplacingOSUtils`,
+  whose rename is one `os.replace`. s3transfer's own commit on Windows removes
+  the destination and then renames onto it, so two downloads whose names
+  differ only in case can interleave between the two steps on a
+  case-insensitive filesystem (`[WinError 183]` on aws-cli), and a process
+  killed between them loses the old file; one replace leaves no such gap.
+  Where Windows refuses the replace, s3transfer's commit runs as it would
+  have, so a failure reads as on aws-cli (a destination in use is `[WinError
+  32]`, not the replace's `[WinError 5]`) and a link to a directory is
+  replaced as aws-cli replaces it. The CRT engine keeps s3transfer's own
+  commit, as aws-cli's does: its `CRTTransferManager` cannot be built with an
+  `osutil` (it never stores the argument, then reads the attribute it would
+  have set, and fails with `AttributeError`), and reaching past that would
+  take its private state. `S3Storage.get_file` is not a transfer and commits
+  with `os.replace` alone, so every failure keeps the old file
+  ([`storage.md`](./storage.md) section 6).
 
 ## 6. streaming (`IOStorage` / `StdioStorage`)
 
@@ -877,7 +891,7 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
   aggregates it as `move failed` (rc 1). The bytes have already arrived.
 - **Durability barrier (`LocalStorage(fsync=True)`, a library extension; default
   off, matching aws-cli)**: s3transfer finalizes a filename download with a
-  temp-file write + `os.rename` and never fsyncs, so aws-cli deletes the durable
+  temp-file write and a rename and never fsyncs, so aws-cli deletes the durable
   S3 source while the downloaded bytes may still be only in the page cache - a
   crash between the two loses the move outright. When the download's destination
   `LocalStorage` opts in, the `_FsyncDest` subscriber (section 3, only on the

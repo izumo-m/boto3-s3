@@ -255,6 +255,8 @@ class TestCreateCrtTransferManager:
         [manager_kwargs] = stubs.manager_kwargs
         assert manager_kwargs["crt_s3_client"] is stubs.crt_client
         assert manager_kwargs["config"] is config
+        # No osutil: CRTTransferManager cannot be built with one (see the factory).
+        assert "osutil" not in manager_kwargs
 
     def test_an_environment_endpoint_still_decides_use_ssl(
         self, stubs: CrtStubs, monkeypatch: pytest.MonkeyPatch

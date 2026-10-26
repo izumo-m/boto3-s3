@@ -456,6 +456,11 @@ def create_crt_transfer_manager(
         return None
     from s3transfer.crt import CRTTransferManager
 
+    # No osutil: CRTTransferManager never stores one handed to it and then
+    # reads the attribute it would have set, so its construction fails with
+    # AttributeError. A CRT filename download therefore commits with
+    # s3transfer's own rename, as on aws-cli, not with the classic engine's
+    # one-step replace (`transfer._ReplacingOSUtils`).
     kwargs: dict[str, Any] = {
         "crt_s3_client": crt_s3_client.crt_client,
         "crt_request_serializer": _crt_serializer,

@@ -22,6 +22,7 @@ from typing import Any, cast
 import pytest
 from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError, ParamValidationError
+from s3transfer.utils import OSUtils
 
 from boto3_s3 import Exclude, Include, crtsupport, globsieve, producers, transferplan
 from boto3_s3.exceptions import (
@@ -996,6 +997,74 @@ class TestDownloadRoute:
         assert calls[0].params == {"Bucket": "b", "Key": "d/a.txt", "ChecksumMode": "ENABLED"}
         assert dest.read_bytes() == b"payload"
         assert os.stat(dest).st_mtime == MTIME.timestamp()
+
+    def test_the_download_commits_with_one_replace(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # One os.replace, not s3transfer's own commit (on Windows a remove,
+        # then a rename, which two downloads of case-twin names can interleave).
+        replaced: list[str] = []
+        real_replace = os.replace
+
+        def recording_replace(src: str, dst: str) -> None:
+            replaced.append(dst)
+            real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", recording_replace)
+        client, _calls = make_recording_client([head_response(), get_response()])
+        dest = tmp_path / "out.bin"
+        dest.write_bytes(b"old")
+        S3().cp(S3Storage("s3://b/d/a.txt", client=client), str(dest), transfer_config=_SYNC)
+        assert replaced == [str(dest)]
+        assert dest.read_bytes() == b"payload"
+
+    def test_a_refused_replace_falls_back_to_s3transfers_commit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Windows refuses the replace onto a link to a directory (WinError 5),
+        # and s3transfer's remove-then-rename replaces it as aws-cli does.
+        committed: list[str] = []
+
+        def refuse(_src: str, _dst: str) -> None:
+            raise PermissionError(13, "Access is denied")
+
+        def s3transfer_commit(_self: OSUtils, src: str, dst: str) -> None:
+            committed.append(dst)
+            os.rename(src, dst)
+
+        monkeypatch.setattr(os, "replace", refuse)
+        monkeypatch.setattr(OSUtils, "rename_file", s3transfer_commit)
+        client, _calls = make_recording_client([head_response(), get_response()])
+        dest = tmp_path / "out.bin"
+        S3().cp(S3Storage("s3://b/d/a.txt", client=client), str(dest), transfer_config=_SYNC)
+        assert committed == [str(dest)]
+        assert dest.read_bytes() == b"payload"
+
+    def test_the_fallbacks_error_is_the_one_reported(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A destination another process holds open: the replace says WinError
+        # 5, s3transfer's removal WinError 32, and aws-cli reports the 32.
+        def refuse(_src: str, _dst: str) -> None:
+            raise PermissionError(13, "Access is denied")
+
+        def in_use(_self: OSUtils, _src: str, dst: str) -> None:
+            raise PermissionError(13, "The file is being used by another process", dst)
+
+        monkeypatch.setattr(os, "replace", refuse)
+        monkeypatch.setattr(OSUtils, "rename_file", in_use)
+        client, _calls = make_recording_client([head_response(), get_response()])
+        results: list[OpResult] = []
+        with pytest.raises(BatchError):
+            S3().cp(
+                S3Storage("s3://b/d/a.txt", client=client),
+                str(tmp_path / "out.bin"),
+                transfer_config=_SYNC,
+                on_result=results.append,
+            )
+        [result] = results
+        assert result.error is not None
+        assert "being used by another process" in str(result.error)
 
     def test_head_omits_checksum_mode_below_the_knob_floor(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -88,6 +88,7 @@ from s3transfer.exceptions import CancelledError as S3TransferCancelledError
 from s3transfer.futures import NonThreadedExecutor
 from s3transfer.manager import TransferManager
 from s3transfer.upload import UploadSubmissionTask
+from s3transfer.utils import OSUtils
 
 from boto3_s3 import crtsupport, mimetable, requestparams, signingreads, transferconfig
 from boto3_s3.exceptions import (
@@ -2025,7 +2026,9 @@ class Transferrer:
         # disrupt a concurrent transfer. Run parallel operations with one client
         # per thread (design/s3.md thread-safety note).
         client: Any = self._completions if self._completions is not None else self._client
-        return TransferManager(client, config=config, executor_cls=executor_cls)
+        return TransferManager(
+            client, config=config, osutil=_ReplacingOSUtils(), executor_cls=executor_cls
+        )
 
     @property
     def _multipart_threshold(self) -> int:
@@ -2538,6 +2541,30 @@ class _ThreadedExecutor(_TaskGuard, ThreadPoolExecutor):
             raise
 
 
+class _ReplacingOSUtils(OSUtils):
+    """s3transfer's ``OSUtils`` for the classic engine, committing a download in one step.
+
+    s3transfer puts a filename download in place with ``rename_file``, which
+    on Windows removes the destination and then renames the temp file onto
+    it: two downloads whose names differ only in case can interleave between
+    the two steps on a case-insensitive filesystem, and one then fails with
+    ``[WinError 183]``. This commit is ``os.replace``, one step. Where Windows
+    refuses that, s3transfer's own commit runs as it would have, so the
+    outcome and the report are aws-cli's: a destination another process
+    holds open is ``[WinError 32]`` rather than the replace's ``[WinError
+    5]``, and a link to a directory is removed and replaced as aws-cli
+    replaces it. Elsewhere s3transfer's commit is the same rename and fails
+    the same way again. The CRT engine's manager cannot take an ``OSUtils``
+    (`crtsupport.create_crt_transfer_manager`).
+    """
+
+    def rename_file(self, current_filename: str, new_filename: str) -> None:
+        try:
+            os.replace(current_filename, new_filename)
+        except OSError:
+            super().rename_file(current_filename, new_filename)
+
+
 class _StreamInterruptedError(RuntimeError):
     """What `_GuardedReader` raises to awscrt in place of the caller's interrupt."""
 
@@ -2747,7 +2774,7 @@ class _FsyncDest:
 
     A library-only durability step, opt-in via ``LocalStorage(fsync=True)`` (off
     by default = aws-cli parity). s3transfer finalizes a filename download with a
-    temp-file write + ``os.rename`` and never fsyncs, so aws-cli / s3transfer
+    temp-file write and a rename and never fsyncs, so aws-cli / s3transfer
     delete the durable S3 source while the downloaded bytes may still be only in
     the page cache - a crash between the two loses the move outright. Placed
     immediately before ``_DeleteSource`` (the same slot and flip contract as

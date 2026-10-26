@@ -42,7 +42,8 @@ modification time a download stamps in some local zones (and the `sync` runs tha
 from it), a transfer or delete whose request dies
 without any response, a multipart copy whose tag write and its cleanup both
 fail, a local source that cannot be walked as a directory, a path with no
-bucket, a filtered path holding glob characters, `--exclude` / `--include`
+bucket, two downloads whose names differ only in case on Windows, a filtered
+path holding glob characters, `--exclude` / `--include`
 between nested S3 prefixes or across sides on Windows (below), a timestamp
 (an object's or a local file's) only `aws`'s local-time conversion cannot
 hold, a
@@ -471,6 +472,20 @@ that say outright that the run comes out differently, listed in section 1.
   command reports the item as `download failed:` / `move failed:` with the
   operating system's error, exits 1, and keeps the object - the classic
   engine's outcome on both tools.
+- **A download replaces its file in one step on Windows.** `aws` puts a
+  downloaded file in place on Windows by removing the file at the destination
+  and then renaming the downloaded temporary file onto it. Two downloads of
+  one run whose names differ only in case - onto a case-insensitive
+  filesystem, under `--case-conflict ignore` (the default) or `warn` - can
+  interleave between those two steps, and then one fails with `[WinError
+  183]` and the run exits 1 (36 of 60 runs on a Windows host). Here the
+  classic engine replaces the file in one step, which leaves no gap between
+  the steps for the other download to fall into: the run exited 0 in 449 of
+  450 runs (and 2 once), leaving one of the two files. Where Windows
+  refuses the one-step replacement, the two steps run as on `aws`, so a
+  read-only file, a directory or a file another process holds open fails as
+  it does there, and a link to a directory is replaced as there. Under the
+  CRT engine both tools take the two steps.
 - **A `mv` between two spellings of one Outposts object is refused here.** An
   Outposts access point's key can be set off from the ARN with `:` or with `/`,
   and a name the access-point pattern cuts short at a character a name may not
