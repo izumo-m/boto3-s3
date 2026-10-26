@@ -80,20 +80,15 @@ maintaining high functional compatibility.
   is the reference rather than a target to match in full. What decides the
   functional outcome is matched: a run carries on past a per-item failure
   where `aws s3` carries on (a `sync` that meets an error keeps going), and
-  stops before it starts where `aws s3` stops. Messages follow aws-cli too:
-  a warning or error message aws-cli's own code writes is written the same
-  way, unless aws-cli's text is inappropriate or makes no sense, where ours
-  may say it differently. Other details of a particular error are not
-  matched: which of two simultaneous mistakes is reported, the order of the
-  reports, and the text the SDK, Python or S3 writes, which is reported as
-  they write it. A functional difference is either a bug or a deliberate
-  deviation written down in
-  [`aws-differences.md`](../docs/cli/aws-differences.md); a difference in an
-  error's details is neither, and is not written down. One source of
-  deliberate functional deviation is settled: S3 objects are deleted in
-  batches ([`deleter.md`](./deleter.md)) where aws-cli deletes one key per
-  request; batching is not to be traded back for per-key deletes. The CRT
-  transfer engine is held to aws-cli's CRT mode on the same terms
+  stops before it starts where `aws s3` stops. Warnings and error messages
+  follow aws-cli as **Messages** (below) sets out. A functional difference is
+  either a bug or a deliberate deviation written down in
+  [`aws-differences.md`](../docs/cli/aws-differences.md); a difference the
+  Messages rules leave uncompared is neither, and is not written down. One
+  source of deliberate functional deviation is settled: S3 objects are
+  deleted in batches ([`deleter.md`](./deleter.md)) where aws-cli deletes one
+  key per request; batching is not to be traded back for per-key deletes.
+  The CRT transfer engine is held to aws-cli's CRT mode on the same terms
   ([`crt.md`](./crt.md)). The CLI has no interactive auto-prompt.
 - **Compatibility target**: the pinned aws-cli release the code is ported
   against, together with the boto3 / botocore / s3transfer / awscrt releases
@@ -121,8 +116,11 @@ maintaining high functional compatibility.
      matched where it changes a normal run's outcome (the request sent, its
      endpoint, signature and headers, the objects selected, the profile used,
      the retries made, the arguments accepted); a difference that shows only
-     in an error or in an unusual environment is not compensated. Where it is
-     matched depends on what it touches:
+     where aws-cli refuses the input (`retry_mode = legacy`), or where the
+     run sets something aws-cli's bundled SDK does not read (`defaults_mode`,
+     `BOTO_DISABLE_CRT`), is not compensated. The arguments accepted are
+     those aws-cli accepts: a run aws-cli takes is taken the same way. Where
+     it is matched depends on what it touches:
      - a value an operation returns to the caller (a presigned URL, its
        signature and its host) is matched however the `S3` was assembled;
      - how the clients send their requests (the endpoint they send to, such as
@@ -145,9 +143,69 @@ maintaining high functional compatibility.
 - **Security before compatibility**: where matching aws-cli would expose a
   secret or silently turn a protection off, the library and the CLI do not
   match it. For example, credentials are masked in debug logs
-  ([`masking.md`](./masking.md)), where aws-cli prints them. Such a deviation
-  is a functional difference and is written down in
+  ([`masking.md`](./masking.md)), where aws-cli prints them; nor does a
+  report print the content of a file a value was read from, where aws-cli
+  prints the bytes a `fileb://` value read when botocore refuses them for a
+  text option - a file's content may be a secret. Such a deviation is a
+  functional difference and is written down in
   [`aws-differences.md`](../docs/cli/aws-differences.md).
+- **Messages**: a warning or an error message is compared with aws-cli's in
+  two parts, so that the same difference is judged the same way wherever it
+  is found. Messages are compared by running the pinned `aws` under the same
+  conditions on the same OS.
+  1. The part aws-cli's own code writes - the sentence around the report, the
+     values it puts in (paths, URIs, keys, counts, option names), and whether
+     a warning or an error is written at all - is written the same way,
+     character for character. A difference is a bug. Ours may say it
+     differently only where aws-cli's text says something untrue about the
+     run (`Invalid JSON` for valid JSON of the wrong shape) or says nothing
+     about what went wrong (a `fatal error: ` with nothing after it); a
+     misspelling or an awkward phrase is not reason enough. A comment at that
+     place in the code then gives aws-cli's text and the reason.
+  2. The part the SDK, awscrt, Python, the OS or S3 writes - the text of an
+     exception the report carries - is reported as they write it, never
+     rewritten, and only its cause is matched: for an OS error, the number
+     the text shows (`[Errno 13]`, `[WinError 5]`); for an S3 error, the
+     error code and the operation (`An error occurred (AccessDenied) when
+     calling the PutObject operation`); for any other exception, its type
+     (for awscrt, the error name). With the same cause, the rest of the text -
+     the file names an exception carries, its wording - may differ. A
+     different cause is a bug, and so is a text of our own where aws-cli
+     reports that part.
+  3. A difference is fixed. Keeping one is discussed beforehand, and only
+     where fixing it would cost function or security, need a large
+     mechanism, or conflict with a settled decision; a difference kept that
+     way is commented at its place in the code.
+  4. The frame aws-cli writes around the report of an exit code
+     (`An error occurred (ParamValidation): ` and `Error parsing parameter
+     '--metadata': ` on a usage error) follows our exit code where the two
+     differ. Whether the exit code may differ is decided by the Exit codes
+     rule below, and the reason for a different one is commented at its
+     place. The text inside the frame is compared by items 1 and 2.
+  5. Not compared, and neither a bug nor written down:
+     - a difference that comes only from an SDK, Python or OS version (the
+       compatibility target rules above). This reaches only the match with
+       aws-cli: the error rules below hold on every version, so a version
+       that makes a report hide its cause or print a traceback is a bug like
+       any other;
+     - an error's **details**: which of two simultaneous mistakes is
+       reported, how the one reported is written where the other changes
+       it, and the order of the reports;
+     - the report where aws-cli loses the failure or fails on a bug of its
+       own, whose text is ours (the error rules below). A bug of its own is
+       a traceback; a report carrying an exception of a type that marks a
+       programming error (`AssertionError`, `AttributeError`, `IndexError`,
+       `KeyError`, `NameError`, `TypeError`); or a report that fails to be
+       written and leaves another error in its place. This leaves out the
+       report only. Where the outcome differs as well - aws-cli stops on a
+       bug of its own where ours runs on - that is a functional difference,
+       written down in
+       [`aws-differences.md`](../docs/cli/aws-differences.md) as one of
+       aws-cli's bugs not copied;
+     - a message that follows from a deliberate deviation written down in
+       [`aws-differences.md`](../docs/cli/aws-differences.md);
+     - a message with no aws-cli counterpart, such as a check only the
+       library makes.
 - **Errors take the intended behavior, not aws-cli's**: how a failure is
   detected, reported and classified follows these rules rather than aws-cli's
   implementation.

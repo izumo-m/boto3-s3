@@ -77,8 +77,8 @@ deliberate deviation recorded in
 [`aws-differences.md`](../docs/cli/aws-differences.md) (the error rules in
 overview.md section 3 can call for one). A mismatch in an error's details
 (which of two mistakes is reported, say), or one that comes only from an SDK
-or Python version difference, is not a bug: the scenario is changed, not the
-code.
+or Python version difference and breaks no error rule, is not a bug: the
+scenario is changed, not the code.
 
 ## 3. Golden contract
 
@@ -834,15 +834,15 @@ on where it is (overview.md section 3):
   default resolution is to align with aws-cli; taking the difference
   deliberately is allowed, but then it is recorded in
   [`aws-differences.md`](../docs/cli/aws-differences.md).
-- In an error report, a message aws-cli's own code writes is matched like
-  normal output, unless aws-cli's text is inappropriate. Which of two
-  mistakes is reported, the order of the reports and the text the SDK,
-  Python or S3 writes are **error details**: a test may pin them, but a
-  difference from aws-cli there is neither a bug nor recorded.
+- In a warning or an error report, the **Messages** rules of overview.md
+  section 3 decide what is compared and how. A test may pin what they leave
+  uncompared, but a difference from aws-cli there is neither a bug nor
+  recorded.
 - A difference that comes only from an SDK or Python version difference (an
   older SDK, pip botocore / s3transfer where aws-cli bundles its own copies,
   or a Python other than the one aws-cli bundles) is neither a bug nor
-  recorded, wherever it is.
+  recorded, wherever it is - unless it breaks one of the error rules, which
+  hold on every version (overview.md section 3).
 
 ### Where the criterion applies
 
@@ -858,8 +858,8 @@ as its mechanism allows:
 - the **unit tier** is where stderr is compared as bytes, its expectations
   being what the pinned `aws` was measured writing - which is also where the
   ad-hoc A/B measurements that settle a behavior question during development
-  end up. For an error detail such a pin records a choice, not a
-  requirement (above).
+  end up. For what the Messages rules leave uncompared, such a pin records
+  a choice, not a requirement (above).
 
 The differential applies the same normalizers the goldens do (section 3's
 endpoint policy: timestamps, bucket name, endpoint, credential scope), so a

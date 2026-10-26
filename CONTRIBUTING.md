@@ -113,9 +113,9 @@ points back here rather than repeating the commands.
 
 ## Conventions
 
-- **Functional compatibility is the contract.** Behavior and options follow
-  `aws s3`, and exit codes carry the meanings aws-cli gives them; error details
-  such as wording need not match. When you add or change a subcommand or
+- **Functional compatibility is the contract.** Behavior, options and
+  messages follow `aws s3`, and exit codes carry the meanings aws-cli gives
+  them. When you add or change a subcommand or
   option, extend the matching scenarios and tests so the comparison keeps
   covering it (see [`design/testing.md`](design/testing.md) and the design
   policy in [`design/overview.md`](design/overview.md) section 3).

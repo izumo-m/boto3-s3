@@ -281,11 +281,9 @@ Console output is held to **functional compatibility**
 conditions a successful run writes what `aws s3` writes, after the
 normalization of the output comparison criterion ([`testing.md`](./testing.md)
 section 9). A difference there that survives the normalization is a functional
-difference - a bug, or one of the deliberate deviations recorded below. In an
-error report, a message aws-cli's own code writes is a target as well,
-unless its text is inappropriate or makes no sense; an error's other details
-(which of two mistakes is reported, the order of the reports, the text
-botocore, Python or S3 writes) are neither a bug nor a deviation.
+difference - a bug, or one of the deliberate deviations recorded below. A
+warning or an error report is held to the **Messages** rules of the same
+section; what they leave uncompared is neither a bug nor a deviation.
 
 The program name and the command hierarchy are **class 1** of that
 normalization rather than an exemption from it. The root tokens `aws` /

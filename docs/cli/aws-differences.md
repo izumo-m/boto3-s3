@@ -6,14 +6,12 @@ or created, the same `sync` decisions, the same meaning for every option, and
 on a successful run the same result lines. This file records where a run does
 not come out that way — the deliberate deviations (batched deletes,
 protections this command keeps on, `aws` bugs it does not copy) and the other
-differences a run can show. A warning or error message that `aws`'s own code
-writes reads the same here, except where `aws`'s text is wrong or misleading
-and this command words it plainly. This file does not record a difference in an
-error's other details — which of two simultaneous mistakes is reported, the
-order of the reports, the text botocore, Python or S3 writes — nor one that
-comes only from the installed botocore / s3transfer or the Python this
-command runs on differing from the copies aws-cli bundles; neither is a bug
-([`../../design/overview.md`](../../design/overview.md) section 3). Where a
+differences a run can show. Warnings and error messages follow `aws`'s as
+the message rules of [`../../design/overview.md`](../../design/overview.md)
+section 3 set out; a difference those rules leave uncompared — which of two
+simultaneous mistakes is reported, the wording botocore, Python or the OS
+writes, one that comes only from the installed botocore / s3transfer or the
+Python this command runs on — is not recorded here and is not a bug. Where a
 difference follows from that section's error rules — a failure is never
 reported as a success, and a run that cannot proceed stops before it
 starts — its entry names the case and what this command does, not every way

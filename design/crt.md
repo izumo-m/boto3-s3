@@ -477,8 +477,9 @@ CRT mode to **aws-cli's CRT mode**, on the same terms as the classic engine is
 held to aws-cli's classic mode; the CRT transfer engine is not an exception.
 When the CRT stack is usable (awscrt present and s3transfer's CRT surface new
 enough - section 6), the normal path of CRT mode matches aws-cli's CRT mode, and
-in an error path what decides the functional outcome matches while the
-error's details need not (checked by the e2e CRT lane - testing.md).
+in an error path what decides the functional outcome matches and the messages
+follow the Messages rules of overview.md section 3 (checked by the e2e CRT
+lane - testing.md).
 
 ## 6. Degradation and known differences (record)
 
@@ -590,7 +591,8 @@ error's details need not (checked by the e2e CRT lane - testing.md).
   CRT cancellation the run did not order stays `FAILED`. The CLI therefore
   ends a CRT run cut short like a classic one - `cancelled: ctrl-c received`
   or the fatal's line, without aws-cli's per-item failed lines - at the same rc
-  1; what it reports there is an error detail (overview.md section 3). A
+  1; what it reports there follows the deviation written down in
+  docs/cli/aws-differences.md (overview.md section 3, Messages). A
   drain-time interrupt that cancels nothing (the waited-on transfer, and every
   other, already finished) still reaches the caller here, where aws-cli, having
   dropped it, exits 0 (docs/cli/aws-differences.md).
