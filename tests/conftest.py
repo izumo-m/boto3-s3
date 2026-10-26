@@ -95,6 +95,15 @@ def _moto_isolation(monkeypatch: pytest.MonkeyPatch, _classic_aws_config: Path) 
     # files under ~/.aws, so ~ must point away from the developer's home.
     home = _classic_aws_config.parent / "home"
     home.mkdir(exist_ok=True)
+    # Nothing of the host's AWS environment reaches a test: every AWS_*
+    # variable steers botocore, aws-cli or this CLI somehow - the profile, the
+    # endpoint a request goes to (AWS_DEFAULTS_MODE, the regional and
+    # FIPS/dual-stack switches), retries, checksums, the CA bundle (an empty
+    # one is refused outright, `s3storage.reject_empty_ca_bundle`) - and the
+    # tests pin each. The ones a test needs are set below or by the test.
+    for leak in [name for name in os.environ if name.upper().startswith("AWS_")]:
+        monkeypatch.delenv(leak, raising=False)
+    monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
@@ -106,20 +115,6 @@ def _moto_isolation(monkeypatch: pytest.MonkeyPatch, _classic_aws_config: Path) 
     monkeypatch.setenv(
         "AWS_SHARED_CREDENTIALS_FILE", str(_classic_aws_config.parent / "credentials-absent")
     )
-    # AWS_DEFAULT_PROFILE leaks as surely as AWS_PROFILE: it is the second link
-    # of the same chain, so a developer exporting it would name a profile the
-    # fixture config does not declare and steer the session.
-    # The CA bundle variables steer every client too, and an empty one is
-    # refused outright (`s3storage.reject_empty_ca_bundle`).
-    for leak in (
-        "AWS_PROFILE",
-        "AWS_DEFAULT_PROFILE",
-        "AWS_ENDPOINT_URL",
-        "AWS_ENDPOINT_URL_S3",
-        "AWS_CA_BUNDLE",
-        "REQUESTS_CA_BUNDLE",
-    ):
-        monkeypatch.delenv(leak, raising=False)
     # No request leaves the host. Every HTTP(S) connection botocore or urllib3
     # opens is sent to a proxy nothing listens on, and fails at once; the
     # loopback endpoints tests run their own fakes on bypass it. Without
