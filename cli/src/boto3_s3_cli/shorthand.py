@@ -16,11 +16,19 @@ accepts exactly what aws-cli accepts, including the corner cases the naive
 
 aws-cli's grammar also builds lists (``k=a,b``, ``k=[a,b]``) and nested maps
 (``k={a=b}``), which a map of strings cannot hold; aws-cli parses them and then
-rejects them with botocore's type report. Here they are rejected while
-parsing, as is a ``fileb://`` value loaded through ``@=``. Every rejection is
-an ``Error parsing parameter '<name>'`` usage error (rc 252 via
-``ValidationError``), a failure to *load* an ``@=`` paramfile included
-(`paramfile.named_argument`), like a paramfile named by any other argument.
+rejects them with botocore's type report (``Parameter validation failed:\\n
+Invalid type for parameter k, value: ['a', 'b'], type: <class 'list'>, valid
+types: <class 'str'>``). Here they are rejected while parsing, in words of
+this parser's own that say how to write the value instead. That difference
+in the report is kept on purpose (design/overview.md section 3, Messages):
+matching it would take porting the list and map grammar back, for inputs
+both tools refuse at the same rc. A ``fileb://`` value loaded through
+``@=`` is rejected while parsing too. Every rejection is rc 252 via
+``ValidationError``: botocore's ``Parameter validation failed:`` report for
+a JSON object value that is not a string, as on aws-cli, and otherwise an
+``Error parsing parameter '<name>'`` usage error, a failure to *load* an
+``@=`` paramfile included (`paramfile.named_argument`), like a paramfile
+named by any other argument.
 """
 
 from __future__ import annotations
@@ -28,7 +36,9 @@ from __future__ import annotations
 import json
 import re
 import string
-from typing import TypeAlias, cast
+from collections import OrderedDict
+from collections.abc import Mapping
+from typing import Any, TypeAlias, cast
 
 from boto3_s3 import ValidationError
 from boto3_s3_cli import paramfile, usage
@@ -74,9 +84,11 @@ def parse_map_option(value: str, *, name: str, operation: str) -> dict[str, str]
     as JSON (aws-cli's short-circuit to its JSON unpacker), and only an object
     whose values are all strings is accepted. Everything else is parsed with
     `_Parser`; a value loaded as bytes through ``@=fileb://`` is then refused,
-    since a map value must be text. Every refusal is the ``Error parsing
-    parameter '<name>'`` usage error (rc 252 via ``ValidationError``), a
-    paramfile the ``@=`` operator cannot *load* included. aws-cli reports that
+    since a map value must be text. Every refusal is rc 252 via
+    ``ValidationError``: botocore's ``Parameter validation failed:`` report
+    for a JSON value that is not a string, and the ``Error parsing parameter
+    '<name>'`` usage error for the rest, a paramfile the ``@=`` operator
+    cannot *load* included. aws-cli reports that
     one load failure at 255 instead - its shorthand parser calls
     ``get_paramfile`` outside the handler that names the argument - an
     accident of its call path that is not copied: a file named on the
@@ -93,6 +105,10 @@ def parse_map_option(value: str, *, name: str, operation: str) -> dict[str, str]
         raise ValidationError(usage.param_error(name, exc), operation=operation) from exc
     for key, item in parsed.items():
         if isinstance(item, bytes):
+            # aws-cli lets botocore's type check refuse the bytes, and its
+            # report prints them (``value: b'...'``); a file's content may be a
+            # secret, so this one names the key instead (design/overview.md
+            # section 3, Security before compatibility).
             raise ValidationError(
                 usage.param_error(
                     name, f"the value of key {key!r} must be text, not the bytes of a fileb:// file"
@@ -105,30 +121,62 @@ def parse_map_option(value: str, *, name: str, operation: str) -> dict[str, str]
 def _parse_json_map(value: str, *, name: str, operation: str) -> dict[str, str]:
     """aws-cli's map branch of ``_unpack_complex_cli_arg``: a JSON object of strings.
 
-    A ``[`` lead is refused without decoding it: no array can be a map.
+    A ``[`` lead is refused: no array can be a map. aws-cli's report there is
+    ``Invalid JSON:\\n<value>``, kept for a value that is not JSON; for a
+    valid JSON array it says something untrue, so this one says what was
+    expected instead (design/overview.md section 3, Messages). The object is
+    decoded as aws-cli decodes it (``OrderedDict`` pairs) and then checked by
+    botocore against the string map, as aws-cli's
+    ``_validate_value_against_schema`` does, so a value that is not a string
+    is botocore's report.
     """
     if value.lstrip()[0] != "{":
-        raise ValidationError(
-            usage.param_error(name, f"expected a JSON object, received: {value}"),
-            operation=operation,
-        )
+        try:
+            json.loads(value)
+        except (ValueError, RecursionError):
+            # Not decoded at all by aws-cli: a value Python's decoder cannot
+            # take - an integer past its digit limit, nesting past the
+            # recursion limit - is not one this report calls untrue.
+            message = f"Invalid JSON:\n{value}"
+        else:
+            message = f"expected a JSON object, received: {value}"
+        raise ValidationError(usage.param_error(name, message), operation=operation)
     try:
-        data = json.loads(value)
-    except json.JSONDecodeError as exc:
+        data = json.loads(value, object_pairs_hook=OrderedDict)
+    except ValueError as exc:  # aws-cli's catch: the digit limit included
         raise ValidationError(
             usage.param_error(name, f"Invalid JSON: {exc}\nJSON received: {value}"),
             operation=operation,
         ) from exc
     entries = cast("dict[str, object]", data)  # a `{`-led document decodes to an object
-    for key, item in entries.items():
-        if not isinstance(item, str):
-            raise ValidationError(
-                usage.param_error(
-                    name, f"the value of key {key!r} must be a string, not {json.dumps(item)}"
-                ),
-                operation=operation,
-            )
-    return cast("dict[str, str]", entries)
+    _validate_string_map(entries, operation=operation)
+    return dict(cast("dict[str, str]", entries))
+
+
+def _validate_string_map(value: Mapping[str, object], *, operation: str) -> None:
+    """botocore's validation of *value* against aws-cli's ``--metadata`` schema.
+
+    aws-cli builds the argument's model from the schema (a map of string to
+    string) and hands the unpacked value to botocore's
+    ``validate_parameters``; a failure is botocore's ``Parameter validation
+    failed:`` report at 252.
+    """
+    from botocore.exceptions import ParamValidationError
+    from botocore.model import ShapeResolver
+    from botocore.validate import validate_parameters
+
+    # The shape definitions ShapeResolver reads, which its stubs type as Shape
+    # objects.
+    definitions: Any = {
+        "InputShape": {"type": "map", "key": {"shape": "Key"}, "value": {"shape": "Value"}},
+        "Key": {"type": "string"},
+        "Value": {"type": "string"},
+    }
+    shape = ShapeResolver(definitions).get_shape_by_name("InputShape")
+    try:
+        validate_parameters(value, shape)
+    except ParamValidationError as exc:
+        raise ValidationError(str(exc), operation=operation) from exc
 
 
 class _Parser:
@@ -241,7 +289,9 @@ class _Parser:
 
     def _first_value(self) -> str | bytes:
         if self._current() == "'":
-            return self._quoted_value(_SINGLE_QUOTED_RE, escaped_char="'", name="single quoted")
+            # "singled quoted" is aws-cli's token name, misspelling and all:
+            # the parse error quotes it (design/overview.md section 3).
+            return self._quoted_value(_SINGLE_QUOTED_RE, escaped_char="'", name="singled quoted")
         if self._current() == '"':
             return self._quoted_value(_DOUBLE_QUOTED_RE, escaped_char='"', name="double quoted")
         match = _FIRST_VALUE_RE.match(self._value[self._index :])
@@ -257,7 +307,7 @@ class _Parser:
         value - that error is what ends the csv list and triggers the backtrack.
         """
         if self._current() == "'":
-            return self._quoted_value(_SINGLE_QUOTED_RE, escaped_char="'", name="single quoted")
+            return self._quoted_value(_SINGLE_QUOTED_RE, escaped_char="'", name="singled quoted")
         if self._current() == '"':
             return self._quoted_value(_DOUBLE_QUOTED_RE, escaped_char='"', name="double quoted")
         consumed = self._must_consume(_SECOND_VALUE_RE, name="second")

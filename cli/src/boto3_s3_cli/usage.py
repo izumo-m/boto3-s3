@@ -46,11 +46,13 @@ def param_error(name: str, message: object) -> str:
     return f"Error parsing parameter '{name}': {message}"
 
 
-def invalid_bucket_name_message(name: str = "") -> str:
-    """The report for a bucket name the commands refuse before any request (252).
+def invalid_bucket_name_message() -> str:
+    """The report for a path that names no bucket, refused before any request (252).
 
-    A path that names no bucket at all (``s3://``, ``s3:///k``;
-    ``base.refuse_bucketless``), and a ``website`` name the bucket/key split
-    would disturb - where aws-cli lets botocore refuse the name, or sends it.
+    ``s3://`` or ``s3:///k`` on the commands that refuse it where aws-cli
+    carries it into the run (``base.refuse_bucketless``; the deviation is in
+    docs/cli/aws-differences.md). ``presign`` and ``website``, where aws-cli
+    lets botocore refuse the name, report botocore's text instead
+    (``base.refuse_invalid_bucket_name``, and the library's ``S3.website``).
     """
-    return f'Invalid bucket name "{name}"'
+    return 'Invalid bucket name ""'

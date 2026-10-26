@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import sys
 
 from boto3_s3_cli import output
@@ -11,6 +12,7 @@ from boto3_s3_cli.commands.base import (
     Command,
     Context,
     expand_positional_paramfile,
+    refuse_invalid_bucket_name,
     resolve_integer_option,
 )
 
@@ -42,7 +44,7 @@ class PresignCommand(Command):
         computation, so rc 1 cannot happen and no S3 request is sent (a
         deferred credential resolution - an assume-role profile - can still
         dial STS during signing, whose ClientError maps to 254). 0 on
-        success; 252 for the path refusals (a path that names no bucket -
+        success; 252 for the path refusals (botocore's bucket-name check -
         ``s3://``, ``s3:///k`` - and the unsupported ARN families) and for
         botocore's client-side parameter validation while signing (an absent
         key), both surfaced as the library's ValidationError through main; 253 for
@@ -63,10 +65,16 @@ class PresignCommand(Command):
         # aws-cli's presign takes the path with or without the s3:// scheme
         # (PresignCommand merely strips a present one), so unlike mb/rb/rm
         # there is no path-type check here; build_s3_storage reads both forms
-        # the same way and makes the path refusals (no bucket, the
-        # unsupported ARNs).
+        # the same way and makes the path refusals in aws-cli's order: the
+        # unsupported ARNs, then the bucket name through botocore's check,
+        # which refuses aws-cli's empty name (an empty bucket names no ARN, so
+        # it comes first there).
         s3 = ctx.s3(args)
-        storage = transferargs.build_s3_storage(args.path, client=s3.client())
+        storage = transferargs.build_s3_storage(
+            args.path,
+            client=s3.client(),
+            refuse_bucket=functools.partial(refuse_invalid_bucket_name, operation="presign"),
+        )
         url = s3.presign(storage, expires_in=expires_in)
         output.uni_write(sys.stdout, url + "\n")
         return 0

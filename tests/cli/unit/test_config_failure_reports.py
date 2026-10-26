@@ -91,7 +91,7 @@ class TestInvalidTimestampFormat:
         assert cli.main(_PRESIGN) == 253
         # aws-cli's own report, through its Configuration handler's envelope.
         assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: An error occurred (Configuration): Unknown "
+            "\nboto3-s3: [ERROR]: An error occurred (Configuration): Unknown "
             'cli_timestamp_format value: bogus, valid values are "wire" or "iso8601"\n'
         )
 

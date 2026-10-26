@@ -159,7 +159,9 @@ class TestPostStartErrors:
         monkeypatch.setattr(sys, "stdout", _FullStdout())
         rc = cli.main(["rb", "s3://b"], ctx=client_ctx(client))
         assert rc == 255
-        assert capsys.readouterr().err == "boto3-s3: [ERROR]: [Errno 28] No space left on device\n"
+        assert (
+            capsys.readouterr().err == "\nboto3-s3: [ERROR]: [Errno 28] No space left on device\n"
+        )
         assert [c.operation for c in calls] == ["DeleteBucket"]
 
     def test_a_run_without_a_stdout_keeps_its_code(

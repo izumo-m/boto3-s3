@@ -262,7 +262,7 @@ class TestCrtEngineConstructionSlot:
         result = run_cli_in_process(resolved, ctx=ctx)
         # --quiet suppresses the result printer's lines, never the handler's
         # report; --dryrun never gets to record anything.
-        expected = (255, "", f"boto3-s3: [ERROR]: {self._UNPARSABLE}\n")
+        expected = (255, "", f"\nboto3-s3: [ERROR]: {self._UNPARSABLE}\n")
         assert (result.rc, result.stdout, result.stderr) == expected, resolved
         assert len(crt_constructions) == 1, resolved
 
@@ -294,7 +294,7 @@ class TestCrtEngineConstructionSlot:
         expected = (
             253,
             "",
-            f"boto3-s3: [ERROR]: An error occurred (NoRegion): {NoRegionError()}"
+            f"\nboto3-s3: [ERROR]: An error occurred (NoRegion): {NoRegionError()}"
             ' You can also configure your region by running "aws configure".\n',
         )
         assert (result.rc, result.stdout, result.stderr) == expected, resolved

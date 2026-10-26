@@ -111,16 +111,23 @@ def split_size_suffix(value: str) -> tuple[str, str]:
 def human_readable_to_int(value: str) -> int:
     """Convert a human readable size (``"10MB"``) to bytes (aws-cli's function).
 
-    Without a recognized suffix the value must be an integer string.
+    Without a recognized suffix the value must be an integer string, refused
+    in aws-cli's words (``Invalid size value: <value>``). With one, aws-cli
+    lets ``int()``'s own ``ValueError`` out for the magnitude (``invalid
+    literal for int() with base 10: '1.5'``), so that is the report here
+    too (design/overview.md section 3, Messages).
     """
     value, suffix = split_size_suffix(value)
     has_size_identifier = len(value) >= 2 and suffix in SIZE_SUFFIX
-    try:
-        if not has_size_identifier:
+    if not has_size_identifier:
+        try:
             return int(value)
+        except ValueError:
+            raise InvalidConfigError(f"Invalid size value: {value}") from None
+    try:
         return int(value[: -len(suffix)]) * SIZE_SUFFIX[suffix]
-    except ValueError:
-        raise InvalidConfigError(f"Invalid size value: {value}") from None
+    except ValueError as exc:
+        raise InvalidConfigError(str(exc)) from exc
 
 
 # Sentinel for "key absent" - distinct from a present value (which is always a

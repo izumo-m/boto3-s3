@@ -741,7 +741,7 @@ decided by procedure rather than by taste.
 
 A closed list of deterministic rewrites translating aws-cli's identity into
 ours: the fixed mapping the CLI unit tests name in their docstrings before
-asserting the pinned `aws`'s measured bytes. Four rules.
+asserting the pinned `aws`'s measured bytes. Three rules.
 
 - **The program token**: `aws` -> `boto3-s3`, in usage lines and in the error
   prefix (`aws: [ERROR]:` -> `boto3-s3: [ERROR]:`).
@@ -753,12 +753,6 @@ asserting the pinned `aws`'s measured bytes. Four rules.
   line's metavar chain (`usage: aws [options] <command> <subcommand>
   [<subcommand> ...] [parameters]` -> `usage: boto3-s3 [options] <subcommand>
   [parameters]`).
-- **The leading blank line** aws-cli opens each `aws: [ERROR]:` report with is
-  stripped; ours opens with the report itself. It comes from aws-cli's error
-  writer, so it is bound to that prefix and goes no further: the s3 command
-  layer's own stderr lines (`fatal error:`, `<op> failed:`,
-  `make_bucket failed:` ...) carry neither the blank line nor the prefix on
-  either tool, and are compared verbatim.
 - **The help blurb**: aws-cli lists one help invocation per level (`aws help`,
   `aws <command> help`, `aws <command> <subcommand> help`). We have one level
   fewer, so the *first* line - the level above `aws s3` - has no counterpart
@@ -766,7 +760,7 @@ asserting the pinned `aws`'s measured bytes. Four rules.
   `boto3-s3 <subcommand> help`, both under the hierarchy rule above
   ([`cli.md`](./cli.md) section 2).
 
-One consequence of the first rule, not a fifth rule: when a message quotes a
+One consequence of the first rule, not a fourth rule: when a message quotes a
 character offset or a byte count measured over a line that itself carries the
 program token, the figure moves with the token's width - `boto3-s3` is five
 characters longer than `aws`, so it reads five higher here. Such an offset

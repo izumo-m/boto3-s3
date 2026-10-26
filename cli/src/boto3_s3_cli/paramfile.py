@@ -172,7 +172,11 @@ def load_text_argument(value: str, name: str, *, operation: str) -> str:
     read: no bytes can be a string value. aws-cli loads them and then refuses them
     (an option, through botocore's type check) or mishandles them (a path
     positional, a whole ``--metadata`` value; docs/cli/aws-differences.md
-    section 2). *name* is the argument name the report carries.
+    section 2). botocore's report on an option prints the bytes read
+    (``Invalid type for parameter input, value: b'...'``); a file's content
+    may be a secret, so this report names the argument instead
+    (design/overview.md section 3, Security before compatibility). *name* is
+    the argument name the report carries.
     """
     if value.startswith("fileb://"):
         raise ValidationError(

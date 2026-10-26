@@ -961,9 +961,15 @@ class TestSymlinks:
         _assert_warned(warnings, (tmp_path / "broken", "does not exist"))
 
     @skip_if_chmod_is_inert
-    def test_followed_link_in_a_searchless_directory_warns(self, tmp_path: Path) -> None:
-        # A directory that can be read but not searched (r--) lists its entries,
-        # but the followed stat of each link fails there, as it does for aws-cli.
+    def test_a_link_in_a_searchless_directory_warns_like_aws(self, tmp_path: Path) -> None:
+        # A directory that can be read but not searched (r--) lists its entries
+        # with their types, so the walk knows the link from d_type; aws-cli's
+        # test is an lstat by full path, which fails there, so it takes the
+        # entry for a non-link and its battery warns that it does not exist
+        # (measured on the pinned aws: two warnings, rc 2). Whether the warning
+        # is written is aws-cli's part of the report (overview.md section 3,
+        # Messages). The follow mode agrees too: the followed stat fails the
+        # same way on both sides.
         _make_tree(tmp_path, "a.txt")
         locked = tmp_path / "rd"
         locked.mkdir()
@@ -975,11 +981,34 @@ class TestSymlinks:
             # Vetting runs in directory-read order on both sides (aws-cli's
             # listdir, our scandir), so only the set of warnings is pinned.
             warnings: list[str] = []
+            assert _keys(tmp_path, follow_symlinks=False, on_warning=warnings.append) == ["a.txt"]
+            _assert_warned(sorted(warnings), *expected)
+            assert sum(str(locked / "lb") in w for w in warnings) == 1  # the other is `l`
+            warnings = []
             assert _keys(tmp_path, on_warning=warnings.append) == ["a.txt"]
             _assert_warned(sorted(warnings), *expected)
             assert sum(str(locked / "lb") in w for w in warnings) == 1  # the other is `l`
         finally:
             locked.chmod(0o755)
+
+    def test_a_link_the_full_path_test_misses_is_vetted_then_classified(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The entry's type says symlink, but the full-path test says it is
+        # not one (the race where it is replaced between the listing and the
+        # test): the entry is vetted like aws-cli's non-link and, with nothing
+        # wrong, classified rather than skipped.
+        _make_tree(tmp_path, "a.txt")
+        link = tmp_path / "link.txt"
+        link.symlink_to(tmp_path / "a.txt")
+        real_islink = os.path.islink
+        monkeypatch.setattr(
+            os.path, "islink", lambda p: False if os.fspath(p) == str(link) else real_islink(p)
+        )
+        warnings: list[str] = []
+        keys = _keys(tmp_path, follow_symlinks=False, on_warning=warnings.append)
+        assert keys == ["a.txt", "link.txt"]
+        assert warnings == []
 
 
 class TestSymlinkLoopDetection:

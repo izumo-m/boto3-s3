@@ -1639,7 +1639,11 @@ the natural per-entry override point, and the owner of the single stat.
 
 Symlinks are decided first, on a free type test: with symlinks not followed,
 the complete view returns the link's own lstat leaf and the normal view skips
-it silently. Then `entry_stat_result` is taken once. A `None` stat warns; the
+it — silently when `os.path.islink` on the full path agrees. When it does not
+(the directory grants no search permission, or the entry raced away), the
+entry is vetted by full path as aws-cli vets it, which normally warns "File
+does not exist." and skips; an entry the vetting passes goes on to be
+classified below. Then `entry_stat_result` is taken once. A `None` stat warns; the
 complete view falls back to the link's lstat and the normal view skips. A stat
 that itself reports a symlink — which only an lstat-style override produces —
 is its own vetting-free leaf. Otherwise the normal view vets the entry through

@@ -36,7 +36,7 @@ if not crtsupport.has_crt_s3transfer():
 _BUCKET = "boto3-s3-crt-noregion"
 _RUN_CLI = "import sys; from boto3_s3_cli.cli import main; sys.exit(main())"
 _NO_REGION_REPORT = (
-    f"boto3-s3: [ERROR]: An error occurred (NoRegion): {NoRegionError()}"
+    f"\nboto3-s3: [ERROR]: An error occurred (NoRegion): {NoRegionError()}"
     ' You can also configure your region by running "aws configure".\n'
 )
 

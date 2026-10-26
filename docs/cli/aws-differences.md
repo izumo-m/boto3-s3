@@ -49,10 +49,11 @@ hold, a
 malformed `--grants`, a file whose size and time could not be read and then
 could, the destination directory of a refused run, a help page or an `mb` /
 `rb` success line that cannot be written, a
-`file://` or `fileb://` reference `aws` mishandles, and non-ASCII text in
-the config and credentials files. A difference of that kind anywhere else is a
-bug worth reporting; which of two mistakes an error report names, or text
-botocore, Python or S3 wrote, is not.
+`file://` or `fileb://` reference `aws` mishandles, a `[s3]` key named
+`self`, and non-ASCII text in the config and credentials files. A difference
+of that kind anywhere else is a bug worth reporting; which of two mistakes an
+error report names, or the wording of text botocore, Python or S3 wrote, is
+not.
 
 **Do not parse the console output.** Not because the wording differs:
 result lines, warnings and the error messages `aws`'s own code writes are
@@ -332,6 +333,14 @@ that say outright that the run comes out differently, listed in section 1.
   Everywhere else the two prefixes work as on `aws`: a `file://` path
   argument (other than `website`'s) is read as the path, and option values
   load as before.
+- **A `fileb://` value for an option that takes text is refused without its
+  content.** `--content-type`, `--cache-control` and the other options whose
+  value is text, and a `--metadata` entry written `key@=fileb://...`, exit
+  252 on both tools. `aws` reads the file, and its report — botocore's type
+  error — prints the bytes it read (`value: b'...'`). A binary file may hold
+  a key or a certificate, so this command's report names the option and the
+  key instead, and for an option it refuses the reference before reading the
+  file. Use `file://` to read text from a file.
 - **Deletes go out in batches.** Up to a thousand keys go out per
   `DeleteObjects` request here, where `aws` sends one `DeleteObject` per key.
   Batching is a settled design, and the differences it causes — this entry's,
@@ -549,6 +558,13 @@ that say outright that the run comes out differently, listed in section 1.
   so their handlers run and a plugin that cannot be loaded stops `aws` before
   anything happens. This command loads none: the section is ignored, a broken
   entry is no error, and no plugin's handler runs.
+- **A `[s3]` key named `self` is ignored.** On `cp`, `mv`, `sync`, `rm` and
+  `rb --force`, which read the `[s3]` transfer settings, `aws` stops before
+  any transfer or delete, at exit code 255 (`RuntimeConfig.build_config() got
+  multiple values for argument 'self'`), on a bug of its own; the other
+  commands do not read the section and run as usual. This command ignores the
+  key, as both tools ignore any `[s3]` key they do not use, and the run goes
+  ahead.
 - **User-Agent.** Requests identify themselves as the installed
   `Boto3`/`Botocore`, not as `aws-cli`, and carry none of aws-cli's command
   metadata (`md/command#s3.ls` and the like). Visible only to the server and

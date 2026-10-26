@@ -241,7 +241,7 @@ class TestListingTimestampEndToEnd:
             assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 255
         captured = capsys.readouterr()
         assert [line.split()[-1] for line in captured.out.splitlines()] == ["a.txt"]
-        assert captured.err.startswith("boto3-s3: [ERROR]: ")
+        assert captured.err.startswith("\nboto3-s3: [ERROR]: ")
 
 
 class TestGlobalOptionPosition:

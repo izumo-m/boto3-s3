@@ -851,20 +851,33 @@ def path_storage(arg: str, kind: str) -> S3Storage | LocalStorage:
     return S3Storage(arg) if kind == "s3" else local_storage(arg)
 
 
-def build_s3_storage(arg: str, *, client: Any, page_size: int | None = None) -> S3Storage:
+def build_s3_storage(
+    arg: str,
+    *,
+    client: Any,
+    page_size: int | None = None,
+    refuse_bucket: Callable[[str], None] = refuse_bucketless,
+) -> S3Storage:
     """An ``S3Storage`` for a CLI s3 path, validated before anything runs.
 
-    Shared by the transfer family, ``rm``, ``presign`` and ``website``. The
-    refusals fire here, ahead of the pipeline (rc 252): a path that names no
-    bucket (``s3://``, ``s3:///k`` - `refuse_bucketless`) and the
-    unsupported ARN families. The storage reads *arg* the way its
-    constructor does - the ``s3://`` scheme optional, access-point ARNs kept
-    whole - so the scheme-less path ``presign`` accepts (``/k``) is refused
-    as its ``s3:///k`` spelling is.
+    Shared by the transfer family, ``rm`` and ``presign``. The refusals fire
+    here, ahead of the pipeline (rc 252), in aws-cli's order: the
+    unsupported ARN families first, then the bucket name *refuse_bucket*
+    refuses - by default a path that names no bucket (``s3://``, ``s3:///k``
+    - `refuse_bucketless`); ``presign`` passes botocore's name check
+    instead. A path with no bucket names no ARN, so its refusal comes
+    before `S3Storage.validate`'s own one. The storage reads *arg* the way
+    its constructor does - the ``s3://`` scheme optional, access-point ARNs
+    kept whole - so the scheme-less path ``presign`` accepts (``/k``) is
+    refused as its ``s3:///k`` spelling is.
     """
     storage = S3Storage(arg, client=client, page_size=page_size)
-    refuse_bucketless(storage.bucket)
-    storage.validate()
+    if storage.bucket:
+        storage.validate()
+        refuse_bucket(storage.bucket)
+    else:
+        refuse_bucket(storage.bucket)
+        storage.validate()
     return storage
 
 
@@ -1004,10 +1017,20 @@ def _closing_line(error: BaseException) -> str | None:
     is a cancelled run, not the dispatcher's 130: aws-cli's result machinery
     swallows the interrupt (``CommandResultRecorder.__exit__``), the shutdown
     cancels the accepted transfers, and the printer emits one ``cancelled:
-    ctrl-c received`` line at rc 1 (measured mid-sync and mid-rm, 2.36.40);
-    the per-item CANCELLED records stay silent like aws-cli's (progress.py
-    ``_prints``), and the pre-pipeline spans keep the 130 backstop. Anything
-    else that killed the run is one ``fatal error:`` line.
+    ctrl-c received`` line at rc 1 (measured mid-transfer and mid-rm,
+    2.36.40); the per-item CANCELLED records stay silent like aws-cli's
+    (progress.py ``_prints``), and the pre-pipeline spans keep the 130
+    backstop. aws-cli writes that line only when the shutdown cancelled a
+    transfer. When it cancels none - the interrupt lands in a listing, or the
+    transfers already in flight finish on their own and none is left waiting
+    - the interrupt reaches its printer first as
+    ``ErrorResult(KeyboardInterrupt())`` and is written ``fatal error: ``
+    with nothing after it (measured on ``sync s3://... dir`` and ``rm
+    --recursive`` interrupted mid-listing, and on a single ``cp`` interrupted
+    mid-upload, whose ``upload:`` line comes first).
+    That says nothing of what happened, so this run writes the cancelled line
+    there too (design/overview.md section 3, Messages). Anything else that
+    killed the run is one ``fatal error:`` line.
     """
     if isinstance(error, BatchError):
         return None

@@ -84,7 +84,7 @@ class TestPresignExitCodeShape:
         )
         assert rc == 255
         err = capsys.readouterr().err
-        assert err.startswith("boto3-s3: [ERROR]: ")
+        assert err.startswith("\nboto3-s3: [ERROR]: ")
         assert "expires_in" in err
 
     def test_non_integer_expires_in_exits_255(self, capsys: pytest.CaptureFixture[str]) -> None:
@@ -105,16 +105,31 @@ class TestPresignExitCodeShape:
         assert rc == 252
         assert "Invalid length for parameter Key" in err
 
-    @pytest.mark.parametrize("path", ["s3://", "s3:///k"])
-    def test_a_path_with_no_bucket_is_refused_before_signing(
+    @pytest.mark.parametrize("path", ["s3://", "s3:///k", "/k"])
+    def test_a_path_with_no_bucket_is_botocores_refusal(
         self, path: str, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # Refused before signing as a path that names no bucket; aws-cli signs
-        # with Bucket="" (+ Key="k") and botocore refuses the empty name, 252
-        # too.
+        # aws-cli signs with Bucket="" (+ Key="k") and botocore's name check
+        # refuses the empty name (measured, 252); the same check refuses it
+        # here before signing, in botocore's words.
         rc = cli.main(["presign", path], ctx=_real_client_ctx())
         assert rc == 252
-        assert 'Invalid bucket name ""' in capsys.readouterr().err
+        assert (
+            "An error occurred (ParamValidation): Parameter validation failed:\n"
+            'Invalid bucket name "": Bucket name must match the regex'
+        ) in capsys.readouterr().err
+
+    def test_an_object_lambda_arn_is_refused_before_the_name_check(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The split leaves "...:accesspoint" as the bucket, which botocore's
+        # check would refuse; aws-cli refuses the resource first (measured).
+        arn = "arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/ol"
+        rc = cli.main(["presign", f"s3://{arn}/k"], ctx=_real_client_ctx())
+        assert rc == 252
+        err = capsys.readouterr().err
+        assert "s3 commands do not support S3 Object Lambda resources" in err
+        assert "Parameter validation failed" not in err
 
     def test_extra_positional_is_unknown_options_252(
         self, capsys: pytest.CaptureFixture[str]

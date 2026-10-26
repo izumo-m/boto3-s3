@@ -42,6 +42,20 @@ class TestBuildS3Storage:
         with pytest.raises(ValidationError, match='Invalid bucket name ""'):
             transferargs.build_s3_storage(arg, client=object())
 
+    def test_refuse_bucket_runs_after_the_arn_refusals(self) -> None:
+        # aws-cli refuses an unsupported resource before the bucket name.
+        arn = "arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/ol"
+        seen: list[str] = []
+        with pytest.raises(ValidationError, match="S3 Object Lambda"):
+            transferargs.build_s3_storage(f"{arn}/k", client=object(), refuse_bucket=seen.append)
+        assert seen == []
+
+    @pytest.mark.parametrize("arg", ["s3://", "b/k"])
+    def test_refuse_bucket_sees_the_split_bucket(self, arg: str) -> None:
+        seen: list[str] = []
+        transferargs.build_s3_storage(arg, client=object(), refuse_bucket=seen.append)
+        assert seen == [arg.removeprefix("s3://").partition("/")[0]]
+
     def test_bucket_and_key_is_validated_normally(self) -> None:
         storage = transferargs.build_s3_storage("b/k", client=object())
         assert (storage.bucket, storage.key) == ("b", "k")

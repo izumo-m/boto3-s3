@@ -88,8 +88,7 @@ SCENARIOS: tuple[PresignScenario, ...] = (
         fetch=True,
     ),
     # --- refused before signing (rc 252): botocore's parameter validation on
-    # both tools for a missing key; for no bucket, the CLI's own refusal here
-    # and botocore's on aws.
+    # both tools, for a missing key and for no bucket.
     PresignScenario(
         "presign_bucket_only",
         ("presign", f"s3://{BUCKET_TOKEN}"),

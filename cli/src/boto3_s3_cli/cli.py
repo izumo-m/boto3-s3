@@ -191,8 +191,9 @@ def _write_error(message: object, *, rc: int | None = None) -> None:
     The envelope goes on before the strip, as aws-cli's formatter strips the
     whole enveloped message; stripping keeps a message that ends with a
     newline - the usage block of a parse error - from surfacing as a
-    trailing blank line. The report is written in the encoding aws-cli writes
-    its reports in (`textencoding.prepare_error_report`).
+    trailing blank line. Like aws-cli's ``write_error``, the report is led by
+    an empty line. It is written in the encoding aws-cli writes its reports in
+    (`textencoding.prepare_error_report`).
     """
     text = str(message)
     if rc == _PARAM_VALIDATION_ERROR_RC:
@@ -207,7 +208,7 @@ def _write_error(message: object, *, rc: int | None = None) -> None:
         return
     textencoding.prepare_error_report(sys.stderr)
     try:
-        sys.stderr.write(f"boto3-s3: [ERROR]: {text.strip()}".rstrip() + "\n")
+        sys.stderr.write("\n" + f"boto3-s3: [ERROR]: {text.strip()}".rstrip() + "\n")
     except OSError:
         # A stderr that cannot take the report (a reader that left the pipe,
         # a full disk) changes no code: what it holds goes to the null device,

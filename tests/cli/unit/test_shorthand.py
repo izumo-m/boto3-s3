@@ -7,11 +7,14 @@ and the ``@=`` paramfile operator
 
 What a map of strings cannot hold - a list, a nested map, a JSON array or a
 non-string JSON value, bytes from ``@=fileb://`` - aws-cli parses and then rejects;
-here it is refused while parsing. Either way it is a usage error (252).
+a non-string JSON value is refused by botocore's validation here too, the rest
+while parsing. Either way it is a usage error (252).
 """
 
 from __future__ import annotations
 
+import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -219,18 +222,89 @@ class TestJsonRoute:
     """A value led by ``[`` or ``{`` (after whitespace) is read as JSON, and
     only an object whose values are all strings is a map."""
 
-    @pytest.mark.parametrize("value", ["[]", "[1,2]", '["a"]', "[a=b]", "[", "   []  "])
-    def test_bracket_lead_is_refused(self, value: str) -> None:
+    @pytest.mark.parametrize("value", ["[]", "[1,2]", '["a"]', "   []  "])
+    def test_a_json_array_is_refused_as_not_an_object(self, value: str) -> None:
+        # aws-cli's "Invalid JSON" is untrue of a valid array.
         with pytest.raises(ValidationError, match="expected a JSON object"):
             _parse(value)
+
+    @pytest.mark.parametrize("value", ["[a=b]", "[", "[1", "[1] x"])
+    def test_a_bracket_lead_that_is_not_json_is_aws_clis_report(self, value: str) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            _parse(value)
+        assert str(excinfo.value) == f"Error parsing parameter '--metadata': Invalid JSON:\n{value}"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param(
+                "[" + "1" * 5000 + "]",
+                marks=pytest.mark.skipif(
+                    not hasattr(sys, "get_int_max_str_digits"), reason="no integer digit limit"
+                ),
+                id="past-the-digit-limit",
+            ),
+            pytest.param("[" * 100_000 + "]" * 100_000, id="past-the-recursion-limit"),
+        ],
+    )
+    def test_a_bracket_lead_python_cannot_decode_is_aws_clis_report(self, value: str) -> None:
+        # aws-cli never decodes a `[` lead, so its report stands for these.
+        with pytest.raises(ValidationError) as excinfo:
+            _parse(value)
+        assert str(excinfo.value).endswith(f"Invalid JSON:\n{value}")
+
+    @pytest.mark.skipif(not hasattr(sys, "get_int_max_str_digits"), reason="no integer digit limit")
+    def test_an_object_past_the_digit_limit_is_aws_clis_invalid_json(self) -> None:
+        # aws-cli catches the decoder's ValueError, so this is its report (252).
+        value = '{"a": ' + "1" * 5000 + "}"
+        with pytest.raises(ValidationError) as excinfo:
+            _parse(value)
+        assert str(excinfo.value).startswith("Error parsing parameter '--metadata': Invalid JSON: ")
+        assert str(excinfo.value).endswith(f"\nJSON received: {value}")
 
     def test_brace_lead_takes_the_json_route(self) -> None:
         assert _parse('  {"a": "b"}') == {"a": "b"}
 
-    @pytest.mark.parametrize("value", ['{"a": 1}', '{"a": "ok", "b": null}', '{"a": {}}'])
-    def test_non_string_values_are_refused(self, value: str) -> None:
-        with pytest.raises(ValidationError, match="must be a string"):
+    @pytest.mark.parametrize(
+        ("value", "report"),
+        [
+            # botocore's report, as the pinned aws-cli writes it (measured).
+            (
+                '{"a": 1}',
+                "Parameter validation failed:\n"
+                "Invalid type for parameter a, value: 1, type: <class 'int'>,"
+                " valid types: <class 'str'>",
+            ),
+            (
+                '{"a": "ok", "b": null}',
+                "Parameter validation failed:\n"
+                "Invalid type for parameter b, value: None, type: <class 'NoneType'>,"
+                " valid types: <class 'str'>",
+            ),
+            (
+                '{"a": "x", "b": 2, "c": [1]}',
+                "Parameter validation failed:\n"
+                "Invalid type for parameter b, value: 2, type: <class 'int'>,"
+                " valid types: <class 'str'>\n"
+                "Invalid type for parameter c, value: [1], type: <class 'list'>,"
+                " valid types: <class 'str'>",
+            ),
+        ],
+    )
+    def test_non_string_values_are_botocores_report(self, value: str, report: str) -> None:
+        with pytest.raises(ValidationError) as excinfo:
             _parse(value)
+        assert str(excinfo.value) == report
+        assert excinfo.value.operation == "cp"
+
+    def test_a_nested_object_is_refused_as_aws_cli_decodes_it(self) -> None:
+        # aws-cli decodes with OrderedDict pairs, so the report names that
+        # type (its repr follows the running Python).
+        with pytest.raises(ValidationError, match=re.escape("<class 'collections.OrderedDict'>")):
+            _parse('{"a": {"b": "c"}}')
+
+    def test_the_map_returned_is_a_plain_dict(self) -> None:
+        assert type(_parse('{"a": "b"}')) is dict
 
 
 class TestJsonDecodeFailure:
@@ -277,3 +351,13 @@ class TestSyntaxErrors:
         with pytest.raises(ValidationError) as excinfo:
             _parse(value)
         assert "--metadata" in str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        ("value", "token"), [("k='x", "singled quoted"), ('k="x', "double quoted")]
+    )
+    def test_an_unterminated_quote_names_aws_clis_token(self, value: str, token: str) -> None:
+        # aws-cli's token names, its misspelling included (measured against
+        # the pinned aws: "Expected: '<singled quoted>', received: '<none>'").
+        with pytest.raises(ValidationError) as excinfo:
+            _parse(value)
+        assert f"Expected: '<{token}>', received: '<none>' for input:" in str(excinfo.value)

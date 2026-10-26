@@ -990,22 +990,29 @@ def head_single(
         # HTTP 404) surfaces as-is in aws-cli, so the translation passes through
         # untouched here too. Duck-typed: this module never imports botocore,
         # and a translated cause always carries the ClientError's dict.
-        raw_response = getattr(exc.__cause__, "response", None)
+        cause = exc.__cause__
+        raw_response = getattr(cause, "response", None)
         response = cast("dict[str, Any]", raw_response) if isinstance(raw_response, dict) else {}
-        if response.get("Error", {}).get("Code") != "404":
+        if cause is None or response.get("Error", {}).get("Code") != "404":
             raise
-        # The bare 404 names no key; this error does. Chain the originating
-        # ClientError directly: this error replaces the s3_errors translation
-        # wholesale, and the section 2.1 reachability guarantee
-        # (exceptions.md) promises the ClientError on the *direct*
-        # `__cause__` of an error raised for a failed S3 request.
+        # The bare 404 names no key; aws-cli's report does. It swaps the
+        # response's Message for 'Key "<key>" does not exist' and builds the
+        # ClientError again, so botocore writes the rest - the retry note
+        # "(reached max retries: N)" included - and so does this rebuild
+        # (design/overview.md section 3, Messages). The originating
+        # ClientError stays the direct `__cause__`: this error replaces the
+        # s3_errors translation wholesale, and the section 2.1 reachability
+        # guarantee (exceptions.md) promises it there.
+        rewritten = {
+            **response,
+            "Error": {**response["Error"], "Message": f'Key "{key}" does not exist'},
+        }
         raise NotFoundError(
-            "An error occurred (404) when calling the HeadObject operation: "
-            f'Key "{key}" does not exist',
+            str(type(cause)(rewritten, "HeadObject")),
             operation=operation,
             bucket=src_storage.bucket,
             key=key,
-        ) from (exc.__cause__ or exc)
+        ) from cause
     yield object_info(src_storage, key, head)
 
 

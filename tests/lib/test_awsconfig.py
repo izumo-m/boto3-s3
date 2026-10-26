@@ -14,7 +14,7 @@ import boto3
 import pytest
 
 from boto3_s3 import S3, InvalidConfigError
-from boto3_s3.awsconfig import AwsConfig, ConfigSection
+from boto3_s3.awsconfig import AwsConfig, ConfigSection, human_readable_to_int
 
 _MIB = 1024 * 1024
 _GIB = 1024**3
@@ -228,6 +228,28 @@ class TestS3Method:
         boto3.setup_default_session(profile_name="prod")
         assert s3.aws_config().get_str("region") == "eu-west-1"
         assert s3.client().meta.region_name == "eu-west-1"
+
+
+class TestHumanReadableToInt:
+    """aws-cli's `human_readable_to_int`, the `[s3]` sizes' and rates' parser."""
+
+    @pytest.mark.parametrize(
+        ("text", "message"),
+        [
+            # aws-cli's words without a suffix, int()'s own ValueError with one
+            # (both as the pinned aws writes them for an `[s3]` value, measured).
+            ("abc", "Invalid size value: abc"),
+            ("", "Invalid size value: "),
+            ("10XB", "Invalid size value: 10xb"),
+            ("MB", "invalid literal for int() with base 10: ''"),
+            ("1.5MB", "invalid literal for int() with base 10: '1.5'"),
+            ("1.5GiB", "invalid literal for int() with base 10: '1.5'"),
+        ],
+    )
+    def test_a_bad_value_is_reported_in_aws_clis_words(self, text: str, message: str) -> None:
+        with pytest.raises(InvalidConfigError) as excinfo:
+            human_readable_to_int(text)
+        assert str(excinfo.value) == message
 
 
 class TestConfigSectionParsing:

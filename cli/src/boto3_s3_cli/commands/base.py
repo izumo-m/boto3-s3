@@ -252,6 +252,25 @@ def refuse_bucketless(bucket: str, *, operation: str | None = None) -> None:
         raise ValidationError(usage.invalid_bucket_name_message(), operation=operation)
 
 
+def refuse_invalid_bucket_name(bucket: str, *, operation: str) -> None:
+    """Refuse a bucket name with botocore's own name check, before any request (252).
+
+    ``presign`` hands aws-cli's bucket name to botocore, whose
+    ``validate_bucket_name`` refuses it before signing - the empty name of
+    ``s3://`` or ``s3:///k`` above all - so the report is botocore's
+    ``Parameter validation failed:`` text, as on aws-cli (design/overview.md
+    section 3, Messages). It checks the bucket ``build_s3_storage`` split off,
+    as aws-cli's ``find_bucket_key`` splits it.
+    """
+    from botocore.exceptions import ParamValidationError
+    from botocore.handlers import validate_bucket_name
+
+    try:
+        validate_bucket_name({"Bucket": bucket})
+    except ParamValidationError as exc:
+        raise ValidationError(str(exc), operation=operation) from exc
+
+
 def add_page_size_argument(parser: argparse.ArgumentParser) -> None:
     """Register ``--page-size`` (shared by ls / rm and the transfer family).
 

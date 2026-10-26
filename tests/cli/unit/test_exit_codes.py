@@ -265,7 +265,7 @@ class TestMainExitCodes:
         rc = cli.main(["ls", "s3://bucket/p/"], ctx=Context(client_factory=factory))
         err = capsys.readouterr().err
         assert rc == expected_rc
-        assert err.startswith("boto3-s3: [ERROR]: ")
+        assert err.startswith("\nboto3-s3: [ERROR]: ")
         assert cause in err
         assert "Traceback" not in err
 
@@ -291,7 +291,7 @@ class TestMainExitCodes:
         monkeypatch.setattr(sys, "stdout", _DeadPipe())
         rc = cli.main(["ls", "s3://bucket/p/"], ctx=ctx)
         assert rc == 255
-        assert capsys.readouterr().err == "boto3-s3: [ERROR]: [Errno 32] Broken pipe\n"
+        assert capsys.readouterr().err == "\nboto3-s3: [ERROR]: [Errno 32] Broken pipe\n"
 
     @pytest.mark.parametrize("work_rc", [0, 2])
     def test_a_successful_run_whose_output_cannot_be_flushed_exits_255(
@@ -311,7 +311,9 @@ class TestMainExitCodes:
         monkeypatch.setattr(cli, "_main", lambda _argv, _ctx: work_rc)
         monkeypatch.setattr(sys, "stdout", _FullStdout())
         assert cli.main(["ls"]) == 255
-        assert capsys.readouterr().err == "boto3-s3: [ERROR]: [Errno 28] No space left on device\n"
+        assert (
+            capsys.readouterr().err == "\nboto3-s3: [ERROR]: [Errno 28] No space left on device\n"
+        )
 
     @pytest.mark.parametrize("argv", [["help"], ["cp", "help"]])
     def test_a_help_page_stdout_cannot_take_exits_255(
@@ -331,7 +333,9 @@ class TestMainExitCodes:
 
         monkeypatch.setattr(sys, "stdout", _FullStdout())
         assert cli.main(argv) == 255
-        assert capsys.readouterr().err == "boto3-s3: [ERROR]: [Errno 28] No space left on device\n"
+        assert (
+            capsys.readouterr().err == "\nboto3-s3: [ERROR]: [Errno 28] No space left on device\n"
+        )
 
     def test_a_run_without_a_stdout_keeps_its_code(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -455,7 +459,7 @@ class TestGlobalResolutionFailures:
         rc = cli.main(["ls", "s3://bucket/p/", "--endpoint-url", "http://[::1:9000"])
         err = capsys.readouterr().err
         assert rc == 255
-        assert err.startswith("boto3-s3: [ERROR]: ")
+        assert err.startswith("\nboto3-s3: [ERROR]: ")
         assert "Traceback" not in err
 
     def test_a_query_too_deep_to_compile_is_the_param_validation_252(
@@ -477,8 +481,7 @@ class TestUnresolvedConfigReports:
     with aws-cli's envelope and hint.
 
     Measured against the pinned aws-cli with an isolated HOME and no
-    credentials configured. The leading blank line `aws` prints before each
-    report, and the program name, are class-1 rules of the parity
+    credentials configured. The program name is a class-1 rule of the parity
     normalization (design/testing.md section 9). The hint keeps naming the
     `aws` tool because those are the words aws-cli writes and both tools read the
     same config files (docs/cli/aws-differences.md). Every other botocore
@@ -494,7 +497,7 @@ class TestUnresolvedConfigReports:
         ctx = Context(client_factory=lambda _args: _RaisingClient(NoCredentialsError()))  # pyright: ignore[reportArgumentType]
         assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 253
         assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: An error occurred (NoCredentials): Unable to locate "
+            "\nboto3-s3: [ERROR]: An error occurred (NoCredentials): Unable to locate "
             'credentials. You can configure credentials by running "aws login".\n'
         )
 
@@ -507,7 +510,7 @@ class TestUnresolvedConfigReports:
         ctx = Context(client_factory=lambda _args: _RaisingClient(NoRegionError()))  # pyright: ignore[reportArgumentType]
         assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 253
         assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: An error occurred (NoRegion): You must specify a region."
+            "\nboto3-s3: [ERROR]: An error occurred (NoRegion): You must specify a region."
             ' You can also configure your region by running "aws configure".\n'
         )
 
@@ -529,8 +532,8 @@ class TestTopLevelErrorText:
     Every assertion here is the pinned aws-cli's own stderr under one fixed
     mapping: ``aws [options] s3`` -> ``boto3-s3 [options]``, aws-cli's
     ``<command> <subcommand>`` hierarchy collapsed onto our single level (this
-    command *is* ``aws s3``), and the ``aws:`` prefix renamed. aws-cli opens each
-    report with a blank line; ours does not, as on every other error path.
+    command *is* ``aws s3``), and the ``aws:`` prefix renamed. Each report opens
+    with a blank line on both tools, as on every other error path.
     """
 
     def test_no_arguments_reports_too_few_arguments(
@@ -540,7 +543,7 @@ class TestTopLevelErrorText:
         # blurb, and a second line whose prefix is part of the message.
         assert cli.main([]) == 252
         assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "\nboto3-s3: [ERROR]: An error occurred (ParamValidation): "
             "usage: boto3-s3 [options] <subcommand> [parameters]\n"
             "boto3-s3: [ERROR]: too few arguments\n"
         )
@@ -551,7 +554,7 @@ class TestTopLevelErrorText:
         # The marker is consumed, so nothing is left to report as unknown.
         assert cli.main(["--"]) == 252
         assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "\nboto3-s3: [ERROR]: An error occurred (ParamValidation): "
             "usage: boto3-s3 [options] <subcommand> [parameters]\n"
             "boto3-s3: [ERROR]: too few arguments\n"
         )
@@ -564,7 +567,7 @@ class TestTopLevelErrorText:
         # message carries a newline of its own, which is the second blank line.
         assert cli.main(["foobar"]) == 252
         assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "\nboto3-s3: [ERROR]: An error occurred (ParamValidation): "
             "argument subcommand: Found invalid choice 'foobar'\n"
             f"\n\n{_USAGE_BLOCK}"
         )
@@ -576,7 +579,7 @@ class TestTopLevelErrorText:
         # 0.8) between the message and the block.
         assert cli.main(["lss"]) == 252
         assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "\nboto3-s3: [ERROR]: An error occurred (ParamValidation): "
             "argument subcommand: Found invalid choice 'lss'\n"
             "\nMaybe you meant:\n"
             "\n  * ls\n"
@@ -591,7 +594,7 @@ class TestTopLevelErrorText:
         # cutoff here would add a block aws-cli does not print.
         assert cli.main(["web"]) == 252
         assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "\nboto3-s3: [ERROR]: An error occurred (ParamValidation): "
             "argument subcommand: Found invalid choice 'web'\n"
             f"\n\n{_USAGE_BLOCK}"
         )
@@ -604,14 +607,14 @@ class TestTopLevelErrorText:
         # The report must blame that name, not read it back as an option.
         assert cli.main(["--region", "us-east-1", "--", "--bogus"]) == 252
         assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "\nboto3-s3: [ERROR]: An error occurred (ParamValidation): "
             "argument subcommand: Found invalid choice '--bogus'\n"
             f"\n\n{_USAGE_BLOCK}"
         )
         # The marker itself is just as much a name once it is behind one.
         assert cli.main(["--", "--", "--bogus"]) == 252
         assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "\nboto3-s3: [ERROR]: An error occurred (ParamValidation): "
             "argument subcommand: Found invalid choice '--bogus'\n"
             f"\n\n{_USAGE_BLOCK}"
         )
@@ -621,7 +624,7 @@ class TestTopLevelErrorText:
     ) -> None:
         assert cli.main(["foobar", "--nope"]) == 252
         assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "\nboto3-s3: [ERROR]: An error occurred (ParamValidation): "
             "argument subcommand: Found invalid choice 'foobar'\n"
             f"\n\n{_USAGE_BLOCK}"
         )
@@ -632,7 +635,7 @@ class TestTopLevelErrorText:
         # No trailing newline on this message, so a single blank line.
         assert cli.main(["ls", "--region"]) == 252
         assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "\nboto3-s3: [ERROR]: An error occurred (ParamValidation): "
             "argument --region: expected one argument\n"
             f"\n{_USAGE_BLOCK}"
         )
@@ -644,7 +647,7 @@ class TestTopLevelErrorText:
         # unknown option (measured on `aws`).
         assert cli.main(["--", "--profile"]) == 252
         assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: An error occurred (ParamValidation): Unknown options: --profile\n"
+            "\nboto3-s3: [ERROR]: An error occurred (ParamValidation): Unknown options: --profile\n"
         )
 
     def test_unknown_options_carry_no_usage_block(self, capsys: pytest.CaptureFixture[str]) -> None:
@@ -652,11 +655,11 @@ class TestTopLevelErrorText:
         # plain message - the block belongs to the parsers only.
         assert cli.main(["--bogus"]) == 252
         assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: An error occurred (ParamValidation): Unknown options: --bogus\n"
+            "\nboto3-s3: [ERROR]: An error occurred (ParamValidation): Unknown options: --bogus\n"
         )
         assert cli.main(["ls", "--nope"]) == 252
         assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: An error occurred (ParamValidation): Unknown options: --nope\n"
+            "\nboto3-s3: [ERROR]: An error occurred (ParamValidation): Unknown options: --nope\n"
         )
 
 
@@ -674,7 +677,7 @@ class TestSubcommandParseErrorText:
     ) -> None:
         assert cli.main(["ls", "--page-size"]) == 252
         assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "\nboto3-s3: [ERROR]: An error occurred (ParamValidation): "
             "argument --page-size: expected one argument\n"
             f"\n{_USAGE_BLOCK}"
         )
@@ -684,7 +687,7 @@ class TestSubcommandParseErrorText:
     ) -> None:
         assert cli.main(["cp"]) == 252
         assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "\nboto3-s3: [ERROR]: An error occurred (ParamValidation): "
             "the following arguments are required: paths\n"
             f"\n{_USAGE_BLOCK}"
         )
@@ -696,7 +699,7 @@ class TestSubcommandParseErrorText:
         # lines are the message elements' own trailing newlines.
         assert cli.main(["cp", "--storage-class", "STANDARD_I", "s3://b/k", "s3://b2/"]) == 252
         assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "\nboto3-s3: [ERROR]: An error occurred (ParamValidation): "
             "argument --storage-class: Found invalid choice 'STANDARD_I'\n"
             "\nMaybe you meant:\n"
             "\n  * STANDARD_IA\n"
@@ -714,7 +717,7 @@ class TestSubcommandParseErrorText:
         # missing (measured per option).
         assert cli.main(["cp", option, "--exclude", "x", "s3://a/", "s3://b/"]) == 252
         assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: An error occurred (ParamValidation): "
+            "\nboto3-s3: [ERROR]: An error occurred (ParamValidation): "
             f"argument {option}: expected one argument\n"
             f"\n{_USAGE_BLOCK}"
         )
@@ -1327,7 +1330,7 @@ class TestTheEntryPointBackstop:
 
         monkeypatch.setattr(cli, "_dispatch", explode)
         assert cli.main(["ls", "s3://b/"]) == 255
-        assert capsys.readouterr().err == "boto3-s3: [ERROR]: boom\n"
+        assert capsys.readouterr().err == "\nboto3-s3: [ERROR]: boom\n"
 
     def test_an_assertion_stays_loud(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def explode(*args: object, **kwargs: object) -> int:

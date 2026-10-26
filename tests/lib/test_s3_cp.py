@@ -1027,6 +1027,37 @@ class TestDownloadRoute:
         # exceptions.md section 2.1 reachability guarantee.
         assert isinstance(excinfo.value.__cause__, ClientError)
 
+    @pytest.mark.parametrize(
+        ("metadata", "retry_note"),
+        [
+            ({"HTTPStatusCode": 404}, ""),
+            (
+                {"HTTPStatusCode": 404, "MaxAttemptsReached": True, "RetryAttempts": 0},
+                " (reached max retries: 0)",
+            ),
+        ],
+    )
+    def test_missing_single_source_is_botocores_report_with_the_key(
+        self, tmp_path: Path, metadata: dict[str, object], retry_note: str
+    ) -> None:
+        # aws-cli swaps the Message and rebuilds the ClientError, so botocore
+        # writes the rest, its retry note included (measured with
+        # AWS_MAX_ATTEMPTS=1: "... HeadObject operation (reached max retries:
+        # 0): Key ..."). The originating response is left as it was.
+        err = ClientError(
+            {"Error": {"Code": "404", "Message": "Not Found"}, "ResponseMetadata": metadata},
+            "HeadObject",
+        )
+        client, _ = make_recording_client([err])
+        with pytest.raises(NotFoundError) as excinfo:
+            S3().cp(S3Storage("s3://b/no-such", client=client), str(tmp_path / "x"))
+        assert str(excinfo.value) == (
+            f"An error occurred (404) when calling the HeadObject operation{retry_note}: "
+            'Key "no-such" does not exist'
+        )
+        assert excinfo.value.__cause__ is err
+        assert err.response.get("Error", {}).get("Message") == "Not Found"
+
     def test_named_404_code_is_not_rewritten(self, tmp_path: Path) -> None:
         # aws-cli's filegenerator rewrites only `Error.Code == '404'` (the
         # bare HeadObject miss); an endpoint that names a code over HTTP 404

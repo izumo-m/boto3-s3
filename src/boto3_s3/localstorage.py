@@ -1175,7 +1175,10 @@ class LocalFileGenerator:
         ``entry_stat_result`` **once** and threads that one value through the
         rest (so nothing below re-stats or re-checks for ``None``). Symlinks are
         decided first on a free ``d_type`` test: no-follow returns an lstat leaf
-        only in the complete view and otherwise skips it silently. A followed
+        only in the complete view and otherwise skips it - silently when
+        ``os.path.islink`` agrees, else through the full-path battery, the way
+        aws-cli's lstat-based test lands where the directory grants no search
+        permission. A followed
         stat that comes back ``None`` warns; the complete view then falls back
         to the link's lstat (whose own timestamp warning still goes out), while
         the normal view skips it. A stat that
@@ -1193,7 +1196,19 @@ class LocalFileGenerator:
             if options.enumerate_all_entries and not options.follow_symlinks:
                 return self.symlink_child(entry, full, notify=notify)
             if not options.follow_symlinks:
-                return None
+                if os.path.islink(full):
+                    return None
+                # The entry's type says symlink, but aws-cli's own test - an
+                # lstat by full path - fails here (the directory grants no
+                # search permission, or the entry raced away), so aws-cli takes
+                # it for a non-link and vets it by full path: normally "File
+                # does not exist.", a warning and rc 2 rather than the silent
+                # skip. Whether the warning is written is aws-cli's part of the
+                # report, so it is written here too (design/overview.md
+                # section 3, Messages). Only when the battery finds nothing
+                # wrong does the entry go on to be classified.
+                if self.triggers_warning(full, notify):
+                    return None
         st = self.entry_stat_result(entry)
         if st is None:
             notify(f"Skipping file {full}. File does not exist.")

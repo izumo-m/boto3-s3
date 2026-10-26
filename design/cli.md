@@ -265,7 +265,7 @@ solidified design is added here.
 | `commands/transferargs.py` | The surface shared by cp / mv / sync: the declaration equivalent to aws-cli `TRANSFER_ARGS` (`--expected-size` is cp-only opt-in, `--recursive` is opt-out for sync), validation of the SSE-C pair / checksum path types / case-conflict / S3 Express, conversion to `TransferOptions`, the non-stream location wiring (including the `--source-region` clone), the `[s3]` read and the engine's construction (`build_transfer_engine`, section 8), and the tail of exit-code derivation (`finish_transfer`, with `report_failed_run`, which rm shares) |
 | `filters.py` | The order-preserving action for `--exclude` / `--include`, appending `Exclude` / `Include` rules to one list, and `compile_filter`, which hands that list to `globsieve.compile` (`None` when there is none). aws-cli's matching - each side's base, the absolute and Windows drive forms, the Windows fold, the single-source forms - is the library's ([`globsieve.md`](./globsieve.md)); the two places it deliberately differs from aws-cli (glob characters in the operation's path, cross-side application) are in docs/cli/aws-differences.md |
 | `progress.py` | `TransferPrinter`: aws-cli-compatible rendering of transfer result lines / progress (section 5.7-5.9. Worker-thread callbacks only count (the rc inputs) and enqueue slim records; a dedicated printer thread renders in queue order - aws-cli's `ResultProcessor` shape, but with a **bounded** queue (aws-cli-option-handling.md section 6). The verb is `TransferType.value` - mv is `move` on every path. A record with no `dest` is rendered with a single endpoint - sync's `delete:` lines) |
-| `shorthand.py` | Parsing of map-type option values (`--metadata k=v,...` / JSON form / the `@=` paramfile operator). The grammar is aws-cli's, cut down to scalar values: it accepts exactly what aws-cli accepts, and refuses while parsing the lists and nested maps aws-cli parses and then rejects, as well as bytes from `@=fileb://`. Every refusal is the parser's `Error parsing parameter '<name>'` (252). A `{`- or `[`-led value is read as JSON, and only an object of strings is accepted |
+| `shorthand.py` | Parsing of map-type option values (`--metadata k=v,...` / JSON form / the `@=` paramfile operator). The grammar is aws-cli's, cut down to scalar values: it accepts exactly what aws-cli accepts, and refuses while parsing the lists and nested maps aws-cli parses and then rejects, as well as bytes from `@=fileb://`. Every refusal is 252: the parser's `Error parsing parameter '<name>'`, or botocore's `Parameter validation failed:` for a JSON object value that is not a string, as on aws-cli. A `{`- or `[`-led value is read as JSON, and only an object of strings is accepted |
 | `paramfile.py` | aws-cli's local paramfile loaders (`file://` text, `fileb://` binary; the `get_paramfile` counterpart) and its `load-cli-arg` handler over them: `load_argument` loads either prefix on an argument, `load_text_argument` on a string-typed one (a `fileb://` refused unread). The option and positional resolutions use the two; the shorthand `@=` operator calls `get_paramfile`. A load failure is a `ParamfileLoadError`, which every caller - the shorthand's `@=` included - turns into the named argument's rc-252 parse error through `named_argument` (the handler's boundary; aws-cli's shorthand alone skips it and ends at 255) |
 | `textencoding.py` | The CLI's text encoding, decided as aws-cli decides it in the same environment whatever Python chose (design/overview.md section 3, "Text encodings"; section 1 below): `text_encoding` (UTF-8 under a `C` / `POSIX` `LC_CTYPE`, otherwise the locale's own encoding read past UTF-8 mode; the ANSI code page on Windows), `filename_encoding` (the same on Linux and the other non-Apple POSIX systems, `None` on Windows and macOS, whose names are Unicode / UTF-8 on both tools) handed to every `S3` / `LocalStorage` the CLI builds, the startup re-decoding of the command line and re-encoding of the standard streams, aws-cli's `set_preferred_output_encoding` for the `[ERROR]` report, and the `os_path` / `text_path` conversions of a command-line path. Standard library only at import (it runs before parsing) |
 | `output.py` | `aws s3`-compatible output formatting (`ls` listing lines, `rm` delete lines. Kept as pure functions; not turned into a class) |
@@ -836,10 +836,12 @@ region is no failure: the client signs for us-east-1), a client-creation
 failure is 255 for a present-but-unusable config (`InvalidConfigError`,
 section 6), a non-integer `--expires-in` is 255, and so is the CRT signer's
 refusal of a non-positive `--expires-in` on a SigV4a target (the table above).
-A path that names no bucket (`s3://`, `s3:///k`, or the scheme-less `/k`) is
-refused before signing by `build_s3_storage` (252, `base.refuse_bucketless`,
-as on every command); aws-cli signs with `Bucket=""` and botocore refuses the
-empty name, also at 252.
+The path is split into a bucket and a key as aws-cli's `find_bucket_key`
+splits it, and `build_s3_storage` refuses it before signing in aws-cli's
+order (252): the unsupported ARN families, then the bucket through botocore's
+own name check (`base.refuse_invalid_bucket_name`) - the empty bucket of
+`s3://`, `s3:///k` or the scheme-less `/k` is botocore's `Invalid bucket name
+""` there, as aws-cli's signing with `Bucket=""` reports it.
 
 ### 5.6 `website`
 
@@ -1094,7 +1096,10 @@ later check refuses the run.
 lines have already been emitted by on_result), a `KeyboardInterrupt` -> one
 `cancelled: ctrl-c received` line + 1 (aws-cli's result machinery swallows a
 mid-run Ctrl-C into a cancelled run - measured mid-sync and mid-rm, 2.36.40;
-rm's span converts through the same `report_failed_run`, and the
+where its shutdown cancels no transfer - mid-listing, or only in-flight
+transfers that finish on their own - aws-cli writes a bare `fatal error: `
+instead, which says nothing, so the cancelled line is written there too
+(`transferargs._closing_line`); rm's span converts through the same `report_failed_run`, and the
 dispatcher's 130 backstop keeps the pre-pipeline spans - and the printer's
 final drain, which is past aws-cli's recorder span: a Ctrl-C there escapes to
 aws-cli's 130 while its
@@ -1366,7 +1371,8 @@ post-parse value failure (`InvalidValueError`) or a bad / unusable config
 
 `_write_error` writes every report, in aws-cli's default enhanced form whatever
 `--cli-error-format` says
-([`aws-cli-option-handling.md`](./aws-cli-option-handling.md) section 2.1).
+([`aws-cli-option-handling.md`](./aws-cli-option-handling.md) section 2.1),
+led by an empty line as aws-cli's `write_error` leads it.
 A 252 report reads `An error occurred (ParamValidation): <message>` -
 argparse failures, unknown options and plain `ValidationError` alike. The
 **code the envelope names is the handler's, not the exception class's**, and
