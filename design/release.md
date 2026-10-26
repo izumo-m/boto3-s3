@@ -131,9 +131,12 @@ treat the PR like a hotfix:
 2. Merge it into `main`; this is what flips the alert to fixed. Applying the
    bump on `develop` instead leaves the alert open until the next release,
    because alert state tracks `main` only.
-3. Immediately merge `main` back into `develop` so both branches stay on one
-   history (unlike release step 5 this is a true merge, since `develop` is
-   usually ahead).
+3. Leave `develop` as it is. The next release brings the bump in: its step 2
+   merges `develop` into `main`, which already holds the bump, and its step 5
+   brings `develop` level with that merge. Until then `develop` locks the
+   version from before the bump; if `develop` changes `uv.lock` meanwhile, the
+   two locks conflict in release step 2, and the lock is regenerated there
+   (with the pinned uv, below).
 
 Two notes for perspective: `uv.lock` serves development and CI only — the
 published packages declare version ranges, so a lock-only advisory does not
