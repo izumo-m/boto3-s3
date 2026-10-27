@@ -1199,8 +1199,9 @@ class Transferrer:
         # True once this run ordered accepted transfers cancelled - set by
         # `__exit__` folding the manager on any exception (the token's own
         # `CancelledError`, a fatal, a Ctrl-C), by `_cancel_futures` when the
-        # drain-time watcher escalates, and by `_keep_swallowed_interrupt` when
-        # pip s3transfer's CRT drain swallows a Ctrl-C. Read by the done
+        # drain-time watcher escalates, by `_track_future` for a future tracked
+        # after that, and by `_keep_swallowed_interrupt` when pip s3transfer's
+        # CRT drain swallows a Ctrl-C. Read by the done
         # callbacks to tell a revocation (CANCELLED) from a CRT cancellation
         # nobody ordered (FAILED; `_is_cancellation`). Monotonic
         # False->True, always set before the cancel it describes is issued,
@@ -1345,13 +1346,22 @@ class Transferrer:
                 return
 
     def _track_future(self, future: Any | None) -> None:
-        """Track a submitted future without losing a synchronous completion race."""
+        """Track a submitted future without losing a synchronous completion race.
+
+        A future tracked once the token is IMMEDIATE is cancelled here.
+        """
         if future is None:
             return
         if not isinstance(self._manager, TransferManager):
             self._guard_crt_cancel(future)
         with self._futures_lock:
             self._futures.add(future)
+        token = self._cancel_token
+        if token is not None and token.mode is CancelMode.IMMEDIATE:
+            # The watcher cancels what is tracked once, when it sees the
+            # escalation; a future tracked after that is cancelled here.
+            self._cancel_initiated = True
+            future.cancel()
         # A non-threaded manager may finish before submit() returns and before
         # _ForgetFuture can remove it. Re-check after insertion to close that race.
         if future.done():
@@ -1660,6 +1670,7 @@ class Transferrer:
         subscribers.append(completion)
         subscribers.append(_ForgetFuture(self._forget_future))
         manager = self._get_manager()
+        self._track_from_queued(manager, subscribers)
         self._admit_capture(item)
         fileobj: Any = item.src_fileobj if item.src_fileobj is not None else src_path
         if item.src_fileobj is not None and not isinstance(manager, TransferManager):
@@ -1723,6 +1734,7 @@ class Transferrer:
         manager = self._get_manager()
         if dest_path is not None and not isinstance(manager, TransferManager):
             subscribers.insert(0, _KeepRenameFailure())
+        self._track_from_queued(manager, subscribers)
         self._admit_capture(item)
         return self._accept(
             manager.download,
@@ -1760,6 +1772,7 @@ class Transferrer:
         subscribers.append(self._completion(item, counted))
         subscribers.append(_ForgetFuture(self._forget_future))
         manager = self._get_manager()
+        self._track_from_queued(manager, subscribers)
         self._admit_capture(item)
         return self._accept(
             manager.copy,
@@ -1770,6 +1783,22 @@ class Transferrer:
             subscribers=subscribers,
             source_client=self._source_client,
         )
+
+    def _track_from_queued(self, manager: Any, subscribers: list[Any]) -> None:
+        """Track a classic transfer from its ``on_queued``, ahead of its own tasks.
+
+        Under ``use_threads=False`` the manager call runs the whole transfer
+        on the calling thread before it returns, so the tracking `submit`
+        does after it comes too late for an IMMEDIATE cancel to reach the
+        transfer in flight. ``on_queued`` runs before the first request task
+        (on the calling thread there, on the submission thread otherwise);
+        registered first, it also precedes the other ``on_queued`` work, such
+        as the annotation preload. The CRT engine keeps the tracking after
+        the call: its coordinator cannot cancel before the request is made,
+        and its ``on_queued`` runs before that.
+        """
+        if isinstance(manager, TransferManager):
+            subscribers.insert(0, _TrackFuture(self._track_future))
 
     def _accept(self, hand_over: Callable[..., Any], **kwargs: Any) -> Any:
         """Hand one transfer to the manager, keeping its own refusal in the taxonomy.
@@ -3100,6 +3129,25 @@ class _Completion:
             getattr(future.meta, "etag", None),
             future.meta.user_context.get(_DELETE_RESPONSE_KEY),
         )
+
+
+class _TrackFuture:
+    """Add a queued top-level future to cancellation tracking.
+
+    A future cancelled as it is tracked (or by the watcher meanwhile) stops
+    the rest of the ``on_queued`` work too - the copy-props reads, the
+    download's parent directory - by raising out of upstream's callback
+    loop: ``SubmissionTask._main`` records nothing over the settled outcome
+    and announces the item once.
+    """
+
+    def __init__(self, track: Callable[[Any], None]) -> None:
+        self._track = track
+
+    def on_queued(self, future: Any, **kwargs: Any) -> None:
+        self._track(future)
+        if future.done():
+            raise S3TransferCancelledError("cancelled before the transfer started")
 
 
 class _ForgetFuture:

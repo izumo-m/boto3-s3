@@ -132,7 +132,16 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   drain - so the escalation is acted on while the submitting thread waits on
   the engine's backpressure (the CRT manager's transfer semaphore, which a
   stalled request would otherwise hold until it completed by itself) as well
-  as during the drain.
+  as during the drain. A classic transfer is tracked from its `on_queued`
+  (`_TrackFuture`, registered first), before its first request task: under
+  `use_threads=False` the manager call runs the whole transfer before it
+  returns, so tracking it afterwards would leave the transfer in flight out
+  of the watcher's reach. A CRT transfer is tracked once the manager call
+  returns, since its coordinator cannot cancel before the request is made.
+  A future tracked after the watcher has acted is cancelled as it is
+  tracked; on the classic engine `_TrackFuture` then raises out of
+  s3transfer's `on_queued` loop, so the rest of the queued work (the
+  copy-props reads, a download's parent directory) does not run either.
   Futures already running may still finish - a cancelled-mid-flight transfer
   that completes reports its real outcome (s3transfer lets the completion
   win), while a revoked one reports one `CANCELLED` record
@@ -202,7 +211,8 @@ deletion pair, so a failed flush keeps the source) and the case-conflict gate's
 `CaseConflictCleanupSubscriber` after the DeleteSource family, so a key stays
 "in flight" for the whole of its download's teardown). The always-present pair
 is 8-9 (the numbering is the slot order, not a single chain that every transfer
-runs end to end).
+runs end to end). On the classic engine, `_TrackFuture` goes ahead of item 1
+(section 2).
 
 `on_result` / `on_progress` fire **from s3transfer's worker threads** for
 submitted transfers (with `use_threads=False`, on the calling thread), and the

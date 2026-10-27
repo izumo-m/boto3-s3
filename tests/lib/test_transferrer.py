@@ -4759,11 +4759,100 @@ class TestImmediateCancelWatcher:
             # Blocked on the slot "a" holds until the watcher cancels "a".
             transferrer.submit(item("b"))
             assert time.monotonic() - started < 5.0
-        assert manager.cancelled == ["a"]
-        assert {result.dest_info or result.dest: result.outcome for result in results} == {
-            "s3://b/a": OpOutcome.CANCELLED,
-            "s3://b/b": OpOutcome.SUCCEEDED,
-        } or [result.outcome for result in results] == [OpOutcome.CANCELLED, OpOutcome.SUCCEEDED]
+        # "b", handed over after the escalation, is cancelled as it is tracked.
+        assert manager.cancelled == ["a", "b"]
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED] * 2
+
+    @staticmethod
+    def _upload_item(tmp_path: Path, size: int) -> TransferItem:
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x" * size)
+        return TransferItem(
+            compare_key="a.bin", size=size, src_path=str(src), dest_bucket="b", dest_key="k"
+        )
+
+    def test_an_escalation_reaches_the_transfer_running_on_the_calling_thread(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Under use_threads=False the manager call runs the whole transfer
+        # before it returns; tracked only after it, the transfer ran to the
+        # end (measured against the dev stack: a 1 GiB upload cancelled at
+        # 3 s finished 6 s later as SUCCEEDED). Tracked from on_queued, the
+        # watcher's cancel lands while the first part is in flight: the second
+        # part and the completion are never sent, and the upload is aborted.
+        cancelled = threading.Event()
+        original_cancel_futures = Transferrer._cancel_futures
+
+        def cancel_futures(self: Transferrer) -> None:
+            original_cancel_futures(self)
+            cancelled.set()
+
+        monkeypatch.setattr(Transferrer, "_cancel_futures", cancel_futures)
+        client, calls = make_recording_client([{"UploadId": "u"}, {"ETag": '"e1"'}, {}])
+        canned = client._make_api_call
+        token = CancelToken()
+
+        def api_call(operation: str, params: dict[str, Any]) -> dict[str, Any]:
+            if operation == "UploadPart":
+                token.cancel(mode=CancelMode.IMMEDIATE)
+                assert cancelled.wait(5.0)
+            return canned(operation, params)
+
+        client._make_api_call = api_call
+        results: list[OpResult] = []
+        with Transferrer(
+            TransferType.UPLOAD,
+            client,
+            transfer_config=_SYNC_CONFIG,
+            cancel_token=token,
+            on_result=results.append,
+        ) as transferrer:
+            transferrer.submit(self._upload_item(tmp_path, 9 * _MIB))
+        assert ops(calls) == ["CreateMultipartUpload", "UploadPart", "AbortMultipartUpload"]
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+
+    def _submit_after_the_escalation(
+        self, kind: TransferType, item: TransferItem
+    ) -> tuple[list[ApiCall], list[OpResult]]:
+        # The watcher cancels what is tracked once and stops; the item is
+        # submitted only after it has.
+        client, calls = make_recording_client([])
+        token = CancelToken()
+        results: list[OpResult] = []
+        with Transferrer(
+            kind, client, transfer_config=_SYNC_CONFIG, cancel_token=token, on_result=results.append
+        ) as transferrer:
+            transferrer.prepare()
+            token.cancel(mode=CancelMode.IMMEDIATE)
+            for watcher in self._watchers():
+                watcher.join(5.0)
+            assert self._watchers() == []
+            transferrer.submit(item)
+        return calls, results
+
+    def test_a_transfer_queued_after_the_escalation_is_cancelled(self, tmp_path: Path) -> None:
+        # Cancelled as it is tracked, before its first request.
+        calls, results = self._submit_after_the_escalation(
+            TransferType.UPLOAD, self._upload_item(tmp_path, 7)
+        )
+        assert calls == []
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+
+    def test_the_cancel_on_tracking_stops_the_rest_of_the_queued_work(self, tmp_path: Path) -> None:
+        # The download's parent directory is made on_queued, after the
+        # tracking; the cancel there stops it too.
+        item = TransferItem(
+            compare_key="a.bin",
+            size=7,
+            etag='"abc123"',
+            src_bucket="b",
+            src_key="a.bin",
+            dest_path=str(tmp_path / "out" / "a.bin"),
+        )
+        calls, results = self._submit_after_the_escalation(TransferType.DOWNLOAD, item)
+        assert calls == []
+        assert not (tmp_path / "out").exists()
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
 
 
 class TestHandOverRefusal:
