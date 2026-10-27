@@ -57,9 +57,11 @@ release.
 - For the CLI, following `aws s3` - a change of behavior, exit code or wording
   to match it - is never a breaking change, since matching `aws s3` is what the
   CLI is for: a fix to a compatibility bug takes a patch, a change made for
-  compatibility a minor, never a major. The version promise covers only what is
-  the CLI's own: its own options and the behavior it extends through the
-  library.
+  compatibility a minor, never a major. Every option the CLI takes is an
+  `aws s3` option, so its version promise covers only the deliberate
+  differences from `aws s3` that
+  [`aws-differences.md`](../docs/cli/aws-differences.md) records, such as a
+  protection it keeps on.
 
 ## Releasing
 
