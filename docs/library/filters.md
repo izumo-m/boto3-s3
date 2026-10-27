@@ -42,7 +42,7 @@ directory or prefix the operation names and matches the entry's full path
 against the result.
 
 A **relative** pattern therefore matches the entry's `compare_key` — its key
-relative to the root the operation is enumerating, `/`-separated on every
+relative to the directory or prefix the operation is enumerating, `/`-separated on every
 operating system. For a recursive `rm s3://bucket/logs/`, an object at
 `logs/app/x.txt` has a compare key of `app/x.txt`, so `app/*` matches it and
 `logs/*` does not. A single source is shown to the filter in `aws s3`'s form:
@@ -50,7 +50,7 @@ operating system. For a recursive `rm s3://bucket/logs/`, an object at
 skips it and `Exclude("d")` does not), and the key `a//b` as `/b`
 ([reference](../reference/filters.md#filefilter)).
 
-A pattern the join takes in place of the root — `/data/*` on Linux and macOS;
+A pattern the join takes in place of that directory or prefix — `/data/*` on Linux and macOS;
 `C:\data\*`, a UNC path or a rooted `\data\*` on Windows — matches the entry's
 full path instead: the absolute path of a local entry, `bucket/key` of an S3
 one. Such a pattern never matches an S3 entry, so one rooted at the local
@@ -148,7 +148,7 @@ m.included("foo.txt")   # True
 m.included("foo.log")   # False
 ```
 
-`included(relative, full=None)` takes the path below the root and, for the
+`included(relative, full=None)` takes the path below the directory or prefix being enumerated and, for the
 patterns matched against a full path, that full path. `globsieve.normcase` is
 the fold `aws s3` applies to both strings before matching on this platform.
 `Exclude`, `Include` and `GlobFilter` are also available at the package root.
