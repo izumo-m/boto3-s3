@@ -263,7 +263,7 @@ class TestRegionAndGuards:
 
 
 def _as_list(value: object) -> list[str]:
-    return value if isinstance(value, list) else [value]  # type: ignore[return-value]
+    return value if isinstance(value, list) else [value]  # pyright: ignore[reportReturnType]
 
 
 class TestMarketAndOutcome:

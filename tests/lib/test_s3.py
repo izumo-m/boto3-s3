@@ -969,7 +969,7 @@ class TestResolveSeam:
             def client(self) -> Any:
                 return sentinel
 
-        class _P(os.PathLike):  # type: ignore[type-arg]
+        class _P(os.PathLike):  # pyright: ignore[reportMissingTypeArgument]
             def __fspath__(self) -> str:
                 return "s3://my-bucket/key"
 

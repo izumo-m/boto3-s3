@@ -5,6 +5,10 @@
     "include": ["src", "cli/src", "tests", "benchmarks"],
     "exclude": ["vendor", "**/__pycache__", ".venv"],
     "typeCheckingMode": "strict",
+    // A `# type: ignore` silences every diagnostic on its line, whatever its
+    // brackets say; `# pyright: ignore[rule]` silences only the rule it
+    // names. Turning the former off keeps every suppression to the latter.
+    "enableTypeIgnoreComments": false,
     "executionEnvironments": [
         {
             // Test code legitimately does what strict mode forbids: white-box

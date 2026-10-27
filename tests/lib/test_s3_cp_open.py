@@ -115,8 +115,8 @@ class _MemStorage(Storage):
     def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
         self.opens.append((key, mode))
         if mode == "rb":
-            return io.BytesIO(self._store[key])  # type: ignore[return-value]
-        return _MemWriter(self._store, key)  # type: ignore[return-value]
+            return io.BytesIO(self._store[key])
+        return _MemWriter(self._store, key)  # pyright: ignore[reportReturnType]
 
     def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
         # scan_pages returns already-filtered pages (the contract): a real custom
@@ -191,7 +191,7 @@ class _CommitFailMem(_MemStorage):
 
     def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
         if mode == "wb":
-            return _FailingWriter(self._store, key)  # type: ignore[return-value]
+            return _FailingWriter(self._store, key)  # pyright: ignore[reportReturnType]
         return super().open(key, mode, size=size)
 
 
@@ -670,7 +670,7 @@ class TestOpenRouteContracts:
             ) -> BinaryIO:
                 if mode == "wb":
                     self.opens.append((key, mode))
-                    return _InterruptedCommitWriter(self._store, key)  # type: ignore[return-value]
+                    return _InterruptedCommitWriter(self._store, key)  # pyright: ignore[reportReturnType]
                 return super().open(key, mode, size=size)
 
         store: dict[str, bytes] = {}
@@ -780,7 +780,7 @@ class TestOpenRouteContracts:
                 self.opens.append((key, mode))
                 reader = io.BytesIO(self._store[key])
                 readers.append(reader)
-                return reader  # type: ignore[return-value]
+                return reader
 
         src = _TrackingMem({"": b"x" * 5}, location="mem://data/a.txt")
         client, put_calls = make_recording_client([{}])

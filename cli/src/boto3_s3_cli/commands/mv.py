@@ -86,8 +86,8 @@ class MvCommand(Command):
 
         def run_mv() -> None:
             s3.mv(
-                src_location,  # type: ignore[arg-type]
-                dest_location,  # type: ignore[arg-type]
+                src_location,  # pyright: ignore[reportArgumentType]
+                dest_location,  # pyright: ignore[reportArgumentType]
                 recursive=args.recursive,
                 filter=item_filter,
                 dryrun=args.dryrun,

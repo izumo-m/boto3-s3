@@ -337,7 +337,7 @@ class TestXmlIncompatibleFallback:
             together.wait()
             return {}
 
-        fake.delete_object = delete_object  # type: ignore[method-assign]
+        fake.delete_object = delete_object
         results: list[OpResult] = []
         deleter = _deleter(fake, on_result=results.append)
         for key in keys:
@@ -364,7 +364,7 @@ class TestXmlIncompatibleFallback:
             assert release.wait(timeout=5.0), "the request was never released"
             return {}
 
-        fake.delete_object = delete_object  # type: ignore[method-assign]
+        fake.delete_object = delete_object
         results: list[OpResult] = []
         deleter = _deleter(fake, on_result=results.append)
         for key in keys:
@@ -412,7 +412,7 @@ class TestXmlIncompatibleFallback:
             assert release.wait(timeout=5.0), "the request was never released"
             return {}
 
-        fake.delete_object = delete_object  # type: ignore[method-assign]
+        fake.delete_object = delete_object
         token = CancelToken()
         results: list[OpResult] = []
         deleter = _deleter(fake, on_result=results.append, cancel_token=token)
@@ -722,7 +722,7 @@ class TestResults:
         # The batch was no key's own request: aws-cli still sends each key
         # once, so the re-send is that one attempt, not a retry.
         fake = _FakeS3Client(script=[_client_error("SlowDown", 503)], single_script=[{}, {}])
-        fake.meta = SimpleNamespace(  # type: ignore[attr-defined]
+        fake.meta = SimpleNamespace(
             config=SimpleNamespace(retries={"total_max_attempts": 1, "mode": "standard"})
         )
         results: list[OpResult] = []
@@ -773,7 +773,7 @@ class TestResults:
         fake = _FakeS3Client(
             script=[{"Errors": [{"Key": "b", "Code": "InternalError", "Message": "msg"}]}]
         )
-        fake.meta = SimpleNamespace(  # type: ignore[attr-defined]
+        fake.meta = SimpleNamespace(
             config=SimpleNamespace(retries={"total_max_attempts": 1, "mode": "standard"})
         )
         results: list[OpResult] = []
@@ -801,7 +801,7 @@ class TestResults:
             together.wait()
             return {}
 
-        fake.delete_object = delete_object  # type: ignore[method-assign]
+        fake.delete_object = delete_object
         results: list[OpResult] = []
         deleter = _deleter(fake, on_result=results.append)
         for key in keys:
@@ -831,7 +831,7 @@ class TestResults:
             assert release.wait(timeout=5.0), "the re-send was never released"
             return {}
 
-        fake.delete_object = delete_object  # type: ignore[method-assign]
+        fake.delete_object = delete_object
         results: list[OpResult] = []
         deleter = _deleter(fake, on_result=results.append)
         for key in keys:
@@ -870,7 +870,7 @@ class TestResults:
             assert release.wait(timeout=5.0), "the re-send was never released"
             return {}
 
-        fake.delete_object = delete_object  # type: ignore[method-assign]
+        fake.delete_object = delete_object
         token = CancelToken()
         results: list[OpResult] = []
         deleter = _deleter(fake, on_result=results.append, cancel_token=token)
@@ -1254,7 +1254,7 @@ class TestCrtRoute:
         fake = _FakeS3Client(
             script=[{"Errors": [{"Key": "b", "Code": "InternalError", "Message": "msg"}]}]
         )
-        fake.meta = SimpleNamespace(  # type: ignore[attr-defined]
+        fake.meta = SimpleNamespace(
             config=SimpleNamespace(retries={"total_max_attempts": 1, "mode": "standard"})
         )
         results: list[OpResult] = []

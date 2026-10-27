@@ -318,7 +318,7 @@ class TestWholeObject:
 
 
 def _composite_golden(data: bytes, sizes: list[int], algorithm: str) -> str:
-    fn = {"crc32c": _crt.crc32c, "crc64nvme": _crt.crc64nvme}[algorithm]  # type: ignore[union-attr]
+    fn = {"crc32c": _crt.crc32c, "crc64nvme": _crt.crc64nvme}[algorithm]  # pyright: ignore[reportOptionalMemberAccess]
     width = {"crc32c": 4, "crc64nvme": 8}[algorithm]
     combined = bytearray()
     off = 0
@@ -1050,8 +1050,8 @@ class TestPureCrcCrossCheck:
     @pytest.mark.parametrize("n", [0, 1, 7, 8, 9, 100, 1000, 4096])
     def test_pure_equals_awscrt(self, n: int) -> None:
         data = bytes((i * 37 + 11) & 0xFF for i in range(n))
-        assert _pure_crc32c(data) == _crt.crc32c(data)  # type: ignore[union-attr]
-        assert _pure_crc64nvme(data) == _crt.crc64nvme(data)  # type: ignore[union-attr]
+        assert _pure_crc32c(data) == _crt.crc32c(data)  # pyright: ignore[reportOptionalMemberAccess]
+        assert _pure_crc64nvme(data) == _crt.crc64nvme(data)  # pyright: ignore[reportOptionalMemberAccess]
 
     def test_chunked_chaining_matches_one_shot(self) -> None:
         data = bytes((i * 91 + 3) & 0xFF for i in range(5000))
@@ -1061,5 +1061,5 @@ class TestPureCrcCrossCheck:
             p32 = _pure_crc32c(data[i : i + step], p32)
             p64 = _pure_crc64nvme(data[i : i + step], p64)
             i += step
-        assert p32 == _crt.crc32c(data)  # type: ignore[union-attr]
-        assert p64 == _crt.crc64nvme(data)  # type: ignore[union-attr]
+        assert p32 == _crt.crc32c(data)  # pyright: ignore[reportOptionalMemberAccess]
+        assert p64 == _crt.crc64nvme(data)  # pyright: ignore[reportOptionalMemberAccess]

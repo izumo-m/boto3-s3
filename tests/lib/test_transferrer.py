@@ -1822,7 +1822,7 @@ class TestFatalCancellation:
                 assert release_first.wait(5.0)
             return {}
 
-        client._make_api_call = api_call  # type: ignore[method-assign]
+        client._make_api_call = api_call
 
         # Release the blocked in-flight request only once the shutdown's
         # cancel has revoked every pending coordinator, so the "queued items

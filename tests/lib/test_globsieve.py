@@ -72,7 +72,7 @@ class TestRules:
     def test_rules_are_frozen_values(self) -> None:
         rule = Exclude("*.tmp")
         with pytest.raises(FrozenInstanceError):
-            rule.patterns = ("x",)  # type: ignore[misc]
+            rule.patterns = ("x",)
         assert rule == Exclude("*.tmp")
         assert rule != Include("*.tmp")
         assert hash(rule) == hash(Exclude("*.tmp"))
@@ -88,14 +88,14 @@ class TestRules:
 
     def test_compile_rejects_what_is_not_a_rule(self) -> None:
         with pytest.raises(ValidationError):
-            globsieve.compile(["*.txt"])  # type: ignore[list-item]
+            globsieve.compile(["*.txt"])
 
     def test_a_rule_rejects_a_pattern_that_is_not_a_string(self) -> None:
         # A list passed whole instead of unpacked is the likely mistake.
         with pytest.raises(ValidationError):
-            Exclude(["*.tmp", "*.log"])  # type: ignore[arg-type]
+            Exclude(["*.tmp", "*.log"])
         with pytest.raises(ValidationError):
-            Include("*.txt", None)  # type: ignore[arg-type]
+            Include("*.txt", None)
 
     def test_rules_attribute_is_the_list_as_given(self) -> None:
         rules = [Exclude("*"), Include("*.txt", "*.md")]
@@ -810,7 +810,7 @@ def _aws_create_filter(parameters: dict[str, object], os: _Os) -> _AwsFilter:
     if parameters["filters"]:
         cli_filters = parameters["filters"]
         real_filters: list[tuple[str, str]] = []
-        for filter_type, filter_pattern in cli_filters:  # type: ignore[attr-defined]
+        for filter_type, filter_pattern in cli_filters:  # pyright: ignore[reportGeneralTypeIssues]
             real_filters.append((filter_type.lstrip("-"), filter_pattern))
         source_location = str(parameters["src"])
         if source_location.startswith("s3://"):

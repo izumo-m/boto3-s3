@@ -609,7 +609,7 @@ class TestContentDiffers:
         # and on the multipart branch's stat alike.
         missing = tmp_path / "nope"
 
-        class _P(os.PathLike):  # type: ignore[type-arg]
+        class _P(os.PathLike):  # pyright: ignore[reportMissingTypeArgument]
             def __fspath__(self) -> str:
                 return str(missing)
 

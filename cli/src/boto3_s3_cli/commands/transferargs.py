@@ -783,7 +783,7 @@ def build_transfer_options(
             # `classify_paths` runs at the head of every cp/mv/sync
             # (aws-cli resolves them at parse time), so the values here are
             # consumed verbatim.
-            options[option] = value  # type: ignore[literal-required]
+            options[option] = value
     if args.metadata is not None:
         options["metadata"] = args.metadata
     if args.sse_c_key is not None:

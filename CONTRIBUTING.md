@@ -133,7 +133,11 @@ points back here rather than repeating the commands.
   docstring or comment names the counterpart and says the two are
   equivalent.
 - **Typed.** The library ships type information (`py.typed`); keep public APIs
-  typed and basedpyright clean.
+  typed and basedpyright clean. Where code breaks a type on purpose (a test
+  passing a value of the wrong type, say), silence the check with
+  `# pyright: ignore[<rule>]` naming the rule it breaks. `# type: ignore` is
+  turned off in `pyrightconfig.json`, because it silences every diagnostic on
+  its line, whatever its brackets say.
 - **English.** All version-controlled files are written in English.
 - **No dead weight.** Remove implementation and docs that are no longer used
   rather than leaving them behind; git history is the record. Once a removed

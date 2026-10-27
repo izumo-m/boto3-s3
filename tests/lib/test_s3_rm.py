@@ -559,7 +559,7 @@ class TestRmTargetValidation:
 
     def test_non_s3_location_is_rejected(self) -> None:
         with pytest.raises(ValidationError, match="rm accepts"):
-            S3().rm(123)  # type: ignore[arg-type]
+            S3().rm(123)
 
     def test_a_bytes_path_is_rejected_like_any_non_string(self) -> None:
         class _BytesPath:
@@ -567,7 +567,7 @@ class TestRmTargetValidation:
                 return b"s3://b/k"
 
         with pytest.raises(ValidationError, match="rm accepts"):
-            S3().rm(_BytesPath())  # type: ignore[arg-type]
+            S3().rm(_BytesPath())
 
     def test_filter_none_deletes_everything_listed(self) -> None:
         client = _FakeS3Client([{"Contents": [_obj("p/a")]}])

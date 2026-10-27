@@ -212,7 +212,7 @@ class TestGrants:
     def test_grants_none_or_empty_is_a_noop(self) -> None:
         # aws-cli gates on truthiness, so None / empty grants is "no grants" -
         # not a TypeError from iterating None (the library API is permissive).
-        assert map_put_object_params(TransferOptions(grants=None)) == {}  # type: ignore[typeddict-item]
+        assert map_put_object_params(TransferOptions(grants=None)) == {}
         assert map_put_object_params(TransferOptions(grants=[])) == {}
         assert map_copy_object_params(TransferOptions(grants=())) == {}
 

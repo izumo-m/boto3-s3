@@ -1682,7 +1682,7 @@ class TestGetFileinfo:
         def counting_stat(*args: object, **kwargs: object) -> os.stat_result:
             nonlocal calls
             calls += 1
-            return real_stat(*args, **kwargs)  # type: ignore[arg-type]
+            return real_stat(*args, **kwargs)
 
         monkeypatch.setattr(os, "stat", counting_stat)
         info = storage.get_fileinfo()

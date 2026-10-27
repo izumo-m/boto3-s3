@@ -36,7 +36,7 @@ class TestSdkFloorCompat:
         def spy(this: object, *args: object, **kwargs: object) -> None:
             captured.clear()
             captured.update(kwargs)
-            real_init(this, *args, **kwargs)  # type: ignore[arg-type]
+            real_init(this, *args, **kwargs)
 
         monkeypatch.setattr(Boto3TransferConfig, "__init__", spy)
         TransferConfig(max_concurrency=5)

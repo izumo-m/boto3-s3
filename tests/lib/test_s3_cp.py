@@ -587,7 +587,7 @@ class TestUploadRoute:
                 assert release_first.wait(5.0)
             return {}
 
-        client._make_api_call = api_call  # type: ignore[method-assign]
+        client._make_api_call = api_call
         token = CancelToken()
         results: list[OpResult] = []
 
@@ -639,7 +639,7 @@ class TestUploadRoute:
                 assert release_running.wait(5.0)
             return {}
 
-        client._make_api_call = api_call  # type: ignore[method-assign]
+        client._make_api_call = api_call
         token = CancelToken()
 
         # The escalation path under test is: a graceful cancel starts the drain

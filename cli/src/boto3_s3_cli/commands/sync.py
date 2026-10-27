@@ -101,8 +101,8 @@ class SyncCommand(Command):
 
         def run_sync() -> None:
             s3.sync(
-                src_location,  # type: ignore[arg-type]
-                dest_location,  # type: ignore[arg-type]
+                src_location,  # pyright: ignore[reportArgumentType]
+                dest_location,  # pyright: ignore[reportArgumentType]
                 delete_filter=args.delete,
                 update_filter=AwsCliComparison(
                     size_only=args.size_only, exact_timestamps=args.exact_timestamps

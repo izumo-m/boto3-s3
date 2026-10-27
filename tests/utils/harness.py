@@ -268,9 +268,9 @@ def run_cli_in_process_streaming(
     err = io.StringIO()
     original_stdin = sys.stdin
     if stdin_payload is not None:
-        sys.stdin = _BinaryStdinShim(stdin_payload)  # type: ignore[assignment]
+        sys.stdin = _BinaryStdinShim(stdin_payload)
     try:
-        with contextlib.redirect_stdout(stdout_shim), contextlib.redirect_stderr(err):  # type: ignore[arg-type]
+        with contextlib.redirect_stdout(stdout_shim), contextlib.redirect_stderr(err):
             rc = cli.main(argv, ctx=ctx)
     finally:
         sys.stdin = original_stdin

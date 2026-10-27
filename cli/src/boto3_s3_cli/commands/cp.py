@@ -124,8 +124,8 @@ class CpCommand(Command):
             if src == "-" and args.expected_size is not None and not args.dryrun:
                 expected_size = int(args.expected_size)
             s3.cp(
-                src_location,  # type: ignore[arg-type]
-                dest_location,  # type: ignore[arg-type]
+                src_location,  # pyright: ignore[reportArgumentType]
+                dest_location,  # pyright: ignore[reportArgumentType]
                 recursive=args.recursive,
                 filter=item_filter,
                 dryrun=args.dryrun,

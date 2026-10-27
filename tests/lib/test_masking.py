@@ -43,7 +43,7 @@ def _stream_logger(
     before_handlers = list(logger.handlers)
     before_level = logger.level
     buf = io.StringIO()
-    m.set_stream_logger(name, stream=buf, **kwargs)  # type: ignore[arg-type]
+    m.set_stream_logger(name, stream=buf, **kwargs)
     try:
         yield logger, buf
     finally:

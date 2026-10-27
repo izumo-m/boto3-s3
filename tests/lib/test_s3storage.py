@@ -579,7 +579,7 @@ class TestListBuckets:
         # must fall back to a single list_buckets() call rather than crash with
         # OperationNotPageableError.
         client = _NoPaginatorClient()
-        storage = S3Storage("s3://", client=client)  # type: ignore[arg-type]
+        storage = S3Storage("s3://", client=client)
         results = list(storage.list_buckets())
         assert client.list_buckets_calls == 1
         assert [(r.key, r.kind) for r in results] == [("alpha", FileKind.BUCKET)]
@@ -591,7 +591,7 @@ class TestListBuckets:
         # must fail rather than answer with the account's whole bucket list.
         # It fails as a later botocore's own parameter validation fails it.
         client = _NoPaginatorClient()
-        storage = S3Storage("s3://", client=client)  # type: ignore[arg-type]
+        storage = S3Storage("s3://", client=client)
         with pytest.raises(ValidationError) as exc_info:
             list(storage.list_buckets(**filters))
         assert client.list_buckets_calls == 0
@@ -603,7 +603,7 @@ class TestListBuckets:
         # "" is not a filter (aws-cli's truthiness check): nothing is sent, so
         # no input member is needed and the sub-floor fallback still lists.
         client = _NoPaginatorClient()
-        storage = S3Storage("s3://", client=client)  # type: ignore[arg-type]
+        storage = S3Storage("s3://", client=client)
         results = list(storage.list_buckets(**filters))
         assert client.list_buckets_calls == 1
         assert [(r.key, r.kind) for r in results] == [("alpha", FileKind.BUCKET)]
@@ -1787,7 +1787,7 @@ class TestPutFile:
         source = tmp_path / "manifest.json"
         source.write_bytes(b"payload-bytes")
         client = _PutRecordingClient()
-        storage = S3Storage("s3://bucket/prefix/", client=client)  # type: ignore[arg-type]
+        storage = S3Storage("s3://bucket/prefix/", client=client)
 
         info = storage.put_file(source, key="manifest.json")
 
@@ -1809,7 +1809,7 @@ class TestPutFile:
         client = _PutRecordingClient(
             {"ETag": '"e"', "VersionId": "v1", "ResponseMetadata": {"HTTPStatusCode": 200}}
         )
-        info = S3Storage("s3://bucket/a.bin", client=client).put_file(source)  # type: ignore[arg-type]
+        info = S3Storage("s3://bucket/a.bin", client=client).put_file(source)
         assert info.head == {"ETag": '"e"', "VersionId": "v1"}
 
     def test_key_joins_like_get_fileinfo(self, tmp_path: Path) -> None:
@@ -1818,22 +1818,22 @@ class TestPutFile:
         client = _PutRecordingClient()
         # The "/" boundary is inserted under a slashless prefix, and "" stays
         # the storage's own key.
-        S3Storage("s3://bucket/prefix", client=client).put_file(source, key="sub/f.txt")  # type: ignore[arg-type]
-        S3Storage("s3://bucket/prefix/obj.txt", client=client).put_file(source)  # type: ignore[arg-type]
+        S3Storage("s3://bucket/prefix", client=client).put_file(source, key="sub/f.txt")
+        S3Storage("s3://bucket/prefix/obj.txt", client=client).put_file(source)
         assert [call["Key"] for call in client.calls] == ["prefix/sub/f.txt", "prefix/obj.txt"]
 
     def test_an_empty_file_uploads_as_an_empty_object(self, tmp_path: Path) -> None:
         source = tmp_path / "empty.bin"
         source.write_bytes(b"")
         client = _PutRecordingClient()
-        info = S3Storage("s3://bucket/empty.bin", client=client).put_file(source)  # type: ignore[arg-type]
+        info = S3Storage("s3://bucket/empty.bin", client=client).put_file(source)
         assert client.bodies == [b""]
         assert info.size == 0
 
     def test_a_missing_source_raises_not_found_without_a_request(self, tmp_path: Path) -> None:
         client = _PutRecordingClient()
         source = tmp_path / "gone.bin"
-        storage = S3Storage("s3://bucket/gone.bin", client=client)  # type: ignore[arg-type]
+        storage = S3Storage("s3://bucket/gone.bin", client=client)
         with pytest.raises(NotFoundError) as exc_info:
             storage.put_file(source)
         # A locally-originating error names the local path in `key`, with no bucket.
@@ -1850,7 +1850,7 @@ class TestPutFile:
         source = tmp_path / "pipe"
         os.mkfifo(source)
         client = _PutRecordingClient()
-        storage = S3Storage("s3://bucket/prefix/", client=client)  # type: ignore[arg-type]
+        storage = S3Storage("s3://bucket/prefix/", client=client)
         with pytest.raises(ValidationError, match="FIFO, or socket") as exc_info:
             storage.put_file(source, key="k")
         assert client.calls == []
@@ -1861,7 +1861,7 @@ class TestPutFile:
         source = tmp_path / "a.bin"
         source.write_bytes(b"x")
         client = _PutRecordingClient(error=client_error("AccessDenied", 403, "PutObject"))
-        storage = S3Storage("s3://bucket/a.bin", client=client)  # type: ignore[arg-type]
+        storage = S3Storage("s3://bucket/a.bin", client=client)
         with pytest.raises(AccessDeniedError) as exc_info:
             storage.put_file(source)
         assert exc_info.value.bucket == "bucket"

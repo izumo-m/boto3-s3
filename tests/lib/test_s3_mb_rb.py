@@ -167,7 +167,7 @@ class TestMb:
 
     def test_non_location_target_raises(self) -> None:
         with pytest.raises(ValidationError):
-            S3().mb(123)  # type: ignore[arg-type]
+            S3().mb(123)
 
     def test_client_error_raises_category_with_cause(self) -> None:
         error = client_error("BucketAlreadyOwnedByYou", 409, "CreateBucket")
