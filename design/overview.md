@@ -240,6 +240,20 @@ maintaining high functional compatibility.
      from a filter or a callback reaches the caller as it is: a filter decides
      on an item and a callback reports on one, so their failure is not the
      item's.
+- **An argument of the wrong type is not specified**: the type annotations of
+  the public API are the contract for its arguments, and a type checker is
+  how a caller holds to them. What a value of another type leads to is not
+  specified - it may fail, stop responding or appear to work - and is not a
+  library bug.
+  1. The library checks an argument only where the check is meaningful and
+     certain: it never refuses a valid argument. A `None` where a value is
+     required, a combination of arguments that cannot work together, a value
+     outside what the parameter defines, an object whose class makes it the
+     other kind (an `io.TextIOBase` where a binary stream is expected) - those
+     are checked, and refused with the library's exception.
+  2. It does not guess at a value from its attributes or its behavior, and a
+     check it makes is a help, not part of the contract: it does not promise
+     to catch every value of the wrong type.
 - **Responses outside S3's API are not specified**: the library relies on S3,
   or an S3-compatible server, answering as S3's API defines. What a response
   outside that definition leads to - a missing element, a value the API does
