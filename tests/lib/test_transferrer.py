@@ -1857,17 +1857,21 @@ class TestFatalCancellation:
                 assert first_started.wait(5.0)
                 raise raise_exc()
 
-        # Only the already-running first transfer reached the API; the queued
-        # two were revoked before ever becoming requests (aws-cli's transfer set:
-        # its uploads in flight at the fatal land on S3 the same way). Record
-        # order is not part of the contract - a revoked item's record fires
-        # from the cancelling thread or the executor's skip path, whichever
-        # its submission had reached.
-        assert len(api_calls) == 1
+        # Only the already-running transfer reached the API; the queued two
+        # were revoked before ever becoming requests (aws-cli's transfer set:
+        # its uploads in flight at the fatal land on S3 the same way). Which
+        # item runs is not part of the contract: the manager's submission
+        # threads hand their requests to the one request thread in whatever
+        # order they are scheduled, so a.bin's can lose to a later item's.
+        # Record order is not part of it either - a revoked item's record
+        # fires from the cancelling thread or the executor's skip path,
+        # whichever its submission had reached.
+        assert len(api_calls) == 1 and api_calls[0].startswith("PutObject:p/")
+        in_flight = api_calls[0].removeprefix("PutObject:p/")
         by_key = {result.compare_key: result for result in results}
         assert len(results) == 3 and set(by_key) == {"a.bin", "b.bin", "c.bin"}
-        assert by_key["a.bin"].outcome is OpOutcome.SUCCEEDED
-        for key in ("b.bin", "c.bin"):
+        assert by_key[in_flight].outcome is OpOutcome.SUCCEEDED
+        for key in sorted(set(by_key) - {in_flight}):
             result = by_key[key]
             assert result.outcome is OpOutcome.CANCELLED
             assert isinstance(result.error, CancelledError)
