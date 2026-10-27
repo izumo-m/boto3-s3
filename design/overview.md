@@ -96,7 +96,7 @@ maintaining high functional compatibility.
   its own Python and its own copies of botocore and s3transfer, which differ
   from the Python and the PyPI releases this project runs on, and the library
   also runs on SDKs as old as the floor and on every supported Python
-  (section 2). Three rules apply, by where a difference comes from:
+  (section 2). Four rules apply, by where a difference comes from:
   1. A difference that comes from the Python version is matched to aws-cli
      where it can be absorbed simply, and left as it is otherwise. Simply
      means all three of: matching it changes nothing outside the library that
@@ -126,6 +126,13 @@ maintaining high functional compatibility.
   3. A difference that comes only from an SDK older than the pinned period,
      down to the floor, is not matched: it is neither a bug nor a deviation to
      write down, and nothing compensates for it.
+  4. A difference that comes from how aws-cli is packaged and started,
+     rather than from its own code, is not considered: its interpreter is
+     frozen into the distribution, runs isolated from the user's
+     environment, and receives the command line from a launcher of its own.
+     The library and the CLI run on the Python the user installed and take
+     what that Python takes from the environment and the command line.
+     Such a difference is neither a bug nor written down.
 
   The rules for errors below still hold on every supported version.
 - **Security before compatibility**: where matching aws-cli would expose a
