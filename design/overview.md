@@ -3,7 +3,10 @@
 This document is the **authoritative reference (source of truth)** for the
 project's purpose, supported scope, and design policy, and it doubles as the
 entry point (index) for `docs/`. When the policy changes, update this document
-first.
+first. It states policy only - what would hold however the code were
+written. Names in the code, the mechanisms behind them and the decisions
+about one feature belong to the design documents and `docs/`, which hold
+the examples too.
 
 For term definitions, see [`glossary.md`](./glossary.md).
 
@@ -87,10 +90,7 @@ maintaining high functional compatibility.
   follow aws-cli as **Messages** (below) sets out. A functional difference is
   either a bug or a deliberate deviation written down in
   [`aws-differences.md`](../docs/cli/aws-differences.md); a difference the
-  Messages rules leave uncompared is neither, and is not written down. One
-  source of deliberate functional deviation is settled: S3 objects are
-  deleted in batches ([`deleter.md`](./deleter.md)) where aws-cli deletes one
-  key per request; batching is not to be traded back for per-key deletes.
+  Messages rules leave uncompared is neither, and is not written down.
   The CRT transfer engine is held to aws-cli's CRT mode on the same terms
   ([`crt.md`](./crt.md)). The CLI has no interactive auto-prompt.
 - **Compatibility target**: the pinned aws-cli release the code is ported
@@ -108,9 +108,8 @@ maintaining high functional compatibility.
      application's other code would feel as a side effect of using the
      library), it needs no large mechanism, and it conflicts with no settled
      decision. A process-wide change the application asks for by calling a
-     function meant for it, with its reach documented, is not a side effect
-     (`set_stream_logger`'s masked debug output is one). The CLI owns its
-     process, so the first condition does not bind it. A
+     function meant for it, with its reach documented, is not a side effect.
+     The CLI owns its process, so the first condition does not bind it. A
      difference left as it is is neither a bug nor a deviation to write down,
      so a behavior may depend on the Python version; where it is a default a
      caller may want fixed, the library lets the caller name the value, as it
@@ -119,27 +118,24 @@ maintaining high functional compatibility.
      matched where it changes a normal run's outcome (the request sent, its
      endpoint, signature and headers, the objects selected, the profile used,
      the retries made, the arguments accepted); a difference that shows only
-     where aws-cli refuses the input (`retry_mode = legacy`), or where the
-     run sets something aws-cli's bundled SDK does not read (`defaults_mode`,
-     `BOTO_DISABLE_CRT`), is not compensated. The arguments accepted are
-     those aws-cli accepts: a run aws-cli takes is taken the same way. Where
-     it is matched depends on what it touches:
+     where aws-cli refuses the input, or where the run sets something
+     aws-cli's bundled SDK does not read, is not compensated. The arguments
+     accepted are those aws-cli accepts: a run aws-cli takes is taken the
+     same way. Where it is matched depends on what it touches:
      - a value an operation returns to the caller (a presigned URL, its
-       signature and its host) is matched however the `S3` was assembled;
-     - how the clients send their requests (the endpoint they send to, such as
-       us-east-1's regional one, the retry posture, the default checksum, the
-       order the profile variables are read in) is matched only under
-       aws-cli's assembly (below).
+       signature and its host) is matched however the clients were assembled;
+     - how the clients send their requests (the endpoint they send to, the
+       retry posture, the default checksum, the order the profile variables
+       are read in) is matched only under aws-cli's assembly (below).
   3. A difference that comes only from an SDK older than the pinned period,
      down to the floor, is not matched: it is neither a bug nor a deviation to
      write down, and nothing compensates for it.
 
   The defaults of a client and its session that the caller does not supply
   (the region, the profile, the default checksum, the CRT client's trust
-  source) follow how the `S3` was assembled: boto3's when the caller built it
-  itself (`S3()`), and aws-cli's when the caller asked for aws-cli's assembly
-  through `S3.from_aws_cli`, the assembly the CLI is built on
-  (`boto3_s3.awsclisession`). A client the caller hands over keeps its own
+  source) follow how the clients were assembled: boto3's by default, and
+  aws-cli's when the caller asks the library for aws-cli's assembly, the one
+  the CLI is built on. A client the caller hands over keeps its own
   settings either way. A caller that assembles its own sets them as for any
   boto3 application. The rules for errors below still hold on every supported
   version.
@@ -239,7 +235,7 @@ maintaining high functional compatibility.
      exceptions, and one it raises is recorded as it is. Any other exception
      from a stream or a storage backend fails that item as the library's base
      exception, with the original kept as its cause - except a stream source
-     that `cp` opens before the transfer, as aws-cli opens stdin: one that
+     opened before the transfer, as aws-cli opens standard input: one that
      cannot be opened stops the run before it starts (the errors rule 3), with
      the same classification. An interrupt (Ctrl-C, a
      request to exit) cancels the item and reaches the caller. An exception
@@ -255,7 +251,7 @@ maintaining high functional compatibility.
      certain: it never refuses a valid argument. A `None` where a value is
      required, a combination of arguments that cannot work together, a value
      outside what the parameter defines, an object whose class makes it the
-     other kind (an `io.TextIOBase` where a binary stream is expected) - those
+     other kind (a text stream where a binary one is expected) - those
      are checked, and refused with the library's exception.
   2. It does not guess at a value from its attributes or its behavior, and a
      check it makes is a help, not part of the contract: it does not promise
@@ -273,19 +269,16 @@ maintaining high functional compatibility.
 - **Text encodings**: which encoding turns bytes into text and back depends on
   the Python version and its environment, and only the application knows
   which one it was written for.
-  1. A library `S3` the caller assembles itself follows Python's defaults
-     wherever it converts - local file names, text streams - and lets the
-     caller name the encoding instead, so an application can fix the one it
-     relies on; one assembled through `S3.from_aws_cli` names local files in
-     the encoding aws-cli uses in the same environment, as the CLI does (rule
-     2), and a caller whose names come from Python's own default hands over a
-     `LocalStorage` instead. An encoding the caller
-     names for local file names is used as given: the OS gets the names in
-     it. Whether the OS and its filesystem can take names in that encoding
-     is the caller's concern; the library only refuses a codec Python does
-     not know, and neither checks the encoding further nor works around what
-     the OS makes of the names. The check that keeps a download inside its
-     destination still runs on the names in the form the OS gets.
+  1. The library follows Python's defaults wherever it converts - local file
+     names, text streams - and lets the caller name the encoding instead, so
+     an application can fix the one it relies on. Under aws-cli's assembly,
+     local file names take the encoding aws-cli uses in the same
+     environment, as in the CLI (rule 2). An encoding the caller names for
+     local file names is used as given: the OS gets the names in it.
+     Whether the OS and its filesystem can take names in that encoding is
+     the caller's concern; the library only refuses a codec Python does not
+     know, and neither checks the encoding further nor works around what the
+     OS makes of the names.
   2. The CLI uses the encoding aws-cli uses in the same environment wherever
      it converts: local file names, its command line, its output, and the
      files it reads values from. A run that replaces `aws s3` with the CLI
@@ -362,44 +355,37 @@ Markdown links inside each half resolve relatively and need no prefix.
   whether the `crt` extra) each feature needs, and how an unavailable one
   behaves.
 - [`exceptions.md`](./exceptions.md) - the exception model.
-- [`opresult.md`](./opresult.md) - the `OpResult` record (the `on_result`
-  callback): the fields, the `src` / `dest` convention, and which operation
-  populates which.
-- [`s3.md`](./s3.md) - the design of the `S3` entry point (the `client` /
-  `resolve` customization seams, resolution rules, module-level functions).
-- [`storage.md`](./storage.md) - the `Storage` abstraction and custom backends
-  (the subclassing contract, `StorageCapability`, the open route).
-- [`deleter.md`](./deleter.md) - the design of `S3Deleter` (asynchronous batch
-  deletion).
+- [`opresult.md`](./opresult.md) - the per-item result a run reports: its
+  fields, which side is the source and which the destination, and which
+  operation fills which.
+- [`s3.md`](./s3.md) - the operation entry point (its customization seams,
+  how a location is resolved, the module-level functions).
+- [`storage.md`](./storage.md) - the storage abstraction and custom backends
+  (the subclassing contract, capabilities, the open route).
+- [`deleter.md`](./deleter.md) - asynchronous batch deletion.
 - [`globsieve.md`](./globsieve.md) - aws-cli's `--exclude` / `--include`
   engine and what each operation shows a filter.
-- [`transfer.md`](./transfer.md) - the design of the transfer engine
-  (`Transferrer` / `S3.cp` / `S3.mv`).
-- [`crt.md`](./crt.md) - the design of the CRT transfer engine mode
-  (`preferred_transfer_client`, library = boto3-faithful / CLI =
-  aws-cli-faithful).
-- [`sync.md`](./sync.md) - the design of `S3.sync` (two-layer pipeline,
-  comparator, the per-lane `create_filter` / `update_filter` / `delete_filter`
-  axis).
-- [`imports.md`](./imports.md) - import discipline (lazy root re-exports and the
-  SDK-free top-level CLI help/version exits).
-- [`masking.md`](./masking.md) - credential masking for debug logs
-  (`set_stream_logger`, `SecretMaskingFilter`, the replacement notation).
+- [`transfer.md`](./transfer.md) - the transfer engine (`cp` and `mv`).
+- [`crt.md`](./crt.md) - the CRT transfer engine mode.
+- [`sync.md`](./sync.md) - `sync` (the two-layer pipeline, the comparator,
+  the per-lane create / update / delete filters).
+- [`imports.md`](./imports.md) - import discipline (lazy re-exports from the
+  package root, and the CLI's help and version answered without the SDK).
+- [`masking.md`](./masking.md) - credential masking for debug logs (what is
+  masked, and the replacement notation).
 - [`aws-cli-option-handling.md`](./aws-cli-option-handling.md) - handling of
   `aws s3` options that are no-ops / unsupported.
-- [`cli.md`](./cli.md) - the design of the CLI layer (`boto3-s3-cli`).
-  Implemented subcommands (currently `cp` / `ls` / `mv` / `rm` / `mb` / `rb` /
-  `presign` / `sync` / `website` - all `aws s3` subcommands).
+- [`cli.md`](./cli.md) - the CLI layer (`boto3-s3-cli`).
 ### Developer runbooks
 
 Neither design nor promises to users - how to work on the project. Read with
 [`CONTRIBUTING.md`](../CONTRIBUTING.md), which is the entry point.
 
-- [`testing.md`](./testing.md) - the test structure (5 tiers, golden
-  contracts, e2e gate, the exit code comparison) and the output comparison
-  criterion.
+- [`testing.md`](./testing.md) - the test structure (the tiers, golden
+  contracts, the e2e gate, the exit code comparison) and the output
+  comparison criterion.
 - [`endpoint-fidelity.md`](./endpoint-fidelity.md) - how the local test
-  endpoint (the dev stack, RustFS) answers differently from real S3, the
+  endpoint (the dev stack) answers differently from real S3, the
   test-side change made for each gap, and how that server was chosen.
 - [`benchmark.md`](./benchmark.md) - the local performance benchmarks
   (E2E differential against the pinned aws-cli, in-process stubbed-S3
@@ -407,7 +393,7 @@ Neither design nor promises to users - how to work on the project. Read with
 - [`release.md`](./release.md) - how the two packages are published to PyPI
   (tag-driven GitHub Actions, Trusted Publishing, independent versioning).
 
-The `S3` entry point itself is documented in [`s3.md`](./s3.md), the `Storage`
-abstraction and custom backends in [`storage.md`](./storage.md); each operation's
-per-method semantics live with its engine (`transfer.md` / `sync.md` /
+The operation entry point is documented in [`s3.md`](./s3.md), the storage
+abstraction and custom backends in [`storage.md`](./storage.md); each
+operation's semantics live with its engine (`transfer.md` / `sync.md` /
 `deleter.md` / `globsieve.md`).

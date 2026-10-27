@@ -546,7 +546,9 @@ numbers in the bold item labels below are that document's.
      attempted 3 times and ends `(reached max retries: 2)` as under aws-cli,
      where the per-client `Config` this used to be left it at legacy's 5
      (measured). botocore then resolves and validates the whole retry
-     configuration inside `create_client`, in its own vocabulary.
+     configuration inside `create_client`, in its own vocabulary, so
+     `retry_mode = legacy`, which aws-cli refuses, is taken as botocore
+     takes it.
   7. **temporary credentials are cached on disk** - botocore caches what the
      `assume-role` / `assume-role-with-web-identity` / `sso` providers fetch in
      a per-process dict, so every invocation would re-call `AssumeRole` and an

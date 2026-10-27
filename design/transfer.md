@@ -570,7 +570,10 @@ dest-existence check for download. We ported the same three faces:
   skipped on recursion** - a faithful reproduction of aws-cli's
   `fileinfo.is_glacier_compatible`, not "a bug to fix."
 - **parent-ref guard** (download only): an object whose compare key normalizes to
-  `../` is skipped + warned (`File references a parent directory.`).
+  `../` is skipped + warned (`File references a parent directory.`). Under a
+  `filename_encoding` it also checks the key in the form the OS gets
+  (`producers._os_key`): an encoding that is not ASCII compatible can turn
+  text with no `..` into bytes that climb out.
 - **>48.8 TiB warning** (upload): as in aws-cli, **it only warns and still
   attempts the transfer** (to show S3's EntityTooLarge).
 - walk warnings (unreadable / special file / broken symlink / invalid mtime) go

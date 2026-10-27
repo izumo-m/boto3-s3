@@ -233,8 +233,8 @@ versioned bucket) cannot be mapped back to submission order.
 
 ## 4. aws-cli compatibility notes
 
-Batching is a settled deliberate deviation ([`overview.md`](./overview.md)
-section 3): a difference from aws-cli that originates in sending
+Batching is a settled deliberate deviation, not to be traded back for
+per-key deletes: a difference from aws-cli that originates in sending
 `DeleteObjects` batches instead of one `DeleteObject` per key is recorded here
 and in aws-differences.md, not reopened. The deleter still narrows such a
 difference where that is cheap - every per-key re-send in section 3 exists for
