@@ -691,6 +691,10 @@ dest-existence check for download. We ported the same three faces:
   system encoding, or on Windows, whose names are Unicode. A key the encoding
   cannot represent fails as its item when the download is submitted, as
   Python's own open fails for one its file system encoding cannot represent.
+  The CRT takes the OS form as a `str` and encodes it as UTF-8 itself, so a
+  name that is not UTF-8 - its OS form carries surrogates - fails as its item
+  on that engine, an upload and a download alike (`surrogates not allowed`);
+  the classic engine opens it through Python and moves it.
   The CLI passes the encoding `aws` uses (design/cli.md).
 - **case-conflict gate** (`case_conflict`, **S3->local recursive download only**,
   fires when mode != `ignore`; aws-cli's `_modify_instructions_for_case_conflicts`

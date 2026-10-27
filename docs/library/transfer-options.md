@@ -204,7 +204,10 @@ s3.cp("s3://bucket/a/", "./a", recursive=True)   # files created with EUC-JP nam
 An upload's keys are the names decoded with that encoding, a download's files
 are the keys encoded with it, and the paths the results and warnings report are
 that text. A name the encoding cannot decode is carried with `surrogateescape`
-and fails as an S3 key; a key it cannot encode fails as that item. The paths
+and fails as an S3 key; a key it cannot encode fails as that item. The CRT
+engine opens local files by UTF-8 names only, so on it a file whose name in
+that encoding is not valid UTF-8 fails as that item, an upload and a download
+alike; the classic engine moves it. The paths
 you pass are text in that encoding too, and `LocalStorage.os_path` gives the
 form to hand to Python's own `os` functions. Windows names files in Unicode,
 so the setting has no effect there. The `boto3-s3` command sets it to the

@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An upload from a custom storage guesses its `Content-Type` from the entry's `compare_key`, every name read as a file name.
 - A single-key `rm` interrupted by Ctrl-C reports the item `CANCELLED` and raises at once instead of waiting for the delete, and a local file time only the local zone cannot hold is read as its UTC value instead of the epoch with a warning.
 - Removed `TransferConfig`'s `should_stream` / `disk_throughput` / `direct_io` (they had no effect; the `[s3]` keys are still accepted), the walk's `crosses_full_path_boundary` and `sym_depth`, and `boto3_s3.transfer`'s two SDK-floor probes from its exports.
-- `S3` and `LocalStorage` take a `filename_encoding` that fixes how local file names turn into keys and back on Linux and macOS, whatever Python's own default (`None` keeps it); `LocalStorage.os_path` / `text_path` convert a path between the two forms.
+- `S3` and `LocalStorage` take a `filename_encoding` that fixes how local file names turn into keys and back on Linux and macOS, whatever Python's own default (`None` keeps it); `LocalStorage.os_path` / `text_path` convert a path between the two forms. The CRT engine moves only files whose names are valid UTF-8.
 - A cancel, Ctrl-C or early stop of a run with a selective `filter` no longer waits for the listing to reach the next entry the filter keeps; `sieve_pages` now yields a page the filter empties.
 - `ls` takes a `filter=` like `cp` / `mv` / `rm` / `sync`; it is offered every entry `ls` would deliver, common prefixes and buckets included.
 - `s3_errors` and `translate_boto_error` moved from `boto3_s3.s3storage` to the new `boto3_s3.sdkerrors`.
