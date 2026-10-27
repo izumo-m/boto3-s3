@@ -488,7 +488,9 @@ Ports keep aws-cli test names, canned responses, and expectations verbatim
 where possible (see the adaptation rules in each port's module docstring -
 e.g. `tests/cli/awscli/test_ls_command.py`). Genuine divergences are to be marked
 `xfail(strict=True)` with the open design question in the reason, never
-silently rewritten (none currently; all ports match aws-cli).
+silently rewritten (none currently; all ports match aws-cli). A port whose
+feature boto3-s3 has removed is skipped with the reason rather than deleted,
+since a deleted port could not be told from one never made.
 
 Each ported test is traceable to its aws-cli original by a simple convention:
 a test carrying **no** `# aws-cli:` comment shares its original's class and

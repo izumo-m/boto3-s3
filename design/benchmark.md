@@ -265,7 +265,9 @@ wrong *absolute* picture of where `aws s3` actually runs. The EC2 lane records
 a baseline in a representative environment (a quiet, fixed-performance
 instance against real S3 in one region) whose "instance type + AMI + region"
 someone else can reproduce. It is not a per-commit lane; run it when recording
-a baseline for [RESULTS.md](../benchmarks/RESULTS.md).
+a baseline for [RESULTS.md](../benchmarks/RESULTS.md), or when refreshing the
+one-file `sync` numbers in the [CLI README](../cli/README.md), which come from
+this lane only.
 
 ```
 python -m benchmarks ec2 setup-iam            # once, needs an administrator

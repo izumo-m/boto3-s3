@@ -123,7 +123,18 @@ points back here rather than repeating the commands.
   typed and basedpyright clean.
 - **English.** All version-controlled files are written in English.
 - **No dead weight.** Remove implementation and docs that are no longer used
-  rather than leaving them behind; git history is the record.
+  rather than leaving them behind; git history is the record. Once a removed
+  feature is confirmed ignored, the test that confirmed it goes too; an aws-cli
+  test port is skipped instead (see
+  [`design/testing.md`](design/testing.md) section 5).
+- **Portable test expectations.** Pin a test's exit code and the parts of a
+  message the code builds itself (a path, say), never the OS's error text,
+  errno or `OSError` subclass: a missing directory is `[Errno 2]` on Linux but
+  `[WinError 3]` with a locale-dependent sentence on Windows, and
+  `mkdir("out/")` where a file `out` exists raises `FileExistsError` on Linux
+  and Windows but `NotADirectoryError` on macOS. Assert `OSError` or the
+  library's exception class instead. A test that touches such results needs
+  every OS's CI job checked, macOS included.
 
 ## Commits
 

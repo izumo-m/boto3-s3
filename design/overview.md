@@ -61,7 +61,10 @@ maintaining high functional compatibility.
   unavailable below the version that introduced them - on a par with the awscrt
   extra. Which feature needs which version, and how an unavailable one behaves,
   is recorded in [`compatibility.md`](../docs/compatibility.md). Everything else works
-  at the floor.
+  at the floor. A feature whose absence would fail every item for the same
+  reason, or quietly drop a safeguard, is checked against the installed SDK
+  before the run starts; one whose failure is reported correctly where it
+  happens is called without a check.
 - **No SigV2**: S3's legacy Signature Version 2 is out of scope, as it is for
   aws-cli v2, whose bundled botocore has no S3 SigV2 signer left. Neither the
   library nor the CLI signs with it on its own, and nothing is shaped to keep
@@ -306,7 +309,9 @@ maintaining high functional compatibility.
   library's exception). Renaming such a symbol to something unrelated - or reusing an
   aws-cli name for a different meaning - obscures the port; a change (including
   a refactoring) that would significantly break this correspondence is
-  rejected.
+  rejected. Where the code is shaped differently from its counterpart
+  (computing from held state what aws-cli re-parses from a string, say), its
+  docstring or comment names the counterpart and says the two are equivalent.
 - **Responsibility boundary for compatibility**: functional compatibility is
   the **library's** responsibility, for every input `aws s3` accepts; the
   library may be a superset that is more permissive than aws-cli for
