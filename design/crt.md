@@ -117,7 +117,7 @@ config=None read as `'auto'` - with the same rules as boto3.
   botocore category (section 6).
 - **Deriving the connection parameters (a documented improvement over boto3)**:
   because the library uses a connection model in which the caller holds the
-  client (the S3 connection model in [`overview.md`](./overview.md)), it derives
+  client (the S3 connection model in [`s3.md`](./s3.md)), it derives
   the CRT wiring from the client.
   - region = `client.meta.region_name`
   - endpoint = the caller's explicit endpoint when one is threaded in, else the

@@ -5,7 +5,7 @@ exception design of `boto3-s3`. When a design decision changes, update this
 document first.
 
 Related: the entry point to the design as a whole is
-[`overview.md`](./overview.md).
+[`README.md`](./README.md).
 
 ---
 
@@ -28,6 +28,16 @@ Related: the entry point to the design as a whole is
 - Backend exceptions (`botocore` / `OSError` / `urllib3`, etc.) are converted at
   the library boundary and the original is preserved on `__cause__` via
   `raise ... from <backend>` (never swallowed).
+- **The caller's code** (overview.md section 3): a failure it reports with
+  the library's exceptions is recorded as it is. Any other exception from a
+  stream or a storage backend fails that item as `Boto3S3Error`, with the
+  original kept as its cause - except a stream source opened before the
+  transfer, as aws-cli opens standard input, which stops the run before it
+  starts when it cannot be opened, with the same classification. An
+  interrupt (Ctrl-C, a request to exit) cancels the item and reaches the
+  caller. An exception from a filter or a callback reaches the caller as it
+  is: a filter decides on an item and a callback reports on one, so their
+  failure is not the item's.
 
 ## 2. Hierarchy
 

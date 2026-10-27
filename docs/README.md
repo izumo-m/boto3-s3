@@ -70,5 +70,5 @@ through.
 
 ---
 
-Curious how it works inside? The [design documents](../design/overview.md) cover
+Curious how it works inside? The [design documents](../design/README.md) cover
 that — nothing there is needed to use either package.

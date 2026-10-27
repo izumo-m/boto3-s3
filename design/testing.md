@@ -832,7 +832,8 @@ on where it is (overview.md section 3):
   deliberately is allowed, but then it is recorded in
   [`aws-differences.md`](../docs/cli/aws-differences.md).
 - In a warning or an error report, the **Messages** rules of overview.md
-  section 3 decide what is compared and how. A test may pin what they leave
+  section 3, worked out below, decide what is compared and how. A test may
+  pin what they leave
   uncompared, but a difference from aws-cli there is neither a bug nor
   recorded.
 - A difference that comes only from an SDK or Python version difference (an
@@ -840,6 +841,51 @@ on where it is (overview.md section 3):
   or a Python other than the one aws-cli bundles) is neither a bug nor
   recorded, wherever it is - unless it breaks one of the error rules, which
   hold on every version (overview.md section 3).
+
+### Warning and error reports
+
+The **Messages** rules of overview.md section 3, worked out. A message is
+compared by running the pinned `aws` under the same conditions on the same
+OS.
+
+- **The part aws-cli's own code writes** - the sentence around the report, the
+  values it puts in (paths, URIs, keys, counts, option names), and whether a
+  warning or an error is written at all - is compared character for
+  character, and a difference is a bug. Ours may say it differently only
+  where aws-cli's text says something untrue about the run (`Invalid JSON`
+  for valid JSON of the wrong shape) or says nothing about what went wrong (a
+  `fatal error: ` with nothing after it); a misspelling or an awkward phrase
+  is not reason enough. A comment at that place in the code then gives
+  aws-cli's text and the reason.
+- **The part the SDK, awscrt, Python, the OS or S3 writes** - the text of an
+  exception the report carries - is compared by its cause only: for an OS
+  error, the number the text shows (`[Errno 13]`, `[WinError 5]`); for an S3
+  error, the error code and the operation (`An error occurred (AccessDenied)
+  when calling the PutObject operation`); for any other exception, its type
+  (for awscrt, the error name). With the same cause, the rest of the text -
+  the file names an exception carries, its wording - may differ. A different
+  cause is a bug, and so is a text of our own where aws-cli reports that
+  part.
+- **A difference kept** after discussion is commented at its place in the
+  code.
+- **The frame aws-cli writes around the report of an exit code**
+  (`An error occurred (ParamValidation): ` and `Error parsing parameter
+  '--metadata': ` on a usage error) follows our exit code where the two
+  differ. Whether the exit code may differ is decided by the exit-code rule of
+  overview.md section 3, and the reason for a different one is commented at
+  its place. The text inside the frame is compared as the two parts above.
+- **What is left uncompared**: a difference that comes only from a version
+  reaches only the match with aws-cli - the error rules hold on every
+  version, so a version that makes a report hide its cause or print a
+  traceback is a bug like any other. A bug of aws-cli's own is a traceback; a
+  report carrying an exception of a type that marks a programming error
+  (`AssertionError`, `AttributeError`, `IndexError`, `KeyError`,
+  `NameError`, `TypeError`); or a report that fails to be written and leaves
+  another error in its place. That leaves out the report only: where the
+  outcome differs as well - aws-cli stops on a bug of its own where ours runs
+  on - that is a functional difference, written down in
+  [`aws-differences.md`](../docs/cli/aws-differences.md) as one of aws-cli's
+  bugs not copied.
 
 ### Where the criterion applies
 

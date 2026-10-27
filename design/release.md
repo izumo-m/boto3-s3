@@ -3,8 +3,7 @@
 Every package-index upload is triggered from this repo and nothing else: a
 matching tag publishes to PyPI, a manual workflow dispatch publishes only to
 TestPyPI, and an ordinary push publishes nothing. The two packages are
-versioned independently ([`overview.md`](./overview.md) section 3), and the tag
-selects which one publishes. Publishing runs in
+versioned independently, and the tag selects which one publishes. Publishing runs in
 [`.github/workflows/release.yml`](../.github/workflows/release.yml) via Trusted
 Publishing (OIDC), so no token is needed.
 

@@ -238,7 +238,7 @@ For the `boto3-s3` command, see its
 what differs from `aws s3`, the exit codes, and the configuration it reads.
 
 The design documents behind all of this are indexed in
-[`design/overview.md`](https://github.com/izumo-m/boto3-s3/blob/main/design/overview.md).
+[`design/README.md`](https://github.com/izumo-m/boto3-s3/blob/main/design/README.md).
 
 ## Compatibility
 

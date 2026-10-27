@@ -698,6 +698,9 @@ dest-existence check for download. We ported the same three faces:
   name that is not UTF-8 - its OS form carries surrogates - fails as its item
   on that engine, an upload and a download alike (`surrogates not allowed`);
   the classic engine opens it through Python and moves it.
+  The encoding is used as given: only a codec Python does not know is
+  refused, and nothing checks it further or works around what the OS makes
+  of the names (overview.md section 3, "Text encodings").
   The CLI passes the encoding `aws` uses (design/cli.md).
 - **case-conflict gate** (`case_conflict`, **S3->local recursive download only**,
   fires when mode != `ignore`; aws-cli's `_modify_instructions_for_case_conflicts`

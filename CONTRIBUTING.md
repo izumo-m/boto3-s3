@@ -119,6 +119,19 @@ points back here rather than repeating the commands.
   option, extend the matching scenarios and tests so the comparison keeps
   covering it (see [`design/testing.md`](design/testing.md) and the design
   policy in [`design/overview.md`](design/overview.md) section 3).
+- **Names traceable to aws-cli.** Compatibility work depends on reading this
+  codebase side by side with the aws-cli source. When a symbol here (a class,
+  function, or option/config key) corresponds to an aws-cli counterpart, keep
+  the same name with the same meaning, or an extended form whose
+  correspondence remains easy to trace (a function ported from aws-cli keeps
+  aws-cli's name even where it re-raises its failure as the library's
+  exception). Renaming such a symbol to something unrelated - or reusing an
+  aws-cli name for a different meaning - obscures the port; a change (a
+  refactoring included) that would significantly break this correspondence
+  is rejected. Where the code is shaped differently from its counterpart
+  (computing from held state what aws-cli re-parses from a string, say), its
+  docstring or comment names the counterpart and says the two are
+  equivalent.
 - **Typed.** The library ships type information (`py.typed`); keep public APIs
   typed and basedpyright clean.
 - **English.** All version-controlled files are written in English.
