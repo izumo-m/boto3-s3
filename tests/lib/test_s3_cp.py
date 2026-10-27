@@ -32,7 +32,7 @@ from boto3_s3.exceptions import (
     TransportError,
     ValidationError,
 )
-from boto3_s3.iostorage import IOStorage, StdioStorage
+from boto3_s3.iostorage import IOStorage, StdioStorage, TextIOStorage
 from boto3_s3.localstorage import LocalStorage
 from boto3_s3.producers import CaseConflictGate
 from boto3_s3.s3 import S3
@@ -1660,9 +1660,12 @@ class TestStreamRoutes:
             ]
         )
         S3().cp(
-            S3Storage("s3://bucket/t.txt", client=client), IOStorage(sink), transfer_config=_SYNC
+            S3Storage("s3://bucket/t.txt", client=client),
+            TextIOStorage(sink),
+            transfer_config=_SYNC,
         )
         assert sink.getvalue() == "héllo"
+        assert not sink.closed
 
     def test_stream_download_into_a_gzip_writer(self, tmp_path: Path) -> None:
         # A non-seekable binary write stream (gzip's compressor) is a valid

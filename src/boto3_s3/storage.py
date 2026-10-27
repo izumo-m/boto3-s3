@@ -26,8 +26,8 @@ Current state (kept accurate because this docstring is the design record): the
 built-in ``S3Storage`` <-> ``LocalStorage`` pairs transfer through ``s3transfer``
 directly off ``S3Storage``'s client/bucket and ``LocalStorage``'s path
 (``transfer.py``); ``S3._run_transfer`` (``s3.py``) routes those. A custom
-backend (any non-built-in ``scheme``) - and the ``IOStorage`` / ``StdioStorage``
-stream wrappers (``iostorage.py``) - instead ride the **open route**: ``cp`` /
+backend (any non-built-in ``scheme``) - and the stream storages (``IOStorageBase``
+and its subclasses, ``iostorage.py``) - instead ride the **open route**: ``cp`` /
 ``mv`` / ``sync`` move the non-built-in side's bytes through its ``Storage.open``
 (the routing keys on concrete types, not the ``scheme`` string - that is
 display-only)
@@ -374,8 +374,8 @@ class Storage(abc.ABC):
         the transfer settles - a ``"wb"`` ``close`` flushes buffered
         writes like any file object (whether the backend persists per write or
         defers to the flush - write-through vs write-back - is its own choice).
-        ``LocalStorage`` and the stream Storages (``IOStorage`` /
-        ``StdioStorage``) implement both modes. ``S3Storage`` implements ``"rb"``
+        ``LocalStorage`` and the stream storages (``IOStorageBase`` and its
+        subclasses) implement both modes. ``S3Storage`` implements ``"rb"``
         only - a ``GetObject`` read convenience (chiefly for a content-based
         ``sync`` filter), addressed by the object's full key; its ``"wb"`` stays
         unimplemented, since every S3 write on the *transfer lanes* rides

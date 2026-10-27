@@ -72,7 +72,7 @@ fields are kept because they are populated even where the entry is absent - a
 | `dest_storage` | dest side | dest side | — | run's dest side |
 | `extra_info` | copy / download: `{"ETag": …}` · upload: — | same | — | — |
 
-A **stream** `cp` (one side is an `IOStorage`) lists nothing, so `src_info` /
+A **stream** `cp` (one side is a stream storage, an `IOStorageBase`) lists nothing, so `src_info` /
 `dest_info` are both `None` and the stream endpoint renders as `-`; the
 `src_storage` / `dest_storage` are still the two sides. One accepted gap: a
 glacier `SKIPPED` record (`ignore_glacier_warnings=True`) carries no `dest` /

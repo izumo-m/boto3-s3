@@ -407,23 +407,25 @@ chain:
   with `os.replace` alone, so every failure keeps the old file
   ([`storage.md`](./storage.md) section 6).
 
-## 6. streaming (`IOStorage` / `StdioStorage`)
+## 6. streaming (`IOStorageBase`: `IOStorage` / `TextIOStorage` / `StdioStorage`)
 
-`S3.cp` streams when one side is an `IOStorage` - a `Storage` (`storage.py` /
-`iostorage.py`) wrapping a single in-hand file-like object - or the
-`StdioStorage` convenience for `sys.stdin` / `sys.stdout`. `cp` accepts only a
-`Location` (`str | PathLike | Storage`), so a caller wraps the stream
-(`cp("s3://b/k", IOStorage(buf))`, `cp(IOStorage(buf), "s3://b/k")`); the CLI
-wraps `-` in `StdioStorage`. The S3 side rides `s3transfer` as usual; the stream
-side hands `s3transfer` the **binary** fileobj that `IOStorage.open` returns - a
-text stream (`io.StringIO`, a text-mode file) is encoded on read / decoded on
-write there, so the s3transfer boundary is always bytes (like `StreamingBody`).
-The caller's stream is never closed by `IOStorage`.
+`S3.cp` streams when one side is a stream storage - an `IOStorageBase`
+(`iostorage.py`, [`storage.md`](./storage.md) section 5): `IOStorage` wrapping a
+single in-hand binary file-like object, `TextIOStorage` a text one, the
+`StdioStorage` convenience for `sys.stdin` / `sys.stdout`, or a subclass of the
+caller's own. `cp` accepts only a `Location` (`str | PathLike | Storage`), so a
+caller wraps the stream (`cp("s3://b/k", IOStorage(buf))`,
+`cp(IOStorage(buf), "s3://b/k")`); the CLI wraps `-` in `StdioStorage`. The S3
+side rides `s3transfer` as usual; the stream side hands `s3transfer` the
+**binary** fileobj that the storage's `open` returns - a text stream is encoded
+on read / decoded on write there (`TextIOStorageBase`), so the s3transfer
+boundary is always bytes (like `StreamingBody`). The caller's stream is never
+closed by `IOStorage` / `TextIOStorage`.
 
 - **Single item, no gates**: a stream is always a single transfer (the same as
   aws-cli's stream path, which does not go through the generator). `recursive`
   is a `ValidationError` (`Streaming currently is only compatible with
-  non-recursive cp commands`), and an `IOStorage` on both sides
+  non-recursive cp commands`), and a stream storage on both sides
   is also rejected. The glacier / parent-ref gates are not run.
 - **Stream option policy (follows aws-cli per option)**: a meaningless option is
   rejected, an additive one that degrades to a no-op is ignored. `recursive`
@@ -436,7 +438,7 @@ The caller's stream is never closed by `IOStorage`.
   transfer path (`s3open`), so its `filter` is still applied, to the single
   source entry. `expected_size` applies to an upload stream and is ignored
   elsewhere.
-- **`mv` with a stream**: an `IOStorage` may be the **destination** of a
+- **`mv` with a stream**: a stream storage may be the **destination** of a
   single-object move - the bytes land on the stream, then the S3 source is
   deleted (section 11) - but never the source (a move deletes its source, which
   a stream cannot be), and not a recursive one (a stream is a single endpoint);
@@ -448,9 +450,13 @@ The caller's stream is never closed by `IOStorage`.
   (`s3://bucket` / `s3://bucket/pre/`) the literal `-` becomes the basename"
   (`pre/-`) is **derived by the CLI layer with transferplan.py before being passed in**
   (the library is permissive; the quirk is owned by the CLI).
-- **upload**: hands s3transfer the fileobj from `IOStorage.open(key, "rb")` (the
-  open ignores the key - a single endpoint). No ContentType guess (there is no
-  filename). `expected_size` is a chunk-design hint for multipart
+- **upload**: hands s3transfer the fileobj from the storage's `open(key, "rb")`
+  (the key carries nothing - a single endpoint). A live run opens it before
+  building the transfer, as aws-cli's `UploadStreamRequestSubmitter` opens
+  stdin when it submits: a source that cannot be opened stops the run before
+  it starts - a family error raised as it is, any other exception as the base
+  `Boto3S3Error` with it as the cause, attributed to `cp` - and the source is
+  closed if the build fails. No ContentType guess (there is no filename). `expected_size` is a chunk-design hint for multipart
   (TransferItem.size_hint, provided to s3transfer only for a non-seekable
   fileobj: a seekable one is sized by the engine, and a provided size would be
   the byte count it reads, so an understated hint would truncate the object) -
@@ -467,11 +473,19 @@ The caller's stream is never closed by `IOStorage`.
 - **download**: provides neither size nor etag -> s3transfer self-probes with
   HeadObject before GetObject (exactly aws-cli's stream wire shape). Directory
   creation and the mtime stamp are not performed (section 5 is for path destinations
-  only). `StdioStorage`'s stdout writer is a **write-only** view (aws-cli's
-  `StdoutBytesWriter`), so s3transfer always takes its non-seekable path and
-  writes ranged chunks in order - a redirected stdout can report seekable
-  while `>>` opened it `O_APPEND`, where seek-based parallel writes would
-  interleave. The writer's `close` flushes the process stream (never closes
+  only). Every stream destination goes to the engine through the open route's
+  deferred writer (`producers.deferred_writer`, section 12), as a `mv` onto a
+  stream does: it offers only `write`, so s3transfer always takes its
+  non-seekable path and writes ranged chunks in order, from where the stream
+  stands - an append-mode stream, a pipe that claims to seek and a forward-only
+  `GzipFile` included - and it calls the storage's `open` at the first write,
+  so a download that ends before its first byte (a missing object, a cancel)
+  never opens the destination - an empty object's successful download opens
+  it at the commit - and a build failure discards it. A seekable
+  `IOStorage` stream gives up the classic engine's positioned parallel writes
+  for this: the parts are still fetched in parallel, and one that arrives
+  early waits in memory. `StdioStorage`'s stdout writer behind it is a
+  **write-only** view too (aws-cli's `StdoutBytesWriter`). The writer's `close` flushes the process stream (never closes
   it), and the transfer closes the writer as the item settles
   (`_CloseFileobj`, ahead of a `mv`'s source delete): a stdout that cannot
   take the bytes - a full disk, a reader that left the pipe - fails the item
@@ -489,9 +503,8 @@ The caller's stream is never closed by `IOStorage`.
   inside the transfer (`'NoneType' object has no attribute 'write'`), an
   empty object included - it writes nothing, so its writer's `close` fails it
   with the same error, as aws-cli's writer does on its write.
-  An `IOStorage` (caller-supplied stream) keeps the stream's own
-  seekability: the caller chose the object, so its protocol governs - and its
-  writer view absorbs the transfer's `close` into a flush in the same way.
+  An `IOStorage` (caller-supplied binary stream) writer view absorbs the
+  transfer's `close` into a flush in the same way.
 - The display renders the stream side as `-` (`src_display` / `dest_display`).
   The `BatchError` on failure is `1 of 1 transfers failed`.
 
@@ -939,7 +952,7 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
 ## 12. open route (custom backends: `opens3` / `s3open`)
 
 A custom `Storage` (anything that is not an `S3Storage` / `LocalStorage`,
-whatever its `scheme` string says; the built-in `IOStorage` / `StdioStorage`
+whatever its `scheme` string says; the stream storages (`IOStorageBase`)
 are the degenerate single-entry case of this same seam, with their own stream
 rules - section 6) transfers as one
 side of `cp` / `mv` / `sync`, the other side always S3. `transferplan.plan_transfer`
@@ -959,8 +972,8 @@ and has no `aws s3` counterpart to compare with.
   writer that `close` flushes buffered writes (`Storage.open`'s contract), and a
   `close` (flush) failure flips the settled future via `set_exception` (a failed transfer).
   `s3transfer` itself never closes a caller fileobj (`CompleteDownloadNOOPTask`),
-  so this is the sole close. An `IOStorage` hands back a close-suppressing view,
-  so the caller's own stream is never closed (section 6).
+  so this is the sole close. `IOStorage` / `TextIOStorage` hand back a
+  close-suppressing view, so the caller's own stream is never closed (section 6).
 - **the open key**: `""` is the location itself (a single source / destination),
   a non-empty key an entry beneath it - the same key regime as `delete`. A
   recursive item's key is its `compare_key`; a single *source* opens `""`. The

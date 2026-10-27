@@ -43,7 +43,7 @@ def ls(
 `target` is an `S3Storage` or a `str` / `os.PathLike[str]` naming an S3
 location. `Location`'s remaining member — a `Storage` that is not an
 `S3Storage` — is rejected: none of the built-in backends implements
-`__fspath__`, so a `LocalStorage`, `IOStorage`, or `StdioStorage` argument
+`__fspath__`, so a `LocalStorage` or stream endpoint (an `IOStorageBase`) argument
 falls into the `ValidationError` below rather than being listed.
 
 An `S3Storage` is used as given, including a subclass, and keeps its own client

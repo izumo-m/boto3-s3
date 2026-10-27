@@ -110,8 +110,10 @@ Two checks are `mv`'s own, and each raises
 [`ValidationError`](../exceptions.md#validationerror) before anything is
 listed, transferred or deleted:
 
-- **a stream source.** An [`IOStorage`](../storage.md#iostorage) or
-  [`StdioStorage`](../storage.md#stdiostorage) as `src` is refused outright: a
+- **a stream source.** A stream endpoint (an
+  [`IOStorageBase`](../storage.md#iostoragebase) such as
+  [`IOStorage`](../storage.md#iostorage) or
+  [`StdioStorage`](../storage.md#stdiostorage)) as `src` is refused outright: a
   move deletes its source, and a stream is not something that can be deleted.
 - **a move onto the same object.** When both sides resolve to S3, the two
   keyless-normalized URIs are compared: an exact match is refused, and so is a

@@ -11,15 +11,16 @@ from __future__ import annotations
 
 import io
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO, Literal
 
 import pytest
 from boto3.s3.transfer import TransferConfig
 
 from boto3_s3 import Exclude, globsieve
 from boto3_s3.exceptions import BatchError, ValidationError
-from boto3_s3.iostorage import IOStorage, StdioStorage
+from boto3_s3.iostorage import IOStorage, IOStorageBase, StdioStorage, TextIOStorage
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.types import OpOutcome, OpResult, TransferProgress, TransferType
@@ -27,6 +28,23 @@ from tests.utils.fakes3 import MTIME, client_error, get_response, head_response
 from tests.utils.recorder import make_recording_client, ops
 
 _SYNC = TransferConfig(use_threads=False)
+
+
+class _OwnStream(IOStorageBase):
+    """A stream storage of the caller's own: the gates key on the base class."""
+
+    def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
+        return io.BytesIO()
+
+
+# Every kind of stream storage the mv gates must refuse alike.
+_STREAM_STORAGES: list[Callable[[], IOStorageBase]] = [
+    lambda: IOStorage(io.BytesIO(b"x")),
+    lambda: TextIOStorage(io.StringIO("x")),
+    StdioStorage,
+    _OwnStream,
+]
+_STREAM_STORAGE_IDS = ["IOStorage", "TextIOStorage", "StdioStorage", "own"]
 
 
 class TestStreams:
@@ -103,15 +121,20 @@ class TestStreams:
         assert (error.operation, error.bucket, error.key) == ("mv", "b", "d/a.txt")
         assert excinfo.value.__cause__ is error
 
-    def test_stream_source_rejected(self) -> None:
+    @pytest.mark.parametrize("make", _STREAM_STORAGES, ids=_STREAM_STORAGE_IDS)
+    def test_stream_source_rejected(self, make: Callable[[], IOStorageBase]) -> None:
         with pytest.raises(ValidationError, match="mv does not support a stream source"):
-            S3().mv(IOStorage(io.BytesIO(b"x")), S3Storage("s3://bucket/k"))
+            S3().mv(make(), S3Storage("s3://bucket/k"))
 
-    def test_recursive_stream_destination_rejected(self) -> None:
+    @pytest.mark.parametrize("make", _STREAM_STORAGES, ids=_STREAM_STORAGE_IDS)
+    def test_recursive_stream_destination_rejected(self, make: Callable[[], IOStorageBase]) -> None:
         with pytest.raises(ValidationError, match="only for a single object"):
-            S3().mv(S3Storage("s3://bucket/pre/"), IOStorage(io.BytesIO()), recursive=True)
+            S3().mv(S3Storage("s3://bucket/pre/"), make(), recursive=True)
 
-    def test_stream_destination_no_overwrite_rejected(self) -> None:
+    @pytest.mark.parametrize("make", _STREAM_STORAGES, ids=_STREAM_STORAGE_IDS)
+    def test_stream_destination_no_overwrite_rejected(
+        self, make: Callable[[], IOStorageBase]
+    ) -> None:
         # cp's stream gate, ported: a streaming download has no existing
         # destination to guard, so no_overwrite must fail loud instead of
         # being silently ignored (and the source deleted anyway).
@@ -119,7 +142,7 @@ class TestStreams:
         with pytest.raises(ValidationError) as excinfo:
             S3().mv(
                 S3Storage("s3://b/d/a.txt", client=client),
-                IOStorage(io.BytesIO()),
+                make(),
                 no_overwrite=True,
             )
         assert type(excinfo.value) is ValidationError

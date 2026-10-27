@@ -89,7 +89,7 @@ instances exist only where no classification applies:
 - a single download's local destination file whose name the operating
   system refuses before asking the filesystem (an embedded NUL, a lone
   surrogate), which fails that item (see [`ValidationError`](#validationerror));
-- an exception a stream raises (an `IOStorage` or `StdioStorage` side) that is
+- an exception a stream raises (a stream endpoint, an `IOStorageBase`, as a side) that is
   not already a `Boto3S3Error`, an `OSError` included — a download to a full
   disk, say; where the SDK reads the stream itself, the SDK's category applies
   instead ([`storage.md`](./storage.md#iostorage));
@@ -196,6 +196,8 @@ operation's `**options`; a malformed `s3://` URI, or a bucket name that is
 empty where the operation requires one; a `mv` whose source and destination
 name the same object; a stream used where the operation does not accept one
 (both sides at once, a `mv` source, a recursive stream destination); an
+`io.TextIOBase` handed to `IOStorage`, or an `io.RawIOBase` /
+`io.BufferedIOBase` to `TextIOStorage`; an
 unrecognized value for a mode option such as `copy_props`,
 `annotation_copy_mode` or `case_conflict`, or for `presign`'s `method`; a
 case-fold collision under `CaseConflictMode.ERROR`; and `stdin` unavailable
@@ -232,8 +234,8 @@ class InvalidValueError(ValidationError): ...
 
 Adds no attributes and no constructor of its own. Inside `boto3_s3` these
 paths raise it: [`presign`](./operations/presign.md) with a non-positive
-`expires_in` the CRT signer refuses, an `IOStorage` given an unknown
-`encoding`, and an [`S3`](./s3.md) or a `LocalStorage` given an unknown
+`expires_in` the CRT signer refuses, a `TextIOStorage` (or another
+`TextIOStorageBase`) given an unknown `encoding`, and an [`S3`](./s3.md) or a `LocalStorage` given an unknown
 `filename_encoding` ([`storage.md`](./storage.md)). Otherwise it is raised by the
 `boto3-s3-cli` distribution (and is available to callers who want the same
 refinement); a handler around library calls need only catch

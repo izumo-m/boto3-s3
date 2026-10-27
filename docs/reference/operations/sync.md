@@ -21,7 +21,7 @@ trailing separator on either argument changes nothing.
 Four routes are accepted: local to S3 (upload), S3 to local (download), S3 to
 S3 (copy), and the open route — a custom `Storage` on one side paired with S3
 on the other. A local-to-local pair, a custom backend paired with anything but
-S3, and a stream endpoint (`IOStorage` / `StdioStorage`, which declares no
+S3, and a stream endpoint (an `IOStorageBase`, which declares no
 scan capability) are each rejected with `ValidationError`.
 
 The call runs two layers. First, visibility: each side's listing is enumerated

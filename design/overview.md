@@ -235,7 +235,10 @@ maintaining high functional compatibility.
   2. The caller's code reports its own failures with the library's
      exceptions, and one it raises is recorded as it is. Any other exception
      from a stream or a storage backend fails that item as the library's base
-     exception, with the original kept as its cause. An interrupt (Ctrl-C, a
+     exception, with the original kept as its cause - except a stream source
+     that `cp` opens before the transfer, as aws-cli opens stdin: one that
+     cannot be opened stops the run before it starts (the errors rule 3), with
+     the same classification. An interrupt (Ctrl-C, a
      request to exit) cancels the item and reaches the caller. An exception
      from a filter or a callback reaches the caller as it is: a filter decides
      on an item and a callback reports on one, so their failure is not the

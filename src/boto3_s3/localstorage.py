@@ -241,7 +241,7 @@ def _filename_codec(encoding: str | None) -> _FilenameCodec | None:
     """The conversion a ``filename_encoding`` asks for, or ``None`` for none.
 
     An unknown codec name is an ``InvalidValueError`` on every platform (as
-    ``IOStorage(encoding=...)``). ``None`` - no conversion at all - for no
+    ``TextIOStorage(encoding=...)``). ``None`` - no conversion at all - for no
     encoding, on Windows (the OS names files in Unicode, so there is no byte
     form to choose), and for the file system encoding itself (compared by
     ``codecs.lookup`` name), so the common case costs nothing per name.

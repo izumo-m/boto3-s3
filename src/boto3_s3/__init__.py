@@ -44,7 +44,13 @@ if TYPE_CHECKING:
         ValidationError,
     )
     from boto3_s3.globsieve import Exclude, GlobFilter, Include
-    from boto3_s3.iostorage import IOStorage, StdioStorage
+    from boto3_s3.iostorage import (
+        IOStorage,
+        IOStorageBase,
+        StdioStorage,
+        TextIOStorage,
+        TextIOStorageBase,
+    )
     from boto3_s3.localstorage import (
         LocalFileGenerator,
         LocalStorage,
@@ -125,6 +131,7 @@ __all__ = [
     "FileKind",
     "GlobFilter",
     "IOStorage",
+    "IOStorageBase",
     "Include",
     "InvalidConfigError",
     "InvalidValueError",
@@ -155,6 +162,8 @@ __all__ = [
     "Storage",
     "StorageCapability",
     "SyncPair",
+    "TextIOStorage",
+    "TextIOStorageBase",
     "TransferConfig",
     "TransferOptions",
     "TransferProgress",
@@ -223,7 +232,10 @@ _EXPORT_HOMES: dict[str, str] = {
     "GlobFilter": "boto3_s3.globsieve",
     "Include": "boto3_s3.globsieve",
     "IOStorage": "boto3_s3.iostorage",
+    "IOStorageBase": "boto3_s3.iostorage",
     "StdioStorage": "boto3_s3.iostorage",
+    "TextIOStorage": "boto3_s3.iostorage",
+    "TextIOStorageBase": "boto3_s3.iostorage",
     "LocalFileGenerator": "boto3_s3.localstorage",
     "LocalStorage": "boto3_s3.localstorage",
     "LoopDetector": "boto3_s3.localstorage",

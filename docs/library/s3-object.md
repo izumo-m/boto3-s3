@@ -91,7 +91,7 @@ as given, with its own client.
 | `"bucket/key"` to `ls` / `rm` / `mb` / `rb` / `presign` | an `S3Storage` — these accept a missing `s3://` prefix |
 | `"bucket"` or `"s3://bucket"` to `website` | the bucket name, read whole as `aws s3 website` reads its argument |
 | `S3Storage(uri, client=...)` | itself, with the client you gave it |
-| `IOStorage(stream)` / `StdioStorage()` | itself, as one side of a `cp` (the other side must be S3) |
+| `IOStorage(stream)` / `TextIOStorage(stream)` / `StdioStorage()` | itself, as one side of a `cp` (the other side must be S3) |
 
 For a specific profile, region or endpoint, configure the `S3` object once and
 every bare `"s3://..."` string follows:

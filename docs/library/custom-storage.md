@@ -5,7 +5,9 @@
 transfer, and its bytes move through the same engine.
 
 [`IOStorage`](./streams.md) is a backend written against this same interface — a
-working example to read before you write your own.
+working example to read before you write your own. For a single stream rather
+than a container, derive from `IOStorageBase` or `TextIOStorageBase` instead
+([`streams.md`](./streams.md), section 5).
 
 ## 1. What a custom backend can be
 

@@ -1228,6 +1228,18 @@ class _DeferredWriter:
             self._fileobj.close()
 
 
+def deferred_writer(storage: Storage, key: str) -> BinaryIO:
+    """A writer opening ``storage.open(key, "wb")`` only at its first write (`_DeferredWriter`).
+
+    The stream route of ``cp`` hands every stream destination through it, as
+    the open route hands a custom one: the destination is written in order,
+    and a download that ends before its first byte - a missing object, a
+    cancel - never opens it (an empty object's successful download opens it
+    at the commit).
+    """
+    return cast("BinaryIO", _DeferredWriter(storage, key, None))
+
+
 def open_upload_item(
     plan: transferplan.TransferPlan,
     info: FileInfo,

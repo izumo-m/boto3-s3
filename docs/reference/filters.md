@@ -108,8 +108,8 @@ A non-recursive `cp` / `mv` and `ls`'s bucket listing set it the same way;
 from `rm`'s blind single-key delete, and from `on_result` / `on_entry`, it
 arrives as raised.
 
-**Where it does not apply.** `cp`'s stream route — an `IOStorage` on either
-side — has no listing to prune, and `filter` is not consulted on it. `mv` has
+**Where it does not apply.** `cp`'s stream route — a stream endpoint (an
+`IOStorageBase`) on either side — has no listing to prune, and `filter` is not consulted on it. `mv` has
 no stream route of its own: a stream source raises `ValidationError`, so does a
 recursive stream destination, and a single-object stream destination rides the
 open route, where `filter` is applied to the single source entry and can call

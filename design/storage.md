@@ -3,7 +3,7 @@
 `Storage` is the abstraction the `S3` operations resolve their sides into:
 `S3.resolve` turns a path/URI argument into a `Storage`. The built-ins are
 `S3Storage` (an S3 bucket/key), `LocalStorage` (a local path), and the
-`IOStorage` / `StdioStorage` stream wrappers. A **custom subclass** is one more
+stream storages (`IOStorage`, `TextIOStorage`, `StdioStorage`; section 5). A **custom subclass** is one more
 `Storage`, so `cp` / `mv` / `sync` reach it through the same planning and
 engine path as the built-ins - through this interface alone on the custom
 side, while the built-in routes use their concrete classes' own API (section
@@ -29,8 +29,8 @@ So a custom backend takes part only in `cp` / `mv` / `sync`, and never in a
 custom↔custom pair. The S3-only operations — `ls` / `rm` / `mb` / `rb` / `presign` /
 `website` — require an actual `S3Storage` and are not part of this seam, and
 neither is the single-request object transfer on `S3Storage` (section 6). (The
-built-in `IOStorage` / `StdioStorage` stream wrappers use the very same seam: a
-stream is a degenerate single-entry backend.)
+built-in stream storages use the very same seam: a stream is a degenerate
+single-entry backend.)
 
 ## 2. The contract
 
@@ -343,18 +343,27 @@ S3().sync(DictStorage(store), "s3://my-bucket/data/")   # custom -> S3 (upload)
 S3().sync("s3://my-bucket/data/", DictStorage(store))   # S3 -> custom (download)
 ```
 
-## 5. Streams: `IOStorage` and `StdioStorage`
+## 5. Streams: `IOStorageBase` and its subclasses
 
-`IOStorage` is a built-in `Storage` that presents **one caller-supplied stream**
-as a single `open`-able endpoint, so a stream can be one side of a
-non-recursive `cp`, or the destination of a non-recursive `mv` (the other side
-always S3), without a temp file:
+A stream storage presents **one stream** as a single `open`-able endpoint, so a
+stream can be one side of a non-recursive `cp`, or the destination of a
+non-recursive `mv` (the other side always S3), without a temp file. They all
+derive from `IOStorageBase`, which is what `cp` / `mv` recognize a stream side
+by:
+
+```
+IOStorageBase                         bytes; `open` abstract
+├─ IOStorage(stream)                  a binary stream the caller hands over
+├─ StdioStorage()                     the process's stdin / stdout
+└─ TextIOStorageBase(*, encoding)     text; `open_text` abstract, `open` wraps it in a codec
+   └─ TextIOStorage(stream, *, encoding)   a text stream the caller hands over
+```
 
 ```python
 import gzip
 import io
 
-from boto3_s3 import S3, IOStorage
+from boto3_s3 import S3, IOStorage, TextIOStorage
 
 s3 = S3()
 
@@ -363,54 +372,94 @@ with open("hello.txt", "rb") as f:
     s3.cp(IOStorage(f), "s3://bucket/hello.txt")
 
 # upload from a text buffer (encoded with `encoding`, default utf-8)
-s3.cp(IOStorage(io.StringIO("hello")), "s3://bucket/hello.txt")
+s3.cp(TextIOStorage(io.StringIO("hello")), "s3://bucket/hello.txt")
 
 # download into a buffer, then read it back: rewind it yourself (or use
 # getvalue())
 buf = io.StringIO()
-s3.cp("s3://bucket/hello.txt", IOStorage(buf))
+s3.cp("s3://bucket/hello.txt", TextIOStorage(buf))
 buf.seek(0)
 print(buf.read())            # or: print(buf.getvalue())
 
-# download straight into a gzip writer - a GzipFile reports seekable() but
-# seeks only forward, so hand over just its write(): a non-seekable binary
-# write stream is written strictly in order
-class WriteOnly:
-    def __init__(self, stream):
-        self.write = stream.write
-
+# download straight into a gzip writer (written strictly in order)
 with gzip.open("hello.txt.gz", "wb") as f:
-    s3.cp("s3://bucket/hello.txt", IOStorage(WriteOnly(f)))
+    s3.cp("s3://bucket/hello.txt", IOStorage(f))
 ```
 
 The contract:
 
-- **Bytes at the s3transfer boundary.** A **binary** stream (`io.BytesIO`, a file
-  opened `"rb"` / `"wb"`, a `gzip` writer, a pipe) is used as-is; a **text**
-  stream (`io.StringIO`, a file opened `"r"` / `"w"`) is wrapped with a codec
-  (`IOStorage(stream, encoding="utf-8")`) — encode on upload, decode on download.
-- **The caller owns the stream.** `IOStorage` **never closes** it and never
-  rewinds it for you: lifecycle and final position are yours. Where a download
-  lands depends on the stream and the engine: the binary view passes `seek`
-  through, so on the classic engine s3transfer's seekable download path writes
-  a seekable binary stream at absolute offsets from 0 — its prior position is
-  ignored, and a multipart download can leave it anywhere — while a text
-  stream, a non-seekable one, an append-mode binary stream (`open(p, "ab")`, a
-  `>>` redirected stdout's `.buffer`: it reports `seekable()` but every write
-  lands at its end, so the view hides `seek` and the parts arrive in order
-  instead of scrambling) and any stream under the CRT engine are written in
-  order from their current position. The append cue is the `mode` string, plus
-  the descriptor's `O_APPEND` flag where `fcntl` can read it - POSIX only:
-  measured on Windows, `os.fdopen(os.open(p, O_APPEND), "wb")` goes
-  unrecognized and scrambles, and a `cmd` `>>` redirect is no append stream at
-  all (seekable, positioned at the end, written from offset 0). To read a
-  download back, rewind it
+- **Bytes at the s3transfer boundary; the class says which kind the caller
+  holds.** `IOStorage` takes a binary stream (`io.BytesIO`, a file opened
+  `"rb"` / `"wb"`, a `gzip` writer, a pipe) and uses it as-is; `TextIOStorage`
+  takes a text stream (`io.StringIO`, a file opened `"r"` / `"w"`, a text
+  stream of the caller's own making) and wraps it with a codec — encode on
+  upload, decode on download. Nothing guesses the kind from the object: the
+  constructor's type says it, so a type checker catches a mix-up, and a stream
+  of the caller's own making is carried as the class it was handed to. A
+  stream of the wrong kind is an argument of the wrong type, whose outcome is
+  not specified (overview section 3): it fails obscurely in the engine, or
+  never ends (botocore's up-front checksum read compares a `str` end of
+  stream with `b""`). The constructors check only what is certain - a stream
+  whose class makes it the other kind (`io.TextIOBase` to `IOStorage`,
+  `io.RawIOBase` / `io.BufferedIOBase` to `TextIOStorage`) is refused with
+  `ValidationError`, naming the class to use - and guess at nothing else:
+  a text-mode `NamedTemporaryFile` / `SpooledTemporaryFile` (and Windows'
+  `TemporaryFile`, which is the former) and `codecs`' streams derive from no
+  `io` class and pass
+  unchecked (the `encoding` attribute they carry is a guess that would also
+  refuse a binary stream carrying one, and `codecs.open`'s text stream calls
+  its mode `"rb"`).
+- **An endpoint of the caller's own.** A subclass of `IOStorageBase`
+  implements `open` (bytes); a subclass of `TextIOStorageBase` implements
+  `open_text(key, mode)` (`"r"` / `"w"`, returning a text stream) and gets the
+  codec from the base, a fresh one per `open`, so a stateful encoding starts
+  afresh for every transfer. Both methods are abstract, so a subclass that
+  forgets one is refused by Python at instantiation. `key` / `size` carry
+  nothing for a single endpoint (cp and mv pass different values). The bases
+  take no stream: a subclass that opens its own (a file, opened only when the
+  transfer needs it) has none to pass.
+- **When the stream opens: a destination at its first byte, a source as the
+  run starts.** A download - `cp` and `mv` alike - writes every stream
+  destination through the open route's deferred writer
+  (`producers.deferred_writer`, transfer.md section 12): it offers only
+  `write`, so the engine writes in order from where the stream stands, and it
+  calls `open` when the first byte arrives, so a download that ends before
+  then (a missing object, a cancel, a dry run) never opens the destination - a
+  subclass that opens a file with `"w"` does not empty it for nothing - and a
+  zero-byte object opens it at the commit. It is the same rule the open route
+  took for custom backends (2026-07-22): open when the bytes move, not when
+  the item is queued. In-order writing also makes `IOStorage`'s former
+  write-side views redundant - an append-mode stream, a pipe claiming to seek,
+  a `GzipFile` that seeks only forward are all written in order - at the cost
+  of a classic download's positioned parallel writes into a seekable stream:
+  parts are still fetched in parallel, and one that arrives early waits in
+  memory (`DeferQueue`), as for aws-cli's `-`. An upload's source opens as
+  `cp` starts, before the transfer, as aws-cli opens stdin when it submits:
+  reading first harms nothing, a seekable source keeps the engine's
+  positioned reads and sizing, and a source that cannot be opened stops the
+  run before it starts (overview section 3's errors rule 3) - StdioStorage's
+  missing stdin as aws-cli's `StdinMissingError` (`fatal error`, rc 1), any
+  other failure of the storage's `open` as the base `Boto3S3Error` with it as
+  the cause. What an upload's `open` returns reaches the engines as it is, so
+  a seekable one must honour `seek` (the subclass is caller code, whose
+  contract the docs state; overview section 3); `IOStorage`'s read-only view
+  for a pipe is its own care for the streams it is handed.
+- **The transfer closes what `open` / `open_text` returns.** It closes every
+  fileobj `open` returns as the item settles (`Storage.open`'s contract), and
+  the text codec closes the stream `open_text` returned along with it — even
+  when the decoder's final characters fail to write. A stream opened for the
+  transfer is released that way; one that must outlive it goes back behind a
+  view whose `close` only flushes. A `cp` whose run fails between opening its
+  source and starting the transfer closes the source, and discards a
+  destination's deferred writer (closing it would open the destination).
+- **The caller owns the stream it hands over.** `IOStorage` and
+  `TextIOStorage` **never close** it — they return it behind that view — and
+  never rewind it for you: lifecycle and final position are yours. A download
+  leaves the stream at the end of what it wrote; to read it back, rewind it
   (`seek(0)`) or use `getvalue()`. A non-seekable sink works just as well —
-  `sys.stdout`, a pipe, a write-only wrapper like the `gzip` one above — there
-  is nothing to rewind; the bytes land wherever the stream sends them (the
-  `.gz` file, the console), and the caller's own `with` / `close` finalizes it.
-  A `GzipFile` handed over directly is not such a sink: it reports `seekable()`
-  but seeks only forward, so a multipart download into it can fail.
+  `sys.stdout`, a pipe, the `gzip` writer above — there is nothing to rewind;
+  the bytes land wherever the stream sends them (the `.gz` file, the
+  console), and the caller's own `with` / `close` finalizes it.
 - **A single endpoint, not a container.** Only `open` is meaningful; the
   inherited `get_fileinfo` / `delete` raise `NotImplementedError` on the call,
   and `scan` raises the same on its first iteration rather than on the call

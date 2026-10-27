@@ -3,7 +3,7 @@
 `Storage` is what each side of an operation resolves to: a local path, an S3
 bucket/prefix, a caller-supplied stream, or an application's own backend. This
 page specifies the abstract contract, the capability declaration that gates it,
-the four built-in implementations, and the override seams of the local
+the built-in implementations, and the override seams of the local
 directory walk.
 
 The walkthrough for writing a backend is
@@ -17,7 +17,8 @@ Every symbol below is exported from the `boto3_s3` root. Each is also
 importable from its own module: `Storage` / `Location` / `StorageCapability`
 from `boto3_s3.storage`, `LocalStorage` / `LocalFileGenerator` / `WalkChild` /
 `LoopDetector` from `boto3_s3.localstorage`, `S3Storage` from
-`boto3_s3.s3storage`, `IOStorage` / `StdioStorage` from `boto3_s3.iostorage`.
+`boto3_s3.s3storage`, and the stream storages (`IOStorageBase` / `IOStorage` /
+`StdioStorage` / `TextIOStorageBase` / `TextIOStorage`) from `boto3_s3.iostorage`.
 
 ## Storage
 
@@ -153,10 +154,10 @@ item — an S3 `403`, a local `EACCES` or `ENOENT` — not by this pre-check. Th
 one pre-flight exception is the transfer commands' missing-local-source check,
 which runs before items flow.
 
-`cp` with an `IOStorage` on either side is diverted to its stream path before a
-transfer plan exists, so no capability check runs on that route. A `mv` onto a
-stream destination does go through the S3-to-custom route and is gated on
-`OPEN_WRITE`, which `IOStorage` declares.
+`cp` with a stream storage (an `IOStorageBase`) on either side is diverted to
+its stream path before a transfer plan exists, so no capability check runs on
+that route. A `mv` onto a stream destination does go through the S3-to-custom
+route and is gated on `OPEN_WRITE`, which `IOStorageBase` declares.
 
 ### scan(options=None, \*, cancel_token=None)
 
@@ -1122,94 +1123,57 @@ cannot be rewound for a retry either. The
 including a failure botocore hits while reading the body mid-request, which it
 reports as one of its own.
 
-## IOStorage
+## IOStorageBase
 
-One caller-supplied stream presented as a `Storage`: a single `open`-able
-endpoint, not a container.
+The base of the stream storages: one stream presented as a `Storage`, a single
+`open`-able endpoint rather than a container. `IOStorage`, `StdioStorage` and
+`TextIOStorageBase` derive from it; derive from it yourself for a binary stream
+endpoint of your own.
 
 ```python
-class IOStorage(Storage):
+class IOStorageBase(Storage):
     scheme: ClassVar[str] = "stream"
     capabilities: ClassVar[StorageCapability] = (
         StorageCapability.OPEN_READ | StorageCapability.OPEN_WRITE
     )
 
-    def __init__(
-        self,
-        stream: SupportsRead[bytes] | SupportsRead[str] | SupportsWrite[bytes] | SupportsWrite[str],
-        *,
-        encoding: str = "utf-8",
-    ) -> None: ...
+    @abstractmethod
+    def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO: ...
 ```
 
-`capabilities` is just the `OPEN_*` pair: a single stream supports byte I/O in
-both directions, chosen per `open` call, with no listing and no deletion.
+`capabilities` is just the `OPEN_*` pair: a stream supports byte I/O in both
+directions, chosen per `open` call, with no listing and no deletion. `open` is
+abstract, so a subclass that does not implement it cannot be instantiated.
 
-`stream` is the caller's file-like object: anything with a `read` for an
-upload or a `write` for a download (typeshed's `SupportsRead` /
-`SupportsWrite`), so a wrapper exposing only one of them is accepted. A binary
-stream is used as it is,
-behind a close-suppressing view — except one that cannot be positioned (a
-pipe, a socket, a console: `seekable()` answers False, or `os.fstat` reports
-its descriptor as a FIFO, character device or socket, which a Windows pipe is
-even though it claims to seek), which an upload reads through a view that
-offers nothing but `read`, so both transfer engines take their buffered path
-instead of probing it with `seek` / `tell`. A text stream — recognized either as an
-`io.TextIOBase` or by carrying an `encoding` attribute, which covers a
-text-mode `SpooledTemporaryFile` — is wrapped with an incremental codec
-instead, encoding on read for an upload and decoding on write for a download.
+`open` returns the bytes the transfer reads (`"rb"`, an upload) or writes
+(`"wb"`, a download). `key` and `size` carry nothing for a single endpoint —
+what an operation passes differs — so an implementation ignores them. The
+transfer closes what `open` returns once the item settles, as for any
+[`Storage.open`](#openkey-mode--sizenone): a resource `open` acquires for the
+transfer is released that way, and a stream that must outlive the transfer
+goes back behind a view whose `close` only flushes, as `IOStorage` returns the
+caller's.
 
-`encoding` is that codec's encoding and applies only to a text stream; a name
-`codecs.lookup` does not know raises `InvalidValueError` from the constructor.
-A single incremental encoder or decoder spans the whole transfer, so a stateful
-codec behaves as one stream — utf-16 emits its BOM once, not per chunk.
+When `open` runs depends on the direction:
 
-A text stream carries the object as text: the encoding it was opened with and
-its newline translation apply to what is read and written. Text that will not
-convert fails the transfer — on a download, an object that is not valid text
-in `encoding` or a character the stream cannot write; on an upload, bytes the
-stream cannot read or a character `encoding` cannot encode. A failed download
-leaves in the stream whatever was decoded before the failure. Either way the
-item's `OpResult.error` is a `Boto3S3Error` with the `UnicodeDecodeError` or
-`UnicodeEncodeError` on `__cause__`, on either transfer engine. A text stream
-is never swapped for its `.buffer` — text it has read ahead would be skipped
-and the encoding it was opened with ignored — so pass a binary stream (a file
-opened `"rb"` or `"wb"`) or [`StdioStorage`](#stdiostorage) for the bytes as
-they are; `StdioStorage` writes standard output in order, where
-`IOStorage(sys.stdout.buffer)` on the classic engine writes a redirected file
-from offset 0.
-
-**The caller's stream is never closed by this class.** The transfer closes
-every file object `open` returns, since that close is how a real backend
-flushes a write; each view here absorbs that close into a flush of the wrapped
-stream at most. Lifecycle stays the caller's, and so does rewinding after a
-download, whose landing place depends on the stream and the engine: the binary
-view passes `seek` through, so on the classic engine `s3transfer` writes a
-seekable binary stream at absolute offsets from 0 — its prior position is
-ignored, and a multipart download can leave it anywhere — while a text stream,
-a stream that cannot seek (a pipe, a socket or a console, judged by its
-descriptor: a Windows pipe answers `seekable()` with `True`, and gets the
-write-only view all the same), a binary stream in append mode (`open(p, "ab")`, a
-`>>` redirected stdout's `.buffer`: it reports `seekable()` but every write
-lands at its end, so it gets a write-only view and the parts arrive in order),
-and any stream under the CRT engine are written in order from their current
-position. Append mode is read from the stream's `mode` string and, on POSIX
-only, from the descriptor's `O_APPEND` flag; Windows cannot be asked for the
-flag, so a stream that appends under another `mode` string is not recognized
-there, and a `>>` redirect from `cmd` — which appends nothing, it only starts
-at the end — is an ordinary seekable stream.
-
-The class relies on the stream keeping the `io` module's contract and does not
-check it: `read` returns bytes (`str` for a text stream) and an empty value at
-the end, `write` takes them, and `seekable()`, where present, answers `True`
-or `False`. A stream that breaks it is not supported — one whose `seekable()`
-raises, such as a `tarfile` member read in stream mode (`"r|"`), fails its
-transfer. What the stream raises fails the item: a `Boto3S3Error` is recorded
-as it is, any other exception becomes a `Boto3S3Error` with the original on
-`__cause__`, and an interrupt cancels the item and reaches the caller. Where
-the SDK reads the stream itself (the classic engine hands a seekable binary
-stream to the SDK as the request body), a failure there takes the SDK's
-category instead, with the original further down the exception chain.
+- **A download** (`cp` or `mv`) calls it when the first byte arrives, through
+  a writer that offers only `write`: the stream is written in order, from
+  where it stands, on either engine, and a download that ends before its first
+  byte — a missing object, a cancel, a dry run — never calls it. An empty
+  object's successful download calls it as the download commits. A large
+  object's parts are still fetched in parallel; one that arrives early waits
+  in memory until the ones before it are written.
+- **An upload** (`cp` only — a stream is never a `mv` source) calls it as the
+  run starts, before any request, as the AWS CLI opens standard input. An
+  exception it raises stops the run there: one of the library's own is raised
+  as it is, and any other as a [`Boto3S3Error`](./exceptions.md#boto3s3error)
+  with it as `__cause__`; no item is recorded. An interrupt
+  (`KeyboardInterrupt`, `SystemExit`) passes as it is. What it returns reaches the
+  transfer engines as it is: one that offers `seek` / `tell` and answers
+  `seekable()` with `True` is read at offsets on the classic engine and has its
+  length probed through them on the CRT engine, so it must honour them — a
+  pipe does not; one that offers only `read` is read in order. If the run
+  fails before the transfer starts, `cp` closes what `open` returned.
 
 Of the four contract operations only `open` is implemented. `get_fileinfo` and
 `delete` keep `Storage`'s base implementations and raise `NotImplementedError`
@@ -1224,12 +1188,12 @@ sides at once, and never an `ls` or `rm` target. `S3.cp` and `S3.mv` raise
 [`./operations/mv.md`](./operations/mv.md)), and `S3.ls` and `S3.rm`, which
 take only an S3 location, for theirs.
 
-### open(key, mode, \*, size=None)
-
-Returns the wrapped stream as a binary stream. `key` and `size` are ignored — a
-single endpoint takes no key. `"rb"` yields a reader over the stream, `"wb"` a
-writer into it; for a text stream those are the encoding and decoding adapters
-built from `encoding`.
+What the stream raises fails the item: a `Boto3S3Error` is recorded as it is,
+any other exception becomes a `Boto3S3Error` with the original on `__cause__`,
+and an interrupt cancels the item and reaches the caller. Where the SDK reads
+the stream itself (the classic engine hands a seekable binary stream to the SDK
+as the request body), a failure there takes the SDK's category instead, with
+the original further down the exception chain.
 
 ### as_text()
 
@@ -1238,22 +1202,68 @@ messages only and is not round-trippable through `S3.resolve`. The default
 `Storage.format` reads it: `"-"` has no trailing `/`, so a single move onto a
 stream keeps its key.
 
+## IOStorage
+
+A binary stream the caller hands over, as a stream endpoint.
+
+```python
+class IOStorage(IOStorageBase):
+    def __init__(self, stream: SupportsRead[bytes] | SupportsWrite[bytes]) -> None: ...
+```
+
+`stream` is the caller's binary file-like object: anything with a `read` for
+an upload or a `write` for a download (typeshed's `SupportsRead` /
+`SupportsWrite`), so a wrapper exposing only one of them is accepted. A text
+stream goes through [`TextIOStorage`](#textiostorage) instead. One whose class
+makes it text — an `io.TextIOBase`, such as `io.StringIO`, a text-mode file or
+`sys.stdout` — raises `ValidationError` from the constructor; no other stream
+is checked, a text-mode `tempfile.NamedTemporaryFile` or
+`SpooledTemporaryFile` (on Windows, `TemporaryFile` too) or a `codecs` stream
+(none derives from an `io` class) included. Passing the wrong kind is passing the wrong type, whose
+outcome is not specified: a classic upload of such a text stream can stop
+responding.
+
+The stream is used as it is, behind a close-suppressing view — except a source
+that cannot be positioned (a pipe, a socket, a console: `seekable()` answers
+False, or `os.fstat` reports its descriptor as a FIFO, character device or
+socket, which a Windows pipe is even though it claims to seek), which an upload
+reads through a view that offers nothing but `read`, so both transfer engines
+take their buffered path instead of probing it with `seek` / `tell`. A
+download writes the stream in order from where it stands, whatever its kind
+(an append-mode file, a pipe, a `gzip` writer included), as
+[`IOStorageBase`](#iostoragebase) describes.
+
+**The caller's stream is never closed by this class.** The transfer closes
+every file object `open` returns; each view here absorbs that close into a
+flush of the wrapped stream at most. Lifecycle stays the caller's, and so does
+rewinding after a download, which leaves the stream at the end of what it
+wrote.
+
+The class relies on the stream keeping the `io` module's contract and does not
+check it: `read` returns bytes and an empty value at the end, `write` takes
+them, and `seekable()`, where present, answers `True` or `False`. A stream that
+breaks it is not supported — one whose `seekable()` raises, such as a `tarfile`
+member read in stream mode (`"r|"`), fails its transfer.
+
+### open(key, mode, \*, size=None)
+
+Returns the wrapped stream as a binary stream, behind one of the views above.
+`key` and `size` are ignored. `"rb"` yields a reader over the stream, `"wb"` a
+writer into it.
+
 ## StdioStorage
 
 The process's own standard streams as a `Storage` — `sys.stdin` to read,
-`sys.stdout` to write. A subclass of `IOStorage` that holds no stream of its
-own.
+`sys.stdout` to write. A stream endpoint that holds no stream of its own.
 
 ```python
-class StdioStorage(IOStorage):
+class StdioStorage(IOStorageBase):
     scheme: ClassVar[str] = "stdio"
-
-    def __init__(self) -> None: ...
 ```
 
 The constructor takes no arguments. `capabilities` and `as_text` are
-`IOStorage`'s, so this too declares `OPEN_READ | OPEN_WRITE` and renders as
-`"-"`; `scheme`, the constructor and `open` are what differ.
+`IOStorageBase`'s, so this too declares `OPEN_READ | OPEN_WRITE` and renders as
+`"-"`.
 
 ### open(key, mode, \*, size=None)
 
@@ -1289,6 +1299,106 @@ fails on the writer's first `write`, from inside the transfer, so it is that
 item's failure (`'NoneType' object has no attribute 'write'`) and not a reason
 for the run not to start. An empty object, which writes nothing, fails the
 same way when the writer is closed.
+
+## TextIOStorageBase
+
+The base of a stream endpoint that trades in text. A subclass implements
+`open_text`, returning a text stream; `open` presents it to the transfer as
+bytes in `encoding`. Derive from it for a text source or destination of your
+own; [`TextIOStorage`](#textiostorage) is the one for a text stream you hand
+over.
+
+```python
+class TextIOStorageBase(IOStorageBase):
+    def __init__(self, *, encoding: str = "utf-8") -> None: ...
+
+    @abstractmethod
+    def open_text(self, key: str, mode: Literal["r", "w"]) -> TextIO: ...
+```
+
+`encoding` is the encoding of the object's bytes; a name `codecs.lookup` does
+not know raises `InvalidValueError` from the constructor. `open_text` is
+abstract, so a subclass that does not implement it cannot be instantiated.
+
+### open_text(key, mode)
+
+The text stream to read (`"r"`, an upload) or write (`"w"`, a download).
+`key` is `open`'s, which carries nothing for a single endpoint. The transfer closes what
+`open_text` returns once the item settles: a stream it opens for the transfer
+(a file, say) is closed for it, and one that must stay open goes back behind a
+view whose `close` only flushes, as `TextIOStorage` returns the caller's.
+
+```python
+class Cp932File(TextIOStorageBase):
+    def __init__(self, path):
+        super().__init__(encoding="utf-8")          # the object's encoding
+        self._path = path
+
+    def open_text(self, key, mode):
+        return open(self._path, mode, encoding="cp932", newline="")
+
+s3.cp(Cp932File("report.txt"), "s3://bucket/report.txt")
+```
+
+### open(key, mode, \*, size=None)
+
+Calls `open_text` with `"r"` for `"rb"` or `"w"` for `"wb"`, and returns its
+stream behind an incremental codec: encoding on read for an upload, decoding on
+write for a download. `size` is ignored. Each call builds a codec of its own,
+and a single encoder or decoder spans the whole transfer, so a stateful codec
+behaves as one stream per transfer — utf-16 emits its BOM once, not per chunk
+and not once per instance. Closing the codec closes the text stream, after a
+download's last characters are written, even when writing them fails.
+
+The stream is read and written in order (the codec offers no `seek`), so an
+upload takes the transfer engines' buffered path and a download lands in order
+from the stream's current position. Text that will not convert fails the
+transfer — on a download, an object that is not valid text in `encoding` or a
+character the stream cannot write; on an upload, bytes the stream cannot read
+in the encoding it was opened with, or a character `encoding` cannot encode. A failed download
+leaves in the stream whatever was decoded before the failure. Either way the
+item's `OpResult.error` is a `Boto3S3Error` with the `UnicodeDecodeError` or
+`UnicodeEncodeError` on `__cause__`, on either transfer engine.
+
+## TextIOStorage
+
+A text stream the caller hands over, as a stream endpoint.
+
+```python
+class TextIOStorage(TextIOStorageBase):
+    def __init__(
+        self, stream: SupportsRead[str] | SupportsWrite[str], *, encoding: str = "utf-8"
+    ) -> None: ...
+```
+
+`stream` is the caller's text file-like object: anything with a `read` that
+returns `str` for an upload or a `write` that takes `str` for a download,
+whatever class it is. A binary stream goes through [`IOStorage`](#iostorage)
+instead. One whose class makes it binary — an `io.RawIOBase` or
+`io.BufferedIOBase`, such as `io.BytesIO`, a file opened `"rb"` or `"wb"`, or
+`sys.stdout.buffer` — raises `ValidationError` from the constructor; no other
+stream is checked, a binary `tempfile.NamedTemporaryFile` or
+`SpooledTemporaryFile` included, and what the
+wrong kind leads to is not specified. `encoding` is
+[`TextIOStorageBase`](#textiostoragebase)'s.
+
+The stream carries the object as text: the encoding it was opened with and its
+newline translation apply to what is read and written. It is never swapped for
+its `.buffer` — text it has read ahead would be skipped and the encoding it was
+opened with ignored — so pass the bytes as they are through `IOStorage` or
+[`StdioStorage`](#stdiostorage) instead.
+
+**The caller's stream is never closed by this class.** `open_text` returns it
+behind a view whose `close` only flushes it.
+
+The class relies on the stream keeping the `io` module's contract and does not
+check it: `read` returns `str` and an empty string at the end, and `write`
+takes `str`.
+
+### open_text(key, mode)
+
+Returns the caller's stream behind that view, whichever `mode`. `key` is
+ignored.
 
 ## LocalFileGenerator
 

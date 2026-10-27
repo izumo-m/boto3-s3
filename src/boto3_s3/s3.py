@@ -61,7 +61,7 @@ from boto3_s3.exceptions import (
     NotFoundError,
     ValidationError,
 )
-from boto3_s3.iostorage import IOStorage
+from boto3_s3.iostorage import IOStorageBase
 from boto3_s3.localstorage import (
     LocalStorage,
     is_readable,
@@ -1250,8 +1250,8 @@ class S3:
         design/globsieve.md section 5) - a `GlobFilter` matches that key (a
         relative pattern) or the full path (an absolute one: a local entry's
         ``key``, an S3 entry's ``bucket/key``) while a richer
-        predicate can read size / mtime / storage_class. On the stream route (an
-        ``IOStorage`` on one side) there is no listing to prune, so ``filter``
+        predicate can read size / mtime / storage_class. On the stream route (a
+        stream storage, ``IOStorageBase``, on one side) there is no listing to prune, so ``filter``
         does not apply - aws-cli applies no filter to a stream either.
         How the local source is walked - whether symlinks are followed
         (``follow_symlinks``) and whether the recursive walk guards against symlink
@@ -1307,7 +1307,7 @@ class S3:
             transfer_config, src_storage, dest_storage, operation="cp"
         )
         options = self._upload_options(options, src_storage, dest_storage, transfer_config)
-        if isinstance(src_storage, IOStorage) or isinstance(dest_storage, IOStorage):
+        if isinstance(src_storage, IOStorageBase) or isinstance(dest_storage, IOStorageBase):
             self._cp_stream(
                 src_storage,
                 dest_storage,
@@ -1653,12 +1653,13 @@ class S3:
         capture_response: bool = False,
         options: TransferOptions,
     ) -> None:
-        """One streaming transfer: an ``IOStorage`` on exactly one side.
+        """One streaming transfer: a stream storage (``IOStorageBase``) on exactly one side.
 
         The other side must be S3 (a non-S3 peer is the "stream on one side"
         error); its key is taken verbatim (the CLI owns aws-cli's ``-``-basename
-        naming quirk). The stream's fileobj comes from ``IOStorage.open`` and is
-        handed straight to ``s3transfer``. Uploads carry ``expected_size`` as the
+        naming quirk). An upload hands ``s3transfer`` what the storage's
+        ``open`` returns, opened here; a download hands it the deferred writer
+        that opens the storage at the first write. Uploads carry ``expected_size`` as the
         multipart sizing hint of a stream the engine cannot size (without it the
         engine buffers up to the threshold and decides; a seekable stream is
         sized by the engine and the hint is ignored); downloads provide neither
@@ -1669,8 +1670,8 @@ class S3:
         ``CancelledError`` before the fileobj is opened or submitted, matching the
         non-stream route's pre-submit poll (a single item, so one check suffices).
         """
-        src_is_stream = isinstance(src_storage, IOStorage)
-        dest_is_stream = isinstance(dest_storage, IOStorage)
+        src_is_stream = isinstance(src_storage, IOStorageBase)
+        dest_is_stream = isinstance(dest_storage, IOStorageBase)
         if recursive:
             raise ValidationError(
                 "Streaming currently is only compatible with non-recursive cp commands",
@@ -1704,14 +1705,22 @@ class S3:
             # dryrun reports the item without submitting it, so skip the open -
             # like the open routes (open_upload_item / open_download_item),
             # keeping a side-effecting stream untouched on a dry run. A live
-            # run opens eagerly here, unlike those routes' deferred handles:
-            # a stream storage wraps an already-open in-hand stream (no
-            # resource is acquired), it is a single item (nothing queues
-            # up), and StdioStorage's missing-stdio ValidationError keeps
-            # its documented in-pipeline slot - attributed to cp here, since
-            # the storage cannot know which operation opened it.
+            # run opens the source here, before the transfer, as aws-cli
+            # opens stdin when it submits: a source that cannot be opened
+            # stops the run before it starts (StdioStorage's missing stdin is
+            # aws-cli's StdinMissingError), and reading it first harms
+            # nothing. The failure is the library's - a family error raised
+            # by the storage as it is, anything else as the base error with
+            # it as the cause - attributed to cp, since the storage cannot
+            # know which operation opened it. What the open returns is closed
+            # by the transfer, or below if the run fails before it reaches one.
             with _attributed_to("cp"):
-                src_fileobj = None if dryrun else src_storage.open(storage.key, "rb")
+                try:
+                    src_fileobj = None if dryrun else src_storage.open(storage.key, "rb")
+                except Boto3S3Error:
+                    raise
+                except Exception as exc:
+                    raise Boto3S3Error(str(exc)) from exc
             item = TransferItem(
                 compare_key=storage.key,
                 size_hint=expected_size,
@@ -1724,9 +1733,11 @@ class S3:
         else:
             storage = self._stream_s3_peer(src_storage)
             transfer_type = TransferType.DOWNLOAD
-            # See the upload branch: a dry run never opens the stream.
-            with _attributed_to("cp"):
-                dest_fileobj = None if dryrun else dest_storage.open(storage.key, "wb")
+            # The destination opens at the download's first write, as the
+            # open route's does (`producers.deferred_writer`): written in
+            # order, and never opened by a download that ends before its
+            # first byte (a missing object, a cancel) - nor by a dry run.
+            dest_fileobj = None if dryrun else producers.deferred_writer(dest_storage, storage.key)
             item = TransferItem(
                 compare_key=storage.key,
                 src_bucket=storage.bucket,
@@ -1737,20 +1748,31 @@ class S3:
                 src_display=storage.normalized_uri(),
                 dest_display="-",
             )
-        transferrer = Transferrer(
-            transfer_type,
-            storage.get_client(),
-            src_storage=src_storage,
-            dest_storage=dest_storage,
-            transfer_config=transfer_config,
-            options=options,
-            operation="cp",
-            on_progress=on_progress,
-            on_result=on_result,
-            cancel_token=cancel_token,
-            capture_response=capture_response,
-            crt=self._crt,
-        )
+        try:
+            transferrer = Transferrer(
+                transfer_type,
+                storage.get_client(),
+                src_storage=src_storage,
+                dest_storage=dest_storage,
+                transfer_config=transfer_config,
+                options=options,
+                operation="cp",
+                on_progress=on_progress,
+                on_result=on_result,
+                cancel_token=cancel_token,
+                capture_response=capture_response,
+                crt=self._crt,
+            )
+        except BaseException:
+            # No transfer will release the fileobj: an opened source may hold
+            # a resource (a subclass's `open` / `open_text`), and a deferred
+            # destination is discarded - closing it would open and empty it.
+            for fileobj in (item.src_fileobj, item.dest_fileobj):
+                if fileobj is not None:
+                    release = getattr(fileobj, "discard", None) or fileobj.close
+                    with suppress(Exception):
+                        release()
+            raise
         with transferrer:
             if dryrun:
                 transferrer.dryrun(item)
@@ -1812,8 +1834,8 @@ class S3:
         forwarded). A failed, skipped, or dry-run item
         keeps its source; a deletion failure turns that item into the
         failure ``aws`` prints as ``move failed`` (the bytes already arrived).
-        Filters prune both the transfer and the deletion. A stream
-        (``IOStorage``) can be the destination of a single-object move -
+        Filters prune both the transfer and the deletion. A stream storage
+        (``IOStorageBase``) can be the destination of a single-object move -
         the bytes land on the stream, then the S3 source is deleted - but
         not a recursive one (a stream is a single endpoint) and never the
         source (a move deletes its source, which a stream cannot be); both
@@ -1848,7 +1870,7 @@ class S3:
             transfer_config, src_storage, dest_storage, operation="mv"
         )
         options = self._upload_options(options, src_storage, dest_storage, transfer_config)
-        if isinstance(src_storage, IOStorage):
+        if isinstance(src_storage, IOStorageBase):
             # A move deletes its source, which a stream cannot be (no delete).
             # The destination side is different: a single-object move onto a
             # stream is well-formed (bytes land on the stream, then the S3
@@ -1858,14 +1880,14 @@ class S3:
                 "which a stream cannot be",
                 operation="mv",
             )
-        if isinstance(dest_storage, IOStorage) and recursive:
+        if isinstance(dest_storage, IOStorageBase) and recursive:
             # A stream is a single endpoint: a recursive move would concatenate
             # every object into it while deleting the sources.
             raise ValidationError(
                 "mv supports a stream destination only for a single object (non-recursive)",
                 operation="mv",
             )
-        if isinstance(dest_storage, IOStorage) and options.get("no_overwrite"):
+        if isinstance(dest_storage, IOStorageBase) and options.get("no_overwrite"):
             # cp's stream gate, ported: a streaming download has no existing
             # destination to guard, so no_overwrite is meaningless - fail loud
             # rather than silently ignore it and delete the source anyway.

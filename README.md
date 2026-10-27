@@ -225,7 +225,7 @@ The [user guide](https://github.com/izumo-m/boto3-s3/blob/main/docs/README.md) c
 | [Sync](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/sync.md) · [by content](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/sync-content.md) | the three decisions, and content comparison |
 | [Filtering](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/filters.md) | `filter=`, glob patterns, which key they match |
 | [Transfer options](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/transfer-options.md) | the `cp` / `mv` / `sync` options and multipart tuning |
-| [Streams](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/streams.md) | `IOStorage` / `StdioStorage` |
+| [Streams](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/streams.md) | `IOStorage` / `TextIOStorage` / `StdioStorage` |
 | [`S3Deleter`](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/deleter.md) | driving batch deletion yourself |
 | [Custom backends](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/custom-storage.md) | a `Storage` as one side of a transfer |
 | [Logging](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/logging.md) | debug output and credential masking |

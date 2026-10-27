@@ -226,7 +226,7 @@ recursive=...)`: the target normalized to end in `/` for a recursive delete
 bucket root. On the blind single-key path no listing runs, so the `FileInfo`
 carries only `key`, the stamped `compare_key` and `storage`.
 
-The stream route (an `IOStorage` on either side) consults no filter, as aws-cli
+The stream route (a stream storage on either side) consults no filter, as aws-cli
 applies none to a stream.
 
 ## 8. Verification

@@ -63,7 +63,7 @@ every operation shares.
   match against.
 - [`transfer-options.md`](./transfer-options.md) — the `cp` / `mv` / `sync`
   options and multipart tuning.
-- [`streams.md`](./streams.md) — `IOStorage` and `StdioStorage`.
+- [`streams.md`](./streams.md) — `IOStorage`, `TextIOStorage` and `StdioStorage`.
 - [`deleter.md`](./deleter.md) — driving batch deletion yourself with
   `S3Deleter`.
 - [`custom-storage.md`](./custom-storage.md) — using a `Storage` as one side of

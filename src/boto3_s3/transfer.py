@@ -2438,8 +2438,8 @@ def _writing_once(handle_io: Callable[..., Any]) -> Callable[..., Any]:
     whose chunks it writes as they arrive (``ImmediatelyWriteIOGetObjectTask``),
     and a body cut mid-stream is retried from its first byte. A destination
     that can seek takes each chunk at its offset, so the retry overwrites; one
-    that cannot (a stream, an append-mode file, a pipe - `IOStorage`'s
-    write-only views) gets the chunks appended, the bytes before the cut twice
+    that cannot (a stream destination, behind the deferred writer that offers
+    only ``write``) gets the chunks appended, the bytes before the cut twice
     and still reported SUCCEEDED (measured: a 50-byte object cut at 3 bytes
     came out 53 bytes, exit code 0). The ranged path does not have the problem
     - its writes pass through s3transfer's ``DeferQueue``, which drops what it
@@ -2967,8 +2967,8 @@ class _CloseFileobj:
     The transfer owns every fileobj a ``Storage.open`` hands it (the file
     protocol the open route relies on): a real backend's ``close`` releases a
     reader or flushes a writer's buffered writes (``Storage.open``'s contract),
-    while a caller-supplied stream (``IOStorage``) hands back a close-suppressing
-    view, so this is a harmless flush there. Sits before ``_DeleteSource`` /
+    while a caller-supplied stream (``IOStorage``, ``TextIOStorage``) hands back
+    a close-suppressing view, so this is a harmless flush there. Sits before ``_DeleteSource`` /
     ``_Completion`` so a writer's ``close`` (flush) failure flips the settled
     future to a failure - and, for ``mv``, leaves the source in place (``_DeleteSource``
     then sees the failure and skips its delete). A transfer that already failed

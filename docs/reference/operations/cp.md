@@ -63,7 +63,9 @@ Four pairings are accepted, and each of them has an
 [`S3Storage`](../storage.md#s3storage) on at least one side: local with S3 in
 either direction; S3 with S3; a custom `Storage` with S3 in either direction
 (the open route, [`../storage.md`](../storage.md)); and a stream endpoint —
-[`IOStorage`](../storage.md#iostorage) or
+an [`IOStorageBase`](../storage.md#iostoragebase) such as
+[`IOStorage`](../storage.md#iostorage),
+[`TextIOStorage`](../storage.md#textiostorage) or
 [`StdioStorage`](../storage.md#stdiostorage) — with S3 in either direction.
 Every other combination raises `ValidationError`: local to local, a custom
 backend paired with a local path or with another custom backend, a stream
@@ -325,6 +327,11 @@ upload, the parent reference) are emitted inline on the calling thread
   needs them. Where the first request is an item's own transfer — an upload, or
   a download to a stream — missing credentials fail that item instead
   (`BatchError` below).
+- [`Boto3S3Error`](../exceptions.md#boto3s3error) itself — a stream source
+  whose `open` (or `open_text`) raises anything but the library's own
+  exceptions, which pass as they are: the run stops before it starts, no item
+  is recorded, and the stream's exception is on `__cause__`. An interrupt
+  (`KeyboardInterrupt`, `SystemExit`) passes as it is.
 - The enumeration's own rejection, translated to its category and propagated:
   [`AccessDeniedError`](../exceptions.md#accessdeniederror),
   [`NotFoundError`](../exceptions.md#notfounderror) or
