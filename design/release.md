@@ -39,6 +39,29 @@ The environment name registered on (Test)PyPI must match the workflow's
 `environment:` value exactly, or the token exchange is refused and nothing
 uploads.
 
+## Choosing the version
+
+What a release promises is what `docs/` promises ([`overview.md`](./overview.md)
+section 4), so the version number follows the `docs/` changes since the last
+release.
+
+- While the version is 0.x, a change to a `docs/` promise takes a minor
+  version, an incompatible one included. Anything else - a reworked mechanism,
+  an internal refactoring, a performance gain, a fix that leaves the promises
+  as they were - takes a patch. CHANGELOG lines do not decide it: a patch
+  release lists its fixes and reworks too. This is what lets the CLI's
+  `boto3-s3>=X.Y.Z,<X.Y+1.0` range (step 1 below) take the library's later
+  patch releases.
+- Performance is part of the promise only where `docs/` states a guarantee.
+- Raising the SDK floor takes a minor version: the floor is a requirement on
+  the environment, not a change to the API.
+- For the CLI, following `aws s3` - a change of behavior, exit code or wording
+  to match it - is never a breaking change, since matching `aws s3` is what the
+  CLI is for: a fix to a compatibility bug takes a patch, a change made for
+  compatibility a minor, never a major. The version promise covers only what is
+  the CLI's own: its own options and the behavior it extends through the
+  library.
+
 ## Releasing
 
 Work happens on `develop`; releases are cut on `main`, and the tag lives on
