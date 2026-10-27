@@ -13,9 +13,9 @@ while parsing. Either way it is a usage error (252).
 
 from __future__ import annotations
 
+import json
 import re
 import sys
-import threading
 from pathlib import Path
 
 import pytest
@@ -35,34 +35,6 @@ def _assert_parse_error(text: str) -> None:
         _parse(text)
     assert not isinstance(excinfo.value, InvalidValueError)
     assert "--metadata" in str(excinfo.value)
-
-
-def _parse_on_a_fixed_stack(value: str) -> None:
-    """Run `_parse` on a thread with a 4 MiB stack and re-raise what it raises.
-
-    From Python 3.14 the decoder bounds nesting by the stack left rather than
-    by a count, so a value nested 100,000 deep decodes on a main thread whose
-    stack is larger than 8 MiB (CI's ubuntu and macOS runners); a fixed stack
-    keeps it past what any version decodes. 4 MiB still holds the nesting an
-    earlier version's count allows.
-    """
-    raised: list[BaseException] = []
-
-    def run() -> None:
-        try:
-            _parse(value)
-        except BaseException as exc:  # handed back to the test's thread
-            raised.append(exc)
-
-    previous = threading.stack_size(4 * 1024 * 1024)
-    try:
-        thread = threading.Thread(target=run)
-        thread.start()
-    finally:
-        threading.stack_size(previous)
-    thread.join()
-    if raised:
-        raise raised[0]
 
 
 class TestParseMapOption:
@@ -263,23 +235,29 @@ class TestJsonRoute:
             _parse(value)
         assert str(excinfo.value) == f"Error parsing parameter '--metadata': Invalid JSON:\n{value}"
 
-    @pytest.mark.parametrize(
-        "value",
-        [
-            pytest.param(
-                "[" + "1" * 5000 + "]",
-                marks=pytest.mark.skipif(
-                    not hasattr(sys, "get_int_max_str_digits"), reason="no integer digit limit"
-                ),
-                id="past-the-digit-limit",
-            ),
-            pytest.param("[" * 100_000 + "]" * 100_000, id="past-the-recursion-limit"),
-        ],
-    )
-    def test_a_bracket_lead_python_cannot_decode_is_aws_clis_report(self, value: str) -> None:
-        # aws-cli never decodes a `[` lead, so its report stands for these.
+    @pytest.mark.skipif(not hasattr(sys, "get_int_max_str_digits"), reason="no integer digit limit")
+    def test_a_bracket_lead_past_the_digit_limit_is_aws_clis_report(self) -> None:
+        # aws-cli never decodes a `[` lead, so its report stands for one
+        # Python cannot decode.
+        value = "[" + "1" * 5000 + "]"
         with pytest.raises(ValidationError) as excinfo:
-            _parse_on_a_fixed_stack(value)
+            _parse(value)
+        assert str(excinfo.value).endswith(f"Invalid JSON:\n{value}")
+
+    def test_a_bracket_lead_past_the_recursion_limit_is_aws_clis_report(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # How deep the decoder goes depends on the version and, from Python
+        # 3.14, on the stack it runs on - CI's ubuntu runner decoded 100,000
+        # levels even on a thread given 4 MiB - so its RecursionError is
+        # raised here directly.
+        def too_deep(*args: object, **kwargs: object) -> object:
+            raise RecursionError("maximum recursion depth exceeded")
+
+        monkeypatch.setattr(json, "loads", too_deep)
+        value = "[[[]]]"
+        with pytest.raises(ValidationError) as excinfo:
+            _parse(value)
         assert str(excinfo.value).endswith(f"Invalid JSON:\n{value}")
 
     @pytest.mark.skipif(not hasattr(sys, "get_int_max_str_digits"), reason="no integer digit limit")
