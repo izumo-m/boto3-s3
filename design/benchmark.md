@@ -83,8 +83,12 @@ instance role, never from `AWS_PROFILE`: both CLIs run with `AWS_CONFIG_FILE`
 pointed at the per-engine config, which hides every profile from them, so the
 harness refuses the combination up front instead of failing on the first
 invocation. Each engine's work tree is removed before the next engine seeds
-its own, and a scenario that hits a local I/O error (a full work tree) is
-skipped and recorded like any other failed scenario.
+its own, and a scenario that hits a local I/O error (a full work tree) or an
+S3 error while staging its input is skipped and recorded like any other
+failed scenario. Only the dev stack's fixed bucket name is cleared before
+the run creates it, since only that name can hold an aborted run's
+leftovers; a per-run name has nothing to clear, so a real-S3 run needs no
+ListBuckets (the EC2 instance role has no permission for one).
 
 **In-process** runs the CLI inside the runner process against stubbed S3:
 a real boto3 client whose `before-send` event returns canned responses, so

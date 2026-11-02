@@ -931,76 +931,95 @@ def run_scenarios(
     handicap: float = 0.0,
     log: Callable[[str], None],
 ) -> tuple[list[ScenarioResult], list[str]]:
-    """Run the scenario set per engine against a freshly created `BUCKET`.
+    """Run the scenario set per engine against a bucket created for the run.
 
-    The bucket is force-deleted first (a leftover from an aborted run must
-    not skew seeding) and again in the finally, so no state survives the run.
     Non-``classic`` engines run only the ``crt_capable`` scenarios plus the
     startup probes their net adjustment needs.
 
     Returns ``(results, failures)``: one scenario failing (an unexpected rc,
-    a verification mismatch, a local I/O error such as a full work tree) is
-    logged and skipped rather than discarding every completed measurement
-    with it - a multi-minute run must not be lost to one flaky lane.
-    Environment/bucket errors still abort the whole run. Each engine's work
-    tree is removed before the next engine seeds its own, so the large
-    payloads of two engines never coexist: the EC2 lane's tmpfs is sized for
-    one engine's.
+    a verification mismatch, a local I/O error such as a full work tree, an
+    S3 error while staging its input) is logged and skipped rather than
+    discarding every completed measurement with it - a multi-minute run must
+    not be lost to one flaky lane. An environment error or a bucket that
+    cannot be created still aborts the whole run; a bucket that cannot be
+    deleted at the end is recorded as a failure, so the measurements are
+    kept. Each engine's work tree is removed before the next engine seeds its
+    own, so the large payloads of two engines never coexist: the EC2 lane's
+    tmpfs is sized for one engine's.
+
+    The bucket is purged and deleted at the end, so no state survives the
+    run. Only the dev stack's fixed name can still hold an aborted run's
+    leftovers, so only there is it cleared before it is created. Anywhere
+    else the name is this run's own (`_bench_bucket`): there is nothing to
+    clear, and the existence check would cost a ListBuckets the EC2 instance
+    role has no permission for. The end-of-run delete names the bucket only
+    once this run has created it (endpoint-fidelity T4).
     """
-    from tests.utils.harness import create_bucket_in_region, force_delete_bucket
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    from tests.utils.harness import create_bucket_in_region, delete_under, force_delete_bucket
 
     ours_exe, aws_exe = check_environment()
     client = _build_client()
     bucket = _bench_bucket()
     region = awsenv.resolve_region()
-    workroot = Path(tempfile.mkdtemp(prefix="boto3-s3-bench-e2e-"))
     results: list[ScenarioResult] = []
     failures: list[str] = []
-    force_delete_bucket(client, bucket)
-    create_bucket_in_region(client, bucket)
+    workroot = Path(tempfile.mkdtemp(prefix="boto3-s3-bench-e2e-"))
     try:
-        for engine in engines:
-            config = _write_engine_config(workroot, engine)
-            overlay = {
-                "AWS_CONFIG_FILE": str(config),
-                "AWS_CLI_AUTO_PROMPT": "off",
-                "AWS_PAGER": "",
-                # The engine config replaces ~/.aws/config, so hand both CLIs
-                # the region explicitly (real S3 needs it; harmless on the dev stack).
-                **({"AWS_REGION": region, "AWS_DEFAULT_REGION": region} if region else {}),
-            }
-            env = E2EEnv(
-                client=client,
-                bucket=bucket,
-                engine=engine,
-                workdir=workroot / engine,
-                ours_exe=ours_exe,
-                aws_exe=aws_exe,
-                overlay=overlay,
-            )
-            try:
-                for scenario in scenarios:
-                    if engine != "classic" and not (
-                        scenario.crt_capable or scenario.name.startswith("startup_")
-                    ):
-                        continue
-                    try:
-                        results.append(
-                            _run_scenario(
-                                env,
-                                scenario,
-                                samples_override=samples_override,
-                                handicap=handicap,
-                                log=log,
+        if awsenv.targeting_local_stack():
+            force_delete_bucket(client, bucket)
+        create_bucket_in_region(client, bucket)
+        try:
+            for engine in engines:
+                config = _write_engine_config(workroot, engine)
+                overlay = {
+                    "AWS_CONFIG_FILE": str(config),
+                    "AWS_CLI_AUTO_PROMPT": "off",
+                    "AWS_PAGER": "",
+                    # The engine config replaces ~/.aws/config, so hand both CLIs
+                    # the region explicitly (real S3 needs it; harmless on the dev stack).
+                    **({"AWS_REGION": region, "AWS_DEFAULT_REGION": region} if region else {}),
+                }
+                env = E2EEnv(
+                    client=client,
+                    bucket=bucket,
+                    engine=engine,
+                    workdir=workroot / engine,
+                    ours_exe=ours_exe,
+                    aws_exe=aws_exe,
+                    overlay=overlay,
+                )
+                try:
+                    for scenario in scenarios:
+                        if engine != "classic" and not (
+                            scenario.crt_capable or scenario.name.startswith("startup_")
+                        ):
+                            continue
+                        try:
+                            results.append(
+                                _run_scenario(
+                                    env,
+                                    scenario,
+                                    samples_override=samples_override,
+                                    handicap=handicap,
+                                    log=log,
+                                )
                             )
-                        )
-                    except (BenchmarkError, OSError) as exc:
-                        message = f"[e2e/{engine}] {scenario.name}: {exc}"
-                        log(f"{message}\n[e2e/{engine}] {scenario.name}: scenario skipped")
-                        failures.append(message)
-            finally:
-                shutil.rmtree(env.workdir, ignore_errors=True)
+                        except (BenchmarkError, OSError, ClientError, BotoCoreError) as exc:
+                            message = f"[e2e/{engine}] {scenario.name}: {exc}"
+                            log(f"{message}\n[e2e/{engine}] {scenario.name}: scenario skipped")
+                            failures.append(message)
+                finally:
+                    shutil.rmtree(env.workdir, ignore_errors=True)
+        finally:
+            try:
+                delete_under(client, bucket, "")
+                client.delete_bucket(Bucket=bucket)
+            except (ClientError, BotoCoreError) as exc:
+                message = f"[e2e] could not delete bucket {bucket}: {exc}"
+                log(message)
+                failures.append(message)
     finally:
-        force_delete_bucket(client, bucket)
         shutil.rmtree(workroot, ignore_errors=True)
     return results, failures

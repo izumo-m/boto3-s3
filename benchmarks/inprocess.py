@@ -418,9 +418,10 @@ def run_scenarios(
     is added to every sample; it exists only for the regression-flag
     self-test (`--self-test-handicap-ms`).
 
-    Returns ``(results, failures)``: a failing scenario is logged and skipped
-    so the rest of the run's measurements survive (same contract as the E2E
-    runner).
+    Returns ``(results, failures)``: a failing scenario (an unexpected rc, a
+    verification mismatch, a local I/O error while preparing its input) is
+    logged and skipped so the rest of the run's measurements survive (same
+    contract as the E2E runner).
     """
     workroot = Path(tempfile.mkdtemp(prefix="boto3-s3-bench-inproc-"))
     results: list[ScenarioResult] = []
@@ -438,7 +439,7 @@ def run_scenarios(
                             log=log,
                         )
                     )
-                except BenchmarkError as exc:
+                except (BenchmarkError, OSError) as exc:
                     message = f"[inprocess] {scenario.name}: {exc}"
                     log(f"{message}\n[inprocess] {scenario.name}: scenario skipped")
                     failures.append(message)

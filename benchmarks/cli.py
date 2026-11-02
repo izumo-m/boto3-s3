@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import traceback
 from fnmatch import fnmatch
 from pathlib import Path
 
@@ -293,4 +294,11 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_list()
     except BenchmarkError as exc:
         print(f"benchmarks: error: {exc}", file=sys.stderr)
+        return 2
+    except Exception:
+        # Anything else (an S3 error outside a scenario, a harness bug) is a
+        # harness error too: exit 2, so that 1 keeps meaning a regression flag
+        # (the EC2 launcher reads the exit codes that way).
+        traceback.print_exc()
+        print("benchmarks: error: unexpected failure (traceback above)", file=sys.stderr)
         return 2

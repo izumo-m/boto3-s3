@@ -297,6 +297,80 @@ class TestRemoteGuards:
             e2e._check_remote_credentials()
 
 
+class _RecordingClient:
+    """An S3 client stand-in that records the operations the runner sends."""
+
+    def __init__(self, *, fail_delete: bool = False) -> None:
+        self.calls: list[str] = []
+        self.meta = type("Meta", (), {"region_name": "ap-northeast-1"})()
+        self._fail_delete = fail_delete
+
+    def __getattr__(self, name: str) -> object:
+        def call(**_kwargs: object) -> dict[str, object]:
+            self.calls.append(name)
+            if name == "delete_bucket" and self._fail_delete:
+                from botocore.exceptions import ClientError
+
+                raise ClientError({"Error": {"Code": "BucketNotEmpty"}}, "DeleteBucket")
+            return {}
+
+        return call
+
+
+class TestRunBucketLifecycle:
+    def _run(
+        self, monkeypatch: pytest.MonkeyPatch, client: _RecordingClient, *, endpoint: str | None
+    ) -> tuple[list[ScenarioResult], list[str]]:
+        from tests.utils import harness
+
+        if endpoint is None:
+            monkeypatch.delenv("AWS_ENDPOINT_URL_S3", raising=False)
+        else:
+            monkeypatch.setenv("AWS_ENDPOINT_URL_S3", endpoint)
+        monkeypatch.setenv("AWS_REGION", "ap-northeast-1")
+        monkeypatch.setattr(e2e, "check_environment", lambda: ("boto3-s3", "aws"))
+        monkeypatch.setattr(e2e, "_build_client", lambda: client)
+        monkeypatch.setattr(
+            harness, "delete_under", lambda c, _b, _p: c.calls.append("delete_under")
+        )
+        return e2e.run_scenarios([], engines=("classic",), log=lambda _line: None)
+
+    def test_real_s3_never_lists_the_account_buckets(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The EC2 instance role holds S3 on the benchmark buckets only, so a
+        # ListBuckets (s3:ListAllMyBuckets) would fail the whole E2E mode.
+        client = _RecordingClient()
+        _results, failures = self._run(monkeypatch, client, endpoint=None)
+        assert client.calls == ["create_bucket", "delete_under", "delete_bucket"]
+        assert failures == []
+
+    def test_dev_stack_clears_its_fixed_name_first(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = _RecordingClient()
+        self._run(monkeypatch, client, endpoint="http://127.0.0.1:9000")
+        assert client.calls[0] == "list_buckets"
+        assert client.calls[-2:] == ["delete_under", "delete_bucket"]
+
+    def test_a_failed_bucket_delete_is_a_failure_not_a_crash(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = _RecordingClient(fail_delete=True)
+        _results, failures = self._run(monkeypatch, client, endpoint=None)
+        assert len(failures) == 1
+        assert "could not delete bucket" in failures[0]
+
+
+class TestExitCodes:
+    def test_an_unexpected_error_exits_2_not_the_flag_code(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from benchmarks import cli
+
+        def broken() -> int:
+            raise RuntimeError("harness bug")
+
+        monkeypatch.setattr(cli, "_cmd_list", broken)
+        assert cli.main(["list"]) == 2
+
+
 class TestRawRows:
     def test_sync_tiny_is_reported_on_raw_medians(self) -> None:
         meta = {"mode": "e2e", "git_rev": "abc", "timestamp_utc": "t", "python": "3.14.7"}
