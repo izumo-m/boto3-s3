@@ -202,8 +202,11 @@ class TestUserData:
         assert upload.rstrip().endswith("|| true")
         # The uv mise.toml pins, installed under pipefail so a failed download
         # fails its own line rather than the `uv sync` after it.
-        assert "https://astral.sh/uv/0.13.5/install.sh | env UV_INSTALL_DIR" in script
+        assert "https://astral.sh/uv/0.13.5/install.sh" in script
+        assert "export UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1" in script
         assert script.index("set -o pipefail") < script.index("astral.sh/uv/")
+        # cloud-init may start the script without HOME, which the installer reads.
+        assert script.index("export HOME=/root") < script.index("astral.sh/uv/")
         # Each mode runs on its own and uploads before the next starts, with
         # errexit and the ERR trap off around the benchmark's own exit codes.
         runs = [line for line in script.splitlines() if "python -m benchmarks run" in line]
@@ -372,15 +375,20 @@ class TestMarketAndOutcome:
             "Client.InstanceInitiatedShutdown: Instance initiated shutdown",
             19.0,
         )
-        verdict = ec2._classify(outcome, 60, "", downloaded=2)
+        both = ["20260906-1_inprocess_abc.ec2-x.jsonl", "20260906-2_e2e_abc.ec2-x.jsonl"]
+        verdict = ec2._classify(outcome, 60, "", results_back=both)
         assert "2 results file(s)" in verdict
         assert "DONE marker never arrived" in verdict
         assert "ran to the end" in verdict
-        assert "without reporting" in ec2._classify(outcome, 60, "", downloaded=0)
-        # One file back means the second mode never uploaded: not "the end".
-        partial = ec2._classify(outcome, 60, "", downloaded=1)
-        assert "ran to the end" not in partial
-        assert "second mode left no results" in partial
+        assert "without reporting" in ec2._classify(outcome, 60, "", results_back=[])
+        # One file back is not "the end", and its name says which mode is missing:
+        # the first mode can fail without a file while the second still uploads.
+        e2e_only = ec2._classify(outcome, 60, "", results_back=both[1:])
+        assert "ran to the end" not in e2e_only
+        assert "the inprocess mode left no results" in e2e_only
+        assert "the e2e mode left no results" in ec2._classify(
+            outcome, 60, "", results_back=both[:1]
+        )
 
     def test_ok_requires_a_zero_marker(self) -> None:
         assert Outcome("completed", "0", None, None, 1.0).ok
@@ -425,6 +433,7 @@ class _ScriptedEC2:
     def __init__(self, states: list[dict[str, Any]] | Exception) -> None:
         self._states = states
         self.calls: list[str] = []
+        self.fail_terminate: Exception | None = None
 
     def describe_instances(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append("describe_instances")
@@ -437,16 +446,9 @@ class _ScriptedEC2:
 
     def terminate_instances(self, **_kwargs: Any) -> dict[str, Any]:
         self.calls.append("terminate_instances")
+        if self.fail_terminate is not None:
+            raise self.fail_terminate
         return {}
-
-    def get_waiter(self, _name: str) -> Any:
-        calls = self.calls
-
-        class _Waiter:
-            def wait(self, **_kwargs: Any) -> None:
-                calls.append("wait_terminated")
-
-        return _Waiter()
 
 
 class _MarkerS3:
@@ -502,7 +504,10 @@ class TestOutcomeReading:
 
         from tests.utils import harness
 
-        fake_ec2 = _ScriptedEC2([])
+        monkeypatch.setattr(ec2.time, "sleep", lambda _seconds: None)
+        fake_ec2 = _ScriptedEC2(
+            [{"State": {"Name": "shutting-down"}}, {"State": {"Name": "terminated"}}]
+        )
         order = fake_ec2.calls
 
         class _Buckets:
@@ -519,10 +524,12 @@ class TestOutcomeReading:
         )
         args = argparse.Namespace(region="ap-northeast-1", profile=None)
         assert ec2.cmd_cleanup(args) == 0
+        # The wait polls until the instance is terminated, then the buckets go.
         assert order == [
             "describe_instances",
             "terminate_instances",
-            "wait_terminated",
+            "describe_instances",
+            "describe_instances",
             "list_buckets",
             "delete boto3-s3-bench-run",
         ]
@@ -530,3 +537,225 @@ class TestOutcomeReading:
     def test_the_uv_version_is_mise_toml_s(self) -> None:
         mise = (ec2.REPO_ROOT / "mise.toml").read_text()
         assert f'uv = "{ec2._pinned_uv_version()}"' in mise
+
+
+class _RunS3:
+    """An S3 client stand-in for `cmd_run`: records the hand-off bucket writes."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def put_object(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("put_object", kwargs["Key"]))
+        return {}
+
+    def delete_object(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("delete_object", kwargs["Key"]))
+        return {}
+
+    def generate_presigned_url(self, *_args: Any, **_kwargs: Any) -> str:
+        return "https://example.test/boot/presigned"
+
+
+class _AnyCall:
+    """A client stand-in answering every operation with an empty response."""
+
+    def __init__(self, **attributes: Any) -> None:
+        self.__dict__.update(attributes)
+
+    def __getattr__(self, _name: str) -> Any:
+        return lambda *_args, **_kwargs: {"Account": "123456789012"}
+
+
+def _run_args(**overrides: Any) -> Any:
+    import argparse
+
+    values: dict[str, Any] = dict(
+        region=None,
+        profile="bench",
+        instance_type="m7i.xlarge",
+        python="3.14",
+        ubuntu_release="26.04",
+        max_minutes=60,
+        keep=False,
+        on_demand=False,
+        large_transfer_mb=1024,
+    )
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+class TestRunTeardown:
+    """`cmd_run`'s endings, with every AWS call answered by a stand-in."""
+
+    def _stub(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        wait: Any = None,
+        launch: Any = None,
+        token: str | None = None,
+    ) -> tuple[_RunS3, _ScriptedEC2, list[str], list[str | None]]:
+        import types
+
+        import boto3
+
+        from tests.utils import harness
+
+        s3 = _RunS3()
+        fake_ec2 = _ScriptedEC2([{"State": {"Name": "terminated"}}])
+        deleted: list[str] = []
+        profiles: list[str | None] = []
+
+        def resolve_region(_explicit: str | None = None, *, profile: str | None = None) -> str:
+            profiles.append(profile)
+            return "ap-northeast-1"
+
+        def done(*_args: Any, **_kwargs: Any) -> Outcome:
+            return Outcome("completed", "0", None, None, 30.0)
+
+        frozen = types.SimpleNamespace(token=token)
+        credentials = types.SimpleNamespace(get_frozen_credentials=lambda: frozen)
+        clients = {"ec2": fake_ec2, "s3": s3}
+        monkeypatch.setattr(awsenv, "refuse_dev_stack_env", lambda: None)
+        monkeypatch.setattr(awsenv, "resolve_region", resolve_region)
+        monkeypatch.setattr(ec2, "_client", lambda kind, *_a: clients.get(kind, _AnyCall()))
+        monkeypatch.setattr(ec2, "_describe_instance_type", lambda *_a: ("x86_64", 16384))
+        monkeypatch.setattr(ec2, "_resolve_ami", lambda *_a: "ami-0123")
+        monkeypatch.setattr(ec2, "_root_device_name", lambda *_a: "/dev/sda1")
+        monkeypatch.setattr(ec2, "_require_instance_profile", lambda *_a: None)
+        monkeypatch.setattr(ec2, "_ensure_boot_bucket", lambda *_a: None)
+        monkeypatch.setattr(ec2, "_archive_working_tree", lambda: b"tar")
+        monkeypatch.setattr(ec2, "_launch", launch or (lambda *_a, **_k: "i-1"))
+        monkeypatch.setattr(ec2, "_await_completion", wait or done)
+        monkeypatch.setattr(
+            ec2, "_download_results", lambda *_a: ["t_inprocess_r.jsonl", "t_e2e_r.jsonl"]
+        )
+        monkeypatch.setattr(ec2, "_dump_diagnostics", lambda *_a: None)
+        monkeypatch.setattr(ec2.time, "sleep", lambda _seconds: None)
+        monkeypatch.setattr(harness, "force_delete_bucket", lambda _c, name: deleted.append(name))
+        monkeypatch.setattr(
+            boto3,
+            "Session",
+            lambda **_kwargs: types.SimpleNamespace(get_credentials=lambda: credentials),
+        )
+        return s3, fake_ec2, deleted, profiles
+
+    @staticmethod
+    def _interrupt(*_args: Any, **_kwargs: Any) -> Outcome:
+        raise KeyboardInterrupt
+
+    def test_a_clean_run_tears_down_and_uses_the_launcher_profile(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        s3, fake_ec2, deleted, profiles = self._stub(monkeypatch)
+        assert ec2.cmd_run(_run_args()) == 0
+        assert profiles == ["bench"]
+        assert "terminate_instances" in fake_ec2.calls
+        assert len(deleted) == 1
+        assert [call for call, _key in s3.calls] == ["put_object", "delete_object"]
+
+    def test_a_failed_launch_still_removes_the_tarball(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        s3, fake_ec2, deleted, _profiles = self._stub(monkeypatch, launch=self._interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            ec2.cmd_run(_run_args())
+        assert [call for call, _key in s3.calls] == ["put_object", "delete_object"]
+        assert fake_ec2.calls == []
+        assert deleted == []
+
+    def test_an_interrupted_wait_waits_out_the_instance_then_cleans_up(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        s3, fake_ec2, deleted, _profiles = self._stub(monkeypatch, wait=self._interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            ec2.cmd_run(_run_args())
+        # It may still be writing into its bucket: terminated first, then emptied.
+        assert fake_ec2.calls == ["terminate_instances", "describe_instances"]
+        assert len(deleted) == 1
+        assert ("delete_object", s3.calls[0][1]) in s3.calls
+
+    def test_keep_leaves_an_unfinished_run_to_the_instance(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        s3, fake_ec2, deleted, _profiles = self._stub(monkeypatch, wait=self._interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            ec2.cmd_run(_run_args(keep=True))
+        # The instance may not have fetched the code yet, so the tarball stays too.
+        assert fake_ec2.calls == []
+        assert deleted == []
+        assert [call for call, _key in s3.calls] == ["put_object"]
+
+    def test_keep_changes_nothing_once_the_run_has_ended(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        s3, fake_ec2, deleted, _profiles = self._stub(monkeypatch)
+        assert ec2.cmd_run(_run_args(keep=True)) == 0
+        assert "terminate_instances" in fake_ec2.calls
+        assert len(deleted) == 1
+        assert [call for call, _key in s3.calls] == ["put_object", "delete_object"]
+
+    def test_a_failed_terminate_still_removes_the_bucket(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from botocore.exceptions import EndpointConnectionError
+
+        _s3, fake_ec2, deleted, _profiles = self._stub(monkeypatch)
+        fake_ec2.fail_terminate = EndpointConnectionError(endpoint_url="https://ec2.test")
+        assert ec2.cmd_run(_run_args()) == 0
+        assert len(deleted) == 1
+
+    def test_temporary_credentials_are_flagged(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._stub(monkeypatch, token="session-token")
+        ec2.cmd_run(_run_args())
+        assert "credentials are temporary" in capsys.readouterr().out
+        self._stub(monkeypatch, token=None)
+        ec2.cmd_run(_run_args())
+        assert "temporary" not in capsys.readouterr().out
+
+    def test_setup_iam_and_cleanup_use_the_launcher_profile(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import types
+
+        _s3, _ec2, _deleted, profiles = self._stub(monkeypatch)
+        refused = type("Refused", (Exception,), {})
+        iam = _AnyCall(
+            exceptions=types.SimpleNamespace(
+                EntityAlreadyExistsException=refused, LimitExceededException=refused
+            )
+        )
+        monkeypatch.setattr(
+            ec2,
+            "_client",
+            lambda kind, *_a: (
+                iam
+                if kind == "iam"
+                else _ScriptedEC2([{"State": {"Name": "terminated"}}])
+                if kind == "ec2"
+                else _AnyCall(list_buckets=lambda: {"Buckets": []})
+            ),
+        )
+        ec2.cmd_setup_iam(_run_args())
+        ec2.cmd_cleanup(_run_args())
+        assert profiles == ["bench", "bench"]
+
+
+@pytest.mark.skipif(not hasattr(__import__("signal"), "SIGHUP"), reason="POSIX signals")
+def test_a_termination_signal_unwinds_through_the_teardown() -> None:
+    import os
+    import signal
+
+    reached: list[str] = []
+    with pytest.raises(SystemExit), ec2._finally_on_termination():
+        try:
+            # A signal to this process is handled before the next statement.
+            os.kill(os.getpid(), signal.SIGHUP)
+        finally:
+            reached.append("finally")
+    assert reached == ["finally"]
+    # The previous handler is back once the run is over.
+    assert signal.getsignal(signal.SIGHUP) is signal.SIG_DFL

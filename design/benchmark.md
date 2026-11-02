@@ -406,10 +406,14 @@ lane does - the pinned `aws`, the uv version `mise.toml` pins, `uv sync
   the second mode keeps the first mode's file. Whatever the ending, the
   launcher terminates the instance, removes the run's bucket if the harness
   did not, and deletes the code tarball (also when the launch itself
-  failed, or the wait was interrupted); the log and results stay under the
-  run prefix as the run's record. `--keep` leaves the instance and its
-  bucket when the launcher stops first (its own timeout, an interrupt), for
-  the instance to finish on its own. So the answer to a failed run is another
+  failed, or the wait was interrupted - a SIGTERM or SIGHUP to the launcher
+  counts as an interrupt); the log and results stay under the run prefix as
+  the run's record. When the launcher stopped first (its own timeout, an
+  interrupt) the instance may still be writing, so its termination is waited
+  out before its bucket is emptied. `--keep` leaves such an unfinished run to
+  the instance instead - the instance, its bucket and the code tarball, which
+  it may not have fetched yet; once the run has ended it changes nothing. So
+  the answer to a failed run is another
   `ec2 run`. `cleanup` is the safety net for a launcher that died before its
   own teardown: it terminates anything still tagged, waits for that, and
   then force-deletes any `boto3-s3-bench-*` bucket left on real S3 (the
