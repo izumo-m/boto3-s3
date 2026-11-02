@@ -19,6 +19,7 @@ import re
 import sys
 import threading
 import time
+import traceback
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1402,6 +1403,150 @@ class TestCancellationTypeOnAFuture:
             exc, cancel_initiated=cancel_initiated, revoked=revoked
         )
         assert judged is expected
+
+
+class _SettledFuture:
+    """A done future whose outcome ``set_exception`` replaces."""
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+        self.meta = SimpleNamespace(user_context={})
+
+    def result(self) -> None:
+        raise self._error
+
+    def set_exception(self, exception: BaseException) -> None:
+        self._error = exception
+
+
+class _TranslatingFuture(_SettledFuture):
+    """A done future that, like the CRT one, re-raises the stored error and
+    raises a fresh translation from it on every call."""
+
+    def result(self) -> None:
+        try:
+            raise self._error
+        except BaseException as exc:
+            raise RuntimeError("translated") from exc
+
+
+class _RaisingInContext(_SettledFuture):
+    """A done future that raises the stored error while ``context`` is being
+    raised, as an interrupt still on its way out elsewhere is."""
+
+    def __init__(self, error: BaseException, context: BaseException) -> None:
+        super().__init__(error)
+        self._context = context
+
+    def result(self) -> None:
+        try:
+            raise self._context
+        except BaseException:
+            # Raised bare on purpose: the context is what the test is about.
+            raise self._error  # noqa: B904
+
+
+class _OwnCauseError(ValueError):
+    """An exception that is its own cause for its first hundred reads and has
+    none after them, so a walk that never ends stops there for the test to
+    see instead of hanging it."""
+
+    def __init__(self) -> None:
+        super().__init__("its own cause")
+        self.reads = 0
+
+    @property
+    def __cause__(self) -> BaseException | None:  # pyright: ignore[reportIncompatibleVariableOverride]
+        self.reads += 1
+        return self if self.reads <= 100 else None
+
+
+def _raised(exc: BaseException) -> BaseException:
+    try:
+        raise exc
+    except BaseException as caught:
+        return caught
+
+
+def _tb_depth(exc: BaseException) -> int:
+    return len(traceback.extract_tb(exc.__traceback__))
+
+
+class TestOutcomeTraceback:
+    """`transfer._outcome`: every retrieval re-raises the stored exception,
+    and each later one takes the frames it added back off the traceback."""
+
+    def test_a_later_retrieval_leaves_the_traceback_alone(self) -> None:
+        stored = ValueError("boom")
+        future = _SettledFuture(stored)
+        assert transfer._outcome(future) is stored  # pyright: ignore[reportPrivateUsage]
+        depth = _tb_depth(stored)
+        for _ in range(3):
+            assert transfer._outcome(future) is stored  # pyright: ignore[reportPrivateUsage]
+        assert _tb_depth(stored) == depth
+
+    def test_a_replaced_outcome_is_kept_afresh(self) -> None:
+        future = _SettledFuture(ValueError("transfer failed"))
+        transfer._outcome(future)  # pyright: ignore[reportPrivateUsage]
+        replacement = _raised(OSError("close failed"))
+        future.set_exception(replacement)
+        assert transfer._outcome(future) is replacement  # pyright: ignore[reportPrivateUsage]
+        depth = _tb_depth(replacement)
+        for _ in range(3):
+            assert transfer._outcome(future) is replacement  # pyright: ignore[reportPrivateUsage]
+        assert _tb_depth(replacement) == depth
+        # Its own frames, not the first outcome's traceback.
+        frames = traceback.extract_tb(replacement.__traceback__)
+        assert "_raised" in [frame.name for frame in frames]
+
+    def test_a_fresh_translation_leaves_its_cause_alone(self) -> None:
+        cause = ValueError("crt error")
+        future = _TranslatingFuture(cause)
+        first = transfer._outcome(future)  # pyright: ignore[reportPrivateUsage]
+        assert first is not None and first.__cause__ is cause
+        depth = _tb_depth(cause)
+        for _ in range(3):
+            translated = transfer._outcome(future)  # pyright: ignore[reportPrivateUsage]
+            assert translated is not None and translated is not first
+            assert translated.__cause__ is cause
+        assert _tb_depth(cause) == depth
+
+    def test_an_exception_only_on_the_context_is_left_alone(self) -> None:
+        context = ValueError("still on its way out")
+        future = _RaisingInContext(_raised(OSError("transfer failed")), context)
+        first = transfer._outcome(future)  # pyright: ignore[reportPrivateUsage]
+        assert first is not None and first.__context__ is context
+        depth = _tb_depth(context)
+        for _ in range(3):
+            transfer._outcome(future)  # pyright: ignore[reportPrivateUsage]
+        # Each call's own raise of the context added a frame, and none is undone.
+        assert _tb_depth(context) == depth + 3
+
+    def test_frames_added_between_calls_stay(self) -> None:
+        # The caller re-raising a stored interrupt while subscribers still ask.
+        stored = _raised(KeyboardInterrupt())
+        future = _SettledFuture(stored)
+
+        def elsewhere() -> None:
+            try:
+                raise stored
+            except BaseException:
+                pass
+
+        transfer._outcome(future)  # pyright: ignore[reportPrivateUsage]
+        elsewhere()
+        for _ in range(3):
+            transfer._outcome(future)  # pyright: ignore[reportPrivateUsage]
+        names = [frame.name for frame in traceback.extract_tb(stored.__traceback__)]
+        assert "elsewhere" in names
+        assert names.count("_outcome") == 1
+
+    def test_a_cause_cycle_ends_the_walk(self) -> None:
+        stored = _raised(_OwnCauseError())
+        future = _SettledFuture(stored)
+        for _ in range(3):
+            assert transfer._outcome(future) is stored  # pyright: ignore[reportPrivateUsage]
+        assert stored.reads < 100
 
 
 class _CrtCancelError(Exception):
@@ -3411,6 +3556,26 @@ class TestMove:
         error = results[0].error
         assert error is not None
         assert isinstance(error.__cause__, ClientError)
+
+    def test_a_failed_move_shows_the_result_frames_once(self, tmp_path: Path) -> None:
+        # Each on_done subscriber takes the outcome out through
+        # future.result(), which re-raises the one stored exception; its
+        # traceback keeps the first retrieval's frames only.
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x")
+        item = TransferItem(
+            compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="k"
+        )
+        _, _, results, _ = _run(
+            TransferType.UPLOAD,
+            [item],
+            [client_error("NoSuchBucket", 404, "PutObject")],
+            is_move=True,
+        )
+        error = results[0].error
+        assert error is not None and error.__cause__ is not None
+        frames = traceback.extract_tb(error.__cause__.__traceback__)
+        assert [frame.name for frame in frames].count("_outcome") == 1
 
     def test_os_remove_failure_flips_the_move_to_failed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

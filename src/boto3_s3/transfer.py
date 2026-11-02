@@ -171,6 +171,10 @@ _POST_TAGGING_KEY = "boto3_s3_post_copy_tag_set"
 # way as S3's.
 _DELETE_RESPONSE_KEY = "boto3_s3_delete_response"
 
+# user_context slot holding the `__cause__` chain `_outcome` last took out of
+# the item's future, so its next call can tell which exceptions come again.
+_OUTCOME_KEY = "boto3_s3_outcome"
+
 _DEFAULT_MULTIPART_THRESHOLD = 8 * 1024 * 1024
 
 
@@ -309,10 +313,36 @@ def _outcome(future: Any) -> BaseException | None:
     failure branch and leave the item without a record.
     `Transferrer._record_failure` turns that outcome into CANCELLED and hands
     the interrupt back to the caller.
+
+    Each ``future.result()`` re-raises the stored exception, which adds its
+    frames to that exception's traceback, and an item has several
+    subscribers asking. For an HTTP error reply, the CRT engine's
+    ``result()`` instead raises a fresh translation (a ``ClientError``) each
+    time, from the same re-raised awscrt error. So the ``__cause__`` chain
+    taken out is kept in the item's ``user_context``, and an exception on it
+    that comes again gets back the traceback it had just before this call:
+    the ``result()`` frames show once on each, and frames another thread
+    added between calls (the caller re-raising an interrupt) stay. Frames it
+    adds during a call can be lost, which changes only how the traceback
+    reads. An exception a subscriber's ``set_exception`` stored instead is
+    new and keeps its frames. ``__context__`` is not followed: it can be an
+    interrupt still on its way out.
     """
+    kept: list[BaseException] = future.meta.user_context.get(_OUTCOME_KEY, [])
+    before = [(seen, seen.__traceback__) for seen in kept]
     try:
         future.result()
     except BaseException as exc:
+        chain: list[BaseException] = []
+        link: BaseException | None = exc
+        while link is not None and not any(link is seen for seen in chain):
+            chain.append(link)
+            for seen, traceback in before:
+                if seen is link:
+                    link.__traceback__ = traceback
+                    break
+            link = link.__cause__
+        future.meta.user_context[_OUTCOME_KEY] = chain
         return exc
     return None
 
