@@ -318,8 +318,8 @@ AMI's root device name; hands the instance a `git archive HEAD` of the tree
 over S3 (a dirty tree is refused, so a baseline is attributable to a commit);
 waits for a completion marker; pulls the results into `benchmarks/results/`;
 and terminates the instance. The instance provisions the same way the local
-lane does - the pinned `aws`, `uv sync --locked`, the chosen Python - and
-runs both modes against real S3.
+lane does - the pinned `aws`, the uv version `mise.toml` pins, `uv sync
+--locked`, the chosen Python - and runs both modes against real S3.
 
 - **The image is Ubuntu LTS, 26.04 by default.** The local lane develops and
   measures on Ubuntu (WSL2), so the same distribution on EC2 keeps glibc and
@@ -339,7 +339,8 @@ runs both modes against real S3.
   profile; it is the one step that needs an administrator, so it is separate
   and run once.
 - **Region.** Resolved as explicit `--region`, then `AWS_REGION`, then
-  `AWS_DEFAULT_REGION`, then the profile - and passed explicitly to every
+  `AWS_DEFAULT_REGION`, then the region of `--profile` (or, without it, of the
+  ambient profile) - and passed explicitly to every
   client and to both CLIs on the instance, because this project's botocore
   floor does not itself read `AWS_REGION`.
 - **The instance type is the only knob for architecture.** `--instance-type`
@@ -364,10 +365,15 @@ runs both modes against real S3.
   stops with that message rather than falling back on its own: paying
   on-demand is a choice.
 - **Cost, and not leaking an instance.** A run is ~30-40 minutes, well under
-  US$1 of instance time plus S3 request charges. The one real risk is a
-  leaked instance, so it has three independent deaths: a timed `shutdown`
-  armed before any work (`--max-minutes`, default 60), `terminate` as the
-  shutdown behavior, and the launcher's own terminate on the way out.
+  US$1 of instance time, plus about 260k PUT-class S3 requests at the
+  default scale (about US$1.2 at the ap-northeast-1 rate; re-seeding the E2E
+  corpora before every invocation is most of them). The one real risk is a
+  leaked instance, so it has two independent deaths: a timed `shutdown` the
+  instance arms before any work (`--max-minutes`, default 60) and the
+  launcher's own terminate on the way out; `terminate` as the shutdown
+  behavior makes every shutdown a termination. Both need something to run -
+  the user data, the launcher - and when neither does, `cleanup` is what
+  stops the instance.
 - **Every ending is explained.** Provisioning runs under errexit with an ERR
   trap that names the failing line; an outside shutdown (a spot reclaim, the
   budget timer) arrives as SIGTERM and is recorded as such; and the EXIT trap
@@ -376,15 +382,20 @@ runs both modes against real S3.
   because the global endpoint answers for a new bucket with a redirect that
   `curl -T` does not follow), so reporting needs neither credentials nor a
   CLI on the instance and a failure before anything was provisioned still
-  leaves a reason behind. The instance also syncs its log every minute, so a
-  stop that leaves no time for the trap still leaves a recent record, and
-  the launcher shows the log's latest line as progress while it waits. When
+  leaves a reason behind. A URL presigned with temporary credentials (SSO, an
+  assumed role) stops working when they expire, whatever its own expiry, so
+  the launcher warns when its credentials carry a session token: they need
+  the budget plus a quarter hour left. The instance also syncs its log every
+  minute (a failed upload does not end the loop), so a stop that leaves no
+  time for the trap still leaves a recent record, and the launcher shows the
+  log's latest line as progress while it waits. When
   the instance disappears without a marker the launcher reads EC2's stop
-  reason. The last line the launcher prints is the verdict: completed, a
-  benchmark exit code, the provisioning line that failed, a spot
-  interruption, the budget exceeded, a service-side stop, results that
-  arrived without a marker (a reporting fault, not a benchmark one), or its
-  own timeout - followed by the log tail when the run did not succeed.
+  reason, as it does for a marker that records an outside shutdown. The
+  launcher ends with the verdict: completed, a benchmark exit code, the
+  provisioning line that failed, a spot interruption, the budget exceeded, a
+  service-side stop, results that arrived without a marker (a reporting
+  fault, not a benchmark one), or its own timeout - followed by the log tail
+  when the run did not succeed, or by where the results went when it did.
 - **Repeating a failed run is safe.** Everything a run creates is named by
   the run: the instance (tagged with the run id), its own bucket
   (`boto3-s3-bench-<run id>`, named by the launcher and handed to the
@@ -393,12 +404,15 @@ runs both modes against real S3.
   the second mode keeps the first mode's file. Whatever the ending, the
   launcher terminates the instance, removes the run's bucket if the harness
   did not, and deletes the code tarball (also when the launch itself
-  failed); the log and results stay under the run prefix as the run's
-  record. So the answer to a failed run is another `ec2 run`. `cleanup` is
-  the safety net for a launcher that died before its own teardown: it
-  terminates anything still tagged and force-deletes any `boto3-s3-bench-*`
-  bucket left on real S3 (the persistent `boto3-s3-bench-boot-*` hand-off
-  buckets excepted) - do not run it while another run is in flight.
+  failed, or the wait was interrupted); the log and results stay under the
+  run prefix as the run's record. `--keep` leaves the instance and its
+  bucket when the launcher stops first (its own timeout, an interrupt), for
+  the instance to finish on its own. So the answer to a failed run is another
+  `ec2 run`. `cleanup` is the safety net for a launcher that died before its
+  own teardown: it terminates anything still tagged, waits for that, and
+  then force-deletes any `boto3-s3-bench-*` bucket left on real S3 (the
+  persistent `boto3-s3-bench-boot-*` hand-off buckets excepted) - do not run
+  it while another run is in flight.
 - **What comes back.** The results files land in `benchmarks/results/` with
   the lane spelled in their name (`...bbbbbbbbbb.ec2-m7i.xlarge-ubuntu26.04.jsonl`),
   the archived commit as their revision, and the AMI id in the meta record;

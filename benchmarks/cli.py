@@ -114,7 +114,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="instance self-terminates after this budget (default: %(default)s)",
     )
     ec2run.add_argument(
-        "--keep", action="store_true", help="do not terminate at the end (still self-terminates)"
+        "--keep",
+        action="store_true",
+        help="leave the instance and its bucket when the launcher stops first "
+        "(it still self-terminates; `ec2 cleanup` removes the bucket)",
     )
     ec2run.add_argument(
         "--on-demand",
@@ -130,7 +133,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     _add_common(ec2sub.add_parser("setup-iam", help="create the instance role/profile (one-time)"))
-    _add_common(ec2sub.add_parser("cleanup", help="terminate any tagged leftover instances"))
+    _add_common(
+        ec2sub.add_parser(
+            "cleanup", help="terminate tagged leftover instances, then delete leftover buckets"
+        )
+    )
 
     return parser
 

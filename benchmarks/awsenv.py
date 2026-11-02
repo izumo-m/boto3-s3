@@ -43,21 +43,22 @@ def targeting_local_stack() -> bool:
     return endpoint_host() in LOCAL_HOSTS
 
 
-def resolve_region(explicit: str | None = None) -> str | None:
+def resolve_region(explicit: str | None = None, *, profile: str | None = None) -> str | None:
     """Resolve the AWS region the way a careful tool should, or None.
 
     Precedence: an explicit value, then `AWS_REGION` (which aws-cli honors but
     this project's botocore floor does not read), then `AWS_DEFAULT_REGION`,
-    then the active profile's configured region. Returning None lets the caller
-    decide whether a missing region is fatal (real S3) or has a safe default
-    (the dev stack reports us-east-1).
+    then the configured region of *profile* (the launcher's ``--profile``) or,
+    without one, of the active profile. Returning None lets the caller decide
+    whether a missing region is fatal (real S3) or has a safe default (the dev
+    stack reports us-east-1).
     """
     for candidate in (explicit, os.environ.get("AWS_REGION"), os.environ.get("AWS_DEFAULT_REGION")):
         if candidate:
             return candidate
     import botocore.session
 
-    session = botocore.session.Session(profile=os.environ.get("AWS_PROFILE"))
+    session = botocore.session.Session(profile=profile or os.environ.get("AWS_PROFILE"))
     region = session.get_config_variable("region")
     return region or None
 

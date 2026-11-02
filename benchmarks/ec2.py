@@ -12,9 +12,12 @@ The instance does the work; this module only orchestrates. It resolves the
 AMI and architecture, hands the working tree to the instance over S3, waits
 for a completion marker, pulls the results back into `benchmarks/results/`,
 and terminates the instance. The instance is given no long-lived state and
-three independent reasons to die (a timed `shutdown` armed before anything
-else, `InstanceInitiatedShutdownBehavior=terminate`, and this module's own
-terminate call), because the one real cost risk here is a leaked instance.
+two independent reasons to die - a timed `shutdown` it arms before anything
+else, and this module's own terminate call - with
+`InstanceInitiatedShutdownBehavior=terminate` making every shutdown a
+termination, because the one real cost risk here is a leaked instance. Both
+need something to run (the user data, this launcher); when neither does,
+`cleanup` is what stops the instance.
 
 The image is Ubuntu LTS (the local lane's distribution, so glibc and the
 kernel generation match across lanes), resolved from Canonical's public SSM
@@ -22,7 +25,8 @@ parameters; the release is a knob.
 
 `setup-iam` (one-time, needs an administrator) creates the instance role;
 `run` provisions and measures; `cleanup` terminates anything a crashed `run`
-left tagged. See design/benchmark.md "Recording a baseline on EC2".
+left tagged and deletes the benchmark buckets it left. See design/benchmark.md
+"Recording a baseline on EC2".
 """
 
 from __future__ import annotations
@@ -117,6 +121,16 @@ def _pinned_aws_version() -> str:
         if line.startswith("__version__"):
             return line.split("'")[1]
     raise BenchmarkError(f"could not read the pinned aws-cli version from {init}")
+
+
+def _pinned_uv_version() -> str:
+    """The uv version mise.toml pins for development, CI and the release workflows."""
+    path = REPO_ROOT / "mise.toml"
+    for line in path.read_text().splitlines():
+        name, sep, value = line.partition("=")
+        if sep and name.strip() == "uv":
+            return value.strip().strip('"')
+    raise BenchmarkError(f"could not read the pinned uv version from {path}")
 
 
 def _archive_working_tree() -> bytes:
@@ -240,6 +254,7 @@ def _user_data(
     region: str,
     python: str,
     aws_version: str,
+    uv_version: str,
     max_minutes: int,
     large_mb: int,
     tmpfs_gb: int,
@@ -270,6 +285,7 @@ def _user_data(
         region=region,
         python=python,
         aws_version=aws_version,
+        uv_version=uv_version,
         large_mb=large_mb,
         tmpfs_gb=tmpfs_gb,
         git_rev=git_rev,
@@ -311,13 +327,16 @@ trap 'RC="terminated-by-signal:$RC"; exit 143' TERM
 # the DONE marker says where it died.
 trap 'RC="failed-at-line-$LINENO"' ERR
 set -e
+# A failed download piped into `sh` must fail its own line, not the next one.
+set -o pipefail
 # Sync the log every minute so even a stop that leaves no time for the trap
 # leaves a recent record, and the launcher can show progress meanwhile. The
 # loop runs without xtrace so its own curl is not the log's newest line each
 # minute (the launcher shows that line as progress).
 ( set +x
   while sleep 60; do
-    curl -fsS -T /var/log/bench-userdata.log "LOG_PUT_URL_PLACEHOLDER" >/dev/null 2>&1
+    # The subshell inherits errexit: one failed upload must not end the loop.
+    curl -fsS -T /var/log/bench-userdata.log "LOG_PUT_URL_PLACEHOLDER" >/dev/null 2>&1 || true
   done ) &
 
 export DEBIAN_FRONTEND=noninteractive
@@ -329,7 +348,9 @@ systemctl disable --now apt-daily.timer apt-daily-upgrade.timer unattended-upgra
 apt-get -o DPkg::Lock::Timeout=300 -q update
 # unzip for the aws-cli release zip install-awscli.sh unpacks (tar/gzip ship).
 apt-get -o DPkg::Lock::Timeout=300 -q install -y unzip
-curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+# The uv mise.toml pins for every other lane, so the interpreter build it picks
+# and its lockfile handling do not change with the day of the run.
+curl -LsSf https://astral.sh/uv/{uv_version}/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 export PATH=/usr/local/bin:$PATH
 export HOME=/root
 
@@ -429,7 +450,8 @@ def _estimated_note(instance_type: str, region: str, *, spot: bool) -> str:
     market = "spot (one-time)" if spot else "on-demand"
     return (
         f"about to launch one {market} {instance_type} in {region}; a run is ~30-40 min, so "
-        "instance cost is typically well under US$1 plus S3 request charges."
+        "instance cost is typically well under US$1, plus about 260k PUT-class S3 requests "
+        "at the default scale (about US$1.2 at the ap-northeast-1 rate)."
     )
 
 
@@ -455,13 +477,13 @@ class Outcome:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    from tests.utils.harness import force_delete_bucket
+    import boto3
 
     awsenv.refuse_dev_stack_env()
-    region = awsenv.resolve_region(args.region)
+    profile = args.profile
+    region = awsenv.resolve_region(args.region, profile=profile)
     if region is None:
         raise BenchmarkError("no region; pass --region or set AWS_REGION / a profile with one")
-    profile = args.profile
     spot = not args.on_demand
 
     ec2 = _client("ec2", region, profile)
@@ -476,6 +498,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     ami = _resolve_ami(ssm, arch, args.ubuntu_release)
     root_device = _root_device_name(ec2, ami)
     aws_version = _pinned_aws_version()
+    uv_version = _pinned_uv_version()
 
     _require_instance_profile(ec2, region, profile)
 
@@ -485,8 +508,17 @@ def cmd_run(args: argparse.Namespace) -> int:
         f"{args.ubuntu_release} AMI {ami} (root {root_device}), Python {args.python}, "
         f"large transfer {args.large_transfer_mb} MB on a {tmpfs_gb} GB tmpfs"
     )
-    print(f"pinned aws-cli {aws_version}")
+    print(f"pinned aws-cli {aws_version}, uv {uv_version}")
     print(_estimated_note(instance_type, region, spot=spot))
+    credentials = boto3.Session(profile_name=profile, region_name=region).get_credentials()
+    if credentials is not None and credentials.get_frozen_credentials().token:
+        # A URL presigned with temporary credentials stops working when they
+        # expire, whatever its own expiry says; the instance reports only
+        # through such URLs.
+        print(
+            "note: these credentials are temporary; the instance's report URLs stop working "
+            f"when they expire, so they need more than {args.max_minutes + 15} min left"
+        )
 
     boot_bucket = _boot_bucket_name(account, region)
     _ensure_boot_bucket(s3, boot_bucket, region)
@@ -498,6 +530,58 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     tarball_key = f"{run_id}/repo.tar.gz"
     s3.put_object(Bucket=boot_bucket, Key=tarball_key, Body=_archive_working_tree())
+    try:
+        return _launch_and_wait(
+            args,
+            ec2=ec2,
+            s3=s3,
+            boot_bucket=boot_bucket,
+            run_id=run_id,
+            bench_bucket=bench_bucket,
+            tarball_key=tarball_key,
+            region=region,
+            instance_type=instance_type,
+            ami=ami,
+            root_device=root_device,
+            aws_version=aws_version,
+            uv_version=uv_version,
+            tmpfs_gb=tmpfs_gb,
+            spot=spot,
+        )
+    finally:
+        # The tarball is the one sizeable object; the log and results stay
+        # under the run prefix (kilobytes) as the run's record on the bucket.
+        # Removed on every ending, an interrupted wait included: `cleanup`
+        # leaves the hand-off bucket alone.
+        try:
+            s3.delete_object(Bucket=boot_bucket, Key=tarball_key)
+        except Exception as exc:  # report, never mask the outcome
+            print(f"could not remove s3://{boot_bucket}/{tarball_key}: {exc}")
+
+
+def _launch_and_wait(
+    args: argparse.Namespace,
+    *,
+    ec2: Any,
+    s3: Any,
+    boot_bucket: str,
+    run_id: str,
+    bench_bucket: str,
+    tarball_key: str,
+    region: str,
+    instance_type: str,
+    ami: str,
+    root_device: str,
+    aws_version: str,
+    uv_version: str,
+    tmpfs_gb: int,
+    spot: bool,
+) -> int:
+    """Launch the instance, wait for its outcome, retrieve the results, tear down."""
+    from botocore.exceptions import ClientError
+
+    from tests.utils.harness import force_delete_bucket
+
     git_rev = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
     ).stdout.strip()
@@ -523,6 +607,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         region=region,
         python=args.python,
         aws_version=aws_version,
+        uv_version=uv_version,
         max_minutes=args.max_minutes,
         large_mb=args.large_transfer_mb,
         tmpfs_gb=tmpfs_gb,
@@ -533,20 +618,15 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     user_data = _inline_urls(user_data, presigned)
 
-    try:
-        instance_id = _launch(
-            ec2,
-            ami=ami,
-            root_device=root_device,
-            instance_type=instance_type,
-            user_data=user_data,
-            run_id=run_id,
-            spot=spot,
-        )
-    except BaseException:
-        # Nothing runs, so nothing else of this run's stays behind.
-        s3.delete_object(Bucket=boot_bucket, Key=tarball_key)
-        raise
+    instance_id = _launch(
+        ec2,
+        ami=ami,
+        root_device=root_device,
+        instance_type=instance_type,
+        user_data=user_data,
+        run_id=run_id,
+        spot=spot,
+    )
     launched = time.monotonic()
     print(f"launched {instance_id} ({'spot' if spot else 'on-demand'}); run id {run_id}")
 
@@ -557,22 +637,25 @@ def cmd_run(args: argparse.Namespace) -> int:
             s3, ec2, boot_bucket, run_id, instance_id, args.max_minutes, launched=launched
         )
         downloaded = _download_results(s3, boot_bucket, run_id)
-        # The tarball is the one sizeable object; the log and results stay
-        # under the run prefix (kilobytes) as the run's record on the bucket.
-        s3.delete_object(Bucket=boot_bucket, Key=tarball_key)
     finally:
         if args.keep:
             print(f"--keep: leaving {instance_id} running (it self-terminates at the budget)")
+            # It may still be measuring in its bucket; `ec2 cleanup` removes
+            # both once it is done.
+            print(f"--keep: leaving {bench_bucket} to the instance; `ec2 cleanup` removes it")
         else:
-            ec2.terminate_instances(InstanceIds=[instance_id])
-            print(f"terminated {instance_id}")
-        # The harness deletes its bucket on a clean finish; any other ending
-        # leaves it, and it is this run's alone, so remove it here (a no-op
-        # when it is already gone).
-        try:
-            force_delete_bucket(s3, bench_bucket)
-        except Exception as exc:  # report, never mask the outcome
-            print(f"could not remove {bench_bucket}: {exc}; `ec2 cleanup` will")
+            try:
+                ec2.terminate_instances(InstanceIds=[instance_id])
+                print(f"terminated {instance_id}")
+            except ClientError as exc:  # report, never mask the outcome
+                print(f"could not terminate {instance_id}: {exc}; `ec2 cleanup` will")
+            # The harness deletes its bucket on a clean finish; any other ending
+            # leaves it, and it is this run's alone, so remove it here (a no-op
+            # when it is already gone).
+            try:
+                force_delete_bucket(s3, bench_bucket)
+            except Exception as exc:  # report, never mask the outcome
+                print(f"could not remove {bench_bucket}: {exc}; `ec2 cleanup` will")
 
     ok = outcome.ok and downloaded > 0
     verdict = _classify(outcome, args.max_minutes, user_data, downloaded=downloaded)
@@ -730,7 +813,17 @@ def _await_completion(
         if body is not None:
             rc = body.strip().removeprefix("rc=")
             print(f"instance finished after {minutes():.1f} min: rc={rc}")
-            return Outcome("completed", rc, None, None, minutes())
+            state = reason = None
+            if rc.startswith("terminated-by-signal"):
+                # Stopped from outside: only EC2's stop reason tells a spot
+                # reclaim from the budget timer, and the trap's marker can land
+                # before the instance has even left `running`.
+                for _ in range(9):
+                    state, reason = _instance_status(ec2, instance_id)
+                    if state in _TERMINAL_STATES and reason:
+                        break
+                    time.sleep(10)
+            return Outcome("completed", rc, state, reason, minutes())
         state, reason = _instance_status(ec2, instance_id)
         if state in _TERMINAL_STATES:
             for _ in range(9):  # up to 90 s for the trap's upload to land
@@ -757,8 +850,20 @@ def _await_completion(
 
 
 def _instance_status(ec2: Any, instance_id: str) -> tuple[str, str | None]:
-    """The instance's state name and, when EC2 gives one, its stop reason."""
-    resp = ec2.describe_instances(InstanceIds=[instance_id])
+    """The instance's state name and, when EC2 gives one, its stop reason.
+
+    Just after RunInstances, DescribeInstances may not know the instance yet
+    (EC2 is eventually consistent, and botocore does not retry that error);
+    it reads as still pending, and the wait's own deadline bounds it.
+    """
+    from botocore.exceptions import ClientError
+
+    try:
+        resp = ec2.describe_instances(InstanceIds=[instance_id])
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "InvalidInstanceID.NotFound":
+            return "pending", None
+        raise
     for reservation in resp.get("Reservations", []):
         for inst in reservation.get("Instances", []):
             state = str(inst["State"]["Name"])
@@ -823,10 +928,15 @@ def _classify(outcome: Outcome, max_minutes: int, user_data: str, *, downloaded:
         if reason.startswith("Server."):
             return f"EC2 stopped the instance on its side ({reason}); run again"
         if "InstanceInitiatedShutdown" in reason and downloaded > 0:
+            ran = (
+                "the benchmark ran to the end"
+                if downloaded >= 2
+                else "the second mode left no results"
+            )
             return (
                 f"the instance shut itself down after uploading {downloaded} results file(s) "
-                "but its DONE marker never arrived: the benchmark ran to the end, its exit "
-                "codes are unknown, and the report path (the presigned PUTs) needs a look"
+                f"but its DONE marker never arrived: {ran}, its exit codes are unknown, and "
+                "the report path (the presigned PUTs) needs a look"
             )
         return f"the instance ended {outcome.state!r} without reporting" + (
             f" ({reason})" if reason else ""
@@ -891,7 +1001,7 @@ def cmd_setup_iam(args: argparse.Namespace) -> int:
     import json
 
     awsenv.refuse_dev_stack_env()
-    region = awsenv.resolve_region(args.region)
+    region = awsenv.resolve_region(args.region, profile=args.profile)
     if region is None:
         raise BenchmarkError("no region; pass --region or set AWS_REGION")
     iam = _client("iam", region, args.profile)
@@ -980,31 +1090,18 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     real S3, when the instance was cut off mid-run (budget shutdown, a
     launcher timeout) so the harness's own delete never ran; those names are
     random, so the whole `boto3-s3-bench-*` family in the account is swept,
-    the persistent `boto3-s3-bench-boot-*` hand-off buckets excepted.
+    the persistent `boto3-s3-bench-boot-*` hand-off buckets excepted. The
+    instances go first, and are waited out, so none is still writing into a
+    bucket while it is being emptied.
     """
-    from botocore.exceptions import ClientError
+    from botocore.exceptions import ClientError, WaiterError
 
     from tests.utils.harness import force_delete_bucket
 
     awsenv.refuse_dev_stack_env()
-    region = awsenv.resolve_region(args.region)
+    region = awsenv.resolve_region(args.region, profile=args.profile)
     if region is None:
         raise BenchmarkError("no region; pass --region or set AWS_REGION")
-    s3 = _client("s3", region, args.profile)
-    leftovers = [
-        b["Name"]
-        for b in s3.list_buckets().get("Buckets", [])
-        if b["Name"].startswith("boto3-s3-bench-")
-        and not b["Name"].startswith("boto3-s3-bench-boot-")
-    ]
-    for name in leftovers:
-        try:
-            force_delete_bucket(s3, name)
-            print(f"deleted leftover bucket {name}")
-        except ClientError as exc:
-            print(f"could not delete {name} (another region?): {exc}")
-    if not leftovers:
-        print("no leftover benchmark buckets")
     ec2 = _client("ec2", region, args.profile)
     resp = ec2.describe_instances(
         Filters=[
@@ -1020,9 +1117,31 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
         for reservation in resp.get("Reservations", [])
         for inst in reservation.get("Instances", [])
     ]
-    if not ids:
+    if ids:
+        ec2.terminate_instances(InstanceIds=ids)
+        print(f"terminating {', '.join(ids)}")
+        try:
+            ec2.get_waiter("instance_terminated").wait(
+                InstanceIds=ids, WaiterConfig={"Delay": 10, "MaxAttempts": 60}
+            )
+            print(f"terminated {', '.join(ids)}")
+        except WaiterError as exc:
+            print(f"gave up waiting for the termination ({exc}); removing the buckets anyway")
+    else:
         print("no tagged benchmark instances to clean up")
-        return 0
-    ec2.terminate_instances(InstanceIds=ids)
-    print(f"terminated {', '.join(ids)}")
+    s3 = _client("s3", region, args.profile)
+    leftovers = [
+        b["Name"]
+        for b in s3.list_buckets().get("Buckets", [])
+        if b["Name"].startswith("boto3-s3-bench-")
+        and not b["Name"].startswith("boto3-s3-bench-boot-")
+    ]
+    for name in leftovers:
+        try:
+            force_delete_bucket(s3, name)
+            print(f"deleted leftover bucket {name}")
+        except ClientError as exc:
+            print(f"could not delete {name} (another region?): {exc}")
+    if not leftovers:
+        print("no leftover benchmark buckets")
     return 0

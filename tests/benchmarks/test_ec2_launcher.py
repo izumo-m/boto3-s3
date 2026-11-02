@@ -14,6 +14,7 @@ import shlex
 import shutil
 import subprocess
 import urllib.parse
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -132,6 +133,7 @@ def _render(**overrides: Any) -> str:
         region="ap-northeast-1",
         python="3.14",
         aws_version="2.36.40",
+        uv_version="0.13.5",
         max_minutes=45,
         large_mb=1024,
         tmpfs_gb=5,
@@ -195,6 +197,13 @@ class TestUserData:
         sync_loop = script.split("( set +x", 1)[1].split(") &", 1)[0]
         assert "while sleep 60" in sync_loop
         assert _URLS["LOG_PUT_URL_PLACEHOLDER"] in sync_loop
+        # The loop inherits errexit, so one failed upload would end it for good.
+        upload = next(line for line in sync_loop.splitlines() if "curl" in line)
+        assert upload.rstrip().endswith("|| true")
+        # The uv mise.toml pins, installed under pipefail so a failed download
+        # fails its own line rather than the `uv sync` after it.
+        assert "https://astral.sh/uv/0.13.5/install.sh | env UV_INSTALL_DIR" in script
+        assert script.index("set -o pipefail") < script.index("astral.sh/uv/")
         # Each mode runs on its own and uploads before the next starts, with
         # errexit and the ERR trap off around the benchmark's own exit codes.
         runs = [line for line in script.splitlines() if "python -m benchmarks run" in line]
@@ -234,6 +243,19 @@ class TestUserData:
 
 
 class TestRegionAndGuards:
+    def test_the_launcher_profile_supplies_the_region(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        config = tmp_path / "config"
+        config.write_text(
+            "[default]\nregion = us-east-1\n[profile bench]\nregion = ap-northeast-1\n"
+        )
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        for name in ("AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE", "AWS_DEFAULT_PROFILE"):
+            monkeypatch.delenv(name, raising=False)
+        assert awsenv.resolve_region(profile="bench") == "ap-northeast-1"
+        assert awsenv.resolve_region() == "us-east-1"
+
     def test_explicit_region_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("AWS_REGION", "eu-west-1")
         assert awsenv.resolve_region("us-east-2") == "us-east-2"
@@ -290,9 +312,14 @@ class TestMarketAndOutcome:
                 Outcome("completed", "inprocess=0,e2e=1", None, None, 35.0),
                 "non-zero exit code",
             ),
+            # The shapes the script writes: RC=0 with the suffix, or the per-mode codes.
             (
-                Outcome("completed", "inprocess=0,e2e=0,results-upload-failed", None, None, 35.0),
+                Outcome("completed", "0,results-upload-failed", None, None, 35.0),
                 "results upload failed",
+            ),
+            (
+                Outcome("completed", "inprocess=0,e2e=1,results-upload-failed", None, None, 35.0),
+                "and a results upload failed",
             ),
             (Outcome("completed", "failed-at-line-2", None, None, 3.0), "provisioning failed"),
             (
@@ -348,7 +375,12 @@ class TestMarketAndOutcome:
         verdict = ec2._classify(outcome, 60, "", downloaded=2)
         assert "2 results file(s)" in verdict
         assert "DONE marker never arrived" in verdict
+        assert "ran to the end" in verdict
         assert "without reporting" in ec2._classify(outcome, 60, "", downloaded=0)
+        # One file back means the second mode never uploaded: not "the end".
+        partial = ec2._classify(outcome, 60, "", downloaded=1)
+        assert "ran to the end" not in partial
+        assert "second mode left no results" in partial
 
     def test_ok_requires_a_zero_marker(self) -> None:
         assert Outcome("completed", "0", None, None, 1.0).ok
@@ -385,3 +417,116 @@ class TestPresignedUrls:
         assert "PLACEHOLDER" not in ec2._inline_urls(
             "x DONE_PUT_URL_PLACEHOLDER", {"DONE_PUT_URL_PLACEHOLDER": url}
         )
+
+
+class _ScriptedEC2:
+    """An EC2 client stand-in answering DescribeInstances from a script of states."""
+
+    def __init__(self, states: list[dict[str, Any]] | Exception) -> None:
+        self._states = states
+        self.calls: list[str] = []
+
+    def describe_instances(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append("describe_instances")
+        if isinstance(self._states, Exception):
+            raise self._states
+        if "Filters" in kwargs:
+            return {"Reservations": [{"Instances": [{"InstanceId": "i-left"}]}]}
+        state = self._states.pop(0) if len(self._states) > 1 else self._states[0]
+        return {"Reservations": [{"Instances": [state]}]}
+
+    def terminate_instances(self, **_kwargs: Any) -> dict[str, Any]:
+        self.calls.append("terminate_instances")
+        return {}
+
+    def get_waiter(self, _name: str) -> Any:
+        calls = self.calls
+
+        class _Waiter:
+            def wait(self, **_kwargs: Any) -> None:
+                calls.append("wait_terminated")
+
+        return _Waiter()
+
+
+class _MarkerS3:
+    """An S3 client stand-in whose DONE marker is already there."""
+
+    def __init__(self, marker: bytes) -> None:
+        self._marker = marker
+
+    def get_object(self, Bucket: str, Key: str) -> dict[str, Any]:  # noqa: N803
+        import io
+
+        assert Key.endswith("/DONE")
+        return {"Body": io.BytesIO(self._marker)}
+
+
+class TestOutcomeReading:
+    def test_an_outside_shutdown_marker_still_learns_the_stop_reason(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The trap's marker can land while the instance is still `running`;
+        # the stop reason that tells a spot reclaim apart comes a little later.
+        monkeypatch.setattr(ec2.time, "sleep", lambda _seconds: None)
+        spot = "Server.SpotInstanceTermination: Spot Instance interrupted"
+        fake = _ScriptedEC2(
+            [
+                {"State": {"Name": "running"}},
+                {"State": {"Name": "shutting-down"}, "StateReason": {"Message": spot}},
+            ]
+        )
+        outcome = ec2._await_completion(
+            _MarkerS3(b"rc=terminated-by-signal:unknown"),
+            fake,
+            "boot",
+            "run",
+            "i-1",
+            60,
+            launched=ec2.time.monotonic(),
+        )
+        assert outcome.kind == "completed"
+        assert outcome.reason == spot
+        assert "spot interruption" in ec2._classify(outcome, 60, "")
+
+    def test_an_instance_not_yet_visible_reads_as_pending(self) -> None:
+        from botocore.exceptions import ClientError
+
+        error = ClientError({"Error": {"Code": "InvalidInstanceID.NotFound"}}, "DescribeInstances")
+        assert ec2._instance_status(_ScriptedEC2(error), "i-1") == ("pending", None)
+
+    def test_cleanup_stops_the_instances_before_emptying_buckets(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import argparse
+
+        from tests.utils import harness
+
+        fake_ec2 = _ScriptedEC2([])
+        order = fake_ec2.calls
+
+        class _Buckets:
+            def list_buckets(self) -> dict[str, Any]:
+                order.append("list_buckets")
+                return {"Buckets": [{"Name": "boto3-s3-bench-run"}]}
+
+        monkeypatch.setattr(awsenv, "refuse_dev_stack_env", lambda: None)
+        monkeypatch.setattr(
+            ec2, "_client", lambda kind, *_args: fake_ec2 if kind == "ec2" else _Buckets()
+        )
+        monkeypatch.setattr(
+            harness, "force_delete_bucket", lambda _client, name: order.append(f"delete {name}")
+        )
+        args = argparse.Namespace(region="ap-northeast-1", profile=None)
+        assert ec2.cmd_cleanup(args) == 0
+        assert order == [
+            "describe_instances",
+            "terminate_instances",
+            "wait_terminated",
+            "list_buckets",
+            "delete boto3-s3-bench-run",
+        ]
+
+    def test_the_uv_version_is_mise_toml_s(self) -> None:
+        mise = (ec2.REPO_ROOT / "mise.toml").read_text()
+        assert f'uv = "{ec2._pinned_uv_version()}"' in mise

@@ -6,8 +6,9 @@ environment, every following line is one scenario's ``result`` record.
 The timestamped filename keeps the directory chronologically sorted, and the
 embedded git revision is what ``--baseline <rev>`` matches against.
 
-A run also belongs to a *lane* - ``local`` by default, ``ec2-<instance type>``
-when the EC2 launcher ran it - and a non-local lane is spelled into the
+A run also belongs to a *lane* - ``local`` by default,
+``ec2-<instance type>-ubuntu<release>`` when the EC2 launcher ran it - and a
+non-local lane is spelled into the
 filename after the revision. Baseline resolution never crosses lanes: a
 ``--baseline last`` on this host must not pick up a file the EC2 lane
 downloaded here, since those numbers come from another machine. The lane and
