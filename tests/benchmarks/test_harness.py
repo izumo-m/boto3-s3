@@ -18,6 +18,8 @@ import pytest
 
 from benchmarks import awsenv, e2e, inprocess, report, results
 from benchmarks.core import DEFAULT_LARGE_MB, BenchmarkError, ScenarioResult
+from benchmarks.e2e import E2EEnv, E2EScenario
+from benchmarks.inprocess import Prepared
 
 _MIB = 1024 * 1024
 _POSIX = hasattr(os, "fork") and hasattr(os, "killpg")
@@ -339,7 +341,33 @@ class TestRemoteGuards:
         monkeypatch.setenv("AWS_REGION", "ap-northeast-1")
         monkeypatch.setenv("AWS_PROFILE", "someone")
         with pytest.raises(BenchmarkError, match="AWS_PROFILE"):
-            e2e._check_remote_credentials()
+            e2e._check_remote_credentials(require_region=True)
+
+    def test_only_real_s3_requires_a_region(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Another endpoint (a MinIO on the LAN, say) is signed for us-east-1
+        # when no region is set; real S3 needs one for CreateBucket.
+        for name in ("AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE", "AWS_DEFAULT_PROFILE"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "config-absent"))
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "A")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "B")
+        e2e._check_remote_credentials(require_region=False)
+        with pytest.raises(BenchmarkError, match="needs a region"):
+            e2e._check_remote_credentials(require_region=True)
+
+    def test_a_profile_is_refused_before_the_region_is_read(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Resolving the region through an undefined profile would raise
+        # ProfileNotFound instead of the refusal that says what to do.
+        for name in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "config-absent"))
+        monkeypatch.setenv("AWS_PROFILE", "not-defined-here")
+        with pytest.raises(BenchmarkError, match="cannot use AWS_PROFILE"):
+            e2e._check_remote_credentials(require_region=True)
 
     def test_an_explicit_remote_endpoint_is_checked_like_real_s3(
         self, monkeypatch: pytest.MonkeyPatch
@@ -395,36 +423,59 @@ class TestRemoteGuards:
         # test; only the interpreter's own directory counts. The host may have
         # no aws at all, so that lookup is answered here.
         real_which = shutil.which
-        searched: list[str | None] = []
+        bindir = str(Path(sys.executable).parent)
+        searched: list[tuple[str, str | None]] = []
+        aws_next_to_python: list[str | None] = [None]
 
         def which(name: str, mode: int = os.F_OK | os.X_OK, path: str | None = None) -> str | None:
+            searched.append((name, path))
             if name == "aws":
-                return "/opt/aws"
-            searched.append(path)
+                return aws_next_to_python[0] if path == bindir else "/usr/bin/aws"
             return real_which(name, mode, path)
 
         monkeypatch.setattr(e2e.shutil, "which", which)
         ours, aws = e2e.check_environment()
-        assert searched == [str(Path(sys.executable).parent)]
-        assert Path(ours).parent == Path(sys.executable).parent
-        assert aws == "/opt/aws"
+        assert Path(ours).parent == Path(bindir)
+        # No aws next to the interpreter (Windows): PATH, after the interpreter's own.
+        assert searched == [("boto3-s3", bindir), ("aws", bindir), ("aws", None)]
+        assert aws == "/usr/bin/aws"
+        # The pinned aws next to the interpreter wins over one earlier on PATH.
+        aws_next_to_python[0] = bindir + "/aws"
+        _ours, aws = e2e.check_environment()
+        assert aws == bindir + "/aws"
+
+    def test_a_run_warns_when_aws_is_not_the_pinned_version(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from benchmarks import cli
+        from tests.utils import golden
+
+        monkeypatch.setattr(e2e, "check_environment", lambda: ("boto3-s3", "/usr/bin/aws"))
+        monkeypatch.setattr(e2e, "aws_version", lambda _exe: "aws-cli/2.38.5 Python/3.13.9")
+        monkeypatch.setattr(golden, "pinned_aws_version", lambda: "2.36.40")
+        # No work scenario matches, so the mode is skipped after the check.
+        assert cli.main(["run", "--mode", "e2e", "--scenario", "no-such-scenario"]) == 0
+        assert "not the pinned aws-cli 2.36.40" in capsys.readouterr().err
+        monkeypatch.setattr(e2e, "aws_version", lambda _exe: "aws-cli/2.36.40 Python/3.14.6")
+        assert cli.main(["run", "--mode", "e2e", "--scenario", "no-such-scenario"]) == 0
+        assert "not the pinned" not in capsys.readouterr().err
 
 
 class _RecordingClient:
     """An S3 client stand-in that records the operations the runner sends."""
 
-    def __init__(self, *, fail_delete: bool = False) -> None:
+    def __init__(self, *, fail: str | None = None) -> None:
         self.calls: list[str] = []
         self.meta = type("Meta", (), {"region_name": "ap-northeast-1"})()
-        self._fail_delete = fail_delete
+        self._fail = fail
 
     def __getattr__(self, name: str) -> object:
         def call(**_kwargs: object) -> dict[str, object]:
             self.calls.append(name)
-            if name == "delete_bucket" and self._fail_delete:
+            if name == self._fail:
                 from botocore.exceptions import ClientError
 
-                raise ClientError({"Error": {"Code": "BucketNotEmpty"}}, "DeleteBucket")
+                raise ClientError({"Error": {"Code": "Refused"}}, name)
             return {}
 
         return call
@@ -432,7 +483,12 @@ class _RecordingClient:
 
 class TestRunBucketLifecycle:
     def _run(
-        self, monkeypatch: pytest.MonkeyPatch, client: _RecordingClient, *, endpoint: str | None
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        client: _RecordingClient,
+        *,
+        endpoint: str | None,
+        scenarios: list[E2EScenario] | None = None,
     ) -> tuple[list[ScenarioResult], list[str]]:
         from tests.utils import harness
 
@@ -446,7 +502,7 @@ class TestRunBucketLifecycle:
         monkeypatch.setattr(
             harness, "delete_under", lambda c, _b, _p: c.calls.append("delete_under")
         )
-        return e2e.run_scenarios([], engines=("classic",), log=lambda _line: None)
+        return e2e.run_scenarios(scenarios or [], engines=("classic",), log=lambda _line: None)
 
     def test_real_s3_never_lists_the_account_buckets(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The EC2 instance role holds S3 on the benchmark buckets only, so a
@@ -465,10 +521,64 @@ class TestRunBucketLifecycle:
     def test_a_failed_bucket_delete_is_a_failure_not_a_crash(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        client = _RecordingClient(fail_delete=True)
+        client = _RecordingClient(fail="delete_bucket")
         _results, failures = self._run(monkeypatch, client, endpoint=None)
         assert len(failures) == 1
         assert "could not delete bucket" in failures[0]
+
+    def test_a_bucket_that_was_never_created_is_never_deleted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from botocore.exceptions import ClientError
+
+        client = _RecordingClient(fail="create_bucket")
+        with pytest.raises(ClientError):
+            self._run(monkeypatch, client, endpoint=None)
+        assert client.calls == ["create_bucket"]
+
+    def test_an_s3_error_staging_one_scenario_fails_only_that_one(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from botocore.exceptions import ClientError
+
+        from tests.utils.harness import CliResult
+
+        monkeypatch.setattr(e2e, "_run_child", lambda *_args: (0.1, CliResult(0, "", ""), None))
+
+        def refused(_env: E2EEnv) -> None:
+            raise ClientError({"Error": {"Code": "SlowDown"}}, "PutObject")
+
+        scenarios = [
+            e2e.E2EScenario(name="broken", dimensions={}, make_argv=lambda *_a: [], reset=refused),
+            e2e.E2EScenario(name="fine", dimensions={}, make_argv=lambda *_a: [], samples=1),
+        ]
+        results_, failures = self._run(
+            monkeypatch, _RecordingClient(), endpoint=None, scenarios=scenarios
+        )
+        assert [r.scenario for r in results_] == ["fine"]
+        assert len(failures) == 1
+        assert failures[0].startswith("[e2e/classic] broken:")
+
+    def test_each_cli_runs_in_the_run_home_without_the_host_profile(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tests.utils.harness import CliResult
+
+        seen: list[dict[str, str]] = []
+
+        def child(_cmd: list[str], env: dict[str, str]) -> tuple[float, CliResult, None]:
+            seen.append(env)
+            return 0.1, CliResult(0, "", ""), None
+
+        monkeypatch.setattr(e2e, "_run_child", child)
+        monkeypatch.setenv("AWS_PROFILE", "someone")
+        scenario = e2e.E2EScenario(name="fine", dimensions={}, make_argv=lambda *_a: [], samples=1)
+        self._run(monkeypatch, _RecordingClient(), endpoint=None, scenarios=[scenario])
+        assert seen
+        for env in seen:
+            assert Path(env["HOME"]).name == "home"
+            assert env["USERPROFILE"] == env["HOME"]
+            assert "AWS_PROFILE" not in env
 
 
 class TestSelfTestHandicap:
@@ -498,6 +608,23 @@ class TestSelfTestHandicap:
 
         assert run("startup_minimal").samples == {"boto3-s3": [1.0], "aws": [1.0]}
         assert run("cp_upload_large").samples == {"boto3-s3": [1.5], "aws": [1.0]}
+
+
+class TestInProcessFailures:
+    def test_a_local_io_error_skips_only_that_scenario(self) -> None:
+        def full_disk(_workdir: Path) -> Prepared:
+            raise OSError(28, "No space left on device")
+
+        scenarios = [
+            inprocess.InProcScenario(name="broken", dimensions={}, prepare=full_disk),
+            next(s for s in inprocess.build_scenarios(True) if s.name == "inproc_dispatch"),
+        ]
+        results_, failures = inprocess.run_scenarios(
+            scenarios, samples_override=1, log=lambda _line: None
+        )
+        assert [r.scenario for r in results_] == ["inproc_dispatch"]
+        assert len(failures) == 1
+        assert "No space left" in failures[0]
 
 
 class TestExitCodes:

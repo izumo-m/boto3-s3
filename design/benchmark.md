@@ -82,14 +82,16 @@ below). Both CLIs run without the host's `~/.aws`: their home is an empty
 directory of the run (`USERPROFILE` too, for Windows), `AWS_CONFIG_FILE`
 points at the per-engine config, and the host's `AWS_PROFILE`,
 `AWS_DEFAULT_PROFILE` and `AWS_SHARED_CREDENTIALS_FILE` are dropped - so the
-host's settings steer neither side, and the pinned `aws` writes its session
-cache there instead of into the host's home. A run off the dev stack
+host's settings steer neither side (only the region the harness resolves is
+handed to both), and the pinned `aws` writes its session cache there instead
+of into the host's home. A run off the dev stack
 therefore takes its credentials from the environment or an instance role,
 and the harness looks its own up the same way: it refuses a profile up front
 instead of failing on the first invocation. Both executables come from the
 interpreter's environment - `boto3-s3` is the console script next to the
 running Python, `aws` the pinned binary scripts/install-awscli.sh installs
-there (taken from PATH only when absent, as on Windows) - so a run measures
+there (taken from PATH only when absent, as on Windows, where
+scripts/dev-env.cmd puts the pinned one first) - so a run measures
 the tree its results file names; a run warns when `aws --version` is not the
 pinned version. Each engine's work tree is removed before the next engine seeds
 its own, and a scenario that hits a local I/O error (a full work tree) or an
@@ -417,7 +419,7 @@ lane does - the pinned `aws`, the uv version `mise.toml` pins, `uv sync
   the lane spelled in their name (`...bbbbbbbbbb.ec2-m7i.xlarge-ubuntu26.04.jsonl`),
   the archived commit as their revision, and the AMI id in the meta record;
   render them with `report`, compare two EC2 runs with `--baseline last` from
-  either, and record the entry in RESULTS.md with the instance type, Ubuntu
+  the later one, and record the entry in RESULTS.md with the instance type, Ubuntu
   release and AMI, region, and Python version.
 - **A clean shell.** The launcher refuses to start if the shell is configured
   for the dev stack (`AWS_ENDPOINT_URL_S3` or the dev static key), because

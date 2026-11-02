@@ -129,21 +129,22 @@ def check_environment() -> tuple[str, str]:
     S3 (no endpoint override). The last two both require the explicit
     `BOTO3_S3_BENCH_ALLOW_REMOTE` opt-in so a bare run cannot touch real AWS by
     accident, and take their credentials from the environment or an instance
-    role (`_check_remote_credentials`).
+    role (`_check_remote_credentials`). Real S3 also needs a region; another
+    endpoint is signed for us-east-1 unless one is set (`_build_client`).
 
     Both executables come from the interpreter's own environment, so the run
     measures the tree its results file names: `boto3-s3` is the console script
     next to the running Python, and `aws` the pinned binary
     scripts/install-awscli.sh installs there. Only when it is not there (on
-    Windows, scripts/install-awscli.cmd puts it on PATH instead) is `aws`
-    taken from PATH.
+    Windows, where scripts/dev-env.cmd puts the pinned aws.exe first on PATH)
+    is `aws` taken from PATH.
     """
     endpoint = os.environ.get("AWS_ENDPOINT_URL_S3")
     opted_in = awsenv.remote_opted_in()
     if not endpoint:
         if not opted_in:
             raise BenchmarkError(f"no AWS_ENDPOINT_URL_S3 set; {_SETUP_HINT}")
-        _check_remote_credentials()
+        _check_remote_credentials(require_region=True)
     elif awsenv.targeting_local_stack():
         missing = [
             name
@@ -160,7 +161,7 @@ def check_environment() -> tuple[str, str]:
             f"{awsenv.ALLOW_REMOTE_ENV}=1 if that endpoint really is the intended target."
         )
     else:
-        _check_remote_credentials()
+        _check_remote_credentials(require_region=False)
     bindir = str(Path(sys.executable).parent)
     ours = shutil.which("boto3-s3", path=bindir)
     if ours is None:
@@ -179,20 +180,18 @@ def check_environment() -> tuple[str, str]:
 _HOST_PROFILE_ENV = ("AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_SHARED_CREDENTIALS_FILE")
 
 
-def _check_remote_credentials() -> None:
-    """Fail fast when a run off the dev stack has no region or no credentials.
+def _check_remote_credentials(*, require_region: bool) -> None:
+    """Fail fast when a run off the dev stack has no credentials, or real S3 no region.
 
-    Better to stop here than after seeding a corpus: create_bucket_in_region
-    needs the region, and every call needs credentials. Both CLIs run with
-    their home in the run's work root and `AWS_CONFIG_FILE` at the per-engine
-    config, so neither sees the host's profiles or credentials file; the
-    credentials are looked up the same way here (`_harness_session`), and a
-    profile is refused outright rather than silently ignored.
+    Better to stop here than after seeding a corpus: every call needs
+    credentials, and on real S3 create_bucket_in_region needs the region.
+    Both CLIs run with their home in the run's work root and
+    `AWS_CONFIG_FILE` at the per-engine config, so neither sees the host's
+    profiles or credentials file; the credentials are looked up the same way
+    here (`_harness_session`), and a profile is refused outright rather than
+    silently ignored - first, since resolving the region would otherwise
+    fail on a profile the host does not define.
     """
-    if awsenv.resolve_region() is None:
-        raise BenchmarkError(
-            "real-S3 run needs a region; set AWS_REGION or use a profile that has one"
-        )
     named = [name for name in ("AWS_PROFILE", "AWS_DEFAULT_PROFILE") if os.environ.get(name)]
     if named:
         raise BenchmarkError(
@@ -200,6 +199,11 @@ def _check_remote_credentials() -> None:
             "the host's ~/.aws, so a profile is invisible to them. Export the credentials "
             "into the environment (e.g. `aws configure export-credentials --format env`) or "
             "run from an instance role."
+        )
+    if require_region and awsenv.resolve_region() is None:
+        raise BenchmarkError(
+            "real-S3 run needs a region; set AWS_REGION (or a region under [default] in the "
+            "host's AWS config)"
         )
     if _harness_session().get_credentials() is None:
         raise BenchmarkError(
@@ -1016,14 +1020,14 @@ def run_scenarios(
     failures: list[str] = []
     workroot = Path(tempfile.mkdtemp(prefix="boto3-s3-bench-e2e-"))
     try:
-        if awsenv.targeting_local_stack():
-            force_delete_bucket(client, bucket)
-        create_bucket_in_region(client, bucket)
         # The CLIs' home: neither reads the host's ~/.aws (the e2e suite's
         # `_isolated_home`), and the pinned aws writes its session cache here
         # instead of into the host's. USERPROFILE is what Windows reads.
         home = workroot / "home"
         home.mkdir()
+        if awsenv.targeting_local_stack():
+            force_delete_bucket(client, bucket)
+        create_bucket_in_region(client, bucket)
         try:
             for engine in engines:
                 config = _write_engine_config(workroot, engine)
