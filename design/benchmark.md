@@ -234,7 +234,9 @@ host-specific timings and stay out of git.
 `--baseline` accepts `last` (newest stored run of the same mode), a results
 file path, or a git-revision prefix matched against stored filenames. Rows
 whose workload dimensions differ from the baseline's (e.g. comparing against
-a `--quick` run) are not compared.
+a `--quick` run) are not compared. `last` and a revision prefix search only
+the files directly in `benchmarks/results/`, so a file moved into a
+subdirectory can be named only by its path.
 
 A run belongs to a *lane*: `local` (no suffix) or
 `ec2-<instance type>-ubuntu<release>` for files the EC2 launcher brought back, and `last` / a revision prefix never
@@ -380,9 +382,9 @@ runs both modes against real S3.
 Cross-run `--baseline` comparison stays like-for-like only within one lane,
 which is one instance type on one Ubuntu release; an x86-64 and a Graviton
 run are two baselines to read side by side, not a regression pair, and the
-lane scoping enforces that. The local lane is like-for-like only within one
-dev stack server: runs before 2026-10-17 were against MinIO, later ones
-against RustFS.
+lane scoping enforces that. The local lane is like-for-like only between
+runs against the same dev stack server (the S3 server
+`scripts/compose.dev.yaml` runs).
 
 ## Reading the numbers on this host
 

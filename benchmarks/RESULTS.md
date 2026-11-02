@@ -6,7 +6,16 @@ measuring host; this file preserves the headline numbers with their exact
 revision and environment so they survive across hosts and cleanups. Metric
 definitions (net, ratio, flags) are in [design/benchmark.md](../design/benchmark.md).
 
-## 2026-09-06 - EC2 baseline: real S3 from m7i.xlarge and m7g.xlarge
+## Historical results
+
+The entries below were recorded from 2026-07-14 to 2026-09-06. The code has
+been reworked since, and the local entries ran against MinIO, which the dev
+stack has replaced with RustFS. They stay as recorded, but no later entry
+compares against them. On the measuring host their results files have moved
+to `benchmarks/results/historical/`, out of reach of `--baseline last` and
+revision prefixes.
+
+### 2026-09-06 - EC2 baseline: real S3 from m7i.xlarge and m7g.xlarge
 
 - Commit: `40ce11e` (`fix(benchmarks): report from the EC2 instance through
   regional SigV4 URLs`), clean working tree, archived by the launcher. First
@@ -37,7 +46,7 @@ Environment:
 - aws-cli side: pinned aws-cli 2.36.40 (the x86_64 and aarch64 Linux builds,
   bundling Python 3.14.6).
 
-### E2E, m7i.xlarge (medians in seconds; ratio = net ours / net `aws`)
+#### E2E, m7i.xlarge (medians in seconds; ratio = net ours / net `aws`)
 
 Startup probes (raw): `--version` ours 0.058 / `aws` 0.367 (classic),
 0.060 / 0.383 (crt); `startup_minimal` ours 0.301 / `aws` 0.527 (classic),
@@ -61,7 +70,7 @@ Startup probes (raw): `--version` ours 0.058 / `aws` 0.367 (classic),
 | cp_upload_large (1GB) | crt | 1.713 | 1.405 | 1.812 | 1.264 | 1.11 |
 | cp_download_large (1GB) | crt | 1.272 | 0.964 | 1.524 | 0.976 | 0.99 |
 
-### E2E, m7g.xlarge (same layout)
+#### E2E, m7g.xlarge (same layout)
 
 Startup probes (raw): `--version` ours 0.076 / `aws` 0.450 (classic),
 0.076 / 0.451 (crt); `startup_minimal` ours 0.387 / `aws` 0.637 (classic),
@@ -85,7 +94,7 @@ Startup probes (raw): `--version` ours 0.076 / `aws` 0.450 (classic),
 | cp_upload_large (1GB) | crt | 1.875 | 1.485 | 1.954 | 1.323 | 1.12 |
 | cp_download_large (1GB) | crt | 1.318 | 0.928 | 1.504 | 0.873 | 1.06 |
 
-### Throughput and peak memory (E2E; MiB/s over net, median peak RSS in MiB)
+#### Throughput and peak memory (E2E; MiB/s over net, median peak RSS in MiB)
 
 | scenario | engine | m7i ours | m7i `aws` | m7g ours | m7g `aws` | m7i RSS ours / `aws` | m7g RSS ours / `aws` |
 |---|---|---|---|---|---|---|---|
@@ -98,7 +107,7 @@ Startup probes (raw): `--version` ours 0.076 / `aws` 0.450 (classic),
 | rm_recursive_2k | classic | - | - | - | - | 70 / 115 | 70 / 134 |
 | startup_minimal | classic | - | - | - | - | 65 / 87 | 65 / 85 |
 
-### In-process (classic; medians in seconds, ± spread)
+#### In-process (classic; medians in seconds, ± spread)
 
 | scenario | m7i median | spread | m7g median | spread |
 |---|---|---|---|---|
@@ -142,7 +151,7 @@ Notes:
   medians within 4%: the interpreter build made no visible difference and
   that is about the run-to-run noise of this lane.
 
-### Follow-up, same day: the CRT 1 GB upload row
+#### Follow-up, same day: the CRT 1 GB upload row
 
 The row had two candidate causes, the only differences left between the two
 CRT lanes once the requests themselves were compared (part size, connection
@@ -187,7 +196,7 @@ the classic engine's uploads, where the 1 GB row stays at parity (0.98,
 mid-run (a real spot interruption, reported as such by the launcher,
 in-process results retrieved, E2E lost) and simply run again.
 
-## 2026-09-06 - interpreter step: the local lane moves to Python 3.14
+### 2026-09-06 - interpreter step: the local lane moves to Python 3.14
 
 - Commit: `9d352af` (`feat(bench): run the local lane on Python 3.14 in its
   own environment`), clean working tree. This entry records the interpreter
@@ -221,7 +230,7 @@ Environment:
 - aws-cli side: pinned aws-cli 2.36.40 (`exe/x86_64.ubuntu.26`, bundling
   Python 3.14.6), the same binary on both runs.
 
-### E2E on Python 3.10 (medians in seconds; ratio = net ours / net `aws`)
+#### E2E on Python 3.10 (medians in seconds; ratio = net ours / net `aws`)
 
 Startup probes (raw): `--version` ours 0.063 / `aws` 0.524 (classic),
 0.062 / 0.463 (crt); `startup_minimal` ours 0.405 / `aws` 0.765 (classic),
@@ -241,7 +250,7 @@ Startup probes (raw): `--version` ours 0.063 / `aws` 0.524 (classic),
 | cp_upload_large (64MB) | crt | 0.498 | 0.211 | 0.741 | 0.182 | 1.16 |
 | cp_download_large (64MB) | crt | 0.451 | 0.164 | 0.748 | 0.189 | 0.87 |
 
-### E2E on Python 3.14 (same layout; "vs 3.10" is the change in ratio)
+#### E2E on Python 3.14 (same layout; "vs 3.10" is the change in ratio)
 
 Startup probes (raw): `--version` ours 0.088 / `aws` 0.437 (classic),
 0.149 / 0.682 (crt); `startup_minimal` ours 0.359 / `aws` 0.653 (classic),
@@ -261,7 +270,7 @@ Startup probes (raw): `--version` ours 0.088 / `aws` 0.437 (classic),
 | cp_upload_large (64MB) | crt | 0.342 | 0.051 | 0.495 | - | - | - |
 | cp_download_large (64MB) | crt | 0.337 | 0.045 | 0.501 | - | - | - |
 
-### In-process (classic; medians in seconds, ± spread)
+#### In-process (classic; medians in seconds, ± spread)
 
 | scenario | 3.10 median | spread | 3.14 median | spread | change |
 |---|---|---|---|---|---|
@@ -307,7 +316,7 @@ Notes:
   `inproc_dispatch` +31% is 0.002 -> 0.003 s, the `--version` floor at the
   resolution limit.
 
-## 2026-07-21 - fast timestamp parsing
+### 2026-07-21 - fast timestamp parsing
 
 - Commit: `f48ca50` (`perf(deleter): check XML key compatibility with a
   compiled regex`), clean working tree. The headline change in the window is
@@ -323,7 +332,7 @@ boto3-s3 0.7.0 / boto3-s3-cli 0.5.0 (as the run recorded them; the tree at
 the commit above declares boto3-s3-cli 0.6.0);
 boto3/botocore 1.43.44, s3transfer 0.19.0, awscrt 0.32.2, Python 3.10.20.
 
-### E2E (medians in seconds; ratio = net ours / net `aws`, < 1 is ours faster)
+#### E2E (medians in seconds; ratio = net ours / net `aws`, < 1 is ours faster)
 
 Startup probes (raw): `--version` ours 0.045 / `aws` 0.358 (classic),
 0.045 / 0.370 (crt); `startup_minimal` ours 0.210 / `aws` 0.410 (classic),
@@ -343,7 +352,7 @@ Startup probes (raw): `--version` ours 0.045 / `aws` 0.358 (classic),
 | cp_upload_large (64MB) | crt | 0.389 | 0.165 | 0.616 | 0.176 | 0.94 |
 | cp_download_large (64MB) | crt | 0.333 | 0.109 | 0.542 | 0.102 | 1.06 |
 
-### In-process (classic; medians in seconds, ± spread)
+#### In-process (classic; medians in seconds, ± spread)
 
 | scenario | median | spread | vs 2026-07-14 |
 |---|---|---|---|
@@ -372,7 +381,7 @@ Notes:
   runs today: parity within noise, in a lane this cycle's changes do not
   touch (the CRT data plane bypasses the response parser).
 
-## 2026-07-14 - first official baseline
+### 2026-07-14 - first official baseline
 
 - Commit: `82b977f` (`perf(crt): reuse the caller's session for CRT request
   serialization`), clean working tree.
@@ -392,7 +401,7 @@ Environment:
   awscrt 0.32.2
 - aws-cli side: pinned aws-cli 2.35.18 (`exe/x86_64.ubuntu.26`)
 
-### E2E (medians in seconds; ratio = net ours / net `aws`, < 1 is ours faster)
+#### E2E (medians in seconds; ratio = net ours / net `aws`, < 1 is ours faster)
 
 Startup probes (raw): `--version` ours 0.038 / `aws` 0.291 (classic),
 0.044 / 0.327 (crt); `startup_minimal` ours 0.196 / `aws` 0.403 (classic),
@@ -412,7 +421,7 @@ Startup probes (raw): `--version` ours 0.038 / `aws` 0.291 (classic),
 | cp_upload_large (64MB) | crt | 0.339 | 0.126 | 0.549 | 0.125 | 1.01 |
 | cp_download_large (64MB) | crt | 0.301 | 0.088 | 0.522 | 0.098 | 0.90 |
 
-### In-process (classic; medians in seconds, ± spread)
+#### In-process (classic; medians in seconds, ± spread)
 
 | scenario | median | spread |
 |---|---|---|
