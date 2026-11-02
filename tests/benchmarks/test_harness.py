@@ -170,9 +170,30 @@ class TestResourceTable:
         text, _flagged = report.render((meta, records), None)
         assert "throughput =" not in text
 
+    def test_a_raw_row_has_no_throughput(self) -> None:
+        # sync_tiny's net is noise the main table does not show; no rate over it.
+        records = [
+            self._records()[0],
+            {
+                "scenario": "sync_tiny",
+                "engine": "classic",
+                "dimensions": {},
+                "samples": {"boto3-s3": [0.3], "aws": [0.5]},
+                "rss": {"boto3-s3": [60 * _MIB], "aws": [80 * _MIB]},
+                "payload_bytes": 11 * 1024,
+            },
+        ]
+        meta = {"mode": "e2e", "git_rev": "abc", "timestamp_utc": "t", "python": "3.14.7"}
+        text, _flagged = report.render((meta, records), None)
+        resource = text.split("throughput =", 1)[1]
+        row = next(line for line in resource.splitlines() if line.startswith("sync_tiny"))
+        assert row.split()[2:4] == ["-", "-"]
+
 
 class TestLanes:
-    def _write(self, mode: str, rev: str, lane: str, stamp: str) -> Path:
+    def _write(
+        self, mode: str, rev: str, lane: str, stamp: str, *, handicap_ms: float = 0.0
+    ) -> Path:
         meta = results.RunMeta(
             mode=mode,
             timestamp_utc=stamp,
@@ -182,10 +203,33 @@ class TestLanes:
             platform="test",
             versions={},
             aws_version=None,
-            options={},
+            options={"handicap_ms": handicap_ms},
             lane=lane,
         )
         return results.write_run(meta, [])
+
+    def test_last_is_the_run_before_the_one_reported(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(results, "RESULTS_DIR", tmp_path)
+        first = self._write("e2e", "aaaaaaaaaa", "local", "20260101-000000")
+        second = self._write("e2e", "bbbbbbbbbb", "local", "20260102-000000")
+        self._write("e2e", "cccccccccc", "local", "20260103-000000")
+        # Re-rendering an older run compares it with the one before it, not a later one.
+        assert results.resolve_baseline("last", "e2e", exclude=second) == first
+        with pytest.raises(BenchmarkError, match="no stored e2e runs"):
+            results.resolve_baseline("last", "e2e", exclude=first)
+
+    def test_a_self_test_run_is_never_a_baseline(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(results, "RESULTS_DIR", tmp_path)
+        real = self._write("e2e", "aaaaaaaaaa", "local", "20260101-000000")
+        self._write("e2e", "bbbbbbbbbb", "local", "20260102-000000", handicap_ms=50.0)
+        current = self._write("e2e", "cccccccccc", "local", "20260103-000000")
+        assert results.resolve_baseline("last", "e2e", exclude=current) == real
+        with pytest.raises(BenchmarkError, match="matches baseline 'bbbb'"):
+            results.resolve_baseline("bbbb", "e2e", exclude=current)
 
     def test_provenance_can_come_from_the_environment(
         self, monkeypatch: pytest.MonkeyPatch
@@ -425,6 +469,35 @@ class TestRunBucketLifecycle:
         _results, failures = self._run(monkeypatch, client, endpoint=None)
         assert len(failures) == 1
         assert "could not delete bucket" in failures[0]
+
+
+class TestSelfTestHandicap:
+    def test_the_probe_every_net_subtracts_is_spared(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Inflating startup_minimal too would cancel out of every net, and no
+        # E2E ratio flag could fire in the self-test.
+        from tests.utils.harness import CliResult
+
+        monkeypatch.setattr(e2e, "_invoke", lambda *_args: (1.0, CliResult(0, "", ""), None))
+        env = e2e.E2EEnv(
+            client=None,
+            bucket="b",
+            engine="classic",
+            workdir=tmp_path,
+            ours_exe="boto3-s3",
+            aws_exe="aws",
+            overlay={},
+        )
+
+        def run(name: str) -> ScenarioResult:
+            scenario = e2e.E2EScenario(name=name, dimensions={}, make_argv=lambda *_args: [])
+            return e2e._run_scenario(
+                env, scenario, samples_override=1, handicap=0.5, log=lambda _line: None
+            )
+
+        assert run("startup_minimal").samples == {"boto3-s3": [1.0], "aws": [1.0]}
+        assert run("cp_upload_large").samples == {"boto3-s3": [1.5], "aws": [1.0]}
 
 
 class TestExitCodes:

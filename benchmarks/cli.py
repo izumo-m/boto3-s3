@@ -62,8 +62,9 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="report raw wall-clock instead of startup-adjusted net times",
     )
-    # Regression-flag self-test only: inflate every boto3-s3 sample by this
-    # many milliseconds and check that the flag fires.
+    # Regression-flag self-test only: inflate every boto3-s3 sample (but the
+    # startup_minimal probe the E2E nets subtract) by this many milliseconds
+    # and check that the flag fires. Such a run is never picked as a baseline.
     run.add_argument("--self-test-handicap-ms", type=float, default=0.0, help=argparse.SUPPRESS)
 
     rep = sub.add_parser("report", help="re-render stored results files")

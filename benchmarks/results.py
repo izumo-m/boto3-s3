@@ -183,6 +183,17 @@ def list_runs(mode: str | None = None, *, lane: str | None = None) -> list[Path]
     return [run for run in runs if lane_of(run) == lane]
 
 
+def _is_self_test(path: Path) -> bool:
+    """Whether *path* records a regression-flag self-test (inflated samples)."""
+    try:
+        with path.open(encoding="utf-8") as handle:
+            meta = json.loads(handle.readline() or "{}")
+    except (OSError, ValueError):
+        return False
+    options = meta.get("options") if isinstance(meta, dict) else None
+    return isinstance(options, dict) and bool(options.get("handicap_ms"))
+
+
 def lane_of(path: Path) -> str:
     """The lane a results filename records (``local`` when it names none)."""
     tail = path.name.removesuffix(".jsonl").split("_", 2)[2]
@@ -195,12 +206,15 @@ def resolve_baseline(
 ) -> Path:
     """Resolve a ``--baseline`` value to a results file for *mode* in *lane*.
 
-    ``last`` picks the newest stored run of the same mode and lane (excluding
-    the run just written, so back-to-back runs compare against the previous
-    one). An existing path is used as-is - the one way to compare across
-    lanes, and the report then says so. Anything else is matched as a
-    git-revision prefix against the stored filenames of that lane; the newest
-    match wins.
+    ``last`` picks the newest stored run of the same mode and lane recorded
+    before *exclude* (the run being reported), so a fresh run compares
+    against the previous one and an older run re-rendered with ``report``
+    against the one before it, never a later one. An existing path is used
+    as-is - the one way to compare across lanes, and the report then says so.
+    Anything else is matched as a git-revision prefix against the stored
+    filenames of that lane; the newest match wins. Neither ``last`` nor a
+    prefix picks a self-test run (``--self-test-handicap-ms``): its samples
+    are inflated on purpose.
     """
     candidate = Path(spec)
     if candidate.is_file():
@@ -209,8 +223,15 @@ def resolve_baseline(
     # (usually relative), so compare resolved paths or the run under report
     # becomes its own baseline.
     excluded = exclude.resolve() if exclude is not None else None
-    runs = [run for run in list_runs(mode, lane=lane) if run.resolve() != excluded]
+    runs = [
+        run
+        for run in list_runs(mode, lane=lane)
+        if run.resolve() != excluded and not _is_self_test(run)
+    ]
     if spec == "last":
+        if exclude is not None:
+            # Filenames start with the UTC timestamp, so they sort by time.
+            runs = [run for run in runs if run.name < exclude.name]
         if not runs:
             raise BenchmarkError(f"no stored {mode} runs in lane {lane!r} to use as baseline")
         return runs[-1]

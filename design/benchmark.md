@@ -258,8 +258,12 @@ interleaving is auditable), and for E2E the per-side peak RSS samples
 (`rss`, bytes) and the transfer scenarios' `payload_bytes`. Results are
 host-specific timings and stay out of git.
 
-`--baseline` accepts `last` (newest stored run of the same mode), a results
-file path, or a git-revision prefix matched against stored filenames. Rows
+`--baseline` accepts `last` (the newest stored run of the same mode recorded
+before the one reported, so `report` of an older file never compares it with
+a later run), a results file path, or a git-revision prefix matched against
+stored filenames. Neither `last` nor a prefix picks a run of the hidden
+regression-flag self-test (`--self-test-handicap-ms`, which inflates every
+boto3-s3 sample but the `startup_minimal` probe the nets subtract). Rows
 whose workload dimensions differ from the baseline's (e.g. comparing against
 a `--quick` run) are not compared. `last` and a revision prefix search only
 the files directly in `benchmarks/results/`, so a file moved into a

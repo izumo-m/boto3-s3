@@ -949,7 +949,10 @@ def _run_scenario(
                 scenario.reset(env)
             elapsed, result, peak = _invoke(env, scenario, side)
             _require_rc(scenario, side, f"round {round_index}", result)
-            if side is Side.OURS:
+            # The self-test handicap spares the probe every net subtracts:
+            # inflating it too would cancel out of each work row's net, and the
+            # ratio flags would never fire.
+            if side is Side.OURS and scenario.name != "startup_minimal":
                 elapsed += handicap
             samples[side.value].append(elapsed)
             if peak is None:
