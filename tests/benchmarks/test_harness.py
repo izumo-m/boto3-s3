@@ -33,7 +33,7 @@ class TestScenarioSets:
     def test_e2e_transfer_scenarios_record_a_payload(self) -> None:
         by_name = {s.name: s for s in e2e.build_scenarios(False)}
         assert by_name["sync_tiny"].payload_bytes == 11 * 1024
-        assert by_name["sync_changed_10k"].payload_bytes == 2_000 * 1024
+        assert by_name["sync_changed_10k"].payload_bytes == 2_000 * 1025
         assert by_name["cp_upload_small_1k"].payload_bytes == 1_000 * 4096
         assert by_name["cp_upload_large"].payload_bytes == DEFAULT_LARGE_MB * _MIB
         assert by_name["mv_download_small_1k"].payload_bytes == 1_000 * 4096
@@ -68,6 +68,55 @@ class TestScenarioSets:
     def test_quick_keeps_a_multipart_size_regardless_of_the_knob(self) -> None:
         quick = {s.name: s for s in e2e.build_scenarios(True, large_mb=1024)}
         assert quick["cp_upload_large"].dimensions["file_size"] == "9MB"
+
+    def _env(self, tmp_path: Path, client: object = None) -> E2EEnv:
+        return E2EEnv(
+            client=client,
+            bucket="b",
+            engine="classic",
+            workdir=tmp_path,
+            ours_exe="boto3-s3",
+            aws_exe="aws",
+            overlay={},
+        )
+
+    def test_the_changed_sync_restages_its_local_side_without_a_request(
+        self, tmp_path: Path
+    ) -> None:
+        from benchmarks import workload
+
+        scenario = {s.name: s for s in e2e.build_scenarios(True)}["sync_changed_10k"]
+        assert scenario.reset is not None
+        env = self._env(tmp_path)  # no client: any S3 request would fail
+        tree = env.dir_for("sync_changed") / "tree"
+        workload.generate_tree(tree, 100, 1024)
+        changed, untouched = workload.rel_paths(100)[0], workload.rel_paths(100)[-1]
+        sizes: list[int] = []
+        for _ in range(3):
+            scenario.reset(env)
+            sizes.append((tree / changed).stat().st_size)
+        # Each invocation uploads the subset, so consecutive sizes differ, and
+        # none is the corpus's own 1 KB.
+        assert sizes[0] != sizes[1] != sizes[2]
+        assert 1024 not in sizes
+        assert (tree / untouched).stat().st_size == 1024
+
+    def test_the_s3_move_bounces_between_two_prefixes(self, tmp_path: Path) -> None:
+        class _Puts:
+            def put_object(self, **_kwargs: object) -> None:
+                return None
+
+        scenario = {s.name: s for s in e2e.build_scenarios(True)}["mv_s3_to_s3_1k"]
+        assert scenario.setup is not None and scenario.reset is not None
+        env = self._env(tmp_path, _Puts())
+        scenario.setup(env)
+        moves: list[tuple[str, str]] = []
+        for _ in range(3):
+            scenario.reset(env)
+            argv = scenario.make_argv(env, e2e.Side.OURS)
+            moves.append((argv[-2].rsplit("/", 2)[-2], argv[-1].rsplit("/", 2)[-2]))
+        # The copies of one invocation are the source of the next: no re-seed.
+        assert moves == [("a", "b"), ("b", "a"), ("a", "b")]
 
     def test_inprocess_has_the_changed_sync(self) -> None:
         by_name = {s.name: s for s in inprocess.build_scenarios(False)}

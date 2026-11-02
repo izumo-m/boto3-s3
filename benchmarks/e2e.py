@@ -612,6 +612,10 @@ def build_scenarios(quick: bool, *, large_mb: int = DEFAULT_LARGE_MB) -> list[E2
 
     changed_total = _scale(10_000, quick)
     changed_count = _scale(2_000, quick)
+    # The changed subset's local size, alternating per invocation: each one
+    # uploads the subset, so the next needs the other size to differ again.
+    # Both sit a byte or two off the corpus's 1 KB.
+    changed_sizes = itertools.cycle((1025, 1026))
 
     def sync_changed_setup(env: E2EEnv) -> None:
         # Local tree a day old, remote seeded now at the same size: the
@@ -628,18 +632,15 @@ def build_scenarios(quick: bool, *, large_mb: int = DEFAULT_LARGE_MB) -> list[E2
         )
 
     def sync_changed_reset(env: E2EEnv) -> None:
-        # Re-stale the first `changed_count` keys by *size* (2 KB against a
-        # 1 KB local file): a size mismatch forces the upload whatever the
-        # timestamps say, and the previous invocation's uploads (which made
-        # them 1 KB again) are undone. Only the subset is rewritten, so the
-        # reset costs changed_count puts, not the whole corpus.
-        workload.seed_prefix(
-            env.client,
-            env.bucket,
-            env.s3_prefix("sync_changed") + "corpus/",
-            changed_count,
-            2048,
-        )
+        # Make the first `changed_count` local files differ by *size* from
+        # their remote copies (which the previous invocation, if any, uploaded
+        # at the other size): a size mismatch forces the upload whatever the
+        # timestamps say. The local side changes, not the remote one, so the
+        # reset costs no request.
+        body = b"x" * next(changed_sizes)
+        tree = env.dir_for("sync_changed") / "tree"
+        for rel in workload.rel_paths(changed_count):
+            (tree / rel).write_bytes(body)
 
     scenarios.append(
         E2EScenario(
@@ -649,7 +650,7 @@ def build_scenarios(quick: bool, *, large_mb: int = DEFAULT_LARGE_MB) -> list[E2
                 "changed_count": str(changed_count),
                 "file_size": "1KB",
             },
-            payload_bytes=changed_count * 1024,
+            payload_bytes=changed_count * 1025,
             crt_capable=True,
             setup=sync_changed_setup,
             reset=sync_changed_reset,
@@ -823,12 +824,19 @@ def build_scenarios(quick: bool, *, large_mb: int = DEFAULT_LARGE_MB) -> list[E2
         )
     )
 
-    # mv is cp plus the removal of each source. Every invocation empties its
-    # source, so the source is re-seeded before each one (warmup included) and
-    # the previous destination purged. The download keeps cp_download_small_1k's
-    # shape, so the gap between the two rows is the removal's cost. An S3-to-S3
-    # copy runs on the classic engine in both tools, so that row has no CRT lane.
+    # mv is cp plus the removal of each source. The download keeps
+    # cp_download_small_1k's shape, so the gap between the two rows is the
+    # removal's cost; it empties its source, so the source is re-seeded and
+    # the previous destination removed before every invocation (warmup
+    # included). The S3-to-S3 move instead moves the corpus back the other way
+    # each time - its copies are the next source - so it is seeded once. An
+    # S3-to-S3 copy runs on the classic engine in both tools, so that row has
+    # no CRT lane.
     mv_count = _scale(1_000, quick)
+    mv_s3_ends = ("a/", "b/")
+    # Which end the next invocation moves from; the reset flips it first, so
+    # the first invocation moves a/ to b/.
+    mv_s3_from = [1]
 
     def move_count_verify(name: str, expected: int) -> Callable[..., None]:
         def verify(_env: E2EEnv, side: Side, result: CliResult) -> None:
@@ -840,25 +848,32 @@ def build_scenarios(quick: bool, *, large_mb: int = DEFAULT_LARGE_MB) -> list[E2
 
         return verify
 
-    def mv_s3_reset(env: E2EEnv) -> None:
-        from tests.utils.harness import delete_under
-
-        delete_under(env.client, env.bucket, env.s3_prefix("mv_s3"))
+    def mv_s3_setup(env: E2EEnv) -> None:
+        mv_s3_from[0] = 1
         workload.seed_prefix(
-            env.client, env.bucket, env.s3_prefix("mv_s3") + "src/", mv_count, 4096
+            env.client, env.bucket, env.s3_prefix("mv_s3") + mv_s3_ends[0], mv_count, 4096
         )
+
+    def mv_s3_reset(_env: E2EEnv) -> None:
+        mv_s3_from[0] = 1 - mv_s3_from[0]
+
+    def mv_s3_argv(env: E2EEnv, _side: Side) -> list[str]:
+        source = mv_s3_ends[mv_s3_from[0]]
+        dest = mv_s3_ends[1 - mv_s3_from[0]]
+        return [
+            "mv",
+            "--recursive",
+            env.s3_url(env.s3_prefix("mv_s3") + source),
+            env.s3_url(env.s3_prefix("mv_s3") + dest),
+        ]
 
     scenarios.append(
         E2EScenario(
             name="mv_s3_to_s3_1k",
             dimensions={"key_count": str(mv_count), "object_size": "4KB"},
+            setup=mv_s3_setup,
             reset=mv_s3_reset,
-            make_argv=lambda env, _side: [
-                "mv",
-                "--recursive",
-                env.s3_url(env.s3_prefix("mv_s3") + "src/"),
-                env.s3_url(env.s3_prefix("mv_s3") + "dst/"),
-            ],
+            make_argv=mv_s3_argv,
             verify=move_count_verify("mv_s3_to_s3", mv_count),
         )
     )

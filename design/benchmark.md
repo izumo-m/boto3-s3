@@ -219,22 +219,26 @@ empty prefix, startup-dominated by design - so the report treats it like the
 startup probes (raw medians, cross-run flag on raw), since a ratio of two
 tens-of-milliseconds nets would be noise. `sync_changed_10k` seeds the whole
 corpus once at the local size and, before each invocation, rewrites the first
-2k keys at a *different* size - a size mismatch forces the upload whatever the
-timestamps say, and only the subset is rewritten, so the reset costs 2k puts,
-not 10k; the untouched 8k compare equal (size) and older (local mtime a day
-back), a no-op. `sync_delete_10k` keeps 8k matching keys and re-seeds 2k
+2k *local* files at a size their remote copies do not have - 1025 and 1026
+bytes in turn, since each invocation uploads them - so a size mismatch forces
+the upload whatever the timestamps say, and the reset costs no request; the
+untouched 8k compare equal (size) and older (local mtime a day back), a
+no-op. `sync_delete_10k` keeps 8k matching keys and re-seeds 2k
 extras under a sub-prefix no local directory matches, so `--delete` has
 exactly those to remove and nothing to upload; the verify checks both counts.
 The in-process `inproc_sync_changed_20k` gets the same shape from the stub:
 2k local files differ in size from the pre-rendered listing.
 
-The `mv` scenarios time cp's work plus the removal of every source. An
-invocation empties its source, so the source is re-seeded and the previous
-destination purged before every invocation, warmup included.
+The `mv` scenarios time cp's work plus the removal of every source.
 `mv_download_small_1k` keeps `cp_download_small_1k`'s shape, so the gap
-between the two rows is what the removals cost. `mv_s3_to_s3_1k` is the
-suite's one server-side copy; both tools run S3-to-S3 copies on the classic
-engine whatever the configuration, so it has no CRT lane. Its in-process
+between the two rows is what the removals cost; it empties its source, so
+the source is re-seeded and the previous destination removed before every
+invocation, warmup included. `mv_s3_to_s3_1k` is the suite's one
+server-side copy. It moves its corpus back the other way each time (`a/` to
+`b/`, then `b/` to `a/`) - the copies are the next source - so it is seeded
+once, and every invocation still copies and deletes 1000 keys. Both tools
+run S3-to-S3 copies on the classic engine whatever the configuration, so it
+has no CRT lane. Its in-process
 counterpart needs no reset: the stub keeps no state, so every sample lists
 the same source again. It is sized at 2k keys, not rm's 20k, because each
 key costs two requests where rm deletes 1000 keys a request.
@@ -367,9 +371,10 @@ lane does - the pinned `aws`, the uv version `mise.toml` pins, `uv sync
   stops with that message rather than falling back on its own: paying
   on-demand is a choice.
 - **Cost, and not leaking an instance.** A run is ~30-40 minutes, well under
-  US$1 of instance time, plus about 260k PUT-class S3 requests at the
-  default scale (about US$1.2 at the ap-northeast-1 rate; re-seeding the E2E
-  corpora before every invocation is most of them). The one real risk is a
+  US$1 of instance time, plus about 200k PUT-class S3 requests at the
+  default scale (about US$0.95 at the ap-northeast-1 rate; the uploads the
+  E2E scenarios time and the corpora re-seeded before every invocation make
+  up most of them). The one real risk is a
   leaked instance, so it has two independent deaths: a timed `shutdown` the
   instance arms before any work (`--max-minutes`, default 60) and the
   launcher's own terminate on the way out; `terminate` as the shutdown

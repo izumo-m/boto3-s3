@@ -455,8 +455,8 @@ def _estimated_note(instance_type: str, region: str, *, spot: bool) -> str:
     market = "spot (one-time)" if spot else "on-demand"
     return (
         f"about to launch one {market} {instance_type} in {region}; a run is ~30-40 min, so "
-        "instance cost is typically well under US$1, plus about 260k PUT-class S3 requests "
-        "at the default scale (about US$1.2 at the ap-northeast-1 rate)."
+        "instance cost is typically well under US$1, plus about 200k PUT-class S3 requests "
+        "at the default scale (about US$0.95 at the ap-northeast-1 rate)."
     )
 
 
