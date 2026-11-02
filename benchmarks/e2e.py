@@ -126,10 +126,17 @@ def check_environment() -> tuple[str, str]:
 
     Three shapes are accepted: the local dev stack (an `AWS_ENDPOINT_URL_S3` on
     a local host plus the static dev keys), a deliberate non-local endpoint, and real
-    S3 (no endpoint override, credentials from the default chain - a profile or
-    an instance role). The last two both require the explicit
+    S3 (no endpoint override). The last two both require the explicit
     `BOTO3_S3_BENCH_ALLOW_REMOTE` opt-in so a bare run cannot touch real AWS by
-    accident.
+    accident, and take their credentials from the environment or an instance
+    role (`_check_remote_credentials`).
+
+    Both executables come from the interpreter's own environment, so the run
+    measures the tree its results file names: `boto3-s3` is the console script
+    next to the running Python, and `aws` the pinned binary
+    scripts/install-awscli.sh installs there. Only when it is not there (on
+    Windows, scripts/install-awscli.cmd puts it on PATH instead) is `aws`
+    taken from PATH.
     """
     endpoint = os.environ.get("AWS_ENDPOINT_URL_S3")
     opted_in = awsenv.remote_opted_in()
@@ -152,45 +159,78 @@ def check_environment() -> tuple[str, str]:
             f"purge a {BUCKET!r} bucket and transfer hundreds of MB. Set "
             f"{awsenv.ALLOW_REMOTE_ENV}=1 if that endpoint really is the intended target."
         )
-    ours = shutil.which("boto3-s3")
+    else:
+        _check_remote_credentials()
+    bindir = str(Path(sys.executable).parent)
+    ours = shutil.which("boto3-s3", path=bindir)
     if ours is None:
         raise BenchmarkError(
-            "boto3-s3 console script not on PATH; run via `uv run python -m benchmarks run`"
+            f"no boto3-s3 console script next to {sys.executable}; run via "
+            "`uv run python -m benchmarks run` after `uv sync --all-packages --locked`"
         )
-    aws = shutil.which("aws")
+    aws = shutil.which("aws", path=bindir) or shutil.which("aws")
     if aws is None:
-        raise BenchmarkError(f"aws binary not on PATH; {_SETUP_HINT}")
+        raise BenchmarkError(f"no aws binary next to {sys.executable} or on PATH; {_SETUP_HINT}")
     return ours, aws
 
 
+# Environment variables that would point a CLI at the host's AWS profiles or
+# credentials file; every child runs without them (`_child_env`).
+_HOST_PROFILE_ENV = ("AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_SHARED_CREDENTIALS_FILE")
+
+
 def _check_remote_credentials() -> None:
-    """Fail fast when a real-S3 run has no region or no resolvable credentials.
+    """Fail fast when a run off the dev stack has no region or no credentials.
 
     Better to stop here than after seeding a corpus: create_bucket_in_region
-    needs the region, and every call needs credentials the default chain (env,
-    profile, or instance role) can produce.
+    needs the region, and every call needs credentials. Both CLIs run with
+    their home in the run's work root and `AWS_CONFIG_FILE` at the per-engine
+    config, so neither sees the host's profiles or credentials file; the
+    credentials are looked up the same way here (`_harness_session`), and a
+    profile is refused outright rather than silently ignored.
     """
     if awsenv.resolve_region() is None:
         raise BenchmarkError(
             "real-S3 run needs a region; set AWS_REGION or use a profile that has one"
         )
-    if os.environ.get("AWS_PROFILE"):
-        # Both CLIs run with AWS_CONFIG_FILE pointed at the per-engine config,
-        # which hides every [profile ...] section from them; the harness's own
-        # pre-flight would pass and the first CLI invocation would fail.
+    named = [name for name in ("AWS_PROFILE", "AWS_DEFAULT_PROFILE") if os.environ.get(name)]
+    if named:
         raise BenchmarkError(
-            "real-S3 run cannot use AWS_PROFILE: the harness pins AWS_CONFIG_FILE for both "
-            "CLIs, so a profile is invisible to them. Export the credentials into the "
-            "environment (e.g. `aws configure export-credentials --format env`) or run "
-            "from an instance role."
+            f"a run off the dev stack cannot use {' or '.join(named)}: both CLIs run without "
+            "the host's ~/.aws, so a profile is invisible to them. Export the credentials "
+            "into the environment (e.g. `aws configure export-credentials --format env`) or "
+            "run from an instance role."
         )
+    if _harness_session().get_credentials() is None:
+        raise BenchmarkError(
+            "a run off the dev stack found no credentials (checked the environment and an "
+            "instance role)"
+        )
+
+
+def _harness_session() -> Any:
+    """The botocore session the harness's own S3 calls use.
+
+    On the dev stack, the default one (the dev keys are in the environment).
+    Anywhere else, one that reads no config or credentials file, so the
+    harness finds credentials exactly where the CLIs can: the environment or
+    an instance role. A credential in the host's ~/.aws would otherwise seed
+    a corpus that neither CLI could then reach.
+    """
     import botocore.session
 
-    session: Any = botocore.session.Session(profile=os.environ.get("AWS_PROFILE"))
-    if session.get_credentials() is None:
-        raise BenchmarkError(
-            "real-S3 run found no credentials (checked env, profile, and instance role)"
-        )
+    session: Any = botocore.session.Session()
+    if not awsenv.targeting_local_stack():
+        session.set_config_variable("config_file", os.devnull)
+        session.set_config_variable("credentials_file", os.devnull)
+    return session
+
+
+def _child_env(overlay: Mapping[str, str]) -> dict[str, str]:
+    """The environment one CLI invocation runs in: the host's, minus its profile, plus *overlay*."""
+    env = {key: value for key, value in os.environ.items() if key not in _HOST_PROFILE_ENV}
+    env.update(overlay)
+    return env
 
 
 def aws_version(aws_exe: str) -> str:
@@ -203,7 +243,7 @@ def _build_client() -> Any:
 
     # No endpoint override means real S3; the dev stack reports us-east-1, so that is
     # the only place the default applies.
-    return boto3.client(
+    return boto3.Session(botocore_session=_harness_session()).client(
         "s3",
         endpoint_url=os.environ.get("AWS_ENDPOINT_URL_S3"),
         region_name=awsenv.resolve_region() or "us-east-1",
@@ -226,9 +266,15 @@ def _bench_bucket() -> str:
     if override:
         # The EC2 launcher names the run's bucket so it can remove exactly that
         # one if the run is cut short; it must stay in the family the instance
-        # role is scoped to.
+        # role is scoped to, and never be the persistent hand-off bucket, which
+        # the run purges and deletes at its end.
         if not override.startswith(BUCKET + "-"):
             raise BenchmarkError(f"{BUCKET_ENV} must start with {BUCKET + '-'!r}: {override!r}")
+        if override.startswith(BUCKET + "-boot-"):
+            raise BenchmarkError(
+                f"{BUCKET_ENV} names the EC2 hand-off bucket family {BUCKET + '-boot-'!r}: "
+                f"{override!r}"
+            )
         return override
     import secrets
 
@@ -269,7 +315,7 @@ def _invoke(
     else:
         cmd = [env.aws_exe, "s3", *argv]
     try:
-        return _run_child(cmd, {**os.environ, **env.overlay})
+        return _run_child(cmd, _child_env(env.overlay))
     except subprocess.TimeoutExpired as exc:
         raise BenchmarkError(
             f"[{scenario.name}] {side.value} exceeded {_SUBPROCESS_TIMEOUT:.0f}s: {cmd}"
@@ -970,10 +1016,17 @@ def run_scenarios(
         if awsenv.targeting_local_stack():
             force_delete_bucket(client, bucket)
         create_bucket_in_region(client, bucket)
+        # The CLIs' home: neither reads the host's ~/.aws (the e2e suite's
+        # `_isolated_home`), and the pinned aws writes its session cache here
+        # instead of into the host's. USERPROFILE is what Windows reads.
+        home = workroot / "home"
+        home.mkdir()
         try:
             for engine in engines:
                 config = _write_engine_config(workroot, engine)
                 overlay = {
+                    "HOME": str(home),
+                    "USERPROFILE": str(home),
                     "AWS_CONFIG_FILE": str(config),
                     "AWS_CLI_AUTO_PROMPT": "off",
                     "AWS_PAGER": "",

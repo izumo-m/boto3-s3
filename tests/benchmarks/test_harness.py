@@ -10,6 +10,7 @@ arithmetic. Nothing here talks to S3.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -295,6 +296,74 @@ class TestRemoteGuards:
         monkeypatch.setenv("AWS_PROFILE", "someone")
         with pytest.raises(BenchmarkError, match="AWS_PROFILE"):
             e2e._check_remote_credentials()
+
+    def test_an_explicit_remote_endpoint_is_checked_like_real_s3(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "https://s3.ap-northeast-1.amazonaws.com")
+        monkeypatch.setenv(awsenv.ALLOW_REMOTE_ENV, "1")
+        monkeypatch.setenv("AWS_REGION", "ap-northeast-1")
+        monkeypatch.setenv("AWS_DEFAULT_PROFILE", "someone")
+        with pytest.raises(BenchmarkError, match="AWS_DEFAULT_PROFILE"):
+            e2e.check_environment()
+
+    def test_remote_credentials_ignore_the_host_files(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # A [default] key in the credentials file is invisible to both CLIs
+        # (their home is the run's), so the harness must not find it either.
+        credentials = tmp_path / "credentials"
+        credentials.write_text("[default]\naws_access_key_id = A\naws_secret_access_key = B\n")
+        monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(credentials))
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "config-absent"))
+        for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv("AWS_ENDPOINT_URL_S3", raising=False)
+        # No instance metadata here; keep the lookup from waiting on it.
+        monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+        assert e2e._harness_session().get_credentials() is None
+        monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "http://127.0.0.1:9000")
+        assert e2e._harness_session().get_credentials() is not None
+
+    def test_children_run_without_the_host_profile(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AWS_PROFILE", "someone")
+        monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", "/somewhere/credentials")
+        env = e2e._child_env({"HOME": "/run/home"})
+        assert "AWS_PROFILE" not in env
+        assert "AWS_SHARED_CREDENTIALS_FILE" not in env
+        assert env["HOME"] == "/run/home"
+
+    def test_the_hand_off_bucket_is_never_the_run_bucket(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("AWS_ENDPOINT_URL_S3", raising=False)
+        monkeypatch.setenv(e2e.BUCKET_ENV, "boto3-s3-bench-boot-123456789012-ap-northeast-1")
+        with pytest.raises(BenchmarkError, match="hand-off"):
+            e2e._bench_bucket()
+
+    def test_ours_is_the_console_script_of_the_running_interpreter(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "http://127.0.0.1:9000")
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "devadmin")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "devadmin")
+        # A boto3-s3 earlier on PATH (a pipx install, say) is not the tree under
+        # test; only the interpreter's own directory counts. The host may have
+        # no aws at all, so that lookup is answered here.
+        real_which = shutil.which
+        searched: list[str | None] = []
+
+        def which(name: str, mode: int = os.F_OK | os.X_OK, path: str | None = None) -> str | None:
+            if name == "aws":
+                return "/opt/aws"
+            searched.append(path)
+            return real_which(name, mode, path)
+
+        monkeypatch.setattr(e2e.shutil, "which", which)
+        ours, aws = e2e.check_environment()
+        assert searched == [str(Path(sys.executable).parent)]
+        assert Path(ours).parent == Path(sys.executable).parent
+        assert aws == "/opt/aws"
 
 
 class _RecordingClient:

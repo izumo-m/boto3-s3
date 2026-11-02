@@ -170,6 +170,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # Fail fast on a missing dev stack before spending in-process time.
         _ours_exe, aws_exe = e2e.check_environment()
         aws_ver = e2e.aws_version(aws_exe)
+        from tests.utils.golden import pinned_aws_version
+
+        # None where the aws-cli source checkout is absent (the EC2 instance's
+        # archive); the launcher installs the pinned version there itself.
+        pinned = pinned_aws_version()
+        if pinned is not None and aws_ver.split(" ", 1)[0] != f"aws-cli/{pinned}":
+            _log(
+                f"[e2e] warning: {aws_exe} is {aws_ver!r}, not the pinned aws-cli {pinned} "
+                "(scripts/install-awscli.sh installs it)"
+            )
 
     options: dict[str, object] = {
         "engines": list(engines),

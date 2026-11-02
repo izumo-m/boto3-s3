@@ -78,11 +78,20 @@ touched. Destinations are purged between invocations so the dev stack's tmpfs
 stays bounded. By default the endpoint must be the local dev stack;
 `BOTO3_S3_BENCH_ALLOW_REMOTE=1` (exactly `1`) opts into a non-local endpoint,
 or into real S3 with no endpoint override at all (how the EC2 lane runs,
-below). A real-S3 run takes its credentials from the environment or an
-instance role, never from `AWS_PROFILE`: both CLIs run with `AWS_CONFIG_FILE`
-pointed at the per-engine config, which hides every profile from them, so the
-harness refuses the combination up front instead of failing on the first
-invocation. Each engine's work tree is removed before the next engine seeds
+below). Both CLIs run without the host's `~/.aws`: their home is an empty
+directory of the run (`USERPROFILE` too, for Windows), `AWS_CONFIG_FILE`
+points at the per-engine config, and the host's `AWS_PROFILE`,
+`AWS_DEFAULT_PROFILE` and `AWS_SHARED_CREDENTIALS_FILE` are dropped - so the
+host's settings steer neither side, and the pinned `aws` writes its session
+cache there instead of into the host's home. A run off the dev stack
+therefore takes its credentials from the environment or an instance role,
+and the harness looks its own up the same way: it refuses a profile up front
+instead of failing on the first invocation. Both executables come from the
+interpreter's environment - `boto3-s3` is the console script next to the
+running Python, `aws` the pinned binary scripts/install-awscli.sh installs
+there (taken from PATH only when absent, as on Windows) - so a run measures
+the tree its results file names; a run warns when `aws --version` is not the
+pinned version. Each engine's work tree is removed before the next engine seeds
 its own, and a scenario that hits a local I/O error (a full work tree) or an
 S3 error while staging its input is skipped and recorded like any other
 failed scenario. Only the dev stack's fixed bucket name is cleared before
