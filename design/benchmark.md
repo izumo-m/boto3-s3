@@ -174,6 +174,8 @@ timing flags stay the regression gate).
 | `sync_delete_10k` | `sync --delete` removing remote extras | 8k kept + 2k extra keys | classic |
 | `cp_upload_small_1k` / `cp_download_small_1k` | `cp --recursive` | 1000 x 4KB | classic+crt |
 | `cp_upload_large` / `cp_download_large` | `cp` | 1 x 64MB (multipart; `--large-transfer-mb`) | classic+crt |
+| `mv_s3_to_s3_1k` | `mv --recursive` between two prefixes | 1000 keys x 4KB, reseeded before every invocation | classic |
+| `mv_download_small_1k` | `mv --recursive` to a local directory | 1000 x 4KB, reseeded before every invocation | classic+crt |
 | `rm_recursive_2k` | `rm --recursive` | 2000 keys, reseeded before every invocation (warmup and each timed side) | classic |
 
 | In-process scenario | Scale |
@@ -183,6 +185,7 @@ timing flags stay the regression gate).
 | `inproc_sync_noop_20k` | 20k local files + matching listing |
 | `inproc_sync_changed_20k` | as above, 2k local files differing in size |
 | `inproc_rm_recursive_20k` | 20k keys |
+| `inproc_mv_s3_to_s3_2k` | 2000 keys, one copy and one delete request each |
 | `inproc_cp_upload_small_2k` | 2000 x 1B |
 | `inproc_cp_upload_large` | 64MB multipart (`--large-transfer-mb`) |
 
@@ -209,6 +212,17 @@ extras under a sub-prefix no local directory matches, so `--delete` has
 exactly those to remove and nothing to upload; the verify checks both counts.
 The in-process `inproc_sync_changed_20k` gets the same shape from the stub:
 2k local files differ in size from the pre-rendered listing.
+
+The `mv` scenarios time cp's work plus the removal of every source. An
+invocation empties its source, so the source is re-seeded and the previous
+destination purged before every invocation, warmup included.
+`mv_download_small_1k` keeps `cp_download_small_1k`'s shape, so the gap
+between the two rows is what the removals cost. `mv_s3_to_s3_1k` is the
+suite's one server-side copy; both tools run S3-to-S3 copies on the classic
+engine whatever the configuration, so it has no CRT lane. Its in-process
+counterpart needs no reset: the stub keeps no state, so every sample lists
+the same source again. It is sized at 2k keys, not rm's 20k, because each
+key costs two requests where rm deletes 1000 keys a request.
 
 The single-object rows measure two different things depending on the link.
 Against the dev stack on localhost a 64 MB object moves in a few hundredths of a

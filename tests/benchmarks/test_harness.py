@@ -33,9 +33,27 @@ class TestScenarioSets:
         assert by_name["sync_changed_10k"].payload_bytes == 2_000 * 1024
         assert by_name["cp_upload_small_1k"].payload_bytes == 1_000 * 4096
         assert by_name["cp_upload_large"].payload_bytes == DEFAULT_LARGE_MB * _MIB
-        # Listing, deletion and the probes move nothing.
-        for name in ("ls_recursive_10k", "sync_noop_10k", "sync_delete_10k", "rm_recursive_2k"):
+        assert by_name["mv_download_small_1k"].payload_bytes == 1_000 * 4096
+        # Listing, deletion, the server-side copy and the probes move nothing
+        # through the client.
+        for name in (
+            "ls_recursive_10k",
+            "sync_noop_10k",
+            "sync_delete_10k",
+            "rm_recursive_2k",
+            "mv_s3_to_s3_1k",
+        ):
             assert by_name[name].payload_bytes is None
+
+    def test_mv_has_a_crt_lane_only_for_the_download(self) -> None:
+        by_name = {s.name: s for s in e2e.build_scenarios(False)}
+        # Both tools copy S3 to S3 on the classic engine whatever is configured.
+        assert not by_name["mv_s3_to_s3_1k"].crt_capable
+        assert by_name["mv_download_small_1k"].crt_capable
+        # The download mirrors cp_download_small_1k so the two rows compare.
+        assert by_name["mv_download_small_1k"].dimensions == (
+            by_name["cp_download_small_1k"].dimensions
+        )
 
     def test_large_transfer_knob_moves_both_modes(self) -> None:
         big = {s.name: s for s in e2e.build_scenarios(False, large_mb=256)}

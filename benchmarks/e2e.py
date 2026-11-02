@@ -773,6 +773,72 @@ def build_scenarios(quick: bool, *, large_mb: int = DEFAULT_LARGE_MB) -> list[E2
         )
     )
 
+    # mv is cp plus the removal of each source. Every invocation empties its
+    # source, so the source is re-seeded before each one (warmup included) and
+    # the previous destination purged. The download keeps cp_download_small_1k's
+    # shape, so the gap between the two rows is the removal's cost. An S3-to-S3
+    # copy runs on the classic engine in both tools, so that row has no CRT lane.
+    mv_count = _scale(1_000, quick)
+
+    def move_count_verify(name: str, expected: int) -> Callable[..., None]:
+        def verify(_env: E2EEnv, side: Side, result: CliResult) -> None:
+            moves = [line for line in result.stdout.splitlines() if line.startswith("move:")]
+            if len(moves) != expected:
+                raise VerificationError(
+                    f"[{name}] {side.value} reported {len(moves)} moves, expected {expected}"
+                )
+
+        return verify
+
+    def mv_s3_reset(env: E2EEnv) -> None:
+        from tests.utils.harness import delete_under
+
+        delete_under(env.client, env.bucket, env.s3_prefix("mv_s3"))
+        workload.seed_prefix(
+            env.client, env.bucket, env.s3_prefix("mv_s3") + "src/", mv_count, 4096
+        )
+
+    scenarios.append(
+        E2EScenario(
+            name="mv_s3_to_s3_1k",
+            dimensions={"key_count": str(mv_count), "object_size": "4KB"},
+            reset=mv_s3_reset,
+            make_argv=lambda env, _side: [
+                "mv",
+                "--recursive",
+                env.s3_url(env.s3_prefix("mv_s3") + "src/"),
+                env.s3_url(env.s3_prefix("mv_s3") + "dst/"),
+            ],
+            verify=move_count_verify("mv_s3_to_s3", mv_count),
+        )
+    )
+
+    def mv_dl_reset(env: E2EEnv) -> None:
+        from tests.utils.harness import delete_under
+
+        delete_under(env.client, env.bucket, env.s3_prefix("mv_dl"))
+        workload.seed_prefix(
+            env.client, env.bucket, env.s3_prefix("mv_dl") + "src/", mv_count, 4096
+        )
+        shutil.rmtree(env.dir_for("mv_dl") / "dest", ignore_errors=True)
+
+    scenarios.append(
+        E2EScenario(
+            name="mv_download_small_1k",
+            dimensions={"file_count": str(mv_count), "file_size": "4KB"},
+            payload_bytes=mv_count * 4096,
+            crt_capable=True,
+            reset=mv_dl_reset,
+            make_argv=lambda env, side: [
+                "mv",
+                "--recursive",
+                env.s3_url(env.s3_prefix("mv_dl") + "src/"),
+                str(env.dir_for("mv_dl") / "dest" / env.unique(side)),
+            ],
+            verify=move_count_verify("mv_download_small", mv_count),
+        )
+    )
+
     rm_count = _scale(2_000, quick)
 
     def rm_reset(env: E2EEnv) -> None:

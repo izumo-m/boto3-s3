@@ -277,6 +277,37 @@ def build_scenarios(quick: bool, *, large_mb: int = DEFAULT_LARGE_MB) -> list[In
         )
     )
 
+    mv_count = _scale(2_000, quick)
+
+    def mv_prepare(_workdir: Path) -> Prepared:
+        # One CopyObject and one DeleteObject per key, so the count matches the
+        # small-file upload's request count rather than rm's (whose deletes go
+        # 1000 to a request). The stub keeps no state, so every sample lists the
+        # same source again without a reset.
+        corpus = stubs.ListingCorpus(bucket=BUCKET, prefix="src/", count=mv_count, size=16)
+        ctx = _make_context(stubs.S3Responder(corpus=corpus))
+
+        def verify(result: CliResult) -> None:
+            lines = [line for line in result.stdout.splitlines() if line.startswith("move:")]
+            if len(lines) != mv_count:
+                raise VerificationError(
+                    f"[inproc_mv_s3_to_s3] expected {mv_count} move lines, got {len(lines)}"
+                )
+
+        return Prepared(
+            argv=["mv", "--recursive", f"s3://{BUCKET}/src/", f"s3://{BUCKET}/dst/"],
+            ctx=ctx,
+            verify=verify,
+        )
+
+    scenarios.append(
+        InProcScenario(
+            name="inproc_mv_s3_to_s3_2k",
+            dimensions={"key_count": str(mv_count)},
+            prepare=mv_prepare,
+        )
+    )
+
     cp_count = _scale(2_000, quick)
 
     def cp_small_prepare(workdir: Path) -> Prepared:
