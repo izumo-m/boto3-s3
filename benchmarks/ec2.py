@@ -31,7 +31,6 @@ left tagged and deletes the benchmark buckets it left. See design/benchmark.md
 
 from __future__ import annotations
 
-import contextlib
 import secrets
 import subprocess
 import time
@@ -44,7 +43,7 @@ from benchmarks.core import BenchmarkError
 
 if TYPE_CHECKING:
     import argparse
-    from collections.abc import Generator, Sequence
+    from collections.abc import Sequence
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -537,64 +536,64 @@ def cmd_run(args: argparse.Namespace) -> int:
     s3.put_object(Bucket=boot_bucket, Key=tarball_key, Body=_archive_working_tree())
     keep_tarball = False
     try:
-        with _finally_on_termination():
-            git_rev = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=REPO_ROOT,
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout.strip()
-            user_data = _inline_urls(
-                _user_data(
-                    boot_bucket=boot_bucket,
-                    run_id=run_id,
-                    region=region,
-                    python=args.python,
-                    aws_version=aws_version,
-                    uv_version=uv_version,
-                    max_minutes=args.max_minutes,
-                    large_mb=args.large_transfer_mb,
-                    tmpfs_gb=tmpfs_gb,
-                    git_rev=git_rev,
-                    lane=f"ec2-{instance_type}-ubuntu{args.ubuntu_release}",
-                    image=ami,
-                    bench_bucket=bench_bucket,
-                ),
-                _presign(s3, boot_bucket, run_id, tarball_key, args.max_minutes),
-            )
-            instance_id = _launch(
-                ec2,
-                ami=ami,
-                root_device=root_device,
-                instance_type=instance_type,
-                user_data=user_data,
+        git_rev = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        user_data = _inline_urls(
+            _user_data(
+                boot_bucket=boot_bucket,
                 run_id=run_id,
-                spot=spot,
-            )
-            launched = time.monotonic()
-            print(f"launched {instance_id} ({'spot' if spot else 'on-demand'}); run id {run_id}")
+                region=region,
+                python=args.python,
+                aws_version=aws_version,
+                uv_version=uv_version,
+                max_minutes=args.max_minutes,
+                large_mb=args.large_transfer_mb,
+                tmpfs_gb=tmpfs_gb,
+                git_rev=git_rev,
+                lane=f"ec2-{instance_type}-ubuntu{args.ubuntu_release}",
+                image=ami,
+                bench_bucket=bench_bucket,
+            ),
+            _presign(s3, boot_bucket, run_id, tarball_key, args.max_minutes),
+        )
+        instance_id = _launch(
+            ec2,
+            ami=ami,
+            root_device=root_device,
+            instance_type=instance_type,
+            user_data=user_data,
+            run_id=run_id,
+            spot=spot,
+        )
+        launched = time.monotonic()
+        print(f"launched {instance_id} ({'spot' if spot else 'on-demand'}); run id {run_id}")
 
-            outcome: Outcome | None = None
-            results_back: list[str] = []
-            try:
-                outcome = _await_completion(
-                    s3, ec2, boot_bucket, run_id, instance_id, args.max_minutes, launched=launched
+        outcome: Outcome | None = None
+        results_back: list[str] = []
+        try:
+            outcome = _await_completion(
+                s3, ec2, boot_bucket, run_id, instance_id, args.max_minutes, launched=launched
+            )
+            results_back = _download_results(s3, boot_bucket, run_id)
+        finally:
+            # The launcher stopped first (its own timeout, Ctrl-C, an error
+            # while waiting): the instance may still be working. Another signal
+            # ends the launcher without any of this (design/benchmark.md).
+            stopped_first = outcome is None or outcome.kind == "timeout"
+            if args.keep and stopped_first:
+                keep_tarball = True
+                print(
+                    f"--keep: leaving {instance_id} to finish on its own (it self-terminates "
+                    f"at the budget), with its bucket {bench_bucket} and the code tarball; "
+                    "`ec2 cleanup` removes the bucket, not the tarball"
                 )
-                results_back = _download_results(s3, boot_bucket, run_id)
-            finally:
-                # The launcher stopped first (its own timeout, an interrupt, an
-                # error while waiting): the instance may still be working.
-                stopped_first = outcome is None or outcome.kind == "timeout"
-                if args.keep and stopped_first:
-                    keep_tarball = True
-                    print(
-                        f"--keep: leaving {instance_id} to finish on its own (it self-terminates "
-                        f"at the budget), with its bucket {bench_bucket} and the code tarball; "
-                        "`ec2 cleanup` removes the bucket"
-                    )
-                else:
-                    _teardown(ec2, s3, instance_id, bench_bucket, wait=stopped_first)
+            else:
+                _teardown(ec2, s3, instance_id, bench_bucket, wait=stopped_first)
     finally:
         # The tarball is the one sizeable object; the log and results stay
         # under the run prefix (kilobytes) as the run's record on the bucket.
@@ -625,33 +624,6 @@ def cmd_run(args: argparse.Namespace) -> int:
             "`uv run python -m benchmarks report`"
         )
     return 0 if ok else 2
-
-
-@contextlib.contextmanager
-def _finally_on_termination() -> Generator[None]:
-    """Turn SIGTERM and SIGHUP into SystemExit while the run is out.
-
-    A signal's default action ends the process without running `finally`, so
-    a closed terminal would leave the instance to its budget, and its bucket
-    and the code tarball to `cleanup`; as an exception it unwinds through the
-    teardown like an interrupt does.
-    """
-    import signal
-
-    def exit_on(signum: int, _frame: object) -> None:
-        raise SystemExit(128 + signum)
-
-    previous: dict[int, Any] = {}
-    for name in ("SIGTERM", "SIGHUP"):
-        number = getattr(signal, name, None)
-        if number is None:  # no SIGHUP on Windows
-            continue
-        previous[number] = signal.signal(number, exit_on)
-    try:
-        yield
-    finally:
-        for number, handler in previous.items():
-            signal.signal(number, handler)
 
 
 def _presign(
@@ -692,11 +664,12 @@ def _teardown(ec2: Any, s3: Any, instance_id: str, bench_bucket: str, *, wait: b
 
     try:
         ec2.terminate_instances(InstanceIds=[instance_id])
-        print(f"terminating {instance_id}")
-        if wait and not _wait_terminated(ec2, [instance_id]):
-            print(f"{instance_id} is not terminated yet; removing its bucket anyway")
     except Exception as exc:
         print(f"could not terminate {instance_id}: {exc}; `ec2 cleanup` will")
+    else:
+        print(f"terminating {instance_id}")
+        if wait and not _wait_terminated(ec2, [instance_id]):
+            print(f"{instance_id} is not confirmed terminated; removing its bucket anyway")
     try:
         force_delete_bucket(s3, bench_bucket)
     except Exception as exc:
@@ -704,16 +677,22 @@ def _teardown(ec2: Any, s3: Any, instance_id: str, bench_bucket: str, *, wait: b
 
 
 def _wait_terminated(ec2: Any, ids: Sequence[str], *, timeout: float = 600.0) -> bool:
-    """Wait until every instance in *ids* is `terminated`; False when *timeout* runs out.
+    """Wait until every instance in *ids* is `terminated`; report, never raise.
 
+    False when *timeout* runs out or the state cannot be read: both callers
+    remove the buckets next, and neither should lose that to a failed poll.
     Polls DescribeInstances rather than using botocore's InstanceTerminated
     waiter, which gives up at once on an instance it sees `pending` or
     `stopping`.
     """
     deadline = time.monotonic() + timeout
     while True:
-        if all(_instance_status(ec2, instance_id)[0] == "terminated" for instance_id in ids):
-            return True
+        try:
+            if all(_instance_status(ec2, instance_id)[0] == "terminated" for instance_id in ids):
+                return True
+        except Exception as exc:
+            print(f"could not read the state of {', '.join(ids)}: {exc}")
+            return False
         if time.monotonic() >= deadline:
             return False
         time.sleep(10)

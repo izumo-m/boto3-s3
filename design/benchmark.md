@@ -411,19 +411,31 @@ lane does - the pinned `aws`, the uv version `mise.toml` pins, `uv sync
   the second mode keeps the first mode's file. Whatever the ending, the
   launcher terminates the instance, removes the run's bucket if the harness
   did not, and deletes the code tarball (also when the launch itself
-  failed, or the wait was interrupted - a SIGTERM or SIGHUP to the launcher
-  counts as an interrupt); the log and results stay under the run prefix as
-  the run's record. When the launcher stopped first (its own timeout, an
-  interrupt) the instance may still be writing, so its termination is waited
-  out before its bucket is emptied. `--keep` leaves such an unfinished run to
-  the instance instead - the instance, its bucket and the code tarball, which
-  it may not have fetched yet; once the run has ended it changes nothing. So
-  the answer to a failed run is another
+  failed, or the wait was interrupted with Ctrl-C); the log and results stay
+  under the run prefix as the run's record. When the launcher stopped first
+  (its own timeout, Ctrl-C) the instance may still be writing, so its
+  termination is waited out before its bucket is emptied; a second Ctrl-C
+  abandons that wait and leaves the bucket to `cleanup`. `--keep` leaves such
+  an unfinished run to the instance instead - the instance, its bucket and
+  the code tarball, which it may not have fetched yet; once the run has ended
+  it changes nothing. So the answer to a failed run is another
   `ec2 run`. `cleanup` is the safety net for a launcher that died before its
   own teardown: it terminates anything still tagged, waits for that, and
   then force-deletes any `boto3-s3-bench-*` bucket left on real S3 (the
   persistent `boto3-s3-bench-boot-*` hand-off buckets excepted) - do not run
   it while another run is in flight.
+- **A launcher ended by a signal runs no teardown.** `kill`, a closed terminal
+  and SIGKILL end the process where it stands; only Ctrl-C unwinds through the
+  teardown. The instance then runs the benchmark to its end and terminates
+  itself, at the budget at the latest, and costs what the run costs. Its
+  results stay under the run prefix, undownloaded. Its bucket is gone if the
+  harness finished; otherwise `cleanup` removes it, and stops the instance if
+  it should not finish. The code tarball stays in the hand-off bucket, as a
+  kept run's does, until removed by hand: `cleanup` leaves that bucket alone.
+  Handling those signals is not worth its own failure modes (a closed terminal
+  breaks the teardown's output, and a handler overrides the SIGHUP that `nohup`
+  ignores): the cost is one small object, and a long run is started so that a
+  closed terminal does not reach it (`setsid nohup`).
 - **What comes back.** The results files land in `benchmarks/results/` with
   the lane spelled in their name (`...bbbbbbbbbb.ec2-m7i.xlarge-ubuntu26.04.jsonl`),
   the archived commit as their revision, and the AMI id in the meta record;
