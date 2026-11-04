@@ -597,8 +597,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     finally:
         # The tarball is the one sizeable object; the log and results stay
         # under the run prefix (kilobytes) as the run's record on the bucket.
-        # Removed on every ending but a kept instance's, which may not have
-        # fetched it yet: `cleanup` leaves the hand-off bucket alone.
+        # Removed on every ending that gets here but a kept instance's, which
+        # may not have fetched it yet: `cleanup` leaves the hand-off bucket alone.
         if not keep_tarball:
             try:
                 s3.delete_object(Bucket=boot_bucket, Key=tarball_key)
@@ -954,7 +954,7 @@ def _classify(
     if outcome.kind == "timeout":
         return (
             f"the launcher stopped waiting after {outcome.minutes:.0f} min with the instance "
-            f"{outcome.state!r}; it self-terminates at its {max_minutes} min budget"
+            f"{outcome.state!r}"
         )
     if outcome.kind == "died":
         if spot_reclaimed:
@@ -1122,14 +1122,16 @@ def instance_policy_document() -> dict[str, Any]:
 def cmd_cleanup(args: argparse.Namespace) -> int:
     """Remove what a crashed or budget-killed run leaves behind.
 
-    Two kinds of leftover exist. A still-running tagged instance, when the
+    It removes two kinds of leftover. A still-running tagged instance, when the
     launcher died before terminating it. And a per-run benchmark bucket on
     real S3, when the instance was cut off mid-run (budget shutdown, a
     launcher timeout) so the harness's own delete never ran; those names are
     random, so the whole `boto3-s3-bench-*` family in the account is swept,
     the persistent `boto3-s3-bench-boot-*` hand-off buckets excepted. The
     instances go first, and are waited out, so none is still writing into a
-    bucket while it is being emptied.
+    bucket while it is being emptied; exit 2 says the termination could not be
+    confirmed. A code tarball left by a kept or signal-killed run stays, since
+    this never touches the hand-off bucket.
     """
     from botocore.exceptions import ClientError
 
@@ -1154,10 +1156,12 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
         for reservation in resp.get("Reservations", [])
         for inst in reservation.get("Instances", [])
     ]
+    confirmed = True
     if ids:
         ec2.terminate_instances(InstanceIds=ids)
         print(f"terminating {', '.join(ids)}")
-        if _wait_terminated(ec2, ids):
+        confirmed = _wait_terminated(ec2, ids)
+        if confirmed:
             print(f"terminated {', '.join(ids)}")
         else:
             print("gave up waiting for the termination; removing the buckets anyway")
@@ -1178,4 +1182,4 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
             print(f"could not delete {name} (another region?): {exc}")
     if not leftovers:
         print("no leftover benchmark buckets")
-    return 0
+    return 0 if confirmed else 2

@@ -22,10 +22,12 @@ class BenchmarkError(Exception):
 
 
 class VerificationError(BenchmarkError):
-    """A scenario's warmup verification failed, so its timings cannot be trusted.
+    """A scenario's verification failed, so its timings cannot be trusted.
 
-    Raised before any timed sample is recorded: a run that silently did no
-    work (wrong prefix, empty tree) would otherwise produce fake-fast numbers.
+    Raised on a warmup, or on a timed invocation of a scenario that verifies
+    each one; either way the scenario records no result. A run that silently
+    did no work (wrong prefix, empty tree) would otherwise produce fake-fast
+    numbers.
     """
 
 

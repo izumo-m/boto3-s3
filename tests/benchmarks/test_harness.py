@@ -670,15 +670,15 @@ class TestRunBucketLifecycle:
                 name=name,
                 dimensions={},
                 make_argv=lambda *_a: [],
-                samples=1,
+                samples=2,
                 verify=counting(name),
                 verify_each=name == "each",
             )
             for name in calls
         ]
         self._run(monkeypatch, _RecordingClient(), endpoint=None, scenarios=scenarios)
-        # Two warmups, then one round on each of the two sides.
-        assert calls == {"warmup_only": 2, "each": 4}
+        # Two warmups, then two rounds on each of the two sides.
+        assert calls == {"warmup_only": 2, "each": 6}
 
     def test_a_timed_invocation_failing_verify_each_fails_the_scenario(
         self, monkeypatch: pytest.MonkeyPatch
@@ -690,14 +690,14 @@ class TestRunBucketLifecycle:
 
         def verify(*_args: object) -> None:
             seen.append(1)
-            if len(seen) > 2:  # past both warmups
+            if len(seen) > 4:  # past both warmups and the first round
                 raise e2e.VerificationError("moved nothing")
 
         scenario = e2e.E2EScenario(
             name="bounce",
             dimensions={},
             make_argv=lambda *_a: [],
-            samples=1,
+            samples=2,
             verify=verify,
             verify_each=True,
         )

@@ -316,6 +316,7 @@ python -m benchmarks ec2 run --instance-type m7g.xlarge   # a Graviton run
 python -m benchmarks ec2 run --ubuntu-release 24.04       # the previous LTS
 python -m benchmarks ec2 run --on-demand      # when spot capacity is not there
 python -m benchmarks ec2 cleanup              # the safety net for a launcher that died
+setsid nohup python -m benchmarks ec2 run > /tmp/ec2-run.log 2>&1 &   # outlives its terminal
 ```
 
 The launcher orchestrates; the instance does the work. `run` resolves the
@@ -409,9 +410,9 @@ lane does - the pinned `aws`, the uv version `mise.toml` pins, `uv sync
   (`boto3-s3-bench-<run id>`, named by the launcher and handed to the
   harness), and the `<run id>/` prefix in the hand-off bucket. Each mode's
   results are uploaded as soon as that mode finishes, so an interruption in
-  the second mode keeps the first mode's file. Whatever the ending, the
-  launcher terminates the instance, removes the run's bucket if the harness
-  did not, and deletes the code tarball (also when the launch itself
+  the second mode keeps the first mode's file. Unless ended by a signal
+  (below), the launcher terminates the instance, removes the run's bucket if
+  the harness did not, and deletes the code tarball (also when the launch itself
   failed, or the wait was interrupted with Ctrl-C); the log and results stay
   under the run prefix as the run's record. When the launcher stopped first
   (its own timeout, Ctrl-C) the instance may still be writing, so its
@@ -424,7 +425,8 @@ lane does - the pinned `aws`, the uv version `mise.toml` pins, `uv sync
   own teardown: it terminates anything still tagged, waits for that, and
   then force-deletes any `boto3-s3-bench-*` bucket left on real S3 (the
   persistent `boto3-s3-bench-boot-*` hand-off buckets excepted) - do not run
-  it while another run is in flight.
+  it while another run is in flight. It exits 2 when it could not confirm the
+  termination.
 - **A launcher ended by a signal runs no teardown.** `kill`, a closed terminal
   and SIGKILL end the process where it stands; only Ctrl-C unwinds through the
   teardown. The instance then runs the benchmark to its end and terminates

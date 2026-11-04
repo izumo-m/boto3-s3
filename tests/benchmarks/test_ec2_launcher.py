@@ -430,7 +430,7 @@ class TestPresignedUrls:
 class _ScriptedEC2:
     """An EC2 client stand-in answering DescribeInstances from a script of states."""
 
-    def __init__(self, states: list[dict[str, Any]] | Exception) -> None:
+    def __init__(self, states: list[dict[str, Any]] | BaseException) -> None:
         self._states = states
         self.calls: list[str] = []
         self.fail_terminate: Exception | None = None
@@ -441,7 +441,7 @@ class _ScriptedEC2:
         if "Filters" in kwargs:
             self.filters = kwargs["Filters"]
             return {"Reservations": [{"Instances": [{"InstanceId": "i-left"}]}]}
-        if isinstance(self._states, Exception):
+        if isinstance(self._states, BaseException):
             raise self._states
         state = self._states.pop(0) if len(self._states) > 1 else self._states[0]
         return {"Reservations": [{"Instances": [state]}]}
@@ -500,7 +500,7 @@ class TestOutcomeReading:
         assert ec2._instance_status(_ScriptedEC2(error), "i-1") == ("pending", None)
 
     @staticmethod
-    def _cleanup(monkeypatch: pytest.MonkeyPatch, fake_ec2: _ScriptedEC2) -> None:
+    def _cleanup(monkeypatch: pytest.MonkeyPatch, fake_ec2: _ScriptedEC2) -> int:
         import argparse
 
         from tests.utils import harness
@@ -526,7 +526,7 @@ class TestOutcomeReading:
             harness, "force_delete_bucket", lambda _client, name: order.append(f"delete {name}")
         )
         args = argparse.Namespace(region="ap-northeast-1", profile=None)
-        assert ec2.cmd_cleanup(args) == 0
+        return ec2.cmd_cleanup(args)
 
     def test_cleanup_stops_the_instances_before_emptying_buckets(
         self, monkeypatch: pytest.MonkeyPatch
@@ -534,7 +534,7 @@ class TestOutcomeReading:
         fake_ec2 = _ScriptedEC2(
             [{"State": {"Name": "shutting-down"}}, {"State": {"Name": "terminated"}}]
         )
-        self._cleanup(monkeypatch, fake_ec2)
+        assert self._cleanup(monkeypatch, fake_ec2) == 0
         # The wait polls until the instance is terminated, then the buckets go;
         # the hand-off bucket stays.
         assert fake_ec2.calls == [
@@ -561,9 +561,18 @@ class TestOutcomeReading:
         from botocore.exceptions import EndpointConnectionError
 
         fake_ec2 = _ScriptedEC2(EndpointConnectionError(endpoint_url="https://ec2.test"))
-        self._cleanup(monkeypatch, fake_ec2)
+        assert self._cleanup(monkeypatch, fake_ec2) == 2
         assert fake_ec2.calls[-1] == "delete boto3-s3-bench-run"
-        assert "could not read the state of i-left" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "could not read the state of i-left" in out
+        assert "terminated i-left" not in out
+        assert "gave up waiting" in out
+
+    def test_cleanup_exits_2_when_the_wait_times_out(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ec2, "_wait_terminated", lambda *_a: False)
+        fake_ec2 = _ScriptedEC2([{"State": {"Name": "running"}}])
+        assert self._cleanup(monkeypatch, fake_ec2) == 2
+        assert fake_ec2.calls[-1] == "delete boto3-s3-bench-run"
 
     def test_the_wait_gives_up_at_its_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(ec2.time, "sleep", lambda _seconds: None)
@@ -631,7 +640,7 @@ class TestRunTeardown:
         wait: Any = None,
         launch: Any = None,
         token: str | None = None,
-        states: list[dict[str, Any]] | Exception | None = None,
+        states: list[dict[str, Any]] | BaseException | None = None,
     ) -> tuple[_RunS3, _ScriptedEC2, list[str], list[str | None]]:
         import types
 
@@ -722,12 +731,26 @@ class TestRunTeardown:
         assert fake_ec2.calls == ["terminate_instances", "describe_instances", "delete_bucket"]
         assert ("delete_object", s3.calls[0][1]) in s3.calls
 
-    def test_the_launcher_timeout_waits_out_the_instance_too(
+    def test_a_second_interrupt_abandons_the_wait_and_leaves_the_bucket(
         self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        s3, fake_ec2, deleted, _profiles = self._stub(
+            monkeypatch, wait=self._interrupt, states=KeyboardInterrupt()
+        )
+        with pytest.raises(KeyboardInterrupt):
+            ec2.cmd_run(_run_args())
+        assert fake_ec2.calls == ["terminate_instances", "describe_instances"]
+        assert deleted == []
+        assert [call for call, _key in s3.calls] == ["put_object", "delete_object"]
+
+    def test_the_launcher_timeout_waits_out_the_instance_too(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _s3, fake_ec2, _deleted, _profiles = self._stub(monkeypatch, wait=self._timed_out)
         assert ec2.cmd_run(_run_args()) == 2
         assert fake_ec2.calls == ["terminate_instances", "describe_instances", "delete_bucket"]
+        # The launcher terminated it, so the verdict must not promise a budget.
+        assert "self-terminates" not in capsys.readouterr().out
 
     def test_a_failed_wait_is_reported_and_still_removes_the_bucket(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -747,13 +770,14 @@ class TestRunTeardown:
         assert "could not terminate" not in out
 
     def test_keep_leaves_a_timed_out_run_to_the_instance(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         s3, fake_ec2, deleted, _profiles = self._stub(monkeypatch, wait=self._timed_out)
         assert ec2.cmd_run(_run_args(keep=True)) == 2
         assert fake_ec2.calls == []
         assert deleted == []
         assert [call for call, _key in s3.calls] == ["put_object"]
+        assert "removes the bucket, not the tarball" in capsys.readouterr().out
 
     def test_a_mode_that_brought_back_no_file_is_named(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
