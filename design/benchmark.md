@@ -189,7 +189,7 @@ timing flags stay the regression gate).
 | `sync_delete_10k` | `sync --delete` removing remote extras | 8k kept + 2k extra keys | classic |
 | `cp_upload_small_1k` / `cp_download_small_1k` | `cp --recursive` | 1000 x 4KB | classic+crt |
 | `cp_upload_large` / `cp_download_large` | `cp` | 1 x 64MB (multipart; `--large-transfer-mb`) | classic+crt |
-| `mv_s3_to_s3_1k` | `mv --recursive` between two prefixes | 1000 keys x 4KB, reseeded before every invocation | classic |
+| `mv_s3_to_s3_1k` | `mv --recursive` between two prefixes | 1000 keys x 4KB, seeded once, moved back the other way each time | classic |
 | `mv_download_small_1k` | `mv --recursive` to a local directory | 1000 x 4KB, reseeded before every invocation | classic+crt |
 | `rm_recursive_2k` | `rm --recursive` | 2000 keys, reseeded before every invocation (warmup and each timed side) | classic |
 
@@ -208,7 +208,8 @@ Every scenario verifies its warmup output (transfer-line counts, listing
 sizes, no-op emptiness) before anything is timed - a scenario that silently
 did no work is skipped and recorded as a verification failure (exit 2 at the
 end; completed scenarios keep their numbers) instead of contributing
-fake-fast ones. `sync` no-op corpora are
+fake-fast ones. `mv_s3_to_s3_1k` verifies every timed invocation as well,
+since each one's source is what the previous one left. `sync` no-op corpora are
 seeded *after* the local tree with past mtimes, so both CLIs deterministically
 judge "nothing to transfer".
 

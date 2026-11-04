@@ -13,6 +13,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -20,6 +21,9 @@ from benchmarks import awsenv, e2e, inprocess, report, results
 from benchmarks.core import DEFAULT_LARGE_MB, BenchmarkError, ScenarioResult
 from benchmarks.e2e import E2EEnv, E2EScenario
 from benchmarks.inprocess import Prepared
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _MIB = 1024 * 1024
 _POSIX = hasattr(os, "fork") and hasattr(os, "killpg")
@@ -117,6 +121,8 @@ class TestScenarioSets:
             moves.append((argv[-2].rsplit("/", 2)[-2], argv[-1].rsplit("/", 2)[-2]))
         # The copies of one invocation are the source of the next: no re-seed.
         assert moves == [("a", "b"), ("b", "a"), ("a", "b")]
+        # So an invocation that moved nothing must not pass unnoticed.
+        assert scenario.verify_each
 
     def test_inprocess_has_the_changed_sync(self) -> None:
         by_name = {s.name: s for s in inprocess.build_scenarios(False)}
@@ -406,6 +412,20 @@ class TestRemoteGuards:
         with pytest.raises(BenchmarkError, match="needs a region"):
             e2e._check_remote_credentials(require_region=True)
 
+    def test_only_a_run_without_an_endpoint_is_asked_for_a_region(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        for name in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "config-absent"))
+        monkeypatch.setenv(awsenv.ALLOW_REMOTE_ENV, "1")
+        monkeypatch.setattr(e2e.shutil, "which", lambda name, path=None: f"/bin/{name}")
+        monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "https://minio.example.test")
+        assert e2e.check_environment() == ("/bin/boto3-s3", "/bin/aws")
+        monkeypatch.delenv("AWS_ENDPOINT_URL_S3")
+        with pytest.raises(BenchmarkError, match="needs a region"):
+            e2e.check_environment()
+
     def test_a_profile_is_refused_before_the_region_is_read(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -625,9 +645,67 @@ class TestRunBucketLifecycle:
         self._run(monkeypatch, _RecordingClient(), endpoint=None, scenarios=[scenario])
         assert seen
         for env in seen:
-            assert Path(env["HOME"]).name == "home"
+            # Inside the run's work root: the test session's own HOME is
+            # also a directory named "home".
+            assert Path(env["HOME"]).parent.name.startswith("boto3-s3-bench-e2e-")
             assert env["USERPROFILE"] == env["HOME"]
             assert "AWS_PROFILE" not in env
+
+    def test_verify_each_reads_every_timed_invocation_too(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tests.utils.harness import CliResult
+
+        monkeypatch.setattr(e2e, "_run_child", lambda *_args: (0.1, CliResult(0, "", ""), None))
+        calls = {"warmup_only": 0, "each": 0}
+
+        def counting(name: str) -> Callable[..., None]:
+            def verify(*_args: object) -> None:
+                calls[name] += 1
+
+            return verify
+
+        scenarios = [
+            e2e.E2EScenario(
+                name=name,
+                dimensions={},
+                make_argv=lambda *_a: [],
+                samples=1,
+                verify=counting(name),
+                verify_each=name == "each",
+            )
+            for name in calls
+        ]
+        self._run(monkeypatch, _RecordingClient(), endpoint=None, scenarios=scenarios)
+        # Two warmups, then one round on each of the two sides.
+        assert calls == {"warmup_only": 2, "each": 4}
+
+    def test_a_timed_invocation_failing_verify_each_fails_the_scenario(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tests.utils.harness import CliResult
+
+        monkeypatch.setattr(e2e, "_run_child", lambda *_args: (0.1, CliResult(0, "", ""), None))
+        seen = []
+
+        def verify(*_args: object) -> None:
+            seen.append(1)
+            if len(seen) > 2:  # past both warmups
+                raise e2e.VerificationError("moved nothing")
+
+        scenario = e2e.E2EScenario(
+            name="bounce",
+            dimensions={},
+            make_argv=lambda *_a: [],
+            samples=1,
+            verify=verify,
+            verify_each=True,
+        )
+        results_, failures = self._run(
+            monkeypatch, _RecordingClient(), endpoint=None, scenarios=[scenario]
+        )
+        assert results_ == []
+        assert "moved nothing" in failures[0]
 
 
 class TestSelfTestHandicap:

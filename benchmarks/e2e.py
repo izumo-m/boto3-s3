@@ -102,7 +102,9 @@ class E2EScenario:
     scenarios purge the previous invocation's output, keeping the dev stack's
     tmpfs-backed storage bounded. `verify` runs on both warmup results only -
     it guards against a run that silently did no work, which would otherwise
-    record fake-fast timings. `top_level` marks argv for the program itself
+    record fake-fast timings. `verify_each` extends it to every timed
+    invocation, for a scenario whose input is what the previous invocation
+    left. `top_level` marks argv for the program itself
     (``--version``), where `aws` takes no ``s3`` token. `payload_bytes` is what
     one invocation moves (transfer scenarios only); the report turns it into
     throughput.
@@ -114,6 +116,7 @@ class E2EScenario:
     setup: Callable[[E2EEnv], None] | None = None
     reset: Callable[[E2EEnv], None] | None = None
     verify: Callable[[E2EEnv, Side, CliResult], None] | None = None
+    verify_each: bool = False
     samples: int = 5
     crt_capable: bool = False
     top_level: bool = False
@@ -875,6 +878,10 @@ def build_scenarios(quick: bool, *, large_mb: int = DEFAULT_LARGE_MB) -> list[E2
             reset=mv_s3_reset,
             make_argv=mv_s3_argv,
             verify=move_count_verify("mv_s3_to_s3", mv_count),
+            # An invocation that moved nothing leaves the next one no source,
+            # and that one would be fake-fast with an rc of 0. Only stdout is
+            # read, so this costs no request.
+            verify_each=True,
         )
     )
 
@@ -968,6 +975,8 @@ def _run_scenario(
                 scenario.reset(env)
             elapsed, result, peak = _invoke(env, scenario, side)
             _require_rc(scenario, side, f"round {round_index}", result)
+            if scenario.verify_each and scenario.verify is not None:
+                scenario.verify(env, side, result)
             # The self-test handicap spares the probe every net subtracts:
             # inflating it too would cancel out of each work row's net, and the
             # ratio flags would never fire.
