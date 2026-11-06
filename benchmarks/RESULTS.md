@@ -145,7 +145,13 @@ Startup probes (raw): `--version` ours 0.075 / `aws` 0.474 (classic),
   1.16 with it. Over HTTPS the signer reads no body, and the guard cost
   0.01 s/GiB.
 - **`cp_download_large` on classic is the one row where boto3-s3's peak memory
-  is above aws-cli's on both instances.** The cause has not been looked into.
+  is above aws-cli's on both instances.** The cause was a reference cycle in the
+  hooks `transfer._TaskGuard` put on each task: a written chunk stayed in memory
+  until the garbage collector ran. It was fixed after this run, so the row is
+  not a baseline for the commits that carry the fix. On the local dev stack, with
+  a 1 GiB object, the fix took the peak from 93 to 72 MiB with the writer keeping
+  up (150 MB/s; aws-cli 94) and from 1053 to 354 MiB with the writer behind
+  (aws-cli 286 to 381 across two runs).
 
 ## Historical results
 

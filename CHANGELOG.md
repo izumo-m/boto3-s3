@@ -44,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `cp`, `mv` and `sync` take `source_region` (`--source-region`), `S3.source_client()` builds that source client, and `mv` takes `validate_same_s3_paths` (`--validate-same-s3-paths`), resolving access points before a same-key move and otherwise warning as `aws s3 mv` does; `S3.check_mv_paths()` runs those checks on their own ahead of a run.
 - Removed `pathresolver.is_mrap_path`, `is_outpost_path` and `is_outpost_alias_path`, the probes for standing down a pinned signature version.
 - An immediate cancel now reaches the transfer in flight under `use_threads=False` too, and a transfer handed over after it is cancelled as well.
+- A classic-engine download no longer keeps the data it has written in memory until the garbage collector runs; a large one ahead of its disk could peak above 1 GiB.
 
 ## [0.12.0] - 2026-10-18
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 import concurrent.futures
 import contextlib
 import errno
+import gc
 import io
 import os
 import re
@@ -20,7 +21,8 @@ import sys
 import threading
 import time
 import traceback
-from collections.abc import Callable
+import weakref
+from collections.abc import Callable, Generator
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,6 +40,13 @@ from botocore.exceptions import (
 )
 from s3transfer import copies as s3transfer_copies
 from s3transfer.copies import CopySubmissionTask
+from s3transfer.download import (
+    DownloadNonSeekableOutputManager,
+    ImmediatelyWriteIOGetObjectTask,
+    IOWriteTask,
+)
+from s3transfer.futures import TransferCoordinator
+from s3transfer.tasks import Task
 
 from boto3_s3 import transfer
 from boto3_s3.exceptions import (
@@ -3092,6 +3101,112 @@ class TestStreamDownloadRetry:
         handle(None, None, b"ab", 0)  # wholly rewritten: dropped
         handle(None, None, b"cdef", 2)  # straddles the high-water mark: trimmed
         assert written == [(b"abcd", 0), (b"ef", 4)]
+
+
+class _NotingTask(Task):
+    """A task whose main records the instance attributes it ran with."""
+
+    ran_with: frozenset[str] = frozenset()
+
+    def _main(self, **_kwargs: Any) -> None:
+        self.ran_with = frozenset(vars(self))
+
+
+class _NotingSubmissionTask(_NotingTask):
+    """`_TaskGuard` tells a submission task by its ``_submit``."""
+
+    def _submit(self) -> None:
+        raise AssertionError("not called")
+
+
+class _NotingSingleRequestTask(_NotingTask, ImmediatelyWriteIOGetObjectTask):
+    pass
+
+
+def _plain_task() -> _NotingTask:
+    return _NotingTask(TransferCoordinator())
+
+
+def _submission_task() -> _NotingTask:
+    return _NotingSubmissionTask(TransferCoordinator())
+
+
+def _single_request_task() -> _NotingTask:
+    coordinator = TransferCoordinator()
+    output = DownloadNonSeekableOutputManager(None, coordinator, None)
+    return _NotingSingleRequestTask(coordinator, main_kwargs={"download_output_manager": output})
+
+
+class TestTaskHooksComeOff:
+    """A task that has run is freed at once, without the garbage collector.
+
+    `_TaskGuard`'s hooks hold the task's own bound methods. A task keeping them
+    is a reference cycle, so what it holds - a download's written chunk - stays
+    in memory until a collection finds the cycle, past the IO queue's bound.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_collector(self) -> Generator[None, None, None]:
+        gc.collect()
+        gc.disable()
+        try:
+            yield
+        finally:
+            gc.enable()
+
+    @pytest.mark.parametrize(
+        "executor_cls",
+        [
+            transfer._ThreadedExecutor,  # pyright: ignore[reportPrivateUsage]
+            transfer._SerialExecutor,  # pyright: ignore[reportPrivateUsage]
+        ],
+        ids=["threads", "serial"],
+    )
+    @pytest.mark.parametrize(
+        ("make_task", "hook"),
+        [
+            (_plain_task, "_execute_main"),
+            (_submission_task, "_log_and_set_exception"),
+            (_single_request_task, "_handle_io"),
+        ],
+        ids=["main", "submission", "single-request"],
+    )
+    def test_a_task_that_ran_is_freed(
+        self, executor_cls: Any, make_task: Callable[[], _NotingTask], hook: str
+    ) -> None:
+        task = make_task()
+        freed = weakref.ref(task)
+        executor = executor_cls(lambda _exc: None, max_workers=1)
+        executor.submit(task).result()
+        executor.shutdown()
+        assert hook in task.ran_with
+        assert hook not in vars(task)
+        del task
+        assert freed() is None
+
+    @pytest.mark.parametrize("use_threads", [True, False], ids=["threads", "serial"])
+    def test_a_ranged_download_keeps_no_written_chunk(
+        self, tmp_path: Path, use_threads: bool
+    ) -> None:
+        part = 1024
+        item = TransferItem(
+            compare_key="a.bin",
+            size=4 * part,
+            etag='"abc123"',
+            src_bucket="bucket",
+            src_key="d/a.bin",
+            dest_path=str(tmp_path / "a.bin"),
+        )
+        _, _, results, _ = _run(
+            TransferType.DOWNLOAD,
+            [item],
+            [{"Body": io.BytesIO(bytes(part)), "ContentLength": part} for _ in range(4)],
+            config=TransferConfig(
+                multipart_threshold=part, multipart_chunksize=part, use_threads=use_threads
+            ),
+        )
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+        assert [task for task in gc.get_objects() if isinstance(task, IOWriteTask)] == []
 
 
 class TestFailureWithoutAResponse:

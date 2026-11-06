@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Under the CRT engine, `REQUESTS_CA_BUNDLE` is no longer read and the default CA file is botocore's own, as with `aws`.
 - A `mv` between two spellings of one Outposts object is now refused before it starts (exit codes changed).
 - `--sse aws:kms` no longer changes how a run signs: under `--no-sign-request` it stays anonymous on both engines, and a multi-Region, Outposts or S3 Express target signs its own scheme (exit codes changed).
+- A classic-engine download no longer keeps the data it has written in memory until the garbage collector runs; a large one ahead of its disk could peak above 1 GiB.
 
 ## [0.9.0] - 2026-10-18
 

@@ -2431,10 +2431,28 @@ class _TaskGuard:
       each byte once across retries (`_writing_once`).
 
     The attribute lookups are guards: an upstream that reshapes its task
-    degrades to its own behavior.
+    degrades to its own behavior. The hooks stay only while the task runs
+    (`_uninstall`).
     """
 
     _note: Callable[[BaseException], None]
+
+    # The attributes `_install` may set on a task.
+    _HOOKS = ("_execute_main", "_log_and_set_exception", "_handle_io")
+
+    def _uninstall(self, fn: Any) -> None:
+        """Take `_install`'s hooks off a task that has run.
+
+        Each hook holds the task's own bound method, so a task keeping them is
+        a reference cycle, and what it holds - a download's written chunk above
+        all - stays in memory until a collection finds the cycle, past the
+        bound of the IO queue (measured: 1 GiB downloaded ahead of its writer
+        peaked at 1053 MiB against 354, and 93 against 72 with the writer
+        keeping up).
+        """
+        hooks = getattr(fn, "__dict__", {})
+        for name in self._HOOKS:
+            hooks.pop(name, None)
 
     def _install(self, fn: Any) -> None:
         coordinator = getattr(fn, "_transfer_coordinator", None)
@@ -2561,6 +2579,8 @@ class _SerialExecutor(_TaskGuard, NonThreadedExecutor):
             if not isinstance(exc, Exception):
                 self._note(exc)
             raise
+        finally:
+            self._uninstall(fn)
 
 
 class _ThreadedExecutor(_TaskGuard, ThreadPoolExecutor):
@@ -2598,6 +2618,8 @@ class _ThreadedExecutor(_TaskGuard, ThreadPoolExecutor):
             if not isinstance(exc, Exception):
                 self._note(exc)
             raise
+        finally:
+            self._uninstall(fn)
 
 
 class _ReplacingOSUtils(OSUtils):

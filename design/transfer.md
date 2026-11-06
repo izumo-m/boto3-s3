@@ -118,7 +118,11 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   (`max_submission_queue_size`, default 1000) blocks the submit thread when it
   is full, and the S3 request executor is separately bounded
   (`max_request_queue_size`). This is the same mechanism aws-cli relies on; we
-  keep no in-flight window of our own.
+  keep no in-flight window of our own. The download IO queue's bound on memory
+  holds only if a written chunk is freed with its task, so the hooks the classic
+  executors put on a task come off once it has run: each holds the task's bound
+  method, and a task keeping them waits for the garbage collector
+  (`transfer._TaskGuard`).
 - context manager: on normal completion it drains (waits for submitted
   transfers). On **any exception** - a fatal in mid-enumeration included - it
   shuts down **cancelling**, by delegating to the s3transfer manager's own
