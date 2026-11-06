@@ -6,6 +6,147 @@ measuring host; this file preserves the headline numbers with their exact
 revision and environment so they survive across hosts and cleanups. Metric
 definitions (net, ratio, flags) are in [design/benchmark.md](../design/benchmark.md).
 
+## Results
+
+### 2026-11-06 - EC2 baseline: real S3 from m7i.xlarge and m7g.xlarge
+
+- Commit: `83d311a` (`test(bench): stop the launcher's run tests reading the
+  aws-cli submodule`), archived by the launcher. One x86-64 and one Graviton
+  instance, launched in parallel with `python -m benchmarks ec2 run` and
+  `... --instance-type m7g.xlarge`, each running `--mode inprocess` and then
+  `--mode e2e --engine both` against real S3 with 1 GB single-object transfers
+  (`--large-transfer-mb 1024`, the lane's default). This entry starts the
+  series after the code rework and adds the `mv` scenarios; it has no baseline,
+  so nothing here flags. Both runs exit 0 with no failed scenario, in 28.0 and
+  29.7 minutes on the instance.
+- Results files: `20261106-062112_inprocess_83d311a976.ec2-m7i.xlarge-ubuntu26.04.jsonl`,
+  `20261106-064536_e2e_83d311a976.ec2-m7i.xlarge-ubuntu26.04.jsonl`,
+  `20261106-062331_inprocess_83d311a976.ec2-m7g.xlarge-ubuntu26.04.jsonl`,
+  `20261106-064848_e2e_83d311a976.ec2-m7g.xlarge-ubuntu26.04.jsonl`.
+
+Environment:
+
+- Instances: m7i.xlarge (4 vCPU, 16 GiB) and m7g.xlarge (4 vCPU, 16 GiB),
+  one-time spot, ap-northeast-1; Ubuntu 26.04 LTS from Canonical's current
+  images (`ami-0db4b9f9a740a4c44` amd64, `ami-0351317de417a8081` arm64), kernel
+  7.0.0-1016-aws; apt timers, unattended upgrades and snapd stopped before
+  measuring; work tree on a 5 GB tmpfs.
+- Endpoint: S3 in the same region over TLS, a bucket created for the run,
+  instance-role credentials (IMDSv2). Nothing else ran on the instances.
+- Python 3.14.9 (uv-managed, uv 0.13.5) on both architectures; boto3-s3
+  0.12.0 / boto3-s3-cli 0.9.0; boto3/botocore 1.43.44, s3transfer 0.19.2,
+  awscrt 0.32.2.
+- aws-cli side: pinned aws-cli 2.36.40 (the x86_64 and aarch64 Linux builds,
+  bundling Python 3.14.6).
+
+#### E2E, m7i.xlarge (medians in seconds; ratio = net ours / net `aws`)
+
+Startup probes (raw): `--version` ours 0.060 / `aws` 0.403 (classic),
+0.064 / 0.440 (crt); `startup_minimal` ours 0.345 / `aws` 0.584 (classic),
+0.365 / 0.627 (crt); `sync_tiny` ours 0.409 / `aws` 0.659 (classic),
+0.490 / 0.721 (crt).
+
+| scenario | engine | ours raw | ours net | `aws` raw | `aws` net | ratio |
+|---|---|---|---|---|---|---|
+| ls_recursive_10k | classic | 1.374 | 1.030 | 2.493 | 1.909 | 0.54 |
+| sync_noop_10k | classic | 1.491 | 1.146 | 2.871 | 2.287 | 0.50 |
+| sync_changed_10k | classic | 8.702 | 8.357 | 10.356 | 9.772 | 0.86 |
+| sync_delete_10k | classic | 3.487 | 3.143 | 8.737 | 8.154 | 0.39 |
+| cp_upload_small_1k | classic | 4.346 | 4.001 | 5.008 | 4.425 | 0.90 |
+| cp_download_small_1k | classic | 3.574 | 3.229 | 4.340 | 3.756 | 0.86 |
+| cp_upload_large (1GB) | classic | 2.068 | 1.723 | 2.447 | 1.863 | 0.92 |
+| cp_download_large (1GB) | classic | 2.569 | 2.224 | 3.481 | 2.897 | 0.77 |
+| mv_s3_to_s3_1k | classic | 8.748 | 8.403 | 9.546 | 8.962 | 0.94 |
+| mv_download_small_1k | classic | 6.107 | 5.762 | 6.953 | 6.369 | 0.90 |
+| rm_recursive_2k | classic | 2.503 | 2.158 | 6.865 | 6.282 | 0.34 |
+| sync_changed_10k | crt | 3.747 | 3.382 | 6.072 | 5.445 | 0.62 |
+| cp_upload_small_1k | crt | 1.892 | 1.527 | 2.307 | 1.680 | 0.91 |
+| cp_download_small_1k | crt | 2.251 | 1.885 | 3.063 | 2.436 | 0.77 |
+| cp_upload_large (1GB) | crt | 1.678 | 1.313 | 1.907 | 1.280 | 1.03 |
+| cp_download_large (1GB) | crt | 1.437 | 1.072 | 1.661 | 1.034 | 1.04 |
+| mv_download_small_1k | crt | 27.009 | 26.644 | 27.888 | 27.261 | 0.98 |
+
+#### E2E, m7g.xlarge (same layout)
+
+Startup probes (raw): `--version` ours 0.075 / `aws` 0.474 (classic),
+0.075 / 0.474 (crt); `startup_minimal` ours 0.415 / `aws` 0.667 (classic),
+0.417 / 0.670 (crt); `sync_tiny` ours 0.462 / `aws` 0.705 (classic),
+0.540 / 0.773 (crt).
+
+| scenario | engine | ours raw | ours net | `aws` raw | `aws` net | ratio |
+|---|---|---|---|---|---|---|
+| ls_recursive_10k | classic | 1.541 | 1.125 | 2.728 | 2.061 | 0.55 |
+| sync_noop_10k | classic | 1.527 | 1.111 | 3.155 | 2.488 | 0.45 |
+| sync_changed_10k | classic | 9.149 | 8.734 | 10.189 | 9.522 | 0.92 |
+| sync_delete_10k | classic | 3.457 | 3.041 | 8.922 | 8.255 | 0.37 |
+| cp_upload_small_1k | classic | 4.371 | 3.956 | 4.880 | 4.213 | 0.94 |
+| cp_download_small_1k | classic | 3.532 | 3.117 | 4.346 | 3.679 | 0.85 |
+| cp_upload_large (1GB) | classic | 2.148 | 1.732 | 2.403 | 1.736 | 1.00 |
+| cp_download_large (1GB) | classic | 2.918 | 2.503 | 3.411 | 2.744 | 0.91 |
+| mv_s3_to_s3_1k | classic | 8.743 | 8.328 | 9.456 | 8.789 | 0.95 |
+| mv_download_small_1k | classic | 6.070 | 5.654 | 6.944 | 6.277 | 0.90 |
+| rm_recursive_2k | classic | 2.561 | 2.145 | 6.854 | 6.187 | 0.35 |
+| sync_changed_10k | crt | 3.763 | 3.346 | 6.610 | 5.940 | 0.56 |
+| cp_upload_small_1k | crt | 1.869 | 1.452 | 2.304 | 1.633 | 0.89 |
+| cp_download_small_1k | crt | 2.329 | 1.912 | 3.196 | 2.525 | 0.76 |
+| cp_upload_large (1GB) | crt | 1.882 | 1.465 | 2.010 | 1.339 | 1.09 |
+| cp_download_large (1GB) | crt | 1.365 | 0.948 | 1.591 | 0.921 | 1.03 |
+| mv_download_small_1k | crt | 27.485 | 27.068 | 28.926 | 28.255 | 0.96 |
+
+#### Throughput and peak memory (E2E; MiB/s over net, median peak RSS in MiB)
+
+| scenario | engine | m7i ours | m7i `aws` | m7g ours | m7g `aws` | m7i RSS ours / `aws` | m7g RSS ours / `aws` |
+|---|---|---|---|---|---|---|---|
+| startup_minimal | classic | - | - | - | - | 72 / 86 | 66 / 84 |
+| ls_recursive_10k | classic | - | - | - | - | 76 / 89 | 69 / 87 |
+| sync_noop_10k | classic | - | - | - | - | 78 / 91 | 75 / 89 |
+| sync_changed_10k | classic | 0.2 | 0.2 | 0.2 | 0.2 | 110 / 124 | 130 / 140 |
+| sync_delete_10k | classic | - | - | - | - | 79 / 115 | 76 / 134 |
+| cp_upload_small_1k | classic | 1.0 | 0.9 | 1.0 | 0.9 | 94 / 110 | 111 / 126 |
+| cp_download_small_1k | classic | 1.2 | 1.0 | 1.3 | 1.1 | 104 / 113 | 119 / 129 |
+| cp_upload_large (1GB) | classic | 594 | 550 | 591 | 590 | 114 / 130 | 112 / 131 |
+| cp_download_large (1GB) | classic | 460 | 353 | 409 | 373 | 123 / 103 | 125 / 111 |
+| mv_s3_to_s3_1k | classic | - | - | - | - | 96 / 114 | 112 / 132 |
+| mv_download_small_1k | classic | 0.7 | 0.6 | 0.7 | 0.6 | 104 / 115 | 119 / 130 |
+| rm_recursive_2k | classic | - | - | - | - | 77 / 115 | 71 / 133 |
+| sync_changed_10k | crt | 0.6 | 0.4 | 0.6 | 0.3 | 92 / 104 | 97 / 108 |
+| cp_upload_small_1k | crt | 2.6 | 2.3 | 2.7 | 2.4 | 81 / 96 | 86 / 100 |
+| cp_download_small_1k | crt | 2.1 | 1.6 | 2.0 | 1.5 | 83 / 98 | 86 / 103 |
+| cp_upload_large (1GB) | crt | 780 | 800 | 699 | 765 | 480 / 493 | 484 / 497 |
+| cp_download_large (1GB) | crt | 955 | 991 | 1080 | 1112 | 471 / 492 | 622 / 496 |
+| mv_download_small_1k | crt | 0.1 | 0.1 | 0.1 | 0.1 | 84 / 99 | 87 / 102 |
+
+#### In-process (classic; medians in seconds, ± spread)
+
+| scenario | m7i median | spread | m7g median | spread |
+|---|---|---|---|---|
+| inproc_dispatch | 0.001 | ±0.000 | 0.002 | ±0.000 |
+| inproc_ls_100k | 2.136 | ±0.027 | 3.304 | ±0.055 |
+| inproc_sync_noop_20k | 0.485 | ±0.007 | 0.770 | ±0.007 |
+| inproc_sync_changed_20k | 2.823 | ±0.081 | 3.748 | ±0.039 |
+| inproc_rm_recursive_20k | 0.560 | ±0.009 | 0.909 | ±0.011 |
+| inproc_mv_s3_to_s3_2k | 3.317 | ±0.014 | 3.547 | ±0.049 |
+| inproc_cp_upload_small_2k | 2.363 | ±0.180 | 2.967 | ±0.072 |
+| inproc_cp_upload_large (1GB) | 1.871 | ±0.010 | 2.201 | ±0.012 |
+
+#### Reading these rows
+
+- **The CRT 1 GB rows are the only ratios above 1.00.** Raw, boto3-s3 is the
+  faster side on all four; the net figures differ by 0.03 to 0.13 s.
+- **`mv_download_small_1k` on CRT takes about 27 s on both sides**, against
+  about 6 s on the classic engine. The gap to `cp_download_small_1k` is about
+  25 ms a key on CRT and about 2.5 ms on classic, on both sides and both
+  instances: a rate consistent with one DeleteObject at a time on CRT, where
+  classic's worker threads share them.
+- **`inproc_cp_upload_large` carries a cost real S3 does not.** The stub's
+  endpoint is plain HTTP, so awscrt's signer hashes the payload, reading it
+  4 KiB at a time through the guard in `signingreads`. A short check on the
+  local host, with every request stubbed, took 0.75 s/GiB without the guard and
+  1.16 with it. Over HTTPS the signer reads no body, and the guard cost
+  0.01 s/GiB.
+- **`cp_download_large` on classic is the one row where boto3-s3's peak memory
+  is above aws-cli's on both instances.** The cause has not been looked into.
+
 ## Historical results
 
 The entries below were recorded from 2026-07-14 to 2026-09-06. The code has
