@@ -2,7 +2,7 @@
 
 `OpResult` is the per-item completion record passed to the `on_result`
 callback of `cp` / `mv` / `rm` / `sync`. One record is emitted per item - from
-a worker thread on the asynchronous paths (s3transfer's for submitted
+a worker thread on the asynchronous paths (the transfer engine's for submitted
 transfers, `S3Deleter`'s for batched deletes), and inline on the operation's
 own thread for the synchronous ones (dry-run - the orchestrators' own branches
 and a `dryrun=True` `S3Deleter`, which dispatches nothing, alike - the
@@ -133,6 +133,11 @@ transfer items like this:
 - an in-flight request that completes despite the cancellation reports its
   real outcome: a running request cannot be interrupted, its bytes really
   landed, and s3transfer lets the completion win over the cancel mark;
+- on the CRT engine, a `mv` whose source is not local and whose transfer has
+  finished but whose source delete has not started reports `CANCELLED`, with
+  `cancelled before the source delete` as its `error`: the file is in place and
+  the source stays (`transfer._DoneWorkers`, [`transfer.md`](./transfer.md)
+  section 2);
 - work never accepted (a graceful cancel stops the submission loop before the
   next item) produces no record.
 
@@ -156,7 +161,11 @@ Ctrl-C landing in its transfer drain into `cancel()` and discards the
 interrupt; the library catches it at that cancel
 (`Transferrer._guard_crt_cancel`), so each transfer the manager cancels
 reports `CANCELLED` (the others finish with their real outcomes, as on
-aws-cli), and re-raises the interrupt once the drain is over. A CRT cancellation the run did not order
+aws-cli), and re-raises the interrupt once the drain is over. One landing in
+the manager's later wait on the done callbacks escapes it with nothing
+cancelled, so the library orders the cancel itself and waits for the cancelled
+transfers (`Transferrer._cancel_interrupted_crt_drain`), with the same records
+and the same re-raise. A CRT cancellation the run did not order
 reports `FAILED`, so a run cut short by something the library cannot see is
 never reported as a success.
 

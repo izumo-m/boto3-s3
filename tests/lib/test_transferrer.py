@@ -46,6 +46,7 @@ from s3transfer.download import (
     IOWriteTask,
 )
 from s3transfer.futures import TransferCoordinator
+from s3transfer.manager import TransferManager
 from s3transfer.tasks import Task
 
 from boto3_s3 import transfer
@@ -84,6 +85,7 @@ from boto3_s3.types import (
 )
 from tests.utils.fakemodel import model_client, model_only_client
 from tests.utils.fakes3 import MTIME, client_error
+from tests.utils.interrupts import interrupt_main_in, skip_without_pthread_kill
 from tests.utils.recorder import ApiCall, make_recording_client, ops
 
 _SYNC_CONFIG = TransferConfig(use_threads=False)
@@ -1741,6 +1743,748 @@ class TestCrtCancelClassification:
         assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
         assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
         assert (transferrer.failed, transferrer.cancelled) == (0, 1)
+
+
+class _SettledCrtFuture(_FakeCrtFuture):
+    """A CRT transfer that succeeds, unless a cancel reaches it before it
+    finishes (``finished``) or a subscriber stores another outcome."""
+
+    def __init__(self) -> None:
+        super().__init__(RuntimeError("unused"))
+        self._stored: BaseException | None = None
+        self.finished = False
+        self.cancelled = False
+
+    def done(self) -> bool:
+        return self.finished
+
+    def result(self) -> None:
+        if self._stored is not None:
+            raise self._stored
+
+    def cancel(self) -> None:
+        self.cancelled = True
+        if not self.finished:
+            self._stored = _CrtCancelError("AWS_ERROR_S3_CANCELED: Request successfully cancelled")
+
+    def set_exception(self, exc: BaseException) -> None:
+        self._stored = exc
+
+
+class _CrtCallbackManager:
+    """The CRT manager's done path: every accepted transfer succeeds, and its
+    done subscribers run in turn on the one thread ``fire`` starts, as awscrt
+    runs them. The manager's shutdown returns once those calls have returned.
+    ``fired`` counts the transfers whose calls have."""
+
+    def __init__(self) -> None:
+        self._accepted: list[tuple[_SettledCrtFuture, list[Any]]] = []
+        self.fired = 0
+
+    def _accept(self, **kwargs: Any) -> _SettledCrtFuture:
+        future = _SettledCrtFuture()
+        self._accepted.append((future, list(kwargs["subscribers"])))
+        return future
+
+    upload = _accept
+    download = _accept
+
+    def fire(self) -> threading.Thread:
+        accepted, self._accepted = self._accepted, []
+
+        def call_on_done() -> None:
+            for future, subscribers in accepted:
+                future.finished = True
+                for subscriber in subscribers:
+                    on_done = getattr(subscriber, "on_done", None)
+                    if on_done is not None:
+                        on_done(future=future, error=None)
+                self.fired += 1
+
+        thread = threading.Thread(target=call_on_done, name=_AWSCRT_THREAD)
+        thread.start()
+        return thread
+
+    def shutdown(self) -> None:
+        self.fire().join()
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self.fire().join()
+
+
+_AWSCRT_THREAD = "stand-in-awscrt"
+
+
+class _CrtLastWaitInterrupted(_CrtCallbackManager):
+    """A Ctrl-C lands in the CRT manager's wait on the done callbacks: shutdown
+    raises it with nothing cancelled, as s3transfer's ``_shutdown`` lets it out.
+    Once every transfer in flight is cancelled, awscrt answers (unless told not
+    to, a transfer that does not answer a cancel): ``before_answer`` runs, and
+    then the transfers' done subscribers."""
+
+    def __init__(
+        self, before_answer: Callable[[], Any] = lambda: None, *, answers: bool = True
+    ) -> None:
+        super().__init__()
+        self.shutdowns = 0
+        self._before_answer = before_answer
+        self._answers = answers
+
+    def shutdown(self) -> None:
+        self.shutdowns += 1
+        if self._answers:
+            threading.Thread(target=self._answer_the_cancel).start()
+        raise KeyboardInterrupt
+
+    def _answer_the_cancel(self) -> None:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if all(future.cancelled for future, _ in self._accepted):
+                break
+            time.sleep(0.005)
+        self._before_answer()
+        self.fire().join()
+
+
+def _setting_max_request_concurrency(value: int) -> LibraryTransferConfig:
+    config = LibraryTransferConfig()
+    config.max_request_concurrency = value
+    return config
+
+
+class TestCrtMoveDoneWorkers:
+    """A CRT move's source deletes run on `_DoneWorkers`, not on awscrt's thread.
+
+    Driven with a stand-in manager, as `TestCrtCancelClassification` is; the
+    real CRT stack takes the same path in the e2e CRT lane.
+    """
+
+    def _item(self, tmp_path: Path, name: str, client: Any) -> TransferItem:
+        dest = tmp_path / name
+        dest.write_bytes(b"x")
+        item = TransferItem(
+            compare_key=name, size=1, src_bucket="bucket", src_key=name, dest_path=str(dest)
+        )
+        _listed_source(item, TransferType.DOWNLOAD, client)
+        return item
+
+    def _move(
+        self, results: list[OpResult], *, manager: Any = None, **kwargs: Any
+    ) -> tuple[Transferrer, Any]:
+        client, _ = make_recording_client([])
+        transferrer = Transferrer(
+            TransferType.DOWNLOAD, client, is_move=True, on_result=results.append, **kwargs
+        )
+        stand_in = manager if manager is not None else _CrtCallbackManager()
+        transferrer._manager = stand_in  # pyright: ignore[reportPrivateUsage]
+        return transferrer, client
+
+    def _manager(self, transferrer: Transferrer) -> _CrtCallbackManager:
+        return transferrer._manager  # pyright: ignore[reportPrivateUsage]
+
+    def _fire_and_join(self, transferrer: Transferrer) -> None:
+        callback = self._manager(transferrer).fire()
+        callback.join(10)
+        assert not callback.is_alive()
+
+    def _block_the_first_delete(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> tuple[list[str], threading.Event, threading.Event]:
+        """A delete stub whose first call waits for the returned ``release``."""
+        deleted: list[str] = []
+        started = threading.Event()
+        release = threading.Event()
+
+        def delete(_self: Any, info: Any, request_payer: Any = None) -> dict[str, Any]:
+            deleted.append(info.key)
+            if not started.is_set():
+                started.set()
+                assert release.wait(10)
+            return {}
+
+        monkeypatch.setattr(S3Storage, "delete", delete)
+        return deleted, started, release
+
+    def test_deletes_run_side_by_side(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # One at a time, each would wait out the barrier and fail its item.
+        barrier = threading.Barrier(2, timeout=10)
+
+        def delete(_self: Any, info: Any, request_payer: Any = None) -> dict[str, Any]:
+            barrier.wait()
+            return {}
+
+        monkeypatch.setattr(S3Storage, "delete", delete)
+        results: list[OpResult] = []
+        transferrer, client = self._move(results)
+        with transferrer:
+            for name in ("a", "b"):
+                transferrer.submit(self._item(tmp_path, name, client))
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED] * 2
+
+    def test_awscrts_thread_does_not_wait_for_a_delete_and_the_run_does(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _, started, release = self._block_the_first_delete(monkeypatch)
+        results: list[OpResult] = []
+        transferrer, client = self._move(results)
+        with transferrer:
+            transferrer.submit(self._item(tmp_path, "a", client))
+            self._fire_and_join(transferrer)
+            assert started.wait(10)
+            assert results == []  # the record follows its delete
+            release.set()
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+        assert transferrer.succeeded == 1
+
+    def test_an_item_keeps_its_order(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        steps: list[str] = []
+
+        def delete(_self: Any, info: Any, request_payer: Any = None) -> dict[str, Any]:
+            steps.append("delete")
+            return {}
+
+        monkeypatch.setattr(S3Storage, "delete", delete)
+        monkeypatch.setattr(transfer._FsyncDest, "_fsync", lambda _self: steps.append("fsync"))
+        results: list[OpResult] = []
+
+        def record(_result: OpResult) -> None:
+            steps.append("result")
+            results.append(_result)
+
+        client, _ = make_recording_client([])
+        with Transferrer(
+            TransferType.DOWNLOAD,
+            client,
+            is_move=True,
+            on_result=record,
+            dest_storage=LocalStorage(str(tmp_path), fsync=True),
+        ) as transferrer:
+            transferrer._manager = _CrtCallbackManager()  # pyright: ignore[reportPrivateUsage]
+            item = self._item(tmp_path, "a", client)
+            item.case_conflict_cleanup = lambda: steps.append("cleanup")
+            transferrer.submit(item)
+        assert steps == ["fsync", "delete", "cleanup", "result"]
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+
+    def test_a_failed_delete_fails_its_item_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def delete(_self: Any, info: Any, request_payer: Any = None) -> dict[str, Any]:
+            if info.key == "a":
+                raise AccessDeniedError("denied", operation="mv", bucket="bucket", key="a")
+            return {}
+
+        monkeypatch.setattr(S3Storage, "delete", delete)
+        results: list[OpResult] = []
+        transferrer, client = self._move(results)
+        with transferrer:
+            for name in ("a", "b"):
+                transferrer.submit(self._item(tmp_path, name, client))
+        outcomes = {result.compare_key: result.outcome for result in results}
+        assert outcomes == {"a": OpOutcome.FAILED, "b": OpOutcome.SUCCEEDED}
+        assert (transferrer.failed, transferrer.succeeded) == (1, 1)
+        assert isinstance(transferrer.first_error, AccessDeniedError)
+
+    def test_a_cancel_keeps_the_sources_still_waiting(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The delete already out finishes; the next one never starts, and its
+        # file stays beside its source.
+        deleted, started, release = self._block_the_first_delete(monkeypatch)
+        results: list[OpResult] = []
+        transferrer, client = self._move(
+            results, transfer_config=LibraryTransferConfig(max_concurrency=1)
+        )
+        with transferrer:
+            for name in ("a", "b"):
+                transferrer.submit(self._item(tmp_path, name, client))
+            self._fire_and_join(transferrer)
+            assert started.wait(10)
+            transferrer._cancel_futures()  # pyright: ignore[reportPrivateUsage]
+            release.set()
+        assert deleted == ["a"]
+        outcomes = {result.compare_key: result.outcome for result in results}
+        assert outcomes == {"a": OpOutcome.SUCCEEDED, "b": OpOutcome.CANCELLED}
+        assert (transferrer.succeeded, transferrer.cancelled, transferrer.failed) == (1, 1, 0)
+        assert (tmp_path / "b").read_bytes() == b"x"
+
+    def test_a_fatal_keeps_every_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        deleted, _, _ = self._block_the_first_delete(monkeypatch)
+        results: list[OpResult] = []
+        transferrer, client = self._move(results)
+        with pytest.raises(RuntimeError, match="fatal elsewhere"):
+            with transferrer:
+                transferrer.submit(self._item(tmp_path, "a", client))
+                raise RuntimeError("fatal elsewhere")
+        assert deleted == []
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+
+    def test_a_graceful_cancel_finishes_the_moves(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            S3Storage, "delete", lambda _self, info, request_payer=None: deleted.append(info.key)
+        )
+        deleted: list[str] = []
+        results: list[OpResult] = []
+        token = CancelToken()
+        transferrer, client = self._move(results, cancel_token=token)
+        with pytest.raises(CancelledError):
+            with transferrer:
+                transferrer.submit(self._item(tmp_path, "a", client))
+                token.cancel(mode=CancelMode.GRACEFUL)
+                raise CancelledError("mv was cancelled", operation="mv")
+        assert deleted == ["a"]
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+
+    @skip_without_pthread_kill
+    def test_a_ctrl_c_in_the_wait_cancels_what_is_still_held(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        deleted, started, release = self._block_the_first_delete(monkeypatch)
+        results: list[OpResult] = []
+        transferrer, client = self._move(
+            results, transfer_config=LibraryTransferConfig(max_concurrency=1)
+        )
+
+        def interrupt_then_release() -> None:
+            interrupt_main_in("_close_done_workers", waiting_in="close")
+            release.set()
+
+        with pytest.raises(KeyboardInterrupt):
+            with transferrer:
+                for name in ("a", "b"):
+                    transferrer.submit(self._item(tmp_path, name, client))
+                self._fire_and_join(transferrer)
+                assert started.wait(10)
+                threading.Thread(target=interrupt_then_release).start()
+        # Read at once: the wait went on after the interrupt, on Python 3.10 to
+        # 3.12 too, where an interrupted Thread.join gives up on the thread.
+        assert deleted == ["a"]
+        outcomes = {result.compare_key: result.outcome for result in results}
+        assert outcomes == {"a": OpOutcome.SUCCEEDED, "b": OpOutcome.CANCELLED}
+
+    @skip_without_pthread_kill
+    def test_a_second_ctrl_c_leaves_the_wait(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _, started, release = self._block_the_first_delete(monkeypatch)
+        results: list[OpResult] = []
+        transferrer, client = self._move(results)
+
+        def twice() -> None:
+            interrupt_main_in("_close_done_workers", waiting_in="close")
+            interrupt_main_in("_close_done_workers", waiting_in="close")
+
+        with pytest.raises(KeyboardInterrupt):
+            with transferrer:
+                transferrer.submit(self._item(tmp_path, "a", client))
+                self._fire_and_join(transferrer)
+                assert started.wait(10)
+                threading.Thread(target=twice).start()
+        assert results == []  # its delete is still out
+        release.set()
+        workers = transferrer._done_workers  # pyright: ignore[reportPrivateUsage]
+        assert workers is not None
+        workers.close()
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+
+    def test_a_ctrl_c_in_the_managers_last_wait_orders_the_cancel(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Nothing cancels on its way out of s3transfer's wait on the done
+        # callbacks: the held item and the transfer in flight would both have
+        # gone on to delete their sources.
+        deleted, started, release = self._block_the_first_delete(monkeypatch)
+        manager = _CrtLastWaitInterrupted(release.set)
+        results: list[OpResult] = []
+        transferrer, client = self._move(
+            results, manager=manager, transfer_config=LibraryTransferConfig(max_concurrency=1)
+        )
+        with pytest.raises(KeyboardInterrupt):
+            with transferrer:
+                for name in ("a", "b"):
+                    transferrer.submit(self._item(tmp_path, name, client))
+                self._fire_and_join(transferrer)
+                assert started.wait(10)
+                transferrer.submit(self._item(tmp_path, "c", client))
+        assert manager.shutdowns == 1
+        assert deleted == ["a"]
+        outcomes = {result.compare_key: result.outcome for result in results}
+        assert outcomes == {
+            "a": OpOutcome.SUCCEEDED,
+            "b": OpOutcome.CANCELLED,
+            "c": OpOutcome.CANCELLED,
+        }
+        assert (transferrer.succeeded, transferrer.cancelled, transferrer.failed) == (1, 2, 0)
+
+    def test_a_ctrl_c_in_the_managers_last_wait_settles_a_cp_too(self, tmp_path: Path) -> None:
+        results: list[OpResult] = []
+        client, _ = make_recording_client([])
+        manager = _CrtLastWaitInterrupted()
+        transferrer = Transferrer(TransferType.DOWNLOAD, client, on_result=results.append)
+        transferrer._manager = manager  # pyright: ignore[reportPrivateUsage]
+        with pytest.raises(KeyboardInterrupt):
+            with transferrer:
+                transferrer.submit(self._item(tmp_path, "a", client))
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+        assert (transferrer.cancelled, transferrer.failed) == (1, 0)
+
+    @skip_without_pthread_kill
+    def test_a_later_ctrl_c_leaves_the_wait_for_the_cancelled_transfers(
+        self, tmp_path: Path
+    ) -> None:
+        results: list[OpResult] = []
+        client, _ = make_recording_client([])
+        manager = _CrtLastWaitInterrupted(answers=False)
+        transferrer = Transferrer(TransferType.DOWNLOAD, client, on_result=results.append)
+        transferrer._manager = manager  # pyright: ignore[reportPrivateUsage]
+        threading.Thread(
+            target=interrupt_main_in,
+            args=("__exit__",),
+            kwargs={"waiting_in": "_cancel_interrupted_crt_drain"},
+        ).start()
+        with pytest.raises(KeyboardInterrupt):
+            with transferrer:
+                transferrer.submit(self._item(tmp_path, "a", client))
+        assert manager.shutdowns == 1
+        assert results == []
+
+    def test_a_ctrl_c_after_the_first_wait_took_one_does_not_wait(self, tmp_path: Path) -> None:
+        # s3transfer's first wait takes two before one gets here: a user still
+        # pressing is not asked for more, and a transfer that does not answer
+        # the cancel does not hold them.
+        client, _ = make_recording_client([])
+        manager = _CrtLastWaitInterrupted(answers=False)
+        transferrer = Transferrer(TransferType.DOWNLOAD, client)
+        transferrer._manager = manager  # pyright: ignore[reportPrivateUsage]
+        raised: list[BaseException] = []
+
+        def run() -> None:
+            try:
+                with transferrer:
+                    transferrer.submit(self._item(tmp_path, "a", client))
+                    interrupt = KeyboardInterrupt()
+                    transferrer._keep_swallowed_interrupt(interrupt)  # pyright: ignore[reportPrivateUsage]
+            except KeyboardInterrupt as exc:
+                raised.append(exc)
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        thread.join(10)
+        assert not thread.is_alive()
+        assert len(raised) == 1
+
+    def test_a_classic_manager_keeps_its_own_ctrl_c(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # It cancels and re-raises by itself; a second shutdown is not its shape.
+        real_shutdown = TransferManager.shutdown
+        shutdowns: list[Any] = []
+
+        def shutdown(manager: Any, *args: Any, **kwargs: Any) -> None:
+            shutdowns.append(manager)
+            real_shutdown(manager, *args, **kwargs)
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(TransferManager, "shutdown", shutdown)
+        client, _ = make_recording_client([])
+        with pytest.raises(KeyboardInterrupt):
+            with Transferrer(
+                TransferType.DOWNLOAD, client, transfer_config=_SYNC_CONFIG
+            ) as transferrer:
+                transferrer.prepare()
+        assert len(shutdowns) == 1
+
+    def test_an_immediate_token_cancels_what_is_still_held(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # With the real watcher, which needs the manager built the real way.
+        deleted, started, release = self._block_the_first_delete(monkeypatch)
+        manager = _CrtCallbackManager()
+        monkeypatch.setattr(Transferrer, "_create_crt_manager", lambda _self: manager)
+        token = CancelToken()
+        results: list[OpResult] = []
+        client, _ = make_recording_client([])
+        with Transferrer(
+            TransferType.DOWNLOAD,
+            client,
+            is_move=True,
+            on_result=results.append,
+            cancel_token=token,
+            transfer_config=LibraryTransferConfig(max_concurrency=1),
+        ) as transferrer:
+            for name in ("a", "b"):
+                transferrer.submit(self._item(tmp_path, name, client))
+            self._fire_and_join(transferrer)
+            assert started.wait(10)
+            token.cancel(mode=CancelMode.IMMEDIATE)
+            deadline = time.monotonic() + 10
+            while not transferrer._cancel_initiated:  # pyright: ignore[reportPrivateUsage]
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+            release.set()
+        assert deleted == ["a"]
+        outcomes = {result.compare_key: result.outcome for result in results}
+        assert outcomes == {"a": OpOutcome.SUCCEEDED, "b": OpOutcome.CANCELLED}
+
+    def test_the_limit_holds_awscrts_thread(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(transfer, "_DONE_WORKERS_LIMIT", 2)
+        _, started, release = self._block_the_first_delete(monkeypatch)
+        results: list[OpResult] = []
+        transferrer, client = self._move(
+            results, transfer_config=LibraryTransferConfig(max_concurrency=1)
+        )
+        with transferrer:
+            for name in ("a", "b", "c"):
+                transferrer.submit(self._item(tmp_path, name, client))
+            manager = self._manager(transferrer)
+            callback = manager.fire()
+            assert started.wait(10)
+            deadline = time.monotonic() + 10
+            while manager.fired < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            callback.join(0.2)
+            assert callback.is_alive()  # "c" waits for a place
+            assert manager.fired == 2
+            release.set()
+            callback.join(10)
+            assert not callback.is_alive()
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED] * 3
+
+    @pytest.mark.parametrize(
+        ("config", "expected"),
+        [
+            (None, 10),
+            (LibraryTransferConfig(max_concurrency=2), 2),
+            (_setting_max_request_concurrency(3), 3),
+        ],
+        ids=["default", "max_concurrency", "max_request_concurrency"],
+    )
+    def test_the_workers_number_max_concurrency(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        config: Any,
+        expected: int,
+    ) -> None:
+        barrier = threading.Barrier(expected, timeout=10)
+        lock = threading.Lock()
+        running = [0, 0]  # now, peak
+
+        def delete(_self: Any, info: Any, request_payer: Any = None) -> dict[str, Any]:
+            with lock:
+                running[0] += 1
+                running[1] = max(running)
+            barrier.wait()
+            with lock:
+                running[0] -= 1
+            return {}
+
+        monkeypatch.setattr(S3Storage, "delete", delete)
+        results: list[OpResult] = []
+        transferrer, client = self._move(results, transfer_config=config)
+        with transferrer:
+            for index in range(expected * 3):
+                transferrer.submit(self._item(tmp_path, f"f{index}", client))
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED] * (expected * 3)
+        assert running == [0, expected]
+
+    def test_what_on_result_raises_reaches_the_caller(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(S3Storage, "delete", lambda _self, info, request_payer=None: {})
+
+        def raising(_result: OpResult) -> None:
+            raise ValueError("the caller's")
+
+        client, _ = make_recording_client([])
+        with pytest.raises(ValueError, match="the caller's"):
+            with Transferrer(
+                TransferType.DOWNLOAD, client, is_move=True, on_result=raising
+            ) as transferrer:
+                transferrer._manager = _CrtCallbackManager()  # pyright: ignore[reportPrivateUsage]
+                transferrer.submit(self._item(tmp_path, "a", client))
+
+    def test_a_local_source_stays_on_awscrts_thread(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        threads: list[str] = []
+        real_delete = LocalStorage.delete
+
+        def delete(self: Any, info: Any) -> None:
+            threads.append(threading.current_thread().name)
+            real_delete(self, info)
+
+        monkeypatch.setattr(LocalStorage, "delete", delete)
+        source = tmp_path / "a.bin"
+        source.write_bytes(b"x")
+        item = TransferItem(
+            compare_key="a.bin", size=1, src_path=str(source), dest_bucket="b", dest_key="k"
+        )
+        client, _ = make_recording_client([])
+        _listed_source(item, TransferType.UPLOAD, client)
+        results: list[OpResult] = []
+        with Transferrer(
+            TransferType.UPLOAD, client, is_move=True, on_result=results.append
+        ) as transferrer:
+            transferrer._manager = _CrtCallbackManager()  # pyright: ignore[reportPrivateUsage]
+            transferrer.submit(item)
+        assert threads == [_AWSCRT_THREAD]
+        assert transferrer._done_workers is None  # pyright: ignore[reportPrivateUsage]
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+
+    def test_a_custom_source_goes_to_the_workers(self, tmp_path: Path) -> None:
+        threads: list[str] = []
+        storage: Any = SimpleNamespace(
+            delete=lambda _info: threads.append(threading.current_thread().name)
+        )
+        item = TransferItem(
+            compare_key="a.bin",
+            size=1,
+            src_fileobj=io.BytesIO(b"x"),
+            src_info=FileInfo(key="a.bin", storage=storage),
+            dest_bucket="b",
+            dest_key="k",
+        )
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        with Transferrer(
+            TransferType.UPLOAD, client, is_move=True, on_result=results.append
+        ) as transferrer:
+            transferrer._manager = _CrtCallbackManager()  # pyright: ignore[reportPrivateUsage]
+            transferrer.submit(item)
+        assert [name.partition("_")[0] for name in threads] == ["boto3-s3-done"]
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+
+    def test_a_cp_builds_no_workers(self, tmp_path: Path) -> None:
+        threads: list[str] = []
+        client, _ = make_recording_client([])
+
+        def record(_result: OpResult) -> None:
+            threads.append(threading.current_thread().name)
+
+        with Transferrer(TransferType.DOWNLOAD, client, on_result=record) as transferrer:
+            transferrer._manager = _CrtCallbackManager()  # pyright: ignore[reportPrivateUsage]
+            transferrer.submit(self._item(tmp_path, "a", client))
+        assert threads == [_AWSCRT_THREAD]
+        assert transferrer._done_workers is None  # pyright: ignore[reportPrivateUsage]
+
+    def test_a_classic_move_builds_no_workers(self, tmp_path: Path) -> None:
+        source = tmp_path / "a.bin"
+        source.write_bytes(b"x")
+        item = TransferItem(
+            compare_key="a.bin", size=1, src_path=str(source), dest_bucket="b", dest_key="k"
+        )
+        _, _, results, transferrer = _run(TransferType.UPLOAD, [item], [{}], is_move=True)
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+        assert transferrer._done_workers is None  # pyright: ignore[reportPrivateUsage]
+
+
+class TestDoneWorkers:
+    """`_DoneWorkers` on its own: what the run around it cannot easily reach."""
+
+    class _Noting:
+        def __init__(self) -> None:
+            self.threads: list[int] = []
+
+        def on_done(self, future: Any) -> None:
+            self.threads.append(threading.get_ident())
+
+    def _run_in_thread(self, call: Callable[[], None]) -> None:
+        """So a place never given back fails the test instead of hanging it."""
+        thread = threading.Thread(target=call, daemon=True)
+        thread.start()
+        thread.join(10)
+        assert not thread.is_alive()
+
+    def test_an_item_after_close_runs_in_line_and_gives_back_its_place(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(transfer, "_DONE_WORKERS_LIMIT", 1)
+        workers = transfer._DoneWorkers(1, lambda: False, lambda _exc: None)
+        workers.close()
+        noting = self._Noting()
+        idents: list[int] = []
+
+        def run_twice() -> None:
+            idents.append(threading.get_ident())
+            workers.run([noting], _SettledCrtFuture())
+            workers.run([noting], _SettledCrtFuture())
+
+        self._run_in_thread(run_twice)
+        assert noting.threads == idents * 2
+
+    def test_a_thread_that_cannot_start_settles_the_item_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ``submit`` raises with the work already queued: the item runs in line,
+        # and the worker that takes the queue next must not run it again.
+        real_start = threading.Thread.start
+        refused: list[Any] = []
+
+        def start(thread: Any) -> None:
+            if not refused:
+                refused.append(thread)
+                raise RuntimeError("can't start new thread")
+            real_start(thread)
+
+        monkeypatch.setattr(threading.Thread, "start", start)
+        noted: list[BaseException] = []
+        workers = transfer._DoneWorkers(2, lambda: False, noted.append)
+        first, second = self._Noting(), self._Noting()
+        workers.run([first], _SettledCrtFuture())
+        assert first.threads == [threading.get_ident()]
+        workers.run([second], _SettledCrtFuture())
+
+        self._run_in_thread(workers.close)
+        assert len(first.threads) == len(second.threads) == 1
+        assert noted == []
+
+    def test_an_item_after_close_is_cancelled_when_the_run_is(self) -> None:
+        workers = transfer._DoneWorkers(1, lambda: True, lambda _exc: None)
+        workers.close()
+        future = _SettledCrtFuture()
+        workers.run([], future)
+        with pytest.raises(transfer.S3TransferCancelledError):
+            future.result()
+
+    def test_a_failed_transfer_keeps_its_own_outcome_under_a_cancel(self) -> None:
+        workers = transfer._DoneWorkers(1, lambda: True, lambda _exc: None)
+        future = _SettledCrtFuture()
+        failure = OSError("the transfer's own")
+        future.set_exception(failure)
+        workers.run([], future)
+        workers.close()
+        with pytest.raises(OSError, match="the transfer's own"):
+            future.result()
+
+    def test_what_a_subscriber_lets_out_is_noted_and_the_place_given_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(transfer, "_DONE_WORKERS_LIMIT", 1)
+        noted: list[BaseException] = []
+        workers = transfer._DoneWorkers(1, lambda: False, noted.append)
+        escaped = AssertionError("an invariant")
+
+        class _Raising:
+            def on_done(self, future: Any) -> None:
+                raise escaped
+
+        noting = self._Noting()
+
+        def run_both() -> None:
+            workers.run([_Raising(), noting], _SettledCrtFuture())
+            workers.run([noting], _SettledCrtFuture())
+            workers.close()
+
+        self._run_in_thread(run_both)
+        assert noted == [escaped]
+        assert len(noting.threads) == 1  # only the second item's: the first stopped there
 
 
 class _CrtWait:

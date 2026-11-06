@@ -483,6 +483,14 @@ lane - testing.md).
 
 ## 6. Degradation and known differences (record)
 
+- **A move's source deletes run side by side**: aws-cli deletes a `mv`'s S3
+  source in the transfer's done callback, on the one awscrt thread that also
+  hands out the CRT client's requests, so its deletes go one at a time and hold
+  every transfer up meanwhile. `transfer._DoneWorkers` runs them on threads of
+  their own ([`transfer.md`](./transfer.md) section 2). Each is still one
+  `DeleteObject` through the botocore client, as on aws-cli, unlike the deletes
+  below. What differs is the time, and what a cancel leaves
+  ([`aws-differences.md`](../docs/cli/aws-differences.md)).
 - **Deletes ride the CRT engine, batched**: under CRT configuration aws-cli
   sends each `rm` / local-side `sync --delete` deletion through its CRT transfer
   manager, one `DeleteObject` per key (an S3-to-S3 sync is classic on both
@@ -587,7 +595,13 @@ lane - testing.md).
   marks that cancel as the run's order, and `Transferrer.__exit__` re-raises
   the interrupt once the drain is over. Which transfers the interrupt cancels
   stays the manager's decision, as on `aws` (the one whose wait it landed in,
-  or every one still running); the rest finish with their real outcomes. A
+  or every one still running); the rest finish with their real outcomes. The
+  manager's later wait on the done callbacks has no such guard, and the first
+  wait stops at the first result that raises, so after a failed item a Ctrl-C
+  lands there and escapes with nothing cancelled.
+  `Transferrer._cancel_interrupted_crt_drain` then cancels every transfer still
+  running, waits for their records and their temporary files' removal, and
+  re-raises the interrupt the same way; a later Ctrl-C leaves that wait. A
   CRT cancellation the run did not order stays `FAILED`. The CLI therefore
   ends a CRT run cut short like a classic one - `cancelled: ctrl-c received`
   or the fatal's line, without aws-cli's per-item failed lines - at the same rc

@@ -136,8 +136,12 @@ Startup probes (raw): `--version` ours 0.075 / `aws` 0.474 (classic),
 - **`mv_download_small_1k` on CRT takes about 27 s on both sides**, against
   about 6 s on the classic engine. The gap to `cp_download_small_1k` is about
   25 ms a key on CRT and about 2.5 ms on classic, on both sides and both
-  instances: a rate consistent with one DeleteObject at a time on CRT, where
-  classic's worker threads share them.
+  instances. The cause was the source delete running in the transfer's done
+  callback, on the one awscrt thread that also hands out the CRT client's
+  requests, so the DeleteObject requests went one at a time. boto3-s3's side was
+  fixed after this run (`transfer._DoneWorkers`), so its row is not a baseline
+  for the commits that carry the fix. On the local dev stack, behind a 20 ms
+  delay, 1000 keys took 33.7 s before the fix and 6.7 s after it (aws-cli 32.9 s).
 - **`inproc_cp_upload_large` carries a cost real S3 does not.** The stub's
   endpoint is plain HTTP, so awscrt's signer hashes the payload, reading it
   4 KiB at a time through the guard in `signingreads`. A short check on the

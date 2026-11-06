@@ -451,7 +451,11 @@ that say outright that the run comes out differently, listed in section 1.
   cuts nothing short leaves it exiting 0 as if uninterrupted; this command
   prints no line for those transfers and closes with `cancelled: ctrl-c
   received`, as on the classic engine, and does not exit 0. The same
-  transfers are cut short on both tools. For deletes `aws`
+  transfers are cut short on both tools. A `mv` from S3 whose download has
+  finished but whose source delete has not started keeps its source here,
+  beside the finished file, and prints no line for it, where `aws` goes on to
+  delete it. Re-running the command finishes the move, unless `--no-overwrite`
+  skips the file already there. For deletes `aws`
   goes on sending every per-key delete already queued; this command's
   batched deletes — an accepted difference (above) — stop at the interrupt as
   on the classic engine: the requests already out finish, no further one

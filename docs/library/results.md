@@ -47,7 +47,7 @@ case-insensitive filesystem. Neither counts as a failure, and a notice can
 precede the same item's real outcome, so do not assume one callback per key.
 
 The callback may run **on a worker thread**, and several may run at once:
-transfers report from `s3transfer`'s threads and batched deletes from the
+transfers report from the transfer engine's threads and batched deletes from the
 deleter's, while dry runs, single-key `rm` and local deletes report inline on
 your own thread. Keep it fast, keep it thread-safe, and do not let it raise.
 
@@ -162,7 +162,9 @@ records resolve like this:
 - accepted but not yet running, or abandoned mid-flight — one `CANCELLED`
   record whose `error` names the cause;
 - in flight and completing anyway — its **real** outcome. A running request
-  cannot be safely interrupted, and if its bytes landed, that is the truth;
+  cannot be safely interrupted, and if its bytes landed, that is the truth. The
+  exception is a `mv` from S3 on the CRT engine whose source delete had not
+  started: `CANCELLED`, with the file in place and the source kept;
 - never accepted — no record at all.
 
 Cancelling twice is safe, and an immediate request upgrades a graceful one.

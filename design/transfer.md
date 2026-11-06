@@ -118,11 +118,34 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   (`max_submission_queue_size`, default 1000) blocks the submit thread when it
   is full, and the S3 request executor is separately bounded
   (`max_request_queue_size`). This is the same mechanism aws-cli relies on; we
-  keep no in-flight window of our own. The download IO queue's bound on memory
+  keep no in-flight window of our own for transfers. The download IO queue's bound on memory
   holds only if a written chunk is freed with its task, so the hooks the classic
   executors put on a task come off once it has run: each holds the task's bound
   method, and a task keeping them waits for the garbage collector
   (`transfer._TaskGuard`).
+- **A CRT `mv` runs its source deletes on threads of their own**
+  (`transfer._DoneWorkers`). awscrt calls a transfer's done subscribers on the
+  one thread that also hands out the CRT client's requests, so a subscriber that
+  waits there holds up every transfer and every other item's subscribers. On
+  that thread the DeleteObject requests go one at a time (measured on real S3:
+  25 ms a key, 27 s for 1000 objects against 6 s on classic, and aws-cli's the
+  same). So from the first subscriber that can wait (section 3, item 6 or 7) to
+  the last, a `mv` whose source is not local hands its subscribers to workers, in
+  order within an item. The workers number `max_request_concurrency`
+  (`max_concurrency` sets it too); the `[s3]` key `max_concurrent_requests` is
+  not passed on the CRT path ([`crt.md`](./crt.md) section 4). Removing a local
+  file is one system call and stays where it is. At most 128 items are held, the
+  CRT manager's own cap on its transfers; past that awscrt's thread waits for a
+  place, which slows the transfers down to the deletes and bounds the memory, and
+  nothing the workers do needs that thread. `__exit__` waits for the workers after
+  the manager's shutdown, which sees those items' done callbacks as returned, and
+  before the end of the cancel watcher. A cancel the run orders - the token's
+  IMMEDIATE, a fatal, a Ctrl-C - settles an item still held as CANCELLED instead
+  of running it: its source stays beside the finished download, and the requests
+  already out finish and report their real outcome. A graceful cancel orders
+  nothing of the kind, and the held items run. The wait looks at a count and
+  sleeps: a Ctrl-C can land in it, and neither `Thread.join` (on Python 3.10 to
+  3.12 it gives up on a thread when interrupted) nor a `Condition` survives one.
 - context manager: on normal completion it drains (waits for submitted
   transfers). On **any exception** - a fatal in mid-enumeration included - it
   shuts down **cancelling**, by delegating to the s3transfer manager's own
@@ -148,7 +171,8 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   copy-props reads, a download's parent directory) does not run either.
   Futures already running may still finish - a cancelled-mid-flight transfer
   that completes reports its real outcome (s3transfer lets the completion
-  win), while a revoked one reports one `CANCELLED` record
+  win), unless a CRT `mv` still holds it short of its source delete (above),
+  while a revoked one reports one `CANCELLED` record
   ([`opresult.md`](./opresult.md)). Active futures are tracked only until
   their done subscriber fires, keeping cancellation tracking bounded by the
   manager's outstanding (queued + running) work rather than total item count. `KeyboardInterrupt` keeps the
@@ -219,8 +243,9 @@ runs end to end). On the classic engine, `_TrackFuture` goes ahead of item 1
 (section 2).
 
 `on_result` / `on_progress` fire **from s3transfer's worker threads** for
-submitted transfers (with `use_threads=False`, on the calling thread), and the
-non-submitting records - dry-run / skip / notice and some warnings - are
+submitted transfers (with `use_threads=False`, on the calling thread; on the CRT
+engine, awscrt's thread, and `_DoneWorkers`' for the record of a `mv` whose source
+is not local - section 2), and the non-submitting records - dry-run / skip / notice and some warnings - are
 emitted inline on the submitting thread. Either way the contract matches the
 deleter's: fast and non-raising.
 
@@ -925,7 +950,9 @@ things `Transferrer(is_move=True)` adds and the same-path guard at the head of
   key. **A deletion failure flips the already-settled
   future to failed with `set_exception`** (s3transfer accepts an override after
   done - isomorphic to aws-cli's `DeleteSourceSubscriber`), and `_Completion`
-  aggregates it as `move failed` (rc 1). The bytes have already arrived.
+  aggregates it as `move failed` (rc 1). The bytes have already arrived. On the
+  CRT engine the deletes of a source that is not local run side by side, off
+  awscrt's thread (section 2).
 - **Durability barrier (`LocalStorage(fsync=True)`, a library extension; default
   off, matching aws-cli)**: s3transfer finalizes a filename download with a
   temp-file write and a rename and never fsyncs, so aws-cli deletes the durable

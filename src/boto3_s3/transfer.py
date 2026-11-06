@@ -72,6 +72,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Generator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -170,6 +171,14 @@ _POST_TAGGING_KEY = "boto3_s3_post_copy_tag_set"
 # it unset, and a custom backend's own Mapping response is captured the same
 # way as S3's.
 _DELETE_RESPONSE_KEY = "boto3_s3_delete_response"
+
+# How many of a CRT move's finished transfers `_DoneWorkers` holds at once,
+# running or waiting: the cap s3transfer's CRT manager puts on its transfers.
+_DONE_WORKERS_LIMIT = 128
+
+# How often a wait a Ctrl-C can land in looks at what it waits for, in seconds
+# (`_DoneWorkers.close`, `Transferrer._cancel_interrupted_crt_drain`).
+_WAIT_LOOK = 0.01
 
 # user_context slot holding the `__cause__` chain `_outcome` last took out of
 # the item's future, so its next call can tell which exceptions come again.
@@ -1095,7 +1104,8 @@ class Transferrer:
     ran - or was abandoned mid-flight - reports ``CANCELLED`` with a
     `CancelledError` naming the cause, while an in-flight request that
     completes despite the cancel reports its real outcome (s3transfer lets
-    the completion win; design/opresult.md). The rollup counters are
+    the completion win; design/opresult.md), but for a CRT move whose source
+    delete has not started (`_DoneWorkers`). The rollup counters are
     approximate while transfers are in flight and exact after the `with`
     block exits.
 
@@ -1250,6 +1260,9 @@ class Transferrer:
         # (`_deliver`).
         self._pending_raise: BaseException | None = None
         self._pending_lock = threading.Lock()
+        # Where a CRT move's source deletes run, built with the first of them
+        # (`_on_done_workers`).
+        self._done_workers: _DoneWorkers | None = None
         # The thread the caller drives the run from: a record settled there
         # can raise the callback's exception on the spot (`_deliver`).
         self._caller_thread = threading.get_ident()
@@ -1334,20 +1347,27 @@ class Transferrer:
                 self._manager.__exit__(type(exc), exc, None)
             else:
                 self._manager.shutdown()
+        except KeyboardInterrupt as interrupt:
+            if isinstance(self._manager, TransferManager):
+                raise
+            self._cancel_interrupted_crt_drain(interrupt)
         finally:
-            self._shutdown_done.set()
-            if watcher is not None:
-                watcher.join()
-            if self._capture is not None:
-                # After shutdown every transfer is drained, so no request is
-                # emitting on the client while the capture handlers are removed.
-                # The finally covers shutdown itself raising (s3transfer re-raises
-                # a KeyboardInterrupt arriving during its drain wait): better to
-                # unregister with stragglers in flight than to leave the handlers
-                # feeding its stores forever on a longer-lived client.
-                self._capture.unregister(self._client)
-            if self._signing_reads_kept:
-                signingreads.unregister(self._client)
+            try:
+                self._close_done_workers()
+            finally:
+                self._shutdown_done.set()
+                if watcher is not None:
+                    watcher.join()
+                if self._capture is not None:
+                    # After shutdown every transfer is drained, so no request is
+                    # emitting on the client while the capture handlers are removed.
+                    # The finally covers shutdown itself raising (s3transfer re-raises
+                    # a KeyboardInterrupt arriving during its drain wait): better to
+                    # unregister with stragglers in flight than to leave the handlers
+                    # feeding its stores forever on a longer-lived client.
+                    self._capture.unregister(self._client)
+                if self._signing_reads_kept:
+                    signingreads.unregister(self._client)
         # A Ctrl-C the CRT drain swallowed reaches the caller as the classic
         # manager's re-raise does: ahead of anything noted, and in place of
         # the exception that folded the run when it landed in that fold's
@@ -1360,6 +1380,51 @@ class Transferrer:
         # has no later `submit` to re-raise it.
         if exc is None:
             self._raise_pending()
+
+    def _cancel_interrupted_crt_drain(self, interrupt: KeyboardInterrupt) -> None:
+        """Order the cancel a Ctrl-C in the CRT manager's last wait does not.
+
+        pip s3transfer's CRT shutdown first waits on the transfers' results,
+        where a ``KeyboardInterrupt`` cancels (`_guard_crt_cancel`), then on
+        their done callbacks, where one escapes with nothing cancelled. The
+        first wait also stops at the first result that raises, so after a
+        failed item the rest of the drain is spent in the second. So the run
+        orders the cancel itself, keeps the interrupt for ``__exit__`` to
+        re-raise, as one the first wait swallows is, and waits for the cancelled
+        transfers' records and their temporary files' removal: until every
+        tracked future is forgotten, a done callback's last step. It does not
+        call the manager's shutdown again, whose first wait would swallow the
+        next Ctrl-Cs too. A later Ctrl-C leaves: the next one in this wait, or
+        this one if the first wait has already taken one.
+        """
+        if self._swallowed_interrupt is not None:
+            raise interrupt
+        self._keep_swallowed_interrupt(interrupt)
+        self._cancel_futures()
+        while self._futures:
+            time.sleep(_WAIT_LOOK)
+
+    def _close_done_workers(self) -> None:
+        """Wait for what a CRT move handed to `_DoneWorkers`.
+
+        The manager's shutdown cannot: as far as it can see, those items' done
+        callbacks have returned. So the wait is here, ahead of the end of the
+        cancel watcher, which keeps an escalation to IMMEDIATE effective on the
+        items still held. The run's first Ctrl-C, landing in the wait, cancels
+        those items and is kept for ``__exit__`` to re-raise, as one the CRT
+        drain swallows is; the wait then resumes for the requests already out.
+        A Ctrl-C after that leaves it.
+        """
+        workers = self._done_workers
+        if workers is None:
+            return
+        try:
+            workers.close()
+        except KeyboardInterrupt as exc:
+            if self._swallowed_interrupt is not None:
+                raise
+            self._keep_swallowed_interrupt(exc)
+            workers.close()
 
     def _watch_for_immediate_cancel(self) -> None:
         """Cancel tracked futures once the token escalates to IMMEDIATE.
@@ -1439,7 +1504,8 @@ class Transferrer:
         one only, for `__exit__` to re-raise once the drain is over. The
         manager decides which transfers it cancels - the one whose wait the
         interrupt landed in, or every one still running - and the rest finish
-        and report their real outcomes, as on aws. A fold under the caller's
+        and report their real outcomes, as on aws, but for a CRT move's items
+        whose source delete has not started (`_DoneWorkers`). A fold under the caller's
         own Ctrl-C comes through here too, with that interrupt, which
         `__exit__` then leaves to propagate as it is.
         """
@@ -1585,7 +1651,8 @@ class Transferrer:
         A record settles where its item ends: the calling thread for a
         submit-time outcome, a walk warning or a ``use_threads=False``
         transfer, an s3transfer worker for a threaded one, an awscrt thread
-        for the CRT engine's. Whatever the callback raises belongs to the
+        for the CRT engine's, a `_DoneWorkers` thread for a CRT move's.
+        Whatever the callback raises belongs to the
         caller, but only the calling thread can raise it there: s3transfer
         logs and drops an ``Exception`` from a done callback (the calling
         thread under ``use_threads=False`` included), a worker's
@@ -1694,12 +1761,14 @@ class Transferrer:
         subscribers, counted = self._common_subscribers(item)
         if item.src_fileobj is not None:
             subscribers.append(_CloseFileobj(item.src_fileobj))
+        waiting: list[Any] = []
         if self._is_move:
-            subscribers.append(self._delete_source_subscriber(item))
+            waiting.append(self._delete_source_subscriber(item))
         completion = self._completion(item, counted)
-        subscribers.append(completion)
-        subscribers.append(_ForgetFuture(self._forget_future))
+        waiting.append(completion)
+        waiting.append(_ForgetFuture(self._forget_future))
         manager = self._get_manager()
+        subscribers.extend(self._on_done_workers(manager, item, waiting))
         self._track_from_queued(manager, subscribers)
         self._admit_capture(item)
         fileobj: Any = item.src_fileobj if item.src_fileobj is not None else src_path
@@ -1740,6 +1809,7 @@ class Transferrer:
         # a failed delete then still leaves the downloaded file carrying the
         # source mtime (a later sync compares equal instead of re-downloading).
         subscribers.append(_StampMtime(item, self._stamp_mtime))
+        waiting: list[Any] = []
         if self._is_move:
             # Durability barrier before the source delete (LocalStorage(fsync=True),
             # a library-only opt-in; off by default = aws-cli parity). Only a real local
@@ -1750,18 +1820,19 @@ class Transferrer:
                 and isinstance(self._dest_storage, LocalStorage)
                 and self._dest_storage.fsync
             ):
-                subscribers.append(_FsyncDest(dest_path, self._dest_storage.text_path))
-            subscribers.append(self._delete_source_subscriber(item))
+                waiting.append(_FsyncDest(dest_path, self._dest_storage.text_path))
+            waiting.append(self._delete_source_subscriber(item))
         if item.case_conflict_cleanup is not None:
             # After the source delete, aws-cli's slot for
             # CaseConflictCleanupSubscriber: on_done subscribers run in
             # registration order, so releasing the key earlier would shrink the
             # window in which a same-name-different-case twin still counts as
             # in flight - by an os.utime on cp, by a whole DeleteObject on mv.
-            subscribers.append(_CaseConflictCleanup(item.case_conflict_cleanup))
-        subscribers.append(self._completion(item, counted))
-        subscribers.append(_ForgetFuture(self._forget_future))
+            waiting.append(_CaseConflictCleanup(item.case_conflict_cleanup))
+        waiting.append(self._completion(item, counted))
+        waiting.append(_ForgetFuture(self._forget_future))
         manager = self._get_manager()
+        subscribers.extend(self._on_done_workers(manager, item, waiting))
         if dest_path is not None and not isinstance(manager, TransferManager):
             subscribers.insert(0, _KeepRenameFailure())
         self._track_from_queued(manager, subscribers)
@@ -1813,6 +1884,31 @@ class Transferrer:
             subscribers=subscribers,
             source_client=self._source_client,
         )
+
+    def _on_done_workers(self, manager: Any, item: TransferItem, waiting: list[Any]) -> list[Any]:
+        """Hand the done subscribers that can wait to `_DoneWorkers`, on a CRT move.
+
+        ``waiting`` runs from an item's durability barrier or source delete to
+        its last subscriber. It stays as it is where nothing there waits on
+        awscrt's thread: the classic engine has workers of its own, a `cp`
+        deletes nothing, and removing a local source is one system call. The
+        workers number the setting the classic engine's pool reads,
+        ``max_request_concurrency`` (``max_concurrency`` sets it too). The
+        ``[s3]`` key ``max_concurrent_requests`` does not reach it: that key is
+        not passed on the CRT path (design/crt.md section 4).
+        """
+        if not self._is_move or isinstance(manager, TransferManager):
+            return waiting
+        info = item.src_info
+        assert info is not None  # as in `_delete_source_subscriber`
+        if isinstance(info.storage, LocalStorage):
+            return waiting
+        if self._done_workers is None:
+            config: Any = self._transfer_config or transferconfig.TransferConfig()
+            self._done_workers = _DoneWorkers(
+                config.max_request_concurrency, lambda: self._cancel_initiated, self._note_raise
+            )
+        return [_HandToDoneWorkers(self._done_workers, waiting)]
 
     def _track_from_queued(self, manager: Any, subscribers: list[Any]) -> None:
         """Track a classic transfer from its ``on_queued``, ahead of its own tasks.
@@ -2972,6 +3068,105 @@ class _StampMtime:
         if _outcome(future) is not None:
             return
         self._stamp(self._item)
+
+
+class _DoneWorkers:
+    """Run the end of a CRT move's done subscribers on threads of their own.
+
+    awscrt calls a transfer's done subscribers on the one thread that also
+    hands out the CRT client's requests, so a subscriber that waits there holds
+    up every transfer and every other item's subscribers. A move's source
+    delete is such a wait: run there, the DeleteObject requests go one at a
+    time (measured on real S3: 25 ms a key, 27 s for 1000 objects against 6 s
+    on the classic engine, and aws-cli's the same). `_HandToDoneWorkers` brings
+    them here instead, where items run side by side as on the classic engine's
+    workers while each item's subscribers keep their order.
+
+    - **The limit** (`_DONE_WORKERS_LIMIT`): ``run`` blocks awscrt's thread once
+      that many items are held, which slows the transfers down to the deletes.
+      Nothing here needs that thread to make progress: a source is deleted
+      through its own backend, on S3 through the botocore client.
+    - **A cancel**: an item whose turn comes after the run ordered a cancel
+      settles as cancelled instead of running, so its source stays beside the
+      finished download, and the request that item would have sent never
+      starts. Requests already out finish and report their real outcome.
+    - **A refusal**: the pool takes nothing once it is closed, or at interpreter
+      shutdown, and an item that arrives then runs in line. A second Ctrl-C in
+      the manager's drain can leave transfers behind to get there, cancelled by
+      then. A thread that cannot start refuses as well, but with the work
+      already queued for a later worker, so an item settles only once.
+    - **An escape**: what a subscriber lets out goes to ``note_raise``, for the
+      run to raise to its caller, as a worker's or an awscrt thread's exception
+      would otherwise be lost.
+    """
+
+    def __init__(
+        self,
+        workers: int,
+        cancelled: Callable[[], bool],
+        note_raise: Callable[[BaseException], None],
+    ) -> None:
+        self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="boto3-s3-done")
+        self._held = 0
+        self._changed = threading.Condition()
+        self._cancelled = cancelled
+        self._note_raise = note_raise
+
+    def run(self, subscribers: list[Any], future: Any) -> None:
+        """Hold one finished transfer's ``subscribers`` until a worker runs them."""
+        with self._changed:
+            while self._held >= _DONE_WORKERS_LIMIT:
+                self._changed.wait()
+            self._held += 1
+        claim = threading.Lock()
+
+        def settle_once() -> None:
+            if claim.acquire(blocking=False):
+                self._settle(subscribers, future)
+
+        try:
+            self._pool.submit(settle_once)
+        except RuntimeError:
+            settle_once()
+
+    def _settle(self, subscribers: list[Any], future: Any) -> None:
+        try:
+            if self._cancelled() and _outcome(future) is None:
+                future.set_exception(S3TransferCancelledError("cancelled before the source delete"))
+            for subscriber in subscribers:
+                subscriber.on_done(future=future)
+        except BaseException as exc:
+            self._note_raise(exc)
+        finally:
+            with self._changed:
+                self._held -= 1
+                self._changed.notify()
+
+    def close(self) -> None:
+        """Refuse new items and wait for the ones held, without taking a lock.
+
+        A Ctrl-C can land here, and the plain waits do not survive one. On
+        Python 3.10 to 3.12 ``Thread.join``, and so the pool's own waiting
+        shutdown, marks a thread finished when interrupted while it runs, so
+        that thread is waited for neither by a second call nor at interpreter
+        exit; a ``Condition`` can be left half-taken, and the workers then
+        block for good. So this looks at the count and sleeps. The pool's
+        threads end by themselves once the queue is empty.
+        """
+        self._pool.shutdown(wait=False)
+        while self._held:
+            time.sleep(_WAIT_LOOK)
+
+
+class _HandToDoneWorkers:
+    """The ``on_done`` a CRT move runs in place of the subscribers it hands over."""
+
+    def __init__(self, workers: _DoneWorkers, subscribers: list[Any]) -> None:
+        self._workers = workers
+        self._subscribers = subscribers
+
+    def on_done(self, future: Any, **kwargs: Any) -> None:
+        self._workers.run(self._subscribers, future)
 
 
 class _PostTransferWrite:

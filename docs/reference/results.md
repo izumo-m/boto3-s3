@@ -265,6 +265,9 @@ carries its own `warning: ` prefix.
 error elsewhere in the run, an immediate cancellation, or Ctrl-C shut the engine
 down, on either transfer engine; a CRT cancellation the run did not order
 itself reports `FAILED` ([`../../design/opresult.md`](../../design/opresult.md)).
+On the CRT engine, a `mv` from S3 whose download has finished but whose source
+delete has not started is such an item: its file is in place, its source stays,
+and its `error` reads `cancelled before the source delete`.
 An item whose outcome the engine holds as an interrupt — a `KeyboardInterrupt`
 or `SystemExit` that landed in, or was raised by, code running for that item —
 reports `CANCELLED`, and that interrupt is then raised to the caller - on every
@@ -621,7 +624,9 @@ record arises. `IMMEDIATE` additionally cancels pending and in-flight transfers
 (whenever it arrives once the engine is built, a submission waiting on the
 engine's backpressure included), and then an accepted item that had not started — or was abandoned mid-flight —
 reports `CANCELLED`, while an in-flight request that completes despite the
-cancellation reports its real outcome, since its bytes really landed. Work never
+cancellation reports its real outcome, since its bytes really landed (on the CRT
+engine, a `mv` from S3 whose source delete had not started reports `CANCELLED`
+all the same). Work never
 accepted, because the submission loop stopped before reaching it, produces no
 record either way. An escalation to `IMMEDIATE` that arrives while a graceful
 drain is already running is honored.

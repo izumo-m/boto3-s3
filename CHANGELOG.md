@@ -45,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed `pathresolver.is_mrap_path`, `is_outpost_path` and `is_outpost_alias_path`, the probes for standing down a pinned signature version.
 - An immediate cancel now reaches the transfer in flight under `use_threads=False` too, and a transfer handed over after it is cancelled as well.
 - A classic-engine download no longer keeps the data it has written in memory until the garbage collector runs; a large one ahead of its disk could peak above 1 GiB.
+- On the CRT engine, `mv` from S3 no longer deletes its sources one at a time, which made it several times slower than on the classic engine; `on_result` can now run on several threads at once there, and a cancel can leave a finished file beside its source.
 
 ## [0.12.0] - 2026-10-18
 
