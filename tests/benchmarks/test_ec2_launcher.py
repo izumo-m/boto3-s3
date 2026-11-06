@@ -675,6 +675,8 @@ class TestRunTeardown:
         monkeypatch.setattr(ec2, "_resolve_ami", lambda *_a: "ami-0123")
         monkeypatch.setattr(ec2, "_root_device_name", lambda *_a: "/dev/sda1")
         monkeypatch.setattr(ec2, "_require_instance_profile", lambda *_a: None)
+        # Read from the aws-cli submodule, which CI does not check out.
+        monkeypatch.setattr(ec2, "_pinned_aws_version", lambda: "2.36.40")
         monkeypatch.setattr(ec2, "_ensure_boot_bucket", lambda *_a: None)
         monkeypatch.setattr(ec2, "_archive_working_tree", lambda: b"tar")
         monkeypatch.setattr(ec2, "_launch", launch or (lambda *_a, **_k: "i-1"))
