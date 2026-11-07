@@ -74,12 +74,12 @@ region, from an m7i.xlarge EC2 instance (Ubuntu 26.04, Python 3.14). Each tool
 ran as a fresh process 5 times, with a different destination for every run and
 alternating execution order:
 
-| Operation | `boto3-s3-cli` 0.8.0 | aws-cli 2.36.40 |
+| Operation | `boto3-s3-cli` 0.9.0 | aws-cli 2.36.40 |
 | --- | ---: | ---: |
-| One-file `sync` (median) | 352 ms | 594 ms |
+| One-file `sync` (median) | 409 ms | 659 ms |
 
 The measurement includes SDK setup, remote listing, and the actual upload; the
-five runs spanned 339-363 ms and 582-600 ms respectively.
+five runs spanned 407-416 ms and 645-663 ms respectively.
 
 Installed package sizes were measured on an x86-64 Linux host with `du` using
 Python 3.10 and the same pinned dependency versions, with bytecode caches
