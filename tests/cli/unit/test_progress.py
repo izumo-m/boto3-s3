@@ -54,84 +54,100 @@ def _progress(key: str, done: int, total: int | None) -> TransferProgress:
 
 @skip_without_pthread_kill
 class TestFinishInterrupted:
-    """A Ctrl-C landing in finish() - past the run, where aws-cli's recorder waits
-    for its printer thread - escapes once the printer is done (measured: `aws`
-    writes every queued line and exits 130)."""
+    """A Ctrl-C landing in finish() stops the output and leaves at once."""
 
-    def _slow_printer(self, monkeypatch: pytest.MonkeyPatch, count: int) -> TransferPrinter:
+    @staticmethod
+    def _slow_printer(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> tuple[TransferPrinter, threading.Event]:
+        """A printer still writing when an interrupt lands, and an event its thread's end sets.
+
+        The tests wait for that end before reading what was captured: left
+        running, the thread would write one more line into the next test's.
+        """
         printer = TransferPrinter(progress=False)
         render = printer._render_result  # pyright: ignore[reportPrivateUsage]
-
-        def slow_render(record: Any) -> None:
-            time.sleep(0.005)  # still writing when the interrupt lands
-            render(record)
-
-        monkeypatch.setattr(printer, "_render_result", slow_render)
-        printer.__enter__()
-        for i in range(count):
-            printer.on_result(_result(OpOutcome.SUCCEEDED, key=f"k{i}", src=f"s3://b/k{i}"))
-        return printer
-
-    def test_the_first_interrupt_waits_for_every_line(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        printer = self._slow_printer(monkeypatch, 200)
-        threading.Thread(target=interrupt_main_in, args=("finish",)).start()
-        with pytest.raises(KeyboardInterrupt):
-            printer.finish()
-        assert printer._drained.is_set()  # pyright: ignore[reportPrivateUsage]
-        assert len(capsys.readouterr().out.splitlines()) == 200
-
-    def test_a_second_interrupt_stops_the_output_but_still_waits(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # Left writing, the daemon printer can be caught mid-write by
-        # interpreter shutdown, which aborts the process (`Fatal Python
-        # error: _enter_buffered_busy`, rc 134).
-        printer = self._slow_printer(monkeypatch, 2000)
-
-        def twice() -> None:
-            interrupt_main_in("finish")
-            interrupt_main_in("finish")
-
-        threading.Thread(target=twice).start()
-        with pytest.raises(KeyboardInterrupt):
-            printer.finish()
-        assert printer._drained.is_set()  # pyright: ignore[reportPrivateUsage]
-        assert len(capsys.readouterr().out.splitlines()) < 2000
-
-    @pytest.mark.parametrize(
-        ("outcome", "closing"),
-        [
-            (None, ""),
-            ("failed", ""),
-            ("fatal", "fatal error: boom\n"),
-            ("interrupted", "cancelled: ctrl-c received\n"),
-        ],
-    )
-    def test_finish_transfer_lets_a_drain_interrupt_reach_the_dispatcher(
-        self,
-        outcome: str | None,
-        closing: str,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        # Whatever the run ended with, the interrupt is the dispatcher's 130
-        # (and its newline) rather than the run span's rc 1 - after the run's
-        # own closing line, which aws-cli's printer thread still writes (measured:
-        # a mid-run Ctrl-C and one in the drain print `cancelled:` and exit
-        # 130).
-        from boto3_s3 import BatchError
-        from boto3_s3_cli.commands.transferargs import finish_transfer
-
-        printer = TransferPrinter(progress=False)  # finish_transfer starts it
-        render = printer._render_result  # pyright: ignore[reportPrivateUsage]
+        drain = printer._drain  # pyright: ignore[reportPrivateUsage]
+        ended = threading.Event()
 
         def slow_render(record: Any) -> None:
             time.sleep(0.005)
             render(record)
 
+        def drain_then_tell() -> None:
+            drain()
+            ended.set()
+
         monkeypatch.setattr(printer, "_render_result", slow_render)
+        monkeypatch.setattr(printer, "_drain", drain_then_tell)
+        return printer, ended
+
+    def test_an_interrupt_stops_the_output(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        printer, ended = self._slow_printer(monkeypatch)
+        printer.__enter__()
+        for i in range(2000):
+            printer.on_result(_result(OpOutcome.SUCCEEDED, key=f"k{i}", src=f"s3://b/k{i}"))
+        threading.Thread(target=interrupt_main_in, args=("finish",)).start()
+        with pytest.raises(KeyboardInterrupt):
+            printer.finish()
+        assert ended.wait(10)
+        assert len(capsys.readouterr().out.splitlines()) < 2000
+
+    def test_an_interrupt_leaves_a_stalled_printer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        stalled = threading.Event()
+        rendered = threading.Event()
+
+        def render(_record: Any) -> None:
+            stalled.wait(30)
+            rendered.set()
+
+        printer = TransferPrinter(progress=False)
+        monkeypatch.setattr(printer, "_render_result", render)
+        printer.__enter__()
+        printer.on_result(_result(OpOutcome.SUCCEEDED, key="k", src="s3://b/k"))
+        threading.Thread(target=interrupt_main_in, args=("finish",)).start()
+        with pytest.raises(KeyboardInterrupt):
+            printer.finish()
+        assert not rendered.is_set()
+        stalled.set()
+
+    def test_a_runs_interrupt_does_not_wait_for_the_queue(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from boto3_s3_cli.commands.transferargs import finish_transfer
+
+        stalled = threading.Event()
+        printer = TransferPrinter(progress=False)  # finish_transfer starts it
+        monkeypatch.setattr(printer, "_render_result", lambda _record: stalled.wait(30))
+
+        def run() -> None:
+            printer.on_result(_result(OpOutcome.SUCCEEDED, key="k", src="s3://b/k"))
+            raise KeyboardInterrupt
+
+        started = time.monotonic()
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                finish_transfer(printer, quiet=False, run=run)
+            assert time.monotonic() - started < 5
+            assert capsys.readouterr().err == ""
+        finally:
+            stalled.set()
+
+    @pytest.mark.parametrize("outcome", [None, "failed", "fatal"])
+    def test_finish_transfer_lets_a_drain_interrupt_reach_the_dispatcher(
+        self,
+        outcome: str | None,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Whatever the run ended with, the interrupt is the dispatcher's 130
+        # rather than the run span's rc 1.
+        from boto3_s3 import BatchError
+        from boto3_s3_cli.commands.transferargs import finish_transfer
+
+        printer, ended = self._slow_printer(monkeypatch)  # finish_transfer starts it
 
         def run() -> None:
             for i in range(200):
@@ -141,14 +157,13 @@ class TestFinishInterrupted:
                 raise BatchError("1 of 201 failed", succeeded=200, failed=1, warned=0, skipped=0)
             if outcome == "fatal":
                 raise RuntimeError("boom")
-            if outcome == "interrupted":
-                raise KeyboardInterrupt
 
         with pytest.raises(KeyboardInterrupt):
             finish_transfer(printer, quiet=False, run=run)
+        assert ended.wait(10)
         captured = capsys.readouterr()
-        assert len(captured.out.splitlines()) == 200
-        assert captured.err == closing
+        assert len(captured.out.splitlines()) < 200
+        assert captured.err == ""
 
 
 class TestResultLines:

@@ -30,7 +30,7 @@ state and local files, the same `sync` decisions, the same result lines on
 success, the same conditions failing, and an exit code with the same
 meaning**, bar the entries in section 2 that say outright that the run comes
 out differently. Those are a recursive delete whose listing dies part way or
-whose endpoint fails its batch requests, a Ctrl-C under the CRT engine, a
+whose endpoint fails its batch requests, a Ctrl-C, a
 delete answered `412`, a transfer answered `412` other than
 `--no-overwrite`'s own write, a CRT download that cannot put its file in
 place, a `mv` between two spellings of one Outposts object, an S3 Express
@@ -313,11 +313,18 @@ that say outright that the run comes out differently, listed in section 1.
   an empty directory behind (measured). This command creates it only once
   every check has passed; a run that starts creates it as `aws` does, empty
   listing or not.
-- **A Ctrl-C during a single-key `rm` prints no `delete:` line.** `aws`
-  waits for its one `DeleteObject` and prints its `delete:` line before the
-  closing line; this command stops at once and prints only `cancelled: ctrl-c
-  received`. The exit code is 1 either way, and the request already out may
-  delete the object on both tools.
+- **Ctrl-C is not matched.** A Ctrl-C ends the command at once at 130 here,
+  where `aws` cancels and waits for what is out and exits 1 during a running
+  transfer or delete. So an unfinished multipart upload or a temporary file can
+  stay behind here, where `aws` cleans them up. What an interrupted run still
+  sends and prints is not compared ([`exit-codes.md`](./exit-codes.md)).
+- **With awscrt installed, a failed upload on a signed payload can report
+  awscrt's error and write tracebacks.** botocore signs with awscrt's signer
+  here, where `aws` signs in pure Python, and that signer reads the body wherever
+  the payload is signed (a plain-HTTP endpoint above all). A local read that
+  first fails there is reported as `AWS_ERROR_UNKNOWN` with a traceback on stderr, where
+  `aws` reports the OS error, and a multipart upload that fails or is interrupted
+  there can write more tracebacks. The exit code of a failure is the same.
 - **`file://` and `fileb://` are refused where `aws` mishandles them.** Each
   of these exits 252 here, before anything is read or sent:
   - **A `fileb://` path argument** of `ls`, `rm`, `mb`, `rb`, `presign` or
@@ -344,8 +351,7 @@ that say outright that the run comes out differently, listed in section 1.
   file. Use `file://` to read text from a file.
 - **Deletes go out in batches.** Up to a thousand keys go out per
   `DeleteObjects` request here, where `aws` sends one `DeleteObject` per key.
-  Batching is a settled design, and the differences it causes — this entry's,
-  and the Ctrl-C under the CRT engine below — are accepted
+  Batching is a settled design, and the differences it causes are accepted
   rather than open: where a batch can cheaply be brought closer to `aws`'s
   per-key outcome it is, by sending keys again one by one. For a run that
   finishes enumerating, the objects removed and the exit code are the same (a
@@ -370,15 +376,6 @@ that say outright that the run comes out differently, listed in section 1.
   without being deleted and without a record: **up to 999 objects that `aws`
   would have removed survive**. Re-running the command deletes them, and a run
   that enumerates to the end is unaffected.
-
-  A **Ctrl-C** while deletes are in flight shows it too. `aws` cancels its
-  per-key delete futures and prints nothing after the interrupt (measured:
-  ten deletes in flight, at most one line), while a batch request already out
-  here cannot be cancelled: it completes, and the lines of the keys it carried
-  — up to a thousand — print before `cancelled: ctrl-c received`, as do those
-  of the per-key requests already out. A per-key request not yet started is
-  not sent and prints nothing, as on `aws`. (Under the CRT engine see the
-  entry below.)
 
   One batch request also has one set of attempts, where each of `aws`'s
   per-key requests has its own, so **an endpoint that fails requests** —
@@ -445,25 +442,6 @@ that say outright that the run comes out differently, listed in section 1.
 
   A signed run against any other bucket signs SigV4 either way and comes out
   the same.
-- **Ctrl-C under the CRT engine.** `aws`'s CRT manager swallows an
-  interrupt landing in its drain. For transfers `aws` then prints a failure
-  line for each transfer cut short and no closing line, and an interrupt that
-  cuts nothing short leaves it exiting 0 as if uninterrupted; this command
-  prints no line for those transfers and closes with `cancelled: ctrl-c
-  received`, as on the classic engine, and does not exit 0. The same
-  transfers are cut short on both tools. A `mv` from S3 whose download has
-  finished but whose source delete has not started keeps its source here,
-  beside the finished file, and prints no line for it, where `aws` goes on to
-  delete it. Re-running the command finishes the move, unless `--no-overwrite`
-  skips the file already there. For deletes `aws`
-  goes on sending every per-key delete already queued; this command's
-  batched deletes — an accepted difference (above) — stop at the interrupt as
-  on the classic engine: the requests already out finish, no further one
-  starts, and the run closes with `cancelled: ctrl-c received`, exit code 1 —
-  so objects `aws` would still have deleted survive. Re-running the command
-  deletes them. A single-key `rm` stops at the interrupt too and prints only
-  the closing line, where `aws` reports the cancelled request as `delete
-  failed:`; both exit 1.
 - **A CRT download that writes no file fails here.** Under
   `preferred_transfer_client = crt`, a download whose file cannot be put in
   place - a name longer than the filesystem allows, a directory already

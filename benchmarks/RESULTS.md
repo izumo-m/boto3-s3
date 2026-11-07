@@ -144,10 +144,19 @@ Startup probes (raw): `--version` ours 0.075 / `aws` 0.474 (classic),
   delay, 1000 keys took 33.7 s before the fix and 6.7 s after it (aws-cli 32.9 s).
 - **`inproc_cp_upload_large` carries a cost real S3 does not.** The stub's
   endpoint is plain HTTP, so awscrt's signer hashes the payload, reading it
-  4 KiB at a time through the guard in `signingreads`. A short check on the
-  local host, with every request stubbed, took 0.75 s/GiB without the guard and
-  1.16 with it. Over HTTPS the signer reads no body, and the guard cost
-  0.01 s/GiB.
+  4 KiB at a time, here through a guard then wrapping the request body. A short
+  check on the local host, with every request stubbed, took 0.75 s/GiB without
+  the guard and 1.16 with it. Over HTTPS with the default checksum the signer
+  reads no body, and the guard cost 0.01 s/GiB. The guard was removed after this
+  run, so the row is not a baseline for the commits that carry the change.
+- **boto3-s3's classic uploads ran with no progress reporting.** Over HTTPS with
+  the default checksum, that guard kept s3transfer's start-of-transfer signal
+  from reaching the part. So a part reported no progress and the CLI wrote no
+  `Completed` lines, where aws-cli wrote them. Removing the guard fixed it, so
+  the classic rows that upload
+  (`cp_upload_small_1k`, `cp_upload_large`, `sync_changed_10k`) and the `sync_tiny`
+  probe are not baselines for the commits that carry the fix. The size of the
+  effect was not measured.
 - **`cp_download_large` on classic is the one row where boto3-s3's peak memory
   is above aws-cli's on both instances.** The cause was a reference cycle in the
   hooks `transfer._TaskGuard` put on each task: a written chunk stayed in memory

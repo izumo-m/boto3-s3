@@ -165,7 +165,8 @@ submission — though a bare `"s3://..."` argument's client is built during
 resolution, which happens before that first poll.
 
 If the token is cancelled at any point the call observes, the call ends by
-raising `CancelledError` after the operation has reclaimed its workers; it does
+raising `CancelledError` after the operation has reclaimed its workers (under
+`S3(reusable_after_interrupt=False)`, a listing's worker ends by itself); it does
 not return normally, and it does not raise `BatchError`. `CancelToken`,
 `CancelMode`, and what the two modes do to accepted and in-flight work are
 specified in [`../results.md`](../results.md).
@@ -197,7 +198,8 @@ documented where it is owned:
 The many-item operations — `cp`, `mv`, `rm` and `sync` — do not abort at the
 first item failure. A failed item becomes a `FAILED` record on `on_result` and
 the run continues through the remaining items. When at least one item failed,
-the call raises `BatchError` once, at the end, after workers are reclaimed; it
+the call raises `BatchError` once, at the end, after workers are reclaimed (a
+listing's worker ends by itself under `S3(reusable_after_interrupt=False)`); it
 carries the run's rollup counts and a sampled failure on `__cause__`. Warnings
 and skips alone do not raise. The shape does not depend on item count: a
 single-object `cp` or a single-key `rm` whose one item failed also ends in

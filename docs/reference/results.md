@@ -271,7 +271,9 @@ and its `error` reads `cancelled before the source delete`.
 An item whose outcome the engine holds as an interrupt — a `KeyboardInterrupt`
 or `SystemExit` that landed in, or was raised by, code running for that item —
 reports `CANCELLED`, and that interrupt is then raised to the caller - on every
-route, a CRT upload whose reader awscrt runs on its own thread included.
+route, a CRT upload whose reader awscrt runs on its own thread included. Under
+`S3(reusable_after_interrupt=False)` a `KeyboardInterrupt` is raised at once and
+nothing more is reported, so an item not settled by then has no record.
 `error` is a
 [`CancelledError`](./exceptions.md#cancellederror) naming the cause where the
 canceller supplied one; an immediate-mode escalation arriving during a drain
@@ -642,7 +644,8 @@ records
 ([`../../design/deleter.md`](../../design/deleter.md)).
 
 For `ls`, both modes behave identically: cancellation stops entry delivery,
-drops prefetched pages, waits for a page request already in progress, reclaims
+drops prefetched pages, waits for a page request already in progress (not under
+`S3(reusable_after_interrupt=False)`: the worker ends by itself), reclaims
 the prefetch worker, and raises. The service-root bucket listing iterates its
 pages directly, so cancellation there simply stops between pages.
 

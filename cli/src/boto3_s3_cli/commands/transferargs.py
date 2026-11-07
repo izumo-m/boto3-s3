@@ -816,7 +816,7 @@ def resolve_locations(
 
     def _s3(arg: str, client_for: Any) -> S3Storage:
         # build_s3_storage applies the path refusals (rc 252 ahead of the
-        # pipeline). The CLI's process-fatal Ctrl-C posture is not a storage
+        # pipeline). The CLI's Ctrl-C posture is not a storage
         # concern:
         # build_s3 declares it once (S3's reusable_after_interrupt).
         return build_s3_storage(arg, client=client_for, page_size=head.page_size)
@@ -939,106 +939,51 @@ def build_printer(
 def finish_transfer(printer: TransferPrinter, *, quiet: bool, run: Callable[[], None]) -> int:
     """Run the library call and derive the `aws` exit code (design/cli.md section 6).
 
-    Everything the pipeline raises is rc 1: ``BatchError`` after per-item
-    ``failed`` lines, a ``KeyboardInterrupt`` as one ``cancelled: ctrl-c
-    received`` line, anything else run-killing as one ``fatal error:`` line -
+    Every ``Exception`` the pipeline raises is rc 1: ``BatchError`` after per-item
+    ``failed`` lines, anything else run-killing as one ``fatal error:`` line -
     any exception type except ``AssertionError`` (an internal-invariant bug,
-    re-raised loudly like the dispatcher does) and ``SystemExit`` (an orderly
-    exit request, honored - a deliberate divergence from aws-cli's recorder,
-    which suppresses even that; the taxonomy special-cases only
-    KeyboardInterrupt), matching aws-cli's
+    re-raised loudly like the dispatcher does), matching aws-cli's
     ``CommandResultRecorder.__exit__``,
     which converts whatever escapes the pipeline span into an ``ErrorResult``
-    (aws-cli's ``CtrlCResult`` is minted separately - its ``DoneResultSubscriber``
-    on a ``CancelledError`` - and our cancelled line renders that same shape;
-    so e.g. a ``RecursionError`` from a
+    (so e.g. a ``RecursionError`` from a
     pathologically deep tree is aws-cli's ``fatal error`` rc 1, never the
-    dispatcher's 255, and a mid-run Ctrl-C is never its 130). A clean run exits 2
+    dispatcher's 255). A clean run exits 2
     when only warnings accumulated, else 0. The printer's rendering thread
     outlives ``run()`` only by its drain: every queued line is written (and
     precedes a ``fatal error:`` line) before the exit code is derived.
 
-    That drain is past aws-cli's recorder span too - its recorder's shutdown,
-    waiting for its printer thread - so a Ctrl-C landing there is not
-    converted: it reaches the dispatcher's 130 (and its newline) once the
-    printer has written what was queued (``TransferPrinter.finish``),
-    whatever the run itself ended with (measured: all lines, rc 130).
+    The rest of the ``BaseException`` family passes: ``SystemExit`` (an orderly
+    exit request, honored) once the printer has drained, and a
+    ``KeyboardInterrupt`` at once, which ``cli.main`` ends at 130.
     """
-    error: BaseException | None = None
-    try:
-        with printer:
-            try:
-                run()
-            except BaseException as exc:  # classified below, once every line is out
-                error = exc
-    except KeyboardInterrupt:
-        # From the drain: aws-cli's printer thread still writes the run's own
-        # closing line - it is a queued result there - before the 130
-        # (measured: a mid-run Ctrl-C, then one in the drain, prints
-        # `cancelled: ctrl-c received` and exits 130).
-        line = None if error is None else _closing_line(error)
-        if line is not None and not quiet:
-            output.write_stderr(line)
-        raise
+    error: Exception | None = None
+    with printer:
+        try:
+            run()
+        except Exception as exc:  # classified below, once every line is out
+            error = exc
     if error is None:
         return 2 if printer.warned else 0
     return report_failed_run(error, quiet=quiet)
 
 
-def report_failed_run(error: BaseException, *, quiet: bool) -> int:
+def report_failed_run(error: Exception, *, quiet: bool) -> int:
     """aws-cli's ``CommandResultRecorder`` on a run span that raised *error*: rc 1.
 
-    The span's closing line (`_closing_line`) goes to stderr unless *quiet*,
-    and the run exits 1 - `finish_transfer`'s verdict once its printer has
-    drained, and ``rm``'s, whose run span sits inside the same recorder on
+    One ``fatal error:`` line goes to stderr unless *quiet*, or none for a
+    ``BatchError``, whose per-item failure lines were already streamed by the
+    printer, and the run exits 1 - `finish_transfer`'s verdict once its printer
+    has drained, and ``rm``'s, whose run span sits inside the same recorder on
     aws-cli (rm is an ``S3TransferCommand`` there too). An ``AssertionError`` -
     an internal-invariant violation, a bug - is re-raised instead, surfacing
     loudly like the dispatcher's own re-raise (cli.py): masking it as a fatal
     error would also blunt the test doubles' unexpected-call guards.
-    ``SystemExit`` and the rest of the ``BaseException`` family (a
-    ``KeyboardInterrupt`` aside) pass the same way.
     """
-    if isinstance(error, AssertionError) or not isinstance(error, Exception | KeyboardInterrupt):
+    if isinstance(error, AssertionError):
         raise error
-    line = _closing_line(error)
-    if line is not None and not quiet:
-        output.write_stderr(line)
+    if not isinstance(error, BatchError) and not quiet:
+        output.write_stderr(f"fatal error: {error}\n")
     return 1
-
-
-def _closing_line(error: BaseException) -> str | None:
-    """The line a run that raised *error* ends with, or None.
-
-    `report_failed_run` writes it, and `finish_transfer` for a Ctrl-C in its
-    drain.
-
-    ``BatchError`` has none - its per-item failure lines were already
-    streamed by the printer. A ``KeyboardInterrupt`` inside the pipeline span
-    is a cancelled run, not the dispatcher's 130: aws-cli's result machinery
-    swallows the interrupt (``CommandResultRecorder.__exit__``), the shutdown
-    cancels the accepted transfers, and the printer emits one ``cancelled:
-    ctrl-c received`` line at rc 1 (measured mid-transfer and mid-rm,
-    2.36.40); the per-item CANCELLED records stay silent like aws-cli's
-    (progress.py ``_prints``), and the pre-pipeline spans keep the 130
-    backstop. aws-cli writes that line only when the shutdown cancelled a
-    transfer. When it cancels none - the interrupt lands in a listing, or the
-    transfers already in flight finish on their own and none is left waiting
-    - the interrupt reaches its printer first as
-    ``ErrorResult(KeyboardInterrupt())`` and is written ``fatal error: ``
-    with nothing after it (measured on ``sync s3://... dir`` and ``rm
-    --recursive`` interrupted mid-listing, and on a single ``cp`` interrupted
-    mid-upload, whose ``upload:`` line comes first).
-    That says nothing of what happened, so this run writes the cancelled line
-    there too (design/overview.md section 3, Messages). Anything else that
-    killed the run is one ``fatal error:`` line.
-    """
-    if isinstance(error, BatchError):
-        return None
-    if isinstance(error, KeyboardInterrupt):
-        return "cancelled: ctrl-c received\n"
-    if isinstance(error, Exception) and not isinstance(error, AssertionError):
-        return f"fatal error: {error}\n"
-    return None
 
 
 __all__ = [

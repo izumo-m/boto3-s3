@@ -165,7 +165,9 @@ as it is; any other exception becomes a `Boto3S3Error` with the original on
 reaches you. Where the SDK reads the stream itself (the classic engine hands
 a seekable binary stream to the SDK as the request body), a failure there
 takes the SDK's category instead, with the original further down the
-exception chain.
+exception chain. Under `use_threads=False` with awscrt installed, awscrt's request
+signer can read the stream on your thread, where it takes what the stream raises:
+an `Exception` becomes its `AWS_ERROR_UNKNOWN`, and a `SystemExit` ends the process.
 
 ## 5. A stream endpoint of your own
 

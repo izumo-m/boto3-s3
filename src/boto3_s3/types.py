@@ -214,18 +214,15 @@ class ScanOptions:
     because ``sync`` walks both sides through one shared sink, the two side-walks
     can invoke it concurrently - keep it thread-safe.
 
-    ``reusable_after_interrupt`` is the scan's Ctrl-C exit policy. ``True`` (the
+    ``reusable_after_interrupt`` is the scan's exit policy. ``True`` (the
     default): the scan's teardown always waits for a page pull already in
-    flight, so no enumeration worker survives it - required for an app that
-    may catch ``KeyboardInterrupt`` and keep using the process. ``False``: a
-    ``KeyboardInterrupt`` unwind abandons the daemon prefetch worker instead
-    of waiting (an in-flight network pull can otherwise hold the exit for a
-    full timeout) - only for an app that treats Ctrl-C as process-fatal. It
-    scopes to the interrupt alone: every other exit, ``SystemExit`` included
-    (``sys.exit()`` requests an orderly termination), reclaims fully. The
-    high-level operations overlay it from ``S3(reusable_after_interrupt=...)`` - the
-    application declares the posture once there - so it reaches every scan an
-    operation starts; set it here only when calling ``Storage.scan`` directly.
+    flight, so no enumeration worker survives it. ``False``: on any early end the
+    worker is told to stop and left to end by itself, a daemon that starts no
+    further pull, since a pull in flight can otherwise hold the exit for a full
+    timeout. The high-level operations overlay it from
+    ``S3(reusable_after_interrupt=...)`` - the application declares the posture
+    once there - so it reaches every scan an operation starts; set it here only
+    when calling ``Storage.scan`` directly.
 
     ``read_ahead`` is whether ``scan`` may read pages ahead of the consumer.
     ``True`` (the default) runs the page producer on a background worker, so the

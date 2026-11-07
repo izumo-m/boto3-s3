@@ -274,6 +274,10 @@ class S3Deleter:
         with S3Deleter(storage, on_result=cb) as deleter:
             for info in storage.scan(S3ScanOptions(recursive=True)):
                 deleter.submit(info)
+
+    ``reusable_after_interrupt=False``: a ``KeyboardInterrupt`` leaves the
+    context at once. The batch in flight finishes behind the caller, starts no
+    further per-key request and reports nothing, and the worker ends by itself.
     """
 
     def __init__(
@@ -291,6 +295,7 @@ class S3Deleter:
         session: Session | None = None,
         crt_endpoint: str | None = None,
         crt: CrtClientOptions | None = None,
+        reusable_after_interrupt: bool = True,
     ) -> None:
         # Runtime guard for untyped callers (e.g. S3.resolve routing a bare
         # "bucket/key" to LocalStorage): fail inside the taxonomy, not with an
@@ -355,6 +360,11 @@ class S3Deleter:
         # batch in flight starts no further per-key request. Written on the
         # caller's thread, read on the workers'.
         self._abandoned = False
+        self._reusable_after_interrupt = reusable_after_interrupt
+        # Set when an interrupt leaves at once (`_leave_on`): nothing waits for
+        # the worker any more and it reports nothing. Written on the caller's
+        # thread, read on the worker's.
+        self._left = False
 
         self._buffer: list[FileInfo] = []
         self._pending: Future[None] | None = None  # at most one in-flight batch
@@ -408,7 +418,14 @@ class S3Deleter:
         # A body exception abandons the unsent buffer but still waits for the
         # in-flight batch; a worker error raised here then propagates with the
         # body exception chained as __context__.
+        self._leave_on(exc)
         self.close(flush=exc_type is None)
+
+    def _leave_on(self, exc: BaseException | None) -> None:
+        """Leave at once if *exc* is an interrupt under ``reusable_after_interrupt=False``."""
+        if isinstance(exc, KeyboardInterrupt) and not self._reusable_after_interrupt:
+            self._abandoned = True
+            self._left = True
 
     def close(self, *, flush: bool = True) -> None:
         """Flush (unless ``flush=False`` or the token is cancelled), wait for
@@ -432,21 +449,23 @@ class S3Deleter:
             # interrupt, the caller's own choice - abandons the run.
             self._abandoned = True
         try:
-            if flush and not self._cancelled():
-                self.flush()
-            self._wait_pending()
-        except BaseException:
+            if not self._left:
+                if flush and not self._cancelled():
+                    self.flush()
+                self._wait_pending()
+        except BaseException as exc:
             # Interrupted (Ctrl-C lands here when the last batch is the one in
             # flight) or re-raising a worker error: either way the run is
             # abandoned from this point, and the shutdown below must not wait
             # for re-sends that have not gone out.
             self._abandoned = True
+            self._leave_on(exc)
             raise
         finally:
             self._closed = True
             self._buffer = []  # non-empty only when flush=False or flush() raised
             if self._executor is not None:
-                self._executor.shutdown(wait=True)
+                self._executor.shutdown(wait=not self._left)
 
     # -- submission --------------------------------------------------------
 
@@ -820,7 +839,7 @@ class S3Deleter:
         it, which is what makes the dryrun path's callback exception the
         caller's own.
         """
-        if self._on_result is not None:
+        if self._on_result is not None and not self._left:
             self._on_result(
                 delete_record(
                     info,

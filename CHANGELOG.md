@@ -5,6 +5,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `reusable_after_interrupt=False` now raises a `KeyboardInterrupt` at once with requests still out, the cleanup going on behind the caller: that `S3` is not used again and a new one works. `S3Deleter` takes it too.
 - `GlobFilter`'s builder is replaced by `Exclude` / `Include` rules compiled with `globsieve.compile`, which matches as `aws s3` does on every OS (absolute and Windows drive forms, Windows case and separators, a single source in `aws s3`'s form); `GlobPattern`, `PatternKind`, `is_anchored` and the matcher classes are gone.
 - `cp`, `mv`, `sync` and `rm` now read the `[s3]` section of the AWS config file the way `aws s3` does, filling the transfer settings a `TransferConfig` leaves unset and picking the engine as `aws s3` picks it; `S3.resolve_transfer_config` returns the config a run would use.
 - An exception from `on_progress` now ends the run and reaches the caller as it is, like one from `on_result`, instead of failing the item it reported on.
@@ -25,7 +26,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - More code that only reproduced `aws s3`'s error details or made up for an older SDK or Python is gone: when two things are wrong the other may be reported, the service root reads as `s3:///` however it is typed, and a boto3 too old for the `DEFAULTS` table keeps its own `max_io_queue`.
 - `website` reads a string target as `aws s3 website` reads its argument: the bucket name whole, a key no longer ignored but refused by botocore with the rest of the name.
 - On Windows, a classic-engine download now replaces its destination in one step instead of removing it first, so two downloads whose names differ only in case rarely make one fail; where Windows refuses that, the download ends as `aws s3`'s does.
-- With awscrt installed, a classic upload or `S3Storage.put_file` whose read fails while botocore signs the request now fails with the read's own error instead of awscrt's `AWS_ERROR_UNKNOWN`, and awscrt no longer writes a traceback for it.
 - Responses outside S3's API are no longer checked; `MalformedResponseError` and `S3ScanOptions.include_common_prefixes` are removed.
 - `ChecksumComparison()` no longer takes `s3, src, dest`: it reaches each S3 side through the entry's `storage`; `mv` deletes a downloaded or copied source through `Storage.delete` as it does an uploaded one; and warnings and notices about an item carry its entry as `src_info`: `Warner.warn` / `notice` take `info=` in place of `key=`, and `Transferrer.warn` / `notice` are removed (use `Transferrer.warner`).
 - `ChecksumComparison` now compares objects stored with a `SHA512`, `MD5` or `XXHASH` checksum (an upload or download of an `XXHASH` one needs the `crt` extra) instead of copying them every run.

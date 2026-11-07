@@ -34,7 +34,6 @@ import boto3
 from typing_extensions import Self, Unpack
 
 from boto3_s3 import (
-    concurrency,
     crtsupport,
     producers,
     requestparams,
@@ -335,72 +334,19 @@ def _raise_if_cancelled(cancel_token: CancelToken | None, operation: str) -> Non
 
 
 @contextmanager
-def _scan_teardown(entries: object, *, reusable_after_interrupt: bool) -> Generator[None]:
-    """Close a consumed scan on exit, honoring the process-fatal posture.
+def _closing_scans(*scans: object) -> Generator[None]:
+    """Close consumed scans on every exit, in the order given.
 
-    ``ls`` / ``rm`` consume a scan outside `prefetch`'s own pull, so a
-    ``KeyboardInterrupt`` landing in their loop bodies (``on_entry``, a
-    deleter submission wait) never unwinds through the prefetch context -
-    the scan's teardown arrives as a plain ``GeneratorExit``, which always
-    joins the page worker. Under ``reusable_after_interrupt=False`` that join is
-    exactly what the posture forbids, so the interrupt is marked
-    (`concurrency.mark_interrupt_unwinding`) *before* the close runs and the
-    teardown abandons the worker instead.
-
-    The caller must iterate a scan it bound to a local, never a bare
-    ``for info in storage.scan(...)`` temporary: an exception unwinding the
-    frame finalizes an unreferenced temporary while it clears the loop's
-    stack - before any handler runs - so the worker would be joined ahead of
-    the mark.
+    A close stops the scan's prefetch worker, and joins it unless the run is
+    under ``reusable_after_interrupt=False`` (`concurrency.prefetch`).
     """
     try:
         yield
-    except KeyboardInterrupt:
-        if not reusable_after_interrupt:
-            concurrency.mark_interrupt_unwinding()
-        raise
     finally:
-        close = getattr(entries, "close", None)
-        if close is not None:
-            close()
-
-
-@contextmanager
-def _producer_teardown(
-    *producers: Generator[object, None, None], reusable_after_interrupt: bool
-) -> Generator[None]:
-    """Close a transfer run's producers on exit, honoring the process-fatal posture.
-
-    ``cp`` / ``mv`` (`S3._run_transfer`) and ``sync`` (its two side scans)
-    close their producers - joining their scan prefetch workers - on every
-    exit but one: under ``reusable_after_interrupt=False`` a
-    ``KeyboardInterrupt`` skips the close, since the unwind must not wait on
-    an in-flight page pull (`S3` docstring), and marks the unwind instead
-    (`concurrency.mark_interrupt_unwinding`). The interrupt may have landed
-    outside the scan's own pull (a submission wait, a result callback), so
-    the producers' eventual teardown - the interpreter finalizes them once
-    the traceback holding the caller's frame is released - arrives as a plain
-    ``GeneratorExit``; marked, it abandons the page worker instead of joining
-    it. Producers close in the order given.
-
-    `_scan_teardown` (``ls`` / ``rm``) closes after marking instead, which
-    the mark turns into an abandon at once; folding the two would move these
-    producers' teardown on a fatal Ctrl-C from the traceback's release into
-    the unwind itself, so they stay apart. Where the close lands relative to
-    the engine's own exit is the caller's placement.
-    """
-    interrupted = False
-    try:
-        yield
-    except KeyboardInterrupt:
-        interrupted = True
-        if not reusable_after_interrupt:
-            concurrency.mark_interrupt_unwinding()
-        raise
-    finally:
-        if reusable_after_interrupt or not interrupted:
-            for producer in producers:
-                producer.close()
+        for scan in scans:
+            close = getattr(scan, "close", None)
+            if close is not None:
+                close()
 
 
 def _is_folder_marker(info: FileInfo) -> bool:
@@ -604,24 +550,37 @@ class S3:
     ``S3Storage(uri, client=...)`` - never share a client, never build clients
     concurrently.
 
-    ``reusable_after_interrupt`` declares the application's Ctrl-C posture, once, for
-    every operation this instance starts a scan for - ``ls``, ``rm``, the
-    ``cp`` / ``mv`` transfers and ``sync``. The operations with no enumeration
-    to reclaim (``mb`` / ``rb`` / ``presign`` / ``website``, and the streaming
-    ``cp`` route) never consult it. ``True`` (the default): a
-    ``KeyboardInterrupt`` propagates only after the operation has reclaimed
-    all of its resources (enumeration workers joined), so an app that catches
-    the interrupt can keep calling operations. ``False``: the app treats
-    Ctrl-C as process-fatal, so the unwind may abandon a scan's daemon
-    prefetch worker instead of waiting out an in-flight listing page pull
-    (the CLI's setting - ``aws`` dies immediately on Ctrl-C). Either way the
-    interrupt itself is re-raised, never converted or swallowed - on the CRT
-    engine too, whose manager would discard one landing in its transfer
-    drain (design/crt.md section 6). The posture scopes to
-    ``KeyboardInterrupt`` alone - ``SystemExit`` and every other exception
-    always get the full reclamation (``sys.exit()``
-    requests an *orderly* termination). The posture reaches the scans through
-    ``ScanOptions.reusable_after_interrupt``.
+    ``reusable_after_interrupt`` declares what a Ctrl-C does, once, for every
+    operation this instance runs. ``mb`` / ``rb`` / ``presign`` / ``website``
+    have nothing running behind them and never consult it. ``True`` (the
+    default): a ``KeyboardInterrupt`` propagates only after the operation has
+    reclaimed all of its resources, so an app that catches the interrupt can keep
+    calling operations. ``False`` (the CLI's setting): it propagates at once,
+    since nothing can cancel a request already out and a server that does not
+    answer holds it for a full timeout. What has not started never starts,
+    ``on_result`` and ``on_progress`` are not called once the interrupt has reached
+    the caller (a ``filter`` already at work on a page finishes it), and the rest
+    of the cleanup - a multipart upload
+    aborted, a temporary file removed, the threads ended - goes on behind the
+    caller for as long as the process lives. This instance is not used again
+    (what it then does is not specified); a new ``S3`` works.
+
+    Either way the interrupt itself is re-raised, never converted or swallowed -
+    on the CRT engine too, whose manager would discard one landing in its
+    transfer drain (design/crt.md section 6). One the library never sees can still
+    be lost: in awscrt's request signer reading a body on the calling thread,
+    which turns it into its own error (design/transfer.md section 9), or in a
+    callback or finalizer the interpreter runs itself. Under either value, on the
+    CRT engine, a multipart upload whose ``CreateMultipartUpload`` is still out when
+    the cancel comes stays open: awscrt does not abort it. On Windows before Python
+    3.14, the calling thread's wait on a lock cannot be interrupted, so the
+    interrupt comes only when that wait ends.
+
+    The posture is about ``KeyboardInterrupt``: ``SystemExit`` and every other
+    exception wait for the transfers and deletes under either value, though under
+    ``False`` no early end of a scan waits for a listing page already in flight
+    (``ScanOptions.reusable_after_interrupt``), whose ``filter`` calls and ``WARNED``
+    records can then come after the operation has raised.
 
     ``crt`` is the CRT transfer engine's own client settings
     (`CrtClientOptions`): whether an explicit ``'crt'`` preference may run
@@ -1121,7 +1080,8 @@ class S3:
 
         `cancel_token` may be cancelled from `on_entry` or another thread.
         Cancellation stops entry delivery, drops prefetched pages, waits for a
-        page request already in progress, reclaims the prefetch worker (the
+        page request already in progress (not under
+        ``reusable_after_interrupt=False``), reclaims the prefetch worker (the
         object listing's machinery; the service-root bucket listing iterates
         its pages directly, so cancellation there just stops between pages),
         and then
@@ -1154,7 +1114,7 @@ class S3:
         # The listing is the storage's, which cannot know the operation reading
         # it: a family error fetching an entry raises unnamed is this ls's
         # (`_attributed_entries`); what `on_entry` raises is the caller's own.
-        with _scan_teardown(items, reusable_after_interrupt=self._reusable_after_interrupt):
+        with _closing_scans(items):
             for info in _attributed_entries(items, "ls"):
                 if cancel_token is not None and cancel_token.cancelled:
                     break
@@ -1519,6 +1479,7 @@ class S3:
             cancel_token=cancel_token,
             capture_response=capture_response,
             crt=self._crt,
+            reusable_after_interrupt=self._reusable_after_interrupt,
         )
         # The case-conflict gate's mode is a set-up check on every route; the
         # gate itself is built below, once the destination directory exists.
@@ -1604,12 +1565,12 @@ class S3:
                     operation=operation,
                     reusable_after_interrupt=self._reusable_after_interrupt,
                 )
-            # Close the producer (joining its scan prefetch worker) before
+            # Close the producer (stopping its scan prefetch worker) before
             # Transferrer.__exit__ shuts down and unregisters the capture
             # handlers - the teardown mirror of prepare()'s
             # register-before-enumeration ordering, so no listing traffic
             # emits on the client during the deregistration.
-            with _producer_teardown(items, reusable_after_interrupt=self._reusable_after_interrupt):
+            with _closing_scans(items):
                 # Check cancellation *before* pulling the next item, not after:
                 # pulling only while the run is live keeps a cancelled run from
                 # enumerating and materializing items it will never submit - the
@@ -1762,6 +1723,7 @@ class S3:
                 cancel_token=cancel_token,
                 capture_response=capture_response,
                 crt=self._crt,
+                reusable_after_interrupt=self._reusable_after_interrupt,
             )
         except BaseException:
             # No transfer will release the fileobj: an opened source may hold
@@ -2156,9 +2118,11 @@ class S3:
             cancel_token=cancel_token,
             capture_response=capture_response,
             crt=self._crt,
+            reusable_after_interrupt=self._reusable_after_interrupt,
         )
         deletes = SyncDeletes(
             dest_storage,
+            reusable_after_interrupt=self._reusable_after_interrupt,
             request_payer=options.get("request_payer"),
             dryrun=dryrun,
             on_result=on_result,
@@ -2217,13 +2181,7 @@ class S3:
             # Close both sides' producers before the stack unwinds into
             # Transferrer.__exit__'s capture deregistration - the teardown
             # mirror of prepare()'s register-before-enumeration ordering.
-            stack.enter_context(
-                _producer_teardown(
-                    dest_entries,
-                    src_entries,
-                    reusable_after_interrupt=self._reusable_after_interrupt,
-                )
-            )
+            stack.enter_context(_closing_scans(dest_entries, src_entries))
 
             def submit_copy(pair: SrcOnlyPair | SyncPair) -> None:
                 item = producers.sync_transfer_item(
@@ -2263,6 +2221,7 @@ class S3:
                         else Lane(delete_decision.decide, deletes.submit, delete_decision.executor)
                     ),
                     cancel_token=cancel_token,
+                    reusable_after_interrupt=self._reusable_after_interrupt,
                 )
 
         _raise_if_cancelled(cancel_token, "sync")
@@ -2401,7 +2360,7 @@ class S3:
             # cancel_token on the scan too (like ls): the prefetch producer
             # stops between page pulls instead of fetching pages nobody reads.
             entries = storage.scan(options, cancel_token=cancel_token)
-            with _scan_teardown(entries, reusable_after_interrupt=self._reusable_after_interrupt):
+            with _closing_scans(entries):
                 # the listing's unnamed failure is this rm's; on_result's is not
                 for info in _attributed_entries(entries, "rm"):
                     _raise_if_cancelled(cancel_token, "rm")
@@ -2421,11 +2380,12 @@ class S3:
             session=self._crt.session,
             crt_endpoint=self._crt.endpoint,
             crt=self._crt.crt,
+            reusable_after_interrupt=self._reusable_after_interrupt,
         ) as deleter:
             # cancel_token on the scan too (like ls): the prefetch producer
             # stops between page pulls instead of fetching pages nobody reads.
             entries = storage.scan(options, cancel_token=cancel_token)
-            with _scan_teardown(entries, reusable_after_interrupt=self._reusable_after_interrupt):
+            with _closing_scans(entries):
                 # the listing's unnamed failure is this rm's
                 for info in _attributed_entries(entries, "rm"):
                     _raise_if_cancelled(cancel_token, "rm")

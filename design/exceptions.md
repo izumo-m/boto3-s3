@@ -395,6 +395,4 @@ taxonomy rather than of the mapping:
   parents, which is why `InvalidValueError` and `InvalidConfigError` do not
   inherit their parents' codes.
 - **`CancelledError` has no exit code of its own.** rc 130 is not a mapping from
-  it: it comes from `main()`'s `KeyboardInterrupt` backstop, and only outside a
-  running transfer - inside one, cancellation is reported as a failed run
-  instead.
+  it: it comes from `main()`'s `KeyboardInterrupt` backstop.

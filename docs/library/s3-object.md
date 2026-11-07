@@ -28,11 +28,14 @@ S3(session=None, *, endpoint_url=None, config=None,
   / `rm` (for `rm`, the engine its deletes ride). Any call can override it.
 - **`reusable_after_interrupt`** — how Ctrl-C is handled: clean up first, or exit fast.
   `True` (the default) re-raises `KeyboardInterrupt` only after every resource
-  has been reclaimed, so the next operation still works. `False` treats Ctrl-C
-  as fatal to the process and lets the unwind abandon an in-flight listing page.
+  has been reclaimed, so the next operation still works. `False` re-raises it at
+  once, with requests still out: the cleanup goes on behind you, that `S3` is not
+  used again, and a new one works.
   Either way the interrupt is re-raised, never swallowed — on the CRT engine
-  too, whose manager would discard one landing in its transfer drain. Only
-  `KeyboardInterrupt` is affected — every other exception reclaims fully.
+  too, whose manager would discard one landing in its transfer drain. One the
+  library never sees can still be lost ([`S3`](../reference/s3.md)). Only
+  `KeyboardInterrupt` is affected — every other exception waits for the transfers
+  and deletes.
 - **`crt`** — the CRT transfer engine's own client settings, a
   `CrtClientOptions`. `None` (the default) keeps boto3's behavior, which
   derives them from the client in hand. Only reproducing `aws s3` needs it,

@@ -165,26 +165,16 @@ A few more members come with working defaults a custom backend normally keeps:
   storage's source-config — and a custom `scan_options_type` subclass — flows
   through the operations, not only an arg-less `scan()`. This is how an app
   configures the walk / listing once on the storage rather than per call.
-- **`ScanOptions.reusable_after_interrupt`** (not a `Storage` member) — the Ctrl-C
-  exit policy of `scan()`'s background page worker. `True` (the default): the
-  scan's teardown always waits for a page pull already in flight, so no worker
-  survives the operation — required for an app that may catch
-  `KeyboardInterrupt` and continue. `False`: a `KeyboardInterrupt` unwind
-  abandons the daemon worker instead of waiting (an in-flight network pull can
-  otherwise hold the exit for a full timeout) — only for an app that treats
-  Ctrl-C as process-fatal. The application declares the posture once, on
-  `S3(reusable_after_interrupt=…)`; every scan an operation starts receives it
-  through this field, and only a direct `Storage.scan` caller sets it here
-  itself. The CLI's `S3` declares `False`, matching aws-cli's immediate death on
-  Ctrl-C. It scopes to the interrupt alone: every other exit — exhaustion, an
-  early break, `SystemExit` (`sys.exit()` requests an orderly termination),
-  an ordinary exception — always waits (`concurrency.prefetch`). The interrupt
-  does not always unwind *through* the prefetch context (it can land in a
-  result callback or a submission wait, leaving the scan's teardown a plain
-  close), so the operations mark the unwind
-  (`concurrency.mark_interrupt_unwinding`, monotonic — the process is fatal by
-  declaration) and every posture-`False` teardown from then on abandons its
-  worker too.
+- **`ScanOptions.reusable_after_interrupt`** (not a `Storage` member) — the exit
+  policy of `scan()`'s background page worker. `True` (the default): the scan's
+  teardown always waits for a page pull already in flight, so no worker survives
+  the operation. `False`: on any early end the worker is told to stop and left to
+  end by itself, a daemon that starts no further pull (`concurrency.prefetch`),
+  since a pull in flight can otherwise hold the exit for a full timeout. The
+  application declares the posture once, on `S3(reusable_after_interrupt=…)`;
+  every scan an operation starts receives it through this field, and only a
+  direct `Storage.scan` caller sets it here itself. The CLI's `S3` declares
+  `False`.
 - **`sep: ClassVar[str]`** — the separator of the backend's path space (`"/"`;
   only `LocalStorage` overrides with the host `os.sep`). Keep the default: the
   `FileInfo.key` / `compare_key` contract is `/`-separated.

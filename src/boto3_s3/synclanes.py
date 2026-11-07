@@ -310,6 +310,7 @@ def run_sync_pairs(
     update_lane: Lane[SyncPair] | None,
     delete_lane: Lane[DestOnlyPair] | None,
     cancel_token: CancelToken | None,
+    reusable_after_interrupt: bool = True,
 ) -> None:
     """Drive ``S3.sync``'s pair loop, routing each pair to its lane.
 
@@ -413,6 +414,7 @@ def run_sync_pairs(
 
     cap = sum(_pool_window(pool) for pool in pools)
     pairs_iter = iter(pairs)
+    left = False
 
     def dispatch() -> bool:
         # Advance the stream, handling non-pooled lanes inline in compare-key
@@ -441,6 +443,14 @@ def run_sync_pairs(
                 submit()
             if dispatch():
                 inflight += 1
+    except KeyboardInterrupt:
+        if not reusable_after_interrupt:
+            # A Ctrl-C leaves at once: what is queued never runs, and a decision
+            # running ends by itself.
+            left = True
+            for future in pending:
+                future.cancel()
+        raise
     finally:
         # An exception from a decision, a lane action, or the pair producer must
         # not leave accepted predicates running after sync has cleaned up its
@@ -449,7 +459,7 @@ def run_sync_pairs(
         # `done()` also handles a plain `Future` cancelled before a waiter was
         # registered. Results are not read, preserving the error that triggered
         # this cleanup.
-        if pending:
+        if pending and not left:
             settle_pending(cancel=True)
 
 
@@ -479,8 +489,10 @@ class SyncDeletes:
         capture_response: bool = False,
         transfer_config: TransferConfig | None = None,
         crt: crtsupport.CrtPostures | None = None,
+        reusable_after_interrupt: bool = True,
     ) -> None:
         self._dest = dest_storage
+        self._reusable_after_interrupt = reusable_after_interrupt
         # What the deleter's client is chosen by (S3Deleter): the run's
         # TransferConfig and the S3 instance's CRT postures.
         self._transfer_config = transfer_config
@@ -539,6 +551,7 @@ class SyncDeletes:
                         session=self._crt.session,
                         crt_endpoint=self._crt.endpoint,
                         crt=self._crt.crt,
+                        reusable_after_interrupt=self._reusable_after_interrupt,
                     )
                 )
             self._deleter.submit(info)

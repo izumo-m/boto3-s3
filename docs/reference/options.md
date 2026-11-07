@@ -445,15 +445,12 @@ consuming thread under `read_ahead=False`), and because `sync` walks both of
 its sides through one sink the two walks can invoke it concurrently — keep it
 thread-safe.
 
-`reusable_after_interrupt` (default `True`) is the scan's Ctrl-C exit policy. `True`
+`reusable_after_interrupt` (default `True`) is the scan's exit policy. `True`
 makes the scan's teardown wait for a page pull already in flight, so no
-enumeration worker survives the scan — what an application that may catch
-`KeyboardInterrupt` and keep using the process needs. `False` lets a
-`KeyboardInterrupt` unwind abandon the daemon prefetch worker rather than wait,
-which matters when an in-flight network pull would otherwise hold the exit for
-a full timeout; it suits an application that treats Ctrl-C as process-fatal.
-The policy is scoped to `KeyboardInterrupt` alone — every other exit,
-`SystemExit` included, reclaims fully. The high-level operations overlay this
+enumeration worker survives the scan. `False` tells the daemon prefetch worker
+to stop and leaves it to end by itself on any early end, which matters when an
+in-flight network pull would otherwise hold the exit for a full timeout. The
+high-level operations overlay this
 field from `S3(reusable_after_interrupt=...)`, where the application declares the
 posture once ([`s3.md`](./s3.md)), so it reaches every scan they start; set it
 here only when calling `Storage.scan` directly.

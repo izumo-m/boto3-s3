@@ -342,12 +342,6 @@ itself mirrors aws-cli's `ResultProcessor`):
   total: the byte meter reads done over expected for the real transfers
   alone, and the two meters disagree mid-run and at the end.
 
-One more is in the result text itself rather than in its rendering:
-
-- **An interrupted `mv`'s record.** aws-cli can delete sources for which it
-  printed no `move:` line (measured); this command prints the line for every
-  source it deletes.
-
 The rest sit outside the pipeline:
 
 - **Help pages** are rendered from this CLI's own argparse parsers, while

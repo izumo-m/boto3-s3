@@ -91,7 +91,7 @@ from s3transfer.manager import TransferManager
 from s3transfer.upload import UploadSubmissionTask
 from s3transfer.utils import OSUtils
 
-from boto3_s3 import crtsupport, mimetable, requestparams, signingreads, transferconfig
+from boto3_s3 import crtsupport, mimetable, requestparams, transferconfig
 from boto3_s3.exceptions import (
     AccessDeniedError,
     Boto3S3Error,
@@ -180,9 +180,13 @@ _DONE_WORKERS_LIMIT = 128
 # (`_DoneWorkers.close`, `Transferrer._cancel_interrupted_crt_drain`).
 _WAIT_LOOK = 0.01
 
-# user_context slot holding the `__cause__` chain `_outcome` last took out of
-# the item's future, so its next call can tell which exceptions come again.
-_OUTCOME_KEY = "boto3_s3_outcome"
+# user_context slot saying an item's done subscribers have forgotten its future,
+# for a future that reaches tracking after them (`Transferrer._track_future`).
+_FORGOTTEN_KEY = "boto3_s3_forgotten"
+
+# The longest a wait goes between two looks at whether it should stop, where the
+# thing waited for wakes it at once (`Transferrer.__exit__`, `_DoneWorkers.run`).
+_WAIT_SLICE = 0.1
 
 _DEFAULT_MULTIPART_THRESHOLD = 8 * 1024 * 1024
 
@@ -322,36 +326,10 @@ def _outcome(future: Any) -> BaseException | None:
     failure branch and leave the item without a record.
     `Transferrer._record_failure` turns that outcome into CANCELLED and hands
     the interrupt back to the caller.
-
-    Each ``future.result()`` re-raises the stored exception, which adds its
-    frames to that exception's traceback, and an item has several
-    subscribers asking. For an HTTP error reply, the CRT engine's
-    ``result()`` instead raises a fresh translation (a ``ClientError``) each
-    time, from the same re-raised awscrt error. So the ``__cause__`` chain
-    taken out is kept in the item's ``user_context``, and an exception on it
-    that comes again gets back the traceback it had just before this call:
-    the ``result()`` frames show once on each, and frames another thread
-    added between calls (the caller re-raising an interrupt) stay. Frames it
-    adds during a call can be lost, which changes only how the traceback
-    reads. An exception a subscriber's ``set_exception`` stored instead is
-    new and keeps its frames. ``__context__`` is not followed: it can be an
-    interrupt still on its way out.
     """
-    kept: list[BaseException] = future.meta.user_context.get(_OUTCOME_KEY, [])
-    before = [(seen, seen.__traceback__) for seen in kept]
     try:
         future.result()
     except BaseException as exc:
-        chain: list[BaseException] = []
-        link: BaseException | None = exc
-        while link is not None and not any(link is seen for seen in chain):
-            chain.append(link)
-            for seen, traceback in before:
-                if seen is link:
-                    link.__traceback__ = traceback
-                    break
-            link = link.__cause__
-        future.meta.user_context[_OUTCOME_KEY] = chain
         return exc
     return None
 
@@ -1100,7 +1078,8 @@ class Transferrer:
     cancel means "drain accepted work", so submitted transfers still run to
     completion; immediate mode cancels them, and a non-`Exception` interrupt
     (Ctrl-C) uses the manager's direct cancellation path. Every accepted item
-    still gets its one result record under a cancellation: an item that never
+    (but for what a Ctrl-C leaves behind under ``reusable_after_interrupt=False``,
+    `__exit__`) still gets its one result record under a cancellation: an item that never
     ran - or was abandoned mid-flight - reports ``CANCELLED`` with a
     `CancelledError` naming the cause, while an in-flight request that
     completes despite the cancel reports its real outcome (s3transfer lets
@@ -1144,6 +1123,7 @@ class Transferrer:
         cancel_token: CancelToken | None = None,
         capture_response: bool = False,
         crt: crtsupport.CrtPostures | None = None,
+        reusable_after_interrupt: bool = True,
     ) -> None:
         if transfer_type not in (TransferType.UPLOAD, TransferType.DOWNLOAD, TransferType.COPY):
             raise ValidationError(
@@ -1221,14 +1201,15 @@ class Transferrer:
         self._on_result = on_result
         self._cancel_token = cancel_token
         self._capture_response = capture_response
+        self._reusable_after_interrupt = reusable_after_interrupt
+        # Set when an interrupt leaves at once (`__exit__`): the caller has gone
+        # on, so its callbacks get nothing more.
+        self._left = False
         # The caller's CRT engine postures (`S3`'s, documented on
         # crtsupport.create_crt_transfer_manager); the default is boto3's rules.
         self._crt = crt if crt is not None else crtsupport.CrtPostures()
         self._manager: Any = None
         self._capture: _ResponseCapture | None = None
-        # Whether the classic engine's client is watched for a body read that
-        # fails while awscrt signs it (`signingreads`), so __exit__ removes it.
-        self._signing_reads_kept = False
         self._lock = threading.Lock()
         self._futures_lock = threading.Lock()
         self._futures: set[Any] = set()
@@ -1293,6 +1274,54 @@ class Transferrer:
         exc: BaseException | None,
         tb: object,
     ) -> None:
+        """Drain submitted work; under ``reusable_after_interrupt=False`` no Ctrl-C waits for it.
+
+        Nothing can cancel a request already out, and a server that does not
+        answer holds it for a full timeout. So under that posture the shutdown
+        runs on a thread of its own, and this thread only watches it: a Ctrl-C
+        leaves at once, with the shutdown going on behind the caller, and
+        anything else takes the shutdown's own path and result. From that Ctrl-C
+        on, the caller's callbacks get nothing more.
+        """
+        interrupted = isinstance(exc, KeyboardInterrupt)
+        if interrupted and not self._reusable_after_interrupt:
+            self._left = True
+        if self._reusable_after_interrupt or self._manager is None:
+            self._shut_down(exc)
+            return
+        if interrupted:
+            self._shut_down_behind(exc)
+            return
+        try:
+            thread, raised = self._shut_down_behind(exc)
+            while thread.is_alive():
+                thread.join(_WAIT_SLICE)
+        except KeyboardInterrupt as interrupt:
+            self._left = True
+            # That shutdown may be draining, or may not have started: this one
+            # cancels, and repeating a shutdown changes nothing.
+            self._shut_down_behind(interrupt)
+            raise
+        if raised:
+            raise raised[0]
+
+    def _shut_down_behind(
+        self, exc: BaseException | None
+    ) -> tuple[threading.Thread, list[BaseException]]:
+        """Run `_shut_down` on its own thread: the thread, and a list for what it raises."""
+        raised: list[BaseException] = []
+
+        def shut_down() -> None:
+            try:
+                self._shut_down(exc)
+            except BaseException as failure:
+                raised.append(failure)
+
+        thread = threading.Thread(target=shut_down, name="boto3-s3-leaving", daemon=True)
+        thread.start()
+        return thread, raised
+
+    def _shut_down(self, exc: BaseException | None) -> None:
         """Drain submitted work, cancelling it when the exit requires that.
 
         Any exception cancels the accepted transfers, like aws-cli's manager
@@ -1366,8 +1395,6 @@ class Transferrer:
                     # unregister with stragglers in flight than to leave the handlers
                     # feeding its stores forever on a longer-lived client.
                     self._capture.unregister(self._client)
-                if self._signing_reads_kept:
-                    signingreads.unregister(self._client)
         # A Ctrl-C the CRT drain swallowed reaches the caller as the classic
         # manager's re-raise does: ahead of anything noted, and in place of
         # the exception that folded the run when it landed in that fold's
@@ -1458,11 +1485,14 @@ class Transferrer:
             self._cancel_initiated = True
             future.cancel()
         # A non-threaded manager may finish before submit() returns and before
-        # _ForgetFuture can remove it. Re-check after insertion to close that race.
-        if future.done():
+        # _ForgetFuture can remove it, and the CRT manager runs an item's done
+        # subscribers inside its submit when the item fails there, its future
+        # then never reporting done. Re-check after insertion to close both.
+        if future.done() or future.meta.user_context.get(_FORGOTTEN_KEY):
             self._forget_future(future)
 
     def _forget_future(self, future: Any) -> None:
+        future.meta.user_context[_FORGOTTEN_KEY] = True
         with self._futures_lock:
             self._futures.discard(future)
 
@@ -1504,7 +1534,7 @@ class Transferrer:
         one only, for `__exit__` to re-raise once the drain is over. The
         manager decides which transfers it cancels - the one whose wait the
         interrupt landed in, or every one still running - and the rest finish
-        and report their real outcomes, as on aws, but for a CRT move's items
+        and report their real outcomes, but for a CRT move's items
         whose source delete has not started (`_DoneWorkers`). A fold under the caller's
         own Ctrl-C comes through here too, with that interrupt, which
         `__exit__` then leaves to propagate as it is.
@@ -1664,6 +1694,8 @@ class Transferrer:
         s3transfer's callback runner, is dropped there and still reaches the
         caller through the note.
         """
+        if self._left:
+            return
         callback = self._on_result
         assert callback is not None  # only wired when the caller passed one
         try:
@@ -1686,6 +1718,8 @@ class Transferrer:
         ``SystemExit``) is left to propagate, so it cancels the item as one
         raised anywhere else in the transfer does.
         """
+        if self._left:
+            return
         callback = self._on_progress
         assert callback is not None  # only wired when the caller passed one
         try:
@@ -1772,9 +1806,10 @@ class Transferrer:
         self._track_from_queued(manager, subscribers)
         self._admit_capture(item)
         fileobj: Any = item.src_fileobj if item.src_fileobj is not None else src_path
-        if item.src_fileobj is not None and not isinstance(manager, TransferManager):
-            # The CRT engine reads the body on an awscrt thread (`_GuardedReader`);
-            # the completion reads back what the guard caught there.
+        if item.src_fileobj is not None:
+            # awscrt can read the caller's stream on a thread of its own, or on
+            # an s3transfer worker while it signs (`_GuardedReader`); the
+            # completion reads back what the guard caught there.
             guard = _GuardedReader(item.src_fileobj, self._note_raise, self._caller_thread)
             completion.stream_guard = guard
             fileobj = guard
@@ -2083,13 +2118,6 @@ class Transferrer:
             manager = self._create_crt_manager()
             if manager is None:
                 manager = self._create_classic_manager()
-                # botocore signs the classic engine's requests, with awscrt's
-                # signer when awscrt is importable: a part or file read failing
-                # while it signs reaches the item as the read's own exception,
-                # not as awscrt's AWS_ERROR_UNKNOWN and a traceback on stderr
-                # (`signingreads`). The CRT engine signs in awscrt's own client.
-                # Removed in __exit__ after the manager shuts down.
-                self._signing_reads_kept = signingreads.register(self._client)
             # Transfer-time breadcrumb: names the engine actually built for
             # this run (CRTTransferManager vs the classic TransferManager),
             # after any CRT->classic fallback. Lets --debug distinguish a real
@@ -2747,30 +2775,32 @@ class _StreamInterruptedError(RuntimeError):
 
 
 class _GuardedReader:
-    """A CRT upload's body that hands the caller's interrupt back, not to awscrt.
+    """A caller's upload stream that hands its interrupt back, not to awscrt.
 
-    awscrt reads an upload body from its own event-loop thread (its
-    ``InputStream`` duck-types ``read`` / ``readinto`` / ``seek``). A
-    ``BaseException`` outside ``Exception`` the caller's stream raises there
-    reaches awscrt's native layer as is: a ``SystemExit`` stalled the process
-    for good, and a ``KeyboardInterrupt`` became the request's
+    awscrt reads the body itself: on the CRT engine from its own event-loop
+    thread, and on the classic engine from an s3transfer worker while its
+    request signer hashes a signed payload (its ``InputStream`` duck-types
+    ``read`` / ``readinto`` / ``seek``). A ``BaseException`` outside
+    ``Exception`` the stream raises there reaches awscrt's native layer as is:
+    a ``SystemExit`` stalled the CRT engine for good and ended the process
+    under the signer, and a ``KeyboardInterrupt`` became the request's
     ``AWS_ERROR_UNKNOWN`` with the interrupt itself gone (measured). This view
     notes it for the calling thread (`Transferrer._note_raise`, re-raised by
     the next ``submit`` or ``__exit__``) and raises an ordinary exception in
     its place, which awscrt turns into that request's failure; it also keeps
     the interrupt (``interrupt``) for the item's completion, which records
     the item CANCELLED as every interrupted item is (`_Completion`). On the
-    calling thread itself (s3transfer positioning the body at submit) the
-    exception propagates unchanged. Every other attribute delegates to the
-    stream.
+    calling thread itself (s3transfer positioning the body at submit, and every
+    read under ``use_threads=False``) the exception propagates unchanged. Every
+    other attribute delegates to the stream.
 
-    An ordinary exception the stream raises on awscrt's thread (a text
+    An ordinary exception the stream raises where awscrt reads it (a text
     stream's ``UnicodeEncodeError``, an ``OSError``) reaches awscrt as is,
     and awscrt reports the request as ``AWS_ERROR_UNKNOWN``, dropping it.
     The last one is kept in ``failure`` - awscrt handles some on its own (a
     ``BlockingIOError`` meaning "no data yet") and fails the request on the
     first it does not, so the last is the cause - and the item fails with it
-    instead (`_Completion`), as it does on the classic engine.
+    instead (`_Completion`), as it does where nothing but the SDK reads it.
     """
 
     _GUARDED = frozenset({"read", "read1", "readinto", "readinto1", "seek", "tell"})
@@ -3083,9 +3113,10 @@ class _DoneWorkers:
     workers while each item's subscribers keep their order.
 
     - **The limit** (`_DONE_WORKERS_LIMIT`): ``run`` blocks awscrt's thread once
-      that many items are held, which slows the transfers down to the deletes.
-      Nothing here needs that thread to make progress: a source is deleted
-      through its own backend, on S3 through the botocore client.
+      that many items are held, which slows the transfers down to the deletes,
+      until the run orders a cancel. Nothing here needs that thread to make
+      progress: a source is deleted through its own backend, on S3 through the
+      botocore client.
     - **A cancel**: an item whose turn comes after the run ordered a cancel
       settles as cancelled instead of running, so its source stays beside the
       finished download, and the request that item would have sent never
@@ -3115,8 +3146,10 @@ class _DoneWorkers:
     def run(self, subscribers: list[Any], future: Any) -> None:
         """Hold one finished transfer's ``subscribers`` until a worker runs them."""
         with self._changed:
-            while self._held >= _DONE_WORKERS_LIMIT:
-                self._changed.wait()
+            # A cancel has the item settle as cancelled once a worker is free,
+            # and awscrt's thread is not to wait for that.
+            while self._held >= _DONE_WORKERS_LIMIT and not self._cancelled():
+                self._changed.wait(_WAIT_SLICE)
             self._held += 1
         claim = threading.Lock()
 

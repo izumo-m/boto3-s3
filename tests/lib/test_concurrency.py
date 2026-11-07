@@ -7,13 +7,13 @@ thread must be gone once the context manager exits (it joins on exit).
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 from collections.abc import Iterator
 
 import pytest
 
-from boto3_s3 import concurrency
 from boto3_s3.concurrency import prefetch
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.types import S3FileInfo, ScanOptions
@@ -129,25 +129,31 @@ def test_interrupt_can_abandon_a_stuck_page_pull() -> None:
         _drain_worker(release)
 
 
-def test_early_break_still_joins_with_reusable_after_interrupt_false() -> None:
-    # The opt-out is interrupt-scoped: GeneratorExit / normal exits keep the
-    # full teardown even when reusable_after_interrupt is False.
-    pages = ([i] for i in range(100_000))
-    with prefetch(pages, queue_size=2, reusable_after_interrupt=False) as it:
-        assert next(it) == 0
-    assert not _worker_alive()
+@pytest.mark.parametrize("exit_with", [None, SystemExit, ValueError])
+def test_no_early_exit_waits_for_a_pull_under_reusable_after_interrupt_false(
+    exit_with: type[BaseException] | None,
+) -> None:
+    # The opt-out covers every early exit, not only an interrupt: the worker is
+    # told to stop and ends by itself after the pull in flight.
+    pull_started = threading.Event()
+    release = threading.Event()
 
+    def pages() -> Iterator[list[int]]:
+        yield [1]
+        pull_started.set()
+        release.wait(10)
+        yield [2]
 
-def test_systemexit_still_joins_with_reusable_after_interrupt_false() -> None:
-    # The opt-out scopes to KeyboardInterrupt alone. sys.exit() requests an
-    # orderly termination, so a SystemExit unwind reclaims the worker like any
-    # ordinary exception even when reusable_after_interrupt is False.
-    pages = ([i] for i in range(100_000))
-    with pytest.raises(SystemExit):
-        with prefetch(pages, queue_size=2, reusable_after_interrupt=False) as it:
-            assert next(it) == 0
-            raise SystemExit(3)
-    assert not _worker_alive()
+    try:
+        with contextlib.suppress(SystemExit, ValueError):
+            with prefetch(pages(), queue_size=1, reusable_after_interrupt=False) as it:
+                assert next(it) == 1
+                assert pull_started.wait(5)
+                if exit_with is not None:
+                    raise exit_with
+        assert _worker_alive()
+    finally:
+        _drain_worker(release)
 
 
 def test_storage_scan_forwards_the_interrupt_policy() -> None:
@@ -192,43 +198,6 @@ def test_storage_scan_forwards_the_interrupt_policy() -> None:
         _drain_worker(release)
 
 
-def test_marked_interrupt_abandons_a_generator_exit_teardown() -> None:
-    # The interrupt does not always unwind through the prefetch context: when
-    # it lands in the consumer's loop body (ls's on_entry, rm's submission
-    # wait) the scan is merely closed - a GeneratorExit. The operation marks
-    # the unwind (`mark_interrupt_unwinding`) and a posture-False teardown
-    # then abandons the in-flight pull instead of joining it.
-    pull_started = threading.Event()
-    release = threading.Event()
-
-    def pages() -> Iterator[list[int]]:
-        yield [1]
-        pull_started.set()
-        release.wait(10)  # the slow in-flight pull
-        yield [2]
-
-    try:
-        with prefetch(pages(), queue_size=1, reusable_after_interrupt=False) as it:
-            assert next(it) == 1
-            assert pull_started.wait(5)
-            concurrency.mark_interrupt_unwinding()
-        # The exit was a plain (non-interrupt) teardown, but the marker made
-        # it abandon: the worker is still inside the 10s pull.
-        assert _worker_alive()
-    finally:
-        _drain_worker(release)
-
-
-def test_the_marker_leaves_a_default_posture_teardown_joining() -> None:
-    # The marker relaxes posture-False contexts alone: full reclamation stays
-    # the default posture's contract even mid-fatal-unwind.
-    pages = ([i] for i in range(100_000))
-    concurrency.mark_interrupt_unwinding()
-    with prefetch(pages, queue_size=2) as it:
-        assert next(it) == 0
-    assert not _worker_alive()
-
-
 class _BlockingScanStorage(S3Storage):
     """An S3Storage whose second page pull blocks until released."""
 
@@ -253,10 +222,8 @@ def _interrupt_on_second(counter: dict[str, int]) -> None:
 
 
 def test_ls_honors_the_posture_when_the_interrupt_lands_in_on_entry() -> None:
-    # The consumer-side windows: an interrupt raised from `on_entry` never
-    # unwinds through the prefetch context, so before the operations marked
-    # the unwind, ls's close joined the 10s pull and held the interrupt back
-    # for its full length (measured pre-fix).
+    # An interrupt raised from `on_entry` never unwinds through the prefetch
+    # context: the scan is merely closed, which must not join the 10s pull.
     from boto3_s3 import S3
 
     storage = _BlockingScanStorage("s3://bkt/prefix/")
@@ -274,9 +241,7 @@ def test_ls_honors_the_posture_when_the_interrupt_lands_in_on_entry() -> None:
 
 
 def test_rm_honors_the_posture_when_the_interrupt_lands_in_on_result() -> None:
-    # Same window on rm's loop - which additionally iterated its scan as a
-    # bare temporary, so the unwind finalized (and joined) it even before an
-    # `except` could have marked anything (measured pre-fix).
+    # Same window on rm's loop.
     from boto3_s3 import S3
 
     storage = _BlockingScanStorage("s3://bkt/prefix/")
@@ -296,12 +261,9 @@ def test_rm_honors_the_posture_when_the_interrupt_lands_in_on_result() -> None:
         _drain_worker(storage.release)
 
 
-def test_transfer_teardown_abandons_after_the_interrupt_is_marked() -> None:
-    # cp/mv/sync already delivered the interrupt promptly (their guard skips
-    # the close), but releasing the traceback finalized the producer and its
-    # teardown joined the pull inside the caller's own interrupt handler
-    # (measured pre-fix). With the unwind marked, the deferred finalization
-    # abandons the worker too.
+def test_transfer_teardown_does_not_wait_for_a_pull() -> None:
+    # Neither closing the producer in the unwind nor finalizing what is left of
+    # it once the traceback is released may join the pull.
     import gc
     import tempfile
 
@@ -329,11 +291,31 @@ def test_transfer_teardown_abandons_after_the_interrupt_is_marked() -> None:
         _drain_worker(storage.release)
 
 
-def test_sync_teardown_abandons_after_the_interrupt_is_marked() -> None:
-    # sync enters the same `_producer_teardown` guard as `_run_transfer`, but
-    # on its ExitStack and with its two side scans - a separate site of the
-    # mark-then-skip decision, pinned here on its own (the deferred
-    # finalization must not join the pull the posture forbids waiting on).
+def test_an_interrupted_scan_stops_with_the_traceback_still_held() -> None:
+    # The operation closes the scan in the unwind: its worker, with pages left to
+    # pull for ever, must not wait for the traceback's release to learn to stop.
+    from boto3_s3 import S3
+
+    class _Endless(_BlockingScanStorage):
+        def scan_pages(self, options: ScanOptions) -> Iterator[list[S3FileInfo]]:
+            while True:
+                yield [
+                    S3FileInfo(key="prefix/a", size=1, compare_key="a"),
+                    S3FileInfo(key="prefix/b", size=1, compare_key="b"),
+                ]
+
+    storage = _Endless("s3://bkt/prefix/")
+    counter = {"n": 0}
+    with pytest.raises(KeyboardInterrupt) as held:
+        S3(reusable_after_interrupt=False).ls(
+            storage, on_entry=lambda info: _interrupt_on_second(counter)
+        )
+    _drain_worker(storage.release)
+    assert held.traceback is not None
+
+
+def test_sync_teardown_does_not_wait_for_a_pull() -> None:
+    # sync closes its two side scans on its ExitStack: a site of its own.
     import tempfile
 
     from boto3_s3 import S3
@@ -360,9 +342,7 @@ def test_sync_teardown_abandons_after_the_interrupt_is_marked() -> None:
 
 def test_rm_live_route_honors_the_posture_when_the_interrupt_lands_in_submit() -> None:
     # The non-dryrun rm consumes its scan through the S3Deleter loop - a
-    # separate `_scan_teardown` site from the dryrun loop the other rm test
-    # drives; a mutation reverting it to a bare for-temporary survived the
-    # suite until this test.
+    # separate site from the dryrun loop the other rm test drives.
     from boto3_s3 import S3
     from boto3_s3.deleter import S3Deleter
 
@@ -385,13 +365,8 @@ def test_rm_live_route_honors_the_posture_when_the_interrupt_lands_in_submit() -
 
 
 @pytest.mark.parametrize("exc_type", [SystemExit, ValueError])
-def test_ls_joins_on_exits_other_than_the_interrupt(exc_type: type[BaseException]) -> None:
-    # The posture scopes to KeyboardInterrupt alone at the operation level
-    # too: `_scan_teardown` must not mark a SystemExit or an ordinary
-    # exception, whose unwind keeps the full reclamation (worker joined)
-    # even under `reusable_after_interrupt=False`. The pull is short so the
-    # correct join stays fast; a mutation that widens the except abandons
-    # instead, leaving the worker alive at the assertion.
+def test_ls_joins_on_every_exit_by_default(exc_type: type[BaseException]) -> None:
+    # The default posture keeps the full reclamation: the worker is joined.
     from boto3_s3 import S3
 
     storage = _BlockingScanStorage("s3://bkt/prefix/", block=1.0)
@@ -404,7 +379,7 @@ def test_ls_joins_on_exits_other_than_the_interrupt(exc_type: type[BaseException
 
     try:
         with pytest.raises(exc_type):
-            S3(reusable_after_interrupt=False).ls(storage, on_entry=on_entry)
+            S3().ls(storage, on_entry=on_entry)
         assert not _worker_alive()
     finally:
         storage.release.set()

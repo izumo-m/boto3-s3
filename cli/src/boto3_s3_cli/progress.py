@@ -36,7 +36,7 @@ single thread renders in queue order, line ordering and the ``\\r`` padding
 protocol are exactly the single-threaded behavior. Use the printer as a
 context manager around the run: ``__exit__`` drains the queue and waits for
 the thread, so by the time the command returns every line has been written
-(a Ctrl-C there is held until then, as ``finish`` describes). A write the
+(a Ctrl-C leaves at once instead, dropping what is still queued). A write the
 stream refuses (``BrokenPipeError`` on a closed pipe) drops that one line and
 rendering goes on with the next record, as aws-cli's result processor does - the
 items' outcomes are unaffected, and a run that otherwise succeeded ends at 255
@@ -71,7 +71,7 @@ in-process tests capture the printer thread's output (rm precedent).
 
 from __future__ import annotations
 
-import _thread
+import contextlib
 import os
 import queue
 import sys
@@ -103,23 +103,9 @@ _QUEUE_MAX = 10_000
 # Queue sentinel: drain what remains, then stop the printer thread.
 _SHUTDOWN = object()
 
-# The longest a `_wait_set` waits between two looks for a Ctrl-C's handler.
+# The longest a wait in `TransferPrinter.finish` goes between two looks for a
+# Ctrl-C's handler, which runs between slices on Windows before Python 3.14.
 _WAKE_SLICE = 0.1
-
-
-def _wait_set(event: threading.Event, wake: _thread.LockType) -> None:
-    """Wait for *event*, woken by *wake* - the setter releases it after setting.
-
-    No ``Event.wait``: its Python-level ``Condition`` can be left half-taken
-    by an interrupt landing between its lock steps (the setter then blocks
-    for good), and a wait that holds Ctrl-Cs and goes on waiting keeps
-    reopening that window. A raw lock's timed acquire is one C call that
-    returns as soon as the setter releases, and lets a Ctrl-C's handler run
-    between slices on Windows before Python 3.14. The event's flag says
-    whether it is set.
-    """
-    while not event.is_set():
-        wake.acquire(timeout=_WAKE_SLICE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,15 +199,9 @@ class TransferPrinter:
         # a queue whose consumer is gone (see finish for the deadlock chain).
         self._finished = False
         # printer-thread-only state (no lock: one thread owns them), except
-        # _output_dead: set by finish() on a second Ctrl-C to stop the output
+        # _output_dead: set on a Ctrl-C to stop the output
         self._progress_length = 0
         self._output_dead = False
-        # Set when the printer thread leaves its loop, then _drained_wake
-        # released: finish() waits on the pair rather than on Thread.join
-        # (see finish).
-        self._drained = threading.Event()
-        self._drained_wake = _thread.allocate_lock()
-        self._drained_wake.acquire()
 
     @property
     def wants_progress(self) -> bool:
@@ -237,60 +217,51 @@ class TransferPrinter:
         self._thread.start()
         return self
 
-    def __exit__(self, *exc: object) -> None:
+    def __exit__(self, exc_type: type[BaseException] | None, *_exc: object) -> None:
+        if exc_type is not None and issubclass(exc_type, KeyboardInterrupt):
+            # The process is about to end (`cli._end_interrupted`).
+            self._stop_output()
+            return
         self.finish()
+
+    def _stop_output(self) -> None:
+        """Drop what is queued, and let the daemon printer end when it can."""
+        self._thread = None
+        self._finished = True
+        self._output_dead = True
+        with contextlib.suppress(queue.Full):
+            self._queue.put_nowait(_SHUTDOWN)
 
     def finish(self) -> None:
         """Drain the queue and stop the printer thread (idempotent).
 
-        A Ctrl-C here lands past the run, where aws-cli's recorder waits for its
-        printer: the interrupt escapes to aws-cli's dispatcher (rc 130) while that
-        ordinary thread still writes every queued line (measured). So the
-        first interrupt is held and the wait goes on with the output alive;
-        a second one stops the output and still waits for the printer to
-        reach the shutdown marker (one write at most - a daemon left writing
-        can abort the process at interpreter shutdown, `Fatal Python error:
-        _enter_buffered_busy`); a third gives up on a printer wedged on a
-        stalled stream. The held interrupt is raised once the printer is
-        done.
-
-        Nothing on this thread takes a Python-level lock while interrupts may
-        land - an interrupt between a ``Condition``'s lock steps leaves the
-        lock held (the other side then blocks for good) or released twice.
-        So the shutdown marker goes in from a throwaway low-level thread (the
-        put blocks while a stalled printer has the queue full), and the wait
-        is `_wait_set`'s on the event the printer sets - not ``Thread.join``,
-        which on Python 3.10 to 3.12 marks a thread finished when interrupted
-        while it runs, and not ``Event.wait``.
+        It waits in slices, so a Ctrl-C ends the wait even with the printer
+        stalled on a reader that stopped reading: the put blocks while the
+        printer has the queue full, and the join for as long as its write does.
         """
         thread = self._thread
         if thread is None:
             return
-        self._thread = None
         # From here the callbacks drop records instead of enqueueing (guards
         # in on_result/on_progress): with the drain thread gone, a blocking
         # put on the bounded queue would never be consumed - and an abandoned
         # scan worker (its generator awaiting finalization after a fatal) can
         # keep warning long after the run's records were drained. A worker
-        # wedged in put() at ~10k would then deadlock the prefetch join at
-        # generator close.
+        # wedged in put() at ~10k would never end.
         self._finished = True
-        interrupt: KeyboardInterrupt | None = None
-        marked = False
-        while True:
-            try:
-                if not marked:
-                    _thread.start_new_thread(self._queue.put, (_SHUTDOWN,))
-                    marked = True
-                _wait_set(self._drained, self._drained_wake)
-                break
-            except KeyboardInterrupt as exc:
-                if interrupt is None:
-                    interrupt = exc
-                elif not self._output_dead:
-                    self._output_dead = True
-                else:
-                    raise
+        try:
+            while True:
+                try:
+                    self._queue.put(_SHUTDOWN, timeout=_WAKE_SLICE)
+                    break
+                except queue.Full:
+                    continue
+            while thread.is_alive():
+                thread.join(_WAKE_SLICE)
+        except KeyboardInterrupt:
+            self._stop_output()
+            raise
+        self._thread = None
         # Discard anything that slipped in around the flag flip, freeing any
         # producer already blocked on a full queue; later stray puts find a
         # queue with room and simply go unread.
@@ -299,8 +270,6 @@ class TransferPrinter:
                 self._queue.get_nowait()
             except queue.Empty:
                 break
-        if interrupt is not None:
-            raise interrupt
 
     # -- callbacks (worker / submitting threads: count and enqueue, never write) --
 
@@ -433,13 +402,6 @@ class TransferPrinter:
 
     def _drain(self) -> None:
         """Render queued records until shutdown, each one's write failure its own."""
-        try:
-            self._render_until_shutdown()
-        finally:
-            self._drained.set()
-            self._drained_wake.release()
-
-    def _render_until_shutdown(self) -> None:
         while True:
             record = self._queue.get()
             if record is _SHUTDOWN:

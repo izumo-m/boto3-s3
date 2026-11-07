@@ -323,12 +323,7 @@ class TestExitCodeShape:
                 ["rm", "s3://b/p/", "--recursive"], ctx=client_ctx(_AssertingPaginatorClient())
             )
 
-    def test_mid_run_ctrl_c_is_rc_1_cancelled_like_aws(self) -> None:
-        # aws-cli's shared result machinery converts a Ctrl-C after the operation
-        # starts into a cancelled run: rc 1 with one `cancelled: ctrl-c
-        # received` line (measured mid-rm on the pinned 2.36.40), never the
-        # dispatcher backstop's 130, which stays for the pre-pipeline spans.
-        # The rc is the match; the closing line is not.
+    def test_mid_run_ctrl_c_is_rc_130(self) -> None:
         class _InterruptPaginatorClient:
             def get_paginator(self, _name: Any) -> Any:
                 class _Paginator:
@@ -340,18 +335,18 @@ class TestExitCodeShape:
         result = run_cli_in_process(
             ["rm", "s3://b/p/", "--recursive"], ctx=client_ctx(_InterruptPaginatorClient())
         )
-        assert result.rc == 1
+        assert (result.rc, result.stdout) == (130, "")
         assert result.stderr == "cancelled: ctrl-c received\n"
 
     def test_ctrl_c_during_the_single_delete_prints_no_delete_line(self) -> None:
         # The interrupted delete's outcome is unknown, so its CANCELLED record
-        # has no line (docs/cli/aws-differences.md).
+        # has no line.
         class _InterruptDeleteClient:
             def delete_object(self, **_kwargs: Any) -> Any:
                 raise KeyboardInterrupt
 
         result = run_cli_in_process(["rm", "s3://b/k"], ctx=client_ctx(_InterruptDeleteClient()))
-        assert (result.rc, result.stdout) == (1, "")
+        assert (result.rc, result.stdout) == (130, "")
         assert result.stderr == "cancelled: ctrl-c received\n"
 
     def test_object_lambda_arn_stays_usage_error(self) -> None:
@@ -470,7 +465,7 @@ class TestScanInterruptPolicy:
     def test_the_cli_posture_reaches_the_listing_scan(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Ctrl-C is process-fatal in the CLI: the S3 the CLI builds declares
+        # A Ctrl-C ends the CLI's process: the S3 the CLI builds declares
         # reusable_after_interrupt=False once, and rm threads it into its recursive
         # listing scan's ScanOptions; the library default keeps waiting.
         import boto3_s3

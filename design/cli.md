@@ -476,13 +476,12 @@ numbers in the bold item labels below are that document's.
      lets CRT handle only the asymmetric SigV4a family. The library's `presign`
      signs a symmetric SigV4 URL with the pure-Python signer per call
      (`boto3_s3.s3._sigv4_presign`), leaving botocore's process-wide table alone; the
-     requests themselves sign with whichever signer the table holds. Where
-     awscrt's signer would hide a failure - a body read that raises while it
-     signs, which it reports as its own `AWS_ERROR_UNKNOWN` after writing a
-     traceback - the library keeps the read's exception from it
-     (transfer.md section 9); the other differences (awscrt's signer refuses
-     an empty region, and adds a lowercase `host` header) show only in an
-     error or an unusual environment and are not compensated.
+     requests themselves sign with whichever signer the table holds. A body
+     read that raises while awscrt's signer signs is reported as its own
+     `AWS_ERROR_UNKNOWN` after a traceback it writes itself (transfer.md section
+     9); the other differences (awscrt's signer refuses an empty region, and
+     adds a lowercase `host` header) show only in an error or an unusual
+     environment. None of them is compensated.
      Asymmetric SigV4a (MRAP ARNs
      and the like) is a domain where botocore itself requires awscrt: with the
      `crt` extra, the CRT signer handles it just as in aws-cli v2 (measured: an
@@ -958,9 +957,9 @@ side - because the library reads how a source is walked / listed from the storag
 itself (`default_scan_options`), not from a per-operation argument. `ls` / `rm`
 likewise build `S3Storage(uri, page_size=…)`. The CLI's Ctrl-C posture is
 declared once instead: `build_s3` constructs the command's `S3` with
-`reusable_after_interrupt=False` (Ctrl-C is process-fatal in the CLI, so a scan's
-exit must not wait for an in-flight listing page pull, matching aws-cli's
-immediate death - the library default keeps waiting), and the operations
+`reusable_after_interrupt=False` (Ctrl-C ends the process in the CLI, so an
+operation must not wait for a request already out - the library default keeps
+waiting), and the operations
 thread it into every scan they start ([`storage.md`](./storage.md) section 2).
 
 **streaming (`-`)**: src `-` = stdin upload, dest `-` = stdout download (passing
@@ -1095,19 +1094,11 @@ its validation (right after the missing-source check) and leaves it there when a
 later check refuses the run.
 **`finish_transfer` - wrapping the `--expected-size` conversion and `S3().cp`
 - is the in-pipeline boundary**: `BatchError` -> 1 (the `... failed:`
-lines have already been emitted by on_result), a `KeyboardInterrupt` -> one
-`cancelled: ctrl-c received` line + 1 (aws-cli's result machinery swallows a
-mid-run Ctrl-C into a cancelled run - measured mid-sync and mid-rm, 2.36.40;
-where its shutdown cancels no transfer - mid-listing, or only in-flight
-transfers that finish on their own - aws-cli writes a bare `fatal error: `
-instead, which says nothing, so the cancelled line is written there too
-(`transferargs._closing_line`); rm's span converts through the same `report_failed_run`, and the
-dispatcher's 130 backstop keeps the pre-pipeline spans - and the printer's
-final drain, which is past aws-cli's recorder span: a Ctrl-C there escapes to
-aws-cli's 130 while its
-printer thread writes every queued line, so `TransferPrinter.finish` holds
-the interrupt until the lines are out and then lets it reach the
-dispatcher, whatever the run ended with). Any other library exception ->
+lines have already been emitted by on_result; rm's span converts through the
+same `report_failed_run`). A `KeyboardInterrupt` passes at once, to the
+dispatcher's 130 backstop, as it does from anywhere else: the printer drops what
+is still queued, and a Ctrl-C in its drain does the same whatever the run ended
+with. Any other library exception ->
 a single `fatal error:` line + 1 (a single s3 src's HeadObject 404 = `Key "..."
 does not exist`, a listing error, a non-integer `--expected-size`, an absent
 stdin, and case-conflict `error` are also here; a malformed `--grants`, which
@@ -1121,16 +1112,16 @@ normal return is **2** if the warned count > 0, else 0.
 relative to cwd = aws-cli `relative_path`, the s3 side is `s3://...`), a `(dryrun) `
 prefix, failure `<transfer_type> failed: <src> to <dest> <err>` (stderr), warning `warning:
 <body>` (stderr, the body assembled by the library with aws-cli wording). A
-CANCELLED record (an item revoked by a fatal elsewhere or a Ctrl-C -
-opresult.md) prints **nothing** (a fatal mid-listing prints zero per-item
-lines for the cancelled set, as on `aws`), while every other record still
-prints and counts after it: a failure that settles after the cancel keeps
-its line and its cause, and a success that completed - an interrupted `mv`
-whose source is already deleted - keeps its `move:` line. aws-cli's
-`ResultProcessor` disables every handler once it has processed the first
-error result, so there those lines never print (an interrupted `mv` lost nine
-`move:` lines in each of four measured runs); a failure is reported here
-whatever happened around it (overview.md section 3). Progress
+CANCELLED record (an item revoked by a fatal elsewhere - opresult.md) prints
+**nothing** (a fatal mid-listing prints zero per-item lines for the cancelled
+set, as on `aws`), while every other record still prints and counts after it:
+a failure that settles after the cancel keeps its line and its cause, and a
+success that completed keeps its line. aws-cli's `ResultProcessor` disables
+every handler once it has processed the first error result, so there those
+lines never print; a failure is reported here whatever happened around it
+(overview.md section 3). A Ctrl-C ends the process at once, so nothing prints
+after it: a source deleted just before it may have no `move:` line, as on
+`aws`. Progress
 is `Completed <done>/<total> (<speed>/s) with <n> file(s) remaining`, overwritten
 with `\r` (**no isatty gate** = mixed into a pipe too, as in aws-cli. Goldens
 mask it). The suppression matrix is the same shape as rm: `--quiet` = no printer
@@ -1327,7 +1318,7 @@ reviewed with it.
 | code | condition | the name on the aws-cli side |
 |---|---|---|
 | 0 | Success. The `help` token / `--version` are also 0 | - |
-| 130 | Ctrl-C **outside the transfer pipeline** (`KeyboardInterrupt` reaching `main`'s backstop: a bare newline on stdout, no traceback), the printer's final drain after the run included (section 5.7). Inside the rm / cp / mv / sync pipeline span a Ctrl-C is instead a cancelled run - `cancelled: ctrl-c received`, rc 1, like aws-cli (section 5.7) | aws-cli's `InterruptExceptionHandler`, 128+SIGINT |
+| 130 | Ctrl-C, as a best effort (`KeyboardInterrupt` reaching `main`'s backstop: `cancelled: ctrl-c received` on stderr and `os._exit`, so no thread is waited for and nothing is flushed - `cli._end_interrupted`; the CLI installs no signal handler, overview.md section 3) | 128+SIGINT |
 | 1 | A subcommand-specific "no result" etc. (`ls` is a specified key / prefix with 0 entries), **all errors after the start of rm / cp / mv / sync / mb / rb** (below; the rm stage of `rb --force` is the 255 below) | the convention of the S3-family commands / a task failure of the transfer family |
 | 2 | **A transfer that completed with warnings only** (cp / mv / sync's glacier skip, an mtime stamp failure, an unreadable local file, etc. section 5.7) | a task warning of the transfer family |
 | 252 | A usage error (an unknown option = `Unknown options: ...`, an invalid choice / value), a client-side `ValidationError` | `PARAM_VALIDATION_ERROR_RC` |
@@ -1353,8 +1344,7 @@ Python 3.11 swallows the write's `OSError` (a page larger than the buffer would
 be lost at 0); a page stdout refuses ends at 255 either way - through `main`'s
 backstop when the write itself fails, through the final flush when the page
 was buffered.
-A Ctrl-C during the final flush ends at 130 with both streams pointed at the
-null device, so the exit's flush does not wait on the same reader again. A stdout that is
+A Ctrl-C during the final flush ends at 130 like any other. A stdout that is
 `None` (closed before the process started, `1>&-`) takes nothing and is left
 alone; the code is the work's. A stderr that cannot take an error report or
 be flushed, or that is `None` (`2>&-`), changes no code (`_write_error`
@@ -1464,8 +1454,7 @@ flow to `main()`'s `exit_code_for` (the 254 family). The catch is **positional,
 not by type**: aws-cli's recorder turns whatever the pipeline raises into an
 error result, so a failure outside the library's taxonomy is the same one `fatal
 error:` line at rc 1 as a `Boto3S3Error` (measured on both tools).
-`KeyboardInterrupt` keeps its own arm
-(the cancelled-run line above), the rest of the `BaseException` family passes,
+The `BaseException` family, `KeyboardInterrupt` included, passes,
 and `AssertionError` is re-raised - the same carve-out the dispatcher's backstop
 below makes. What becomes 252 is only a usage
 error before the operation begins (a non-s3 path, an ARN rejection, cp / mv's

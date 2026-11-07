@@ -177,7 +177,8 @@ from the enumeration, so a cancelled run stops listing promptly instead of
 paging on. What each cancellation mode guarantees for the transfer lane — a
 graceful drain, an immediate revocation — is specified with the token itself.
 Under either mode the call ends by raising `CancelledError` once the engine and
-the enumeration workers have been reclaimed.
+the enumeration workers have been reclaimed (a listing's worker ends by itself
+under `S3(reusable_after_interrupt=False)`).
 
 `transfer_config` overrides, for this call only, the `TransferConfig` the `S3`
 instance was constructed with; `None` uses that instance default, and a `None`

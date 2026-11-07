@@ -20,7 +20,6 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
 | `transfer.py` | `Transferrer`: the transfer engine proper that drives the classic / CRT transfer manager (the subject of this document). With `is_move` it deletes the source and reports MOVE (section 11). Engine selection is in section 2 / [`crt.md`](./crt.md) |
 | `transferconfig.py` | The public `TransferConfig` = a subclass of boto3's that adds the CRT tuning field `target_bandwidth` and `annotation_temp_dir` ([`crt.md`](./crt.md) section 2) |
 | `crtsupport.py` | CRT engine resolution (a faithful port of boto3 `boto3/crt.py` plus refinements). `should_use_crt` / `create_crt_transfer_manager` / lock, and `create_crt_request_sender` for the deletes on the same engine (`crtrequest.py`). The design is in [`crt.md`](./crt.md) |
-| `signingreads.py` | Keeps a request body's read failure away from awscrt's request signer, which would write a traceback and report its own `AWS_ERROR_UNKNOWN`: registered on botocore's public `before-sign` / `request-created` events of the classic engine's client for a run, and around `S3Storage.put_file`'s request (section 9) |
 | `pathresolver.py` | A port of aws-cli's `S3PathResolver` (resolves access point ARN / alias / MRAP to the real bucket; the s3control / sts client is injected). The building block for `S3.mv(validate_same_s3_paths=True)` (`S3._check_underlying_paths`) |
 | `comparator.py` | sync's pairing and the building blocks for its decisions (`Comparator` / the `MergedPair` pair shapes / `PairFilter` / combinators). The design is in [`sync.md`](./sync.md) |
 | `S3.cp` / `S3.mv` / `S3.sync` in `s3.py` | orchestration: path classification -> pre-validation -> enumeration -> gates (glacier / parent-ref / dryrun) -> submit -> `BatchError` aggregation (cp / mv share `_run_transfer`). mv adds a same-path guard and `is_move` ahead of that. sync forks the enumeration into two streams, inserts pair decisions in between, and shares the per-info item builder and the gates with cp |
@@ -146,6 +145,16 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   nothing of the kind, and the held items run. The wait looks at a count and
   sleeps: a Ctrl-C can land in it, and neither `Thread.join` (on Python 3.10 to
   3.12 it gives up on a thread when interrupted) nor a `Condition` survives one.
+- `reusable_after_interrupt=False`: a `KeyboardInterrupt` leaves at once. Nothing
+  can cancel a request already out, and a server that does not answer holds it
+  for a full timeout, so the shutdown below runs on a thread of its own and the
+  calling thread only watches it (`Transferrer.__exit__`). On an interrupt the
+  calling thread leaves and reporting stops. That thread cancels what has not
+  started and waits for what is out, so a multipart upload is aborted (but for
+  one awscrt is still creating, which it leaves open under either posture) and a
+  temporary file removed as far as the process lives, and a new `S3` works beside
+  it (measured on both engines, with a server not answering). Every other
+  exception gets the shutdown's own path and result.
 - context manager: on normal completion it drains (waits for submitted
   transfers). On **any exception** - a fatal in mid-enumeration included - it
   shuts down **cancelling**, by delegating to the s3transfer manager's own
@@ -839,21 +848,28 @@ dest-existence check for download. We ported the same three faces:
   importable, as botocore picks them; `presign` signs symmetric SigV4
   pure-Python, cli.md section 4) does not change with the transfer engine.
   awscrt's signer reads the request body itself wherever the payload is
-  signed (a plain-HTTP endpoint above all), and a read that raises there - a
-  disk error, the exception s3transfer's part reader raises to stop the
-  other parts of an upload that already failed, a Ctrl-C landing in the read
-  - would reach awscrt, which writes the traceback to stderr and fails the
-  request with its own `AWS_ERROR_UNKNOWN`, the exception gone. aws-cli's
-  pure-Python signer lets the exception out of the signing. So the classic
-  engine's client (for the run) and `put_file`'s one request are watched
-  (`signingreads`, on botocore's public `before-sign` and `request-created`
-  events): what a read raises while the request is signed is kept from the
-  signer, and right after the signing the request's own body is put back and
-  the kept exception raised - from the signing step, as the pure-Python
-  signer's comes, so the request is neither sent nor retried, an interrupt
-  cancels its item as anywhere else, and awscrt writes nothing. A body that
-  reads cleanly is signed and sent unchanged, as its own object (measured:
-  the signature, the headers and the bytes match an unwatched request).
+  signed (a plain-HTTP endpoint above all, or HTTPS with no checksum), and a
+  read that raises there - a disk error, the exception s3transfer's part reader
+  raises to stop the other parts of an upload that already failed or was
+  cancelled, a Ctrl-C landing in the read - reaches awscrt, which writes the traceback to stderr
+  and fails the request with its own `AWS_ERROR_UNKNOWN`, the exception gone.
+  aws-cli's pure-Python signer lets the exception out of the signing. This is
+  left as it is (overview.md section 3, the error rules): keeping the exception
+  from awscrt takes a wrapper around every request body, for a failure that
+  still fails its item and sets the exit code. So a read that first fails in the
+  signer is reported as `AWS_ERROR_UNKNOWN`, with its cause only in that traceback,
+  and a failed or interrupted multipart upload can write several tracebacks. On a
+  default plain-HTTP endpoint botocore's checksum reads the body first, so a read
+  that fails for good keeps its own error there; with no checksum
+  (`request_checksum_calculation=when_required`) every failing read is the
+  signer's. A Ctrl-C can be lost this way only where a signer reads the body on
+  the main thread, the one thread a Ctrl-C lands on: `put_file`, or a library
+  upload with `use_threads=False`. The item is then `FAILED`, not `CANCELLED`, and
+  the run goes on with its next item. The CLI does neither. A caller's stream is
+  guarded on either engine (`_GuardedReader`): what it raises off the calling
+  thread is kept and becomes the item's outcome. On the calling thread, under
+  `use_threads=False`, it still reaches awscrt, where a `SystemExit` ends the
+  process.
 
 ## 10. SDK version differences (not matched)
 

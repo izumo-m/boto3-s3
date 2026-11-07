@@ -120,13 +120,13 @@ class RmCommand(Command):
         inside the same result recorder cp / mv / sync's does - one rule,
         ``transferargs.report_failed_run``, derives the code of both):
         per-key failures
-        print ``delete failed:`` lines, a Ctrl-C prints one ``cancelled:
-        ctrl-c received`` line, anything else that kills the run (the
+        print ``delete failed:`` lines, anything else that kills the run (the
         listing rejecting the bucket or the page size, botocore validation)
         prints one ``fatal error:`` line - all suppressed by ``--quiet``
         with the exit codes kept. Nothing maps to 254 here. Ahead of all of
         that sit the client build and the ``[s3]`` runtime config, whose
-        failures stop the run before it starts (253 or 255 by kind).
+        failures stop the run before it starts (253 or 255 by kind). A Ctrl-C
+        is no failure of the run: ``main`` ends it at 130.
         """
         expand_positional_paramfile(args, "paths", name="paths", operation="rm")
         page_size = resolve_integer_option(args, "page_size", operation="rm")
@@ -165,11 +165,9 @@ class RmCommand(Command):
                 # the client they ride and its retry policy.
                 transfer_config=transfer_config,
             )
-        except BaseException as exc:
+        except Exception as exc:
             # By position rather than by type: aws-cli's rm runs inside the same
             # `CommandResultRecorder` cp/mv/sync do, which turns whatever
-            # escapes the pipeline into its closing line at rc 1 - a mid-run
-            # Ctrl-C included (measured mid-rm, 2.36.40), never the
-            # dispatcher's 130.
+            # escapes the pipeline into its closing line at rc 1.
             return transferargs.report_failed_run(exc, quiet=args.quiet)
         return 0

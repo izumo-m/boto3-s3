@@ -617,6 +617,10 @@ def _exit_code_for_unexpected(exc: BaseException) -> int:
     return _GENERAL_ERROR_RC
 
 
+# What a Ctrl-C reports, in aws-cli's words.
+_INTERRUPTED = "cancelled: ctrl-c received\n"
+
+
 def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
     """Parse ``argv``, dispatch to the requested subcommand, and return its exit code.
 
@@ -626,8 +630,8 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
     ``AssertionError`` - an internal bug - and a command-raised
     ``SystemExit``, whose orderly exit is honored) - argparse's ``SystemExit`` is
     absorbed downstream so usage errors map to aws-cli's 252, not argparse's 2,
-    and a Ctrl-C mirrors aws-cli's ``InterruptExceptionHandler``: a bare
-    newline on stdout and rc 130 (128+SIGINT), never a traceback. The
+    and a Ctrl-C that reaches here is one line on stderr and rc 130 (128+SIGINT)
+    (`_end_interrupted`). The
     standard streams are flushed before the code is returned
     (`_settle_std_streams`), so the code is the one the process ends with.
 
@@ -638,36 +642,56 @@ def main(argv: list[str] | None = None, *, ctx: Context | None = None) -> int:
     (`textencoding.decode_argv`). An ``argv`` given by a caller is taken as
     it is.
     """
-    if argv is None:
-        textencoding.configure_std_streams()
-        argv = textencoding.decode_argv(sys.argv[1:])
+    console = argv is None
     try:
-        rc = _main(argv, ctx)
-    except KeyboardInterrupt:
-        with contextlib.suppress(Exception):
-            sys.stdout.write("\n")
-        rc = 130
-    except AssertionError:
-        # An internal-invariant violation, kept loud (see `_run_command`).
-        raise
-    except Exception as exc:
-        # The rest of that chain: whatever escapes aws-cli's driver - not only a
-        # command - reaches its entry point's handlers and is reported there,
-        # never as a traceback. A command's failures are settled inside
-        # `_run_command`; this is the same mapping for the dispatcher's own
-        # steps, where an exception no step claims must still not surface as
-        # a traceback.
-        rc = _exit_code_for_unexpected(exc)
-        _write_error(exc, rc=rc)
-    try:
+        if argv is None:
+            textencoding.configure_std_streams()
+            argv = textencoding.decode_argv(sys.argv[1:])
+        try:
+            rc = _main(argv, ctx)
+        except AssertionError:
+            # An internal-invariant violation, kept loud (see `_run_command`).
+            raise
+        except Exception as exc:
+            # The rest of that chain: whatever escapes aws-cli's driver - not only a
+            # command - reaches its entry point's handlers and is reported there,
+            # never as a traceback. A command's failures are settled inside
+            # `_run_command`; this is the same mapping for the dispatcher's own
+            # steps, where an exception no step claims must still not surface as
+            # a traceback.
+            rc = _exit_code_for_unexpected(exc)
+            _write_error(exc, rc=rc)
         return _settle_std_streams(rc)
     except KeyboardInterrupt:
-        # A flush held up by a reader that stopped reading, cut short: what
-        # the streams still hold is dropped, or the interpreter's flush at
-        # exit would wait on the same reader again (or end at 120).
-        _discard(sys.stdout)
-        _discard(sys.stderr)
+        quiet = argv is not None and "--quiet" in argv
+        if console:
+            _end_interrupted(quiet=quiet)
+        # Called in-process (a test): the caller's process goes on.
+        if not quiet:
+            with contextlib.suppress(Exception):
+                sys.stderr.write(_INTERRUPTED)
         return 130
+
+
+def _end_interrupted(*, quiet: bool) -> NoReturn:
+    """End the console process at 130 with its threads left as they are.
+
+    Nothing can cancel a request already out, and the interpreter's own exit
+    would wait for it (design/overview.md section 3). So this waits for nothing
+    and flushes nothing: the line goes straight to the descriptor, past a stream
+    lock a stalled thread may hold. Each result line was flushed as it was
+    written (`output.uni_write`), so only lines still queued for the printer are
+    lost. A further Ctrl-C, which raises out of the write a full stderr holds up,
+    ends the process all the same. With no stderr (``2>&-``) descriptor 2 may be
+    another file, so nothing is written.
+    """
+    try:
+        if not quiet and sys.stderr is not None:
+            with contextlib.suppress(OSError):
+                # On a terminal the line may start where a progress meter stands.
+                os.write(2, (b"\n" if os.isatty(2) else b"") + _INTERRUPTED.encode())
+    finally:
+        os._exit(130)
 
 
 def _settle_std_streams(rc: int) -> int:
@@ -918,8 +942,8 @@ def _run_command(
         # (a failure is reported, not a traceback - design/overview.md
         # section 3).
         # KeyboardInterrupt / SystemExit are BaseException, not Exception, so
-        # they still propagate - a Ctrl-C reaches main's aws-cli-shaped backstop
-        # (a bare newline + rc 130, no traceback).
+        # they still propagate - a Ctrl-C reaches main's backstop (one line on
+        # stderr + rc 130, no traceback).
         rc = _exit_code_for_unexpected(exc)
         _write_error(exc, rc=rc)
         return rc

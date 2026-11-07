@@ -617,17 +617,12 @@ class TestStreaming:
         assert rc == 1
         assert "fatal error: maximum recursion depth exceeded" in captured.err
 
-    def test_mid_pipeline_ctrl_c_is_rc_1_cancelled_like_aws(
+    def test_mid_pipeline_ctrl_c_is_rc_130(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        # A Ctrl-C inside the pipeline span is aws-cli's cancelled run - rc 1
-        # with one `cancelled: ctrl-c received` line (measured mid-sync on
-        # the pinned 2.36.40), never the dispatcher backstop's 130, which
-        # stays for the pre-pipeline spans (test_exit_codes). The rc is the
-        # match; the closing line is not.
         (tmp_path / "a.txt").write_bytes(b"x")
 
         def interrupt(*_args: object, **_kwargs: object) -> object:
@@ -637,29 +632,9 @@ class TestStreaming:
         ctx, _ = _recording_ctx([])
         rc = cli.main(["cp", str(tmp_path), "s3://bucket/pre/", "--recursive"], ctx=ctx)
         captured = capsys.readouterr()
-        assert rc == 1
+        assert rc == 130
         assert captured.err == "cancelled: ctrl-c received\n"
         assert captured.out == ""
-
-    def test_mid_pipeline_ctrl_c_respects_quiet(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        # --quiet suppresses the cancelled line like the fatal-error line
-        # (aws-cli attaches no result printer under --quiet); the rc stays 1.
-        (tmp_path / "a.txt").write_bytes(b"x")
-
-        def interrupt(*_args: object, **_kwargs: object) -> object:
-            raise KeyboardInterrupt
-
-        monkeypatch.setattr("boto3_s3.localstorage.LocalFileGenerator.scan_children", interrupt)
-        ctx, _ = _recording_ctx([])
-        rc = cli.main(["cp", str(tmp_path), "s3://bucket/pre/", "--recursive", "--quiet"], ctx=ctx)
-        captured = capsys.readouterr()
-        assert rc == 1
-        assert captured.err == ""
 
     def test_expected_size_non_integer_ignored_off_the_stream_route(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -890,7 +865,7 @@ class TestSourceScanWiring:
     def test_the_cli_posture_reaches_the_source_scan(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Ctrl-C is process-fatal in the CLI: the S3 the CLI builds declares
+        # A Ctrl-C ends the CLI's process: the S3 the CLI builds declares
         # reusable_after_interrupt=False once, and the operation threads it into the
         # ScanOptions of every scan it starts (here the upload's source walk);
         # the library default keeps waiting.

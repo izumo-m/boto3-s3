@@ -545,6 +545,7 @@ S3Deleter(
     session: Session | None = None,
     crt_endpoint: str | None = None,
     crt: CrtClientOptions | None = None,
+    reusable_after_interrupt: bool = True,
 )
 ```
 
@@ -574,6 +575,11 @@ postures, with [`S3`](./s3.md#s3)'s meaning (`crt_endpoint` is its
 pass their instance's, and `sync` passes a classic config for an S3-to-S3 run,
 which `aws s3` always runs on its classic client. A `dryrun` deleter builds no
 engine.
+
+`reusable_after_interrupt=False` makes a `KeyboardInterrupt` leave the context at
+once: the batch in flight finishes behind the caller, reports nothing and starts
+no further per-key request, and the worker ends by itself. `S3.rm` and `sync` pass
+their instance's.
 
 `on_result` is a [`ResultCallback`](./results.md#resultcallback) receiving one
 [`OpResult`](./results.md#opresult) per dispatched entry — see

@@ -99,7 +99,7 @@ class Context:
 
         # Built as build_s3 builds the command's own - the session, the
         # region, the CRT client's settings, the local names, the
-        # process-fatal Ctrl-C posture, the cli_* format checks - with the
+        # Ctrl-C posture, the cli_* format checks - with the
         # clients the factories hand out.
         return build_s3(args, s3_class=InjectedClientS3)
 

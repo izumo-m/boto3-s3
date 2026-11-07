@@ -12,7 +12,7 @@ the command produces them is recorded in
 | 0 | The command succeeded. `help` and `--version` also exit 0. |
 | 1 | The operation failed after it started. |
 | 2 | A transfer finished with warnings but no failures. |
-| 130 | Interrupted with Ctrl-C outside a running transfer or delete. |
+| 130 | Interrupted with Ctrl-C. |
 | 252 | The command line was rejected. |
 | 253 | The environment cannot supply what the command needs. |
 | 254 | A request reached S3 and S3 returned an error. |
@@ -44,12 +44,6 @@ to stdout that stdout cannot take — full, or its reader gone, as in `cp
 s3://bucket/key - | head -c1` on an object larger than the pipe holds — is
 such a failure: `download failed: … [Errno 32] Broken pipe`.
 
-Ctrl-C during a running transfer or delete is also 1, with a
-`cancelled: ctrl-c received` line. `rb --force` is the
-exception: Ctrl-C during its listing or its deletions is 255, the code of a
-deletion that fails there (section 2), and during the bucket removal itself
-130 (below).
-
 `ls` uses 1 for its own "nothing to show" case: a key or prefix that matched no
 entries.
 
@@ -61,15 +55,27 @@ modification time that could not be stamped onto a downloaded file. Everything
 else transferred normally. Warnings count toward this code, failures do not —
 if anything failed, the code is 1.
 
-### 130 — Ctrl-C outside a running transfer or delete
+### 130 — Ctrl-C
 
-Ctrl-C before a `cp` / `mv` / `rm` / `sync` run has started, or while `ls`,
-`mb`, `website`, `presign` or `rb` is at work — a request already in flight
-included, and for `rb --force` once its objects are deleted — exits 130. Once a transfer or delete is running,
-Ctrl-C reports 1 instead (above). After the run has ended, while its result
-lines are still being written (a slow terminal or pipe), Ctrl-C lets every
-line out and then exits 130, as `aws` does; a second Ctrl-C stops the
-remaining lines.
+Ctrl-C ends the command at once, with `cancelled: ctrl-c received`
+on stderr (none with `--quiet`) and exit code 130. It waits for nothing, a server
+that does not answer included, but for that line: a stderr nobody reads can hold
+it until a second Ctrl-C. The line and the code are a best effort, not a
+guarantee: a Ctrl-C can be discarded when it lands in code Python runs by itself
+(a finalizer, say), can end the command with another code, and can leave part of
+a traceback on stderr. If the command goes on, press Ctrl-C again. On Windows
+before Python 3.14, the wait on a lock cannot be interrupted, so a Ctrl-C can take
+effect only when that wait ends. Result lines already written stay, in a terminal, a pipe or a file; ones
+not yet written are dropped.
+
+Because it stops at once, it can leave behind what a finished command would not:
+an unfinished multipart upload, which S3 charges for until it is aborted (a
+bucket lifecycle rule can do that), and a download's temporary file beside its
+destination. The object or file being transferred is not left half-written under
+its own name, and `mv` keeps its source unless the destination is in place.
+
+In the first moments of a command, while Python itself is still starting, what
+happens is Python's own.
 
 ### 252 — the command line was rejected
 

@@ -381,7 +381,7 @@ class TestScanInterruptPolicy:
     def test_the_cli_posture_reaches_the_listing_scan(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Ctrl-C is process-fatal in the CLI: the S3 the CLI builds declares
+        # A Ctrl-C ends the CLI's process: the S3 the CLI builds declares
         # reusable_after_interrupt=False once, and ls threads it into its listing
         # scan's ScanOptions; the library default keeps waiting.
         import boto3_s3

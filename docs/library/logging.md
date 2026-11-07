@@ -86,10 +86,12 @@ Operations write nothing to stdout or stderr. Progress, per-item outcomes and
 warnings all arrive through the callbacks described in
 [`results.md`](./results.md); rendering them is the application's job — which is
 exactly what the `boto3-s3` command does with them. One thing escapes this:
-on the CRT engine, when a stream an upload reads from raises, awscrt writes
-the exception's traceback to stderr itself (ending `Treating Python exception
-as error 3(AWS_ERROR_UNKNOWN)`). The item still fails and is reported as
-usual.
+when a body awscrt reads raises, awscrt writes the exception's traceback to
+stderr itself (ending `Treating Python exception as error 3(AWS_ERROR_UNKNOWN)`).
+That is a stream an upload reads from on the CRT engine, and any request body
+awscrt's signer reads where the payload is signed, a plain-HTTP endpoint above
+all, which a failed or interrupted multipart upload can show several times. The
+item is still reported as usual.
 
 Components that have something to say beyond their results log it under their
 own module name, such as `boto3_s3.deleter`. On its own the library attaches

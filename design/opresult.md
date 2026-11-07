@@ -141,27 +141,27 @@ transfer items like this:
 - work never accepted (a graceful cancel stops the submission loop before the
   next item) produces no record.
 
+Under `reusable_after_interrupt=False` a `KeyboardInterrupt` is handed back at
+once and nothing more is reported: an item not settled by then has no record
+(`Transferrer.__exit__`, `S3Deleter`).
+
 `rm`'s blind single-key delete (one request, no engine) sends its request on
 the calling thread. An interrupt landing while it is out leaves at once: the
 item is `CANCELLED` and the interrupt is raised to the caller, as for an item
-abandoned mid-flight. aws-cli sends it on a transfer-manager worker whose
-shutdown waits for it and prints its line; that wait is not copied
-([`aws-differences.md`](../docs/cli/aws-differences.md)).
+abandoned mid-flight.
 
 On the CRT engine, a revocation surfaces as awscrt's `AWS_ERROR_S3_CANCELED`
 rather than s3transfer's `CancelledError`, and it reports `CANCELLED` (with
 the error carrying awscrt's cancellation wording) when the run ordered the
 cancel: its `CancelToken` (the token's own `CancelledError` surfacing through
 the submission loop, or its drain-time escalation), or a fatal or a Ctrl-C
-folding the manager. aws-cli counts each such item failed instead (measured:
-a fatal or Ctrl-C folding its CRT manager prints a failed line per in-flight
-item, design/crt.md section 6), which is not copied: the item is revoked,
-not faulty, as on the classic engine. pip s3transfer's CRT manager converts a
+folding the manager: the item is revoked, not faulty, as on the classic engine.
+pip s3transfer's CRT manager converts a
 Ctrl-C landing in its transfer drain into `cancel()` and discards the
 interrupt; the library catches it at that cancel
 (`Transferrer._guard_crt_cancel`), so each transfer the manager cancels
-reports `CANCELLED` (the others finish with their real outcomes, as on
-aws-cli), and re-raises the interrupt once the drain is over. One landing in
+reports `CANCELLED` (the others finish with their real outcomes), and re-raises
+the interrupt once the drain is over. One landing in
 the manager's later wait on the done callbacks escapes it with nothing
 cancelled, so the library orders the cancel itself and waits for the cancelled
 transfers (`Transferrer._cancel_interrupted_crt_drain`), with the same records
@@ -188,11 +188,9 @@ with it instead, as on the classic engine: a `Boto3S3Error` the stream raised
 is recorded as it is, anything else becomes the base error with it on
 `__cause__`. On the classic engine botocore signs each request, with awscrt's
 signer when awscrt is importable, and that signer reads the body wherever it
-signs the payload (a plain-HTTP endpoint above all): what a read raises there, an
-interrupt included, is kept from it (`signingreads`) and raised on the
-signing thread once the signing is done, so the item fails with the read's
-own exception, or is `CANCELLED` with the interrupt re-raised (transfer.md
-section 9). A classic threaded
+signs the payload (a plain-HTTP endpoint above all): a read that first fails
+there, an interrupt included, becomes awscrt's `AWS_ERROR_UNKNOWN`, and the item is
+`FAILED` with that error (transfer.md section 9). A classic threaded
 download's sink raising an interrupt is settled on its IO worker (`_TaskGuard`): the
 item is `CANCELLED` and the interrupt re-raised.
 The classic engine settles every revoked item with s3transfer's

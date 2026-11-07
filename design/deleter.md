@@ -208,10 +208,7 @@ versioned bucket) cannot be mapped back to submission order.
   none here. The re-send goes out whatever the retry policy, since the batch was
   no key's own request - so a key can get more attempts than aws-cli gives
   it, never fewer - and a key the run is abandoned before re-sending gets no
-  record (measured on the classic engine: Ctrl-C with aws-cli's per-key requests
-  still queued prints no line for them; aws-cli's CRT manager instead swallows
-  an interrupt in its drain and sends them all, a difference recorded in
-  aws-differences.md).
+  record.
 - **the request raising outside the boto family** (botocore reading a
   response that lacks an element it needs - an S3 Express `CreateSession`
   reply without `Credentials`, a `KeyError` - or a redirect loop ending in
@@ -278,14 +275,10 @@ that - so a key never gets fewer attempts than aws-cli gives it.
   sibling key that differs only by CR/LF - a delete reported for the key that
   was refused.
 - A Ctrl-C (or any abandonment) cannot cancel a request already out: a batch
-  in flight completes and reports every key it carried, and the CLI prints
-  those lines before its closing `cancelled: ctrl-c received`, where aws-cli,
-  whose per-key futures are cancelled, prints nothing after the interrupt.
-  Stopping the lines at the signal instead needs a SIGINT hook that must not
-  take the printer's lock, must stay out of an ignored SIGINT, and must not
-  apply under the CRT engine (whose manager swallows the interrupt and goes
-  on reporting on `aws`) - tried and withdrawn as not worth that machinery, so
-  the extra lines are an accepted batching difference.
+  in flight completes and reports every key it carried. Under
+  `reusable_after_interrupt=False` the interrupt leaves at once instead, and the
+  batch finishes behind the caller, reporting nothing and starting no further
+  per-key request.
 - Failure messages are unified to the full `str(ClientError)`
   (`An error occurred (...) ...`), the same shape as the string aws-cli emits on
   a failure line (so the CLI layer can use it as-is when composing

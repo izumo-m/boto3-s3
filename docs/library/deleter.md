@@ -21,7 +21,7 @@ which are not objects; submitting them would try to delete prefixes.
 S3Deleter(storage, *, request_payer=None, on_result=None, cancel_token=None,
           batch_size=1000, operation="delete", capture_response=False,
           dryrun=False, transfer_config=None, session=None, crt_endpoint=None,
-          crt=None)
+          crt=None, reusable_after_interrupt=True)
 ```
 
 `storage` must be an `S3Storage`; anything else raises `ValidationError`. Only
@@ -36,6 +36,9 @@ until the first request is signed, so missing credentials arrive as per-key
 failures (`ConfigurationError`).
 
 `batch_size` must be between 1 and 1000, S3's own limit for one batch request.
+
+`reusable_after_interrupt=False` makes a `KeyboardInterrupt` leave the context at
+once: the batch in flight finishes behind you and reports nothing.
 
 Deleting a specific `VersionId` is not provided, as `aws s3 rm` does not offer
 it either.

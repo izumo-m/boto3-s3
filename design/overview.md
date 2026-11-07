@@ -166,12 +166,54 @@ maintaining high functional compatibility.
      item, and the exit code says so, even where aws-cli loses the failure and
      reports success.
   2. A failure is reported so that its cause can be seen: not as a traceback,
-     and with the original exception kept as its cause.
+     and with the original exception kept as its cause. This covers the reports
+     the library and the CLI write, and it is met by catching exceptions in their
+     own code. What awscrt or the interpreter writes by itself is left alone, as
+     is an exception awscrt drops while it reads a request body to sign it
+     ([`transfer.md`](./transfer.md) section 9), and no code exists only to
+     change how a traceback reads.
   3. A per-item failure leaves the other items running; a failure the run
      cannot proceed past (configuration, credentials, a missing destination)
      stops it before it starts.
   4. The library's exceptions classify the failures within its own reach: the
      SDK, S3 and local files. How the caller's code fails is the next item.
+- **Ctrl-C is not matched to aws-cli**: nothing is added only to make an
+  interrupted run behave as aws-cli's does, in its output, its exit code or the
+  requests it still sends, and a difference there is neither a bug nor a
+  deviation to discuss. What an interrupt does follows from these rules alone:
+  1. Under `reusable_after_interrupt=True`, the default, an operation cleans up
+     after an interrupt as after any other exception, the caller's code's
+     included: it clears its state so that a new operation can run, and only
+     then hands control back to the caller, the exception re-raised (one the
+     library never sees can still be lost, as in awscrt's signer's read,
+     [`transfer.md`](./transfer.md) section 9). A further interrupt may cut that
+     cleanup short.
+  2. Under `reusable_after_interrupt=False`, an operation hands an interrupt back
+     at once: nothing can cancel a request already out, and a server that does
+     not answer holds it for a full timeout. What has not started never starts,
+     `on_result` and `on_progress` are not called once the interrupt has reached
+     the caller, and the cleanup goes on
+     behind the caller, as far as the process lives. That `S3` is not used again; a new one works.
+  3. Running the operation again reaches a consistent result. What an interrupt
+     cut short leaves nothing a re-run would take for finished work: a download's
+     temporary file is removed, a multipart upload is aborted (but for one awscrt
+     is still creating, which it leaves open), and a `mv` keeps
+     its source unless its destination is in place.
+  4. The CLI declares `False` and ends its process with `os._exit`: one
+     `cancelled: ctrl-c received` line on standard error and exit code 130. The
+     cleanup is cut off there, so an unfinished multipart upload and a download's
+     temporary file can stay behind, which the previous rule does not cover.
+  5. That line and exit code are a best effort, not a guarantee: at worst, it is
+     enough that the command stops. Python discards an interrupt that lands in a
+     callback or finalizer it runs itself (its `signal` documentation says most
+     code cannot be made robust against this), and no code here can change that:
+     the user's next Ctrl-C covers it.
+- **The `signal` module is a last resort**: it is highly OS-dependent and costs
+  portability, so it is used only where no other way exists. Neither the library
+  nor the CLI installs a signal handler; a gap one could close (the previous rule)
+  is not reason enough.
+- **A stalled output may stop the program** until it clears, even through a
+  failure or a Ctrl-C.
 - **The caller's code is the caller's responsibility**: code the caller
   writes and hands to the library - a stream, a storage backend, a filter, a
   callback - is outside the library's reach. The library answers for its own

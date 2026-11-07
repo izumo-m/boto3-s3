@@ -371,13 +371,11 @@ class TestMainExitCodes:
         monkeypatch.setattr(sys, "stderr", None)
         assert cli.main(["ls", "--bogus"]) == 252
 
-    def test_keyboard_interrupt_exits_130_with_a_bare_newline(
+    def test_keyboard_interrupt_exits_130_with_one_line_on_stderr(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws-cli's InterruptExceptionHandler: Ctrl-C is a bare newline on stdout
-        # and rc 130 (128+SIGINT), never a traceback (measured on the pinned aws-cli).
-        # KeyboardInterrupt is a BaseException, so it passes _run_command's
-        # handlers and reaches main's backstop.
+        # Never a traceback. KeyboardInterrupt is a BaseException, so it passes
+        # _run_command's handlers and reaches main's backstop.
         class _InterruptClient:
             def get_paginator(self, name: str) -> Any:
                 class _Paginator:
@@ -390,16 +388,31 @@ class TestMainExitCodes:
         rc = cli.main(["ls", "s3://bucket/p/"], ctx=ctx)
         out, err = capsys.readouterr()
         assert rc == 130
-        assert out == "\n"
-        assert err == ""
+        assert out == ""
+        assert err == "cancelled: ctrl-c received\n"
 
-    def test_keyboard_interrupt_before_the_pipeline_stays_130(
+    def test_keyboard_interrupt_in_rb_force_is_130_not_its_rm_failure(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # A failure of the inner rm is 255; an interrupt is no failure.
+        class _InterruptClient:
+            def get_paginator(self, name: str) -> Any:
+                class _Paginator:
+                    def paginate(self, **kwargs: Any) -> Any:
+                        raise KeyboardInterrupt
+
+                return _Paginator()
+
+        ctx = Context(client_factory=lambda _args: _InterruptClient())  # pyright: ignore[reportArgumentType]
+        rc = cli.main(["rb", "s3://bucket", "--force"], ctx=ctx)
+        out, err = capsys.readouterr()
+        assert rc == 130
+        assert out == ""
+        assert err == "cancelled: ctrl-c received\n"
+
+    def test_keyboard_interrupt_before_the_run_is_130(
         self, capsys: pytest.CaptureFixture[str], tmp_path: Path
     ) -> None:
-        # The cancelled-run conversion (transferargs.finish_transfer, rc 1)
-        # covers only the pipeline span of the transfer family; a Ctrl-C in
-        # client construction is still the dispatcher backstop's 130 with the
-        # bare newline, like aws-cli's InterruptExceptionHandler.
         (tmp_path / "a.txt").write_bytes(b"x")
 
         def factory(_args: Any) -> Any:
@@ -409,8 +422,8 @@ class TestMainExitCodes:
         rc = cli.main(["cp", str(tmp_path / "a.txt"), "s3://bucket/k"], ctx=ctx)
         out, err = capsys.readouterr()
         assert rc == 130
-        assert out == "\n"
-        assert err == ""
+        assert out == ""
+        assert err == "cancelled: ctrl-c received\n"
 
 
 class TestClientCreationExitCodes:

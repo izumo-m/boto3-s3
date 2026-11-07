@@ -22,14 +22,14 @@ skip_without_pthread_kill = pytest.mark.skipif(
 )
 
 
-def interrupt_main_in(caller: str, *, waiting_in: str = "_wait_set") -> None:
+def interrupt_main_in(caller: str, *, waiting_in: str | None = None) -> None:
     """Send the main thread a SIGINT once it waits in *caller*'s *waiting_in*.
 
     Polls the main thread's stack until its innermost Python frame is the
-    function named *waiting_in* (by default ``_wait_set``, the raw-lock wait
-    the CLI printer holds Ctrl-Cs in) called directly from the function named
-    *caller*, then signals and gives the interrupt a moment to land. Call it
-    from another thread.
+    function named *waiting_in* called directly from the function named
+    *caller* - or, with no *waiting_in*, until *caller* is anywhere on the stack
+    - then signals and gives the interrupt a moment to land. Call it from
+    another thread.
     """
     main = threading.main_thread().ident
     assert main is not None
@@ -37,10 +37,10 @@ def interrupt_main_in(caller: str, *, waiting_in: str = "_wait_set") -> None:
     while time.monotonic() < deadline:
         frame = sys._current_frames().get(main)  # pyright: ignore[reportPrivateUsage]
         names: list[str] = []
-        while frame is not None and len(names) < 2:
+        while frame is not None:
             names.append(frame.f_code.co_name)
             frame = frame.f_back
-        if names == [waiting_in, caller]:
+        if caller in names if waiting_in is None else names[:2] == [waiting_in, caller]:
             break
         time.sleep(0.005)
     else:

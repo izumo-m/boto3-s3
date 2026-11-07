@@ -165,7 +165,8 @@ delivered stand, and a cancel that arrives after the last entry still ends the
 call with `CancelledError` rather than a normal return. Both `CancelMode`
 values have the same effect here, because a listing request already in flight
 cannot be aborted safely: an object listing drops its prefetched pages and
-waits for the page request in progress before reclaiming its prefetch worker,
+waits for the page request in progress before reclaiming its prefetch worker
+(under `S3(reusable_after_interrupt=False)` it leaves the worker to end by itself),
 and the bucket listing, which is iterated directly, simply stops between
 entries.
 
