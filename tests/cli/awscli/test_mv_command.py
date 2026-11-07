@@ -64,11 +64,13 @@ from __future__ import annotations
 import datetime as dt
 import io
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
 import pytest
 from boto3.s3.transfer import TransferConfig
+from s3transfer.futures import TransferCoordinator
 
 from boto3_s3_cli.commands.base import Context
 from tests.utils.harness import CliResult, run_cli_in_process
@@ -800,34 +802,53 @@ class TestMvRecursiveCaseConflict:
         assert f"Failed to download bucket/{self.UPPER_KEY}" in result.stderr
 
     # aws-cli: TestSyncCaseConflict.test_error_with_case_conflicts_in_s3 (test_sync_command.py)
-    def test_error_with_case_conflicts_in_s3(self, tmp_path: Path) -> None:
-        # The gate's fatal cancels the already-admitted first twin (the
-        # engine shuts down with cancel=True on a fatal, like aws's manager
-        # context), so its download - and with it mv's source delete -
-        # normally never becomes an API call. That cancellation races the
-        # worker by nature (aws's own sync original scripts only the listing
-        # and asserts no operations), so the admitted twin's get-then-delete
-        # pair is scripted defensively and the assertions accept either
-        # outcome; the conflicting key must never reach the API, and its
-        # source must never be deleted.
-        result, calls = _run_cmd(
-            [
-                list_objects_response([self.UPPER_KEY, self.LOWER_KEY]),
-                get_object_response(),
-                {},
-            ],
-            self._cmd(tmp_path, "error"),
-            expected_rc=1,
-            transfer_config=_CASE_CONFLICT_CONFIG,
+    def test_error_with_case_conflicts_in_s3(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The gate's fatal cancels the already-admitted first twin (the engine
+        # shuts down with cancel=True on a fatal, like aws's manager context).
+        # Whether that twin has started by then is a race, so the test sets the
+        # order: the listing hands over the conflicting key only once the twin's
+        # GetObject is out, and that request is answered only once the run has
+        # ordered the cancel. The request then finishes, but nothing after it
+        # runs: no file is left and no source is deleted, and the conflicting
+        # key never reaches the API.
+        cancelled = threading.Event()
+        real_cancel = TransferCoordinator.cancel
+
+        def cancel(coordinator: TransferCoordinator, *args: Any, **kwargs: Any) -> None:
+            real_cancel(coordinator, *args, **kwargs)
+            cancelled.set()
+
+        monkeypatch.setattr(TransferCoordinator, "cancel", cancel)
+        first_page = {
+            **list_objects_response([self.UPPER_KEY]),
+            "IsTruncated": True,
+            "NextContinuationToken": "page-2",
+        }
+        client, calls = make_recording_client(
+            [first_page, get_object_response(), list_objects_response([self.LOWER_KEY])]
         )
+        answer = client._make_api_call
+        twin_out = threading.Event()
+
+        def in_order(operation: str, params: dict[str, Any]) -> Any:
+            if operation == "ListObjectsV2" and "ContinuationToken" in params:
+                assert twin_out.wait(10)
+            response = answer(operation, params)
+            if operation == "GetObject":
+                twin_out.set()
+                assert cancelled.wait(10)
+            return response
+
+        client._make_api_call = in_order
+        ctx = Context(client_factory=lambda _args: client, transfer_config=_CASE_CONFLICT_CONFIG)
+        result = run_cli_in_process(self._cmd(tmp_path, "error"), ctx=ctx)
+        assert result.rc == 1, (result.stdout, result.stderr)
         assert f"Failed to download bucket/{self.LOWER_KEY}" in result.stderr
-        operations = _operations(calls)
-        assert operations[0] == "ListObjectsV2"
-        assert operations in (
-            ["ListObjectsV2"],  # the admitted twin cancelled (the usual case)
-            ["ListObjectsV2", "GetObject", "DeleteObject"],  # it out-raced the cancel
-        )
-        assert all(call.params.get("Key") != self.LOWER_KEY for call in calls[1:])
+        assert _operations(calls) == ["ListObjectsV2", "GetObject", "ListObjectsV2"]
+        assert calls[1].params["Key"] == self.UPPER_KEY
+        assert list(tmp_path.iterdir()) == []
 
     def test_warn_with_existing_file(self, case_insensitive_workdir: Path) -> None:
         (case_insensitive_workdir / self.LOWER_KEY).write_text("mycontent")

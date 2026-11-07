@@ -669,7 +669,9 @@ class TestProgressOutput:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         written = io.BytesIO()
-        monkeypatch.setattr(ec2.sys, "stdout", io.TextIOWrapper(written, encoding="utf-8"))
+        monkeypatch.setattr(
+            ec2.sys, "stdout", io.TextIOWrapper(written, encoding="utf-8", newline="\n")
+        )
         ec2._line_buffer_stdout()  # pyright: ignore[reportPrivateUsage]
         print("launched")
         assert written.getvalue() == b"launched\n"
