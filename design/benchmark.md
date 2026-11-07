@@ -438,7 +438,8 @@ lane does - the pinned `aws`, the uv version `mise.toml` pins, `uv sync
   Handling those signals is not worth its own failure modes (a closed terminal
   breaks the teardown's output, and a handler overrides the SIGHUP that `nohup`
   ignores): the cost is one small object, and a long run is started so that a
-  closed terminal does not reach it (`setsid nohup`).
+  closed terminal does not reach it (`setsid nohup`). The launcher line-buffers
+  its output, so the log shows the run's progress as it goes.
 - **What comes back.** The results files land in `benchmarks/results/` with
   the lane spelled in their name (`...bbbbbbbbbb.ec2-m7i.xlarge-ubuntu26.04.jsonl`),
   the archived commit as their revision, and the AMI id in the meta record;

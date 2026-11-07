@@ -9,6 +9,7 @@ user-data template renders with no leftover placeholder.
 
 from __future__ import annotations
 
+import io
 import json
 import shlex
 import shutil
@@ -582,6 +583,102 @@ class TestOutcomeReading:
     def test_the_uv_version_is_mise_toml_s(self) -> None:
         mise = (ec2.REPO_ROOT / "mise.toml").read_text()
         assert f'uv = "{ec2._pinned_uv_version()}"' in mise
+
+
+class _BootBucketS3:
+    """An S3 client stand-in for `_ensure_boot_bucket`: each create takes the next
+    answer, an error code or None for a success."""
+
+    class _Meta:
+        region_name = "ap-northeast-1"
+
+    meta = _Meta()
+
+    def __init__(self, *answers: str | None, listed: tuple[str, ...] = ()) -> None:
+        self._answers = list(answers)
+        self._listed = listed
+        self.creates = 0
+
+    def list_buckets(self) -> dict[str, Any]:
+        return {"Buckets": [{"Name": name} for name in self._listed]}
+
+    def create_bucket(self, **_kwargs: Any) -> dict[str, Any]:
+        from botocore.exceptions import ClientError
+
+        self.creates += 1
+        answer = self._answers.pop(0)
+        if answer is not None:
+            raise ClientError({"Error": {"Code": answer}}, "CreateBucket")
+        return {}
+
+
+class TestBootBucket:
+    """Two launchers started together race to create the hand-off bucket."""
+
+    @pytest.fixture(autouse=True)
+    def _no_sleep(self, monkeypatch: pytest.MonkeyPatch) -> list[float]:
+        slept: list[float] = []
+        monkeypatch.setattr(ec2.time, "sleep", slept.append)
+        return slept
+
+    def _ensure(self, s3: _BootBucketS3) -> None:
+        ec2._ensure_boot_bucket(s3, "boot", "ap-northeast-1")  # pyright: ignore[reportPrivateUsage]
+
+    def test_a_listed_bucket_is_not_created(self) -> None:
+        s3 = _BootBucketS3(listed=("boot",))
+        self._ensure(s3)
+        assert s3.creates == 0
+
+    def test_a_missing_bucket_is_created(self, _no_sleep: list[float]) -> None:
+        s3 = _BootBucketS3(None)
+        self._ensure(s3)
+        assert s3.creates == 1
+        assert _no_sleep == []
+
+    def test_a_create_in_progress_elsewhere_is_waited_out(self, _no_sleep: list[float]) -> None:
+        s3 = _BootBucketS3("OperationAborted", "OperationAborted", None)
+        self._ensure(s3)
+        assert s3.creates == 3
+        assert len(_no_sleep) == 2
+
+    def test_a_create_finished_elsewhere_is_enough(self) -> None:
+        s3 = _BootBucketS3("OperationAborted", "BucketAlreadyOwnedByYou")
+        self._ensure(s3)
+        assert s3.creates == 2
+
+    def test_a_create_that_never_clears_raises(self) -> None:
+        from botocore.exceptions import ClientError
+
+        attempts = ec2._BOOT_BUCKET_ATTEMPTS  # pyright: ignore[reportPrivateUsage]
+        s3 = _BootBucketS3(*["OperationAborted"] * attempts)
+        with pytest.raises(ClientError, match="OperationAborted"):
+            self._ensure(s3)
+        assert s3.creates == attempts
+
+    def test_any_other_error_raises_at_once(self) -> None:
+        from botocore.exceptions import ClientError
+
+        s3 = _BootBucketS3("AccessDenied")
+        with pytest.raises(ClientError, match="AccessDenied"):
+            self._ensure(s3)
+        assert s3.creates == 1
+
+
+class TestProgressOutput:
+    def test_a_line_reaches_a_redirected_stdout_as_it_is_printed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        written = io.BytesIO()
+        monkeypatch.setattr(ec2.sys, "stdout", io.TextIOWrapper(written, encoding="utf-8"))
+        ec2._line_buffer_stdout()  # pyright: ignore[reportPrivateUsage]
+        print("launched")
+        assert written.getvalue() == b"launched\n"
+
+    def test_a_stdout_that_is_not_a_text_wrapper_is_left_alone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(ec2.sys, "stdout", io.StringIO())
+        ec2._line_buffer_stdout()  # pyright: ignore[reportPrivateUsage]
 
 
 class _RunS3:

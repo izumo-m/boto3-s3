@@ -31,8 +31,10 @@ left tagged and deletes the benchmark buckets it left. See design/benchmark.md
 
 from __future__ import annotations
 
+import io
 import secrets
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -230,6 +232,12 @@ def _root_device_name(ec2: Any, ami: str) -> str:
     return str(images[0]["RootDeviceName"])
 
 
+# How long a launcher lets another launcher's create of the hand-off bucket
+# finish: attempts, and the seconds between them.
+_BOOT_BUCKET_ATTEMPTS = 15
+_BOOT_BUCKET_RETRY_SECONDS = 2
+
+
 def _boot_bucket_name(account: str, region: str) -> str:
     """A per-account, per-region bucket for the code hand-off and results.
 
@@ -241,11 +249,30 @@ def _boot_bucket_name(account: str, region: str) -> str:
 
 
 def _ensure_boot_bucket(s3: Any, name: str, region: str) -> None:
+    """Make sure the hand-off bucket exists, whichever launcher creates it.
+
+    Two launchers started together, as a baseline's m7i and m7g runs are, both
+    find it missing on a region's first run. S3 answers the second create
+    ``OperationAborted`` while the first is in progress, and
+    ``BucketAlreadyOwnedByYou`` once it is done.
+    """
+    from botocore.exceptions import ClientError
+
     from tests.utils.harness import create_bucket_in_region
 
     if any(b["Name"] == name for b in s3.list_buckets().get("Buckets", [])):
         return
-    create_bucket_in_region(s3, name)
+    for attempt in range(_BOOT_BUCKET_ATTEMPTS):
+        try:
+            create_bucket_in_region(s3, name)
+            return
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code")
+            if code == "BucketAlreadyOwnedByYou":
+                return
+            if code != "OperationAborted" or attempt == _BOOT_BUCKET_ATTEMPTS - 1:
+                raise
+        time.sleep(_BOOT_BUCKET_RETRY_SECONDS)
 
 
 def _user_data(
@@ -480,9 +507,24 @@ class Outcome:
         return self.kind == "completed" and self.rc == "0"
 
 
+def _line_buffer_stdout() -> None:
+    """Write each progress line as it is printed, to a file or pipe as well.
+
+    A run is long and usually redirected (`setsid nohup ... > log`), where
+    Python would otherwise hold its stdout back in blocks: the log stays empty
+    for much of the run and falls out of order with stderr. A pipe whose reader
+    has gone (a dead `| tee`) raises `BrokenPipeError` at the next print, ending
+    the launcher's wait and cutting its teardown short; `ec2 cleanup` removes
+    what that leaves. A file has no reader to lose.
+    """
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(line_buffering=True)
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     import boto3
 
+    _line_buffer_stdout()
     awsenv.refuse_dev_stack_env()
     profile = args.profile
     region = awsenv.resolve_region(args.region, profile=profile)
