@@ -560,17 +560,19 @@ class S3:
     answer holds it for a full timeout. What has not started never starts,
     ``on_result`` and ``on_progress`` are not called once the interrupt has reached
     the caller (a ``filter`` already at work on a page finishes it), and the rest
-    of the cleanup - a multipart upload
-    aborted, a temporary file removed, the threads ended - goes on behind the
-    caller for as long as the process lives. This instance is not used again
-    (what it then does is not specified); a new ``S3`` works.
+    of the cleanup - a multipart upload aborted, a temporary file removed - goes
+    on behind the caller for as long as the process lives. One pressed while the
+    operation cleans up after another exception can wait for the requests already
+    out, as that cleanup does. This instance is not used again (what it then
+    does is not specified); a new ``S3`` works.
 
-    Either way the interrupt itself is re-raised, never converted or swallowed -
-    on the CRT engine too, whose manager would discard one landing in its
-    transfer drain (design/crt.md section 6). One the library never sees can still
-    be lost: in awscrt's request signer reading a body on the calling thread,
-    which turns it into its own error (design/transfer.md section 9), or in a
-    callback or finalizer the interpreter runs itself. Under either value, on the
+    Either way the interrupt itself is re-raised, never converted or swallowed.
+    One the library never sees can still be lost: in awscrt's request signer
+    reading a body on the calling thread, which turns it into its own error
+    (design/transfer.md section 9), in a callback or finalizer the interpreter
+    runs itself, and in the CRT engine's transfer drain while the operation
+    cleans up after another exception, which its manager discards, so that
+    exception is raised instead (design/crt.md section 6). Under either value, on the
     CRT engine, a multipart upload whose ``CreateMultipartUpload`` is still out when
     the cancel comes stays open: awscrt does not abort it. On Windows before Python
     3.14, the calling thread's wait on a lock cannot be interrupted, so the
@@ -579,8 +581,8 @@ class S3:
     The posture is about ``KeyboardInterrupt``: ``SystemExit`` and every other
     exception wait for the transfers and deletes under either value, though under
     ``False`` no early end of a scan waits for a listing page already in flight
-    (``ScanOptions.reusable_after_interrupt``), whose ``filter`` calls and ``WARNED``
-    records can then come after the operation has raised.
+    (``ScanOptions.reusable_after_interrupt``), whose ``filter`` calls can then
+    come after the operation has raised.
 
     ``crt`` is the CRT transfer engine's own client settings
     (`CrtClientOptions`): whether an explicit ``'crt'`` preference may run

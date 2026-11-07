@@ -156,18 +156,10 @@ the error carrying awscrt's cancellation wording) when the run ordered the
 cancel: its `CancelToken` (the token's own `CancelledError` surfacing through
 the submission loop, or its drain-time escalation), or a fatal or a Ctrl-C
 folding the manager: the item is revoked, not faulty, as on the classic engine.
-pip s3transfer's CRT manager converts a
-Ctrl-C landing in its transfer drain into `cancel()` and discards the
-interrupt; the library catches it at that cancel
-(`Transferrer._guard_crt_cancel`), so each transfer the manager cancels
-reports `CANCELLED` (the others finish with their real outcomes), and re-raises
-the interrupt once the drain is over. One landing in
-the manager's later wait on the done callbacks escapes it with nothing
-cancelled, so the library orders the cancel itself and waits for the cancelled
-transfers (`Transferrer._cancel_interrupted_crt_drain`), with the same records
-and the same re-raise. A CRT cancellation the run did not order
-reports `FAILED`, so a run cut short by something the library cannot see is
-never reported as a success.
+A CRT cancellation the run did not order reports `FAILED` (a Ctrl-C the CRT
+manager turns into a cancel in a graceful cancel's drain among them;
+[`crt.md`](./crt.md) section 6), so a run cut short by something the library
+cannot see is never reported as a success.
 
 An item whose stored outcome is itself an interrupt is `CANCELLED` wherever
 it occurs and the interrupt is re-raised to the caller

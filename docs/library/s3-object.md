@@ -31,9 +31,8 @@ S3(session=None, *, endpoint_url=None, config=None,
   has been reclaimed, so the next operation still works. `False` re-raises it at
   once, with requests still out: the cleanup goes on behind you, that `S3` is not
   used again, and a new one works.
-  Either way the interrupt is re-raised, never swallowed — on the CRT engine
-  too, whose manager would discard one landing in its transfer drain. One the
-  library never sees can still be lost ([`S3`](../reference/s3.md)). Only
+  Either way the interrupt is re-raised, never swallowed. One the library never
+  sees can still be lost ([`S3`](../reference/s3.md)). Only
   `KeyboardInterrupt` is affected — every other exception waits for the transfers
   and deletes.
 - **`crt`** — the CRT transfer engine's own client settings, a

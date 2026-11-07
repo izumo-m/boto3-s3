@@ -142,21 +142,31 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   IMMEDIATE, a fatal, a Ctrl-C - settles an item still held as CANCELLED instead
   of running it: its source stays beside the finished download, and the requests
   already out finish and report their real outcome. A graceful cancel orders
-  nothing of the kind, and the held items run. The wait looks at a count and
-  sleeps: a Ctrl-C can land in it, and neither `Thread.join` (on Python 3.10 to
-  3.12 it gives up on a thread when interrupted) nor a `Condition` survives one.
+  nothing of the kind, and the held items run. The wait sleeps on a
+  `concurrency.Wake` the last item to settle sends: a Ctrl-C can land in it, and
+  neither `Thread.join` (on Python 3.10 to 3.12 it gives up on a thread when
+  interrupted) nor a `Condition` survives one.
 - `reusable_after_interrupt=False`: a `KeyboardInterrupt` leaves at once. Nothing
   can cancel a request already out, and a server that does not answer holds it
-  for a full timeout, so the shutdown below runs on a thread of its own and the
-  calling thread only watches it (`Transferrer.__exit__`). On an interrupt the
-  calling thread leaves and reporting stops. That thread cancels what has not
-  started and waits for what is out, so a multipart upload is aborted (but for
-  one awscrt is still creating, which it leaves open under either posture) and a
-  temporary file removed as far as the process lives, and a new `S3` works beside
-  it (measured on both engines, with a server not answering). Every other
-  exception gets the shutdown's own path and result.
-- context manager: on normal completion it drains (waits for submitted
-  transfers). On **any exception** - a fatal in mid-enumeration included - it
+  for a full timeout, so `Transferrer.__exit__` does not shut the manager down on
+  an interrupt (`_leave`): it cancels the tracked transfers and stops reporting.
+  What has not started never starts. A request already out finishes on its
+  thread, which then runs the cancel's cleanup, so a multipart upload is aborted
+  (but for one awscrt is still creating, which it leaves open under either
+  posture) and a temporary file removed as far as the process lives, and a new
+  `S3` works beside it (measured on both engines, with a server not answering).
+  The manager's idle threads stay until it is collected or the process ends.
+  Every other exception gets the shutdown below, and an interrupt during that
+  shutdown waits as the shutdown does: the classic manager joins its workers
+  even as it re-raises one.
+- context manager: on normal completion it waits on the calling thread until
+  every accepted transfer has settled (its future forgotten by its done
+  subscribers, below), sleeping on a `concurrency.Wake` the last forget sends,
+  then shuts the manager down. The first exception noted
+  for the caller meanwhile (`_note_raise`: what `on_result` raised, an interrupt
+  a worker caught) ends that wait, and the run ends as if the submission loop
+  had raised it. Whatever exception the run ends with, the callbacks are stopped
+  (`_left`) before it reaches the caller. On **any exception** - a fatal in mid-enumeration included - it
   shuts down **cancelling**, by delegating to the s3transfer manager's own
   `__exit__` (aws-cli's actual path; measured live: a mid-listing fatal leaves
   every queued transfer unrun, prints only the one `fatal error:` line, and
@@ -174,8 +184,8 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   returns, so tracking it afterwards would leave the transfer in flight out
   of the watcher's reach. A CRT transfer is tracked once the manager call
   returns, since its coordinator cannot cancel before the request is made.
-  A future tracked after the watcher has acted is cancelled as it is
-  tracked; on the classic engine `_TrackFuture` then raises out of
+  A future tracked after the watcher has acted, or after an interrupt has
+  left, is cancelled as it is tracked; on the classic engine `_TrackFuture` then raises out of
   s3transfer's `on_queued` loop, so the rest of the queued work (the
   copy-props reads, a download's parent directory) does not run either.
   Futures already running may still finish - a cancelled-mid-flight transfer

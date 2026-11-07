@@ -114,7 +114,8 @@ return `None`; the record stream is the result. The default discards records.
 `on_entry: ListingCallback` instead — and `mb`, `rb`, `presign` and `website`
 emit nothing.
 
-Records arrive while the run proceeds, not at the end. An item the operation
+Records arrive while the run proceeds, not at the end, and none arrives once the
+operation has raised. An item the operation
 acts on produces one terminal record — `SUCCEEDED`, `FAILED`, `SKIPPED`,
 `DRYRUN` or `CANCELLED` — while `WARNED` and `NOTICE` records are advisories
 outside that rule, so one key may produce more than one callback. An item that

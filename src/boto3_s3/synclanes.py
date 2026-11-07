@@ -12,12 +12,11 @@ the rollup around it; nothing here is used by another operation.
 from __future__ import annotations
 
 import functools
-import time
 from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import Executor, Future
 from contextlib import ExitStack
 from dataclasses import dataclass
-from queue import Empty, Queue
+from queue import Empty, SimpleQueue
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from boto3_s3 import crtsupport, producers
@@ -31,6 +30,7 @@ from boto3_s3.comparator import (
     SrcOnlyPair,
     SyncPair,
 )
+from boto3_s3.concurrency import Wake
 from boto3_s3.deleter import S3Deleter, delete_record
 from boto3_s3.exceptions import Boto3S3Error, CancelledError, ValidationError
 from boto3_s3.localstorage import LocalStorage, to_native_path
@@ -337,7 +337,21 @@ def run_sync_pairs(
     # A pooled decision's completion delivers its pre-bound submit (the lane's
     # ``submit`` closed over its pair), so the queue needs no pair/lane fields -
     # each lane keeps its own pair shape without a shared existential type.
-    done: Queue[tuple[Callable[[], None], Future[bool]]] = Queue()
+    done: SimpleQueue[tuple[Callable[[], None], Future[bool]]] = SimpleQueue()
+    # Sent with each report on `done`: what the two waits below sleep on. Only
+    # `done.get_nowait` takes from the queue (its timed get can miss its
+    # timeout on Python 3.10 to 3.12; `concurrency.Wake`).
+    arrived = Wake()
+
+    def cancelled() -> bool:
+        return cancel_token is not None and cancel_token.cancelled
+
+    def immediate() -> bool:
+        return cancel_token is not None and cancel_token.mode is CancelMode.IMMEDIATE
+
+    def report(submit: Callable[[], None], future: Future[bool]) -> None:
+        done.put((submit, future))
+        arrived.send()
 
     def settle_pending(*, cancel: bool) -> None:
         """Optionally cancel queued decisions, then await every accepted one.
@@ -348,24 +362,32 @@ def run_sync_pairs(
         that can only complete through `cancel()`, such as one queued on an
         executor that will never run it, would otherwise pin this loop
         forever. `cancel` never downgrades, matching the token's monotonicity.
+
+        A decision's report only wakes the loop; ``done()`` says which have
+        ended. A Ctrl-C can lose a report - landing after the main loop took it
+        but before it dropped the future, or before the future's callback was
+        added - and the wait's own look then finds the future ended.
         """
-        remaining = pending
-        while remaining:
-            cancel = cancel or (
-                cancel_token is not None and cancel_token.mode is CancelMode.IMMEDIATE
-            )
+
+        def changed() -> bool:
+            # A decision ended, or the token escalated past what this pass applied.
+            return any(future.done() for future in pending) or (not cancel and immediate())
+
+        while True:
+            cancel = cancel or immediate()
             if cancel:
-                for future in remaining:
+                for future in pending:
                     future.cancel()
-            remaining = {future for future in remaining if not future.done()}
-            if remaining:
-                time.sleep(0.1)
+            pending.difference_update([future for future in pending if future.done()])
+            if not pending:
+                return
+            arrived.wait_until(changed)
 
     def stop_if_cancelled() -> None:
         """Apply the token mode to accepted decisions, then raise cancellation."""
-        if cancel_token is None or not cancel_token.cancelled:
+        if not cancelled():
             return
-        settle_pending(cancel=cancel_token.mode is CancelMode.IMMEDIATE)
+        settle_pending(cancel=immediate())
         raise CancelledError("sync was cancelled", operation="sync")
 
     def handle(lane: Lane[_PairT] | None, pair: _PairT) -> bool:
@@ -382,7 +404,7 @@ def run_sync_pairs(
         future = executor.submit(lane.decide, pair)
         pending.add(future)
         submit = functools.partial(lane.submit, pair)
-        future.add_done_callback(lambda f: done.put((submit, f)))
+        future.add_done_callback(lambda f: report(submit, f))
         return True
 
     def handle_pair(pair: MergedPair) -> bool:
@@ -433,8 +455,9 @@ def run_sync_pairs(
         while inflight:
             stop_if_cancelled()
             try:
-                submit, future = done.get(timeout=0.1)
+                submit, future = done.get_nowait()
             except Empty:
+                arrived.wait_until(lambda: not done.empty() or cancelled())
                 continue
             pending.discard(future)
             inflight -= 1

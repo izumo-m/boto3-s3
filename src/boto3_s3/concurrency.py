@@ -16,13 +16,16 @@ drops buffered pages and waits for a page pull already in progress before
 returning, so no worker survives the operation. The single opt-out is
 ``reusable_after_interrupt=False`` for apps that leave at once on a Ctrl-C (see
 `prefetch`).
+
+``Wake`` is how the calling thread, where a Ctrl-C lands, waits for another
+thread to finish something.
 """
 
 from __future__ import annotations
 
 import queue
 import threading
-from collections.abc import Generator, Iterable, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, TypeVar
 
@@ -39,6 +42,45 @@ _END: object = object()
 # enough that an early-break consumer tears down promptly; long enough that an
 # idle worker does not spin.
 _STOP_POLL_SECONDS = 0.1
+
+# The longest a `Wake` wait sleeps before it looks again by itself. A wake-up
+# ends the sleep at once; the look lets a Ctrl-C through where a lock wait
+# cannot be interrupted (Windows before Python 3.14), and bounds what a missed
+# wake-up could cost.
+_WAKE_SLICE = 0.1
+
+
+class Wake:
+    """Wake the thread that waits for a condition, safely under Ctrl-C.
+
+    One thread waits at a time: it sleeps in `wait_until` until the condition
+    holds, and any thread that may have made it hold calls `send`. Built on a
+    ``threading.Lock`` used as a one-place signal - held means no wake-up is
+    pending - whose ``acquire`` and ``release`` are C: a signal cannot leave
+    them half-done, ``release`` never blocks, and ``acquire``'s timeout holds
+    when a signal handler runs during the wait (``queue.SimpleQueue.get``'s
+    does not on Python 3.10 to 3.12, and then waits for the next put).
+    ``threading.Event``, ``Condition`` and ``queue.Queue`` are Python code: a
+    Ctrl-C landing inside can leave their lock held or released, and the
+    thread that signals them then blocks for good or fails (measured under a
+    storm of interrupts on Python 3.10 to 3.14).
+    """
+
+    def __init__(self) -> None:
+        self._pending = threading.Lock()
+        self._pending.acquire()
+
+    def send(self) -> None:
+        """Wake the waiting thread, if any; never blocks."""
+        try:
+            self._pending.release()
+        except RuntimeError:
+            pass  # a wake-up is pending already
+
+    def wait_until(self, ready: Callable[[], bool]) -> None:
+        """Sleep until ``ready()`` holds, looking again on each wake-up."""
+        while not ready():
+            self._pending.acquire(timeout=_WAKE_SLICE)
 
 
 @contextmanager
@@ -151,4 +193,4 @@ def prefetch(
             worker.join()
 
 
-__all__ = ["prefetch"]
+__all__ = ["Wake", "prefetch"]

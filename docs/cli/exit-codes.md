@@ -60,9 +60,11 @@ if anything failed, the code is 1.
 Ctrl-C ends the command at once, with `cancelled: ctrl-c received`
 on stderr (none with `--quiet`) and exit code 130. It waits for nothing, a server
 that does not answer included, but for that line: a stderr nobody reads can hold
-it until a second Ctrl-C. The line and the code are a best effort, not a
-guarantee: a Ctrl-C can be discarded when it lands in code Python runs by itself
-(a finalizer, say), can end the command with another code, and can leave part of
+it until a second Ctrl-C. One pressed while the command cleans up after another
+error can wait for the requests already out, as that cleanup does. The line and
+the code are a best effort, not a guarantee: a Ctrl-C can be discarded when it
+lands in code Python runs by itself (a finalizer, say), can end the command with
+another code, and can leave part of
 a traceback on stderr. If the command goes on, press Ctrl-C again. On Windows
 before Python 3.14, the wait on a lock cannot be interrupted, so a Ctrl-C can take
 effect only when that wait ends. Result lines already written stay, in a terminal, a pipe or a file; ones

@@ -573,34 +573,19 @@ lane - testing.md).
   throughput differ). The CLI keeps aws-cli's promise with
   `CrtClientOptions(allow_lockless=True)` (section 4, "Building without the
   cross-process lock"); library callers keep boto3's fallback by default.
-- **Ctrl-C and fatals on the CRT lane**: pip s3transfer's CRT manager
-  discards a drain-time `KeyboardInterrupt` - its coordinator converts the
-  interrupt into `cancel()`, the cancellation error replaces it, and its
-  shutdown drops that too - where the classic manager re-raises it. The library
-  follows its own rules (exceptions.md section 1: an interrupt cancels the item
-  and reaches the caller), the same on both engines: a CRT
-  cancellation the run ordered - its `CancelToken`, a fatal or a Ctrl-C
-  folding the manager - classifies `CANCELLED`
-  (`Transferrer._cancel_initiated`, marked before the cancel is issued), and
-  the swallowed drain-time interrupt is caught where the manager issues its
-  cancel: `Transferrer._guard_crt_cancel` wraps each CRT coordinator's
-  `cancel` and reads the interrupt being handled (`sys.exc_info`) there,
-  marks that cancel as the run's order, and `Transferrer.__exit__` re-raises
-  the interrupt once the drain is over. Which transfers the interrupt cancels
-  stays the manager's decision (the one whose wait it landed in,
-  or every one still running); the rest finish with their real outcomes. The
-  manager's later wait on the done callbacks has no such guard, and the first
-  wait stops at the first result that raises, so after a failed item a Ctrl-C
-  lands there and escapes with nothing cancelled.
-  `Transferrer._cancel_interrupted_crt_drain` then cancels every transfer still
-  running, waits for their records and their temporary files' removal, and
-  re-raises the interrupt the same way; a later Ctrl-C leaves that wait. A
-  CRT cancellation the run did not order stays `FAILED`. A
-  drain-time interrupt that cancels nothing (the waited-on transfer, and every
-  other, already finished) still reaches the caller. Under
-  `reusable_after_interrupt=False` none of these waits holds the caller: the
-  interrupt is handed back at once and the shutdown runs behind it (transfer.md
-  section 2).
+- **Ctrl-C and fatals on the CRT lane**: a CRT cancellation the run ordered -
+  its `CancelToken`, a fatal or a Ctrl-C folding the manager - classifies
+  `CANCELLED` (`Transferrer._cancel_initiated`, marked before the cancel is
+  issued), as on the classic engine (exceptions.md section 1: an interrupt
+  cancels the item and reaches the caller). A CRT cancellation the run did not
+  order stays `FAILED`. A Ctrl-C reaches the run's own wait for its transfers
+  (transfer.md section 2), so the manager's drain meets one only in the cleanup
+  after another exception. There pip s3transfer's CRT manager discards it - its
+  coordinator converts the interrupt into `cancel()`, the cancellation error
+  replaces it, and its shutdown drops that too - or lets it out of its last
+  wait with nothing more cancelled, where the classic manager cancels and
+  re-raises it. The library leaves both as they are: the line and exit code
+  after a Ctrl-C are a best effort (overview.md section 3).
 - **fio_options**: unavailable on any pip s3transfer
   ([`compatibility.md`](../docs/compatibility.md)), so the three `[s3]` keys
   are accepted and validated and do nothing, and `TransferConfig` has no field

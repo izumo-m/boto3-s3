@@ -337,8 +337,7 @@ class BatchError(Boto3S3Error):
   raising the fatal (or `CancelledError`) instead, and cancelled items are not
   failures - the engine's separate `cancelled` rollup counter carries them
   ([`opresult.md`](./opresult.md), the `on_result` contract), on either
-  transfer engine: a drain-time Ctrl-C the CRT manager swallows is re-raised
-  ([`crt.md`](./crt.md) section 6).
+  transfer engine.
 - `BatchError` is also a subtype of `Boto3S3Error`, so it is caught by
   `except Boto3S3Error`.
 - `cp` / `mv` / `sync` / `rm` follow the batch model regardless of the item

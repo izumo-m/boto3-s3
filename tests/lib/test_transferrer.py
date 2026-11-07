@@ -84,7 +84,6 @@ from boto3_s3.types import (
 )
 from tests.utils.fakemodel import model_client, model_only_client
 from tests.utils.fakes3 import MTIME, client_error
-from tests.utils.interrupts import interrupt_main_in, skip_without_pthread_kill
 from tests.utils.recorder import ApiCall, make_recording_client, ops
 
 _SYNC_CONFIG = TransferConfig(use_threads=False)
@@ -1630,7 +1629,9 @@ class _CrtCallbackManager:
     """The CRT manager's done path: every accepted transfer succeeds, and its
     done subscribers run in turn on the one thread ``fire`` starts, as awscrt
     runs them. The manager's shutdown returns once those calls have returned.
-    ``fired`` counts the transfers whose calls have."""
+    ``fired`` counts the transfers whose calls have. A run waits for its
+    transfers to settle before it shuts the manager down, so a test fires the
+    ones it lets finish before its block ends."""
 
     def __init__(self) -> None:
         self._accepted: list[tuple[_SettledCrtFuture, list[Any]]] = []
@@ -1668,37 +1669,6 @@ class _CrtCallbackManager:
 
 
 _AWSCRT_THREAD = "stand-in-awscrt"
-
-
-class _CrtLastWaitInterrupted(_CrtCallbackManager):
-    """A Ctrl-C lands in the CRT manager's wait on the done callbacks: shutdown
-    raises it with nothing cancelled, as s3transfer's ``_shutdown`` lets it out.
-    Once every transfer in flight is cancelled, awscrt answers (unless told not
-    to, a transfer that does not answer a cancel): ``before_answer`` runs, and
-    then the transfers' done subscribers."""
-
-    def __init__(
-        self, before_answer: Callable[[], Any] = lambda: None, *, answers: bool = True
-    ) -> None:
-        super().__init__()
-        self.shutdowns = 0
-        self._before_answer = before_answer
-        self._answers = answers
-
-    def shutdown(self) -> None:
-        self.shutdowns += 1
-        if self._answers:
-            threading.Thread(target=self._answer_the_cancel).start()
-        raise KeyboardInterrupt
-
-    def _answer_the_cancel(self) -> None:
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            if all(future.cancelled for future, _ in self._accepted):
-                break
-            time.sleep(0.005)
-        self._before_answer()
-        self.fire().join()
 
 
 def _setting_max_request_concurrency(value: int) -> LibraryTransferConfig:
@@ -1776,6 +1746,7 @@ class TestCrtMoveDoneWorkers:
         with transferrer:
             for name in ("a", "b"):
                 transferrer.submit(self._item(tmp_path, name, client))
+            self._fire_and_join(transferrer)
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED] * 2
 
     def test_awscrts_thread_does_not_wait_for_a_delete_and_the_run_does(
@@ -1820,6 +1791,7 @@ class TestCrtMoveDoneWorkers:
             item = self._item(tmp_path, "a", client)
             item.case_conflict_cleanup = lambda: steps.append("cleanup")
             transferrer.submit(item)
+            self._fire_and_join(transferrer)
         assert steps == ["fsync", "delete", "cleanup", "result"]
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
 
@@ -1837,6 +1809,7 @@ class TestCrtMoveDoneWorkers:
         with transferrer:
             for name in ("a", "b"):
                 transferrer.submit(self._item(tmp_path, name, client))
+            self._fire_and_join(transferrer)
         outcomes = {result.compare_key: result.outcome for result in results}
         assert outcomes == {"a": OpOutcome.FAILED, "b": OpOutcome.SUCCEEDED}
         assert (transferrer.failed, transferrer.succeeded) == (1, 1)
@@ -1895,144 +1868,6 @@ class TestCrtMoveDoneWorkers:
                 raise CancelledError("mv was cancelled", operation="mv")
         assert deleted == ["a"]
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
-
-    @skip_without_pthread_kill
-    def test_a_ctrl_c_in_the_wait_cancels_what_is_still_held(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        deleted, started, release = self._block_the_first_delete(monkeypatch)
-        results: list[OpResult] = []
-        transferrer, client = self._move(
-            results, transfer_config=LibraryTransferConfig(max_concurrency=1)
-        )
-
-        def interrupt_then_release() -> None:
-            interrupt_main_in("_close_done_workers", waiting_in="close")
-            release.set()
-
-        with pytest.raises(KeyboardInterrupt):
-            with transferrer:
-                for name in ("a", "b"):
-                    transferrer.submit(self._item(tmp_path, name, client))
-                self._fire_and_join(transferrer)
-                assert started.wait(10)
-                threading.Thread(target=interrupt_then_release).start()
-        # Read at once: the wait went on after the interrupt, on Python 3.10 to
-        # 3.12 too, where an interrupted Thread.join gives up on the thread.
-        assert deleted == ["a"]
-        outcomes = {result.compare_key: result.outcome for result in results}
-        assert outcomes == {"a": OpOutcome.SUCCEEDED, "b": OpOutcome.CANCELLED}
-
-    @skip_without_pthread_kill
-    def test_a_second_ctrl_c_leaves_the_wait(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _, started, release = self._block_the_first_delete(monkeypatch)
-        results: list[OpResult] = []
-        transferrer, client = self._move(results)
-
-        def twice() -> None:
-            interrupt_main_in("_close_done_workers", waiting_in="close")
-            interrupt_main_in("_close_done_workers", waiting_in="close")
-
-        with pytest.raises(KeyboardInterrupt):
-            with transferrer:
-                transferrer.submit(self._item(tmp_path, "a", client))
-                self._fire_and_join(transferrer)
-                assert started.wait(10)
-                threading.Thread(target=twice).start()
-        assert results == []  # its delete is still out
-        release.set()
-        workers = transferrer._done_workers  # pyright: ignore[reportPrivateUsage]
-        assert workers is not None
-        workers.close()
-        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
-
-    def test_a_ctrl_c_in_the_managers_last_wait_orders_the_cancel(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Nothing cancels on its way out of s3transfer's wait on the done
-        # callbacks: the held item and the transfer in flight would both have
-        # gone on to delete their sources.
-        deleted, started, release = self._block_the_first_delete(monkeypatch)
-        manager = _CrtLastWaitInterrupted(release.set)
-        results: list[OpResult] = []
-        transferrer, client = self._move(
-            results, manager=manager, transfer_config=LibraryTransferConfig(max_concurrency=1)
-        )
-        with pytest.raises(KeyboardInterrupt):
-            with transferrer:
-                for name in ("a", "b"):
-                    transferrer.submit(self._item(tmp_path, name, client))
-                self._fire_and_join(transferrer)
-                assert started.wait(10)
-                transferrer.submit(self._item(tmp_path, "c", client))
-        assert manager.shutdowns == 1
-        assert deleted == ["a"]
-        outcomes = {result.compare_key: result.outcome for result in results}
-        assert outcomes == {
-            "a": OpOutcome.SUCCEEDED,
-            "b": OpOutcome.CANCELLED,
-            "c": OpOutcome.CANCELLED,
-        }
-        assert (transferrer.succeeded, transferrer.cancelled, transferrer.failed) == (1, 2, 0)
-
-    def test_a_ctrl_c_in_the_managers_last_wait_settles_a_cp_too(self, tmp_path: Path) -> None:
-        results: list[OpResult] = []
-        client, _ = make_recording_client([])
-        manager = _CrtLastWaitInterrupted()
-        transferrer = Transferrer(TransferType.DOWNLOAD, client, on_result=results.append)
-        transferrer._manager = manager  # pyright: ignore[reportPrivateUsage]
-        with pytest.raises(KeyboardInterrupt):
-            with transferrer:
-                transferrer.submit(self._item(tmp_path, "a", client))
-        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
-        assert (transferrer.cancelled, transferrer.failed) == (1, 0)
-
-    @skip_without_pthread_kill
-    def test_a_later_ctrl_c_leaves_the_wait_for_the_cancelled_transfers(
-        self, tmp_path: Path
-    ) -> None:
-        results: list[OpResult] = []
-        client, _ = make_recording_client([])
-        manager = _CrtLastWaitInterrupted(answers=False)
-        transferrer = Transferrer(TransferType.DOWNLOAD, client, on_result=results.append)
-        transferrer._manager = manager  # pyright: ignore[reportPrivateUsage]
-        threading.Thread(
-            target=interrupt_main_in,
-            args=("_shut_down",),
-            kwargs={"waiting_in": "_cancel_interrupted_crt_drain"},
-        ).start()
-        with pytest.raises(KeyboardInterrupt):
-            with transferrer:
-                transferrer.submit(self._item(tmp_path, "a", client))
-        assert manager.shutdowns == 1
-        assert results == []
-
-    def test_a_ctrl_c_after_the_first_wait_took_one_does_not_wait(self, tmp_path: Path) -> None:
-        # s3transfer's first wait takes two before one gets here: a user still
-        # pressing is not asked for more, and a transfer that does not answer
-        # the cancel does not hold them.
-        client, _ = make_recording_client([])
-        manager = _CrtLastWaitInterrupted(answers=False)
-        transferrer = Transferrer(TransferType.DOWNLOAD, client)
-        transferrer._manager = manager  # pyright: ignore[reportPrivateUsage]
-        raised: list[BaseException] = []
-
-        def run() -> None:
-            try:
-                with transferrer:
-                    transferrer.submit(self._item(tmp_path, "a", client))
-                    interrupt = KeyboardInterrupt()
-                    transferrer._keep_swallowed_interrupt(interrupt)  # pyright: ignore[reportPrivateUsage]
-            except KeyboardInterrupt as exc:
-                raised.append(exc)
-
-        thread = threading.Thread(target=run, daemon=True)
-        thread.start()
-        thread.join(10)
-        assert not thread.is_alive()
-        assert len(raised) == 1
 
     def test_a_classic_manager_keeps_its_own_ctrl_c(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # It cancels and re-raises by itself; a second shutdown is not its shape.
@@ -2146,6 +1981,7 @@ class TestCrtMoveDoneWorkers:
         with transferrer:
             for index in range(expected * 3):
                 transferrer.submit(self._item(tmp_path, f"f{index}", client))
+            self._fire_and_join(transferrer)
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED] * (expected * 3)
         assert running == [0, expected]
 
@@ -2164,6 +2000,7 @@ class TestCrtMoveDoneWorkers:
             ) as transferrer:
                 transferrer._manager = _CrtCallbackManager()  # pyright: ignore[reportPrivateUsage]
                 transferrer.submit(self._item(tmp_path, "a", client))
+                self._fire_and_join(transferrer)
 
     def test_a_local_source_stays_on_awscrts_thread(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2189,6 +2026,7 @@ class TestCrtMoveDoneWorkers:
         ) as transferrer:
             transferrer._manager = _CrtCallbackManager()  # pyright: ignore[reportPrivateUsage]
             transferrer.submit(item)
+            self._fire_and_join(transferrer)
         assert threads == [_AWSCRT_THREAD]
         assert transferrer._done_workers is None  # pyright: ignore[reportPrivateUsage]
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
@@ -2213,6 +2051,7 @@ class TestCrtMoveDoneWorkers:
         ) as transferrer:
             transferrer._manager = _CrtCallbackManager()  # pyright: ignore[reportPrivateUsage]
             transferrer.submit(item)
+            self._fire_and_join(transferrer)
         assert [name.partition("_")[0] for name in threads] == ["boto3-s3-done"]
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
 
@@ -2226,6 +2065,7 @@ class TestCrtMoveDoneWorkers:
         with Transferrer(TransferType.DOWNLOAD, client, on_result=record) as transferrer:
             transferrer._manager = _CrtCallbackManager()  # pyright: ignore[reportPrivateUsage]
             transferrer.submit(self._item(tmp_path, "a", client))
+            self._fire_and_join(transferrer)
         assert threads == [_AWSCRT_THREAD]
         assert transferrer._done_workers is None  # pyright: ignore[reportPrivateUsage]
 
@@ -2366,170 +2206,6 @@ class TestDoneWorkers:
         self._run_in_thread(run_both)
         assert noted == [escaped]
         assert len(noting.threads) == 1  # only the second item's: the first stopped there
-
-
-class _CrtWait:
-    """One request's awscrt ``finished_future``, as the drain waits on it.
-
-    ``state`` is ``running`` until the request finishes ``ok`` or
-    ``cancelled``, which runs the done callbacks the way the CRT client does
-    (``settle``). A wait marked ``interrupt`` is where the Ctrl-C lands.
-    """
-
-    def __init__(self, *, interrupt: bool) -> None:
-        self.interrupt = interrupt
-        self.state = "running"
-        self.settle: Callable[[], None] = lambda: None
-
-    def done(self) -> bool:
-        return self.state != "running"
-
-    def result(self, timeout: float | None = None) -> None:
-        if self.state == "cancelled":
-            raise _CrtCancelError("AWS_ERROR_S3_CANCELED: Request successfully cancelled")
-        if self.state == "ok":
-            return
-        if self.interrupt:
-            self.interrupt = False
-            raise KeyboardInterrupt
-        raise AssertionError("the drain waited on a request that never finishes")
-
-    def finish(self, state: str) -> None:
-        self.state = state
-        self.settle()
-
-
-class _CrtRequest:
-    """An awscrt request whose cancel settles it - cancelled, or ``ok`` when
-    it had already completed (``completes``) by the time the cancel arrived."""
-
-    def __init__(self, wait: _CrtWait, *, completes: bool) -> None:
-        self.finished_future = wait
-        self._completes = completes
-
-    def cancel(self) -> None:
-        if self.finished_future.state == "running":
-            self.finished_future.finish("ok" if self._completes else "cancelled")
-
-
-def _swallowing_crt_manager(*requests: dict[str, bool]) -> Any:
-    """pip s3transfer's own CRT manager and coordinators over fake requests.
-
-    The drain (``shutdown`` / ``_shutdown``) and the coordinator's
-    ``result`` / ``cancel`` are s3transfer's, so a Ctrl-C landing in the
-    drain's wait is swallowed exactly as pip s3transfer swallows it; only the
-    awscrt requests underneath are stand-ins. Each upload takes the next of
-    ``requests``: ``interrupt`` (the drain's wait on it is interrupted),
-    ``completes`` (a cancel finds it already complete), ``done`` (finished
-    before the drain).
-    """
-    pytest.importorskip("awscrt")
-    from s3transfer.crt import CRTTransferCoordinator, CRTTransferFuture, CRTTransferManager
-
-    specs = list(requests)
-
-    class Manager(CRTTransferManager):
-        def upload(
-            self,
-            fileobj: Any,
-            bucket: Any,
-            key: Any,
-            extra_args: Any = None,
-            subscribers: Any = None,
-        ) -> Any:
-            spec = specs.pop(0)
-            coordinator = CRTTransferCoordinator(transfer_id=len(self._future_coordinators))
-            future = CRTTransferFuture(meta=cast(Any, _FakeCrtMeta()), coordinator=coordinator)
-            wait = _CrtWait(interrupt=spec.get("interrupt", False))
-
-            def settle() -> None:
-                for subscriber in subscribers or ():
-                    on_done = getattr(subscriber, "on_done", None)
-                    if on_done is not None:
-                        on_done(future)
-                coordinator.set_done_callbacks_complete()
-
-            wait.settle = settle
-            request = _CrtRequest(wait, completes=spec.get("completes", False))
-            coordinator.set_s3_request(cast(Any, request))
-            self._future_coordinators.append(coordinator)
-            if spec.get("done", False):
-                wait.finish("ok")
-            return future
-
-    manager = object.__new__(Manager)
-    manager._future_coordinators = []  # pyright: ignore[reportAttributeAccessIssue]
-    return manager
-
-
-class TestCrtSwallowedInterrupt:
-    """A Ctrl-C landing in pip s3transfer's CRT drain is swallowed there - the
-    coordinator turns it into its own ``cancel()`` and the manager's shutdown
-    drops what follows. Here what it cancelled is CANCELLED, as on the
-    classic engine, and the interrupt reaches the caller once the drain is
-    over (design/crt.md section 6)."""
-
-    def _run(self, tmp_path: Path, manager: Any) -> list[OpResult]:
-        client, _ = make_recording_client([])
-        results: list[OpResult] = []
-        transferrer = Transferrer(TransferType.UPLOAD, client, on_result=results.append)
-        with pytest.raises(KeyboardInterrupt):
-            with transferrer:
-                transferrer._manager = manager  # pyright: ignore[reportPrivateUsage]
-                for name in ("a.bin", "b.bin"):
-                    src = tmp_path / name
-                    src.write_bytes(b"x")
-                    transferrer.submit(
-                        TransferItem(
-                            compare_key=name,
-                            size=1,
-                            src_path=str(src),
-                            dest_bucket="b",
-                            dest_key=name,
-                        )
-                    )
-        assert transferrer.failed == 0
-        return results
-
-    def test_the_cancelled_transfer_is_cancelled_and_the_interrupt_raised(
-        self, tmp_path: Path
-    ) -> None:
-        # The coordinator cancels the transfer it was waiting on, and its
-        # cancellation error replaces the interrupt; the manager drops that.
-        manager = _swallowing_crt_manager({"interrupt": True}, {"done": True})
-        results = self._run(tmp_path, manager)
-        assert sorted((r.compare_key, r.outcome) for r in results) == [
-            ("a.bin", OpOutcome.CANCELLED),
-            ("b.bin", OpOutcome.SUCCEEDED),
-        ]
-
-    def test_a_transfer_complete_before_the_cancel_keeps_its_outcome(self, tmp_path: Path) -> None:
-        # The waited-on transfer had already completed, so the coordinator
-        # re-raises the interrupt and the manager's shutdown catches it,
-        # cancels every transfer still running, and drops it there instead.
-        manager = _swallowing_crt_manager({"interrupt": True, "completes": True}, {"done": True})
-        results = self._run(tmp_path, manager)
-        assert sorted((r.compare_key, r.outcome) for r in results) == [
-            ("a.bin", OpOutcome.SUCCEEDED),
-            ("b.bin", OpOutcome.SUCCEEDED),
-        ]
-
-    def test_a_cancel_without_an_interrupt_passes_through(self, tmp_path: Path) -> None:
-        # The guard reads the interrupt being handled; a cancel the run's
-        # token issues has none, and nothing is kept to raise.
-        client, _ = make_recording_client([])
-        results: list[OpResult] = []
-        with Transferrer(TransferType.UPLOAD, client, on_result=results.append) as transferrer:
-            transferrer._manager = _swallowing_crt_manager({})  # pyright: ignore[reportPrivateUsage]
-            src = tmp_path / "a.bin"
-            src.write_bytes(b"x")
-            transferrer.submit(
-                TransferItem(
-                    compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="a"
-                )
-            )
-            transferrer._cancel_futures()  # pyright: ignore[reportPrivateUsage]
-        assert [(r.compare_key, r.outcome) for r in results] == [("a.bin", OpOutcome.CANCELLED)]
 
 
 class TestFatalCancellation:

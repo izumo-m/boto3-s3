@@ -1,4 +1,4 @@
-"""Unit tests for boto3_s3.concurrency.prefetch.
+"""Unit tests for boto3_s3.concurrency: prefetch and Wake.
 
 The worker is a background thread; tests drive it through in-memory page lists
 so timing stays deterministic. Where teardown is asserted, the named worker
@@ -14,9 +14,11 @@ from collections.abc import Iterator
 
 import pytest
 
-from boto3_s3.concurrency import prefetch
+from boto3_s3 import concurrency
+from boto3_s3.concurrency import Wake, prefetch
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.types import S3FileInfo, ScanOptions
+from tests.utils.interrupts import interrupt_main_in, skip_without_pthread_kill
 
 _WORKER_NAME = "boto3-s3-prefetch"
 
@@ -383,3 +385,52 @@ def test_ls_joins_on_every_exit_by_default(exc_type: type[BaseException]) -> Non
         assert not _worker_alive()
     finally:
         storage.release.set()
+
+
+class TestWake:
+    """The wait the calling thread does on other threads (`concurrency.Wake`)."""
+
+    @staticmethod
+    def _send_soon(wake: Wake, flag: list[bool]) -> None:
+        def send() -> None:
+            time.sleep(0.05)
+            flag[0] = True
+            wake.send()
+
+        threading.Thread(target=send).start()
+
+    def test_a_send_ends_the_wait_at_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Woken by the send, not by the look the slice takes.
+        monkeypatch.setattr(concurrency, "_WAKE_SLICE", 30.0)
+        wake, flag = Wake(), [False]
+        self._send_soon(wake, flag)
+        started = time.monotonic()
+        wake.wait_until(lambda: flag[0])
+        assert time.monotonic() - started < 5
+
+    def test_a_condition_that_holds_is_not_waited_for(self) -> None:
+        Wake().wait_until(lambda: True)
+
+    def test_sends_with_nobody_waiting_do_not_pile_up(self) -> None:
+        wake = Wake()
+        for _ in range(1000):
+            wake.send()
+        pending = wake._pending  # pyright: ignore[reportPrivateUsage]
+        assert pending.acquire(blocking=False)  # one wake-up pending
+        assert not pending.acquire(blocking=False)  # and no more
+
+    @skip_without_pthread_kill
+    def test_a_ctrl_c_in_the_wait_leaves_it_usable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(concurrency, "_WAKE_SLICE", 30.0)
+        wake, flag = Wake(), [False]
+        threading.Thread(
+            target=interrupt_main_in,
+            args=("test_a_ctrl_c_in_the_wait_leaves_it_usable",),
+            kwargs={"waiting_in": "wait_until"},
+        ).start()
+        with pytest.raises(KeyboardInterrupt):
+            wake.wait_until(lambda: flag[0])
+        self._send_soon(wake, flag)
+        started = time.monotonic()
+        wake.wait_until(lambda: flag[0])
+        assert time.monotonic() - started < 5

@@ -25,11 +25,23 @@ skip_without_pthread_kill = pytest.mark.skipif(
 def interrupt_main_in(caller: str, *, waiting_in: str | None = None) -> None:
     """Send the main thread a SIGINT once it waits in *caller*'s *waiting_in*.
 
+    Waits as `main_waits_in` does, then signals and gives the interrupt a moment
+    to land. Call it from another thread.
+    """
+    main_waits_in(caller, waiting_in=waiting_in)
+    main = threading.main_thread().ident
+    assert main is not None
+    signal.pthread_kill(main, signal.SIGINT)
+    time.sleep(0.05)
+
+
+def main_waits_in(caller: str, *, waiting_in: str | None = None) -> None:
+    """Return once the main thread waits in *caller*'s *waiting_in*.
+
     Polls the main thread's stack until its innermost Python frame is the
     function named *waiting_in* called directly from the function named
-    *caller* - or, with no *waiting_in*, until *caller* is anywhere on the stack
-    - then signals and gives the interrupt a moment to land. Call it from
-    another thread.
+    *caller* - or, with no *waiting_in*, until *caller* is anywhere on the stack.
+    Call it from another thread.
     """
     main = threading.main_thread().ident
     assert main is not None
@@ -45,5 +57,3 @@ def interrupt_main_in(caller: str, *, waiting_in: str | None = None) -> None:
         time.sleep(0.005)
     else:
         raise AssertionError(f"the main thread never waited in {caller}'s {waiting_in}")
-    signal.pthread_kill(main, signal.SIGINT)
-    time.sleep(0.05)

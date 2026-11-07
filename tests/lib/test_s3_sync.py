@@ -13,7 +13,9 @@ the wire).
 from __future__ import annotations
 
 import os
+import sys
 import threading
+import time
 from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -87,6 +89,22 @@ def _refused_crt_engine(monkeypatch: pytest.MonkeyPatch) -> TransferConfig:
 _CASE_CONFLICT_CONFIG = TransferConfig(max_concurrency=1)
 _OLDER = MTIME - timedelta(hours=1)
 _NEWER = MTIME + timedelta(hours=1)
+
+
+def _settles(runner: threading.Thread) -> bool:
+    """Whether *runner* comes to sleep in sync's settle loop within a few seconds."""
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        frame = sys._current_frames().get(runner.ident or 0)  # pyright: ignore[reportPrivateUsage]
+        if (
+            frame is not None
+            and frame.f_code.co_name == "wait_until"
+            and frame.f_back is not None
+            and frame.f_back.f_code.co_name == "settle_pending"
+        ):
+            return True
+        time.sleep(0.01)
+    return False
 
 
 def _write(root: Path, rel: str, body: bytes, *, mtime: datetime | None = None) -> Path:
@@ -1236,13 +1254,6 @@ class TestParallelFilter:
         # through nothing but cancel() - so only re-observing the token inside
         # the wait can end it. Freezing the mode at entry hung a CI run here
         # (28 minutes of silence until the job timeout).
-        settle_probe = threading.Event()  # the settle loop polled the queued future
-
-        class _ProbedFuture(Future[Any]):
-            def done(self) -> bool:
-                settle_probe.set()
-                return super().done()
-
         class _ProbedWindow(Executor):
             _max_workers = 2
 
@@ -1256,7 +1267,7 @@ class TestParallelFilter:
                     future = self._pool.submit(fn, *args, **kwargs)
                     self.queued.append(future)
                     return future
-                future = _ProbedFuture()
+                future = Future[Any]()
                 self.queued.append(future)
                 self.queued_ready.set()
                 return future
@@ -1300,7 +1311,8 @@ class TestParallelFilter:
             assert first_started.wait(5.0)
             assert pool.queued_ready.wait(5.0)
             token.cancel()  # graceful: sync starts awaiting both decisions
-            assert settle_probe.wait(5.0)  # the graceful wait is under way
+            # The graceful wait is under way: the runner sleeps in settle_pending.
+            assert _settles(runner)
             token.cancel(mode=CancelMode.IMMEDIATE)  # upgrade lands mid-settle
             for _ in range(500):
                 if pool.queued[1].cancelled():

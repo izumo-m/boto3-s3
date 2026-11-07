@@ -177,6 +177,8 @@ maintaining high functional compatibility.
      stops it before it starts.
   4. The library's exceptions classify the failures within its own reach: the
      SDK, S3 and local files. How the caller's code fails is the next item.
+  5. Once an operation's exception has reached the caller, `on_result` and
+     `on_progress` are not called again.
 - **Ctrl-C is not matched to aws-cli**: nothing is added only to make an
   interrupted run behave as aws-cli's does, in its output, its exit code or the
   requests it still sends, and a difference there is neither a bug nor a
@@ -191,9 +193,10 @@ maintaining high functional compatibility.
   2. Under `reusable_after_interrupt=False`, an operation hands an interrupt back
      at once: nothing can cancel a request already out, and a server that does
      not answer holds it for a full timeout. What has not started never starts,
-     `on_result` and `on_progress` are not called once the interrupt has reached
-     the caller, and the cleanup goes on
-     behind the caller, as far as the process lives. That `S3` is not used again; a new one works.
+     and the cleanup goes on behind the caller, as far as the process lives. One
+     pressed while the operation cleans up after another exception can wait for the
+     requests already out, as that cleanup does. That `S3` is not used again; a
+     new one works.
   3. Running the operation again reaches a consistent result. What an interrupt
      cut short leaves nothing a re-run would take for finished work: a download's
      temporary file is removed, a multipart upload is aborted (but for one awscrt
@@ -214,6 +217,11 @@ maintaining high functional compatibility.
   is not reason enough.
 - **A stalled output may stop the program** until it clears, even through a
   failure or a Ctrl-C.
+- **A wait on another thread sleeps until woken and survives a Ctrl-C**: the
+  calling thread waits on `concurrency.Wake` (a C lock underneath), which the
+  other thread sends; not by looking again and again, and not on
+  `threading.Event`, `Condition` or `queue.Queue`, which a Ctrl-C landing inside
+  can leave locked.
 - **The caller's code is the caller's responsibility**: code the caller
   writes and hands to the library - a stream, a storage backend, a filter, a
   callback - is outside the library's reach. The library answers for its own
