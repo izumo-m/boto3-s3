@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-09
+
 - `S3.from_aws_cli()` builds an `S3` whose session and clients are assembled the way `aws s3` assembles its own, and `cp`, `mv`, `sync` and `rm` read the config file's `[s3]` section as `aws s3` does (`S3.resolve_transfer_config` returns the config a run would use).
 - `cp`, `mv` and `sync` take `source_region` (`S3.source_client()` builds that client), and `mv` takes `validate_same_s3_paths` (`S3.check_mv_paths()` runs its checks ahead of a run).
 - `ls` takes a `filter=` like the other operations, and `ChecksumComparison` compares objects stored with a `SHA512`, `MD5` or `XXHASH` checksum instead of copying them every run.
@@ -129,7 +131,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release.
 
-[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.12.0...HEAD
+[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.13.0...HEAD
+[0.13.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.12.0...boto3-s3-v0.13.0
 [0.12.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.11.1...boto3-s3-v0.12.0
 [0.11.1]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.11.0...boto3-s3-v0.11.1
 [0.11.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.10.0...boto3-s3-v0.11.0

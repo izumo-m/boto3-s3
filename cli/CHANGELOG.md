@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-09
+
 - Ctrl-C now ends any command at once at exit code 130 with `cancelled: ctrl-c received`, waiting for nothing, so an unfinished multipart upload or a temporary file can stay behind (exit codes changed).
 - `--exclude` / `--include` now take the path a command names literally (a `[1]` there is no longer read as a pattern), and between nested S3 prefixes a pattern applies only to its own side's entries.
 - The `[plugins]` section, `~/.aws/cli/alias` and the interactive auto-prompt (with the `autoprompt` extra) are gone: none is read or applied, a file or section naming them is no error, and `--cli-auto-prompt` / `--no-cli-auto-prompt` are accepted and ignored.
@@ -121,7 +123,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release.
 
-[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.9.0...HEAD
+[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.10.0...HEAD
+[0.10.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.9.0...boto3-s3-cli-v0.10.0
 [0.9.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.8.1...boto3-s3-cli-v0.9.0
 [0.8.1]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.8.0...boto3-s3-cli-v0.8.1
 [0.8.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.7.0...boto3-s3-cli-v0.8.0
