@@ -15,9 +15,10 @@ how the dev stack's server was chosen (section 3).
 
 Every known way the dev stack answers differently from real S3, plus the
 places where moto does and a golden is affected. The dev stack column is the
-observed behavior of RustFS 1.0.3 (`rustfs/rustfs:1.0.3`, image revision
-`331fb896`): probed on 1.0.2 on 2026-10-17 and again on 1.0.3, which keeps
-1.0.2's server code, on 2026-10-25. The compose file pins that release, so a
+observed behavior of RustFS 1.0.4 (`rustfs/rustfs:1.0.4`, image revision
+`46337942`): probed on 1.0.2 on 2026-10-17, again on 1.0.3, which keeps
+1.0.2's server code, on 2026-10-25, and on 1.0.4, whose probes match
+1.0.3's, on 2026-11-09. The compose file pins that release, so a
 newer one has not been checked against these rows until the probes are re-run;
 `docker exec boto3-s3-dev-s3-1 rustfs --version` prints the running one.
 
@@ -31,7 +32,7 @@ goldens replay on moto: a golden captured on one endpoint only works if moto
 answers the same way. The last column points to the test-side changes in
 section 2; the table doubles as the probe checklist for a new endpoint.
 
-| # | Surface | Dev stack (RustFS 1.0.3) | Real S3 | moto | Section 2 |
+| # | Surface | Dev stack (RustFS 1.0.4) | Real S3 | moto | Section 2 |
 |---|---|---|---|---|---|
 | G1 | PutBucketWebsite without an IndexDocument (error document only, or empty) | rejected, `MalformedXML` | rejected (`InvalidArgument`; the error-document-only shape *unverified*) | stored | T8 |
 | G2 | `--storage-class` other than STANDARD and REDUCED_REDUNDANCY (STANDARD_IA, ONEZONE_IA, INTELLIGENT_TIERING, GLACIER_IR, GLACIER, DEEP_ARCHIVE) | `InvalidStorageClass`, rc 1 | accepted, rc 0 (*measured*) | accepted | T9 |
@@ -186,8 +187,8 @@ neither CLI sends it.
 CloudServer drops out: without conditional PutObject the `--no-overwrite`
 scenarios prove nothing, and aws-cli's CRT downloads fail against it. RustFS
 answers as real S3 does on more surfaces than Silo and is further on two
-(G9, G15), so it became the dev stack. It is pinned to 1.0.2 because its 1.0
-release (2026-09-16) is recent.
+(G9, G15), so it became the dev stack. It is pinned to one release (section 1
+names it) because its 1.0 release (2026-09-16) is recent.
 
 ### Desk survey (2026-10-06)
 
