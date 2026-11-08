@@ -459,27 +459,3 @@ class TestAppendFilterAction:
         compiled = filters.compile_filter(rules)
         assert isinstance(compiled, GlobFilter)
         assert compiled.rules == tuple(rules)
-
-
-class TestScanInterruptPolicy:
-    def test_the_cli_posture_reaches_the_listing_scan(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # A Ctrl-C ends the CLI's process: the S3 the CLI builds declares
-        # reusable_after_interrupt=False once, and rm threads it into its recursive
-        # listing scan's ScanOptions; the library default keeps waiting.
-        import boto3_s3
-
-        scan_waits: list[bool] = []
-
-        class _Recording(boto3_s3.S3Storage):
-            def scan(self, options: Any = None, *, cancel_token: Any = None) -> Any:
-                assert options is not None
-                scan_waits.append(options.reusable_after_interrupt)
-                return super().scan(options, cancel_token=cancel_token)
-
-        # Patch the command module's binding: rm.py imports S3Storage at top.
-        monkeypatch.setattr("boto3_s3_cli.commands.transferargs.S3Storage", _Recording)
-        client, _calls = make_recording_client([{}])
-        assert cli.main(["rm", "s3://b/k/", "--recursive"], ctx=client_ctx(client)) == 0
-        assert scan_waits == [False]

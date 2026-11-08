@@ -545,7 +545,6 @@ S3Deleter(
     session: Session | None = None,
     crt_endpoint: str | None = None,
     crt: CrtClientOptions | None = None,
-    reusable_after_interrupt: bool = True,
 )
 ```
 
@@ -576,10 +575,9 @@ pass their instance's, and `sync` passes a classic config for an S3-to-S3 run,
 which `aws s3` always runs on its classic client. A `dryrun` deleter builds no
 engine.
 
-`reusable_after_interrupt=False` makes a `KeyboardInterrupt` leave the context at
-once: the batch in flight finishes behind the caller, reports nothing and starts
-no further per-key request, and the worker ends by itself. `S3.rm` and `sync` pass
-their instance's.
+A `KeyboardInterrupt` leaves the context at once: the batch in flight finishes
+behind the caller, reports nothing and starts no further per-key request, and
+the worker ends by itself ([`s3.md`](./s3.md#s3)).
 
 `on_result` is a [`ResultCallback`](./results.md#resultcallback) receiving one
 [`OpResult`](./results.md#opresult) per dispatched entry — see
@@ -675,8 +673,10 @@ def close(self, *, flush: bool = True) -> None
 
 Flush, wait for in-flight work, shut the worker down. Idempotent. The flush is
 skipped when `flush=False` or when the token is already cancelled. Afterwards
-the rollup counters are final and `submit` / `flush` raise
-[`ValidationError`](./exceptions.md#validationerror).
+`submit` / `flush` raise [`ValidationError`](./exceptions.md#validationerror),
+and the rollup counters are final — but for a close an immediate cancel or a
+Ctrl-C ended, which waits for nothing: a batch already sent then finishes behind
+it, still counting.
 
 An unexpected worker exception — or one raised by `on_result` — re-raises here;
 the deleter still ends up closed and the worker shut down either way. Entries
@@ -688,8 +688,9 @@ are abandoned without any result being emitted for them.
 `__enter__` returns the deleter; `__exit__` calls
 `close(flush=exc_type is None)`. Leaving the block normally flushes; leaving it
 because of an exception abandons the unsent buffer while still waiting for the
-batch already in flight, and a worker error raised at that point propagates
-with the body's exception chained as its `__context__`.
+batch already in flight - but for a Ctrl-C and an immediate cancel, which wait
+for nothing - and a worker error raised at that point propagates with the
+body's exception chained as its `__context__`.
 
 Closing matters: interpreter shutdown joins the worker thread whichever thread
 started it (the executor registers the join itself, so a daemon caller is no
@@ -840,16 +841,14 @@ or at `close()`.
 ### Cancellation
 
 A cancelled [`CancelToken`](./results.md#canceltoken) stops further batches
-from being dispatched. A batch whose request has already started completes and
-delivers its per-key results — a graceful cancel drains all of it, while an
-immediate one (like `close(flush=False)` for any other reason) starts none of
-the batch's remaining per-key requests, and a key left unsent that way gets
-no record.
-Buffered entries that were never sent are
-discarded without results, and
-[`CancelMode.IMMEDIATE`](./results.md#cancelmode) may additionally cancel a
-dispatched batch that has not started, whose entries likewise produce no
-records. The deleter does not raise
+from being dispatched, and buffered entries that were never sent are discarded
+without results. A graceful cancel waits for a batch whose request has already
+started, which completes and delivers its per-key results.
+[`CancelMode.IMMEDIATE`](./results.md#cancelmode) waits for nothing: a
+dispatched batch that has not started never runs, and one already sent
+finishes on its own without delivering its results and, like
+`close(flush=False)` for any other reason, starts none of its remaining per-key
+requests. The entries of such batches produce no records. The deleter does not raise
 [`CancelledError`](./exceptions.md#cancellederror) itself; the operations
 driving it do.
 

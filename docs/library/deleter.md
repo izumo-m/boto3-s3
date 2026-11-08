@@ -21,7 +21,7 @@ which are not objects; submitting them would try to delete prefixes.
 S3Deleter(storage, *, request_payer=None, on_result=None, cancel_token=None,
           batch_size=1000, operation="delete", capture_response=False,
           dryrun=False, transfer_config=None, session=None, crt_endpoint=None,
-          crt=None, reusable_after_interrupt=True)
+          crt=None)
 ```
 
 `storage` must be an `S3Storage`; anything else raises `ValidationError`. Only
@@ -37,8 +37,8 @@ failures (`ConfigurationError`).
 
 `batch_size` must be between 1 and 1000, S3's own limit for one batch request.
 
-`reusable_after_interrupt=False` makes a `KeyboardInterrupt` leave the context at
-once: the batch in flight finishes behind you and reports nothing.
+A `KeyboardInterrupt` leaves the context at once: the batch in flight finishes
+behind you and reports nothing.
 
 Deleting a specific `VersionId` is not provided, as `aws s3 rm` does not offer
 it either.
@@ -113,14 +113,15 @@ calls it on your own thread — see [Rehearsing with
 
 `submit` / `flush` / `close` are meant to be called from **one** thread.
 
-Cancelling through `cancel_token` never discards a batch whose request has
-already started — it completes and delivers its results. Buffered entries not
-yet sent are dropped without records, and immediate mode may also cancel a
-dispatched batch that has not begun. One kind of entry inside a started batch
-can still go unsent: a key the batch sends as a request of its own (one XML
-cannot carry, or a re-send) that had not gone out when the run was abandoned — by
-`close(flush=False)` for anything but a graceful cancel, or by an immediate
-one. It is dropped without a record, like a buffered entry.
+Cancelling through `cancel_token` drops the buffered entries not yet sent,
+without records. A graceful cancel waits for a batch whose request has already
+started, which completes and delivers its results. An immediate cancel waits
+for nothing: a dispatched batch that has not begun never runs, and one already
+sent finishes on its own without delivering its results. One kind of entry
+inside a started batch can go unsent: a key the batch sends as a request of
+its own (one XML cannot carry, or a re-send) that had not gone out when the run
+was abandoned — by `close(flush=False)` for anything but a graceful cancel, or
+by an immediate one. It is dropped without a record, like a buffered entry.
 
 Nothing is printed. Beyond the result records, the deleter logs batch
 dispatches and failures to the `boto3_s3.deleter` logger at debug level.

@@ -96,6 +96,13 @@ def _deleter(fake: _FakeS3Client, **kwargs: Any) -> S3Deleter:
     return S3Deleter(S3Storage("s3://bucket/prefix/", client=fake), **kwargs)
 
 
+def _join_worker(deleter: S3Deleter) -> None:
+    """Wait for the worker a deleter left running behind its caller."""
+    executor = deleter._executor  # pyright: ignore[reportPrivateUsage]
+    assert executor is not None
+    executor.shutdown(wait=True)
+
+
 def _info(key: str) -> S3FileInfo:
     """A minimal listing entry for ``S3Deleter.submit`` (only ``key`` matters;
     with no ``compare_key`` stamped, the emitted record's ``compare_key`` falls
@@ -266,10 +273,10 @@ class TestBatching:
         assert results[0].src_info is not None
         assert results[0].src_info.key == "prefix/"
 
-    def test_immediate_cancel_delivers_the_started_batch_and_drops_the_rest(self) -> None:
-        # design/deleter.md: IMMEDIATE cannot claw back a batch the worker
-        # already started - all of its results are delivered - while work not
-        # yet dispatched is abandoned without records.
+    def test_immediate_cancel_leaves_the_started_batch_and_drops_the_rest(self) -> None:
+        # design/deleter.md: IMMEDIATE waits for nothing - the batch the worker
+        # already started finishes behind the caller, unreported - while work
+        # not yet dispatched is abandoned without records.
         fake = _FakeS3Client()
         fake.gate = threading.Event()
         token = CancelToken()
@@ -280,11 +287,11 @@ class TestBatching:
         assert fake.entered.wait(timeout=5.0)
         deleter.submit(_info("c"))  # buffered; must never be dispatched
         token.cancel(mode=CancelMode.IMMEDIATE)
+        deleter.close()  # returns with the batch still held
         fake.gate.set()
-        deleter.close()
+        _join_worker(deleter)
         assert _keys(fake.calls) == [["a", "b"]]
-        assert [r.compare_key for r in results] == ["a", "b"]
-        assert all(r.outcome is OpOutcome.SUCCEEDED for r in results)
+        assert results == []
 
     def test_duplicate_keys_pass_through(self) -> None:
         fake = _FakeS3Client()
@@ -855,8 +862,8 @@ class TestResults:
 
     def test_an_immediate_cancel_starts_no_further_resends(self) -> None:
         # The other way to abandon a run: the token switched to IMMEDIATE
-        # while the batch is re-sending. Same outcome as close(flush=False) -
-        # the requests out finish, the rest get no record.
+        # while the batch is re-sending. The requests out finish behind the
+        # caller, the rest never start, and none of it is reported.
         keys = [f"k{i:02d}" for i in range(30)]
         fake = _FakeS3Client(
             script=[{"Errors": [{"Key": k, "Code": "SlowDown", "Message": "msg"} for k in keys]}]
@@ -880,11 +887,11 @@ class TestResults:
         for _ in range(10):
             assert started.acquire(timeout=5.0)
         token.cancel(mode=CancelMode.IMMEDIATE)
+        deleter.close()  # returns with the re-sends still held
         release.set()
-        deleter.close()
+        _join_worker(deleter)
         assert len(fake.single_calls) == 10
-        assert len(results) == 10
-        assert all(r.outcome is OpOutcome.SUCCEEDED for r in results)
+        assert results == []
 
     def test_resends_fall_back_in_line_when_no_thread_can_be_started(
         self, monkeypatch: pytest.MonkeyPatch

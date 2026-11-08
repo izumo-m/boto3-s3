@@ -166,7 +166,6 @@ class TestWalkScanOptions:
             recursive=True,
             on_warning=None,
             item_filter=None,
-            reusable_after_interrupt=True,
             read_ahead=read_ahead,
         )
 

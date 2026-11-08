@@ -6,19 +6,18 @@ consumer would otherwise block on. ``prefetch`` runs the page iterable on a
 worker thread and hands back a flattened iterator, so the next page is in flight
 while the consumer processes the current one.
 
-Backpressure is bounded by a ``queue.Queue``: the worker blocks when the
-queue is full, so a slow consumer throttles a fast producer instead of buffering
+Backpressure is bounded: the worker waits while ``queue_size`` pages are
+unread, so a slow consumer throttles a fast producer instead of buffering
 without limit. A worker-side exception surfaces on the consumer's pull once
 the items already queued have drained.
-Cleanup is cooperative -- the worker checks a stop flag between puts. The
+Cleanup is cooperative -- the worker checks a stop flag between pages. The
 owner must exit the `prefetch` context when it stops consuming; context exit
-drops buffered pages and waits for a page pull already in progress before
-returning, so no worker survives the operation. The single opt-out is
-``reusable_after_interrupt=False`` for apps that leave at once on a Ctrl-C (see
-`prefetch`).
+drops buffered pages and tells the worker to stop, without waiting for a page
+pull already in progress (see `prefetch`).
 
-``Wake`` is how the calling thread, where a Ctrl-C lands, waits for another
-thread to finish something.
+``Wake`` is how a thread, the calling thread where a Ctrl-C lands among them,
+waits for another thread to do something, and ``WakeAll`` how one event wakes
+every thread waiting for it.
 """
 
 from __future__ import annotations
@@ -38,28 +37,29 @@ T = TypeVar("T")
 # -- should the source yield one -- is never mistaken for termination.
 _END: object = object()
 
-# How long the worker blocks on a put before re-checking the stop flag. Short
-# enough that an early-break consumer tears down promptly; long enough that an
-# idle worker does not spin.
-_STOP_POLL_SECONDS = 0.1
-
-# The longest a `Wake` wait sleeps before it looks again by itself. A wake-up
-# ends the sleep at once; the look lets a Ctrl-C through where a lock wait
-# cannot be interrupted (Windows before Python 3.14), and bounds what a missed
-# wake-up could cost.
-_WAKE_SLICE = 0.1
+# How long a `Wake` wait on the main thread sleeps before it looks again by
+# itself, to let a Ctrl-C through (design/overview.md section 3, "A wait does
+# not poll"). Python acts on a Ctrl-C only once the main thread is back in
+# Python code, and the lock wait does not end for one that came just as the
+# wait began, nor on Windows before Python 3.14 for any
+# (python/cpython#125541). A wait on another thread wakes only by a send.
+_CTRL_C_SLICE = 1.0
 
 
 class Wake:
     """Wake the thread that waits for a condition, safely under Ctrl-C.
 
     One thread waits at a time: it sleeps in `wait_until` until the condition
-    holds, and any thread that may have made it hold calls `send`. Built on a
-    ``threading.Lock`` used as a one-place signal - held means no wake-up is
-    pending - whose ``acquire`` and ``release`` are C: a signal cannot leave
-    them half-done, ``release`` never blocks, and ``acquire``'s timeout holds
-    when a signal handler runs during the wait (``queue.SimpleQueue.get``'s
-    does not on Python 3.10 to 3.12, and then waits for the next put).
+    holds, and any thread that may have made it hold calls `send`. The wait
+    looks at the condition only when woken, so whatever can make it hold must
+    send. Built on a ``threading.Lock`` used as a one-place signal - held means
+    no wake-up is pending - whose ``acquire`` and ``release`` are C: a signal
+    cannot leave them half-done, ``release`` never blocks (so a signal handler
+    may send), and on POSIX a Ctrl-C during the ``acquire`` ends it (measured
+    on Python 3.10 to 3.14). One that comes just as the wait begins does not,
+    nor any on Windows before Python 3.14, so a wait on the main thread also
+    looks again every `_CTRL_C_SLICE` by itself. A signal sent by
+    ``_thread.interrupt_main`` does not end a blocking call either.
     ``threading.Event``, ``Condition`` and ``queue.Queue`` are Python code: a
     Ctrl-C landing inside can leave their lock held or released, and the
     thread that signals them then blocks for good or fails (measured under a
@@ -77,10 +77,56 @@ class Wake:
         except RuntimeError:
             pass  # a wake-up is pending already
 
-    def wait_until(self, ready: Callable[[], bool]) -> None:
-        """Sleep until ``ready()`` holds, looking again on each wake-up."""
-        while not ready():
-            self._pending.acquire(timeout=_WAKE_SLICE)
+    def wait_until(
+        self, ready: Callable[[], bool], *, cancel_token: CancelToken | None = None
+    ) -> None:
+        """Sleep until ``ready()`` holds, looking again on each wake-up.
+
+        A ``cancel_token`` wakes the wait when it is cancelled, for a
+        condition that looks at it.
+        """
+        timeout = -1.0
+        if threading.current_thread() is threading.main_thread():
+            timeout = _CTRL_C_SLICE
+        if cancel_token is None:
+            while not ready():
+                self._pending.acquire(timeout=timeout)
+            return
+        # Joined before the first look: a cancel after it sends, and one
+        # before it is what that look sees.
+        waiters = cancel_token._waiters  # pyright: ignore[reportPrivateUsage]
+        try:
+            waiters.add(self)
+            while not ready():
+                self._pending.acquire(timeout=timeout)
+        finally:
+            waiters.discard(self)
+
+
+class WakeAll:
+    """Wake every thread waiting for one event, each sleeping on its own `Wake`.
+
+    A waiting thread adds its `Wake` before it first looks at the condition
+    and discards it once done; `send` sends each one added at the time. No
+    lock: the set's add and discard each change it in one step, and its copy
+    reads it in one step, none of which a thread switch, a signal handler or
+    the garbage collector can cut into, so `send` never blocks and a signal
+    handler may call it.
+    """
+
+    def __init__(self) -> None:
+        self._wakes: set[Wake] = set()
+
+    def add(self, wake: Wake) -> None:
+        self._wakes.add(wake)
+
+    def discard(self, wake: Wake) -> None:
+        self._wakes.discard(wake)
+
+    def send(self) -> None:
+        """Wake every thread waiting."""
+        for wake in self._wakes.copy():
+            wake.send()
 
 
 @contextmanager
@@ -89,54 +135,50 @@ def prefetch(
     *,
     queue_size: int = 4,
     cancel_token: CancelToken | None = None,
-    reusable_after_interrupt: bool = True,
 ) -> Generator[Iterator[T]]:
     """Run ``pages`` on a worker thread; yield a flattened iterator.
 
     ``pages`` is an iterable of chunks where pulling the next chunk is slow I/O
     (e.g. an S3 ``ListObjectsV2`` page). The worker overlaps that latency with
     the consumer's progress, buffering at most ``queue_size`` chunks in the
-    queue plus the one it holds in hand while blocked
+    queue plus the one it holds in hand while it waits for room
     (~ ``(queue_size + 1)`` x items-per-chunk in memory).
 
     Items are flattened from the chunks. A worker-side exception is re-raised on
     the consumer's next pull, after any items already queued. On context exit the
-    worker is signalled to stop and joined; unread chunks are dropped. A
-    `cancel_token` stops the producer before its next page pull; a pull already
-    in progress finishes, but its returned page is discarded. An empty chunk is
+    worker is told to stop and unread chunks are dropped. The exit does not wait
+    for a page pull already in flight, which can block for a full network
+    timeout: the worker, a daemon thread, drops the page it brings back and ends
+    by itself, starting no further pull, so whatever ``pages`` runs for that page
+    (a filter) can still run after the exit (design/overview.md section 3). A
+    `cancel_token`'s cancel, of either mode, ends the items at once, chunks
+    still queued included, and stops the producer before its next page pull; a
+    pull already in progress finishes behind the consumer, and its page is
+    discarded. The consumer then sees the items end, so it must look at the
+    token before it takes them for the whole listing. An empty chunk is
     not queued, so a source that yields one per filtered-out page lets the
     worker stop between those pages at no queue cost.
 
-    ``reusable_after_interrupt=False`` leaves that wait out: the worker is told
-    to stop and left to end by itself, a page pull already in flight (which can
-    block for a full network timeout) with it. It is a daemon thread that starts
-    no further pull, on any exit. Otherwise the context always joins it, keeping
-    the no-surviving-worker contract.
-
-    `queue_size` must be positive. `queue.Queue` treats non-positive values as
-    unbounded, which would violate this helper's bounded-backpressure contract.
+    `queue_size` must be positive: with none, the worker could never queue a
+    page. The pages wait on a ``queue.SimpleQueue`` taken from without
+    waiting; the consumer and the worker each sleep on a `Wake` the other
+    sends (`Wake` says why).
     """
     if queue_size <= 0:
         raise ValueError(f"queue_size must be positive (got {queue_size!r})")
-    q: queue.Queue[Sequence[T] | object] = queue.Queue(maxsize=queue_size)
-    stop = threading.Event()
+    ready: queue.SimpleQueue[Sequence[T] | object] = queue.SimpleQueue()
+    # Sent by the worker for each page it queues and when it finishes.
+    arrived = Wake()
+    # Sent by the consumer for each page it takes and when it stops.
+    room = Wake()
+    stop = False
     error: list[BaseException] = []
 
     def _cancelled() -> bool:
         return cancel_token is not None and cancel_token.cancelled
 
     def _stopping() -> bool:
-        return stop.is_set() or _cancelled()
-
-    def _put(item: Sequence[T] | object, *, finish: bool = False) -> None:
-        # Block on a full queue, but wake periodically to honour an early-break
-        # consumer rather than deadlocking on the put.
-        while not stop.is_set() and (finish or not _cancelled()):
-            try:
-                q.put(item, timeout=_STOP_POLL_SECONDS)
-                return
-            except queue.Full:
-                continue
+        return stop or _cancelled()
 
     def _produce() -> None:
         try:
@@ -152,45 +194,53 @@ def prefetch(
                 # from its own pull, so the stop check above ran; it carries
                 # nothing for the consumer.
                 if chunk:
-                    _put(chunk)
+                    room.wait_until(
+                        lambda: ready.qsize() < queue_size or _stopping(),
+                        cancel_token=cancel_token,
+                    )
+                    if _stopping():
+                        break
+                    ready.put(chunk)
+                    arrived.send()
         except BaseException as exc:  # re-raised on the consumer side
             error.append(exc)
         finally:
-            # Always deliver the end marker via the same stop-poll loop: if every
-            # chunk fit in the queue the producer finishes with the queue full,
-            # and a single drop-on-timeout here would leave the consumer's untimed
-            # get() blocked forever after it drains.
-            _put(_END, finish=True)
+            ready.put(_END)
+            arrived.send()
 
     worker = threading.Thread(target=_produce, name="boto3-s3-prefetch", daemon=True)
     worker.start()
 
     def _consume() -> Iterator[T]:
         while True:
-            item = q.get()
+            # A cancel ends the items at once: the worker drops whatever it
+            # still brings back, so nothing is worth waiting for.
+            arrived.wait_until(lambda: not ready.empty() or _cancelled(), cancel_token=cancel_token)
+            if _cancelled():
+                return
+            item = ready.get_nowait()
+            room.send()
             if item is _END:
                 if error:
                     raise error[0]
                 return
             chunk: Sequence[T] = item  # pyright: ignore[reportAssignmentType]
-            yield from chunk
+            for entry in chunk:
+                if _cancelled():  # the rest of the chunk in hand as well
+                    return
+                yield entry
 
     try:
         yield _consume()
     finally:
-        stop.set()
-        # Free a producer blocked on put() by making room.
+        stop = True
+        room.send()
+        # Drop the buffered pages.
         try:
             while True:
-                q.get_nowait()
+                ready.get_nowait()
         except queue.Empty:
             pass
-        # A page pull already in progress is accepted work: wait for it to
-        # finish rather than returning with a live worker. Botocore's request
-        # timeouts bound a stuck S3 fetch; local/custom backends must likewise
-        # make their page producer eventually return.
-        if reusable_after_interrupt:
-            worker.join()
 
 
-__all__ = ["Wake", "prefetch"]
+__all__ = ["Wake", "WakeAll", "prefetch"]

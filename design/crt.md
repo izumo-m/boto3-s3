@@ -395,8 +395,8 @@ the whole of `_initialize` (serializer, `verify`, part size, fio options) and
 contradict section 1, where the library both resolves the engine and builds
 it. Carrying the posture on `TransferConfig` would reach the same code with no
 plumbing, but that class is transfer *tuning*, and a compatibility posture
-does not belong in it. `S3` already declares one such posture
-(`reusable_after_interrupt`), so it is where the CRT postures go.
+does not belong in it. `S3` holds what an application declares once for every
+operation, so it is where the CRT postures go.
 
 Only uploads and a single-key `rm` reach this surface - a local source or a
 stdin stream alike, and the rm's one `DeleteObject`. A download, a sync or a recursive rm fails earlier, at the
@@ -574,7 +574,7 @@ lane - testing.md).
   `CrtClientOptions(allow_lockless=True)` (section 4, "Building without the
   cross-process lock"); library callers keep boto3's fallback by default.
 - **Ctrl-C and fatals on the CRT lane**: a CRT cancellation the run ordered -
-  its `CancelToken`, a fatal or a Ctrl-C folding the manager - classifies
+  its `CancelToken`, a fatal folding the manager, or a Ctrl-C - classifies
   `CANCELLED` (`Transferrer._cancel_initiated`, marked before the cancel is
   issued), as on the classic engine (exceptions.md section 1: an interrupt
   cancels the item and reaches the caller). A CRT cancellation the run did not

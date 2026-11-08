@@ -178,10 +178,6 @@ _DONE_WORKERS_LIMIT = 128
 # for a future that reaches tracking after them (`Transferrer._track_future`).
 _FORGOTTEN_KEY = "boto3_s3_forgotten"
 
-# The longest a wait goes between two looks at whether it should stop, where the
-# thing waited for wakes it at once (`_DoneWorkers.run`).
-_WAIT_SLICE = 0.1
-
 _DEFAULT_MULTIPART_THRESHOLD = 8 * 1024 * 1024
 
 
@@ -365,7 +361,7 @@ def _is_cancellation(
     The CRT data plane surfaces awscrt's ``AWS_ERROR_S3_CANCELED`` instead,
     matched by the error's ``name`` without importing awscrt, and a
     revocation under the same condition: the run ordered the cancel - its
-    cancel token, a fatal or a Ctrl-C folding the manager (`Transferrer`'s
+    cancel token, a fatal folding the manager, or a Ctrl-C (`Transferrer`'s
     ``_cancel_initiated``) - so an item revoked is ``CANCELLED`` on both
     engines. aws-cli prints a failed line for each such CRT item instead
     (measured: its ``DoneResultSubscriber`` treats every
@@ -1070,10 +1066,10 @@ class Transferrer:
     queued transfers unrun and prints only the one fatal line). The exception
     is a `CancelledError` backed by a graceful `CancelToken`: a graceful
     cancel means "drain accepted work", so submitted transfers still run to
-    completion; immediate mode cancels them, and a non-`Exception` interrupt
-    (Ctrl-C) uses the manager's direct cancellation path. Every accepted item
-    (but for what a Ctrl-C leaves behind under ``reusable_after_interrupt=False``,
-    `_leave`) still gets its one result record under a cancellation: an item that never
+    completion. An immediate cancel and a Ctrl-C leave at once (`_leave`),
+    cancelling what has not started. Every accepted item (but for what a
+    leave leaves behind) still gets its one result record under a
+    cancellation: an item that never
     ran - or was abandoned mid-flight - reports ``CANCELLED`` with a
     `CancelledError` naming the cause, while an in-flight request that
     completes despite the cancel reports its real outcome (s3transfer lets
@@ -1117,7 +1113,6 @@ class Transferrer:
         cancel_token: CancelToken | None = None,
         capture_response: bool = False,
         crt: crtsupport.CrtPostures | None = None,
-        reusable_after_interrupt: bool = True,
     ) -> None:
         if transfer_type not in (TransferType.UPLOAD, TransferType.DOWNLOAD, TransferType.COPY):
             raise ValidationError(
@@ -1195,7 +1190,6 @@ class Transferrer:
         self._on_result = on_result
         self._cancel_token = cancel_token
         self._capture_response = capture_response
-        self._reusable_after_interrupt = reusable_after_interrupt
         # Set once the run hands an exception to the caller (`__exit__`) or an
         # interrupt leaves at once (`_leave`): the caller has gone on, so its
         # callbacks get nothing more.
@@ -1211,7 +1205,10 @@ class Transferrer:
         # Sent when the last tracked future is forgotten or an exception is
         # noted for the caller: what `__exit__`'s wait looks for.
         self._settled = concurrency.Wake()
-        self._shutdown_done = threading.Event()
+        # Set, and `_watch_stop` sent, once the shutdown is done or the run
+        # leaves: what ends the immediate-cancel watcher.
+        self._shutdown_done = False
+        self._watch_stop = concurrency.Wake()
         # The immediate-cancel watcher, alive from the manager's construction
         # (`_get_manager`) until the shutdown is done (`_shut_down`) or the run
         # leaves (`_leave`).
@@ -1274,30 +1271,52 @@ class Transferrer:
         - Normally: wait here until every accepted transfer has settled. The
           first exception noted for the caller (`_note_raise`) ends the wait,
           and the run then ends as if the block had raised it.
-        - By an exception: the manager's own shutdown cancels what is left and
-          reclaims its threads (`_shut_down`); the first exception is the one
-          the caller gets.
-        - By a Ctrl-C under ``reusable_after_interrupt=False``: nothing is
-          waited for (`_leave`).
+        - By a graceful cancel's `CancelledError`: the same wait, the accepted
+          transfers running to their end.
+        - By another exception: the manager's own shutdown cancels what is left
+          and reclaims its threads (`_shut_down`); the first exception is the
+          one the caller gets.
+        - By a Ctrl-C (a ``KeyboardInterrupt``) or under an immediate cancel,
+          one that comes during the wait above included: nothing is waited for
+          (`_leave`). The operation raises the cancel's `CancelledError` once
+          this returns.
 
-        Whatever exception the run ends with, the caller's callbacks get
-        nothing more once it has reached the caller (`_left`).
+        The wait is here rather than in the manager's shutdown so that an
+        immediate cancel ends it. Whatever exception the run ends with, the
+        caller's callbacks get nothing more once it has reached the caller
+        (`_left`).
         """
         raised: BaseException | None = None
         try:
-            if exc is None and self._manager is not None:
-                try:
+            token = self._cancel_token
+            graceful = (
+                isinstance(exc, CancelledError)
+                and token is not None
+                and token.mode is CancelMode.GRACEFUL
+            )
+            if (exc is None or graceful) and self._manager is not None:
+
+                def settled() -> bool:
                     # A transfer is forgotten once its done subscribers have run.
-                    self._settled.wait_until(
-                        lambda: not self._futures or self._pending_raise is not None
+                    return (
+                        not self._futures
+                        or (exc is None and self._pending_raise is not None)
+                        or self._cancelled_immediately()
                     )
-                except KeyboardInterrupt as interrupt:
+
+                try:
+                    self._settled.wait_until(settled, cancel_token=token)
+                except BaseException as interrupt:
+                    # Only an asynchronous exception comes out of the wait. It
+                    # ends the run as it would raised in place: a Ctrl-C
+                    # leaves, anything else gets the shutdown.
                     exc = raised = interrupt
                 else:
-                    with self._pending_lock:
-                        exc = raised = self._pending_raise
-                        self._pending_raise = None
-            if isinstance(exc, KeyboardInterrupt) and not self._reusable_after_interrupt:
+                    if exc is None:
+                        with self._pending_lock:
+                            exc = raised = self._pending_raise
+                            self._pending_raise = None
+            if isinstance(exc, KeyboardInterrupt) or self._cancelled_immediately():
                 self._leave()
             else:
                 self._shut_down(exc)
@@ -1306,22 +1325,35 @@ class Transferrer:
         except BaseException:
             self._left = True
             raise
-        if exc is not None:
-            # The block's own exception goes on to the caller once this returns.
+        if exc is not None or (token is not None and token.cancelled):
+            # The block's own exception goes on to the caller once this returns,
+            # and so does the cancel's CancelledError, which the operation
+            # raises next: a cancel can have ended its listing without one, and
+            # the walk may still warn behind it about a page in flight.
             self._left = True
 
     def _leave(self) -> None:
-        """Hand a Ctrl-C back at once under ``reusable_after_interrupt=False``.
+        """End a run a Ctrl-C or an immediate cancel stops, waiting for nothing.
 
         What has not started never starts, and the caller's callbacks get
-        nothing more. The manager is not shut down: a request already out
-        finishes on its thread, which then runs the cancel's cleanup (a
-        multipart upload aborted, a temporary file removed), and the idle
-        threads stay until the manager is collected or the process ends.
+        nothing more (design/overview.md section 3). The manager is not shut
+        down: a request already out finishes on its thread, which then runs the
+        cancel's cleanup (a multipart upload aborted, a temporary file removed),
+        and the idle threads stay until the manager is collected or the process
+        ends. The capture handlers come off the client now, with those requests
+        still out, as the shutdown's own failure path takes them off: better
+        than leaving them on a client the caller may use again.
         """
         self._left = True
         self._cancel_futures()
-        self._shutdown_done.set()
+        self._shutdown_done = True
+        self._watch_stop.send()
+        if self._capture is not None:
+            self._capture.unregister(self._client)
+
+    def _cancelled_immediately(self) -> bool:
+        token = self._cancel_token
+        return token is not None and token.mode is CancelMode.IMMEDIATE
 
     def _shut_down(self, exc: BaseException | None) -> None:
         """Drain submitted work, cancelling it when the exit requires that.
@@ -1332,15 +1364,16 @@ class Transferrer:
         mid-listing leaves every queued transfer unrun). The one drain-on-
         exception case is a graceful token's `CancelledError`: graceful
         cancellation is *defined* as draining accepted work (exceptions.md),
-        and the watcher thread keeps a mid-drain escalation to immediate
-        effective. The cancelling shutdown is delegated to the manager's own
+        which ``__exit__`` has waited for already, so the shutdown finds
+        nothing left to wait for. The cancelling shutdown is delegated to the manager's own
         ``__exit__`` - aws-cli's actual path - because s3transfer's public
         ``shutdown()`` forwards its arguments shifted (``(cancel, cancel,
         cancel_msg)``), which would cancel a pending coordinator with the
         message as the exception *class*. ``__exit__`` exists on both engines;
         the classic one cancels with aws-cli's exception shape
-        (``FatalError(str(exc))``, Ctrl-C's plain ``CancelledError``), so a
-        classic ``CANCELLED`` record names the fatal that revoked it. The CRT
+        (``FatalError(str(exc))``), so a classic ``CANCELLED`` record names
+        the fatal that revoked it. Neither a Ctrl-C nor an immediate cancel
+        comes here (`_leave`). The CRT
         manager's cancel surfaces awscrt's ``AWS_ERROR_S3_CANCELED``, which
         classifies ``CANCELLED`` too, the fold having marked the run's order
         first (`_is_cancellation`; aws-cli prints a failed line per such
@@ -1368,17 +1401,16 @@ class Transferrer:
         )
         cancel = exc is not None and not graceful_drain
         # The immediate-cancel watcher has run since the manager was built
-        # (`_get_manager`); the drain keeps it alive until the shutdown is
-        # done, so a mid-drain escalation to IMMEDIATE stays effective.
+        # (`_get_manager`), and is ended below once the shutdown is done.
         watcher = self._watcher
         try:
             if cancel:
                 # The manager cancel this fold forces - the token's own
                 # CancelledError surfacing through the submission loop
-                # (s3._raise_if_cancelled), a fatal, a Ctrl-C - is this run's
-                # order: mark it before it is issued, and the revoked items
-                # classify CANCELLED on the CRT engine as on the classic one.
-                self._cancel_initiated = True
+                # (s3._raise_if_cancelled), a fatal - is this run's order:
+                # mark it before it is issued, and the revoked items classify
+                # CANCELLED on the CRT engine as on the classic one.
+                self._initiate_cancel()
                 self._manager.__exit__(type(exc), exc, None)
             else:
                 self._manager.shutdown()
@@ -1387,7 +1419,8 @@ class Transferrer:
                 if self._done_workers is not None:
                     self._done_workers.close()
             finally:
-                self._shutdown_done.set()
+                self._shutdown_done = True
+                self._watch_stop.send()
                 if watcher is not None:
                     watcher.join()
                 if self._capture is not None:
@@ -1409,14 +1442,16 @@ class Transferrer:
 
         Runs from the manager's construction until the shutdown is done, so
         the escalation is acted on during submission and during the drain
-        alike.
+        alike. Woken by the token's cancel and by the shutdown's end.
         """
         token = self._cancel_token
         assert token is not None
-        while not self._shutdown_done.wait(0.1):
-            if token.mode is CancelMode.IMMEDIATE:
-                self._cancel_futures()
-                return
+        self._watch_stop.wait_until(
+            lambda: self._shutdown_done or token.mode is CancelMode.IMMEDIATE,
+            cancel_token=token,
+        )
+        if not self._shutdown_done:
+            self._cancel_futures()
 
     def _track_future(self, future: Any | None) -> None:
         """Track a submitted future without losing a synchronous completion race.
@@ -1432,7 +1467,7 @@ class Transferrer:
         if self._left or (token is not None and token.mode is CancelMode.IMMEDIATE):
             # The watcher, or `_leave`, cancels what is tracked once; a future
             # tracked after that is cancelled here.
-            self._cancel_initiated = True
+            self._initiate_cancel()
             future.cancel()
         # A non-threaded manager may finish before submit() returns and before
         # _ForgetFuture can remove it, and the CRT manager runs an item's done
@@ -1449,8 +1484,16 @@ class Transferrer:
         if settled:
             self._settled.send()
 
-    def _cancel_futures(self) -> None:
+    def _initiate_cancel(self) -> None:
+        """Mark that this run ordered a cancel, and wake what waits for one."""
         self._cancel_initiated = True
+        # Read after the mark: done workers made after this see the mark.
+        done_workers = self._done_workers
+        if done_workers is not None:
+            done_workers.note_cancel()
+
+    def _cancel_futures(self) -> None:
+        self._initiate_cancel()
         with self._futures_lock:
             futures = tuple(self._futures)
         for future in futures:
@@ -1473,6 +1516,11 @@ class Transferrer:
     @property
     def warned(self) -> int:
         return self._warner.warned
+
+    @property
+    def cancel_token(self) -> CancelToken | None:
+        """The run's token, which the listings feeding the run take as well."""
+        return self._cancel_token
 
     @property
     def warner(self) -> Warner:
@@ -1564,7 +1612,7 @@ class Transferrer:
         # had happened. The same holds for whatever a worker noted since the
         # last submit (`_note_raise`). Re-raise it here - the item's fileobjs
         # were already released by its done subscribers - and the caller's
-        # exit folds the manager the way any mid-run interrupt does.
+        # exit leaves the way any mid-run interrupt does (`_leave`).
         self._raise_pending()
 
     def _note_raise(self, exc: BaseException) -> None:
@@ -3020,9 +3068,11 @@ class _DoneWorkers:
 
     - **The limit** (`_DONE_WORKERS_LIMIT`): ``run`` blocks awscrt's thread once
       that many items are held, which slows the transfers down to the deletes,
-      until the run orders a cancel. Nothing here needs that thread to make
-      progress: a source is deleted through its own backend, on S3 through the
-      botocore client.
+      until the run orders a cancel (`note_cancel`). Nothing here needs that
+      thread to make progress: a source is deleted through its own backend, on
+      S3 through the botocore client. The manager's submit can run an item's
+      subscribers too, on the calling thread, so more than one thread can wait
+      at the limit; each sleeps on its own `concurrency.Wake`.
     - **A cancel**: an item whose turn comes after the run ordered a cancel
       settles as cancelled instead of running, so its source stays beside the
       finished download, and the request that item would have sent never
@@ -3045,7 +3095,9 @@ class _DoneWorkers:
     ) -> None:
         self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="boto3-s3-done")
         self._held = 0
-        self._changed = threading.Condition()
+        self._held_lock = threading.Lock()
+        # Sent when an item settles and when the run orders a cancel (`run`).
+        self._room = concurrency.WakeAll()
         # Sent when the count of items held drops to none (`close`).
         self._idle = concurrency.Wake()
         self._cancelled = cancelled
@@ -3053,12 +3105,12 @@ class _DoneWorkers:
 
     def run(self, subscribers: list[Any], future: Any) -> None:
         """Hold one finished transfer's ``subscribers`` until a worker runs them."""
-        with self._changed:
-            # A cancel has the item settle as cancelled once a worker is free,
-            # and awscrt's thread is not to wait for that.
-            while self._held >= _DONE_WORKERS_LIMIT and not self._cancelled():
-                self._changed.wait(_WAIT_SLICE)
-            self._held += 1
+        wake = concurrency.Wake()
+        try:
+            self._room.add(wake)
+            wake.wait_until(self._take_place)
+        finally:
+            self._room.discard(wake)
         claim = threading.Lock()
 
         def settle_once() -> None:
@@ -3070,6 +3122,22 @@ class _DoneWorkers:
         except RuntimeError:
             settle_once()
 
+    def _take_place(self) -> bool:
+        """Count one more item held, if there is room or the run ordered a cancel.
+
+        A cancel has the item settle as cancelled once a worker is free, and
+        awscrt's thread is not to wait for that.
+        """
+        with self._held_lock:
+            if self._held >= _DONE_WORKERS_LIMIT and not self._cancelled():
+                return False
+            self._held += 1
+            return True
+
+    def note_cancel(self) -> None:
+        """The run has ordered a cancel: wake whoever waits at the limit."""
+        self._room.send()
+
     def _settle(self, subscribers: list[Any], future: Any) -> None:
         try:
             if self._cancelled() and _outcome(future) is None:
@@ -3079,10 +3147,10 @@ class _DoneWorkers:
         except BaseException as exc:
             self._note_raise(exc)
         finally:
-            with self._changed:
+            with self._held_lock:
                 self._held -= 1
-                self._changed.notify()
                 idle = not self._held
+            self._room.send()
             if idle:
                 self._idle.send()
 

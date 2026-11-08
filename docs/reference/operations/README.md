@@ -85,8 +85,7 @@ unchanged, and returns what the method returns — `None` for all of them except
 method; the wrapper adds nothing to the contract but the `S3()` it builds.
 
 That `S3()` is constructed per call with no arguments: no `session`, no
-`endpoint_url`, no `config`, no default `transfer_config`, and
-`reusable_after_interrupt=True`. Nothing is shared or memoized between calls, so each
+`endpoint_url`, no `config` and no default `transfer_config`. Nothing is shared or memoized between calls, so each
 call builds its own clients. Configuring any of that means constructing an `S3`
 yourself and calling the method ([`../s3.md`](../s3.md)). Subclassing does not
 reach these functions either — they instantiate `S3` itself, not the subclass.
@@ -166,8 +165,9 @@ submission — though a bare `"s3://..."` argument's client is built during
 resolution, which happens before that first poll.
 
 If the token is cancelled at any point the call observes, the call ends by
-raising `CancelledError` after the operation has reclaimed its workers (under
-`S3(reusable_after_interrupt=False)`, a listing's worker ends by itself); it does
+raising `CancelledError` — under a graceful cancel once the operation has
+reclaimed its workers, under an immediate one at once, the requests already
+sent finishing behind it (a listing's worker ends by itself either way); it does
 not return normally, and it does not raise `BatchError`. `CancelToken`,
 `CancelMode`, and what the two modes do to accepted and in-flight work are
 specified in [`../results.md`](../results.md).
@@ -200,8 +200,7 @@ The many-item operations — `cp`, `mv`, `rm` and `sync` — do not abort at the
 first item failure. A failed item becomes a `FAILED` record on `on_result` and
 the run continues through the remaining items. When at least one item failed,
 the call raises `BatchError` once, at the end, after workers are reclaimed (a
-listing's worker ends by itself under `S3(reusable_after_interrupt=False)`); it
-carries the run's rollup counts and a sampled failure on `__cause__`. Warnings
+listing's worker ends by itself); it carries the run's rollup counts and a sampled failure on `__cause__`. Warnings
 and skips alone do not raise. The shape does not depend on item count: a
 single-object `cp` or a single-key `rm` whose one item failed also ends in
 `BatchError`, reported as 1 of 1.

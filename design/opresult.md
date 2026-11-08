@@ -87,7 +87,8 @@ because the run died first - produces nothing. The delete lane carries one
 carve-out: `S3Deleter` entries accepted but never run produce no record - the
 unsent buffer, which a cancellation or an exception that ends the run (a
 listing failure part-way through, say) discards, a dispatched batch an
-immediate cancellation stopped before its request started, and a key of a
+immediate cancellation stopped before its request started, the keys of a batch
+an immediate cancellation or a Ctrl-C left running behind the caller, and a key of a
 started batch due a request of its own - XML-incompatible, a re-send of a
 transient per-key failure, any key of a batch request that failed as a
 whole - that an abandoned run had not sent yet ([`deleter.md`](./deleter.md)
@@ -124,9 +125,11 @@ A batched `DeleteObjects` that dies this way decides nothing for its
 keys - aws-cli never sends one - so they go out again one `DeleteObject`
 each and take their own outcomes ([`deleter.md`](./deleter.md) section 3).
 
-A cancellation (a fatal elsewhere in the run, `CancelToken` immediate mode, a
-Ctrl-C - on either engine, see below for the CRT one) resolves the accepted
-transfer items like this:
+A cancellation by a fatal elsewhere in the run (on either engine, see below
+for the CRT one) resolves the accepted transfer items like this; a
+`CancelToken`'s immediate mode revokes them the same way but leaves at once,
+like a Ctrl-C, so only the items settled before the operation raised get
+their record (overview section 3):
 
 - accepted but not yet running - or abandoned mid-flight - reports
   `CANCELLED`, with `error` a `CancelledError` naming the cause;
@@ -141,9 +144,8 @@ transfer items like this:
 - work never accepted (a graceful cancel stops the submission loop before the
   next item) produces no record.
 
-Under `reusable_after_interrupt=False` a `KeyboardInterrupt` is handed back at
-once and nothing more is reported: an item not settled by then has no record
-(`Transferrer.__exit__`, `S3Deleter`).
+A `KeyboardInterrupt` is handed back at once and nothing more is reported: an
+item not settled by then has no record (`Transferrer.__exit__`, `S3Deleter`).
 
 `rm`'s blind single-key delete (one request, no engine) sends its request on
 the calling thread. An interrupt landing while it is out leaves at once: the
@@ -154,8 +156,8 @@ On the CRT engine, a revocation surfaces as awscrt's `AWS_ERROR_S3_CANCELED`
 rather than s3transfer's `CancelledError`, and it reports `CANCELLED` (with
 the error carrying awscrt's cancellation wording) when the run ordered the
 cancel: its `CancelToken` (the token's own `CancelledError` surfacing through
-the submission loop, or its drain-time escalation), or a fatal or a Ctrl-C
-folding the manager: the item is revoked, not faulty, as on the classic engine.
+the submission loop, or its drain-time escalation), a fatal folding the
+manager, or a Ctrl-C: the item is revoked, not faulty, as on the classic engine.
 A CRT cancellation the run did not order reports `FAILED` (a Ctrl-C the CRT
 manager turns into a cancel in a graceful cancel's drain among them;
 [`crt.md`](./crt.md) section 6), so a run cut short by something the library
@@ -291,10 +293,10 @@ events - the delete calls are issued directly - so it works on any engine.
 never a raw exception. A `FAILED` record carries the failure; a `CANCELLED`
 record carries a `CancelledError` whose message names what revoked the item
 where the canceller supplied a reason (classic: the fatal's text, or the
-cancel reason; an immediate-mode escalation during the drain revokes without a
-message, and those records carry the bare `canceled`; the CRT manager cancels
-without the message, so its records carry awscrt's cancellation wording
-instead); a `WARNED` / `NOTICE` record carries
+cancel reason; an immediate cancel revokes without a message, and the records
+it lets through carry the bare `canceled`; the CRT manager cancels without the
+message, so its records carry awscrt's cancellation wording instead); a
+`WARNED` / `NOTICE` record carries
 the advisory text - a `WARNED` body is bare (the CLI prints
 `warning: {error}`), while a `NOTICE` body already carries its own
 `warning: ` prefix (the CLI prints it verbatim).

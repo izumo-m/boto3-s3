@@ -376,10 +376,13 @@ order rather than in compare-key order.
   destination directory failed, mapped by the same rules as any other local
   failure.
 - [`CancelledError`](../exceptions.md#cancellederror) — `cancel_token` was
-  cancelled. Graceful cancellation stops taking new pair actions and drains
-  the transfers and delete batches already accepted; immediate cancellation
-  also asks their futures to cancel. Either way, decisions outstanding on a
-  `ParallelFilter` pool are awaited first, and that pool is never shut down.
+  cancelled. Graceful cancellation stops taking new pair actions, awaits the
+  decisions outstanding on a `ParallelFilter` pool, and drains the transfers
+  and delete batches already accepted. Immediate cancellation raises at once:
+  what has not started never starts, and running decisions, transfers and
+  delete batches finish behind the caller, unreported
+  ([`../results.md`](../results.md#canceltoken)). Either way, that pool is never
+  shut down.
 - [`BatchError`](../exceptions.md#batcherror) — at least one item failed. Its
   `succeeded` and `failed` are the sums of the transfer and the delete side,
   while `warned` and `skipped` come from the transfer side only. `__cause__`

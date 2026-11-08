@@ -166,6 +166,34 @@ class TestFinishInterrupted:
         assert captured.err == ""
 
 
+class TestFinish:
+    def test_finish_waits_for_room_in_a_full_queue(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The shutdown record waits for the printer to take one; woken by
+        # that take, not by a look of its own.
+        from boto3_s3_cli import progress
+
+        monkeypatch.setattr(progress, "_QUEUE_MAX", 3)
+        stalled = threading.Event()
+        printer = TransferPrinter(progress=False)
+        monkeypatch.setattr(printer, "_render_result", lambda _record: stalled.wait(10))
+        printer.__enter__()
+        for i in range(4):  # one in the printer's hands, three filling the queue
+            printer.on_result(_result(OpOutcome.SUCCEEDED, key=f"k{i}", src=f"s3://b/k{i}"))
+        queue = printer._queue  # pyright: ignore[reportPrivateUsage]
+        for _ in range(500):
+            if queue.full():
+                break
+            time.sleep(0.01)
+        assert queue.full()
+        finisher = threading.Thread(target=printer.finish, daemon=True)
+        finisher.start()
+        finisher.join(0.2)
+        assert finisher.is_alive()
+        stalled.set()
+        finisher.join(5)
+        assert not finisher.is_alive()
+
+
 class TestResultLines:
     def test_success_line_renders_local_sides_relative(
         self,

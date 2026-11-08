@@ -16,6 +16,7 @@ import gzip
 import io
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -642,11 +643,10 @@ class TestUploadRoute:
         client._make_api_call = api_call
         token = CancelToken()
 
-        # The escalation path under test is: a graceful cancel starts the drain
-        # (which spawns the immediate-cancel watcher), then the token upgrades to
-        # IMMEDIATE while that drain waits. Synchronize on the watcher and on the
-        # future-cancel it performs instead of sleeping, so the assertion never
-        # races the watcher's 0.1s poll - fixed sleeps flake on a busy CI runner.
+        # The escalation path under test is: a graceful cancel starts the drain,
+        # then the token upgrades to IMMEDIATE, which ends it at once. Wait for
+        # the immediate-cancel watcher rather than sleeping: fixed sleeps flake
+        # on a busy CI runner.
         watcher_running = threading.Event()
         original_watch = Transferrer._watch_for_immediate_cancel
 
@@ -655,16 +655,6 @@ class TestUploadRoute:
             original_watch(self)
 
         monkeypatch.setattr(Transferrer, "_watch_for_immediate_cancel", watch)
-
-        original_cancel_futures = Transferrer._cancel_futures
-
-        def cancel_futures(self: Transferrer) -> None:
-            original_cancel_futures(self)
-            # Queued transfers are now cancelled; let the accepted in-flight
-            # transfer finish so the drain (and cp) can complete.
-            release_running.set()
-
-        monkeypatch.setattr(Transferrer, "_cancel_futures", cancel_futures)
 
         def escalate() -> None:
             assert watcher_running.wait(5.0)
@@ -679,15 +669,22 @@ class TestUploadRoute:
                 threading.Thread(target=escalate, daemon=True).start()
 
         _release_once_queued(monkeypatch, release_first, 3)
-        with pytest.raises(CancelledError):
-            S3().cp(
-                str(tmp_path),
-                S3Storage("s3://b/p/", client=client),
-                recursive=True,
-                transfer_config=TransferConfig(max_concurrency=1),
-                cancel_token=token,
-                on_result=cancel_after_first,
-            )
+        started = time.monotonic()
+        try:
+            with pytest.raises(CancelledError):
+                S3().cp(
+                    str(tmp_path),
+                    S3Storage("s3://b/p/", client=client),
+                    recursive=True,
+                    transfer_config=TransferConfig(max_concurrency=1),
+                    cancel_token=token,
+                    on_result=cancel_after_first,
+                )
+            # Raised at once: a second request the pool may have started is
+            # still held, and nothing waited for it.
+            assert time.monotonic() - started < 4
+        finally:
+            release_running.set()
 
         # The first accepted transfer runs; the submission pool may already have
         # accepted a second before the drain began, and that request cannot be
@@ -696,17 +693,50 @@ class TestUploadRoute:
         # run, in no guaranteed order (the pool races per-file prep).
         assert 1 <= len(calls) <= 2
         assert set(calls) <= {"PutObject:p/a.txt", "PutObject:p/b.txt", "PutObject:p/c.txt"}
-        # Every accepted item keeps its one record: a transfer whose request
-        # ran to completion reports SUCCEEDED (a running request cannot be
-        # interrupted, and s3transfer lets the completion win over the cancel
-        # mark), while a revoked queued one reports CANCELLED - never FAILED.
-        assert len(results) == 3
+        # The records stop with the immediate cancel: the first transfer's
+        # SUCCEEDED came before it, and a queued one revoked before cp raised may
+        # report CANCELLED - never FAILED.
         outcomes = [result.outcome for result in results]
-        assert outcomes.count(OpOutcome.SUCCEEDED) == len(calls)
-        assert outcomes.count(OpOutcome.CANCELLED) == 3 - len(calls)
+        assert outcomes[0] is OpOutcome.SUCCEEDED
+        assert set(outcomes) <= {OpOutcome.SUCCEEDED, OpOutcome.CANCELLED}
         for result in results:
             if result.outcome is OpOutcome.CANCELLED:
                 assert isinstance(result.error, CancelledError)
+
+    def test_the_same_s3_runs_on_after_an_immediate_cancel(self, tmp_path: Path) -> None:
+        # An immediate cancel raises at once, the request already sent left
+        # behind, and the S3 stays usable (overview section 3).
+        source = tmp_path / "a.txt"
+        source.write_bytes(b"a")
+        client, _ = make_recording_client([])
+        sent = threading.Event()
+        release = threading.Event()
+
+        def api_call(operation: str, params: dict[str, Any]) -> dict[str, Any]:
+            sent.set()
+            assert release.wait(5.0)
+            return {}
+
+        client._make_api_call = api_call
+        token = CancelToken()
+
+        def cancel_once_sent() -> None:
+            assert sent.wait(5.0)
+            token.cancel(mode=CancelMode.IMMEDIATE)
+
+        s3 = S3()
+        threading.Thread(target=cancel_once_sent, daemon=True).start()
+        started = time.monotonic()
+        try:
+            with pytest.raises(CancelledError):
+                s3.cp(str(source), S3Storage("s3://b/a.txt", client=client), cancel_token=token)
+            # Raised with the request still out, not once it gave up waiting.
+            assert time.monotonic() - started < 4
+        finally:
+            release.set()
+        next_client, calls = make_recording_client([{}])
+        s3.cp(str(source), S3Storage("s3://b/a.txt", client=next_client))
+        assert [call.operation for call in calls] == ["PutObject"]
 
 
 class TestFilters:
@@ -2028,7 +2058,6 @@ class TestCaseConflictGate:
             transferrer=transferrer,
             item_filter=None,
             operation="mv",
-            reusable_after_interrupt=True,
         )
         assert gate is not None
         first = TransferItem(
@@ -2138,7 +2167,6 @@ class TestCaseConflictGate:
             transferrer=transferrer,
             item_filter=item_filter,
             operation="cp",
-            reusable_after_interrupt=True,
         )
         return gate, transferrer
 

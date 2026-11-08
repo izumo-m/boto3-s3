@@ -32,10 +32,11 @@ from __future__ import annotations
 
 import io
 import re
-import threading
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
+
+from boto3_s3.concurrency import Wake
 
 __all__ = ["CrtRequestSender"]
 
@@ -124,7 +125,11 @@ class CrtRequestSender:
         response_headers: list[tuple[str, str]] = []
         body = bytearray()
         outcome: list[BaseException | None] = []
-        done = threading.Event()
+        # Sent by awscrt's thread once the request is done. The caller waits on
+        # a `Wake`, as every wait on another thread does: a Ctrl-C landing in a
+        # `threading.Event`'s wait could leave it so that this send blocks
+        # awscrt's thread for good.
+        done = Wake()
 
         # awscrt passes every argument by keyword, so the names are its own.
         def on_headers(status_code: int, headers: list[tuple[str, str]], **_kwargs: Any) -> None:
@@ -136,7 +141,7 @@ class CrtRequestSender:
 
         def on_done(error: BaseException | None = None, **_kwargs: Any) -> None:
             outcome.append(error)
-            done.set()
+            done.send()
 
         args: dict[str, Any] = {
             "type": awscrt.s3.S3RequestType.DEFAULT,
@@ -153,7 +158,7 @@ class CrtRequestSender:
             args["signing_config"] = signing_config
         # Held until done: the request object is what keeps it running.
         request = self._crt_client.make_request(**args)
-        done.wait()
+        done.wait_until(lambda: bool(outcome))
         del request
         error = outcome[0]
         if error is not None:

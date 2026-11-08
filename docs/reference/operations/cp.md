@@ -175,10 +175,11 @@ before its own side effects — the destination pre-create, the `case_conflict`
 destination walk, a deferred client build — and again before pulling each item
 from the enumeration, so a cancelled run stops listing promptly instead of
 paging on. What each cancellation mode guarantees for the transfer lane — a
-graceful drain, an immediate revocation — is specified with the token itself.
-Under either mode the call ends by raising `CancelledError` once the engine and
-the enumeration workers have been reclaimed (a listing's worker ends by itself
-under `S3(reusable_after_interrupt=False)`).
+graceful drain, an immediate return — is specified with the token itself.
+Either mode ends the call by raising `CancelledError`: a graceful one once the
+engine has been reclaimed, an immediate one at once, leaving the requests
+already sent to finish behind the caller (a listing's worker ends by itself
+either way).
 
 `transfer_config` overrides, for this call only, the `TransferConfig` the `S3`
 instance was constructed with; `None` uses that instance default, and a `None`
@@ -255,10 +256,11 @@ The outcomes `cp` emits:
   Display-only, counted nowhere, and it may precede the same item's real
   outcome.
 - `DRYRUN` — under `dryrun=True`, one per item that reached the submit step.
-- `CANCELLED` — an accepted item revoked before it could complete, by an
-  immediate cancellation, a fatal error elsewhere in the run, or `Ctrl-C`, on
-  either transfer engine. A CRT cancellation the run did not order itself
-  reports `FAILED`.
+- `CANCELLED` — an accepted item revoked before it could complete, by a fatal
+  error elsewhere in the run, on either transfer engine, or by an immediate
+  cancellation before the call raised. An immediate cancellation and a Ctrl-C
+  report nothing more once they have been raised. A CRT cancellation the run did
+  not order itself reports `FAILED`.
 
 The archived-object gate behind that warning and its
 `ignore_glacier_warnings` skip runs on downloads and copies only; an upload

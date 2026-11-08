@@ -81,6 +81,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, TextIO
 
 from boto3_s3 import OpOutcome
+from boto3_s3.concurrency import Wake
 from boto3_s3.localstorage import LocalStorage
 from boto3_s3_cli import textencoding
 from boto3_s3_cli.output import human_readable_size, uni_write
@@ -102,10 +103,6 @@ _QUEUE_MAX = 10_000
 
 # Queue sentinel: drain what remains, then stop the printer thread.
 _SHUTDOWN = object()
-
-# The longest a wait in `TransferPrinter.finish` goes between two looks for a
-# Ctrl-C's handler, which runs between slices on Windows before Python 3.14.
-_WAKE_SLICE = 0.1
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +195,11 @@ class TransferPrinter:
         # Set by finish(): the callbacks then drop records instead of feeding
         # a queue whose consumer is gone (see finish for the deadlock chain).
         self._finished = False
+        # Set by the printer thread as it ends. `_moved` is what finish()
+        # sleeps on: the printer sends it per record it takes once finish()
+        # has begun, and as it ends.
+        self._drain_ended = False
+        self._moved = Wake()
         # printer-thread-only state (no lock: one thread owns them), except
         # _output_dead: set on a Ctrl-C to stop the output
         self._progress_length = 0
@@ -235,9 +237,11 @@ class TransferPrinter:
     def finish(self) -> None:
         """Drain the queue and stop the printer thread (idempotent).
 
-        It waits in slices, so a Ctrl-C ends the wait even with the printer
-        stalled on a reader that stopped reading: the put blocks while the
-        printer has the queue full, and the join for as long as its write does.
+        It sleeps on a `Wake` the printer sends, so a Ctrl-C ends the wait
+        even with the printer stalled on a reader that stopped reading: the
+        shutdown record waits while the printer has the queue full, and the
+        end for as long as its write does. The join comes once the printer has
+        said it is ending, so it is short.
         """
         thread = self._thread
         if thread is None:
@@ -250,14 +254,9 @@ class TransferPrinter:
         # wedged in put() at ~10k would never end.
         self._finished = True
         try:
-            while True:
-                try:
-                    self._queue.put(_SHUTDOWN, timeout=_WAKE_SLICE)
-                    break
-                except queue.Full:
-                    continue
-            while thread.is_alive():
-                thread.join(_WAKE_SLICE)
+            self._moved.wait_until(self._queue_shutdown)
+            self._moved.wait_until(lambda: self._drain_ended)
+            thread.join()
         except KeyboardInterrupt:
             self._stop_output()
             raise
@@ -270,6 +269,14 @@ class TransferPrinter:
                 self._queue.get_nowait()
             except queue.Empty:
                 break
+
+    def _queue_shutdown(self) -> bool:
+        """Queue the shutdown record if the queue has room; whether it did."""
+        try:
+            self._queue.put_nowait(_SHUTDOWN)
+        except queue.Full:
+            return False
+        return True
 
     # -- callbacks (worker / submitting threads: count and enqueue, never write) --
 
@@ -402,8 +409,19 @@ class TransferPrinter:
 
     def _drain(self) -> None:
         """Render queued records until shutdown, each one's write failure its own."""
+        try:
+            self._render_queued()
+        finally:
+            self._drain_ended = True
+            self._moved.send()
+
+    def _render_queued(self) -> None:
         while True:
             record = self._queue.get()
+            # Read after the get: once finish() has begun, every record taken
+            # makes room for its shutdown record.
+            if self._finished:
+                self._moved.send()
             if record is _SHUTDOWN:
                 self._clear_residual_progress()
                 return

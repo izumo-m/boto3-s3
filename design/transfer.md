@@ -146,19 +146,22 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   `concurrency.Wake` the last item to settle sends: a Ctrl-C can land in it, and
   neither `Thread.join` (on Python 3.10 to 3.12 it gives up on a thread when
   interrupted) nor a `Condition` survives one.
-- `reusable_after_interrupt=False`: a `KeyboardInterrupt` leaves at once. Nothing
-  can cancel a request already out, and a server that does not answer holds it
-  for a full timeout, so `Transferrer.__exit__` does not shut the manager down on
-  an interrupt (`_leave`): it cancels the tracked transfers and stops reporting.
-  What has not started never starts. A request already out finishes on its
-  thread, which then runs the cancel's cleanup, so a multipart upload is aborted
-  (but for one awscrt is still creating, which it leaves open under either
-  posture) and a temporary file removed as far as the process lives, and a new
-  `S3` works beside it (measured on both engines, with a server not answering).
-  The manager's idle threads stay until it is collected or the process ends.
-  Every other exception gets the shutdown below, and an interrupt during that
-  shutdown waits as the shutdown does: the classic manager joins its workers
-  even as it re-raises one.
+- A `KeyboardInterrupt` and an immediate cancel leave at once (overview section
+  3). Nothing can cancel a request already out, and a server that does not
+  answer holds it for a full timeout, so `Transferrer.__exit__` does not shut
+  the manager down then (`_leave`): it cancels the tracked transfers, stops
+  reporting and takes the capture handlers off the client. What has not started
+  never starts. A request already out finishes on its thread, which then runs
+  the cancel's cleanup, so a multipart upload is aborted (but for one awscrt is
+  still creating, which it leaves open) and a temporary file removed as far as
+  the process lives, and a new `S3` works beside it (measured on both engines,
+  with a server not answering). The manager's idle threads stay until it is
+  collected or the process ends. An immediate cancel that comes while the
+  calling thread waits for the accepted transfers - the end of a clean run, or a
+  graceful cancel's drain - ends that wait too, which is why that wait is
+  `__exit__`'s own rather than the manager's shutdown's. Every other exception
+  gets the shutdown below, and an interrupt during that shutdown waits as the
+  shutdown does: the classic manager joins its workers even as it re-raises one.
 - context manager: on normal completion it waits on the calling thread until
   every accepted transfer has settled (its future forgotten by its done
   subscribers, below), sleeping on a `concurrency.Wake` the last forget sends,
@@ -172,13 +175,13 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   every queued transfer unrun, prints only the one `fatal error:` line, and
   exits 1). The exception to that is `CancelMode.GRACEFUL`'s
   `CancelledError`, which drains by definition (graceful cancel = stop
-  submitting, run accepted work; exceptions.md). `CancelMode.IMMEDIATE`
-  additionally calls `cancel()` on the active top-level transfer futures, from
-  a watcher thread that runs from the manager's construction to the end of the
-  drain - so the escalation is acted on while the submitting thread waits on
-  the engine's backpressure (the CRT manager's transfer semaphore, which a
-  stalled request would otherwise hold until it completed by itself) as well
-  as during the drain. A classic transfer is tracked from its `on_queued`
+  submitting, run accepted work; exceptions.md), in `__exit__`'s own wait.
+  `CancelMode.IMMEDIATE` leaves (above), and its `cancel()` on the active
+  top-level transfer futures comes from a watcher thread that runs from the
+  manager's construction to the end of the shutdown - so the escalation is
+  acted on while the submitting thread waits on the engine's backpressure (the
+  CRT manager's transfer semaphore, which a stalled request would otherwise
+  hold until it completed by itself) as well. A classic transfer is tracked from its `on_queued`
   (`_TrackFuture`, registered first), before its first request task: under
   `use_threads=False` the manager call runs the whole transfer before it
   returns, so tracking it afterwards would leave the transfer in flight out
@@ -194,8 +197,8 @@ comparison, and deletion lanes live in [`sync.md`](./sync.md)).
   while a revoked one reports one `CANCELLED` record
   ([`opresult.md`](./opresult.md)). Active futures are tracked only until
   their done subscriber fires, keeping cancellation tracking bounded by the
-  manager's outstanding (queued + running) work rather than total item count. `KeyboardInterrupt` keeps the
-  manager's direct best-effort cancellation path.
+  manager's outstanding (queued + running) work rather than total item count. A
+  `KeyboardInterrupt` leaves at once instead (`_leave`).
 
 ## 3. Subscriber composition (follows the order of aws-cli `s3handler`)
 

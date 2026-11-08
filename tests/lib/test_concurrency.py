@@ -1,4 +1,4 @@
-"""Unit tests for boto3_s3.concurrency: prefetch and Wake.
+"""Unit tests for boto3_s3.concurrency: prefetch, Wake and WakeAll.
 
 The worker is a background thread; tests drive it through in-memory page lists
 so timing stays deterministic. Where teardown is asserted, the named worker
@@ -10,15 +10,17 @@ from __future__ import annotations
 import contextlib
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from pathlib import Path
+from typing import Any
 
 import pytest
 
 from boto3_s3 import concurrency
-from boto3_s3.concurrency import Wake, prefetch
+from boto3_s3.concurrency import Wake, WakeAll, prefetch
 from boto3_s3.s3storage import S3Storage
-from boto3_s3.types import S3FileInfo, ScanOptions
-from tests.utils.interrupts import interrupt_main_in, skip_without_pthread_kill
+from boto3_s3.types import CancelMode, CancelToken, S3FileInfo, ScanOptions
+from tests.utils.interrupts import interrupt_main_in, main_waits_in, skip_without_pthread_kill
 
 _WORKER_NAME = "boto3-s3-prefetch"
 
@@ -76,11 +78,11 @@ def test_worker_joined_on_normal_exit() -> None:
 
 def test_early_break_tears_down_worker() -> None:
     # A large lazy source the consumer abandons after one item; on context exit
-    # the worker must observe the stop flag and join.
+    # the worker must observe the stop flag and end by itself.
     pages = ([i] for i in range(100_000))
     with prefetch(pages, queue_size=2) as it:
         assert next(it) == 0
-    assert not _worker_alive()
+    _drain_worker(threading.Event())
 
 
 def _drain_worker(release: threading.Event) -> None:
@@ -92,23 +94,44 @@ def _drain_worker(release: threading.Event) -> None:
     assert not _worker_alive()
 
 
-def test_interrupt_still_joins_by_default() -> None:
-    # A KeyboardInterrupt unwind keeps the no-surviving-worker contract unless
-    # the app opted out with reusable_after_interrupt=False. The producer far exceeds
-    # the queue, so the worker is genuinely blocked mid-run - it cannot have
-    # finished naturally, and only the context exit's join reclaims it.
+def test_an_exit_run_on_the_worker_does_not_wait_for_itself() -> None:
+    # The garbage collector closes a scan left unclosed in a reference cycle on
+    # whichever thread it runs, the worker's included.
+    entered = threading.Event()
+    exited = threading.Event()
+    contexts: list[contextlib.AbstractContextManager[Iterator[int]]] = []
+
+    def pages() -> Iterator[list[int]]:
+        yield [1]
+        assert entered.wait(5)
+        contexts[0].__exit__(None, None, None)
+        exited.set()
+        yield [2]
+
+    contexts.append(prefetch(pages()))
+    contexts[0].__enter__()
+    entered.set()
+    assert exited.wait(5)
+
+
+def test_an_interrupt_leaves_the_worker_to_end_by_itself() -> None:
+    # A KeyboardInterrupt unwind does not join the worker, but tells it to stop:
+    # blocked for room with pages left to pull for ever, it ends by itself.
     pages = ([i] for i in range(100_000))
     with pytest.raises(KeyboardInterrupt):
         with prefetch(pages, queue_size=2) as it:
             assert next(it) == 0
             raise KeyboardInterrupt
+    deadline = time.monotonic() + 5
+    while _worker_alive() and time.monotonic() < deadline:
+        time.sleep(0.01)
     assert not _worker_alive()
 
 
 def test_interrupt_can_abandon_a_stuck_page_pull() -> None:
-    # reusable_after_interrupt=False: a KeyboardInterrupt unwind must not wait for a
-    # page pull in flight (a network fetch can block for a full timeout); the
-    # daemon worker is abandoned to die with the process.
+    # A KeyboardInterrupt unwind must not wait for a page pull in flight (a
+    # network fetch can block for a full timeout); the daemon worker is left to
+    # end by itself.
     pull_started = threading.Event()
     release = threading.Event()
 
@@ -120,7 +143,7 @@ def test_interrupt_can_abandon_a_stuck_page_pull() -> None:
 
     try:
         with pytest.raises(KeyboardInterrupt):
-            with prefetch(pages(), queue_size=1, reusable_after_interrupt=False) as it:
+            with prefetch(pages(), queue_size=1) as it:
                 assert next(it) == 1
                 assert pull_started.wait(5)
                 raise KeyboardInterrupt
@@ -132,11 +155,9 @@ def test_interrupt_can_abandon_a_stuck_page_pull() -> None:
 
 
 @pytest.mark.parametrize("exit_with", [None, SystemExit, ValueError])
-def test_no_early_exit_waits_for_a_pull_under_reusable_after_interrupt_false(
-    exit_with: type[BaseException] | None,
-) -> None:
-    # The opt-out covers every early exit, not only an interrupt: the worker is
-    # told to stop and ends by itself after the pull in flight.
+def test_no_early_exit_waits_for_a_pull(exit_with: type[BaseException] | None) -> None:
+    # Every early exit, not only an interrupt: the worker is told to stop and
+    # ends by itself after the pull in flight.
     pull_started = threading.Event()
     release = threading.Event()
 
@@ -148,7 +169,7 @@ def test_no_early_exit_waits_for_a_pull_under_reusable_after_interrupt_false(
 
     try:
         with contextlib.suppress(SystemExit, ValueError):
-            with prefetch(pages(), queue_size=1, reusable_after_interrupt=False) as it:
+            with prefetch(pages(), queue_size=1) as it:
                 assert next(it) == 1
                 assert pull_started.wait(5)
                 if exit_with is not None:
@@ -158,10 +179,36 @@ def test_no_early_exit_waits_for_a_pull_under_reusable_after_interrupt_false(
         _drain_worker(release)
 
 
-def test_storage_scan_forwards_the_interrupt_policy() -> None:
-    # Storage.scan wires ScanOptions.reusable_after_interrupt into prefetch: with
-    # False, a KeyboardInterrupt unwind of the scan returns without waiting
-    # for the in-flight page pull.
+@pytest.mark.parametrize("mode", [CancelMode.GRACEFUL, CancelMode.IMMEDIATE])
+def test_a_cancel_ends_the_items_without_waiting_for_a_pull(mode: CancelMode) -> None:
+    # The consumer waiting for the next page wakes on the cancel and ends, the
+    # pull in flight left to the worker, which drops its page.
+    pull_started = threading.Event()
+    release = threading.Event()
+    token = CancelToken()
+
+    def pages() -> Iterator[list[int]]:
+        yield [1]
+        pull_started.set()
+        release.wait(10)
+        yield [2]
+
+    try:
+        with prefetch(pages(), queue_size=1, cancel_token=token) as it:
+            assert next(it) == 1
+            assert pull_started.wait(5)
+            threading.Timer(0.1, token.cancel, kwargs={"mode": mode}).start()
+            started = time.monotonic()
+            assert list(it) == []
+            assert time.monotonic() - started < 5
+        assert _worker_alive()
+    finally:
+        _drain_worker(release)
+
+
+def test_storage_scan_does_not_wait_for_a_pull_on_an_interrupt() -> None:
+    # A KeyboardInterrupt thrown into the scan returns without waiting for the
+    # in-flight page pull.
     from typing import BinaryIO, Literal
 
     from boto3_s3 import Storage
@@ -190,7 +237,7 @@ def test_storage_scan_forwards_the_interrupt_policy() -> None:
             return "blocking-stub"
 
     try:
-        scan = _Blocking().scan(ScanOptions(reusable_after_interrupt=False))
+        scan = _Blocking().scan(ScanOptions())
         assert next(scan).key == "a"
         assert pull_started.wait(5)
         with pytest.raises(KeyboardInterrupt):
@@ -206,6 +253,7 @@ class _BlockingScanStorage(S3Storage):
     def __init__(self, *args: object, block: float = 10.0, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)  # pyright: ignore[reportArgumentType]
         self.release = threading.Event()
+        self.pulling = threading.Event()
         self.block = block
 
     def scan_pages(self, options: ScanOptions) -> Iterator[list[S3FileInfo]]:
@@ -213,6 +261,7 @@ class _BlockingScanStorage(S3Storage):
             S3FileInfo(key="prefix/a", size=1, compare_key="a"),
             S3FileInfo(key="prefix/b", size=1, compare_key="b"),
         ]
+        self.pulling.set()
         self.release.wait(self.block)  # the slow in-flight pull
         yield [S3FileInfo(key="prefix/c", size=1, compare_key="c")]
 
@@ -223,9 +272,10 @@ def _interrupt_on_second(counter: dict[str, int]) -> None:
         raise KeyboardInterrupt
 
 
-def test_ls_honors_the_posture_when_the_interrupt_lands_in_on_entry() -> None:
+def test_ls_does_not_wait_when_the_interrupt_lands_in_on_entry() -> None:
     # An interrupt raised from `on_entry` never unwinds through the prefetch
-    # context: the scan is merely closed, which must not join the 10s pull.
+    # context: the scan is closed while it is handled, which must not join the
+    # 10s pull.
     from boto3_s3 import S3
 
     storage = _BlockingScanStorage("s3://bkt/prefix/")
@@ -233,16 +283,14 @@ def test_ls_honors_the_posture_when_the_interrupt_lands_in_on_entry() -> None:
     start = time.monotonic()
     try:
         with pytest.raises(KeyboardInterrupt):
-            S3(reusable_after_interrupt=False).ls(
-                storage, on_entry=lambda info: _interrupt_on_second(counter)
-            )
+            S3().ls(storage, on_entry=lambda info: _interrupt_on_second(counter))
         assert time.monotonic() - start < 5
         assert _worker_alive()
     finally:
         _drain_worker(storage.release)
 
 
-def test_rm_honors_the_posture_when_the_interrupt_lands_in_on_result() -> None:
+def test_rm_does_not_wait_when_the_interrupt_lands_in_on_result() -> None:
     # Same window on rm's loop.
     from boto3_s3 import S3
 
@@ -251,7 +299,7 @@ def test_rm_honors_the_posture_when_the_interrupt_lands_in_on_result() -> None:
     start = time.monotonic()
     try:
         with pytest.raises(KeyboardInterrupt):
-            S3(reusable_after_interrupt=False).rm(
+            S3().rm(
                 storage,
                 recursive=True,
                 dryrun=True,
@@ -277,7 +325,7 @@ def test_transfer_teardown_does_not_wait_for_a_pull() -> None:
     try:
         with tempfile.TemporaryDirectory() as dest:
             with pytest.raises(KeyboardInterrupt):
-                S3(reusable_after_interrupt=False).cp(
+                S3().cp(
                     storage,
                     dest,
                     recursive=True,
@@ -309,9 +357,7 @@ def test_an_interrupted_scan_stops_with_the_traceback_still_held() -> None:
     storage = _Endless("s3://bkt/prefix/")
     counter = {"n": 0}
     with pytest.raises(KeyboardInterrupt) as held:
-        S3(reusable_after_interrupt=False).ls(
-            storage, on_entry=lambda info: _interrupt_on_second(counter)
-        )
+        S3().ls(storage, on_entry=lambda info: _interrupt_on_second(counter))
     _drain_worker(storage.release)
     assert held.traceback is not None
 
@@ -328,7 +374,7 @@ def test_sync_teardown_does_not_wait_for_a_pull() -> None:
     try:
         with tempfile.TemporaryDirectory() as dest:
             with pytest.raises(KeyboardInterrupt):
-                S3(reusable_after_interrupt=False).sync(
+                S3().sync(
                     storage,
                     dest,
                     dryrun=True,
@@ -342,7 +388,7 @@ def test_sync_teardown_does_not_wait_for_a_pull() -> None:
         _drain_worker(storage.release)
 
 
-def test_rm_live_route_honors_the_posture_when_the_interrupt_lands_in_submit() -> None:
+def test_rm_live_route_does_not_wait_when_the_interrupt_lands_in_submit() -> None:
     # The non-dryrun rm consumes its scan through the S3Deleter loop - a
     # separate site from the dryrun loop the other rm test drives.
     from boto3_s3 import S3
@@ -358,7 +404,7 @@ def test_rm_live_route_honors_the_posture_when_the_interrupt_lands_in_submit() -
     start = time.monotonic()
     try:
         with pytest.raises(KeyboardInterrupt):
-            S3(reusable_after_interrupt=False).rm(storage, recursive=True)
+            S3().rm(storage, recursive=True)
         assert time.monotonic() - start < 5
         assert _worker_alive()
     finally:
@@ -367,11 +413,11 @@ def test_rm_live_route_honors_the_posture_when_the_interrupt_lands_in_submit() -
 
 
 @pytest.mark.parametrize("exc_type", [SystemExit, ValueError])
-def test_ls_joins_on_every_exit_by_default(exc_type: type[BaseException]) -> None:
-    # The default posture keeps the full reclamation: the worker is joined.
+def test_ls_does_not_wait_for_a_pull_on_any_exit(exc_type: type[BaseException]) -> None:
+    # Not only a Ctrl-C: no early end waits for the page pull in flight.
     from boto3_s3 import S3
 
-    storage = _BlockingScanStorage("s3://bkt/prefix/", block=1.0)
+    storage = _BlockingScanStorage("s3://bkt/prefix/")
     counter = {"n": 0}
 
     def on_entry(_info: object) -> None:
@@ -379,34 +425,203 @@ def test_ls_joins_on_every_exit_by_default(exc_type: type[BaseException]) -> Non
         if counter["n"] == 2:
             raise exc_type()
 
+    start = time.monotonic()
     try:
         with pytest.raises(exc_type):
             S3().ls(storage, on_entry=on_entry)
-        assert not _worker_alive()
+        assert time.monotonic() - start < 5
+        assert _worker_alive()
     finally:
-        storage.release.set()
+        _drain_worker(storage.release)
+
+
+def test_a_cancel_ends_the_chunk_in_hand() -> None:
+    token = CancelToken()
+    with prefetch([[1, 2, 3]], cancel_token=token) as it:
+        assert next(it) == 1
+        token.cancel()
+        assert list(it) == []
+
+
+def test_a_graceful_cancel_ending_the_walk_reports_nothing_after_it(tmp_path: Path) -> None:
+    # A graceful cancel can end cp's source walk with no exception while the
+    # walk still warns about the page in flight: nothing reaches on_result
+    # once the CancelledError has reached the caller (overview section 3).
+    from boto3_s3 import S3, CancelledError, LocalStorage
+    from boto3_s3.types import OpResult
+
+    pulling = threading.Event()
+    release = threading.Event()
+    warned = threading.Event()
+
+    class _Slow(LocalStorage):
+        def scan_pages(self, options: Any) -> Any:
+            pages = super().scan_pages(options)
+            yield next(pages)
+            pulling.set()
+            release.wait(10)
+            if options.on_warning is not None:
+                options.on_warning("from the page in flight")
+            warned.set()
+            yield from pages
+
+    src = tmp_path / "src"
+    src.mkdir()
+    for name in ("a", "b", "c"):
+        (src / name).write_text("x")
+    token = CancelToken()
+
+    def cancel_once_waiting() -> None:
+        assert pulling.wait(5)
+        main_waits_in("_consume", waiting_in="wait_until")
+        token.cancel()
+
+    threading.Thread(target=cancel_once_waiting, daemon=True).start()
+    raised = [False]
+    after: list[OpResult] = []
+
+    def on_result(result: OpResult) -> None:
+        if raised[0]:
+            after.append(result)
+
+    try:
+        with pytest.raises(CancelledError):
+            S3().cp(
+                _Slow(str(src)),
+                "s3://bkt/p/",
+                recursive=True,
+                dryrun=True,
+                on_result=on_result,
+                cancel_token=token,
+            )
+        raised[0] = True
+    finally:
+        _drain_worker(release)
+    assert warned.is_set()
+    assert after == []
+
+
+@pytest.mark.parametrize("operation", ["cp", "sync"])
+def test_a_transfer_run_does_not_wait_for_a_pull_on_a_cancel(
+    operation: str, tmp_path: Path
+) -> None:
+    # A cancel ends cp's and sync's source listing at once, as it ends ls's:
+    # the page pull in flight is left to the worker (overview section 3).
+    from boto3_s3 import S3, CancelledError
+
+    storage = _BlockingScanStorage("s3://bkt/prefix/")
+    token = CancelToken()
+
+    def cancel_once_waiting() -> None:
+        # Once the run waits for the page being pulled, not before.
+        assert storage.pulling.wait(5)
+        main_waits_in("_consume", waiting_in="wait_until")
+        token.cancel(mode=CancelMode.IMMEDIATE)
+
+    threading.Thread(target=cancel_once_waiting, daemon=True).start()
+    start = time.monotonic()
+    try:
+        with pytest.raises(CancelledError):
+            if operation == "cp":
+                S3().cp(storage, str(tmp_path), recursive=True, dryrun=True, cancel_token=token)
+            else:
+                S3().sync(storage, str(tmp_path), dryrun=True, cancel_token=token)
+        assert time.monotonic() - start < 5
+    finally:
+        _drain_worker(storage.release)
 
 
 class TestWake:
-    """The wait the calling thread does on other threads (`concurrency.Wake`)."""
+    """How one thread waits for another (`concurrency.Wake`, `concurrency.WakeAll`).
+
+    A wait that should end runs on a thread whose first look at the condition
+    comes before the other side acts, so the wait can end only by being woken,
+    and that is joined with a deadline; or on the main thread with a late send
+    as a backstop. A wait that never ends fails the test instead of hanging it.
+    """
 
     @staticmethod
-    def _send_soon(wake: Wake, flag: list[bool]) -> None:
-        def send() -> None:
+    def _soon(act: Callable[[], None]) -> None:
+        def later() -> None:
             time.sleep(0.05)
+            act()
+
+        threading.Thread(target=later, daemon=True).start()
+
+    def _send_soon(self, wake: Wake, flag: list[bool]) -> None:
+        def send() -> None:
             flag[0] = True
             wake.send()
 
-        threading.Thread(target=send).start()
+        self._soon(send)
 
-    def test_a_send_ends_the_wait_at_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Woken by the send, not by the look the slice takes.
-        monkeypatch.setattr(concurrency, "_WAKE_SLICE", 30.0)
+    class _Waiting:
+        """``wait(ready)`` on a thread, with its first look and its end observable."""
+
+        def __init__(
+            self, wait: Callable[[Callable[[], bool]], None], holds: Callable[[], bool]
+        ) -> None:
+            self.looks = 0
+            self.looked = threading.Event()
+            self.ended = threading.Event()
+
+            def ready() -> bool:
+                self.looks += 1
+                result = holds()
+                self.looked.set()
+                return result
+
+            def run() -> None:
+                wait(ready)
+                self.ended.set()
+
+            threading.Thread(target=run, daemon=True).start()
+            assert self.looked.wait(5)
+            assert not self.ended.is_set()
+
+    def _woken_by(
+        self,
+        act: Callable[[], None],
+        wait: Callable[[Callable[[], bool]], None],
+        holds: Callable[[], bool],
+    ) -> None:
+        """*act* after the wait's first look; assert the wait then ends."""
+        waiting = self._Waiting(wait, holds)
+        act()
+        assert waiting.ended.wait(5), "the wait never ended"
+
+    @staticmethod
+    def _backstop(wake: Wake, flag: list[bool]) -> threading.Timer:
+        """For a wait on the main thread: end it in 10 s should nothing else."""
+
+        def send() -> None:
+            flag[0] = True
+            wake.send()
+
+        timer = threading.Timer(10, send)
+        timer.daemon = True
+        timer.start()
+        return timer
+
+    def test_a_send_ends_the_wait_at_once(self) -> None:
         wake, flag = Wake(), [False]
-        self._send_soon(wake, flag)
-        started = time.monotonic()
-        wake.wait_until(lambda: flag[0])
-        assert time.monotonic() - started < 5
+
+        def send() -> None:
+            flag[0] = True
+            wake.send()
+
+        self._woken_by(send, wake.wait_until, lambda: flag[0])
+
+    def test_the_wait_looks_only_when_woken(self) -> None:
+        # No look of its own: a condition that comes true without a send is
+        # seen only at the next send.
+        wake, flag = Wake(), [False]
+        waiting = self._Waiting(wake.wait_until, lambda: flag[0])
+        flag[0] = True
+        assert not waiting.ended.wait(0.3)
+        wake.send()
+        assert waiting.ended.wait(5)
+        assert waiting.looks == 2
 
     def test_a_condition_that_holds_is_not_waited_for(self) -> None:
         Wake().wait_until(lambda: True)
@@ -419,10 +634,57 @@ class TestWake:
         assert pending.acquire(blocking=False)  # one wake-up pending
         assert not pending.acquire(blocking=False)  # and no more
 
-    @skip_without_pthread_kill
-    def test_a_ctrl_c_in_the_wait_leaves_it_usable(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(concurrency, "_WAKE_SLICE", 30.0)
+    def test_a_cancel_wakes_a_wait_given_the_token(self) -> None:
+        token, wake = CancelToken(), Wake()
+        self._woken_by(
+            token.cancel,
+            lambda ready: wake.wait_until(ready, cancel_token=token),
+            lambda: token.cancelled,
+        )
+        assert not token._waiters._wakes  # pyright: ignore[reportPrivateUsage]
+
+    def test_an_escalation_wakes_the_wait_again(self) -> None:
+        token, wake = CancelToken(), Wake()
+        token.cancel()
+        self._woken_by(
+            lambda: token.cancel(mode=CancelMode.IMMEDIATE),
+            lambda ready: wake.wait_until(ready, cancel_token=token),
+            lambda: token.mode is CancelMode.IMMEDIATE,
+        )
+
+    def test_send_all_wakes_every_thread_waiting(self) -> None:
+        wake_all, flag = WakeAll(), [False]
+
+        def wait(ready: Callable[[], bool]) -> None:
+            wake = Wake()
+            wake_all.add(wake)
+            try:
+                wake.wait_until(ready)
+            finally:
+                wake_all.discard(wake)
+
+        waitings = [self._Waiting(wait, lambda: flag[0]) for _ in range(3)]
+        flag[0] = True
+        wake_all.send()
+        for waiting in waitings:
+            assert waiting.ended.wait(5)
+
+    def test_the_main_thread_looks_by_itself(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The main thread's wait wakes by itself to let a Ctrl-C through, and so
+        # sees a condition nothing sent for.
+        monkeypatch.setattr(concurrency, "_CTRL_C_SLICE", 0.05)
         wake, flag = Wake(), [False]
+        backstop = self._backstop(wake, flag)
+        self._soon(lambda: flag.__setitem__(0, True))
+        started = time.monotonic()
+        wake.wait_until(lambda: flag[0])
+        backstop.cancel()
+        assert time.monotonic() - started < 5
+
+    @skip_without_pthread_kill
+    def test_a_ctrl_c_in_the_wait_leaves_it_usable(self) -> None:
+        wake, flag = Wake(), [False]
+        backstop = self._backstop(wake, flag)
         threading.Thread(
             target=interrupt_main_in,
             args=("test_a_ctrl_c_in_the_wait_leaves_it_usable",),
@@ -430,7 +692,10 @@ class TestWake:
         ).start()
         with pytest.raises(KeyboardInterrupt):
             wake.wait_until(lambda: flag[0])
+        backstop.cancel()
+        backstop = self._backstop(wake, flag)
         self._send_soon(wake, flag)
         started = time.monotonic()
         wake.wait_until(lambda: flag[0])
+        backstop.cancel()
         assert time.monotonic() - started < 5

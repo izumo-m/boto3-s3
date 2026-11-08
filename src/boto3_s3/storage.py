@@ -87,15 +87,18 @@ def _pull_pages(
     each page is produced only once the consumer has drained the previous one,
     so a consumer that mutates what it is enumerating - ``sync --delete``
     removing local orphans as the merge-join streams them - never receives an
-    entry captured before its own change. `cancel_token` is honored where
-    ``prefetch`` honors it: before a page pull, leaving entries already yielded
-    untouched.
+    entry captured before its own change. `cancel_token` is honored as
+    ``prefetch`` honors it: a cancel ends the entries at once. A page pull
+    already under way runs on this thread, so it is waited for.
     """
     while cancel_token is None or not cancel_token.cancelled:
         page = next(pages, None)
         if page is None:
             return
-        yield from page
+        for info in page:
+            if cancel_token is not None and cancel_token.cancelled:
+                return
+            yield info
 
 
 class StorageCapability(Flag):
@@ -236,10 +239,8 @@ class Storage(abc.ABC):
         storage's configuration. The high-level ``cp`` / ``sync`` / ``ls`` / ``rm``
         paths build from this and overlay only the run-level knobs
         (``recursive`` / ``sort`` / ``filter`` / ``on_warning`` / ``prefix`` /
-        ``request_payer``, plus the application's ``reusable_after_interrupt``
-        posture), which
-        is what lets an app configure the walk through the storage rather than per
-        call.
+        ``request_payer``), which is what lets an app configure the walk through
+        the storage rather than per call.
         """
         return self.scan_options_type()
 
@@ -272,9 +273,16 @@ class Storage(abc.ABC):
         filter - so a predicate always sees the producing backend, per
         ``FileInfo``'s contract (the built-ins already stamp it during the
         scan). Used by ``ls`` and the recursive forms of
-        ``cp`` / ``mv`` / ``rm`` / ``sync``. `cancel_token` stops the prefetch
-        producer before another page pull without changing entries already
-        yielded to the consumer.
+        ``cp`` / ``mv`` / ``rm`` / ``sync``. `cancel_token`'s cancel ends the
+        entries at once, without an exception: pages already fetched are
+        dropped, no page pull starts, and one already in flight is not waited
+        for - but for one under ``read_ahead=False``, which runs on the calling
+        thread. So the consumer looks at the token before it takes the entries
+        for the whole listing. Entries already yielded are unaffected. A scan
+        closed before its end does not wait for a page pull already in flight:
+        the worker is told to stop, drops the
+        page it brings back and ends by itself, and the filter can still run on
+        that page after the close (`concurrency.prefetch`).
         """
         opts = options if options is not None else self.default_scan_options()
 
@@ -299,10 +307,7 @@ class Storage(abc.ABC):
             yield from _pull_pages(pages, cancel_token)
             return
         with prefetch(
-            pages,
-            queue_size=self._scan_prefetch_pages,
-            cancel_token=cancel_token,
-            reusable_after_interrupt=opts.reusable_after_interrupt,
+            pages, queue_size=self._scan_prefetch_pages, cancel_token=cancel_token
         ) as items:
             yield from items
 

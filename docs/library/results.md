@@ -148,7 +148,7 @@ token = CancelToken()
 s3.sync("./site", "s3://bucket/site/", cancel_token=token)
 ...
 token.cancel()                          # graceful: drain what was accepted
-token.cancel(mode=CancelMode.IMMEDIATE) # also try to stop what is in flight
+token.cancel(mode=CancelMode.IMMEDIATE) # stop at once
 ```
 
 **Graceful** (the default) is a drain: the operation stops taking new work,
@@ -156,19 +156,24 @@ finishes the transfers it already accepted (the delete lanes of `rm` / `sync`
 drop their unsent buffered deletes instead), reclaims its workers, and raises
 `CancelledError`. No `CANCELLED` records appear.
 
-**Immediate** additionally asks pending and in-flight work to stop. Then the
-records resolve like this:
+**Immediate** raises `CancelledError` at once. The operation starts nothing new
+and cancels what has not started, but a request already sent cannot be safely
+interrupted, so it finishes behind your back, along with its cleanup. That
+has two consequences:
 
-- accepted but not yet running, or abandoned mid-flight — one `CANCELLED`
-  record whose `error` names the cause;
-- in flight and completing anyway — its **real** outcome. A running request
-  cannot be safely interrupted, and if its bytes landed, that is the truth. The
-  exception is a `mv` from S3 on the CRT engine whose source delete had not
-  started: `CANCELLED`, with the file in place and the source kept;
-- never accepted — no record at all.
+- the records stop with the cancel: an item that ends after the operation
+  raised reports nothing, whatever its real outcome;
+- S3 and your files can still change after the operation raised — a `mv`
+  whose copy completes still deletes its source on the classic engine.
 
-Cancelling twice is safe, and an immediate request upgrades a graceful one.
-Nothing ever downgrades it.
+The same `S3` can run the next operation; a client you passed in is still in
+use by the requests left behind
+([`../reference/s3.md`](../reference/s3.md#thread-safety)). Neither mode cuts
+short a request the operation's own thread is waiting on, such as the single
+request of `rm s3://bucket/key`: the operation raises once it returns.
+
+Cancelling twice is safe, and an immediate request upgrades a graceful one,
+ending a drain already under way. Nothing ever downgrades it.
 
 A run that a cancellation actually cut short **always ends by raising** — the
 triggering error, or `CancelledError`. It never ends with the partial-failure

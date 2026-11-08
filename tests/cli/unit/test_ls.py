@@ -377,30 +377,6 @@ class TestQueryValidation:
         assert cli.main(["ls", "s3://b/p/", "--query", "Contents[].Key"], ctx=ctx) == 0
 
 
-class TestScanInterruptPolicy:
-    def test_the_cli_posture_reaches_the_listing_scan(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # A Ctrl-C ends the CLI's process: the S3 the CLI builds declares
-        # reusable_after_interrupt=False once, and ls threads it into its listing
-        # scan's ScanOptions; the library default keeps waiting.
-        import boto3_s3
-
-        scan_waits: list[bool] = []
-
-        class _Recording(boto3_s3.S3Storage):
-            def scan(self, options: Any = None, *, cancel_token: Any = None) -> Any:
-                assert options is not None
-                scan_waits.append(options.reusable_after_interrupt)
-                return super().scan(options, cancel_token=cancel_token)
-
-        # Patch the command module's binding: ls.py imports S3Storage at top.
-        monkeypatch.setattr("boto3_s3_cli.commands.ls.S3Storage", _Recording)
-        ctx, _client = _fake_ctx([{"Contents": []}])
-        assert cli.main(["ls", "s3://b/p/"], ctx=ctx) == 1
-        assert scan_waits == [False]
-
-
 class TestTimestampFormat:
     """`cli_timestamp_format` is validated, but neither value moves this output.
 

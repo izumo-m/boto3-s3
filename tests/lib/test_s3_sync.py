@@ -91,6 +91,10 @@ _OLDER = MTIME - timedelta(hours=1)
 _NEWER = MTIME + timedelta(hours=1)
 
 
+class _HandlerError(Exception):
+    """What a signal handler of the caller's raises (`TestParallelFilter`)."""
+
+
 def _settles(runner: threading.Thread) -> bool:
     """Whether *runner* comes to sleep in sync's settle loop within a few seconds."""
     deadline = time.monotonic() + 5
@@ -1253,7 +1257,8 @@ class TestParallelFilter:
         # pooled decisions gracefully, and the queued decision can complete
         # through nothing but cancel() - so only re-observing the token inside
         # the wait can end it. Freezing the mode at entry hung a CI run here
-        # (28 minutes of silence until the job timeout).
+        # (28 minutes of silence until the job timeout). The upgrade also ends
+        # the wait for the decision still running.
         class _ProbedWindow(Executor):
             _max_workers = 2
 
@@ -1314,10 +1319,10 @@ class TestParallelFilter:
             # The graceful wait is under way: the runner sleeps in settle_pending.
             assert _settles(runner)
             token.cancel(mode=CancelMode.IMMEDIATE)  # upgrade lands mid-settle
-            for _ in range(500):
-                if pool.queued[1].cancelled():
-                    break
-                threading.Event().wait(0.01)
+            # It awaits no decision (overview section 3): the run ends with the
+            # first one still running.
+            runner.join(5.0)
+            assert not runner.is_alive()
         finally:
             release_first.set()
             runner.join(5.0)
@@ -1327,6 +1332,67 @@ class TestParallelFilter:
         assert pool.queued[1].cancelled()  # the settle loop observed the upgrade
         assert len(errors) == 1 and isinstance(errors[0], CancelledError)
         assert not [call for call in calls if call.operation == "PutObject"]
+
+    def test_an_exception_before_the_report_callback_still_settles(self, tmp_path: Path) -> None:
+        # An exception between the submit and its add_done_callback - a signal
+        # handler's, which can land anywhere - leaves a running decision that
+        # would wake nothing: the settle wait must still end when it does.
+        class _InterruptedOnFirstCallback(Future[Any]):
+            def __init__(self) -> None:
+                super().__init__()
+                self.interrupted = False
+
+            def add_done_callback(self, fn: Any) -> None:
+                if not self.interrupted:
+                    self.interrupted = True
+                    raise _HandlerError
+                super().add_done_callback(fn)
+
+        class _Pool(Executor):
+            _max_workers = 1
+
+            def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
+                future = _InterruptedOnFirstCallback()
+                future.set_running_or_notify_cancel()
+
+                def run() -> None:
+                    future.set_result(fn(*args, **kwargs))
+
+                threading.Thread(target=run, daemon=True).start()
+                return future
+
+        src = tmp_path / "src"
+        _write(src, "a.txt", b"a")
+        client, _calls = make_recording_client([listing()])
+        release = threading.Event()
+
+        def decide(_info: FileInfo) -> bool:
+            assert release.wait(5.0)
+            return True
+
+        errors: list[BaseException] = []
+
+        def run_sync() -> None:
+            try:
+                S3().sync(
+                    str(src),
+                    S3Storage("s3://bucket/p", client=client),
+                    create_filter=ParallelFilter(decide, executor=_Pool()),
+                    transfer_config=_SERIAL,
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        # daemon: on regression the runner sleeps in the settle loop forever.
+        runner = threading.Thread(target=run_sync, daemon=True)
+        runner.start()
+        try:
+            assert _settles(runner)
+        finally:
+            release.set()
+            runner.join(5.0)
+        assert not runner.is_alive()
+        assert len(errors) == 1 and isinstance(errors[0], _HandlerError)
 
     def test_update_lane_matches_the_bare_strategy_decisions(self, tmp_path: Path) -> None:
         # Update pairs (a/b/c already at the destination) are pooled through

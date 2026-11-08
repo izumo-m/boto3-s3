@@ -310,7 +310,6 @@ def run_sync_pairs(
     update_lane: Lane[SyncPair] | None,
     delete_lane: Lane[DestOnlyPair] | None,
     cancel_token: CancelToken | None,
-    reusable_after_interrupt: bool = True,
 ) -> None:
     """Drive ``S3.sync``'s pair loop, routing each pair to its lane.
 
@@ -327,10 +326,11 @@ def run_sync_pairs(
     ``decide`` exception propagates here (aborting the sync) when its result is
     consumed. Before returning from a decision, action, or pair-producer
     failure, decisions that have not started are cancelled and running decisions
-    are awaited, so none outlive the operation.
+    are awaited, so none outlive the operation. A Ctrl-C and an immediate cancel
+    leave at once instead: they cancel the decisions not started and leave the
+    running ones to end by themselves (design/overview.md section 3).
     `cancel_token` is polled before decisions and actions. Graceful cancellation
-    awaits outstanding decisions; immediate mode first calls `cancel()` on their
-    futures. The caller's executor is never shut down.
+    awaits outstanding decisions. The caller's executor is never shut down.
     """
 
     pending: set[Future[bool]] = set()
@@ -338,9 +338,10 @@ def run_sync_pairs(
     # ``submit`` closed over its pair), so the queue needs no pair/lane fields -
     # each lane keeps its own pair shape without a shared existential type.
     done: SimpleQueue[tuple[Callable[[], None], Future[bool]]] = SimpleQueue()
-    # Sent with each report on `done`: what the two waits below sleep on. Only
-    # `done.get_nowait` takes from the queue (its timed get can miss its
-    # timeout on Python 3.10 to 3.12; `concurrency.Wake`).
+    # What the two waits below sleep on: sent with each report on `done`, by
+    # `settle_pending`'s own callbacks, and by the token's cancel. Only
+    # `done.get_nowait` takes from the queue: a wait in its `get` could not
+    # also be woken by the token.
     arrived = Wake()
 
     def cancelled() -> bool:
@@ -356,32 +357,36 @@ def run_sync_pairs(
     def settle_pending(*, cancel: bool) -> None:
         """Optionally cancel queued decisions, then await every accepted one.
 
-        Re-observes the token each pass: an upgrade to `IMMEDIATE` arriving
-        while a graceful settle is already waiting must still cancel the
-        queued decisions (`CancelToken`'s escalation contract) - a decision
-        that can only complete through `cancel()`, such as one queued on an
-        executor that will never run it, would otherwise pin this loop
-        forever. `cancel` never downgrades, matching the token's monotonicity.
+        Under an immediate cancel - one arriving while a graceful settle
+        already waits included (`CancelToken`'s escalation contract) - it
+        cancels the queued decisions and awaits none: a decision running ends
+        by itself, and one queued on an executor that will never run it cannot
+        pin the loop.
 
-        A decision's report only wakes the loop; ``done()`` says which have
-        ended. A Ctrl-C can lose a report - landing after the main loop took it
-        but before it dropped the future, or before the future's callback was
-        added - and the wait's own look then finds the future ended.
+        A decision's end only wakes the loop; ``done()`` says which have
+        ended. A Ctrl-C can lose a report from the queue - landing after the
+        main loop took it but before it dropped the future - and the look on
+        the next wake-up then finds the future ended. One landing in ``handle``
+        between the submit and its ``add_done_callback`` leaves a future that
+        would wake nothing, so this adds a callback of its own to each.
         """
 
         def changed() -> bool:
-            # A decision ended, or the token escalated past what this pass applied.
-            return any(future.done() for future in pending) or (not cancel and immediate())
+            # A decision ended, or the token turned immediate.
+            return any(future.done() for future in pending) or immediate()
 
+        for future in pending:
+            future.add_done_callback(lambda _future: arrived.send())
         while True:
-            cancel = cancel or immediate()
-            if cancel:
+            if cancel or immediate():
                 for future in pending:
                     future.cancel()
+            if immediate():
+                return
             pending.difference_update([future for future in pending if future.done()])
             if not pending:
                 return
-            arrived.wait_until(changed)
+            arrived.wait_until(changed, cancel_token=cancel_token)
 
     def stop_if_cancelled() -> None:
         """Apply the token mode to accepted decisions, then raise cancellation."""
@@ -457,7 +462,9 @@ def run_sync_pairs(
             try:
                 submit, future = done.get_nowait()
             except Empty:
-                arrived.wait_until(lambda: not done.empty() or cancelled())
+                arrived.wait_until(
+                    lambda: not done.empty() or cancelled(), cancel_token=cancel_token
+                )
                 continue
             pending.discard(future)
             inflight -= 1
@@ -467,21 +474,19 @@ def run_sync_pairs(
             if dispatch():
                 inflight += 1
     except KeyboardInterrupt:
-        if not reusable_after_interrupt:
-            # A Ctrl-C leaves at once: what is queued never runs, and a decision
-            # running ends by itself.
-            left = True
-            for future in pending:
-                future.cancel()
+        # A Ctrl-C leaves at once: what is queued never runs, and a decision
+        # running ends by itself.
+        left = True
+        for future in pending:
+            future.cancel()
         raise
     finally:
         # An exception from a decision, a lane action, or the pair producer must
         # not leave accepted predicates running after sync has cleaned up its
         # transfer manager and storages. Cancel work that has not started and
-        # await the rest without shutting down the caller-owned executor. Polling
-        # `done()` also handles a plain `Future` cancelled before a waiter was
-        # registered. Results are not read, preserving the error that triggered
-        # this cleanup.
+        # await the rest without shutting down the caller-owned executor.
+        # Results are not read, preserving the error that triggered this
+        # cleanup.
         if pending and not left:
             settle_pending(cancel=True)
 
@@ -512,10 +517,8 @@ class SyncDeletes:
         capture_response: bool = False,
         transfer_config: TransferConfig | None = None,
         crt: crtsupport.CrtPostures | None = None,
-        reusable_after_interrupt: bool = True,
     ) -> None:
         self._dest = dest_storage
-        self._reusable_after_interrupt = reusable_after_interrupt
         # What the deleter's client is chosen by (S3Deleter): the run's
         # TransferConfig and the S3 instance's CRT postures.
         self._transfer_config = transfer_config
@@ -574,7 +577,6 @@ class SyncDeletes:
                         session=self._crt.session,
                         crt_endpoint=self._crt.endpoint,
                         crt=self._crt.crt,
-                        reusable_after_interrupt=self._reusable_after_interrupt,
                     )
                 )
             self._deleter.submit(info)

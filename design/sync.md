@@ -562,11 +562,11 @@ botocore client is safe to share for concurrent calls).
   does), surfacing when its result is consumed; decisions that have not started
   are cancelled and running decisions are awaited before the exception returns.
   `cancel_token` is polled between pairs. Graceful cancellation stops new pair
-  actions and drains transfers and delete batches already accepted; immediate
-  cancellation additionally asks their futures to cancel where possible.
-  Outstanding decisions on the caller's pool are always awaited before sync
-  returns; immediate mode first calls `cancel()` on each future, without shutting
-  down the caller-owned executor.
+  actions, awaits the outstanding decisions on the caller's pool, and drains
+  transfers and delete batches already accepted. Immediate cancellation, like a
+  Ctrl-C, leaves at once (overview section 3): it calls `cancel()` on each
+  decision not started and leaves running decisions, transfers and delete
+  batches to end by themselves. Neither shuts down the caller-owned executor.
 
 `ParallelFilter` is a library-only building block: there is no `aws s3` flag for a
 parallel filter, so the CLI never sets it and compatibility is not at stake.

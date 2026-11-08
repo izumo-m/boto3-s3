@@ -74,16 +74,18 @@ constant is `boto3_s3.deleter.S3_DELETE_BATCH`.
   daemon-ness does not exempt a daemon caller. If you fail to close it,
   shutdown blocks until the in-flight batch completes, so using the context
   manager is recommended.
-- Cancellation never discards a *running* batch's results: a batch whose S3
-  request has started completes and delivers its per-key results before
-  shutdown returns - bar the per-key requests an abandoned run had not sent
-  yet (an XML-incompatible key, a re-send of a transient failure, any key of
-  a batch request that failed as a whole), which get no record (section 3). A graceful cancel is not an
-  abandonment - it drains the batch in flight whole, although rm and sync
-  leave the deleter through `close(flush=False)` then. Unsent buffered entries
-  are discarded without an
-  `OpResult`, and immediate mode may also cancel a dispatched batch that has
-  not started yet - its entries likewise produce no records.
+- A graceful cancel never discards a *running* batch's results: a batch whose
+  S3 request has started completes and delivers its per-key results before
+  shutdown returns. It is not an abandonment - it drains the batch in flight
+  whole, although rm and sync leave the deleter through `close(flush=False)`
+  then. Any other early end does deliver the results too, bar the per-key
+  requests an abandoned run had not sent yet (an XML-incompatible key, a
+  re-send of a transient failure, any key of a batch request that failed as a
+  whole), which get no record (section 3) - except an immediate cancel and a
+  Ctrl-C, which leave at once (overview section 3): a dispatched batch that
+  has not started never runs, and one already sent finishes behind the caller
+  without reporting. Unsent buffered entries are discarded without an
+  `OpResult` in every case.
 
 ## 3. Error model
 
@@ -275,10 +277,9 @@ that - so a key never gets fewer attempts than aws-cli gives it.
   sibling key that differs only by CR/LF - a delete reported for the key that
   was refused.
 - A Ctrl-C (or any abandonment) cannot cancel a request already out: a batch
-  in flight completes and reports every key it carried. Under
-  `reusable_after_interrupt=False` the interrupt leaves at once instead, and the
-  batch finishes behind the caller, reporting nothing and starting no further
-  per-key request.
+  in flight completes and reports every key it carried, unless the
+  abandonment is a Ctrl-C, which leaves at once: the batch finishes behind the
+  caller, reporting nothing and starting no further per-key request.
 - Failure messages are unified to the full `str(ClientError)`
   (`An error occurred (...) ...`), the same shape as the string aws-cli emits on
   a failure line (so the CLI layer can use it as-is when composing

@@ -118,14 +118,16 @@ class TestAStreamRaisingWhereTheSignerReadsIt:
             on_result=results.append,
         )
 
-    @pytest.mark.parametrize("interrupt", [SystemExit(3), KeyboardInterrupt()])
-    def test_an_interrupt_cancels_the_item_and_reaches_the_caller(
-        self, interrupt: BaseException
-    ) -> None:
+    def test_an_exit_cancels_the_item_and_reaches_the_caller(self) -> None:
         results: list[OpResult] = []
-        with pytest.raises(type(interrupt)):
-            self._upload(interrupt, results)
+        with pytest.raises(SystemExit):
+            self._upload(SystemExit(3), results)
         assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+
+    def test_a_ctrl_c_reaches_the_caller(self) -> None:
+        # It leaves at once: whether the item's record came first is not specified.
+        with pytest.raises(KeyboardInterrupt):
+            self._upload(KeyboardInterrupt(), [])
 
     def test_a_library_error_is_recorded_as_it_is(self) -> None:
         results: list[OpResult] = []

@@ -165,18 +165,15 @@ delivered stand, and a cancel that arrives after the last entry still ends the
 call with `CancelledError` rather than a normal return. Both `CancelMode`
 values have the same effect here, because a listing request already in flight
 cannot be aborted safely: an object listing drops its prefetched pages and
-waits for the page request in progress before reclaiming its prefetch worker
-(under `S3(reusable_after_interrupt=False)` it leaves the worker to end by itself),
-and the bucket listing, which is iterated directly, simply stops between
+tells its prefetch worker to stop, which ends by itself after the page request
+in progress, and the bucket listing, which is iterated directly, simply stops between
 entries.
 
 Some listing knobs are not parameters of `ls`. The page size — for object
 listings, and for bucket listings wherever `ListBuckets` paginates — and
 `fetch_owner`, which reaches the object listing only, are configured on the
 target `S3Storage` and seeded into the listings it produces, so pass a
-configured `S3Storage` to tune them (see [`../storage.md`](../storage.md)). The
-Ctrl-C posture of an object listing's page worker comes from
-`S3(reusable_after_interrupt=...)` (see [`../s3.md`](../s3.md)).
+configured `S3Storage` to tune them (see [`../storage.md`](../storage.md)).
 
 ### Ordering
 

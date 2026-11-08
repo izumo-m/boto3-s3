@@ -1,4 +1,4 @@
-"""``reusable_after_interrupt=False``: a Ctrl-C leaves at once, with requests still out.
+"""A Ctrl-C leaves at once, with requests still out (design/overview.md section 3).
 
 Nothing can cancel a request already out, so the client here is a real botocore
 client whose requests a ``before-send`` stub holds until the test releases them,
@@ -121,7 +121,7 @@ def _works_in_a_new_s3(source: Path) -> None:
     fresh = _HeldEndpoint()
     fresh.release.set()
     results: list[OpResult] = []
-    S3(reusable_after_interrupt=False).cp(
+    S3().cp(
         source,
         S3Storage("s3://b/again", client=fresh.client),
         transfer_config=_CLASSIC,
@@ -183,7 +183,7 @@ class TestCtrlC:
         try:
             with pytest.raises(KeyboardInterrupt):
                 route(
-                    S3(reusable_after_interrupt=False),
+                    S3(),
                     endpoint,
                     tmp_path,
                     on_result=results.append,
@@ -213,7 +213,6 @@ class TestCtrlC:
             TransferType.UPLOAD,
             endpoint.client,
             transfer_config=_SERIAL_REQUESTS,
-            reusable_after_interrupt=False,
         )
         threading.Thread(target=interrupt_the_wait).start()
         started = time.monotonic()
@@ -226,7 +225,7 @@ class TestCtrlC:
         assert _settled(transferrer)
         assert endpoint.sent == ["request"]
 
-    def test_the_default_posture_waits_for_the_request(self, tmp_path: Path) -> None:
+    def test_a_run_with_no_interrupt_waits_for_the_request(self, tmp_path: Path) -> None:
         source = _file(tmp_path)
         endpoint = _HeldEndpoint()
         started = time.monotonic()
@@ -252,15 +251,13 @@ class _NotingPool(ThreadPoolExecutor):
 class TestCtrlCWithDecisionsOnTheCallersPool:
     """A ``ParallelFilter``'s decisions: the pool is the caller's, and no shutdown here ends it."""
 
-    def _sync(
-        self, reusable: bool, decide: Callable[[Any], bool], pool: Any, tmp_path: Path
-    ) -> None:
+    def _sync(self, decide: Callable[[Any], bool], pool: Any, tmp_path: Path) -> None:
         source = tmp_path / "tree"
         source.mkdir()
         _file(source)
         endpoint = _HeldEndpoint()
         endpoint.release.set()
-        S3(reusable_after_interrupt=reusable).sync(
+        S3().sync(
             source,
             S3Storage("s3://b/p/", client=endpoint.client),
             create_filter=ParallelFilter(decide, pool),
@@ -287,7 +284,7 @@ class TestCtrlCWithDecisionsOnTheCallersPool:
             started = time.monotonic()
             try:
                 with pytest.raises(KeyboardInterrupt):
-                    self._sync(False, decide, pool, tmp_path)
+                    self._sync(decide, pool, tmp_path)
                 assert time.monotonic() - started < _WELL_UNDER_THE_HOLD
             finally:
                 release.set()
@@ -307,33 +304,11 @@ class TestCtrlCWithDecisionsOnTheCallersPool:
             threading.Thread(target=self._interrupt_once, args=(pool.submitted,)).start()
             try:
                 with pytest.raises(KeyboardInterrupt):
-                    self._sync(False, decide, pool, tmp_path)
+                    self._sync(decide, pool, tmp_path)
             finally:
                 release.set()
         # The pool has run everything it was left with.
         assert decided == []
-
-    def test_the_default_posture_waits_for_a_decision_running(self, tmp_path: Path) -> None:
-        running = threading.Event()
-        interrupted = threading.Event()
-        finished = threading.Event()
-
-        def decide(_pair: Any) -> bool:
-            running.set()
-            assert interrupted.wait(_HOLD)
-            time.sleep(0.2)
-            finished.set()
-            return False
-
-        def interrupt() -> None:
-            self._interrupt_once(running)
-            interrupted.set()
-
-        with _NotingPool() as pool:
-            threading.Thread(target=interrupt).start()
-            with pytest.raises(KeyboardInterrupt):
-                self._sync(True, decide, pool, tmp_path)
-            assert finished.is_set()
 
 
 class TestInterruptReachingTheExit:
@@ -344,7 +319,6 @@ class TestInterruptReachingTheExit:
             TransferType.UPLOAD,
             _HeldEndpoint().client,
             on_result=results.append,
-            reusable_after_interrupt=False,
         )
         with pytest.raises(KeyboardInterrupt):
             with transferrer:
@@ -361,7 +335,6 @@ class TestInterruptReachingTheExit:
             endpoint.client,
             transfer_config=_SERIAL_REQUESTS,
             on_result=results.append,
-            reusable_after_interrupt=False,
         )
         started = time.monotonic()
         with pytest.raises(KeyboardInterrupt):
@@ -385,7 +358,6 @@ class TestInterruptReachingTheExit:
                 TransferType.UPLOAD,
                 endpoint.client,
                 transfer_config=_SERIAL_REQUESTS,
-                reusable_after_interrupt=False,
             ) as transferrer:
                 transferrer.submit(_item(source, "big"))
                 assert endpoint.held.wait(_HOLD)
@@ -407,22 +379,16 @@ class _InterruptedCleanup:
 
 
 class TestNothingIsReportedOnceTheCallerHasTheException:
-    """Under either posture, the exception a run ends with reaches the caller
-    only once its callbacks have been stopped: a warning the walk sends after
-    that, as a page still in flight would, reaches nobody."""
+    """The exception a run ends with reaches the caller only once its
+    callbacks have been stopped: a warning the walk sends after that, as a page
+    still in flight would, reaches nobody."""
 
-    def _transferrer(self, reusable: bool, on_result: Callable[[OpResult], None]) -> Transferrer:
-        return Transferrer(
-            TransferType.UPLOAD,
-            _HeldEndpoint().client,
-            on_result=on_result,
-            reusable_after_interrupt=reusable,
-        )
+    def _transferrer(self, on_result: Callable[[OpResult], None]) -> Transferrer:
+        return Transferrer(TransferType.UPLOAD, _HeldEndpoint().client, on_result=on_result)
 
-    @pytest.mark.parametrize("reusable", [True, False])
-    def test_the_blocks_own(self, reusable: bool) -> None:
+    def test_the_blocks_own(self) -> None:
         results: list[OpResult] = []
-        transferrer = self._transferrer(reusable, results.append)
+        transferrer = self._transferrer(results.append)
         with pytest.raises(ValueError, match="fatal"):
             with transferrer:
                 transferrer.warner.warn("before")
@@ -430,15 +396,14 @@ class TestNothingIsReportedOnceTheCallerHasTheException:
         transferrer.warner.warn("after")
         assert [result.outcome for result in results] == [OpOutcome.WARNED]
 
-    @pytest.mark.parametrize("reusable", [True, False])
-    def test_one_noted_on_a_worker(self, reusable: bool) -> None:
+    def test_one_noted_on_a_worker(self) -> None:
         calls: list[OpResult] = []
 
         def on_result(result: OpResult) -> None:
             calls.append(result)
             raise ValueError("from on_result")
 
-        transferrer = self._transferrer(reusable, on_result)
+        transferrer = self._transferrer(on_result)
         with pytest.raises(ValueError, match="from on_result"):
             with transferrer:
                 worker = threading.Thread(target=transferrer.warner.warn, args=("noted",))
@@ -448,10 +413,9 @@ class TestNothingIsReportedOnceTheCallerHasTheException:
         transferrer.warner.warn("after")
         assert len(calls) == 1
 
-    @pytest.mark.parametrize("reusable", [True, False])
-    def test_an_interrupt_out_of_the_cleanup(self, reusable: bool) -> None:
+    def test_an_interrupt_out_of_the_cleanup(self) -> None:
         results: list[OpResult] = []
-        transferrer = self._transferrer(reusable, results.append)
+        transferrer = self._transferrer(results.append)
         with pytest.raises(KeyboardInterrupt):
             with transferrer:
                 transferrer._manager = _InterruptedCleanup()  # pyright: ignore[reportPrivateUsage]
@@ -460,7 +424,7 @@ class TestNothingIsReportedOnceTheCallerHasTheException:
         assert results == []
 
 
-class TestEverythingElseIsAsUnderTheDefault:
+class TestEverythingElse:
     def test_any_other_exception_still_waits_and_names_itself(self, tmp_path: Path) -> None:
         # The interrupt alone leaves at once: another failure's records still
         # come, naming it, and its caller finds nothing running.
@@ -474,7 +438,6 @@ class TestEverythingElseIsAsUnderTheDefault:
                 endpoint.client,
                 transfer_config=_SERIAL_REQUESTS,
                 on_result=results.append,
-                reusable_after_interrupt=False,
             ) as transferrer:
                 transferrer.submit(_item(_file(tmp_path), "k0"))
                 transferrer.submit(_item(_file(tmp_path, "g"), "k1"))
@@ -485,10 +448,7 @@ class TestEverythingElseIsAsUnderTheDefault:
         assert cancelled
         assert "boom" in str(cancelled[0].error)
 
-    @pytest.mark.parametrize("reusable", [True, False])
-    def test_an_exception_noted_on_a_worker_reaches_the_caller(
-        self, reusable: bool, tmp_path: Path
-    ) -> None:
+    def test_an_exception_noted_on_a_worker_reaches_the_caller(self, tmp_path: Path) -> None:
         # What on_result raises is noted on a worker and raised from __exit__.
         endpoint = _HeldEndpoint()
         endpoint.release.set()
@@ -497,17 +457,14 @@ class TestEverythingElseIsAsUnderTheDefault:
             raise ValueError("from on_result")
 
         with pytest.raises(ValueError, match="from on_result"):
-            S3(reusable_after_interrupt=reusable).cp(
+            S3().cp(
                 _file(tmp_path),
                 S3Storage("s3://b/k", client=endpoint.client),
                 transfer_config=_CLASSIC,
                 on_result=on_result,
             )
 
-    @pytest.mark.parametrize("reusable", [True, False])
-    def test_one_noted_in_the_wait_cancels_what_has_not_started(
-        self, reusable: bool, tmp_path: Path
-    ) -> None:
+    def test_one_noted_in_the_wait_cancels_what_has_not_started(self, tmp_path: Path) -> None:
         # The first record's on_result raises once the caller waits in __exit__.
         # The one request place is taken until then, so the second request goes
         # out after it and is held, and the third waits behind that one.
@@ -525,7 +482,6 @@ class TestEverythingElseIsAsUnderTheDefault:
             endpoint.client,
             transfer_config=_SERIAL_REQUESTS,
             on_result=on_result,
-            reusable_after_interrupt=reusable,
         )
 
         def release_once_cancelled() -> None:
@@ -566,10 +522,7 @@ class TestEverythingElseIsAsUnderTheDefault:
         transferrer._deliver_progress(record)  # pyright: ignore[reportPrivateUsage]
         assert progress == []
 
-    @pytest.mark.parametrize("reusable", [True, False])
-    def test_a_done_subscribers_exit_reaches_the_caller(
-        self, reusable: bool, tmp_path: Path
-    ) -> None:
+    def test_a_done_subscribers_exit_reaches_the_caller(self, tmp_path: Path) -> None:
         # A reader whose close raises SystemExit on a worker: its item is never
         # forgotten by the subscribers after it, which must not hold the run.
         class _Reader(io.BytesIO):
@@ -600,7 +553,7 @@ class TestEverythingElseIsAsUnderTheDefault:
         endpoint = _HeldEndpoint()
         endpoint.release.set()
         with pytest.raises(SystemExit):
-            S3(reusable_after_interrupt=reusable).cp(
+            S3().cp(
                 _Source(),
                 S3Storage("s3://b/p/", client=endpoint.client),
                 recursive=True,
@@ -629,7 +582,6 @@ class TestTheDeleter:
                 storage,
                 on_result=results.append,
                 transfer_config=_CLASSIC,
-                reusable_after_interrupt=False,
             ) as deleter:
                 deleter.submit(FileInfo(key="k", storage=storage))
                 deleter.flush()

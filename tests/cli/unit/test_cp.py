@@ -862,31 +862,6 @@ class TestSourceScanWiring:
         assert calls[0].operation == "ListObjectsV2"
         assert calls[0].params["MaxKeys"] == 5
 
-    def test_the_cli_posture_reaches_the_source_scan(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # A Ctrl-C ends the CLI's process: the S3 the CLI builds declares
-        # reusable_after_interrupt=False once, and the operation threads it into the
-        # ScanOptions of every scan it starts (here the upload's source walk);
-        # the library default keeps waiting.
-        import boto3_s3
-
-        scan_waits: list[bool] = []
-
-        class _RecLocal(boto3_s3.LocalStorage):
-            def scan(self, options: Any = None, *, cancel_token: Any = None) -> Any:
-                assert options is not None
-                scan_waits.append(options.reusable_after_interrupt)
-                return super().scan(options, cancel_token=cancel_token)
-
-        # Patch the binding module: transferargs imports LocalStorage at top.
-        monkeypatch.setattr("boto3_s3_cli.commands.transferargs.LocalStorage", _RecLocal)
-        (tmp_path / "f.txt").write_bytes(b"x")
-        ctx, _calls = _recording_ctx([{}])
-        rc = cli.main(["cp", str(tmp_path), "s3://bucket/pre/", "--recursive"], ctx=ctx)
-        assert rc == 0
-        assert scan_waits == [False]
-
 
 class TestCaseConflict:
     def test_skip_warns_and_skips_the_twin(

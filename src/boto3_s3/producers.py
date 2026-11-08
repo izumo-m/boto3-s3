@@ -34,6 +34,7 @@ from boto3_s3.sdkerrors import attribute_failure, s3_request
 from boto3_s3.storage import Storage, StorageCapability
 from boto3_s3.transfer import TransferItem, Transferrer, option_mode
 from boto3_s3.types import (
+    CancelToken,
     CaseConflictMode,
     FileFilter,
     FileInfo,
@@ -55,7 +56,6 @@ def walk_source_scan_options(
     sort: bool = False,
     on_warning: Callable[[str], None] | None,
     item_filter: FileFilter | None,
-    reusable_after_interrupt: bool,
     read_ahead: bool = True,
 ) -> ScanOptions:
     """Scan options for a walkable transfer source (upload / sync side).
@@ -65,9 +65,7 @@ def walk_source_scan_options(
     ``detect_symlink_loops`` / ``enumerate_all_entries``, a
     custom backend's own knobs, all configured on the constructor) - with only
     the run-level knobs overlaid: the operation-inherent ones (``recursive`` /
-    ``sort`` / ``on_warning`` / the item ``filter``) and the application's
-    Ctrl-C posture (``reusable_after_interrupt``, declared once on
-    ``S3(reusable_after_interrupt=...)``). So a ``LocalStorage`` subclass,
+    ``sort`` / ``on_warning`` / the item ``filter``). So a ``LocalStorage`` subclass,
     or any custom source backend whose ``scan_pages`` requires its own
     ``ScanOptions`` subclass, is honored here exactly as an arg-less ``scan()``
     would honor it. An S3 source never comes here (it lists through
@@ -99,7 +97,6 @@ def walk_source_scan_options(
         sort=sort,
         on_warning=on_warning,
         filter=item_filter,
-        reusable_after_interrupt=reusable_after_interrupt,
         read_ahead=base.read_ahead and read_ahead,
     )
     return options
@@ -110,7 +107,6 @@ def scan_walk_source(
     *,
     transferrer: Transferrer,
     item_filter: FileFilter | None,
-    reusable_after_interrupt: bool,
     sort: bool = False,
     read_ahead: bool = True,
 ) -> Iterator[FileInfo]:
@@ -119,7 +115,7 @@ def scan_walk_source(
     The walk twin of `scan_s3_source`: ``storage.scan`` under
     `walk_source_scan_options`, with the walk's warnings going into the run's
     rollup (``transferrer.warner``), as aws-cli routes them into its shared
-    result queue.
+    result queue. The run's cancel ends the walk at once (``Storage.scan``).
     """
     return storage.scan(
         walk_source_scan_options(
@@ -128,9 +124,9 @@ def scan_walk_source(
             sort=sort,
             on_warning=transferrer.warner.warn,
             item_filter=item_filter,
-            reusable_after_interrupt=reusable_after_interrupt,
             read_ahead=read_ahead,
-        )
+        ),
+        cancel_token=transferrer.cancel_token,
     )
 
 
@@ -481,7 +477,6 @@ def upload_items(
     transferrer: Transferrer,
     item_filter: FileFilter | None,
     operation: str,
-    reusable_after_interrupt: bool,
 ) -> Generator[TransferItem, None, None]:
     """Materialize upload items from the local source (warnings -> rollup).
 
@@ -502,7 +497,6 @@ def upload_items(
             plan.src,
             transferrer=transferrer,
             item_filter=item_filter,
-            reusable_after_interrupt=reusable_after_interrupt,
         )
     else:
         # Single source object: the get_fileinfo point op (the scan
@@ -566,7 +560,6 @@ def s3_source_items(
     options: TransferOptions,
     case_gate: CaseConflictGate | None = None,
     operation: str,
-    reusable_after_interrupt: bool,
 ) -> Generator[TransferItem, None, None]:
     """Materialize download/copy items from an S3 source, gates applied."""
     infos = _list_objects(
@@ -576,7 +569,7 @@ def s3_source_items(
         item_filter=item_filter,
         options=options,
         operation=operation,
-        reusable_after_interrupt=reusable_after_interrupt,
+        cancel_token=transferrer.cancel_token,
     )
     for info in infos:
         if transfer_type is TransferType.DOWNLOAD:
@@ -851,7 +844,7 @@ def _list_objects(
     item_filter: FileFilter | None,
     options: TransferOptions,
     operation: str,
-    reusable_after_interrupt: bool,
+    cancel_token: CancelToken | None,
 ) -> Iterator[FileInfo]:
     """An S3 source's entries, as aws-cli's ``FileGenerator.list_objects`` yields them.
 
@@ -872,7 +865,7 @@ def _list_objects(
             key_prefix=key_after_bucket(plan.src_root, src_bucket),
             item_filter=item_filter,
             options=options,
-            reusable_after_interrupt=reusable_after_interrupt,
+            cancel_token=cancel_token,
         )
     if not src_storage.key:
         # Keyless non-recursive source (`cp s3://bucket .`, or a custom
@@ -890,11 +883,10 @@ def _list_objects(
             recursive=True,
             prefix="",
             request_payer=options.get("request_payer"),
-            reusable_after_interrupt=reusable_after_interrupt,
         )
         return (
             info
-            for info in src_storage.scan(scan_options)
+            for info in src_storage.scan(scan_options, cancel_token=cancel_token)
             if f"{src_bucket}/{info.key}" == src_bucket
         )
     infos = head_single(
@@ -915,7 +907,7 @@ def scan_s3_source(
     key_prefix: str,
     item_filter: FileFilter | None,
     options: TransferOptions,
-    reusable_after_interrupt: bool,
+    cancel_token: CancelToken | None,
 ) -> Iterator[FileInfo]:
     """A recursive object listing anchored at the '/'-normalized ``key_prefix``.
 
@@ -926,8 +918,8 @@ def scan_s3_source(
     ``storage``'s own ``default_scan_options`` (so its ``page_size`` / ``fetch_owner``
     config and a custom ``S3Storage`` subclass survive), with the run-level
     knobs overlaid - the ``prefix`` re-anchoring the listing at the normalized
-    ``key_prefix``, ``request_payer`` from the transfer options, and the
-    application's Ctrl-C posture (``reusable_after_interrupt``).
+    ``key_prefix`` and ``request_payer`` from the transfer options. The run's
+    ``cancel_token`` ends the listing at once (``Storage.scan``).
     """
 
     visible = None if item_filter is None else s3_listing_filter(item_filter, storage.key)
@@ -947,9 +939,8 @@ def scan_s3_source(
         prefix=key_prefix,
         filter=scan_filter,
         request_payer=options.get("request_payer"),
-        reusable_after_interrupt=reusable_after_interrupt,
     )
-    return storage.scan(scan_options)
+    return storage.scan(scan_options, cancel_token=cancel_token)
 
 
 def head_single(
@@ -1093,7 +1084,6 @@ def open_upload_items(
     item_filter: FileFilter | None,
     operation: str,
     dryrun: bool,
-    reusable_after_interrupt: bool,
 ) -> Generator[TransferItem, None, None]:
     """Upload items from a custom source: each entry's bytes via ``open("rb")``.
 
@@ -1121,7 +1111,6 @@ def open_upload_items(
             plan.src,
             transferrer=transferrer,
             item_filter=item_filter,
-            reusable_after_interrupt=reusable_after_interrupt,
         )
     else:
         single = _single_source_info(plan, transferrer, operation=operation)
@@ -1293,7 +1282,6 @@ def open_download_items(
     options: TransferOptions,
     operation: str,
     dryrun: bool,
-    reusable_after_interrupt: bool,
 ) -> Generator[TransferItem, None, None]:
     """Download items from an S3 source into a custom destination's ``open("wb")``.
 
@@ -1313,7 +1301,7 @@ def open_download_items(
         item_filter=item_filter,
         options=options,
         operation=operation,
-        reusable_after_interrupt=reusable_after_interrupt,
+        cancel_token=transferrer.cancel_token,
     )
     for info in infos:
         item = open_download_item(
@@ -1378,7 +1366,6 @@ def cp_case_gate(
     transferrer: Transferrer,
     item_filter: FileFilter | None,
     operation: str,
-    reusable_after_interrupt: bool,
 ) -> CaseConflictGate | None:
     """Build the ``--case-conflict`` gate when it applies (aws-cli scope:
     recursive S3->local with a mode other than ``ignore``).
@@ -1412,7 +1399,6 @@ def cp_case_gate(
             plan.dest,
             transferrer=transferrer,
             item_filter=item_filter,
-            reusable_after_interrupt=reusable_after_interrupt,
             sort=True,  # the merge pairs against the destination in byte order
         )
     ]
@@ -1450,7 +1436,6 @@ def sync_entries(
     item_filter: FileFilter | None,
     transferrer: Transferrer,
     options: TransferOptions,
-    reusable_after_interrupt: bool,
     deletes_orphans: bool = False,
 ) -> Generator[tuple[str, FileInfo], None, None]:
     """One side's ``(compare_key, info)`` stream, visibility applied.
@@ -1489,7 +1474,7 @@ def sync_entries(
             key_prefix=key_prefix,
             item_filter=item_filter,
             options=options,
-            reusable_after_interrupt=reusable_after_interrupt,
+            cancel_token=transferrer.cancel_token,
         ):
             yield _compare_key(info), info
         return
@@ -1497,7 +1482,6 @@ def sync_entries(
         storage,
         transferrer=transferrer,
         item_filter=item_filter,  # each side's visibility filter, applied in the scan
-        reusable_after_interrupt=reusable_after_interrupt,
         sort=True,  # the merge-join needs both sides byte-ordered
         read_ahead=not (deletes_orphans and isinstance(storage, LocalStorage)),
     ):

@@ -361,7 +361,8 @@ that triggered the shutdown, or this class — and never with `BatchError`;
 cancelled items are not counted as failures. The class also appears as
 `OpResult.error` on `CANCELLED` records without being raised, for accepted
 items revoked when the engine shut down: a fatal error elsewhere in the run,
-an immediate cancellation, or Ctrl-C, on either transfer engine. The
+on either transfer engine, or an immediate cancellation before the operation
+raised. The
 cancellation modes and the resulting record shapes are in
 [`results.md`](./results.md) and
 [`../library/results.md`](../library/results.md).

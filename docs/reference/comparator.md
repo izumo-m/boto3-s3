@@ -725,9 +725,10 @@ entries reach it. The update lane never touches that gate.
 **Failure and cancellation.** A decision that raises aborts the run as the
 serial path would: the exception surfaces when that decision's result is
 consumed, decisions that have not started are cancelled, and running ones are
-awaited first. Cancellation through `cancel_token` behaves the same way —
-graceful mode awaits outstanding decisions, immediate mode first asks their
-futures to cancel — and in neither case is the caller's executor shut down.
+awaited first. Cancellation through `cancel_token` stops the same way —
+graceful mode awaits outstanding decisions, while immediate mode cancels the
+ones not started and leaves the running ones to end by themselves — and in
+neither case is the caller's executor shut down.
 
 ## all_of
 

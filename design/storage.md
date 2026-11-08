@@ -149,8 +149,7 @@ A few more members come with working defaults a custom backend normally keeps:
   that takes the base `ScanOptions` sets nothing. A custom subclass must stay a
   `frozen=True, kw_only=True` dataclass and give **every added field a
   default**: the high-level operations overlay only the run-level knobs — the
-  operation-inherent ones plus the application's Ctrl-C posture
-  (`reusable_after_interrupt`, from `S3(reusable_after_interrupt=…)`) — via
+  operation-inherent ones — via
   `dataclasses.replace(storage.default_scan_options(), …)`, and the
   base `default_scan_options()` constructs the type with no arguments.
 - **`default_scan_options() -> ScanOptions`** — builds `scan_options_type` and is
@@ -165,16 +164,12 @@ A few more members come with working defaults a custom backend normally keeps:
   storage's source-config — and a custom `scan_options_type` subclass — flows
   through the operations, not only an arg-less `scan()`. This is how an app
   configures the walk / listing once on the storage rather than per call.
-- **`ScanOptions.reusable_after_interrupt`** (not a `Storage` member) — the exit
-  policy of `scan()`'s background page worker. `True` (the default): the scan's
-  teardown always waits for a page pull already in flight, so no worker survives
-  the operation. `False`: on any early end the worker is told to stop and left to
-  end by itself, a daemon that starts no further pull (`concurrency.prefetch`),
-  since a pull in flight can otherwise hold the exit for a full timeout. The
-  application declares the posture once, on `S3(reusable_after_interrupt=…)`;
-  every scan an operation starts receives it through this field, and only a
-  direct `Storage.scan` caller sets it here itself. The CLI's `S3` declares
-  `False`.
+- **The exit of `scan()`'s background page worker** — a scan closed before its
+  end does not wait for a page pull already in flight, which can hold the exit
+  for a full timeout (overview section 3): the worker is told to stop, drops the
+  page it brings back and ends by itself, a daemon that starts no further pull.
+  The close cannot tell a Ctrl-C from any other end without guessing from the
+  exception's context, which misfires, so no close waits.
 - **`sep: ClassVar[str]`** — the separator of the backend's path space (`"/"`;
   only `LocalStorage` overrides with the host `os.sep`). Keep the default: the
   `FileInfo.key` / `compare_key` contract is `/`-separated.

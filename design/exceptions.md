@@ -198,16 +198,20 @@ taxonomy ([`storage.md`](./storage.md) section 2).
 accepting new work, discard work not yet accepted, drain accepted work (a
 delete lane instead discards the deleter's unsent buffer - deleter.md
 section 2), reclaim their workers, and then raise `CancelledError`. Passing
-`mode=CancelMode.IMMEDIATE` additionally requests best-effort cancellation of
-pending and in-flight futures. Synchronous external I/O already running cannot
-be killed safely and may still finish - such a completion reports its real
-outcome, while a revoked accepted item reports one `CANCELLED` record
-([`opresult.md`](./opresult.md), the `on_result` contract; a fatal error or
-a Ctrl-C cancels the same way, on either transfer engine). Cancellation is
-monotonic and idempotent:
-an immediate request upgrades graceful cancellation, and later requests never
-downgrade it. `on_result` may call `cancel()`; it only changes token state and
-never shuts an engine down from the callback's worker thread.
+`mode=CancelMode.IMMEDIATE` raises at once, as a Ctrl-C does (overview section
+3): what has not started is cancelled and never starts, the requests already
+sent and their cleanup finish behind the caller, and nothing more is reported
+once the `CancelledError` is on its way. Unlike a Ctrl-C, it leaves the `S3`
+usable. A request on the operation's own thread (a single-object `cp` / `mv`'s
+first `HeadObject`, the service-root `ls`, a single-key `rm`, `mb`, `rb`, a
+listing page under `read_ahead=False`) is still waited for: no cancel cuts it
+short. A fatal error cancels too, on either transfer engine, but waits: a
+revoked accepted item then reports one `CANCELLED` record and a completion its
+real outcome ([`opresult.md`](./opresult.md), the `on_result` contract).
+Cancellation is monotonic and idempotent: an immediate request upgrades graceful
+cancellation, ending a drain under way, and later requests never downgrade it.
+`on_result` may call `cancel()`; it only changes token state and never shuts an
+engine down from the callback's worker thread.
 
 Local `OSError`s are converted by one shared translator
 (`localstorage.translate_os_error`, the local mirror of

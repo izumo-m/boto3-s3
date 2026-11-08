@@ -1800,8 +1800,8 @@ class LocalStorage(Storage):
         ``follow_symlinks`` / ``detect_symlink_loops`` /
         ``enumerate_all_entries`` come from the constructor, so every scan reads the walk
         configured once on this ``LocalStorage``; an operation overlays only its
-        own knobs (``recursive`` / ``sort`` / ``filter`` / ``on_warning``, plus
-        the application's ``reusable_after_interrupt`` posture) onto this.
+        own knobs (``recursive`` / ``sort`` / ``filter`` / ``on_warning``) onto
+        this.
         The single-path ``get_fileinfo`` does not build these options - it reads
         ``follow_symlinks`` directly and ignores the enumeration / loop knobs.
         """

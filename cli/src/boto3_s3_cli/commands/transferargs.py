@@ -816,9 +816,7 @@ def resolve_locations(
 
     def _s3(arg: str, client_for: Any) -> S3Storage:
         # build_s3_storage applies the path refusals (rc 252 ahead of the
-        # pipeline). The CLI's Ctrl-C posture is not a storage
-        # concern:
-        # build_s3 declares it once (S3's reusable_after_interrupt).
+        # pipeline).
         return build_s3_storage(arg, client=client_for, page_size=head.page_size)
 
     def _local(path: str) -> LocalStorage:

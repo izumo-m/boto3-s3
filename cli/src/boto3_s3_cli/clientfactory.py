@@ -104,19 +104,14 @@ def build_s3(args: argparse.Namespace, *, s3_class: type[S3] | None = None) -> S
     region chain once (its last link, the EC2 IMDS probe, costs seconds on a
     host with no region configured and no metadata service answering); every
     client the `S3` hands out comes from that session (design/cli.md section
-    4). ``reusable_after_interrupt=False``: the CLI ends its process on a Ctrl-C
-    (`cli._end_interrupted`), so an operation leaves at once rather than wait
-    for a request already out; the library default keeps waiting. Its S3
-    clients carry aws-cli's error-message rewriter (`s3errormsg`), and the
+    4). Its S3 clients carry aws-cli's error-message rewriter (`s3errormsg`), and the
     profile's ``cli_*`` formats are checked as aws-cli checks them when its
     session starts (`_reject_unknown_cli_formats`). *s3_class* replaces the
     command's own class (`cli_s3_class`) with a subclass of it - the test
     seam's (``Context``), which injects clients - and keeps the rest.
     """
     prepare_process()
-    s3 = (s3_class or cli_s3_class()).from_aws_cli(
-        **from_aws_cli_arguments(args), reusable_after_interrupt=False
-    )
+    s3 = (s3_class or cli_s3_class()).from_aws_cli(**from_aws_cli_arguments(args))
     assert s3.session is not None  # from_aws_cli opened it
     _reject_unknown_cli_formats(s3.session._session, args)  # pyright: ignore[reportPrivateUsage]
     return s3

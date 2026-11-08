@@ -98,9 +98,8 @@ class Context:
                 return super().service_client(service, region=region)
 
         # Built as build_s3 builds the command's own - the session, the
-        # region, the CRT client's settings, the local names, the
-        # Ctrl-C posture, the cli_* format checks - with the
-        # clients the factories hand out.
+        # region, the CRT client's settings, the local names, the cli_*
+        # format checks - with the clients the factories hand out.
         return build_s3(args, s3_class=InjectedClientS3)
 
     def with_s3(self, s3: S3) -> Context:

@@ -14,8 +14,7 @@ S3().cp("local.txt", "s3://bucket/key")
 
 ```python
 S3(session=None, *, endpoint_url=None, config=None,
-   transfer_config=None, reusable_after_interrupt=True,
-   crt=None, filename_encoding=None)
+   transfer_config=None, crt=None, filename_encoding=None)
 ```
 
 - **`session`** — a `boto3.Session`. Omit it for a default session.
@@ -26,15 +25,6 @@ S3(session=None, *, endpoint_url=None, config=None,
   S3-compatible endpoint or a `botocore.config.Config`.
 - **`transfer_config`** — the default `TransferConfig` for `cp` / `mv` / `sync`
   / `rm` (for `rm`, the engine its deletes ride). Any call can override it.
-- **`reusable_after_interrupt`** — how Ctrl-C is handled: clean up first, or exit fast.
-  `True` (the default) re-raises `KeyboardInterrupt` only after every resource
-  has been reclaimed, so the next operation still works. `False` re-raises it at
-  once, with requests still out: the cleanup goes on behind you, that `S3` is not
-  used again, and a new one works.
-  Either way the interrupt is re-raised, never swallowed. One the library never
-  sees can still be lost ([`S3`](../reference/s3.md)). Only
-  `KeyboardInterrupt` is affected — every other exception waits for the transfers
-  and deletes.
 - **`crt`** — the CRT transfer engine's own client settings, a
   `CrtClientOptions`. `None` (the default) keeps boto3's behavior, which
   derives them from the client in hand. Only reproducing `aws s3` needs it,
@@ -53,6 +43,28 @@ S3(session=None, *, endpoint_url=None, config=None,
   every `LocalStorage` built from a string path. `None` (the default) is
   Python's file system encoding. It has no effect on Windows, and an unknown
   codec raises `InvalidValueError`.
+
+### Ctrl-C
+
+A Ctrl-C re-raises `KeyboardInterrupt` at once, with requests still out: the
+cleanup goes on behind you. Every other exception waits for the transfers and
+deletes first.
+
+"At once" is as far as Python lets the library see the interrupt, not a
+promise. Python raises it only where your main thread runs Python code, so
+when the main thread waits inside another library and the interrupt does not
+wake that wait, it comes when the wait ends; and code outside the library,
+Python's own included, can lose it or raise another exception in its place. The next Ctrl-C then stops the operation, except where that wait cannot
+be woken at all: on Windows, boto3 waiting for an answer holds every Ctrl-C
+until the answer or its read timeout comes, as it does for `aws s3`. The
+details are under [`S3`](../reference/s3.md).
+
+Once a Ctrl-C — or any exception a signal handler raises — has interrupted an
+operation, do not use that `S3` again; build a new one. To stop an operation and
+keep using the same `S3`, cancel it with a `CancelToken` instead: its `cancel`
+may be called from a signal handler, and the operation raises `CancelledError`
+— an immediate cancel at once, as a Ctrl-C does
+([Cancelling](./results.md#5-cancelling)).
 
 ### The way `aws s3` builds it
 

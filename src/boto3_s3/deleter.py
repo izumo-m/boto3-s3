@@ -45,13 +45,11 @@ from concurrent.futures import (
     Future,
     ThreadPoolExecutor,
 )
-from concurrent.futures import (
-    TimeoutError as FutureTimeoutError,
-)
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 from boto3_s3 import crtsupport
+from boto3_s3.concurrency import Wake
 from boto3_s3.exceptions import Boto3S3Error, TransportError, ValidationError
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.sdkerrors import S3_CODE_CATEGORIES, request_failure, s3_errors
@@ -275,9 +273,10 @@ class S3Deleter:
             for info in storage.scan(S3ScanOptions(recursive=True)):
                 deleter.submit(info)
 
-    ``reusable_after_interrupt=False``: a ``KeyboardInterrupt`` leaves the
-    context at once. The batch in flight finishes behind the caller, starts no
-    further per-key request and reports nothing, and the worker ends by itself.
+    A ``KeyboardInterrupt``, and a token's immediate cancel, leave the context
+    at once (design/overview.md section 3). The batch in flight finishes behind
+    the caller, starts no further per-key request and reports nothing, and the
+    worker ends by itself.
     """
 
     def __init__(
@@ -295,7 +294,6 @@ class S3Deleter:
         session: Session | None = None,
         crt_endpoint: str | None = None,
         crt: CrtClientOptions | None = None,
-        reusable_after_interrupt: bool = True,
     ) -> None:
         # Runtime guard for untyped callers (e.g. S3.resolve routing a bare
         # "bucket/key" to LocalStorage): fail inside the taxonomy, not with an
@@ -360,7 +358,6 @@ class S3Deleter:
         # batch in flight starts no further per-key request. Written on the
         # caller's thread, read on the workers'.
         self._abandoned = False
-        self._reusable_after_interrupt = reusable_after_interrupt
         # Set when an interrupt leaves at once (`_leave_on`): nothing waits for
         # the worker any more and it reports nothing. Written on the caller's
         # thread, read on the worker's.
@@ -368,6 +365,8 @@ class S3Deleter:
 
         self._buffer: list[FileInfo] = []
         self._pending: Future[None] | None = None  # at most one in-flight batch
+        # Sent when the batch in flight ends (`_wait_pending`).
+        self._batch_ended = Wake()
         self._closed = False
 
         # Rollup state: written only by the worker thread (single worker,
@@ -390,12 +389,12 @@ class S3Deleter:
 
     @property
     def succeeded(self) -> int:
-        """Keys deleted without error. Final after ``close``."""
+        """Keys deleted without error. Final after ``close`` (`close` says when not)."""
         return self._succeeded
 
     @property
     def failed(self) -> int:
-        """Keys that failed to delete. Final after ``close``."""
+        """Keys that failed to delete. Final after ``close`` (`close` says when not)."""
         return self._failed
 
     @property
@@ -416,14 +415,15 @@ class S3Deleter:
     ) -> None:
         """Flush on success, or abandon unsent entries while draining active work."""
         # A body exception abandons the unsent buffer but still waits for the
-        # in-flight batch; a worker error raised here then propagates with the
-        # body exception chained as __context__.
+        # in-flight batch (a Ctrl-C and an immediate cancel do not); a worker
+        # error raised here then propagates with the body exception chained as
+        # __context__.
         self._leave_on(exc)
         self.close(flush=exc_type is None)
 
     def _leave_on(self, exc: BaseException | None) -> None:
-        """Leave at once if *exc* is an interrupt under ``reusable_after_interrupt=False``."""
-        if isinstance(exc, KeyboardInterrupt) and not self._reusable_after_interrupt:
+        """Leave at once if *exc* is a Ctrl-C (a ``KeyboardInterrupt``)."""
+        if isinstance(exc, KeyboardInterrupt):
             self._abandoned = True
             self._left = True
 
@@ -431,8 +431,10 @@ class S3Deleter:
         """Flush (unless ``flush=False`` or the token is cancelled), wait for
         in-flight work, shut down.
 
-        Idempotent. Afterwards the rollup counters are final and ``submit`` /
-        ``flush`` raise ``ValidationError``. An unexpected worker exception (or
+        Idempotent. Afterwards ``submit`` / ``flush`` raise ``ValidationError``,
+        and the rollup counters are final - but after a leave (a Ctrl-C, an
+        immediate cancel), which waits for nothing, a batch already sent
+        finishes behind the caller, still counting. An unexpected worker exception (or
         one raised by ``on_result``) re-raises here; the deleter still ends up
         closed and the worker shut down either way, and any entries left in the
         buffer by that re-raise, by ``flush=False``, or by a cancelled token
@@ -533,28 +535,45 @@ class S3Deleter:
             )
 
     def _wait_pending(self) -> None:
-        """Wait for the active batch while polling for immediate cancellation."""
+        """Wait for the active batch, leaving it if the token turns IMMEDIATE.
+
+        An immediate cancel waits for nothing (design/overview.md section 3): a
+        batch not started then never runs, and one running finishes behind the
+        caller, unreported, with no re-send after it (the run is left). The
+        future is read only once it is done. Its callback that wakes the wait is
+        added here, by the waiting thread, so a Ctrl-C between the submit and
+        the add cannot leave a batch that nothing wakes the wait for; the
+        callback runs once the future reports done, so the wait finds it so.
+        """
         pending = self._pending
         if pending is None:
             return
         self._pending = None  # cleared first: a failed batch is reported once
-        while True:
-            if self._cancel_token is not None and self._cancel_token.mode is CancelMode.IMMEDIATE:
-                pending.cancel()
-            try:
-                pending.result(timeout=0.1)
-            except FutureTimeoutError:
-                continue
-            except FutureCancelledError:
-                # Ours only when the future itself was cancelled (the
-                # immediate-mode cancel() above beat the executor to it). A
-                # CancelledError *raised by* a ran batch - an on_result
-                # callback misusing the type - is a worker exception and must
-                # honor the re-raise contract, not be mistaken for our cancel.
-                if pending.cancelled():
-                    return
-                raise
-            return
+        pending.add_done_callback(lambda _future: self._batch_ended.send())
+        self._batch_ended.wait_until(
+            lambda: pending.done() or self._immediate(), cancel_token=self._cancel_token
+        )
+        if not pending.done():
+            pending.cancel()
+            if not pending.done():
+                self._abandoned = True
+                self._left = True
+                return
+        try:
+            pending.result()
+        except FutureCancelledError:
+            # Ours only when the future itself was cancelled (the
+            # immediate-mode cancel() above beat the executor to it). A
+            # CancelledError *raised by* a ran batch - an on_result
+            # callback misusing the type - is a worker exception and must
+            # honor the re-raise contract, not be mistaken for our cancel.
+            if pending.cancelled():
+                return
+            raise
+
+    def _immediate(self) -> bool:
+        token = self._cancel_token
+        return token is not None and token.mode is CancelMode.IMMEDIATE
 
     def _cancelled(self) -> bool:
         return self._cancel_token is not None and self._cancel_token.cancelled

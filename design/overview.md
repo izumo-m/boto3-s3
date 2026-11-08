@@ -182,44 +182,61 @@ maintaining high functional compatibility.
 - **Ctrl-C is not matched to aws-cli**: nothing is added only to make an
   interrupted run behave as aws-cli's does, in its output, its exit code or the
   requests it still sends, and a difference there is neither a bug nor a
-  deviation to discuss. What an interrupt does follows from these rules alone:
-  1. Under `reusable_after_interrupt=True`, the default, an operation cleans up
-     after an interrupt as after any other exception, the caller's code's
-     included: it clears its state so that a new operation can run, and only
-     then hands control back to the caller, the exception re-raised (one the
-     library never sees can still be lost, as in awscrt's signer's read,
-     [`transfer.md`](./transfer.md) section 9). A further interrupt may cut that
-     cleanup short.
-  2. Under `reusable_after_interrupt=False`, an operation hands an interrupt back
-     at once: nothing can cancel a request already out, and a server that does
-     not answer holds it for a full timeout. What has not started never starts,
-     and the cleanup goes on behind the caller, as far as the process lives. One
-     pressed while the operation cleans up after another exception can wait for the
-     requests already out, as that cleanup does. That `S3` is not used again; a
-     new one works.
-  3. Running the operation again reaches a consistent result. What an interrupt
-     cut short leaves nothing a re-run would take for finished work: a download's
-     temporary file is removed, a multipart upload is aborted (but for one awscrt
-     is still creating, which it leaves open), and a `mv` keeps
-     its source unless its destination is in place.
-  4. The CLI declares `False` and ends its process with `os._exit`: one
+  deviation to discuss. What an interrupt or a cancel does follows from these
+  rules alone:
+  1. An asynchronous exception leaves the `S3` unusable. It is an exception a
+     signal raises wherever the program happens to be: a `KeyboardInterrupt`
+     from Ctrl-C, or what a signal handler raises (a `SIGALRM` handler's, say).
+     It can land anywhere, so no code can promise to clean up after it: the `S3`
+     whose operation it interrupts is not used again (what that `S3` then does
+     is not specified), and a new `S3` works. Every other end keeps the `S3`
+     usable. A return and any other exception clean up before control goes back
+     to the caller. A `CancelToken`'s immediate cancel does not wait for the
+     requests already sent: nothing can cancel a request already out, so they and
+     their cleanup go on behind the caller, and what they do can still change the
+     result after the operation has returned. A graceful cancel finishes the work
+     already accepted, as it is defined to. No cancel cuts short a request the
+     operation's own thread is waiting on: the operation returns once that request
+     does. On any early end, a listing page already being fetched is left to the
+     scan's worker, which finishes and drops it behind the caller, so a `filter`
+     call on it can come after the operation has raised. An application that
+     wants to stop an operation and keep its `S3` cancels it through a
+     `CancelToken`, whose `cancel` a signal handler may call.
+  2. A `KeyboardInterrupt` the library sees is handed back at once, re-raised:
+     nothing can cancel a request already out, and a server that does not answer
+     holds it for a full timeout. What has not started never starts, and the
+     cleanup goes on behind the caller, as far as the process lives. That is a
+     best effort, not a guarantee: Python raises the interrupt only where the main
+     thread runs Python code, so a wait the library does not own holds it until
+     that wait ends, and code outside the library, Python's own included, can lose
+     it or raise another exception in its place. The next Ctrl-C covers such a
+     case, as far as that wait can be woken at all. One pressed while the
+     operation cleans up after another exception can wait for the requests
+     already out, as that cleanup does. The library cannot tell any other
+     asynchronous exception from the same exception raised in place, so it
+     handles it as it does that one; the previous rule still applies.
+  3. Running the operation again on a new `S3` reaches a consistent result.
+  4. The CLI ends its process with `os._exit`: one
      `cancelled: ctrl-c received` line on standard error and exit code 130. The
      cleanup is cut off there, so an unfinished multipart upload and a download's
      temporary file can stay behind, which the previous rule does not cover.
   5. That line and exit code are a best effort, not a guarantee: at worst, it is
-     enough that the command stops. Python discards an interrupt that lands in a
-     callback or finalizer it runs itself (its `signal` documentation says most
-     code cannot be made robust against this), and no code here can change that:
-     the user's next Ctrl-C covers it.
+     enough that the command stops, at the user's next Ctrl-C if need be (the
+     second rule).
 - **The `signal` module is a last resort**: it is highly OS-dependent and costs
   portability, so it is used only where no other way exists. Neither the library
   nor the CLI installs a signal handler; a gap one could close (the previous rule)
   is not reason enough.
 - **A stalled output may stop the program** until it clears, even through a
   failure or a Ctrl-C.
-- **A wait on another thread sleeps until woken and survives a Ctrl-C**: the
-  calling thread waits on `concurrency.Wake` (a C lock underneath), which the
-  other thread sends; not by looking again and again, and not on
+- **A wait does not poll**: a thread waiting for another sleeps until woken, and
+  does not wake by itself to look again. Whatever can make what it waits for
+  come true wakes it, a `CancelToken`'s `cancel` included. Two exceptions: a
+  wait on the main thread also wakes every second to let a Ctrl-C through, as
+  Python cannot always wake a wait for one; and a library in use that offers no
+  way to be woken.
+- **A wait on another thread survives a Ctrl-C**: the calling thread waits on
+  `concurrency.Wake` (a C lock underneath), which the other thread sends; not on
   `threading.Event`, `Condition` or `queue.Queue`, which a Ctrl-C landing inside
   can leave locked.
 - **The caller's code is the caller's responsibility**: code the caller

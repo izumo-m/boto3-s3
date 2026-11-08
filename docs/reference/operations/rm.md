@@ -145,8 +145,9 @@ rejection below. During a run it stops the listing prefetch producer between
 page pulls and stops the deleter from dispatching further batches; what each
 mode leaves buffered, dispatched or in flight is specified with the token
 itself. Either mode ends by raising
-[`CancelledError`](../exceptions.md#cancellederror) once the worker has been
-reclaimed. On the blind single-key path the token is polled after the record
+[`CancelledError`](../exceptions.md#cancellederror): a graceful one once the
+worker has been reclaimed, an immediate one at once, a batch already sent
+finishing behind it. On the blind single-key path the token is polled after the record
 is emitted, the `FAILED` record included, so a cancel from that callback
 raises `CancelledError` in place of the `BatchError` the failure would
 otherwise become. A Ctrl-C (or another interrupt) while that single request

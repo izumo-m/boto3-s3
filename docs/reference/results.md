@@ -57,12 +57,12 @@ discarded after acceptance:
 - deletes the deleter accepted but whose own request never went out, which
   produce no record at all: its unsent buffer, discarded by a cancellation or
   by an exception that ends the run (a listing failure part-way through,
-  say), and, under `CancelMode.IMMEDIATE`, a dispatched batch whose request
-  had not started — or, inside a started batch, a key due a request of its
-  own (one the XML round trip cannot carry, a re-send of a transient per-key
-  failure, any key of a batch request that failed as a whole) that had not
-  gone out when the run was abandoned, even where S3 had already answered the
-  batch for it ([`../../design/deleter.md`](../../design/deleter.md)).
+  say), and, under `CancelMode.IMMEDIATE`, a dispatched batch: one whose
+  request had not started never runs, and one already sent finishes behind
+  the caller without reporting, starting none of the requests its keys
+  would still need on their own (one the XML round trip cannot carry, a
+  re-send of a transient per-key failure, any key of a batch request that
+  failed as a whole) ([`../../design/deleter.md`](../../design/deleter.md)).
 
 An item whose request died without any response — the connection closed, the
 read timed out — is an ordinary `FAILED` record, although `aws s3` on its
@@ -262,24 +262,24 @@ outcome, so a consumer must not assume one callback per key. The body already
 carries its own `warning: ` prefix.
 
 `CANCELLED` — an accepted item revoked before it could complete, because a fatal
-error elsewhere in the run, an immediate cancellation, or Ctrl-C shut the engine
-down, on either transfer engine; a CRT cancellation the run did not order
-itself reports `FAILED` ([`../../design/opresult.md`](../../design/opresult.md)).
+error elsewhere in the run shut the engine down, on either transfer engine; a
+CRT cancellation the run did not order itself reports `FAILED`
+([`../../design/opresult.md`](../../design/opresult.md)). An immediate
+cancellation revokes items too, but its records stop with it, so only an item
+revoked before the operation raised reports `CANCELLED`.
 On the CRT engine, a `mv` from S3 whose download has finished but whose source
 delete has not started is such an item: its file is in place, its source stays,
 and its `error` reads `cancelled before the source delete`.
 An item whose outcome the engine holds as an interrupt — a `KeyboardInterrupt`
 or `SystemExit` that landed in, or was raised by, code running for that item —
 reports `CANCELLED`, and that interrupt is then raised to the caller - on every
-route, a CRT upload whose reader awscrt runs on its own thread included. Under
-`S3(reusable_after_interrupt=False)` a `KeyboardInterrupt` is raised at once and
-nothing more is reported, so an item not settled by then has no record.
+route, a CRT upload whose reader awscrt runs on its own thread included. A
+`KeyboardInterrupt` is raised at once and nothing more is reported, so an item
+not settled by then has no record.
 `error` is a
 [`CancelledError`](./exceptions.md#cancellederror) naming the cause where the
-canceller supplied one; an immediate-mode escalation arriving during a drain
-revokes without a message and those records carry the bare `canceled`, while the
-CRT manager cancels without the message and its records carry awscrt's
-cancellation wording. It is deliberately distinct from `FAILED`: nothing is
+canceller supplied one; the CRT manager cancels without the message, and its
+records carry awscrt's cancellation wording. It is deliberately distinct from `FAILED`: nothing is
 wrong with the item itself, so it is not counted as a failure, it appears in no
 `BatchError` counter, and it is not sampled as `BatchError`'s `__cause__`. A run
 that produced such records ends by raising — the fatal that triggered the
@@ -619,43 +619,43 @@ external synchronization.
 What each mode guarantees depends on the lane the work is in, because a request
 already issued to S3 cannot be aborted safely.
 
-For the transfer lanes of `cp` / `mv` / `sync`, `GRACEFUL` is a drain: the
-operation stops accepting new work and lets everything it already accepted run
-to completion, so those items report their real outcomes and no `CANCELLED`
-record arises. `IMMEDIATE` additionally cancels pending and in-flight transfers
-(whenever it arrives once the engine is built, a submission waiting on the
-engine's backpressure included), and then an accepted item that had not started — or was abandoned mid-flight —
-reports `CANCELLED`, while an in-flight request that completes despite the
-cancellation reports its real outcome, since its bytes really landed (on the CRT
-engine, a `mv` from S3 whose source delete had not started reports `CANCELLED`
-all the same). Work never
-accepted, because the submission loop stopped before reaching it, produces no
-record either way. An escalation to `IMMEDIATE` that arrives while a graceful
-drain is already running is honored.
+`GRACEFUL` is a drain: the operation stops accepting new work and finishes what
+it already accepted before it raises.
 
-For the delete lanes of `rm` and `sync`, `GRACEFUL` discards the deleter's
-unsent buffer and drains the batch already dispatched; `IMMEDIATE` additionally
-cancels a dispatched batch that has not started, and starts none of the
-per-key requests a started batch still had to send (its XML-incompatible keys,
-its re-sends). A batch whose S3 request has started otherwise completes and
-delivers its per-key records first. Discarded buffered entries, the entries of
-a cancelled batch and a key whose own request was left unsent produce no
-records
-([`../../design/deleter.md`](../../design/deleter.md)).
+- On the transfer lanes of `cp` / `mv` / `sync`, everything accepted runs to
+  completion, so those items report their real outcomes and no `CANCELLED`
+  record arises.
+- On the delete lanes of `rm` and `sync`, the deleter's unsent buffer is
+  discarded without records, and the batch already dispatched is drained
+  ([`../../design/deleter.md`](../../design/deleter.md)).
+- In `sync`'s pair loop, the decisions already handed to a `ParallelFilter`
+  executor ([`comparator.md`](./comparator.md)) are awaited.
 
-For `ls`, both modes behave identically: cancellation stops entry delivery,
-drops prefetched pages, waits for a page request already in progress (not under
-`S3(reusable_after_interrupt=False)`: the worker ends by itself), reclaims
-the prefetch worker, and raises. The service-root bucket listing iterates its
-pages directly, so cancellation there simply stops between pages.
+`IMMEDIATE` raises at once, without waiting for the requests already sent. The
+operation starts nothing new and cancels what has not started; the requests
+already out, and their cleanup (a multipart upload aborted, a download's
+temporary file removed), finish behind the caller. What they do can still
+change S3 or local files after the operation has raised: on the classic engine,
+a `mv` whose copy completes still deletes its source, for one. Records stop with
+the cancel: once the `CancelledError` is on its way the operation makes no more
+`on_result` or `on_progress` calls, so an accepted item that ends after it gets
+no record. A call another thread had already begun may still be running, or
+just entering your callback, when the exception reaches you. An escalation to `IMMEDIATE` while a graceful drain is running ends the
+drain the same way. The same `S3` can run the next operation; see
+[`s3.md`](./s3.md#thread-safety) for the client the requests still out use.
 
-For `sync`'s pair loop, the token is polled before each decision and each
-action. `GRACEFUL` awaits the decisions already handed to a `ParallelFilter`
-executor ([`comparator.md`](./comparator.md)); `IMMEDIATE` first cancels those
-futures. The caller's executor is never shut down.
+In both modes, work never accepted, because the operation stopped before
+reaching it, produces no record, and a cancel ends a listing at once: `ls` (and
+the listings of the other operations) stops delivering entries, drops prefetched
+pages, tells the prefetch worker to stop (it ends by itself after a page request
+already in progress) and raises. The service-root bucket listing iterates its
+pages directly, so cancellation there stops between pages.
 
-Under either mode, external I/O already running may still have to finish before
-the operation can return.
+No mode cuts short a request the operation's own thread is waiting on: the
+`HeadObject` a single-object `cp` / `mv` sends first, the service-root bucket
+listing, a single-key `rm`, `mb`, `rb`, and a listing page under
+`read_ahead=False`. The operation raises once that request returns. The
+caller's executor is never shut down.
 
 ### cancel(\*, mode=CancelMode.GRACEFUL)
 
@@ -696,8 +696,7 @@ accepted items report their real outcomes and produce no `CANCELLED` records;
 on the delete lanes the deleter's unsent buffer is discarded without records,
 and only the batch already dispatched is drained.
 
-`IMMEDIATE` additionally asks each engine to cancel pending and in-flight work
-wherever its implementation supports cancellation. What that yields per lane is
-listed under [`CancelToken`](#canceltoken); external I/O already running may
-still have to finish, and an operation is free to report the real outcome of a
-request that completed despite the request to cancel.
+`IMMEDIATE` raises at once: the operation starts nothing new, cancels what has
+not started, and leaves the requests already sent to finish behind the caller,
+reporting nothing more. A request the operation's own thread is waiting on is
+still waited for. The details are listed under [`CancelToken`](#canceltoken).

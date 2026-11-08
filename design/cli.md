@@ -955,12 +955,7 @@ Two of these are **source-config**, not `S3.cp` / `mv` / `sync` arguments:
 follow_symlinks=…)` for a local side and `S3Storage(uri, page_size=…)` for an S3
 side - because the library reads how a source is walked / listed from the storage
 itself (`default_scan_options`), not from a per-operation argument. `ls` / `rm`
-likewise build `S3Storage(uri, page_size=…)`. The CLI's Ctrl-C posture is
-declared once instead: `build_s3` constructs the command's `S3` with
-`reusable_after_interrupt=False` (Ctrl-C ends the process in the CLI, so an
-operation must not wait for a request already out - the library default keeps
-waiting), and the operations
-thread it into every scan they start ([`storage.md`](./storage.md) section 2).
+likewise build `S3Storage(uri, page_size=…)`.
 
 **streaming (`-`)**: src `-` = stdin upload, dest `-` = stdout download (passing
 `StdioStorage()` to the library. [`transfer.md`](./transfer.md) section 6). In

@@ -7,6 +7,7 @@ import io
 import os
 import re
 import threading
+import time
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any, cast
@@ -85,7 +86,7 @@ class TestLsRouting:
 
         assert client.calls == []
 
-    def test_cancel_from_on_entry_stops_delivery_and_reclaims_prefetch(self) -> None:
+    def test_cancel_from_on_entry_stops_delivery_and_the_prefetch_worker(self) -> None:
         pages = [
             {"Contents": [{"Key": f"p/{i}", "Size": 1, "LastModified": _MTIME}]} for i in range(20)
         ]
@@ -101,6 +102,13 @@ class TestLsRouting:
             S3().ls(storage, on_entry=stop_after_first, cancel_token=token)
 
         assert keys == ["p/0"]
+        # Told to stop, the worker ends by itself; nothing waits for it.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and any(
+            thread.name == "boto3-s3-prefetch" and thread.is_alive()
+            for thread in threading.enumerate()
+        ):
+            time.sleep(0.01)
         assert not any(
             thread.name == "boto3-s3-prefetch" and thread.is_alive()
             for thread in threading.enumerate()

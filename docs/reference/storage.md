@@ -171,8 +171,18 @@ raised by the producer surfaces on the consumer's pull.
 the base knobs must arrive on its own `ScanOptions` subclass; the built-ins
 reject a foreign options type.
 
-`cancel_token` ([`./results.md`](./results.md)) stops the producer before its
-next page pull. Entries already yielded to the consumer are unaffected.
+`cancel_token` ([`./results.md`](./results.md)) ends the entries at once when
+it is cancelled, without raising: pages already fetched are dropped, no further
+page pull starts, and one already in flight is not waited for (but under
+`read_ahead=False` that pull runs on the calling thread, so it is). The
+iteration then simply ends, so a direct caller checks the token to tell a
+cancelled scan from a complete listing. Entries already yielded to the consumer
+are unaffected.
+
+Closing the scan before its end does not wait for a page pull already in
+flight, which can take a full network timeout: the prefetch worker is told to
+stop, drops the page it brings back and ends by itself, so `options.filter` can
+still run on that page after the close.
 
 Two things happen between the producer and the consumer. Each entry whose
 `storage` is still `None` is stamped with this backend, so a `scan_pages`

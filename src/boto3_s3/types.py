@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from typing_extensions import TypedDict
 
+from boto3_s3.concurrency import WakeAll
+
 if TYPE_CHECKING:
     from boto3_s3.exceptions import Boto3S3Error
     from boto3_s3.storage import Storage
@@ -214,16 +216,6 @@ class ScanOptions:
     because ``sync`` walks both sides through one shared sink, the two side-walks
     can invoke it concurrently - keep it thread-safe.
 
-    ``reusable_after_interrupt`` is the scan's exit policy. ``True`` (the
-    default): the scan's teardown always waits for a page pull already in
-    flight, so no enumeration worker survives it. ``False``: on any early end the
-    worker is told to stop and left to end by itself, a daemon that starts no
-    further pull, since a pull in flight can otherwise hold the exit for a full
-    timeout. The high-level operations overlay it from
-    ``S3(reusable_after_interrupt=...)`` - the application declares the posture
-    once there - so it reaches every scan an operation starts; set it here only
-    when calling ``Storage.scan`` directly.
-
     ``read_ahead`` is whether ``scan`` may read pages ahead of the consumer.
     ``True`` (the default) runs the page producer on a background worker, so the
     next page's I/O overlaps the current page's consumption. ``False`` pulls each
@@ -244,7 +236,6 @@ class ScanOptions:
     sort: bool = False
     filter: Callable[[FileInfo], bool] | None = None
     on_warning: Callable[[str], None] | None = None
-    reusable_after_interrupt: bool = True
     read_ahead: bool = True
 
 
@@ -467,9 +458,10 @@ class CancelMode(enum.Enum):
     """How an operation shuts down after a `CancelToken` request.
 
     `GRACEFUL` stops accepting new work and drains work already accepted by
-    the operation. `IMMEDIATE` additionally asks each engine to cancel pending
-    and in-flight work where its implementation supports cancellation; external
-    I/O already running may still have to finish.
+    the operation. `IMMEDIATE` returns at once: it cancels what has not started
+    and leaves the requests already sent to finish behind the caller, reporting
+    nothing more; a request the operation's own thread waits on is still waited
+    for (`CancelToken`).
     """
 
     GRACEFUL = "graceful"
@@ -482,8 +474,12 @@ class CancelToken:
     `cancel()` may be called from any thread or a signal handler. The default
     is graceful cancellation; a later `IMMEDIATE` request upgrades it, while a
     later graceful request never downgrades it. The operation observes the
-    effective `mode`, performs that shutdown policy, and raises
-    `CancelledError` after reclaiming its resources.
+    effective `mode` and raises `CancelledError`: a graceful cancel once the
+    work already accepted has finished, an immediate one at once, starting
+    nothing new and leaving the requests already sent to finish behind the
+    caller - but for a request the operation's own thread is waiting on,
+    which no cancel cuts short (design/overview.md section 3). The `S3`
+    stays usable either way.
     """
 
     def __init__(self) -> None:
@@ -497,17 +493,20 @@ class CancelToken:
         # downgraded. The flags are plain bools, not threading.Events:
         # Event.set() takes the Event's own
         # non-reentrant Condition lock, so a nested signal-handler cancel()
-        # landing inside an outer set() would deadlock the main thread - and
-        # nothing ever wait()s on the flags, so the Event bought nothing.
+        # landing inside an outer set() would deadlock the main thread.
         self._lock = threading.RLock()
         self._immediate = False
         self._cancelled = False
+        # The operation's waits that look at this token, woken by each cancel()
+        # (`concurrency.Wake.wait_until`); as signal-handler-safe as the above.
+        self._waiters = WakeAll()
 
     def cancel(self, *, mode: CancelMode = CancelMode.GRACEFUL) -> None:
         with self._lock:
             if mode is CancelMode.IMMEDIATE:
                 self._immediate = True
             self._cancelled = True
+        self._waiters.send()
 
     @property
     def cancelled(self) -> bool:

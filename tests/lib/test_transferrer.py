@@ -1562,11 +1562,20 @@ class TestCrtCancelClassification:
         assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
         assert (transferrer.failed, transferrer.cancelled) == (0, 1)
 
-    def test_token_cancel_caught_mid_submission_stays_cancelled(self, tmp_path: Path) -> None:
-        # An immediate token cancel surfacing in the submission loop reaches
-        # __exit__ as the CancelledError that folds the manager
-        # (s3._raise_if_cancelled): the in-flight item revokes CANCELLED
-        # exactly like the drain-time escalation above.
+    def test_an_immediate_cancel_caught_mid_submission_leaves_the_manager(
+        self, tmp_path: Path
+    ) -> None:
+        # An immediate token cancel surfacing in the submission loop
+        # (s3._raise_if_cancelled) leaves at once (overview section 3): the
+        # manager is neither drained nor shut down, and the item still out
+        # reports nothing.
+        drained: list[bool] = []
+
+        class _Recording(_CrtDrainManager):
+            def _drain(self) -> None:
+                drained.append(True)
+                super()._drain()
+
         client, _ = make_recording_client([])
         results: list[OpResult] = []
         token = CancelToken()
@@ -1575,28 +1584,12 @@ class TestCrtCancelClassification:
         )
         with pytest.raises(CancelledError):
             with transferrer:
-                transferrer._manager = _CrtDrainManager()  # pyright: ignore[reportPrivateUsage]
+                transferrer._manager = _Recording()  # pyright: ignore[reportPrivateUsage]
                 self._submit_one(transferrer, tmp_path)
                 token.cancel(mode=CancelMode.IMMEDIATE)
                 raise CancelledError("cp was cancelled", operation="cp")
-        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
-        assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
-        assert (transferrer.failed, transferrer.cancelled) == (0, 1)
-
-    def test_interrupt_folded_cancellations_are_cancelled(self, tmp_path: Path) -> None:
-        # A Ctrl-C forcing the fold revokes the in-flight items like a fatal;
-        # the interrupt itself propagates.
-        client, _ = make_recording_client([])
-        results: list[OpResult] = []
-        transferrer = Transferrer(TransferType.UPLOAD, client, on_result=results.append)
-        with pytest.raises(KeyboardInterrupt):
-            with transferrer:
-                transferrer._manager = _CrtDrainManager()  # pyright: ignore[reportPrivateUsage]
-                self._submit_one(transferrer, tmp_path)
-                raise KeyboardInterrupt
-        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
-        assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
-        assert (transferrer.failed, transferrer.cancelled) == (0, 1)
+        assert drained == []
+        assert results == []
 
 
 class _SettledCrtFuture(_FakeCrtFuture):
@@ -1865,6 +1858,8 @@ class TestCrtMoveDoneWorkers:
             with transferrer:
                 transferrer.submit(self._item(tmp_path, "a", client))
                 token.cancel(mode=CancelMode.GRACEFUL)
+                # The drain waits for the accepted move, as a clean exit does.
+                self._manager(transferrer).fire()
                 raise CancelledError("mv was cancelled", operation="mv")
         assert deleted == ["a"]
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
@@ -1915,10 +1910,12 @@ class TestCrtMoveDoneWorkers:
             while not transferrer._cancel_initiated:  # pyright: ignore[reportPrivateUsage]
                 assert time.monotonic() < deadline
                 time.sleep(0.01)
-            release.set()
+        # The run left at once (overview section 3), "a"'s delete still held.
+        release.set()
+        workers = transferrer._done_workers  # pyright: ignore[reportPrivateUsage]
+        assert workers is not None
+        workers.close()  # what the run left behind settles by itself
         assert deleted == ["a"]
-        outcomes = {result.compare_key: result.outcome for result in results}
-        assert outcomes == {"a": OpOutcome.SUCCEEDED, "b": OpOutcome.CANCELLED}
 
     def test_the_limit_holds_awscrts_thread(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2160,6 +2157,40 @@ class TestDoneWorkers:
             at_the_limit.join(0.3)
             assert at_the_limit.is_alive()
             cancelled.set()
+            workers.note_cancel()
+            at_the_limit.join(5)
+            assert not at_the_limit.is_alive()
+        finally:
+            release.set()
+        self._run_in_thread(workers.close)
+
+    def test_the_runs_cancel_wakes_the_wait_at_the_limit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(transfer, "_DONE_WORKERS_LIMIT", 1)
+        release = threading.Event()
+
+        class Held:
+            def on_done(self, future: Any) -> None:
+                release.wait(10)
+
+        client, _ = make_recording_client([])
+        transferrer = Transferrer(TransferType.UPLOAD, client)
+        workers = transfer._DoneWorkers(
+            1,
+            lambda: transferrer._cancel_initiated,  # pyright: ignore[reportPrivateUsage]
+            lambda _exc: None,
+        )
+        transferrer._done_workers = workers  # pyright: ignore[reportPrivateUsage]
+        workers.run([Held()], _SettledCrtFuture())
+        at_the_limit = threading.Thread(
+            target=workers.run, args=([], _SettledCrtFuture()), daemon=True
+        )
+        at_the_limit.start()
+        try:
+            at_the_limit.join(0.3)
+            assert at_the_limit.is_alive()
+            transferrer._cancel_futures()  # pyright: ignore[reportPrivateUsage]
             at_the_limit.join(5)
             assert not at_the_limit.is_alive()
         finally:
@@ -2224,18 +2255,6 @@ class TestFatalCancellation:
                 "listing died",
                 "listing died mid-enumeration",
                 id="fatal",
-            ),
-            pytest.param(
-                # An interrupt escaping the submission loop folds the manager
-                # the same way: the classic manager revokes the queued work
-                # with CancelledError (str(KI) is empty, so s3transfer's repr
-                # fallback names it) and the interrupt propagates - CANCELLED
-                # records, as on the CRT lane for the same window.
-                KeyboardInterrupt,
-                KeyboardInterrupt,
-                None,
-                "KeyboardInterrupt()",
-                id="interrupt",
             ),
         ],
     )
@@ -2880,7 +2899,13 @@ class TestWorkerRaise:
         )
         with pytest.raises(KeyboardInterrupt), transferrer:
             transferrer.submit(item)
-        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+        # The Ctrl-C leaves at once, so whether the record came first is not
+        # specified; once the transfer has settled, it counts as cancelled.
+        deadline = time.monotonic() + 10
+        while transferrer._futures and time.monotonic() < deadline:  # pyright: ignore[reportPrivateUsage]
+            time.sleep(0.01)
+        assert OpOutcome.SUCCEEDED not in [result.outcome for result in results]
+        assert (transferrer.succeeded, transferrer.cancelled) == (0, 1)
 
     @pytest.mark.parametrize("config", [TransferConfig(), _SYNC_CONFIG], ids=["threads", "serial"])
     def test_an_on_result_error_reaches_the_caller(
