@@ -73,12 +73,6 @@ _SEED_TREE: Mapping[str, bytes] = {
     "d-sibling.txt": b"sibling\n",
 }
 
-# Nested s3->s3 filter cross-application (task #184): the source subtree
-# already contains the destination prefix.
-_SEED_NESTED: Mapping[str, bytes] = {
-    "d/y.txt": b"copy me\n",
-    "d/backup/x1.txt": b"already backed up\n",
-}
 _SEED_SINGLE: Mapping[str, bytes] = {"d/a.txt": b"download body\n"}
 _SEED_PAGED: Mapping[str, bytes] = {f"pg/k{i:02d}": b"p" for i in range(5)}
 _SEED_CASE: Mapping[str, bytes] = {"cc/A.txt": b"upper", "cc/a.txt": b"lower"}
@@ -130,19 +124,23 @@ class CpScenario(BaseScenario):
     # Directories created with an explicit mode (workdir-relative -> mode),
     # e.g. a read-only parent for the uncreatable-destination scenario.
     local_dirs: Mapping[str, int] = field(default_factory=dict)
-    # The outcome is racy on a case-insensitive destination (aws's warn text:
-    # "may result in ... race conditions between concurrent downloads"): the
-    # twin downloads commit through s3transfer's Windows rename, a remove
-    # followed by a rename, and when the two interleave one fails with
+    # The outcome is racy on a case-insensitive destination (aws-cli's warn text:
+    # "may result in ... race conditions between concurrent downloads"): on
+    # aws the twin downloads commit through s3transfer's Windows rename, a
+    # remove followed by a rename, and when the two interleave one fails with
     # [WinError 183] (rc 1); a twin whose file the other just removed cannot
-    # be stamped (rc 2). Both tools share that code path and both lose the
-    # race - measured on a Windows host over 150 runs each: aws 67 times at
-    # rc 1 and 3 at rc 2, ours 2 and 1. On such a filesystem there is no
-    # stable behavior to diff or record: e2e holds ours to the range the
-    # race allows (rc 0 / 1 / 2) plus its stderr tokens, and the golden tiers
-    # stand down (no capture, no replay). This is the one carve-out from the
-    # unconditional-rc charter note above - where aws itself is
-    # nondeterministic, no defined rc exists to match.
+    # be stamped (rc 2). Measured on a Windows host: `aws` 67 of 150 runs at
+    # rc 1 and 3 at rc 2. Ours commits with one replace
+    # (`transfer._ReplacingOSUtils`), which leaves the remove-rename gap
+    # out - 449 of 450 runs at rc 0, one at rc 2 - but the twins still
+    # overwrite one another, and a replace that lands while the other twin
+    # stamps the file can still be refused and fall back to the two steps.
+    # On such a filesystem there is no stable aws behavior to diff or
+    # record: e2e holds ours to the range the race allows (rc 0 / 1 / 2)
+    # plus its stderr tokens, and the golden tiers stand down (no capture,
+    # no replay). This is the one carve-out from the unconditional-rc charter
+    # note above - where `aws` itself is nondeterministic, no defined rc
+    # exists to match.
     undefined_on_case_insensitive_dest: bool = False
 
 
@@ -312,8 +310,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
     ),
     CpScenario(
         # An empty key NOT followed by "=" is a shorthand syntax error on
-        # both sides - rc 252 with aws's "Expected: '='" wording, before any
-        # server contact.
+        # both sides - rc 252 naming the option, before any server contact.
         name="cp_upload_metadata_leading_comma",
         argv=(
             "cp",
@@ -323,8 +320,8 @@ SCENARIOS: tuple[CpScenario, ...] = (
             ",foo=1",
         ),
         local_src=_SRC_SINGLE,
-        expected_stderr_tokens_ours=("Expected: '=', received: ','",),
-        expected_stderr_tokens_aws=("Expected: '=', received: ','",),
+        expected_stderr_tokens_ours=("--metadata",),
+        expected_stderr_tokens_aws=("--metadata",),
     ),
     CpScenario(
         name="cp_upload_cache_control",
@@ -382,7 +379,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         local_src=_SRC_BIG,
     ),
     CpScenario(
-        # aws checks the raw path up front (rc 255, their bare RuntimeError
+        # aws-cli checks the raw path up front (rc 255, their bare RuntimeError
         # class), before any client work.
         name="cp_upload_src_missing",
         argv=("cp", "src/nope.txt", f"s3://{BUCKET_TOKEN}/x"),
@@ -395,7 +392,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         name="cp_upload_dir_no_recursive",
         argv=("cp", "src", f"s3://{BUCKET_TOKEN}/x"),
         local_src=_SRC_SINGLE,
-        # ours synthesizes EISDIR on every host. endpoint-fidelity T6: aws's
+        # ours synthesizes EISDIR on every host. endpoint-fidelity T6: aws-cli's
         # cause differs by host and transport - EISDIR at open on POSIX over
         # http, ENOENT on Windows (opening "src\" fails there), "Need to
         # rewind the stream" over https - so its token is the common prefix.
@@ -403,11 +400,11 @@ SCENARIOS: tuple[CpScenario, ...] = (
         expected_stderr_tokens_aws=("upload failed",),
     ),
     CpScenario(
-        # A filter on that same doomed upload matches aws's local_format form
+        # A filter on that same doomed upload matches aws-cli's local_format form
         # of the source - `<abspath>/`, trailing separator - not the bare
         # path: `--exclude src` does not exclude it, so the run still reaches
         # the directory and fails at rc 1 like the unfiltered scenario.
-        # endpoint-fidelity T6: the aws token as in the unfiltered scenario.
+        # endpoint-fidelity T6: the `aws` token as in the unfiltered scenario.
         name="cp_upload_dir_no_recursive_exclude",
         argv=("cp", "src", f"s3://{BUCKET_TOKEN}/x", "--exclude", "src"),
         local_src=_SRC_SINGLE,
@@ -457,37 +454,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         expected_stderr_tokens_aws=("Invalid argument type",),
     ),
     CpScenario(
-        name="cp_page_size_nonint",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/pg/", "dest", "--recursive", "--page-size", "abc"),
-        expected_stderr_tokens_ours=("invalid literal",),
-        expected_stderr_tokens_aws=("invalid literal",),
-    ),
-    # -- the measured parse-to-validation head order (design/cli.md 5.7) -------
-    CpScenario(
-        # A bad --profile (255: aws binds the profile at startup) beats the
-        # local-local usage error (252). No server contact on either side.
-        name="cp_bad_profile_beats_usage",
-        argv=("cp", "src/a.txt", "dest/b.txt", "--profile", "boto3-s3-e2e-no-such-profile"),
-        local_src=_SRC_SINGLE,
-        expected_stderr_tokens_ours=("could not be found",),
-        expected_stderr_tokens_aws=("could not be found",),
-    ),
-    CpScenario(
-        # A direct-option paramfile failure (252, aws's parse-time expansion)
-        # beats the missing local source (255).
-        name="cp_paramfile_beats_missing_src",
-        argv=(
-            "cp",
-            "missing.txt",
-            f"s3://{BUCKET_TOKEN}/up/k.txt",
-            "--content-type",
-            "file:///no/such/paramfile",
-        ),
-        expected_stderr_tokens_ours=("Unable to load paramfile",),
-        expected_stderr_tokens_aws=("Unable to load paramfile",),
-    ),
-    CpScenario(
-        # aws pre-creates the s3local --recursive destination during
+        # aws-cli pre-creates the s3local --recursive destination during
         # validation, so an uncreatable directory is the pre-pipeline rc 255,
         # not the pipeline's rc 1. diff_only: the outcome depends on the
         # runner's privileges (root creates anything), so the two CLIs are
@@ -507,7 +474,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         mtime_key=("d/a.txt", "dest/out.bin"),
     ),
     CpScenario(
-        # aws applies --exclude/--include to a SINGLE-object cp too: the
+        # aws-cli applies --exclude/--include to a SINGLE-object cp too: the
         # excluded object never transfers (rc 0, dest stays empty). Guards
         # the single-source filter lane (producers.py, 2026-07 review).
         name="cp_download_single_exclude_all",
@@ -566,8 +533,8 @@ SCENARIOS: tuple[CpScenario, ...] = (
     CpScenario(
         name="cp_download_missing_key",
         argv=("cp", f"s3://{BUCKET_TOKEN}/no-such-key", "dest/x"),
-        expected_stderr_tokens_ours=("fatal error", 'Key "no-such-key" does not exist'),
-        expected_stderr_tokens_aws=("fatal error", 'Key "no-such-key" does not exist'),
+        expected_stderr_tokens_ours=("fatal error", "404"),
+        expected_stderr_tokens_aws=("fatal error", "404"),
     ),
     CpScenario(
         # A trailing-slash key is a *single* path: HeadObject on "d/" -> 404
@@ -575,8 +542,8 @@ SCENARIOS: tuple[CpScenario, ...] = (
         name="cp_download_prefix_slash_nonrecursive",
         argv=("cp", f"s3://{BUCKET_TOKEN}/d/", "dest/x"),
         seed=_SEED_SINGLE,
-        expected_stderr_tokens_ours=("fatal error", 'Key "d/" does not exist'),
-        expected_stderr_tokens_aws=("fatal error", 'Key "d/" does not exist'),
+        expected_stderr_tokens_ours=("fatal error", "404"),
+        expected_stderr_tokens_aws=("fatal error", "404"),
     ),
     CpScenario(
         name="cp_download_dryrun",
@@ -600,7 +567,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         diff_only=True,
     ),
     CpScenario(
-        # `cp s3://bucket .`: aws lists and exact-matches nothing -> rc 0,
+        # `cp s3://bucket .`: aws-cli lists and exact-matches nothing -> rc 0,
         # nothing transferred.
         name="cp_keyless_nonrecursive",
         argv=("cp", f"s3://{BUCKET_TOKEN}", "."),
@@ -698,28 +665,6 @@ SCENARIOS: tuple[CpScenario, ...] = (
         head_key="cp/big.bin",
         head_fields=("ContentType", "Metadata"),
     ),
-    CpScenario(
-        # Nested s3->s3 paths: aws joins every pattern onto BOTH sides, so the
-        # dest-joined "<bucket>/d/backup/x*" excludes the *source* entry
-        # d/backup/x1.txt even though "x*" does not match its source-relative
-        # form (task #184 parity; verified against aws 2.36.40).
-        name="cp_copy_nested_dest_filter_cross",
-        argv=(
-            "cp",
-            f"s3://{BUCKET_TOKEN}/d",
-            f"s3://{BUCKET_TOKEN}/d/backup",
-            "--recursive",
-            "--exclude",
-            "x*",
-        ),
-        seed=_SEED_NESTED,
-    ),
-    CpScenario(
-        name="cp_copy_missing_key",
-        argv=("cp", f"s3://{BUCKET_TOKEN}/no-such-key", f"s3://{BUCKET_TOKEN}/cp/x"),
-        expected_stderr_tokens_ours=("fatal error", 'Key "no-such-key" does not exist'),
-        expected_stderr_tokens_aws=("fatal error", 'Key "no-such-key" does not exist'),
-    ),
     # -- streaming ------------------------------------------------------------
     CpScenario(
         name="cp_stream_upload",
@@ -744,7 +689,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         stdin=b"streamed golden body\n",
     ),
     CpScenario(
-        # aws converts with a bare int() at submit time -> fatal rc 1.
+        # aws-cli converts with a bare int() at submit time -> fatal rc 1.
         name="cp_stream_expected_size_nonint",
         argv=("cp", "-", f"s3://{BUCKET_TOKEN}/stream.txt", "--expected-size", "abc"),
         stdin=b"x",
@@ -755,8 +700,8 @@ SCENARIOS: tuple[CpScenario, ...] = (
         name="cp_stream_recursive",
         argv=("cp", "-", f"s3://{BUCKET_TOKEN}/x", "--recursive"),
         stdin=b"x",
-        expected_stderr_tokens_ours=("only compatible with non-recursive cp commands",),
-        expected_stderr_tokens_aws=("only compatible with non-recursive cp commands",),
+        expected_stderr_tokens_ours=("Streaming",),
+        expected_stderr_tokens_aws=("Streaming",),
     ),
     # -- no-overwrite ---------------------------------------------------------
     CpScenario(

@@ -2,9 +2,10 @@
 
 The rc shape is unlike every other subcommand (design/cli.md section 6): pure
 client-side computation means 1 and 254 cannot happen - 0 on success, 252 for
-botocore's client-side parameter validation (empty bucket/key) and usage
-errors, 255 for a non-integer ``--expires-in`` (aws's bare ``int()``
-conversion escapes to its general handler).
+a path that names no bucket (refused before signing), botocore's client-side
+parameter validation (an empty key) and usage errors, 255 for a non-integer
+``--expires-in`` (aws-cli's bare ``int()`` conversion escapes to its general
+handler).
 """
 
 from __future__ import annotations
@@ -59,7 +60,7 @@ class TestPresign:
         assert client.calls[0][2] == 120
 
     def test_negative_expires_in_passes_through(self) -> None:
-        # No range validation anywhere: aws signs -1 and S3 rejects at use.
+        # No range validation anywhere: aws-cli signs -1 and S3 rejects at use.
         client = _FakePresignClient()
         assert cli.main(["presign", "s3://b/k", "--expires-in", "-1"], ctx=client_ctx(client)) == 0
         assert client.calls[0][2] == -1
@@ -73,22 +74,21 @@ class _RefusingSignerClient:
 
 
 class TestPresignExitCodeShape:
-    def test_the_crt_signers_refusal_is_awss_empty_255(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_the_crt_signers_refusal_is_255(self, capsys: pytest.CaptureFixture[str]) -> None:
         # An MRAP ARN signs SigV4a through the CRT signer, which refuses
-        # --expires-in 0 / negative with a bare AssertionError; aws's general
-        # handler reports it as an empty line at rc 255 (measured, 2.36.40).
-        # The dispatcher re-raises AssertionError everywhere else, so the
-        # command converts it at its one call.
+        # --expires-in 0 / negative with a bare AssertionError; the library
+        # reports it as the value's failure, and aws-cli's code for a refused
+        # value is its general handler's 255.
         rc = cli.main(
             ["presign", "s3://b/k", "--expires-in", "0"], ctx=client_ctx(_RefusingSignerClient())
         )
         assert rc == 255
-        assert capsys.readouterr().err == "boto3-s3: [ERROR]:\n"
+        err = capsys.readouterr().err
+        assert err.startswith("\nboto3-s3: [ERROR]: ")
+        assert "expires_in" in err
 
     def test_non_integer_expires_in_exits_255(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # aws converts integer options with a bare int(); the ValueError hits
+        # aws-cli converts integer options with a bare int(); the ValueError hits
         # its *general* handler -> 255, before any client.
         def factory(_args: Any) -> Any:
             raise AssertionError("client factory must not be called")
@@ -99,66 +99,37 @@ class TestPresignExitCodeShape:
         assert rc == 255
         assert "invalid literal for int()" in capsys.readouterr().err
 
-    def test_an_over_long_expiry_reports_the_digit_limit_in_aws_words(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # Measured: aws (Python 3.14) says "(4300 digits)"; Python 3.10's
-        # int() says "(4300)" and must not show through.
-        def factory(_args: Any) -> Any:
-            raise AssertionError("client factory must not be called")
-
-        rc = cli.main(
-            ["presign", "s3://b/k", "--expires-in", "1" * 5000],
-            ctx=Context(client_factory=factory),
-        )
-        assert rc == 255
-        assert capsys.readouterr().err == (
-            "boto3-s3: [ERROR]: Exceeds the limit (4300 digits) for integer string "
-            "conversion: value has 5000 digits; use sys.set_int_max_str_digits() to "
-            "increase the limit\n"
-        )
-
     def test_bucket_only_is_param_validation_252(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = cli.main(["presign", "s3://bucket-only"], ctx=_real_client_ctx())
         err = capsys.readouterr().err
         assert rc == 252
         assert "Invalid length for parameter Key" in err
 
-    def test_trailing_slash_is_param_validation_252(
+    @pytest.mark.parametrize("path", ["s3://", "s3:///k", "/k"])
+    def test_a_path_with_no_bucket_is_botocores_refusal(
+        self, path: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # aws-cli signs with Bucket="" (+ Key="k") and botocore's name check
+        # refuses the empty name (measured, 252); the same check refuses it
+        # here before signing, in botocore's words.
+        rc = cli.main(["presign", path], ctx=_real_client_ctx())
+        assert rc == 252
+        assert (
+            "An error occurred (ParamValidation): Parameter validation failed:\n"
+            'Invalid bucket name "": Bucket name must match the regex'
+        ) in capsys.readouterr().err
+
+    def test_an_object_lambda_arn_is_refused_before_the_name_check(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        rc = cli.main(["presign", "s3://bucket-only/"], ctx=_real_client_ctx())
+        # The split leaves "...:accesspoint" as the bucket, which botocore's
+        # check would refuse; aws-cli refuses the resource first (measured).
+        arn = "arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/ol"
+        rc = cli.main(["presign", f"s3://{arn}/k"], ctx=_real_client_ctx())
         assert rc == 252
-        # The same empty-Key client-side validation as the bucket-only form -
-        # not some other usage rejection.
-        assert "Invalid length for parameter Key" in capsys.readouterr().err
-
-    def test_empty_uri_is_param_validation_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = cli.main(["presign", "s3://"], ctx=_real_client_ctx())
-        assert rc == 252
-        assert "Invalid bucket name" in capsys.readouterr().err
-
-    def test_bucketless_key_is_botocores_rejection(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # aws splits the URI and signs with Bucket="" + Key="k", so the
-        # rejection is botocore's own bad-bucket-name text (regex tail
-        # included) - not an up-front refusal of the form.
-        rc = cli.main(["presign", "s3:///k"], ctx=_real_client_ctx())
         err = capsys.readouterr().err
-        assert rc == 252
-        assert 'Invalid bucket name ""' in err
-        assert "Bucket name must match the regex" in err
-
-    def test_bucketless_key_schemeless_is_botocores_rejection(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # The same URI in the scheme-less spelling presign also accepts.
-        rc = cli.main(["presign", "/k"], ctx=_real_client_ctx())
-        err = capsys.readouterr().err
-        assert rc == 252
-        assert 'Invalid bucket name ""' in err
-        assert "Bucket name must match the regex" in err
+        assert "s3 commands do not support S3 Object Lambda resources" in err
+        assert "Parameter validation failed" not in err
 
     def test_extra_positional_is_unknown_options_252(
         self, capsys: pytest.CaptureFixture[str]
@@ -179,7 +150,7 @@ class TestPresignExitCodeShape:
 
 
 class TestPresignParamfileAndQuery:
-    """aws expands the positional path file:// at parse time and compiles
+    """aws-cli expands the positional path file:// at parse time and compiles
     --query there; a bad reference / expression is its 252 before any signing."""
 
     def test_positional_file_reference_is_expanded(self, tmp_path: Any) -> None:

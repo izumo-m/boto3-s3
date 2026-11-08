@@ -24,7 +24,7 @@ Two comparison axes, by design:
 scripts/compose-up.sh                  # dev S3 stack (same as the e2e suite)
 source scripts/bench-env.sh            # the lane's interpreter + environment
 uv sync --all-packages --locked        # provisions .venv-bench on first use
-scripts/install-awscli.sh              # pinned aws -> .venv-bench/bin/aws
+scripts/install-awscli.sh              # pinned aws-cli -> .venv-bench/bin/aws
 source scripts/dev-env.sh              # endpoint + credentials env
 uv run python -m benchmarks run        # both modes, classic engine
 ```
@@ -50,7 +50,7 @@ only when the first S3 call fails.
 
 The lane runs on Python 3.14, the interpreter the pinned aws-cli bundles
 (`aws --version` prints it). With both sides on one interpreter the E2E
-differential compares two tools; boto3-s3 on the 3.10 floor against aws on
+differential compares two tools; boto3-s3 on the 3.10 floor against aws-cli on
 3.14 would fold the interpreter generations into every ratio. Development
 stays on the floor (`.python-version`; CONTRIBUTING.md), so the lane has an
 environment of its own: `scripts/bench-env.sh` points uv at `.venv-bench`,
@@ -78,13 +78,28 @@ touched. Destinations are purged between invocations so the dev stack's tmpfs
 stays bounded. By default the endpoint must be the local dev stack;
 `BOTO3_S3_BENCH_ALLOW_REMOTE=1` (exactly `1`) opts into a non-local endpoint,
 or into real S3 with no endpoint override at all (how the EC2 lane runs,
-below). A real-S3 run takes its credentials from the environment or an
-instance role, never from `AWS_PROFILE`: both CLIs run with `AWS_CONFIG_FILE`
-pointed at the per-engine config, which hides every profile from them, so the
-harness refuses the combination up front instead of failing on the first
-invocation. Each engine's work tree is removed before the next engine seeds
-its own, and a scenario that hits a local I/O error (a full work tree) is
-skipped and recorded like any other failed scenario.
+below). Both CLIs run without the host's `~/.aws`: their home is an empty
+directory of the run (`USERPROFILE` too, for Windows), `AWS_CONFIG_FILE`
+points at the per-engine config, and the host's `AWS_PROFILE`,
+`AWS_DEFAULT_PROFILE` and `AWS_SHARED_CREDENTIALS_FILE` are dropped - so the
+host's settings steer neither side (only the region the harness resolves is
+handed to both), and the pinned `aws` writes its session cache there instead
+of into the host's home. A run off the dev stack
+therefore takes its credentials from the environment or an instance role,
+and the harness looks its own up the same way: it refuses a profile up front
+instead of failing on the first invocation. Both executables come from the
+interpreter's environment - `boto3-s3` is the console script next to the
+running Python, `aws` the pinned binary scripts/install-awscli.sh installs
+there (taken from PATH only when absent, as on Windows, where
+scripts/dev-env.cmd puts the pinned one first) - so a run measures
+the tree its results file names; a run warns when `aws --version` is not the
+pinned version. Each engine's work tree is removed before the next engine seeds
+its own, and a scenario that hits a local I/O error (a full work tree) or an
+S3 error while staging its input is skipped and recorded like any other
+failed scenario. Only the dev stack's fixed bucket name is cleared before
+the run creates it, since only that name can hold an aborted run's
+leftovers; a per-run name has nothing to clear, so a real-S3 run needs no
+ListBuckets (the EC2 instance role has no permission for one).
 
 **In-process** runs the CLI inside the runner process against stubbed S3:
 a real boto3 client whose `before-send` event returns canned responses, so
@@ -95,19 +110,19 @@ boto3-s3's own work - enumeration, compare, transfer orchestration, local
 file I/O - deterministically (spreads are typically a few percent), which
 makes it the sensitive lane for cross-run comparison. What it does not
 include: process startup (imports are warm after the first invocation), the
-production `build_client` path (the client is injected via `Context`), and
-the network/server. Listing corpora are synthesized (100k keys costs
+production client build (the client is injected via `Context`; the session
+`S3.from_aws_cli` opens around it is included), and the network/server. Listing corpora are synthesized (100k keys costs
 nothing to "seed"), so it scales past what E2E seeding affords.
 
 The CRT engine is E2E-only: it bypasses botocore's HTTP layer, so the
 `before-send` stub never sees its requests. Both modes pin
 `preferred_transfer_client` through `AWS_CONFIG_FILE` (the test suite's
 mechanism); `--engine both` adds a CRT pass over the transfer scenarios for
-aws and boto3-s3 alike. On the CRT lane the harness passes `--endpoint-url`
-explicitly to both sides - the same workaround as the e2e CRT parity tests,
-because aws's CRT client reads `use_ssl` from the CLI argument only and an
-env-only `AWS_ENDPOINT_URL_S3` makes it dial TLS to the dev stack's http
-endpoint (`AWS_IO_SOCKET_CLOSED`).
+aws-cli and boto3-s3 alike. On the CRT lane the harness passes `--endpoint-url`
+explicitly to both sides - the same workaround as the e2e CRT tests
+(`test_crt_parity.py`), because aws-cli's CRT client reads `use_ssl` from the
+CLI argument only and an env-only `AWS_ENDPOINT_URL_S3` makes it dial TLS to the
+dev stack's http endpoint (`AWS_IO_SOCKET_CLOSED`).
 
 A scenario that fails (unexpected rc, verification mismatch) is skipped and
 recorded - in the run summary, and under `failures` in the results file's
@@ -174,6 +189,8 @@ timing flags stay the regression gate).
 | `sync_delete_10k` | `sync --delete` removing remote extras | 8k kept + 2k extra keys | classic |
 | `cp_upload_small_1k` / `cp_download_small_1k` | `cp --recursive` | 1000 x 4KB | classic+crt |
 | `cp_upload_large` / `cp_download_large` | `cp` | 1 x 64MB (multipart; `--large-transfer-mb`) | classic+crt |
+| `mv_s3_to_s3_1k` | `mv --recursive` between two prefixes | 1000 keys x 4KB, seeded once, moved back the other way each time | classic |
+| `mv_download_small_1k` | `mv --recursive` to a local directory | 1000 x 4KB, reseeded before every invocation | classic+crt |
 | `rm_recursive_2k` | `rm --recursive` | 2000 keys, reseeded before every invocation (warmup and each timed side) | classic |
 
 | In-process scenario | Scale |
@@ -183,6 +200,7 @@ timing flags stay the regression gate).
 | `inproc_sync_noop_20k` | 20k local files + matching listing |
 | `inproc_sync_changed_20k` | as above, 2k local files differing in size |
 | `inproc_rm_recursive_20k` | 20k keys |
+| `inproc_mv_s3_to_s3_2k` | 2000 keys, one copy and one delete request each |
 | `inproc_cp_upload_small_2k` | 2000 x 1B |
 | `inproc_cp_upload_large` | 64MB multipart (`--large-transfer-mb`) |
 
@@ -190,7 +208,8 @@ Every scenario verifies its warmup output (transfer-line counts, listing
 sizes, no-op emptiness) before anything is timed - a scenario that silently
 did no work is skipped and recorded as a verification failure (exit 2 at the
 end; completed scenarios keep their numbers) instead of contributing
-fake-fast ones. `sync` no-op corpora are
+fake-fast ones. `mv_s3_to_s3_1k` verifies every timed invocation as well,
+since each one's source is what the previous one left. `sync` no-op corpora are
 seeded *after* the local tree with past mtimes, so both CLIs deterministically
 judge "nothing to transfer".
 
@@ -201,21 +220,36 @@ empty prefix, startup-dominated by design - so the report treats it like the
 startup probes (raw medians, cross-run flag on raw), since a ratio of two
 tens-of-milliseconds nets would be noise. `sync_changed_10k` seeds the whole
 corpus once at the local size and, before each invocation, rewrites the first
-2k keys at a *different* size - a size mismatch forces the upload whatever the
-timestamps say, and only the subset is rewritten, so the reset costs 2k puts,
-not 10k; the untouched 8k compare equal (size) and older (local mtime a day
-back), a no-op. `sync_delete_10k` keeps 8k matching keys and re-seeds 2k
+2k *local* files at a size their remote copies do not have - 1025 and 1026
+bytes in turn, since each invocation uploads them - so a size mismatch forces
+the upload whatever the timestamps say, and the reset costs no request; the
+untouched 8k compare equal (size) and older (local mtime a day back), a
+no-op. `sync_delete_10k` keeps 8k matching keys and re-seeds 2k
 extras under a sub-prefix no local directory matches, so `--delete` has
 exactly those to remove and nothing to upload; the verify checks both counts.
 The in-process `inproc_sync_changed_20k` gets the same shape from the stub:
 2k local files differ in size from the pre-rendered listing.
 
+The `mv` scenarios time cp's work plus the removal of every source.
+`mv_download_small_1k` keeps `cp_download_small_1k`'s shape, so the gap
+between the two rows is what the removals cost; it empties its source, so
+the source is re-seeded and the previous destination removed before every
+invocation, warmup included. `mv_s3_to_s3_1k` is the suite's one
+server-side copy. It moves its corpus back the other way each time (`a/` to
+`b/`, then `b/` to `a/`) - the copies are the next source - so it is seeded
+once, and every invocation still copies and deletes 1000 keys. Both tools
+run S3-to-S3 copies on the classic engine whatever the configuration, so it
+has no CRT lane. Its in-process
+counterpart needs no reset: the stub keeps no state, so every sample lists
+the same source again. It is sized at 2k keys, not rm's 20k, because each
+key costs two requests where rm deletes 1000 keys a request.
+
 The single-object rows measure two different things depending on the link.
 Against the dev stack on localhost a 64 MB object moves in a few hundredths of a
 second, so `cp_upload_large` / `cp_download_large` there are the CPU cost of
-multipart orchestration, not throughput - and on the CRT lane the aws side can
-finish inside its own startup constant, which the report renders as `-`. For a
-throughput figure the object has to be large enough to outlast startup by a
+multipart orchestration, not throughput - and on the CRT lane the aws-cli side
+can finish inside its own startup constant, which the report renders as `-`. For
+a throughput figure the object has to be large enough to outlast startup by a
 clear margin: `--large-transfer-mb` sizes both modes' large rows, and the EC2
 lane defaults it to 1024 for that reason. Read the 64 MB rows as overhead
 rows, not as the project's transfer speed.
@@ -231,10 +265,16 @@ interleaving is auditable), and for E2E the per-side peak RSS samples
 (`rss`, bytes) and the transfer scenarios' `payload_bytes`. Results are
 host-specific timings and stay out of git.
 
-`--baseline` accepts `last` (newest stored run of the same mode), a results
-file path, or a git-revision prefix matched against stored filenames. Rows
+`--baseline` accepts `last` (the newest stored run of the same mode recorded
+before the one reported, so `report` of an older file never compares it with
+a later run), a results file path, or a git-revision prefix matched against
+stored filenames. Neither `last` nor a prefix picks a run of the hidden
+regression-flag self-test (`--self-test-handicap-ms`, which inflates every
+boto3-s3 sample but the `startup_minimal` probe the nets subtract). Rows
 whose workload dimensions differ from the baseline's (e.g. comparing against
-a `--quick` run) are not compared.
+a `--quick` run) are not compared. `last` and a revision prefix search only
+the files directly in `benchmarks/results/`, so a file moved into a
+subdirectory can be named only by its path.
 
 A run belongs to a *lane*: `local` (no suffix) or
 `ec2-<instance type>-ubuntu<release>` for files the EC2 launcher brought back, and `last` / a revision prefix never
@@ -251,8 +291,8 @@ machine environment - are kept in [benchmarks/RESULTS.md](../benchmarks/RESULTS.
 which survives the git-ignored results directory.
 
 Flag rules (`--threshold`, default 1.10): an E2E work scenario flags when
-`(net ratio now) / (net ratio baseline)` exceeds the threshold - the aws side
-is the same-run control, so this survives cross-run host noise; without a
+`(net ratio now) / (net ratio baseline)` exceeds the threshold - the aws-cli
+side is the same-run control, so this survives cross-run host noise; without a
 baseline the ratio itself must exceed it. Startup probes and in-process
 scenarios flag on `median now / median baseline`.
 
@@ -265,7 +305,9 @@ wrong *absolute* picture of where `aws s3` actually runs. The EC2 lane records
 a baseline in a representative environment (a quiet, fixed-performance
 instance against real S3 in one region) whose "instance type + AMI + region"
 someone else can reproduce. It is not a per-commit lane; run it when recording
-a baseline for [RESULTS.md](../benchmarks/RESULTS.md).
+a baseline for [RESULTS.md](../benchmarks/RESULTS.md), or when refreshing the
+one-file `sync` numbers in the [CLI README](../cli/README.md), which come from
+this lane only.
 
 ```
 python -m benchmarks ec2 setup-iam            # once, needs an administrator
@@ -274,6 +316,7 @@ python -m benchmarks ec2 run --instance-type m7g.xlarge   # a Graviton run
 python -m benchmarks ec2 run --ubuntu-release 24.04       # the previous LTS
 python -m benchmarks ec2 run --on-demand      # when spot capacity is not there
 python -m benchmarks ec2 cleanup              # the safety net for a launcher that died
+setsid nohup python -m benchmarks ec2 run > /tmp/ec2-run.log 2>&1 &   # outlives its terminal
 ```
 
 The launcher orchestrates; the instance does the work. `run` resolves the
@@ -283,8 +326,8 @@ AMI's root device name; hands the instance a `git archive HEAD` of the tree
 over S3 (a dirty tree is refused, so a baseline is attributable to a commit);
 waits for a completion marker; pulls the results into `benchmarks/results/`;
 and terminates the instance. The instance provisions the same way the local
-lane does - the pinned `aws`, `uv sync --locked`, the chosen Python - and
-runs both modes against real S3.
+lane does - the pinned `aws`, the uv version `mise.toml` pins, `uv sync
+--locked`, the chosen Python - and runs both modes against real S3.
 
 - **The image is Ubuntu LTS, 26.04 by default.** The local lane develops and
   measures on Ubuntu (WSL2), so the same distribution on EC2 keeps glibc and
@@ -304,7 +347,8 @@ runs both modes against real S3.
   profile; it is the one step that needs an administrator, so it is separate
   and run once.
 - **Region.** Resolved as explicit `--region`, then `AWS_REGION`, then
-  `AWS_DEFAULT_REGION`, then the profile - and passed explicitly to every
+  `AWS_DEFAULT_REGION`, then the region of `--profile` (or, without it, of the
+  ambient profile) - and passed explicitly to every
   client and to both CLIs on the instance, because this project's botocore
   floor does not itself read `AWS_REGION`.
 - **The instance type is the only knob for architecture.** `--instance-type`
@@ -329,10 +373,16 @@ runs both modes against real S3.
   stops with that message rather than falling back on its own: paying
   on-demand is a choice.
 - **Cost, and not leaking an instance.** A run is ~30-40 minutes, well under
-  US$1 of instance time plus S3 request charges. The one real risk is a
-  leaked instance, so it has three independent deaths: a timed `shutdown`
-  armed before any work (`--max-minutes`, default 60), `terminate` as the
-  shutdown behavior, and the launcher's own terminate on the way out.
+  US$1 of instance time, plus about 200k PUT-class S3 requests at the
+  default scale (about US$0.95 at the ap-northeast-1 rate; the uploads the
+  E2E scenarios time and the corpora re-seeded before every invocation make
+  up most of them). The one real risk is a
+  leaked instance, so it has two independent deaths: a timed `shutdown` the
+  instance arms before any work (`--max-minutes`, default 60) and the
+  launcher's own terminate on the way out; `terminate` as the shutdown
+  behavior makes every shutdown a termination. Both need something to run -
+  the user data, the launcher - and when neither does, `cleanup` is what
+  stops the instance.
 - **Every ending is explained.** Provisioning runs under errexit with an ERR
   trap that names the failing line; an outside shutdown (a spot reclaim, the
   budget timer) arrives as SIGTERM and is recorded as such; and the EXIT trap
@@ -341,34 +391,60 @@ runs both modes against real S3.
   because the global endpoint answers for a new bucket with a redirect that
   `curl -T` does not follow), so reporting needs neither credentials nor a
   CLI on the instance and a failure before anything was provisioned still
-  leaves a reason behind. The instance also syncs its log every minute, so a
-  stop that leaves no time for the trap still leaves a recent record, and
-  the launcher shows the log's latest line as progress while it waits. When
+  leaves a reason behind. A URL presigned with temporary credentials (SSO, an
+  assumed role) stops working when they expire, whatever its own expiry, so
+  the launcher warns when its credentials carry a session token: they need
+  the budget plus a quarter hour left. The instance also syncs its log every
+  minute (a failed upload does not end the loop), so a stop that leaves no
+  time for the trap still leaves a recent record, and the launcher shows the
+  log's latest line as progress while it waits. When
   the instance disappears without a marker the launcher reads EC2's stop
-  reason. The last line the launcher prints is the verdict: completed, a
-  benchmark exit code, the provisioning line that failed, a spot
-  interruption, the budget exceeded, a service-side stop, results that
-  arrived without a marker (a reporting fault, not a benchmark one), or its
-  own timeout - followed by the log tail when the run did not succeed.
+  reason, as it does for a marker that records an outside shutdown. The
+  launcher ends with the verdict: completed, a benchmark exit code, the
+  provisioning line that failed, a spot interruption, the budget exceeded, a
+  service-side stop, results that arrived without a marker (a reporting
+  fault, not a benchmark one), or its own timeout - followed by the log tail
+  when the run did not succeed, or by where the results went when it did.
 - **Repeating a failed run is safe.** Everything a run creates is named by
   the run: the instance (tagged with the run id), its own bucket
   (`boto3-s3-bench-<run id>`, named by the launcher and handed to the
   harness), and the `<run id>/` prefix in the hand-off bucket. Each mode's
   results are uploaded as soon as that mode finishes, so an interruption in
-  the second mode keeps the first mode's file. Whatever the ending, the
-  launcher terminates the instance, removes the run's bucket if the harness
-  did not, and deletes the code tarball (also when the launch itself
-  failed); the log and results stay under the run prefix as the run's
-  record. So the answer to a failed run is another `ec2 run`. `cleanup` is
-  the safety net for a launcher that died before its own teardown: it
-  terminates anything still tagged and force-deletes any `boto3-s3-bench-*`
-  bucket left on real S3 (the persistent `boto3-s3-bench-boot-*` hand-off
-  buckets excepted) - do not run it while another run is in flight.
+  the second mode keeps the first mode's file. Unless ended by a signal
+  (below), the launcher terminates the instance, removes the run's bucket if
+  the harness did not, and deletes the code tarball (also when the launch itself
+  failed, or the wait was interrupted with Ctrl-C); the log and results stay
+  under the run prefix as the run's record. When the launcher stopped first
+  (its own timeout, Ctrl-C) the instance may still be writing, so its
+  termination is waited out before its bucket is emptied; a second Ctrl-C
+  abandons that wait and leaves the bucket to `cleanup`. `--keep` leaves such
+  an unfinished run to the instance instead - the instance, its bucket and
+  the code tarball, which it may not have fetched yet; once the run has ended
+  it changes nothing. So the answer to a failed run is another
+  `ec2 run`. `cleanup` is the safety net for a launcher that died before its
+  own teardown: it terminates anything still tagged, waits for that, and
+  then force-deletes any `boto3-s3-bench-*` bucket left on real S3 (the
+  persistent `boto3-s3-bench-boot-*` hand-off buckets excepted) - do not run
+  it while another run is in flight. It exits 2 when it could not confirm the
+  termination.
+- **A launcher ended by a signal runs no teardown.** `kill`, a closed terminal
+  and SIGKILL end the process where it stands; only Ctrl-C unwinds through the
+  teardown. The instance then runs the benchmark to its end and terminates
+  itself, at the budget at the latest, and costs what the run costs. Its
+  results stay under the run prefix, undownloaded. Its bucket is gone if the
+  harness finished; otherwise `cleanup` removes it, and stops the instance if
+  it should not finish. The code tarball stays in the hand-off bucket, as a
+  kept run's does, until removed by hand: `cleanup` leaves that bucket alone.
+  Handling those signals is not worth its own failure modes (a closed terminal
+  breaks the teardown's output, and a handler overrides the SIGHUP that `nohup`
+  ignores): the cost is one small object, and a long run is started so that a
+  closed terminal does not reach it (`setsid nohup`). The launcher line-buffers
+  its output, so the log shows the run's progress as it goes.
 - **What comes back.** The results files land in `benchmarks/results/` with
   the lane spelled in their name (`...bbbbbbbbbb.ec2-m7i.xlarge-ubuntu26.04.jsonl`),
   the archived commit as their revision, and the AMI id in the meta record;
   render them with `report`, compare two EC2 runs with `--baseline last` from
-  either, and record the entry in RESULTS.md with the instance type, Ubuntu
+  the later one, and record the entry in RESULTS.md with the instance type, Ubuntu
   release and AMI, region, and Python version.
 - **A clean shell.** The launcher refuses to start if the shell is configured
   for the dev stack (`AWS_ENDPOINT_URL_S3` or the dev static key), because
@@ -378,9 +454,9 @@ runs both modes against real S3.
 Cross-run `--baseline` comparison stays like-for-like only within one lane,
 which is one instance type on one Ubuntu release; an x86-64 and a Graviton
 run are two baselines to read side by side, not a regression pair, and the
-lane scoping enforces that. The local lane is like-for-like only within one
-dev stack server: runs before 2026-10-17 were against MinIO, later ones
-against RustFS.
+lane scoping enforces that. The local lane is like-for-like only between
+runs against the same dev stack server (the S3 server
+`scripts/compose.dev.yaml` runs).
 
 ## Reading the numbers on this host
 

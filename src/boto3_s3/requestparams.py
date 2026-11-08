@@ -6,7 +6,7 @@ S3 operation the transfer path performs, each returning a fresh dict of
 PascalCase API parameters built from the snake_case ``TransferOptions``.
 Falsy values are omitted exactly like aws-cli's truthiness gates - including
 their quirks: a truthy SSE-C algorithm carries its dependent key value
-verbatim even when falsy, as aws does.
+verbatim even when falsy, as aws-cli does.
 
 Only the operations the transfer path actually calls are ported
 (put/get/copy/head/tagging/delete, plus the annotation pair -
@@ -15,14 +15,18 @@ aws-cli's CreateMultipartUpload /
 UploadPart variants are ``s3transfer``'s internal concern - it splits the
 submit-time extra args itself.
 
-The grants shape is validated here with aws-cli's exact wording, but the
-*call site* is the transfer submit path: aws-cli maps params per item inside
-its pipeline, so a bad ``--grants`` surfaces as an in-flight fatal error
-(rc 1), never as a usage error - keep mapping lazy to preserve that.
+The grants shape is validated here. aws-cli maps params per item inside its
+pipeline, so a bad ``--grants`` surfaces there as an in-flight fatal error -
+after any deletes already sent, or not at all when nothing needs
+transferring. The operation layer instead refuses it before the run
+(`validate_grants`, a ``ValidationError`` like any other malformed argument),
+on every route, and the CLI checks its ``--grants`` with the same function;
+the per-item mapping keeps the same check.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from boto3_s3.exceptions import ValidationError
@@ -151,10 +155,24 @@ def map_put_object_annotation_params(options: TransferOptions) -> dict[str, Any]
 
 
 def map_delete_object_params(options: TransferOptions) -> dict[str, Any]:
-    """API params for the copy-props rollback delete (and mv's source delete)."""
+    """API params for the copy-props rollback delete."""
     params: dict[str, Any] = {}
     _set_request_payer_param(params, options)
     return params
+
+
+def validate_grants(grants: Sequence[str] | None, *, operation: str) -> None:
+    """Refuse a malformed ``grants`` value before the run starts.
+
+    Each entry must be ``permission=grantee`` with ``permission`` one of
+    ``read``, ``readacl``, ``writeacl`` or ``full`` - the same check the
+    upload and copy mappers make per item (`_set_grant_params`), run once
+    over the value alone, so a bad grant stops every route (a download's
+    included, which maps no grants) before anything is listed, sent or
+    deleted. ``None`` or an empty sequence is no grants. Raises
+    ``ValidationError`` naming ``operation``.
+    """
+    _set_grant_params({}, TransferOptions(grants=grants or ()), operation)
 
 
 def _set_general_object_params(
@@ -258,6 +276,7 @@ def _set_no_overwrite_param(params: dict[str, Any], options: TransferOptions) ->
         params["IfNoneMatch"] = "*"
 
 
-# Package-internal: the mappers are consumed by producers/transfer only and
-# carry no documented surface (design/imports.md).
-__all__: list[str] = []
+# The mappers are package-internal (producers / transfer). `validate_grants` is
+# the documented surface: the operation layer (s3) and the CLI's argument
+# handling share it as the one grants check (design/imports.md).
+__all__ = ["validate_grants"]

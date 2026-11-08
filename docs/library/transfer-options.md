@@ -62,15 +62,24 @@ requests, and a 1000-deep download IO queue (boto3's own class buffers a tenth
 of that; see [`options.md`](../reference/options.md#transferconfig)). Set it
 once on the `S3` object to apply everywhere, and per call to override.
 
-**Unlike `aws s3`, the library never reads the `[s3]` section of
-`~/.aws/config`** — tuning comes only from `TransferConfig`. To reuse the values
-already in your config file, read them with `s3.aws_config()` and pass them in;
-see [`s3-object.md`](./s3-object.md).
+**Like `aws s3`, `cp` / `mv` / `sync` / `rm` read the `[s3]` section of
+`~/.aws/config`** for the active profile. Each setting comes from the first
+of: what you pass to `TransferConfig`, the `[s3]` value, the default above —
+so `TransferConfig(max_concurrency=4)` overrides the concurrency and leaves the
+rest to the file. A plain `boto3.s3.transfer.TransferConfig` is used as it is.
+To keep a run free of the file, point `AWS_CONFIG_FILE` elsewhere, as for
+boto3 ([`S3.resolve_transfer_config`](../reference/s3.md#resolve_transfer_configtransfer_confignone--copyfalse)).
 
 `preferred_transfer_client` selects the engine — `"auto"` (the default),
 `"classic"`, or `"crt"`. S3-to-S3 copies always use the classic engine, since
 the CRT engine has no copy operation. See
 [`compatibility.md`](../compatibility.md) for what the CRT engine needs.
+
+The classic engine does not check a download split into ranges (a single
+object at or above the multipart threshold) against the checksum stored with
+the object, as it checks a download that comes in one piece, so a corruption
+that got past TLS and TCP would land as a success. The CRT engine checks both;
+select `"crt"` when that matters.
 
 ## 2. Refusing to overwrite
 
@@ -109,9 +118,9 @@ whole mechanism.
 
 Under `default` and `all`, tags too large for the request header are applied
 after the copy succeeds. If that call fails, the destination is deleted on a
-best-effort basis and the item is reported as failed. There is one corner where
-that cleanup itself fails: the item is then reported **successful** with the
-destination left carrying no tags, which is `aws s3`'s behavior as well.
+best-effort basis and the item is reported as failed. If that cleanup fails
+too, the item is still reported as failed, and the destination is left in
+place without its tags (`aws s3` reports this case as a success).
 
 `annotation_copy_mode` chooses how a multipart copy under `copy_props="all"`
 stages the source annotations
@@ -174,9 +183,35 @@ s3.sync(LocalStorage("./site", follow_symlinks=False), "s3://bucket/site/")
 ```
 
 `follow_symlinks` matches `aws s3`. `detect_symlink_loops` is an addition, off
-by default to preserve that parity: without it a symlink cycle descends until
+by default to keep that behavior: without it a symlink cycle descends until
 the operating system stops it, exactly as `aws s3` does; with it, a directory
 that resolves to one of its own ancestors is skipped with a warning.
+
+**Local file names.** On Linux and other POSIX systems a file name is bytes,
+and Python turns them into text with its file system encoding: the locale's,
+or UTF-8 in Python's UTF-8 mode — which Python 3.15 turns on by default, and
+`PYTHONUTF8=1` on any version. The library follows that choice. An application
+written for one encoding names it, on the storage or once on `S3` for every
+local path given as a string:
+
+```python
+s3 = S3(filename_encoding="euc_jp")
+
+s3.sync("./site", "s3://bucket/site/")           # names read as EUC-JP
+s3.cp("s3://bucket/a/", "./a", recursive=True)   # files created with EUC-JP names
+```
+
+An upload's keys are the names decoded with that encoding, a download's files
+are the keys encoded with it, and the paths the results and warnings report are
+that text. A name the encoding cannot decode is carried with `surrogateescape`
+and fails as an S3 key; a key it cannot encode fails as that item. The CRT
+engine opens local files by UTF-8 names only, so on it a file whose name in
+that encoding is not valid UTF-8 fails as that item, an upload and a download
+alike; the classic engine moves it. The paths
+you pass are text in that encoding too, and `LocalStorage.os_path` gives the
+form to hand to Python's own `os` functions. Windows names files in Unicode,
+so the setting has no effect there. The `boto3-s3` command sets it to the
+encoding `aws` uses.
 
 Listing behavior is likewise configured on `S3Storage` — `page_size` and
 `fetch_owner`. See [`s3-object.md`](./s3-object.md).

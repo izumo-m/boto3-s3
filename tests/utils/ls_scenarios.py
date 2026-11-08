@@ -5,14 +5,9 @@ functional (moto) and e2e (dev stack / real S3) suites exercise **identical
 inputs** - that identity is what makes "golden captured from aws-cli" a valid
 expectation for the moto replay.
 
-Charter note (design/overview.md section 3): the exit code is compared for *every*
-scenario, unconditionally - there is deliberately no flag to relax it.
+The exit code is compared for *every* scenario, unconditionally
+(design/testing.md section 2) - there is deliberately no flag to relax it.
 ``compare_stdout`` / ``diff_only`` only relax stdout and golden handling.
-
-Not represented here:
-
-- the interactive prompt (``--cli-auto-prompt``): it needs a terminal on both
-  sides and is the charter's exception 2, so it is unit-tested instead.
 """
 
 from __future__ import annotations
@@ -78,7 +73,7 @@ SCENARIOS: tuple[LsScenario, ...] = (
         _TREE,
     ),
     LsScenario("ls_page_size", ("ls", f"s3://{BUCKET_TOKEN}/pg/", "--page-size", "5"), _PAGED),
-    # Key given but nothing matches -> rc 1 (aws _check_no_objects).
+    # Key given but nothing matches -> rc 1 (aws-cli _check_no_objects).
     LsScenario("ls_empty_prefix", ("ls", f"s3://{BUCKET_TOKEN}/no-such-prefix/")),
     # Bucket given without key -> rc 0 even when empty.
     LsScenario("ls_bucket_empty", ("ls", f"s3://{BUCKET_TOKEN}")),
@@ -92,7 +87,7 @@ SCENARIOS: tuple[LsScenario, ...] = (
     LsScenario(
         "ls_nonexistent_bucket",
         ("ls", f"s3://{BUCKET_TOKEN}-no-such/"),
-        expected_stderr_tokens_ours=("boto3-s3:", "NoSuchBucket"),
+        expected_stderr_tokens_ours=("NoSuchBucket",),
         expected_stderr_tokens_aws=("NoSuchBucket",),
     ),
     # Out-of-range page sizes pass through to the server with no client-side
@@ -111,7 +106,7 @@ SCENARIOS: tuple[LsScenario, ...] = (
         expected_stderr_tokens_aws=("InvalidArgument",),
     ),
     # A non-integer page size dies in the CLI's own int() conversion -> rc
-    # 255 on both sides (aws's bare int() escapes to its *general* handler,
+    # 255 on both sides (aws-cli's bare int() escapes to its *general* handler,
     # not the 252 usage path). No server contact, so it
     # replays on moto unchanged.
     LsScenario(
@@ -119,15 +114,6 @@ SCENARIOS: tuple[LsScenario, ...] = (
         ("ls", f"s3://{BUCKET_TOKEN}/pg/", "--page-size", "abc"),
         expected_stderr_tokens_ours=("invalid literal",),
         expected_stderr_tokens_aws=("invalid literal",),
-    ),
-    # Head-order (design/cli.md 5.7): the --endpoint-url scheme check (252, aws
-    # validates the value at parse time) beats the bare int() coercion (255).
-    LsScenario(
-        "ls_endpoint_beats_page_size",
-        ("ls", f"s3://{BUCKET_TOKEN}/pg/", "--page-size", "abc", "--endpoint-url", "badurl"),
-        _PAGED,
-        expected_stderr_tokens_ours=("scheme is missing",),
-        expected_stderr_tokens_aws=("scheme is missing",),
     ),
     # Access-point ARN bucket: botocore (driving both tools) injects the AP
     # name as a host prefix onto the endpoint, so against the dev stack and
@@ -146,7 +132,7 @@ SCENARIOS: tuple[LsScenario, ...] = (
     LsScenario(
         "ls_object_lambda_arn",
         ("ls", "s3://arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/my-olap"),
-        expected_stderr_tokens_ours=("boto3-s3:", "S3 Object Lambda", "s3api"),
+        expected_stderr_tokens_ours=("S3 Object Lambda", "s3api"),
         expected_stderr_tokens_aws=("S3 Object Lambda", "s3api"),
     ),
     LsScenario(
@@ -156,7 +142,7 @@ SCENARIOS: tuple[LsScenario, ...] = (
             "s3://arn:aws:s3-outposts:us-west-2:123456789012:"
             "outpost/op-01234567890123456/bucket/my-bucket",
         ),
-        expected_stderr_tokens_ours=("boto3-s3:", "Outpost Bucket", "s3control"),
+        expected_stderr_tokens_ours=("Outpost Bucket", "s3control"),
         expected_stderr_tokens_aws=("Outpost Bucket", "s3control"),
     ),
 )

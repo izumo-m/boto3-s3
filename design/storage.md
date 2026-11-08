@@ -3,7 +3,7 @@
 `Storage` is the abstraction the `S3` operations resolve their sides into:
 `S3.resolve` turns a path/URI argument into a `Storage`. The built-ins are
 `S3Storage` (an S3 bucket/key), `LocalStorage` (a local path), and the
-`IOStorage` / `StdioStorage` stream wrappers. A **custom subclass** is one more
+stream storages (`IOStorage`, `TextIOStorage`, `StdioStorage`; section 5). A **custom subclass** is one more
 `Storage`, so `cp` / `mv` / `sync` reach it through the same planning and
 engine path as the built-ins - through this interface alone on the custom
 side, while the built-in routes use their concrete classes' own API (section
@@ -29,8 +29,8 @@ So a custom backend takes part only in `cp` / `mv` / `sync`, and never in a
 custom↔custom pair. The S3-only operations — `ls` / `rm` / `mb` / `rb` / `presign` /
 `website` — require an actual `S3Storage` and are not part of this seam, and
 neither is the single-request object transfer on `S3Storage` (section 6). (The
-built-in `IOStorage` / `StdioStorage` stream wrappers use the very same seam: a
-stream is a degenerate single-entry backend.)
+built-in stream storages use the very same seam: a stream is a degenerate
+single-entry backend.)
 
 ## 2. The contract
 
@@ -85,32 +85,10 @@ front only when the declaration is honest:
   `read_ahead=False` in its `default_scan_options`, which the operations narrow
   but never widen.
 
-  **A producer that fails part-way through a page** should yield what it has
-  already built and only then raise: `scan`'s prefetch re-raises a producer
-  error after the chunks it had queued are consumed, so the entries ahead of
-  the failure reach the consumer first - the entry-by-entry order aws-cli dies
-  in, where a page is the smallest chunk this interface can deliver. The
-  built-in S3 backend is what needs it: it reads the elements a listing entry
-  must carry by subscript, in aws-cli's own order (`Key` -> `LastModified` ->
-  `Size` for an object, `Prefix` for a common prefix, `CreationDate` -> `Name`
-  for a bucket), so an entry missing one raises `MalformedResponseError`
-  naming the element (aws-cli's `KeyError` text and cause) instead of being
-  silently dropped - the object listing emitting the part of
-  the page it had converted, the bucket listing being streamed entry by entry
-  to begin with. (A response that echoes `EncodingType` has botocore
-  URL-decode each `Key` / `Prefix` by subscript while it parses the page, so
-  there the same error is raised from the page fetch, the whole page lost with
-  it - aws-cli's listing dies in that same handler.) Its single-object `HeadObject` (`get_fileinfo`, and the
-  transfer engine's `producers.head_single`) reads `ContentLength` ->
-  `LastModified` the same way, `ETag` with a default - aws-cli's
-  `_list_single_object` order.
-
   `options.filter` (the `--exclude`/`--include` predicate) is applied by
-  **`scan()` as a safety net** by default, so a `scan_pages` that forgets it
-  cannot silently leak excluded entries into `--exclude`/`--include` or, on a
-  `sync --delete` destination, into deletion. A backend that filters at its
-  source applies it in `scan_pages` and declares
-  **`scan_pages_filters = True`** to skip the redundant re-filter
+  **`scan()`** by default, after `scan_pages`, so a backend need not filter at
+  all. A backend that filters at its source applies it in `scan_pages` and
+  declares **`scan_pages_filters = True`** to skip the redundant re-filter
   (`storage.sieve_pages` is the helper; a custom
   `LocalFileGenerator.finalize_children` override prunes by its *own* rules -
   it never sees `options.filter` - so it does not qualify by itself). Honor
@@ -125,7 +103,7 @@ front only when the declaration is honest:
   `ScanOptions` subclass still carries them to `scan_pages`, but the caller
   does not pass them per operation (`S3ScanOptions` = the `ListObjectsV2`
   knobs `page_size` / `fetch_owner`, plus the operation-set `request_payer` /
-  `prefix` / `include_common_prefixes`; `LocalScanOptions` = `follow_symlinks` /
+  `prefix`; `LocalScanOptions` = `follow_symlinks` /
   `detect_symlink_loops` / `enumerate_all_entries`, plus the internal `storage`
   back-reference the walk stamps on each entry). A subclass keeps one backend's
   knobs from leaking into another's; the built-ins reject a foreign options
@@ -140,29 +118,17 @@ front only when the declaration is honest:
   device-side-effect, and deletion behavior. The default `False` keeps aws-cli
   transfer enumeration.
 
-  The S3 side has one widening of the same kind, `include_common_prefixes`:
-  emit the `CommonPrefixes` of a **recursive** page as `DIRECTORY` entries
-  (a non-recursive page always emits them — its `Delimiter` is what asks for
-  them). Only `S3.ls` sets it, because aws-cli's display prints a page's common
-  prefixes whether or not `--recursive` was given, while its transfer-side
-  generator reads `Contents` only; a listing without a `Delimiter` gets no
-  prefixes from a conforming service, so the setting is visible only against
-  one that returns them anyway. The transfers keep the default `False`: a
-  directory record is not transferable, and a page's prefixes arrive ahead of
-  its objects, which would break the `compare_key` byte order `sync`'s
-  merge-join asserts on (section 3).
-
   `LocalStorage` also takes one **destination-side** constructor knob that is
-  *not* a scan source-config: `fsync` (default off = aws parity), a library
+  *not* a scan source-config: `fsync` (default off, as aws-cli), a library
   extension the transfer engine reads off the destination to make an `mv`
   download durable before deleting the S3 source (transfer.md section 11).
 - **`get_fileinfo(key="", *, on_warning=None) -> FileInfo | None`**
   — the single-entry counterpart of `scan` (a single source, or an existence
   check). `key=""` is the location itself; `None` means "no entry to hand the
   engine" (`LocalStorage`: an absent path, a `follow_symlinks=False` symlink,
-  or a special / unreadable file after the aws-style warn-and-skip - but a
+  or a special / unreadable file after the aws-cli-style warn-and-skip - but a
   directory *is* returned, with no type check, and fails later at `open` the
-  way aws fails). Whether a symlink is followed is `LocalStorage`'s own
+  way aws-cli fails). Whether a symlink is followed is `LocalStorage`'s own
   `follow_symlinks` config, read from the storage like every scan (not a
   parameter here). `enumerate_all_entries` does not apply: the point query
   always uses those single-file rules.
@@ -183,8 +149,7 @@ A few more members come with working defaults a custom backend normally keeps:
   that takes the base `ScanOptions` sets nothing. A custom subclass must stay a
   `frozen=True, kw_only=True` dataclass and give **every added field a
   default**: the high-level operations overlay only the run-level knobs — the
-  operation-inherent ones plus the application's Ctrl-C posture
-  (`reusable_after_interrupt`, from `S3(reusable_after_interrupt=…)`) — via
+  operation-inherent ones — via
   `dataclasses.replace(storage.default_scan_options(), …)`, and the
   base `default_scan_options()` constructs the type with no arguments.
 - **`default_scan_options() -> ScanOptions`** — builds `scan_options_type` and is
@@ -199,32 +164,18 @@ A few more members come with working defaults a custom backend normally keeps:
   storage's source-config — and a custom `scan_options_type` subclass — flows
   through the operations, not only an arg-less `scan()`. This is how an app
   configures the walk / listing once on the storage rather than per call.
-- **`ScanOptions.reusable_after_interrupt`** (not a `Storage` member) — the Ctrl-C
-  exit policy of `scan()`'s background page worker. `True` (the default): the
-  scan's teardown always waits for a page pull already in flight, so no worker
-  survives the operation — required for an app that may catch
-  `KeyboardInterrupt` and continue. `False`: a `KeyboardInterrupt` unwind
-  abandons the daemon worker instead of waiting (an in-flight network pull can
-  otherwise hold the exit for a full timeout) — only for an app that treats
-  Ctrl-C as process-fatal. The application declares the posture once, on
-  `S3(reusable_after_interrupt=…)`; every scan an operation starts receives it
-  through this field, and only a direct `Storage.scan` caller sets it here
-  itself. The CLI's `S3` declares `False`, matching aws's immediate death on
-  Ctrl-C. It scopes to the interrupt alone: every other exit — exhaustion, an
-  early break, `SystemExit` (`sys.exit()` requests an orderly termination),
-  an ordinary exception — always waits (`concurrency.prefetch`). The interrupt
-  does not always unwind *through* the prefetch context (it can land in a
-  result callback or a submission wait, leaving the scan's teardown a plain
-  close), so the operations mark the unwind
-  (`concurrency.mark_interrupt_unwinding`, monotonic — the process is fatal by
-  declaration) and every posture-`False` teardown from then on abandons its
-  worker too.
+- **The exit of `scan()`'s background page worker** — a scan closed before its
+  end does not wait for a page pull already in flight, which can hold the exit
+  for a full timeout (overview section 3): the worker is told to stop, drops the
+  page it brings back and ends by itself, a daemon that starts no further pull.
+  The close cannot tell a Ctrl-C from any other end without guessing from the
+  exception's context, which misfires, so no close waits.
 - **`sep: ClassVar[str]`** — the separator of the backend's path space (`"/"`;
   only `LocalStorage` overrides with the host `os.sep`). Keep the default: the
   `FileInfo.key` / `compare_key` contract is `/`-separated.
 - **`format(*, dir_op) -> (root, use_src_name)`** — how this side enters a
   transfer plan (the per-side half of aws-cli's `FileFormat.format`, resolved
-  polymorphically; `S3Storage` / `LocalStorage` override it with aws's
+  polymorphically; `S3Storage` / `LocalStorage` override it with aws-cli's
   `s3_format` / `local_format` on their own held state). The default is the
   open-route rule. The root is `""`: a custom backend encapsulates its own
   location, its `open` receives `compare_key`, which addresses an entry relative
@@ -234,9 +185,9 @@ A few more members come with working defaults a custom backend normally keeps:
   (`dir_op` or a trailing `/` on `as_text()`).
 - **`validate() -> None`** — a public hook for deferred strict validation of
   the location, a no-op by default. Construction is permissive (a building
-  block); an operation — or the CLI at its parity point — calls this to reject
-  a malformed location loudly before use. `S3Storage` overrides it with the
-  aws-cli-parity checks (unsupported ARN forms, a key with no bucket),
+  block); an operation — or the CLI where aws-cli validates — calls this to
+  reject a malformed location loudly before use. `S3Storage` overrides it with
+  the checks aws-cli makes (unsupported ARN forms, a key with no bucket),
   `LocalStorage` rejects an empty path (`""` is no location to Python, only
   `abspath` would make it the working directory; aws-cli agrees except for
   the destination of a single download, which the CLI layer turns into `"."`
@@ -260,7 +211,9 @@ A `FileInfo` carries two keys (see [`glossary.md`](./glossary.md)):
 - **`key`** is the entry's full, `/`-separated identifier **in the backend's own
   address space** — what `delete(info)` acts on (the built-ins key on
   `info.key`). A backend chooses its own space (`S3Storage`'s `key` is the full
-  bucket key, `LocalStorage`'s an absolute path). A typical custom backend uses
+  bucket key, `LocalStorage`'s an absolute path - as text in its
+  `filename_encoding`, which `LocalStorage.os_path` turns into what the OS
+  calls take; design/transfer.md section 8). A typical custom backend uses
   keys relative to its location, so a recursive entry's `key` is its
   `compare_key` and the single location is `""`. `open`'s
   address argument is backend-specific: `S3Storage.open` takes the full bucket
@@ -296,18 +249,18 @@ of deep inside the run:
 
 The reading members form a lattice: `SORTABLE_SCAN` implies `SCAN` implies
 `GET_FILEINFO`. `sync`'s merge-join walks both listings in UTF-8 byte order, so a
-custom `sync` side **must** declare `SORTABLE_SCAN` — an unsorted listing would
-manufacture phantom pairs and, with `--delete`, corrupt the destination. The
-promise is taken on trust: the merge follows aws-cli's step for step and does
-not check the order, so a backend that breaks it - like an S3-compatible
-endpoint returning an unsorted `ListObjectsV2`, on which aws-cli mis-pairs the
-same way - gets aws-cli's mis-pairing ([`sync.md`](./sync.md) section 3).
+custom `sync` side **must** declare `SORTABLE_SCAN` and honor it, listing each
+`compare_key` once. Both promises are taken on trust: the merge follows
+aws-cli's step for step and checks neither, and what a backend breaking them
+leads to is not specified ([`overview.md`](./overview.md) section 3). An
+S3-compatible endpoint returning an unsorted `ListObjectsV2` is the library's
+own reach, and gets aws-cli's mis-pairing ([`sync.md`](./sync.md) section 3).
 **`sync` is the only order-sensitive consumer**: recursive `cp` / `mv` take the
 backend's entries in whatever order `scan` yields them (they never pass
 `ScanOptions(sort=True)`), so a plain `SCAN` side needs no ordering guarantee
 at all. The byte-order promise is likewise scoped to the recursive listing
 `sync` performs: a non-recursive (delimiter) listing keeps its native shape -
-`S3Storage`'s pages emit a page's common prefixes before its objects, aws
+`S3Storage`'s pages emit a page's common prefixes before its objects, aws-cli
 `ls`'s order. A recursive custom *destination* of `cp` / `mv` needs no `SCAN`
 either - only `sync` lists a destination. The exact per-route gates are in
 [`sync.md`](./sync.md) / [`transfer.md`](./transfer.md).
@@ -375,18 +328,27 @@ S3().sync(DictStorage(store), "s3://my-bucket/data/")   # custom -> S3 (upload)
 S3().sync("s3://my-bucket/data/", DictStorage(store))   # S3 -> custom (download)
 ```
 
-## 5. Streams: `IOStorage` and `StdioStorage`
+## 5. Streams: `IOStorageBase` and its subclasses
 
-`IOStorage` is a built-in `Storage` that presents **one caller-supplied stream**
-as a single `open`-able endpoint, so a stream can be one side of a
-non-recursive `cp`, or the destination of a non-recursive `mv` (the other side
-always S3), without a temp file:
+A stream storage presents **one stream** as a single `open`-able endpoint, so a
+stream can be one side of a non-recursive `cp`, or the destination of a
+non-recursive `mv` (the other side always S3), without a temp file. They all
+derive from `IOStorageBase`, which is what `cp` / `mv` recognize a stream side
+by:
+
+```
+IOStorageBase                         bytes; `open` abstract
+├─ IOStorage(stream)                  a binary stream the caller hands over
+├─ StdioStorage()                     the process's stdin / stdout
+└─ TextIOStorageBase(*, encoding)     text; `open_text` abstract, `open` wraps it in a codec
+   └─ TextIOStorage(stream, *, encoding)   a text stream the caller hands over
+```
 
 ```python
 import gzip
 import io
 
-from boto3_s3 import S3, IOStorage
+from boto3_s3 import S3, IOStorage, TextIOStorage
 
 s3 = S3()
 
@@ -395,54 +357,94 @@ with open("hello.txt", "rb") as f:
     s3.cp(IOStorage(f), "s3://bucket/hello.txt")
 
 # upload from a text buffer (encoded with `encoding`, default utf-8)
-s3.cp(IOStorage(io.StringIO("hello")), "s3://bucket/hello.txt")
+s3.cp(TextIOStorage(io.StringIO("hello")), "s3://bucket/hello.txt")
 
 # download into a buffer, then read it back: rewind it yourself (or use
 # getvalue())
 buf = io.StringIO()
-s3.cp("s3://bucket/hello.txt", IOStorage(buf))
+s3.cp("s3://bucket/hello.txt", TextIOStorage(buf))
 buf.seek(0)
 print(buf.read())            # or: print(buf.getvalue())
 
-# download straight into a gzip writer - a GzipFile reports seekable() but
-# seeks only forward, so hand over just its write(): a non-seekable binary
-# write stream is written strictly in order
-class WriteOnly:
-    def __init__(self, stream):
-        self.write = stream.write
-
+# download straight into a gzip writer (written strictly in order)
 with gzip.open("hello.txt.gz", "wb") as f:
-    s3.cp("s3://bucket/hello.txt", IOStorage(WriteOnly(f)))
+    s3.cp("s3://bucket/hello.txt", IOStorage(f))
 ```
 
 The contract:
 
-- **Bytes at the s3transfer boundary.** A **binary** stream (`io.BytesIO`, a file
-  opened `"rb"` / `"wb"`, a `gzip` writer, a pipe) is used as-is; a **text**
-  stream (`io.StringIO`, a file opened `"r"` / `"w"`) is wrapped with a codec
-  (`IOStorage(stream, encoding="utf-8")`) — encode on upload, decode on download.
-- **The caller owns the stream.** `IOStorage` **never closes** it and never
-  rewinds it for you: lifecycle and final position are yours. Where a download
-  lands depends on the stream and the engine: the binary view passes `seek`
-  through, so on the classic engine s3transfer's seekable download path writes
-  a seekable binary stream at absolute offsets from 0 — its prior position is
-  ignored, and a multipart download can leave it anywhere — while a text
-  stream, a non-seekable one, an append-mode binary stream (`open(p, "ab")`, a
-  `>>` redirected stdout's `.buffer`: it reports `seekable()` but every write
-  lands at its end, so the view hides `seek` and the parts arrive in order
-  instead of scrambling) and any stream under the CRT engine are written in
-  order from their current position. The append cue is the `mode` string, plus
-  the descriptor's `O_APPEND` flag where `fcntl` can read it - POSIX only:
-  measured on Windows, `os.fdopen(os.open(p, O_APPEND), "wb")` goes
-  unrecognized and scrambles, and a `cmd` `>>` redirect is no append stream at
-  all (seekable, positioned at the end, written from offset 0). To read a
-  download back, rewind it
+- **Bytes at the s3transfer boundary; the class says which kind the caller
+  holds.** `IOStorage` takes a binary stream (`io.BytesIO`, a file opened
+  `"rb"` / `"wb"`, a `gzip` writer, a pipe) and uses it as-is; `TextIOStorage`
+  takes a text stream (`io.StringIO`, a file opened `"r"` / `"w"`, a text
+  stream of the caller's own making) and wraps it with a codec — encode on
+  upload, decode on download. Nothing guesses the kind from the object: the
+  constructor's type says it, so a type checker catches a mix-up, and a stream
+  of the caller's own making is carried as the class it was handed to. A
+  stream of the wrong kind is an argument of the wrong type, whose outcome is
+  not specified (overview section 3): it fails obscurely in the engine, or
+  never ends (botocore's up-front checksum read compares a `str` end of
+  stream with `b""`). The constructors check only what is certain - a stream
+  whose class makes it the other kind (`io.TextIOBase` to `IOStorage`,
+  `io.RawIOBase` / `io.BufferedIOBase` to `TextIOStorage`) is refused with
+  `ValidationError`, naming the class to use - and guess at nothing else:
+  a text-mode `NamedTemporaryFile` / `SpooledTemporaryFile` (and Windows'
+  `TemporaryFile`, which is the former) and `codecs`' streams derive from no
+  `io` class and pass
+  unchecked (the `encoding` attribute they carry is a guess that would also
+  refuse a binary stream carrying one, and `codecs.open`'s text stream calls
+  its mode `"rb"`).
+- **An endpoint of the caller's own.** A subclass of `IOStorageBase`
+  implements `open` (bytes); a subclass of `TextIOStorageBase` implements
+  `open_text(key, mode)` (`"r"` / `"w"`, returning a text stream) and gets the
+  codec from the base, a fresh one per `open`, so a stateful encoding starts
+  afresh for every transfer. Both methods are abstract, so a subclass that
+  forgets one is refused by Python at instantiation. `key` / `size` carry
+  nothing for a single endpoint (cp and mv pass different values). The bases
+  take no stream: a subclass that opens its own (a file, opened only when the
+  transfer needs it) has none to pass.
+- **When the stream opens: a destination at its first byte, a source as the
+  run starts.** A download - `cp` and `mv` alike - writes every stream
+  destination through the open route's deferred writer
+  (`producers.deferred_writer`, transfer.md section 12): it offers only
+  `write`, so the engine writes in order from where the stream stands, and it
+  calls `open` when the first byte arrives, so a download that ends before
+  then (a missing object, a cancel, a dry run) never opens the destination - a
+  subclass that opens a file with `"w"` does not empty it for nothing - and a
+  zero-byte object opens it at the commit. It is the same rule the open route
+  took for custom backends (2026-07-22): open when the bytes move, not when
+  the item is queued. In-order writing also makes `IOStorage`'s former
+  write-side views redundant - an append-mode stream, a pipe claiming to seek,
+  a `GzipFile` that seeks only forward are all written in order - at the cost
+  of a classic download's positioned parallel writes into a seekable stream:
+  parts are still fetched in parallel, and one that arrives early waits in
+  memory (`DeferQueue`), as for aws-cli's `-`. An upload's source opens as
+  `cp` starts, before the transfer, as aws-cli opens stdin when it submits:
+  reading first harms nothing, a seekable source keeps the engine's
+  positioned reads and sizing, and a source that cannot be opened stops the
+  run before it starts (overview section 3's errors rule 3) - StdioStorage's
+  missing stdin as aws-cli's `StdinMissingError` (`fatal error`, rc 1), any
+  other failure of the storage's `open` as the base `Boto3S3Error` with it as
+  the cause. What an upload's `open` returns reaches the engines as it is, so
+  a seekable one must honour `seek` (the subclass is caller code, whose
+  contract the docs state; overview section 3); `IOStorage`'s read-only view
+  for a pipe is its own care for the streams it is handed.
+- **The transfer closes what `open` / `open_text` returns.** It closes every
+  fileobj `open` returns as the item settles (`Storage.open`'s contract), and
+  the text codec closes the stream `open_text` returned along with it — even
+  when the decoder's final characters fail to write. A stream opened for the
+  transfer is released that way; one that must outlive it goes back behind a
+  view whose `close` only flushes. A `cp` whose run fails between opening its
+  source and starting the transfer closes the source, and discards a
+  destination's deferred writer (closing it would open the destination).
+- **The caller owns the stream it hands over.** `IOStorage` and
+  `TextIOStorage` **never close** it — they return it behind that view — and
+  never rewind it for you: lifecycle and final position are yours. A download
+  leaves the stream at the end of what it wrote; to read it back, rewind it
   (`seek(0)`) or use `getvalue()`. A non-seekable sink works just as well —
-  `sys.stdout`, a pipe, a write-only wrapper like the `gzip` one above — there
-  is nothing to rewind; the bytes land wherever the stream sends them (the
-  `.gz` file, the console), and the caller's own `with` / `close` finalizes it.
-  A `GzipFile` handed over directly is not such a sink: it reports `seekable()`
-  but seeks only forward, so a multipart download into it can fail.
+  `sys.stdout`, a pipe, the `gzip` writer above — there is nothing to rewind;
+  the bytes land wherever the stream sends them (the `.gz` file, the
+  console), and the caller's own `with` / `close` finalizes it.
 - **A single endpoint, not a container.** Only `open` is meaningful; the
   inherited `get_fileinfo` / `delete` raise `NotImplementedError` on the call,
   and `scan` raises the same on its first iteration rather than on the call
@@ -457,9 +459,9 @@ The contract:
 `StdioStorage` is the convenience for the process's own stdio — `sys.stdin` as a
 source, `sys.stdout` as a destination (both binary, via `.buffer`) — the
 equivalent of `aws s3 cp - …` / `aws s3 cp … -`. Its stdout writer hands each
-chunk straight to `sys.stdout.buffer` and never flushes it, aws's writer having
-neither `flush` nor `close`, so a finished download can still be sitting in the
-process stream's buffer until the interpreter's own flush at exit.
+chunk straight to `sys.stdout.buffer`, and its `close` flushes that buffer
+without closing it, so a stdout that cannot take the bytes fails the item
+rather than the process at exit ([`transfer.md`](./transfer.md) section 6).
 
 ## 6. Single-request object transfer: `S3Storage.get_file` / `put_file`
 
@@ -530,14 +532,14 @@ spanning both would file a broken stream as a local failure.
   fails with S3's own error; `get_file` streams the whole object in one
   `GetObject`. Multipart, parallelism and resumption remain `S3.cp`'s.
 - no `HeadObject`, and no `ContentType` / MIME guessing on upload — guessing an
-  upload's type from its name is the transfer lanes' aws-cli parity behavior
+  upload's type from its name is the transfer lanes' aws-cli behavior
   (`guess_mime_type`), not this lane's.
-- no local mtime stamping after a download, and no `reject_unrepresentable_stamp`
-  guard: both exist for the transfer lanes' aws parity, and here the caller holds
-  the returned `S3FileInfo` and decides.
-- **`cp` / `mv` / `sync` do not use them**, so aws-cli parity is untouched: the
-  transfer engine, its gates (glacier, `--no-overwrite`, case-conflict) and the
-  CLI do not depend on them.
+- no local mtime stamping after a download: it exists so the transfer lanes
+  match aws-cli, and here the caller holds the returned `S3FileInfo` and
+  decides.
+- **`cp` / `mv` / `sync` do not use them**, so compatibility with aws-cli is
+  untouched: the transfer engine, its gates (glacier, `--no-overwrite`,
+  case-conflict) and the CLI do not depend on them.
 - not part of the `Storage` SPI. These are `S3Storage`-specific building blocks
   like the S3-only operations, so neither `StorageCapability` nor the `Storage`
   ABC describes them, and a custom backend implements none of it.

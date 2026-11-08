@@ -35,6 +35,8 @@ def mv(
     cancel_token: CancelToken | None = None,
     transfer_config: TransferConfig | None = None,
     capture_response: bool = False,
+    source_region: str | None = None,
+    validate_same_s3_paths: bool | None = False,
     **options: Unpack[TransferOptions],
 ) -> None: ...
 ```
@@ -45,8 +47,8 @@ The parameters are `cp`'s minus `expected_size`, and each behaves as
 [`cp.md`](./cp.md) specifies: `src` / `dest` resolution and the accepted
 pairings, directory semantics and destination naming, single-object versus
 recursive enumeration, `filter` and the key it matches, `dryrun`,
-`on_progress`, `cancel_token`, `transfer_config`, `capture_response` and
-`**options`. The gates are the same too — the archived-object gate, the
+`on_progress`, `cancel_token`, `transfer_config`, `capture_response`,
+`source_region` and `**options`. `validate_same_s3_paths` is `mv`'s own (below). The gates are the same too — the archived-object gate, the
 parent-directory guard, `no_overwrite`, `case_conflict` — as are the walk
 warnings, the `BatchError` model and the per-item record stream.
 `expected_size` is absent because it is a hint for uploading from a stream,
@@ -58,16 +60,13 @@ predicate rejects is not transferred, so its source is not removed either.
 ### The delete step
 
 The source is deleted only after that item's own transfer has succeeded, and
-never before. How the removal is issued follows the route:
+never before. It is removed through the `Storage.delete` of the backend its
+listing entry came from (`src_info.storage`), addressed by that entry:
 
-- an upload's source — a local file, or an entry in a custom backend — is
-  removed through that backend's own `Storage.delete`, addressed by the source
-  listing entry;
-- a download's S3 source is removed with one `DeleteObject` per object, on the
-  transfer's client;
-- an S3-to-S3 copy's source is removed with one `DeleteObject` per object, on
-  the source side's client, so a two-account move deletes with the credentials
-  that read.
+- an upload's source is a local file, or an entry in a custom backend;
+- a download's or an S3-to-S3 copy's source is an S3 object, removed with one
+  `DeleteObject` ([`S3Storage.delete`](../storage.md#s3storage)) on the source
+  side's client, so a two-account move deletes with the credentials that read.
 
 `request_payer` rides the delete call like every other request. Deletions are
 issued one object at a time; `mv` does not batch them the way `rm` and `sync`'s
@@ -111,8 +110,10 @@ Two checks are `mv`'s own, and each raises
 [`ValidationError`](../exceptions.md#validationerror) before anything is
 listed, transferred or deleted:
 
-- **a stream source.** An [`IOStorage`](../storage.md#iostorage) or
-  [`StdioStorage`](../storage.md#stdiostorage) as `src` is refused outright: a
+- **a stream source.** A stream endpoint (an
+  [`IOStorageBase`](../storage.md#iostoragebase) such as
+  [`IOStorage`](../storage.md#iostorage) or
+  [`StdioStorage`](../storage.md#stdiostorage)) as `src` is refused outright: a
   move deletes its source, and a stream is not something that can be deleted.
 - **a move onto the same object.** When both sides resolve to S3, the two
   keyless-normalized URIs are compared: an exact match is refused, and so is a
@@ -137,10 +138,28 @@ bucket through an access point ARN, an access point alias, a multi-region
 access point, or an access point of an S3 Express directory bucket (`--xa-s3`)
 and the directory bucket itself are not detected by it — and S3 may then accept
 the copy onto itself, which a directory bucket does, so the delete that follows
-removes the only copy (measured on real S3); resolve them yourself with
-[`S3PathResolver`](../misc.md#s3pathresolver) beforehand when that risk
-applies. The library never builds the `s3control` / `sts` clients such a
-resolution needs.
+removes the only copy (measured on real S3).
+
+`validate_same_s3_paths=True` is `aws s3 mv --validate-same-s3-paths`. When
+both sides are S3 and their keys match, each side is resolved to the paths it
+may land in through [`S3PathResolver`](../misc.md#s3pathresolver) — the
+source's `s3control` client in `source_region`, the destination's in the
+`region` given to [`S3.from_aws_cli`](../s3.md#from_aws_cli) (the session's for
+an `S3()`, and for an unset region either way), and an `sts` client, each from
+[`S3.service_client`](../s3.md#service_clientservice--regionnone), which uses
+neither `endpoint_url` nor `config` — and a resolved pair naming
+the same path is refused with the same `ValidationError`, naming the original
+URIs, before anything runs. Resolving sends `s3control` and `sts` requests, and
+their failures raise as the resolver's do. Without it, a same-key move one of
+whose sides is shaped like an access point emits aws-cli's warning — `warning:
+Provided s3 paths may resolve to same underlying s3 object(s) ...` — as a
+`NOTICE` record on `on_result` before the run, and the move proceeds. Keys that
+differ are not looked at either way. The `boto3-s3` command reads
+`AWS_CLI_S3_MV_VALIDATE_SAME_S3_PATHS` as aws-cli does; the library does not.
+
+`validate_same_s3_paths=None` leaves out the same-object check, the
+resolution and the warning: the caller has run them already through
+[`check_mv_paths`](#s3check_mv_paths). The stream checks still run.
 
 ### The stream destination
 
@@ -170,6 +189,35 @@ from `mv`'s own entry point (the recursive one in `mv`'s wording), and the
 extra `DELETE` capability requirement. A source that could not be deleted is not
 a separate exception: it is that item's `FAILED` record, aggregated into
 [`BatchError`](../exceptions.md#batcherror) with the rest.
+
+## S3.check_mv_paths
+
+```python
+def check_mv_paths(
+    self,
+    src: Location,
+    dest: Location,
+    *,
+    validate_same_s3_paths: bool = False,
+    source_region: str | None = None,
+    on_result: ResultCallback | None = None,
+) -> None: ...
+```
+
+Runs `mv`'s S3-to-S3 checks on their own: the same-object guard, then with
+`validate_same_s3_paths=True` the resolution through `S3PathResolver`, and
+without it the access-point warning as a `NOTICE` record on `on_result`
+([What `mv` rejects that `cp` accepts](#what-mv-rejects-that-cp-accepts)).
+The parameters mean what `mv`'s do. A pair that is not S3-to-S3 passes. A
+location string is read as [`resolve`](../s3.md#resolveloc) reads it, but no S3
+client is built; only the resolution builds its `s3control` / `sts` clients.
+A refused pair raises `ValidationError`, and the resolver's failures raise as
+they do under `mv`.
+
+`aws s3 mv` runs these checks before its run starts, so a refused pair is
+reported apart from a failure of the run. To do the same, call this first and
+pass `validate_same_s3_paths=None` to `mv`, which then runs none of them a
+second time; the `boto3-s3` command does.
 
 ## boto3_s3.mv
 

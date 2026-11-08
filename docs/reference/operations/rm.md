@@ -61,9 +61,9 @@ choice is the client the deletes ride, as `aws s3 rm` carries them on its
 transfer manager: the storage's botocore client, or — when it selects the CRT
 engine — the CRT client, with this instance's CRT postures (see
 [`S3Deleter`](../misc.md#s3deleter)). That client's retry policy and error
-text are the deletes', and a delete that dies without a response is dropped
-without a record on botocore, as `aws s3` drops it, and a `FAILED` record on
-the CRT client ([`../results.md`](../results.md)). A dryrun builds no engine.
+text are the deletes'. A delete that dies without a response is a `FAILED`
+record on either client, where `aws s3` drops it without a line on botocore
+([`../results.md`](../results.md)). A dryrun builds no engine.
 
 `target` names what to delete: an `"s3://bucket/key"` string (the `s3://`
 scheme is optional, so `"bucket/key"` works too), an `os.PathLike[str]`
@@ -93,9 +93,11 @@ scan stamps it `Prefix`-relative, and that `Prefix` is
 [`rm_filter_root`](#rm_filter_root)'s return value; the blind single-key path
 has no listing and stamps the same relativization by hand. A relative
 [`GlobFilter`](../filters.md#globfilter) pattern therefore matches the key
-relative to that root, while an absolute pattern matches the full `key` — and
-since an S3 key normally has no leading `/`, an absolute pattern is inert here
-unless a key literally begins with one. On the bucket-root sweep the
+relative to that root, while an absolute pattern matches the full path
+`bucket/key`, which has no root — so an absolute pattern is inert here (on
+Windows a pattern whose drive part is a glob, such as `*:*`, is matched as
+written and can match a key holding a `:`). Glob characters in the target
+itself are taken literally. On the bucket-root sweep the
 folder-marker test runs before `filter`, so the predicate is consulted only for
 entries that are already zero-byte `/`-terminated keys.
 
@@ -126,9 +128,10 @@ is the `rm_filter_root`-relative key described above, `src` is the
 `s3://bucket/key` display form, and `src_info` / `src_storage` carry the entry
 and the target storage; the `dest_*` fields are unset and `bytes_transferred`
 is `0` — `rm` moves no bytes and takes no `on_progress`. The outcomes it emits
-are `SUCCEEDED`, `FAILED` and `DRYRUN`: an entry `filter` rejected produces no
-record, entries abandoned by a cancellation produce no record, and `rm` emits
-no `CANCELLED`, `WARNED`, `SKIPPED` or `NOTICE` records at all. Records for
+are `SUCCEEDED`, `FAILED` and `DRYRUN`, and `CANCELLED` for a blind single
+key an interrupt cut short (below): an entry `filter` rejected produces no
+record, entries the batched path abandons on a cancellation produce no record,
+and `rm` emits no `WARNED`, `SKIPPED` or `NOTICE` records at all. Records for
 batched deletes arrive on the deleter's worker thread, in submission order
 within a batch; the blind single-key path and every dry-run record are emitted
 inline on the calling thread. The callback must be fast and must not raise.
@@ -142,17 +145,15 @@ rejection below. During a run it stops the listing prefetch producer between
 page pulls and stops the deleter from dispatching further batches; what each
 mode leaves buffered, dispatched or in flight is specified with the token
 itself. Either mode ends by raising
-[`CancelledError`](../exceptions.md#cancellederror) once the worker has been
-reclaimed. On the blind single-key path the token is polled after the record
+[`CancelledError`](../exceptions.md#cancellederror): a graceful one once the
+worker has been reclaimed, an immediate one at once, a batch already sent
+finishing behind it. On the blind single-key path the token is polled after the record
 is emitted, the `FAILED` record included, so a cancel from that callback
 raises `CancelledError` in place of the `BatchError` the failure would
-otherwise become. A Ctrl-C while that single request is out does not abandon
-it: `rm` waits for the answer and then raises the `KeyboardInterrupt`,
-emitting the `SUCCEEDED` record first if the delete went through - as
-`aws s3 rm` still reports a delete it had sent - but no `FAILED` record if it
-failed (there the interrupt wins, as on `aws s3 rm`). A second Ctrl-C still
-lets the request finish but emits no record (`aws s3 rm` still completes it
-and prints nothing more); a third stops the wait.
+otherwise become. A Ctrl-C (or another interrupt) while that single request
+is out leaves at once: the key's record is `CANCELLED`, its `error` a
+`CancelledError`, and the interrupt reaches the caller. The server may still
+carry out the delete.
 
 `capture_response=True` attaches the delete response to a successful
 record's `extra_info` under the key `"delete"`, with `ResponseMetadata`
@@ -181,10 +182,14 @@ Raises:
   request. The blind single-key delete, which lists nothing, reports missing
   credentials as its item's failure instead (`BatchError` below). A selected
   CRT engine that cannot be built — a CA bundle it cannot read or use — is an
-  `InvalidConfigError`, raised where the engine is built (above).
-- botocore's `MissingDependencyException` — `preferred_transfer_client="crt"`
-  requested explicitly without a usable awscrt, raised where the engine would
-  be built, as a transfer raises it ([`../options.md`](../options.md)).
+  `InvalidConfigError`, raised where the engine is built (above). An S3 Express
+  location the SDK predates raises `ConfigurationError` naming the version,
+  before any request.
+- botocore's `MissingDependencyException` — a plain boto3 `TransferConfig`
+  requesting `preferred_transfer_client="crt"` explicitly without a usable
+  awscrt, raised where the engine would be built, as a transfer raises it
+  ([`../options.md`](../options.md)). The library's own `TransferConfig`
+  gets a `ConfigurationError` instead, as the run resolves it.
 - The listing's own rejection, translated to its category and propagated
   untouched: `NoSuchBucket` becomes
   [`NotFoundError`](../exceptions.md#notfounderror), a denied `ListBucket`
@@ -223,7 +228,9 @@ filter pattern resolves against and, on the enumerating shapes, the `Prefix`
 the listing is issued with. It is a pure function of its arguments — no
 request, no client, no `S3` instance — so a caller can predict exactly which
 key a [`GlobFilter`](../filters.md#globfilter) pattern will be matched against
-before calling `rm`. It is exported from the `boto3_s3` root and from
+before calling `rm` (on Windows, a recursive target ending in a backslash adds
+a leading `/` to each key, as the AWS CLI's join does;
+[`../filters.md`](../filters.md#filefilter)). It is exported from the `boto3_s3` root and from
 `boto3_s3.s3`.
 
 ```python
@@ -242,14 +249,16 @@ cases are:
   `/`, so `"data/a.txt"` gives `"data/"`, and `""` when the key contains no
   `/` at all, so `"a.txt"` gives `""`. A `/` that directly follows another, or
   opens the key, is not counted twice: `"a//b"` gives `"a/"` and `"/b"` gives
-  `""`, so both entries are matched as `"/b"` — the relative key aws is left
+  `""`, so both entries are matched as `"/b"` — the relative key aws-cli is left
   with after joining a pattern onto its root with `os.path.join`, which adds
-  no second `/`.
+  no second `/`. On Windows that join takes a backslash for a separator too,
+  so a parent ending in one is returned as is: `"a\\/b"` gives `"a\\"`, and the
+  entry is matched as `"/b"`.
 - `recursive=False` with a key that already ends in `/`, or an empty key — the
   key unchanged: `"data/"` gives `"data/"` and `""` gives `""`.
 
-The result is therefore either empty or `/`-terminated; no other form is
-returned.
+The result is therefore empty or ends in a separator: `/`, or on Windows the
+backslash of such a parent.
 
 An entry's `compare_key` is its full key with this prefix removed, which makes
 two cases worth predicting. Under `rm("s3://b/data", recursive=True)` the root
@@ -257,4 +266,5 @@ is `"data/"`, so `data-sibling.txt` is outside the listing altogether and an
 object at `data/app/x.txt` is matched as `app/x.txt`. Under the non-recursive
 `rm("s3://b/data/")` the root is the target key itself, so the single entry's
 `compare_key` is the empty string: a relative pattern has to match `""` to
-reject it, while an absolute pattern still matches the full key `data/`.
+reject it (`*` does), and an absolute pattern cannot, the full path `b/data/`
+having no root.

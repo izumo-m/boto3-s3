@@ -3,17 +3,18 @@
 aws-cli hangs one handler off the ``after-call.s3`` event
 (its ``s3errormsg`` customization) that rewrites three S3 error messages in
 place, before anything renders them: the two "this bucket needs Signature
-Version 4" shapes and the cross-region ``PermanentRedirect``. The rewrite is
-observable on every report that carries a service message - the top-level
-``[ERROR]`` line and the per-item ``upload failed:`` / ``download failed:``
-lines alike - so the handler has to ride the S3 clients the CLI builds
-(`clientfactory.build_client`). The library stays boto3-faithful and never
+Version 4" shapes and the cross-region ``PermanentRedirect``. The rewrite shows
+on every report that carries a service message - the top-level ``[ERROR]``
+line and the per-item ``upload failed:`` / ``download failed:`` lines alike -
+so the handler has to ride the S3 clients the CLI builds
+(`clientfactory.build_s3`'s `S3`). The library stays boto3-faithful and never
 rewrites a service message.
 
 The wording is aws-cli's, verbatim, including the two commands it advises
-(``aws s3api get-bucket-location`` and ``aws configure set``) which have no
-boto3-s3 counterpart: parity is a byte-identical report, the same rule the
-credential and region hints in `cli` follow.
+(``aws s3api get-bucket-location`` and ``aws configure set``), which have no
+boto3-s3 counterpart: a message aws-cli's own code writes is written the same
+way (design/overview.md section 3), the same rule the credential and region
+hints in `cli` follow.
 """
 
 from __future__ import annotations
@@ -40,9 +41,10 @@ ENABLE_SIGV4_MSG = (
 def register(client: S3Client) -> None:
     """Attach the rewriter to one S3 client.
 
-    aws registers the handler on its session, so every S3 client it creates
-    carries it; registering per client is the same reach here, because
-    `clientfactory.build_client` is the CLI's only S3 client builder.
+    aws-cli registers the handler on its session, so every S3 client it creates
+    carries it; registering per client is the same reach here, because the
+    command's `S3` (`clientfactory.cli_s3_class`) registers it in `client()`
+    and `source_client()`, the only places it builds an S3 client.
     """
     client.meta.events.register("after-call.s3", enhance_error_msg)
 
@@ -57,11 +59,9 @@ def enhance_error_msg(parsed: dict[str, Any] | None, **kwargs: Any) -> None:
             "Signature Version 4.  " + REGION_ERROR_MSG
         )
     elif _is_permanent_redirect_message(parsed):
-        # Read in aws's order, the endpoint first: a response carrying
-        # neither element then fails on the same name there and here.
         endpoint = parsed["Error"]["Endpoint"]
         message: str = parsed["Error"]["Message"]
-        # aws drops the message's final character - the period ending "Please
+        # aws-cli drops the message's final character - the period ending "Please
         # send all future requests to this endpoint." - so the endpoint reads
         # as its continuation.
         parsed["Error"]["Message"] = f"{message[:-1]}: {endpoint}\n{REGION_ERROR_MSG}"

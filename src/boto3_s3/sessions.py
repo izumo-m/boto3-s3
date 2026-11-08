@@ -54,14 +54,13 @@ def fast_parse_timestamp(value: Any) -> datetime:
     calendar form S3 sends (`_S3_TIMESTAMP`): Python 3.11+'s
     `fromisoformat` reads much more - a digit-only ``"20200101"``, which
     botocore reads as epoch seconds, a week date (``2025-W01-1``), and on
-    3.14 an hour of ``24`` - where botocore answers differently or refuses
-    (an S3-compatible endpoint's week date must stop a listing as it stops
-    aws's), so the gate keeps every other spelling on botocore's
-    interpretation on every Python. For every input both paths accept the
-    returned value is equal; only the tzinfo class differs
-    (`datetime.timezone` instead of dateutil's ``tzutc`` / ``tzoffset``), so
-    the two compare and subtract identically and render the same ``str()``
-    and ``isoformat()``. The one rendering they do *not* share is
+    3.14 an hour of ``24`` - where botocore answers differently or refuses,
+    and `session` builds the clients of every service, so the gate keeps
+    every other spelling on botocore's interpretation on every Python. For
+    every input both paths accept the returned value is equal; only the
+    tzinfo class differs (`datetime.timezone` instead of dateutil's
+    ``tzutc`` / ``tzoffset``), so the two compare and subtract identically
+    and render the same ``str()`` and ``isoformat()``. The one rendering they do *not* share is
     ``strftime('%Z')``, which asks the tzinfo for its name: dateutil's offset
     has none (an empty field) where `datetime.timezone` answers the literal
     ``UTC-05:00`` - a form dateutil re-reads with POSIX's inverted sign.

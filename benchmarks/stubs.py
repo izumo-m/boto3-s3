@@ -170,6 +170,8 @@ class S3Responder:
         self._handlers: dict[str, Callable[[Any], AWSResponse]] = {
             "ListObjectsV2": self._list_objects_v2,
             "PutObject": self._put_object,
+            "CopyObject": self._copy_object,
+            "DeleteObject": self._delete_object,
             "DeleteObjects": self._delete_objects,
             "CreateMultipartUpload": self._create_multipart_upload,
             "UploadPart": self._upload_part,
@@ -196,6 +198,21 @@ class S3Responder:
     def _put_object(self, request: Any) -> AWSResponse:
         _drain_body(request)
         return _response(request, headers={"ETag": '"benchetag"'})
+
+    def _copy_object(self, request: Any) -> AWSResponse:
+        _drain_body(request)
+        payload = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            f'<CopyObjectResult xmlns="{_XMLNS}">'
+            "<ETag>&quot;benchetag&quot;</ETag>"
+            f"<LastModified>{_LAST_MODIFIED}</LastModified>"
+            "</CopyObjectResult>"
+        ).encode()
+        return _response(request, body=payload)
+
+    def _delete_object(self, request: Any) -> AWSResponse:
+        _drain_body(request)
+        return _response(request, status=204)
 
     def _delete_objects(self, request: Any) -> AWSResponse:
         body = _drain_body(request, keep=True)

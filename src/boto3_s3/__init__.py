@@ -29,7 +29,6 @@ if TYPE_CHECKING:
         all_of,
         any_of,
     )
-    from boto3_s3.crtsupport import CLIENT_REGION, CrtRegion
     from boto3_s3.deleter import S3_DELETE_BATCH, S3Deleter
     from boto3_s3.etagcompare import EtagComparison
     from boto3_s3.exceptions import (
@@ -40,13 +39,18 @@ if TYPE_CHECKING:
         ConfigurationError,
         InvalidConfigError,
         InvalidValueError,
-        MalformedResponseError,
         NotFoundError,
         TransportError,
         ValidationError,
     )
-    from boto3_s3.globsieve import GlobFilter, GlobPattern, PatternKind
-    from boto3_s3.iostorage import IOStorage, StdioStorage
+    from boto3_s3.globsieve import Exclude, GlobFilter, Include
+    from boto3_s3.iostorage import (
+        IOStorage,
+        IOStorageBase,
+        StdioStorage,
+        TextIOStorage,
+        TextIOStorageBase,
+    )
     from boto3_s3.localstorage import (
         LocalFileGenerator,
         LocalStorage,
@@ -55,6 +59,7 @@ if TYPE_CHECKING:
     )
     from boto3_s3.masking import set_stream_logger
     from boto3_s3.pathresolver import S3PathResolver, has_underlying_s3_path
+    from boto3_s3.proxytunnel import pin_proxy_connect
     from boto3_s3.s3 import (
         S3,
         cp,
@@ -78,6 +83,7 @@ if TYPE_CHECKING:
         CancelToken,
         CaseConflictMode,
         CopyPropsMode,
+        CrtClientOptions,
         FileFilter,
         FileInfo,
         FileKind,
@@ -99,7 +105,6 @@ if TYPE_CHECKING:
     __version__: str
 
 __all__ = [
-    "CLIENT_REGION",
     "S3",
     "S3_DELETE_BATCH",
     "AccessDeniedError",
@@ -117,15 +122,17 @@ __all__ = [
     "ConfigSection",
     "ConfigurationError",
     "CopyPropsMode",
-    "CrtRegion",
+    "CrtClientOptions",
     "DestOnlyPair",
     "EtagComparison",
+    "Exclude",
     "FileFilter",
     "FileInfo",
     "FileKind",
     "GlobFilter",
-    "GlobPattern",
     "IOStorage",
+    "IOStorageBase",
+    "Include",
     "InvalidConfigError",
     "InvalidValueError",
     "ListingCallback",
@@ -135,7 +142,6 @@ __all__ = [
     "LocalStorage",
     "Location",
     "LoopDetector",
-    "MalformedResponseError",
     "MergedPair",
     "MergedPairFilter",
     "NotFoundError",
@@ -143,7 +149,6 @@ __all__ = [
     "OpResult",
     "PairFilter",
     "ParallelFilter",
-    "PatternKind",
     "ProgressCallback",
     "ResultCallback",
     "S3Deleter",
@@ -157,6 +162,8 @@ __all__ = [
     "Storage",
     "StorageCapability",
     "SyncPair",
+    "TextIOStorage",
+    "TextIOStorageBase",
     "TransferConfig",
     "TransferOptions",
     "TransferProgress",
@@ -173,6 +180,7 @@ __all__ = [
     "ls",
     "mb",
     "mv",
+    "pin_proxy_connect",
     "presign",
     "rb",
     "rm",
@@ -217,15 +225,17 @@ _EXPORT_HOMES: dict[str, str] = {
     "ConfigurationError": "boto3_s3.exceptions",
     "InvalidConfigError": "boto3_s3.exceptions",
     "InvalidValueError": "boto3_s3.exceptions",
-    "MalformedResponseError": "boto3_s3.exceptions",
     "NotFoundError": "boto3_s3.exceptions",
     "TransportError": "boto3_s3.exceptions",
     "ValidationError": "boto3_s3.exceptions",
+    "Exclude": "boto3_s3.globsieve",
     "GlobFilter": "boto3_s3.globsieve",
-    "GlobPattern": "boto3_s3.globsieve",
-    "PatternKind": "boto3_s3.globsieve",
+    "Include": "boto3_s3.globsieve",
     "IOStorage": "boto3_s3.iostorage",
+    "IOStorageBase": "boto3_s3.iostorage",
     "StdioStorage": "boto3_s3.iostorage",
+    "TextIOStorage": "boto3_s3.iostorage",
+    "TextIOStorageBase": "boto3_s3.iostorage",
     "LocalFileGenerator": "boto3_s3.localstorage",
     "LocalStorage": "boto3_s3.localstorage",
     "LoopDetector": "boto3_s3.localstorage",
@@ -233,6 +243,7 @@ _EXPORT_HOMES: dict[str, str] = {
     "set_stream_logger": "boto3_s3.masking",
     "S3PathResolver": "boto3_s3.pathresolver",
     "has_underlying_s3_path": "boto3_s3.pathresolver",
+    "pin_proxy_connect": "boto3_s3.proxytunnel",
     "S3": "boto3_s3.s3",
     "cp": "boto3_s3.s3",
     "ls": "boto3_s3.s3",
@@ -250,13 +261,12 @@ _EXPORT_HOMES: dict[str, str] = {
     "Location": "boto3_s3.storage",
     "Storage": "boto3_s3.storage",
     "StorageCapability": "boto3_s3.storage",
-    "CLIENT_REGION": "boto3_s3.crtsupport",
-    "CrtRegion": "boto3_s3.crtsupport",
     "CancelToken": "boto3_s3.types",
     "AnnotationCopyMode": "boto3_s3.types",
     "CancelMode": "boto3_s3.types",
     "CaseConflictMode": "boto3_s3.types",
     "CopyPropsMode": "boto3_s3.types",
+    "CrtClientOptions": "boto3_s3.types",
     "FileInfo": "boto3_s3.types",
     "ListingCallback": "boto3_s3.types",
     "FileKind": "boto3_s3.types",

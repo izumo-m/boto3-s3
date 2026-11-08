@@ -1,8 +1,8 @@
 """``S3.mv``: the cp pipeline plus the onto-itself guard and source deletion.
 
 Everything route-shaped is cp's (test_s3_cp.py pins it); these tests pin
-what mv adds - the always-on same-path guard with aws's exact message
-(rc 252 even with ``recursive``),
+what mv adds - the always-on same-path guard (rc 252 even with
+``recursive``),
 MOVE-kind reporting, and the per-item source deletion with its gates (no
 delete on dryrun / filter / skip / warn / failure).
 """
@@ -11,15 +11,16 @@ from __future__ import annotations
 
 import io
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO, Literal
 
 import pytest
 from boto3.s3.transfer import TransferConfig
 
-from boto3_s3 import GlobFilter
+from boto3_s3 import Exclude, globsieve
 from boto3_s3.exceptions import BatchError, ValidationError
-from boto3_s3.iostorage import IOStorage, StdioStorage
+from boto3_s3.iostorage import IOStorage, IOStorageBase, StdioStorage, TextIOStorage
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.types import OpOutcome, OpResult, TransferProgress, TransferType
@@ -29,6 +30,23 @@ from tests.utils.recorder import make_recording_client, ops
 _SYNC = TransferConfig(use_threads=False)
 
 
+class _OwnStream(IOStorageBase):
+    """A stream storage of the caller's own: the gates key on the base class."""
+
+    def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
+        return io.BytesIO()
+
+
+# Every kind of stream storage the mv gates must refuse alike.
+_STREAM_STORAGES: list[Callable[[], IOStorageBase]] = [
+    lambda: IOStorage(io.BytesIO(b"x")),
+    lambda: TextIOStorage(io.StringIO("x")),
+    StdioStorage,
+    _OwnStream,
+]
+_STREAM_STORAGE_IDS = ["IOStorage", "TextIOStorage", "StdioStorage", "own"]
+
+
 class TestStreams:
     """A stream is a valid single-object move destination, never a source.
 
@@ -36,7 +54,7 @@ class TestStreams:
     S3 source). A stream source cannot satisfy the move contract (a move
     deletes its source), and a recursive stream destination would concatenate
     every object into one stream - both are rejected up front. The CLI rejects
-    ``-`` for mv on either side outright (aws parity, tests/cli/unit/test_mv.py).
+    ``-`` for mv on either side outright (aws-cli parity, tests/cli/unit/test_mv.py).
     """
 
     def test_stream_destination_downloads_then_deletes_source(self) -> None:
@@ -80,7 +98,7 @@ class TestStreams:
     def test_missing_stdout_fails_the_item_attributed_to_mv(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # A stream destination has no stdout precondition (aws guards stdin
+        # A stream destination has no stdout precondition (aws-cli guards stdin
         # only), so a missing stdout fails at the writer's first write inside
         # the transfer - a per-item failure, not a pre-flight raise. The
         # storage names no operation, so the run fills its own - "mv" here,
@@ -99,19 +117,24 @@ class TestStreams:
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
         error = results[0].error
         assert error is not None
-        assert str(error) == "'NoneType' object has no attribute 'write'"
+        assert isinstance(error.__cause__, AttributeError)
         assert (error.operation, error.bucket, error.key) == ("mv", "b", "d/a.txt")
         assert excinfo.value.__cause__ is error
 
-    def test_stream_source_rejected(self) -> None:
+    @pytest.mark.parametrize("make", _STREAM_STORAGES, ids=_STREAM_STORAGE_IDS)
+    def test_stream_source_rejected(self, make: Callable[[], IOStorageBase]) -> None:
         with pytest.raises(ValidationError, match="mv does not support a stream source"):
-            S3().mv(IOStorage(io.BytesIO(b"x")), S3Storage("s3://bucket/k"))
+            S3().mv(make(), S3Storage("s3://bucket/k"))
 
-    def test_recursive_stream_destination_rejected(self) -> None:
+    @pytest.mark.parametrize("make", _STREAM_STORAGES, ids=_STREAM_STORAGE_IDS)
+    def test_recursive_stream_destination_rejected(self, make: Callable[[], IOStorageBase]) -> None:
         with pytest.raises(ValidationError, match="only for a single object"):
-            S3().mv(S3Storage("s3://bucket/pre/"), IOStorage(io.BytesIO()), recursive=True)
+            S3().mv(S3Storage("s3://bucket/pre/"), make(), recursive=True)
 
-    def test_stream_destination_no_overwrite_rejected(self) -> None:
+    @pytest.mark.parametrize("make", _STREAM_STORAGES, ids=_STREAM_STORAGE_IDS)
+    def test_stream_destination_no_overwrite_rejected(
+        self, make: Callable[[], IOStorageBase]
+    ) -> None:
         # cp's stream gate, ported: a streaming download has no existing
         # destination to guard, so no_overwrite must fail loud instead of
         # being silently ignored (and the source deleted anyway).
@@ -119,7 +142,7 @@ class TestStreams:
         with pytest.raises(ValidationError) as excinfo:
             S3().mv(
                 S3Storage("s3://b/d/a.txt", client=client),
-                IOStorage(io.BytesIO()),
+                make(),
                 no_overwrite=True,
             )
         assert type(excinfo.value) is ValidationError
@@ -128,46 +151,29 @@ class TestStreams:
 
 
 class TestSamePathGuard:
-    """aws-cli's ``Cannot mv a file onto itself`` - before any client work."""
+    """aws-cli's onto-itself guard - before any client work."""
 
-    def _assert_guard(self, src: str, dest: str, message: str, **kwargs: Any) -> None:
+    def _assert_guard(self, src: str, dest: str, **kwargs: Any) -> None:
 
         client, calls = make_recording_client([])
         with pytest.raises(ValidationError) as excinfo:
             S3().mv(S3Storage(src, client=client), S3Storage(dest, client=client), **kwargs)
-        assert str(excinfo.value) == message
+        assert excinfo.value.operation == "mv"
         assert calls == []
 
     def test_exact_same_uri(self) -> None:
-        self._assert_guard(
-            "s3://b/k.txt",
-            "s3://b/k.txt",
-            "Cannot mv a file onto itself: s3://b/k.txt - s3://b/k.txt",
-        )
+        self._assert_guard("s3://b/k.txt", "s3://b/k.txt")
 
     def test_implied_basename(self) -> None:
-        self._assert_guard(
-            "s3://b/d/a.txt",
-            "s3://b/d/",
-            "Cannot mv a file onto itself: s3://b/d/a.txt - s3://b/d/",
-        )
+        self._assert_guard("s3://b/d/a.txt", "s3://b/d/")
 
-    def test_keyless_destination_is_normalized_in_the_message(self) -> None:
-        self._assert_guard(
-            "s3://b/k.txt",
-            "s3://b",
-            "Cannot mv a file onto itself: s3://b/k.txt - s3://b/",
-        )
+    def test_keyless_destination_reads_as_the_bucket_root(self) -> None:
+        self._assert_guard("s3://b/k.txt", "s3://b")
 
     def test_recursive_is_not_exempt(self) -> None:
         # The aws-cli's faithful false positive: no key would map onto
-        # itself, but aws rejects it anyway (rc 252).
-        self._assert_guard(
-            "s3://b/d",
-            "s3://b/",
-            "Cannot mv a file onto itself: s3://b/d - s3://b/",
-            recursive=True,
-        )
+        # itself, but aws-cli rejects it anyway (rc 252).
+        self._assert_guard("s3://b/d", "s3://b/", recursive=True)
 
     def test_different_buckets_pass(self) -> None:
 
@@ -242,7 +248,7 @@ class TestUploadMove:
         (tmp_path / "keep.txt").write_bytes(b"k")
         (tmp_path / "skip.log").write_bytes(b"s")
         client, calls = make_recording_client([{}])
-        keep = GlobFilter().exclude("*.log").compile()
+        keep = globsieve.compile([Exclude("*.log")])
         S3().mv(
             str(tmp_path),
             S3Storage("s3://b/tree/", client=client),
@@ -275,7 +281,7 @@ class TestUploadMove:
     def test_recursive_upload_move_keeps_the_emptied_source_directories(
         self, tmp_path: Path
     ) -> None:
-        # aws removes only the moved files, never the directories they leave
+        # aws-cli removes only the moved files, never the directories they leave
         # empty behind (design/transfer.md) - a recursive local mv is not rmdir.
         src_root = tmp_path / "tree"
         sub = src_root / "sub"
@@ -326,10 +332,10 @@ class TestDownloadMove:
         assert [result.transfer_type for result in results] == [TransferType.MOVE]
 
     def test_filtered_single_source_is_neither_moved_nor_deleted(self, tmp_path: Path) -> None:
-        # aws filters the single-object routes too: an excluded mv source
+        # aws-cli filters the single-object routes too: an excluded mv source
         # must not transfer - and, crucially, must not be deleted.
 
-        drop = GlobFilter().exclude("*").compile()
+        drop = globsieve.compile([Exclude("*")])
         client, calls = make_recording_client([head_response()])
         S3().mv(
             S3Storage("s3://b/d/a.txt", client=client),
@@ -361,7 +367,7 @@ class TestDownloadMove:
         assert ops(calls) == ["ListObjectsV2", "GetObject", "DeleteObject"]
         assert calls[2].params == {"Bucket": "b", "Key": "pre/a.txt"}
 
-    def test_glacier_warning_keeps_the_route_wording_and_the_object(self, tmp_path: Path) -> None:
+    def test_glacier_warning_keeps_the_object(self, tmp_path: Path) -> None:
 
         client, calls = make_recording_client([head_response(StorageClass="GLACIER")])
         results: list[OpResult] = []
@@ -371,12 +377,10 @@ class TestDownloadMove:
             transfer_config=_SYNC,
             on_result=results.append,
         )
-        # No GetObject, no DeleteObject; the message says "download" (the
-        # aws-cli uses operation_name, not "move") but reports kind MOVE.
+        # No GetObject, no DeleteObject; the record reports kind MOVE.
         assert ops(calls) == ["HeadObject"]
         assert [result.outcome for result in results] == [OpOutcome.WARNED]
         assert results[0].transfer_type is TransferType.MOVE
-        assert "Unable to perform download operations on GLACIER objects." in str(results[0].error)
 
     def test_no_overwrite_existing_destination_skips_without_deleting(self, tmp_path: Path) -> None:
 
@@ -415,7 +419,7 @@ class TestDownloadMove:
         assert ops(calls) == ["HeadObject", "GetObject", "DeleteObject"]
         assert (excinfo.value.succeeded, excinfo.value.failed) == (0, 1)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
-        # The bytes still arrived (aws ditto): only the move failed - and a
+        # The bytes still arrived (aws-cli ditto): only the move failed - and a
         # non-SUCCEEDED result reports zero bytes regardless (design/opresult.md).
         assert results[0].bytes_transferred == 0
         assert (tmp_path / "out.txt").read_bytes() == b"payload"

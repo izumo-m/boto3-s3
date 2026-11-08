@@ -1,8 +1,21 @@
 # Differences from `aws s3`
 
-Read this before you switch a script over. Most `aws s3` invocations behave
-identically; the handful that do not are listed below, and three of them are
-silent — one here, two on `aws`'s side.
+Read this before you switch a script over. This command aims at functional
+compatibility with `aws s3`: the same objects and files transferred, deleted
+or created, the same `sync` decisions, the same meaning for every option, and
+on a successful run the same result lines. This file records where a run does
+not come out that way — the deliberate deviations (batched deletes,
+protections this command keeps on, `aws` bugs it does not copy) and the other
+differences a run can show. Warnings and error messages follow `aws`'s as
+the message rules of [`../../design/overview.md`](../../design/overview.md)
+section 3 set out; a difference those rules leave uncompared — which of two
+simultaneous mistakes is reported, the wording botocore, Python or the OS
+writes, one that comes only from the installed botocore / s3transfer or the
+Python this command runs on — is not recorded here and is not a bug. Where a
+difference follows from that section's error rules — a failure is never
+reported as a success, and a run that cannot proceed stops before it
+starts — its entry names the case and what this command does, not every way
+`aws` comes out.
 
 For what each option does, run `boto3-s3 <subcommand> help`; every option is an
 `aws s3` option and is described there. For exit codes see
@@ -13,79 +26,56 @@ variables and `[s3]` tuning keys the command reads see
 ## 1. What you can rely on
 
 Under the same arguments and configuration you get **the same resulting S3
-state, the same returned values, the same error conditions, and the same exit
-code**, bar the entries in section 2 that say outright that the run comes out
-differently. Those are a corrupted ranged download, a download body cut
-mid-stream, a recursive delete whose listing dies part way or whose endpoint
-fails its batch requests, a Ctrl-C during deletes under the CRT engine, a plain-HTTP
-endpoint named anywhere but `--endpoint-url` under the CRT engine, a
-`REQUESTS_CA_BUNDLE` the CRT engine cannot use, an `aws` plugin that imports
-`awscli` modules, exits, raises outside Python's `Exception` family or
-unregisters one of the SDK's own handlers, a `[toplevel]` alias that leads to
-another `aws` command, a timeout typed beside an alias, a `cli_history` directory
-`aws` cannot create, the modification time a download stamps in some local
-zones (and the `sync` runs that follow from it), a CRT-engine `mv` download whose
-source delete dies without a response, a help page that cannot be written,
-an ambiguous option abbreviation under Python 3.10 and 3.11, an invalid
-`AWS_DEFAULTS_MODE` or `sts_regional_endpoints` value, the `PYTHON*` environment
-variables, and three failures the interpreter decides rather than
-either tool: a stdout that cannot take a streamed object, an error report that
-cannot be written at all, and a standard stream that cannot be set up at all —
-that last one settling before either tool's first line of code runs. A mismatch
-anywhere else is a bug worth reporting.
+state and local files, the same `sync` decisions, the same result lines on
+success, the same conditions failing, and an exit code with the same
+meaning**, bar the entries in section 2 that say outright that the run comes
+out differently. Those are a recursive delete whose listing dies part way or
+whose endpoint fails its batch requests, a Ctrl-C, a
+delete answered `412`, a transfer answered `412` other than
+`--no-overwrite`'s own write, a CRT download that cannot put its file in
+place, a `mv` between two spellings of one Outposts object, an S3 Express
+access point, a plain-HTTP endpoint named anywhere but `--endpoint-url` under
+the CRT engine, a FIPS pseudo-region under the CRT engine, `--sse aws:kms`
+under `--no-sign-request` or against a multi-Region, Outposts or S3 Express
+target, a `[plugins]` section, an alias file, a `cli_history` directory `aws` cannot create, the
+modification time a download stamps in some local zones (and the `sync` runs that follow
+from it), a transfer or delete whose request dies
+without any response, a multipart copy whose tag write and its cleanup both
+fail, a local source that cannot be walked as a directory, a path with no
+bucket, two downloads whose names differ only in case on Windows, a filtered
+path holding glob characters, `--exclude` / `--include`
+between nested S3 prefixes or across sides on Windows (below), a timestamp
+(an object's or a local file's) only `aws`'s local-time conversion cannot
+hold, a
+malformed `--grants`, a file whose size and time could not be read and then
+could, the destination directory of a refused run, a help page or an `mb` /
+`rb` success line that cannot be written, a
+`file://` or `fileb://` reference `aws` mishandles, a `[s3]` key named
+`self`, and non-ASCII text in the config and credentials files. A difference
+of that kind anywhere else is a bug worth reporting; which of two mistakes an
+error report names, or the wording of text botocore, Python or S3 wrote, is
+not.
 
-**Do not parse the console output.** Not because the wording differs: result
-lines, error text and warnings are aws's own, with this command's name
-substituted for `aws` — the error prefix is `boto3-s3:`, not `aws:`, and usage
-lines read `boto3-s3 <subcommand>` where aws's read `aws s3 <subcommand>`. That
-is exactly what makes parsing fragile: the wording is aws's to change, and it
-does change from one `aws` release to the next. Eleven of section 2's entries
-cover the text that differs on purpose — the progress display, help pages and
-`--debug` traces, the failure lines of a batched delete, the closing line of a Ctrl-C
-`aws` cannot attribute to a cancelled classic transfer, the failure line of a
-directory copied without `--recursive`, the `--version` line, three
-argument-parsing corners, the history warning `aws` writes and this command
-has not, the messages the installed botocore itself writes, the element a
-listing entry missing two required ones is blamed on, and the request a
-failing stream download is blamed on under a non-default checksum-validation
-setting. The interactive prompt
-(`--cli-auto-prompt`) is outside parity altogether, its output included. And
-the ordering of concurrent output is not reproducible on either tool (below).
-
-Because the text is aws's, so are its envelopes: parameter-validation errors
-use `An error occurred (ParamValidation): <message>`, and so do the
-exit-code 253 reports this command shares with `aws` — unresolved credentials,
-an unresolved region, and an unusable `cli_timestamp_format` (`An error
-occurred (Configuration): ...`); the 253 an uninstalled dependency produces is
-this command's own and has no envelope
-(see [`exit-codes.md`](./exit-codes.md)). The credentials and region reports
-also keep
-aws's hint verbatim, which is why the credentials error tells you to run
-`aws login`: this command has no login subcommand of its own, and both tools
-read the same credentials and config files, so configuring credentials with
-`aws` — or by any other means — is what fixes the run either way. The
-unresolved-region report points at `aws configure` for the same reason.
-`aws` drops the envelope when the profile you named does not exist in any
-config file, keeping the exit code, and so does this command. Where the two
-part is the error format — `--cli-error-format`, `AWS_CLI_ERROR_FORMAT` and
-the profile key `cli_error_format`: `aws` acts on all three, this command
-accepts every value and ignores it. On `aws`, `enhanced` puts the envelope
-back in that dropped-envelope situation (as the option or the variable — the
-profile key would have to come from the profile that does not exist),
-`legacy` drops the envelope, and `json`, `yaml`, `text` and `table` re-render
-the report itself — into a JSON object, a YAML mapping, a tab-separated line,
-an ASCII table — where here the report keeps its usual one-line form
-throughout. `aws` applies the setting from the point where it has read it:
-the reports it makes before that — `--profile` without a value, `--debug=1`,
-the two auto-prompt flags together — never change, and the option, unlike the
-variable and the profile key, does not reach a failure of the very parse that
-reads it (`ls --output bad --cli-error-format legacy` keeps its envelope). A
-value outside that list, in the variable or the profile, is an error on
-neither tool: `aws` falls back to `enhanced`, and says so in a line of its
-own (`Invalid cli_error_format: 'x'. Using 'enhanced' format.`) ahead of a
-usage error in its top-level options — a global that does not parse, a bad
-`--endpoint-url` or `--query` — which this command never prints. Whichever
-value is set, the exit code is the same on both tools.
+**Do not parse the console output.** Not because the wording differs:
+result lines, warnings and the error messages `aws`'s own code writes are
+aws-cli's own (a few that `aws` words wrongly or misleadingly aside), with
+this command's name substituted for `aws` — the error prefix
+is `boto3-s3: [ERROR]:`, and usage lines and the help commands a usage error
+suggests read `boto3-s3 <subcommand>` where `aws`'s read `aws s3 <subcommand>`
+(or `aws <command> <subcommand>`). The advice a message gives keeps naming the
+`aws` commands aws-cli names: a missing-credentials report ends `You can
+configure credentials by running "aws login".`, a missing-region one points at
+`aws configure`, and the region advice `aws` adds to some of S3's messages at
+`aws s3api get-bucket-location`. This command has none of them, but both tools
+read the same config and credentials files, so following the advice fixes the
+run either way. That is exactly what makes parsing fragile: the wording is
+aws-cli's to change, and it does change from one `aws` release to the next. Four
+of section 2's entries cover the text that differs on purpose — the progress
+display, help pages and `--debug` traces, the `--version` line, and the
+history warning `aws` writes and this command has not. Text that botocore, Python or S3
+writes is reported as they write it, so it can read differently where their
+versions differ from the ones `aws` bundles. And the ordering of concurrent
+output is not reproducible on either tool (below).
 
 **Ordering**, as promised above: with concurrent transfers, result lines — and
 `delete:` lines against transfer lines — interleave freely, on either tool.
@@ -109,7 +99,21 @@ promised by either tool, so such a run is not something the two can be
 compared on. Do not pass `--delete` when one side of a same-bucket sync
 contains the other.
 
-The same holds for **a `sync --delete` against an S3-compatible endpoint whose
+Nested prefixes also change what `--exclude` / `--include` select, on any
+command and with no timing involved: `aws` joins each pattern onto both
+sides' bases and applies both to every entry, so where one side's base lies
+inside the other's, the other side's patterns reach it. `cp s3://bkt/d
+s3://bkt/d/backup --recursive --exclude 'x*'` skips the source's
+`d/backup/x1.txt`, and a single object whose parents nest is caught the same
+way (`cp s3://bkt/a/x s3://bkt/z --exclude 'a/*'` excludes the object on
+`aws`). This command matches each entry under its own side's base only, so
+it copies both. The same cross-side reach lets `aws` on Windows match a local
+path with a root-relative or drive-relative pattern joined onto the S3 side,
+which has no drive to anchor it (`C:?b*` matching `C:\b...`, `\?srv\...`
+matching a UNC path); this command does not reproduce that either.
+
+Timing decides the result on either tool, as in the nested `sync --delete`
+above, for **a `sync --delete` against an S3-compatible endpoint whose
 listing is not in key order**: both tools pair such a listing the same way,
 and that pairing can copy a key and delete it in one run, so whether the key
 survives is timing on either tool (measured: lost in four of six runs on
@@ -136,53 +140,33 @@ syncing with `--delete` onto such a directory.
 
 ## 2. Behavior differences
 
-The first can leave you with something wrong without saying so: a corrupted
-ranged download is a silent success here. The rest are visible, or make no
-difference to the result — except the ones that say outright that the run
-comes out differently, listed in section 1.
+These are visible, or make no difference to the result — except the ones
+that say outright that the run comes out differently, listed in section 1.
 
-- **Corrupted ranged downloads are not detected by the classic engine.** For a
-  single-object download at or above the multipart threshold, `aws` verifies the
-  reassembled object and fails on a mismatch; here such a corruption — one that
-  got past TLS and TCP integrity — would be reported as a success. **If that
-  matters to you, install the `crt` extra and set
-  `preferred_transfer_client = crt`**, which validates exactly as `aws` does.
-  Downloads below the threshold are verified on both tools, so only large
-  single-object downloads are affected.
-- **An `mv` download whose source delete dies without a response hangs `aws`
-  under the CRT engine.** With `preferred_transfer_client = crt`, an `mv` from
-  S3 to a local path downloads on the CRT client and then deletes the source
-  with a plain `DeleteObject`. When that request's connection is closed before
-  any response, `aws`'s completion handler fails on the missing response (the
-  same failure that makes it drop such an item on the classic engine), but the
-  CRT engine does not swallow it: `aws` writes an `Exception ignored in:`
-  traceback ending in `AttributeError: 'NoneType' object has no attribute
-  'get'` and never exits (measured: still waiting after 90 seconds). Here the
-  item is dropped as on the classic engine: no line, exit code 0, the file
-  downloaded and the source kept.
-- **A download answered `416` reads as an empty object here.** The
-  classic engine's installed `s3transfer` takes a `GetObject` answered
-  `416 InvalidRange` for an object with no bytes; the fork `aws` bundles
-  reports it. From an endpoint that answers a plain `GET` of a non-empty
-  object that way (S3 does not), a download to stdout writes nothing and
-  exits 0 here, where `aws` prints `download failed: ... (InvalidRange)` and
-  exits 1; a download to a file fails on both tools at 1, worded here by the
-  missing temporary file it then tries to rename.
-- **A download body cut mid-stream is retried here and not by `aws`.** The
-  retryable set differs between the `s3transfer` installed from PyPI and the
-  fork `aws` bundles: the installed botocore turns a connection broken in the
-  middle of a response body into an error the installed `s3transfer` re-fetches
-  the range for, while the bundled pair does not. So one transient break leaves
-  this command at exit code 0 with the complete file (on stdout, every byte
-  once), where `aws` exits 1 with
-  the underlying `Connection broken: IncompleteRead(...)` on its
-  `download failed:` line and nothing at the destination (on stdout, the bytes
-  that arrived before the break). A break that persists
-  fails both — exit code 1, no file — but this command spends five attempts per
-  range and ends with `Max Retries Exceeded`, where `aws` gives up on the first
-  break and prints that same underlying error. This lives in the installed
-  `botocore` / `s3transfer` rather than in either tool's own code — the same
-  split as the default checksum algorithm below — so no option here changes it.
+- **A request that dies without any response fails its item here.** When a
+  request's connection is closed before any response, or its read times out,
+  once the client's retries are spent — or the HTTP layer refuses to send a
+  header value (a line break in `--cache-control`) — `aws`'s classic engine
+  loses the item (a download's timed-out read aside): it prints no line for
+  it and, if nothing else failed, exits 0. Under the CRT engine an `mv`
+  download meets it in its source delete, a plain `DeleteObject` the CRT
+  client does not send, and there `aws` never exits. This
+  command reports such an item like any other failure and exits 1; `rb
+  --force` then stops with 255 before removing the bucket. S3 may have acted
+  on the request before the response was lost, so the object may have been
+  written or deleted all the same. A request the CRT client sends itself — a
+  CRT transfer, a delete under the CRT engine — is reported as a failure by
+  both tools.
+- **A multipart copy whose tag write and its cleanup both fail fails here.**
+  An S3-to-S3 copy at or above the multipart threshold writes a tag set too
+  large for its create request after the copy, and deletes the copied object
+  again when that write fails. When the delete fails too, `aws` prints the
+  copy's success line and exits 0, the copied object is left without its
+  tags (under `--copy-props all`, with its annotations written), and a `mv`
+  deletes its source. This command reports the item as failed (`copy
+  failed:` / `move failed:` with the tagging error) and exits 1; the copied
+  object is left without its tags or annotations, and a `mv` keeps its
+  source.
 - **A download's modification time differs in some zones.** Both tools give
   the downloaded file the object's `LastModified`; here the object's own
   instant is stamped, always. `aws` converts the timestamp to local time and
@@ -214,21 +198,6 @@ comes out differently, listed in section 1.
   The bytes are identical throughout. Real S3 never reports a `LastModified`
   as old as the last two cases need, so those take an S3-compatible
   implementation that does; the first needs only the zone.
-- **Default checksum algorithm without awscrt.** Without `--checksum-algorithm`,
-  the requests that carry a client-computed checksum use `CRC64NVME` here as on
-  `aws` v2 — uploads, deletes, bucket configuration writes, the annotation
-  writes a `--copy-props all` multipart copy sends — as long as the installed
-  botocore can compute it, which takes awscrt (the `crt` extra). Without
-  awscrt the installed botocore's own default stands instead — `CRC32` from
-  botocore 1.36 on, and no default checksum at all below it, where an upload
-  carries `Content-MD5`; `aws` always bundles awscrt. None of these changes
-  the result or the exit code; what differs is the checksum left on an
-  uploaded object (a full-object CRC64NVME against a composite CRC32, or
-  none). An explicit `--checksum-algorithm` makes the two agree regardless.
-  The batched deletes the CRT engine sends carry the installed botocore's own
-  default even with awscrt (`CRC32` from botocore 1.36 on); `aws` sends no such
-  request — its deletes
-  go one key at a time, with no checksum.
 - **Output back-pressure.** `aws` queues result lines without limit, so a stalled
   reader grows memory. Here the queue is bounded: a reader that falls far enough
   behind slows the transfer instead. No result line is ever dropped.
@@ -243,14 +212,18 @@ comes out differently, listed in section 1.
   where here it joins them as it completes. The numbers painted are exact
   either way, and the final counts agree.
 - **Help pages and `--debug` traces.** Help pages are laid out by this
-  command's own parser, not by aws's documentation renderer; the options, their
-  values and their meanings are the same, the typography is not. `--debug`
-  traces come from the installed boto3/botocore rather than aws's bundled copy,
-  and credentials appearing in them are masked here — `aws` prints them in
-  full. A help page that cannot be written ends differently as well: `aws`
-  hands its page to a pager process and exits 0 whatever becomes of it, while
-  this command writes the page itself, so `help > /dev/full`, or a reader that
-  closes at once, is exit code 120 here.
+  command's own parser, not by aws-cli's documentation renderer; the options,
+  their values and their meanings are the same, the typography is not.
+  Credentials appearing in `--debug` traces are masked here — `aws` prints them
+  in full.
+- **Output that cannot be written.** `aws` hands a help page to a pager
+  process and exits 0 whatever becomes of it, while this command writes the
+  page itself, so a page that cannot be written (`help > /dev/full`, or a
+  reader that closes at once) fails with the write error. `mb` and `rb` on
+  `aws` report a bucket they created or removed as `make_bucket failed:` /
+  `remove_bucket failed:` when the success line cannot be written; here the
+  bucket is done and the lost line follows the rule every command follows
+  ([`exit-codes.md`](./exit-codes.md)).
 - **A delete answered `412 PreconditionFailed` fails here.** `aws` turns a
   `PreconditionFailed` answer into a silent skip whatever the request was - a
   rule meant for `--no-overwrite`'s conditional writes - so a `DeleteObject`
@@ -261,39 +234,139 @@ comes out differently, listed in section 1.
   `rb --force`, whose bucket removal then does not run). S3 itself never
   answers an unconditional delete this way; only an S3-compatible endpoint
   can.
-- **A batched delete names a different operation when a key fails.** Deletes go
-  out in batches here — up to a thousand keys per `DeleteObjects` request —
-  where `aws` sends one `DeleteObject` per key. Batching is a settled design,
-  and the differences it causes — this entry's, and the Ctrl-C during deletes
-  under the CRT engine below — are accepted rather than open: where a batch
-  can cheaply be brought closer to `aws`'s per-key outcome it is, by sending
-  keys again one by one. For a run that finishes
-  enumerating, the objects removed and the exit code are the same (a key that
-  no longer exists is a success on both wire shapes) unless the endpoint keeps
-  failing requests (below); the per-key failure line is not. A key the batch
-  response fails reads `delete failed: s3://bkt/key An error occurred
-  (AccessDenied) when calling the DeleteObjects operation: <message>` — the
-  plural operation name, and never the `(reached max retries: N)` suffix —
-  because the line is composed from that batch response's own per-key error
-  rather than written by botocore, where `aws`'s reads `... when calling the
-  DeleteObject operation: <message>`, with that suffix where botocore spent
-  the request's attempts (`AWS_MAX_ATTEMPTS=1` gives `(reached max retries:
-  0)`; its CRT client's line never carries one). A batch request that fails as
-  a whole — a missing bucket, a refusal, a server error — is not one of these:
-  its keys are sent again one by one (below), so their lines are aws's.
-  (A key the batch reports with a fault the service
+- **A transfer answered `412 PreconditionFailed` fails here, unless the
+  answer is to `--no-overwrite`'s own write.** The same `aws` rule covers
+  every request of a transfer whose `412` reaches it. Under the CRT engine a
+  multipart download reads each part on the condition that the object has not
+  changed since the download began, so an object overwritten during the
+  download is answered `412`; so can the tag write that follows a multipart
+  copy whose tag set is too large for its create request, after which `aws`
+  deletes the copied object again. In each case `aws` prints no line for the
+  item, does not count it and, if nothing else failed, exits 0: the item
+  leaves no file or object behind, and a `mv` keeps its source. This command
+  reports the item as failed (`download failed:`, `copy failed:`,
+  `move failed:`) and exits 1, with the same files and objects left behind.
+  The classic engine's multipart download and any multipart copy put the same
+  condition on each part, but there a part's `412` fails the item as an ETag
+  mismatch on both tools. `--no-overwrite`'s own write - a `PutObject` or `CopyObject`,
+  or the call completing a multipart upload or copy - answered `412` is a
+  silent skip on both tools, and any other request answered that way is a
+  failure here even under `--no-overwrite`. Measured on `aws` 2.36.40 through
+  a proxy answering `412`.
+- **A local source that cannot be walked as a directory stops the run
+  here.** A `sync` or a recursive `cp` / `mv` reads its local source as a
+  directory. When the source is a file, a special file, a directory it cannot
+  read, a symbolic link under `--no-follow-symlinks`, or a path found only
+  through a `..` after a symbolic link, `aws` skips it and runs on an empty
+  source, so `sync --delete` goes on to delete every object under the
+  destination prefix. This command refuses such a source before anything is listed, sent
+  or deleted, as it refuses a missing one: exit code 255 with the reason.
+- **A path with no bucket is refused here.** `s3:///key` or a bare `s3://`
+  given to `cp`, `mv`, `sync`, `rm`, `mb` or `rb` is exit code 252 before
+  any request (`presign` and `website` refused it already; `ls` lists the
+  buckets for both, as `aws` does, and `rb s3:///key` is refused at 252 as a
+  key on a bucket on both tools). `aws` carries the rest into the run, where it
+  fails item by item or as a fatal error — or, for a `--dryrun` `cp` or
+  `rm`, prints its success line and exits 0 — and `rb --force` runs its
+  deletion first.
+- **A timestamp only `aws`'s local-time conversion cannot hold does not stop
+  the run here.** `aws` converts every `LastModified` it reads to local time,
+  so an object stamped within the local zone's offset of the year 1 or 9999
+  (on Windows also before 1970 or after about 3001) ends its run where the
+  listing or the single-object HEAD reads it - `fatal error: date value out
+  of range`, exit code 1 - and nothing after it is transferred, compared or
+  deleted (measured). Here the stamp is kept as the instant it names and the
+  run goes on. `ls` prints times in the local zone, as `aws` does, so the
+  line of such an object still stops the listing there, at exit code 255 on
+  both tools. S3 itself never sends such a stamp.
+- **A local file time only `aws`'s local-time conversion cannot hold is
+  read as it is here.** `aws` reads each local file's modification time in
+  the local zone. Where that fails but UTC does not - within the zone's offset
+  of the year 1 or 9999, say, or on Windows a time just after 1970-01-01
+  00:00 UTC in some zones (measured under `TZ=EST5EDT`: `0` fails, `3600`
+  does not) - it warns `File has an invalid timestamp. Passing epoch time as
+  timestamp.`, takes the file as stamped 1970-01-01 and exits 2. Here the
+  time is the instant it names, with no warning, and the run exits 0; an
+  upload `sync` then sends a file stamped near 9999 again on every run, as it
+  does any file stamped in the future, where `aws`'s 1970 stamp leaves it
+  be. A time UTC cannot hold either - outside the years 1 to 9999, or on
+  Windows from about half a day before 1970 back or after about 3001 - gets
+  the warning and the 1970 stamp on both tools.
+- **A malformed `--grants` is refused before the run.** A grant not of the
+  form `permission=grantee`, or naming a permission other than `read`,
+  `readacl`, `writeacl` and `full`, is exit code 252 here before anything is
+  listed, sent or deleted, on every route. `aws` finds it only as it maps the
+  first upload or copy, so its run stops there, after any deletes a `sync`
+  has already sent, and a run with nothing to upload or copy — a download, or
+  a `sync` whose `--delete` deletions are all it has to do — never finds it
+  and succeeds, where this command does nothing.
+- **A file whose size and time could not be read and then could is warned
+  about here.** A local walk reads each file's size and time again just
+  before handing it on. When that read fails and the file is back by the time
+  the failure is examined (it was being replaced, say), `aws` skips the file
+  without a line and exits 0; this command skips it too, with a `Skipping
+  file ...` warning naming the error, and exits 2.
+- **A refused run leaves no destination directory.** `aws` creates the
+  missing local destination directory of a recursive `cp` / `mv` or a `sync`
+  while it checks the paths, ahead of its other checks, so a run it then
+  refuses - a `sync` with a directory bucket, a misused SSE-C option - leaves
+  an empty directory behind (measured). This command creates it only once
+  every check has passed; a run that starts creates it as `aws` does, empty
+  listing or not.
+- **Ctrl-C is not matched.** A Ctrl-C ends the command at once at 130 here,
+  where `aws` cancels and waits for what is out and exits 1 during a running
+  transfer or delete. So an unfinished multipart upload or a temporary file can
+  stay behind here, where `aws` cleans them up. What an interrupted run still
+  sends and prints is not compared ([`exit-codes.md`](./exit-codes.md)).
+- **With awscrt installed, a failed upload on a signed payload can report
+  awscrt's error and write tracebacks.** botocore signs with awscrt's signer
+  here, where `aws` signs in pure Python, and that signer reads the body wherever
+  the payload is signed (a plain-HTTP endpoint above all). A local read that
+  first fails there is reported as `AWS_ERROR_UNKNOWN` with a traceback on stderr, where
+  `aws` reports the OS error, and a multipart upload that fails or is interrupted
+  there can write more tracebacks. The exit code of a failure is the same.
+- **`file://` and `fileb://` are refused where `aws` mishandles them.** Each
+  of these exits 252 here, before anything is read or sent:
+  - **A `fileb://` path argument** of `ls`, `rm`, `mb`, `rb`, `presign` or
+    `website`. `aws` loads the bytes as the path; `rm` then decodes them back
+    into a path and deletes it.
+  - **A `file://` bucket for `website`.** `aws` takes the first character of
+    the file as the bucket: a file holding `s3://mybucket` configures the
+    website of bucket `s`. A `fileb://` one is refused too.
+  - **A whole `--metadata fileb://...`.** A map is text, so use `file://`.
+  - **A single `--grants` value with either prefix.** `aws` reads the file
+    as grants one character at a time. Give each grant as an argument
+    instead.
+
+  Everywhere else the two prefixes work as on `aws`: a `file://` path
+  argument (other than `website`'s) is read as the path, and option values
+  load as before.
+- **A `fileb://` value for an option that takes text is refused without its
+  content.** `--content-type`, `--cache-control` and the other options whose
+  value is text, and a `--metadata` entry written `key@=fileb://...`, exit
+  252 on both tools. `aws` reads the file, and its report — botocore's type
+  error — prints the bytes it read (`value: b'...'`). A binary file may hold
+  a key or a certificate, so this command's report names the option and the
+  key instead, and for an option it refuses the reference before reading the
+  file. Use `file://` to read text from a file.
+- **Deletes go out in batches.** Up to a thousand keys go out per
+  `DeleteObjects` request here, where `aws` sends one `DeleteObject` per key.
+  Batching is a settled design, and the differences it causes are accepted
+  rather than open: where a batch can cheaply be brought closer to `aws`'s
+  per-key outcome it is, by sending keys again one by one. For a run that
+  finishes enumerating, the objects removed and the exit code are the same (a
+  key that no longer exists is a success on both wire shapes) unless the
+  endpoint keeps failing requests (below). A batch request that fails as a
+  whole — a missing bucket, a refusal, a server error — has its keys sent
+  again one by one (below). A key the batch reports with a fault the service
   asks to have retried — `InternalError`, `SlowDown`, `ServiceUnavailable`,
-  `RequestTimeout` — is the exception: it is sent again as a `DeleteObject`
-  of its own, retried as `aws` retries it, and if it still fails its line is
-  aws's. With retries turned off — `AWS_MAX_ATTEMPTS=1` — on the classic
-  engine it is not sent again, fails as it does on `aws`, and keeps the
-  batch's line; the CRT client retries whatever that setting says, so under
-  it the key is always sent again.) Only the batching routes are affected —
-  `rm --recursive`, an S3-side `sync --delete`, and `rb --force` — while a
-  single `rm s3://bkt/key` still issues `DeleteObject` and its line is byte for
-  byte aws's. So a script grepping for the singular name, or for the retry
-  suffix, keeps matching on single deletes and can quietly stop matching on
-  recursive ones.
+  `RequestTimeout` — is sent again as a `DeleteObject` of its own and retried
+  as `aws` retries it. (With retries turned off — `AWS_MAX_ATTEMPTS=1` — on
+  the classic engine it is not sent again and fails as it does on `aws`; the
+  CRT client retries whatever that setting says, so under it the key is always
+  sent again.) Only the batching routes are affected — `rm --recursive`, an
+  S3-side `sync --delete`, and `rb --force` — while a single
+  `rm s3://bkt/key` still issues `DeleteObject`.
 
   Batching is also what makes those same three routes end differently when the
   **listing that feeds them dies part way** — the service failing mid-pagination,
@@ -303,15 +376,6 @@ comes out differently, listed in section 1.
   without being deleted and without a record: **up to 999 objects that `aws`
   would have removed survive**. Re-running the command deletes them, and a run
   that enumerates to the end is unaffected.
-
-  A **Ctrl-C** while deletes are in flight shows it too. `aws` cancels its
-  per-key delete futures and prints nothing after the interrupt (measured:
-  ten deletes in flight, at most one line), while a batch request already out
-  here cannot be cancelled: it completes, and the lines of the keys it carried
-  — up to a thousand — print before `cancelled: ctrl-c received`, as do those
-  of the per-key requests already out. A per-key request not yet started is
-  not sent and prints nothing, as on `aws`. (Under the CRT engine see the
-  entry below.)
 
   One batch request also has one set of attempts, where each of `aws`'s
   per-key requests has its own, so **an endpoint that fails requests** —
@@ -323,25 +387,20 @@ comes out differently, listed in section 1.
   attempt `aws` gives it). A key can so get more attempts than `aws` gives
   it, never fewer, and an endpoint failing often enough to defeat `aws`'s
   per-key requests can leave this command deleting objects, with their
-  `delete:` lines, that `aws` leaves in place: dropped connections make `aws`
-  lose such a key without a line at exit code 0 on the classic engine
-  (measured: six dropped requests for two keys) and report it at exit code 1
-  under the CRT (measured: twelve), and error answers make it report the key
-  at exit code 1 (measured on the classic engine: six `InternalError`
-  answers for two keys, or a single 429 or 403, or a single 500 under
-  `AWS_MAX_ATTEMPTS=1` — where three `InternalError` or `Throttling` answers
-  leave both tools deleting both). A delete that keeps failing ends the same
-  on both tools, in the same words.
+  `delete:` lines, that `aws` leaves in place, losing the key without a line
+  at exit code 0 or reporting it at exit code 1. A delete that keeps failing
+  ends the same
+  on both tools, bar one whose requests die without any response on the
+  classic engine (the first entry of this section).
 
   Under the CRT engine (`preferred_transfer_client = crt`) the batches ride
   the CRT client, as `aws`'s per-key deletes ride its own — `rm` and a
   `sync --delete` from a local directory (an S3-to-S3 sync is on the classic
-  client on both tools) — so the CRT's retry policy, its failure text and the
-  `[s3]` keys that tune the CRT client apply to them as they do on `aws`. The
-  CRT re-sends a server error answer itself (a 500, a 503, a
-  `RequestTimeout`), and once its attempts are spent it reports its own error
-  rather than the answer; either way the batch's keys are sent again key by
-  key, as on the classic engine.
+  client on both tools) — so the CRT's retry policy and the `[s3]` keys that
+  tune the CRT client apply to them as they do on `aws`. The CRT re-sends a
+  server error answer itself (a 500, a 503, a `RequestTimeout`), and once its
+  attempts are spent the batch's keys are sent again key by key, as on the
+  classic engine.
 - **A plain-HTTP endpoint named anywhere but `--endpoint-url` still reaches
   the CRT engine.** Under `preferred_transfer_client = crt`, `aws` decides
   whether its CRT client speaks TLS from `--endpoint-url` alone, so an
@@ -354,42 +413,35 @@ comes out differently, listed in section 1.
   the resulting S3 state differ, in the direction of working. Pass
   `--endpoint-url` and the two agree again
   ([`../../design/crt.md`](../../design/crt.md) section 3 records the
-  measurement).
-- **Ctrl-C's closing line.** Both tools exit 1 on a Ctrl-C caught mid-run,
-  and both close with `cancelled: ctrl-c received` when the interrupt
-  cancels a classic transfer: a download whose body is still arriving, a
-  multipart upload or copy with parts still to go, or an item still waiting
-  for a worker. `aws` produces that line only from such a
-  cancelled transfer, so everywhere else it has one — the
-  interrupt landed before the first transfer was submitted, or during a
-  `--dryrun`, or after the last one finished, or while every transfer of the
-  run was down to its one request already out (an upload or copy small
-  enough to go as one request, a multipart one sending its completion, or a
-  delete, that it lets finish and reports done: a single one, or a few no
-  more than the worker count), or mid-submission under
-  `preferred_transfer_client = crt` — `aws` closes instead with a
-  `fatal error:` line carrying no message: its recorder renders the
-  `KeyboardInterrupt`, whose text is empty, as an error result padded with the
-  blanks that erase the progress line. The empty line is a rendering accident,
-  so this command keeps its uniform Ctrl-C ending instead of copying it. (An
-  interrupt landing in the CRT engine's transfer drain is a different shape
-  with no divergence for transfers: the CRT manager swallows it on both tools,
-  which print their per-item failure lines and no closing line. Deletes
-  differ, below.)
-- **Ctrl-C during deletes under the CRT engine.** `aws`'s CRT manager swallows
-  an interrupt in its drain there too and goes on sending every per-key
-  delete already queued, then ends with the per-key lines — a request the
-  interrupt cancelled fails with `AWS_ERROR_S3_CANCELED` — and no closing line,
-  exit code 1 (measured: thirty keys, all deleted). This command's deletes
-  are batched — an accepted difference (above) — and stop at the interrupt as
-  on the classic engine: the
-  requests already out finish, no further one starts, and the run closes with
-  `cancelled: ctrl-c received`, exit code 1 — so objects `aws` would still
-  have deleted survive. Re-running the command deletes them. A single-key `rm`
-  sends one request, unbatched, and the same rule holds: the request out
-  finishes and is reported (`delete: s3://…`) before that closing line, where
-  `aws` cancels it and reports `delete failed: s3://… AWS_ERROR_S3_CANCELED:
-  Request successfully cancelled` with no closing line, exit code 1 on both.
+  measurement). A host under an AWS domain (`s3.us-east-1.amazonaws.com`,
+  a VPC endpoint's name) is the exception: its scheme is not read here
+  either, so TLS stays on, as on `aws`.
+- **A FIPS pseudo-region under the CRT engine.** Under
+  `preferred_transfer_client = crt`, a region named in the old FIPS form
+  (`--region fips-us-east-1`, `us-east-1-fips`) reaches `aws`'s CRT client as
+  the region to sign for, which S3 is expected to refuse for every item (not
+  measured). Here the CRT engine signs for the region the client resolved -
+  the plain region, on the FIPS endpoint - so the run transfers, as the
+  classic engine does on both tools. Name the plain region with
+  `use_fips_endpoint = true` and the two agree
+  ([`../../design/crt.md`](../../design/crt.md) section 4).
+- **`--sse aws:kms` leaves signing alone.** `aws` builds its S3 client with
+  SigV4 pinned whenever `--sse aws:kms` is given, and the pin outranks the
+  rest of its signing setup:
+  - **Under `--no-sign-request`** its classic engine signs anyway. With no
+    credentials the run fails with `Unable to locate credentials` (exit code
+    1) before sending anything, a profile whose credentials cannot be built
+    stops it with exit code 255, and with credentials the requests go out
+    signed. Its CRT engine stays anonymous (all measured). Here the run is
+    anonymous on both engines, as without the option.
+  - **Against a multi-Region access point, an S3 on Outposts access point or
+    an S3 Express directory bucket** it signs plain SigV4, where every other
+    run signs the endpoint's own scheme (SigV4a, or the S3 Express session).
+    Here `--sse aws:kms` signs that scheme too. The signatures were measured
+    offline; how those endpoints answer `aws`'s was not.
+
+  A signed run against any other bucket signs SigV4 either way and comes out
+  the same.
 - **A CRT download that writes no file fails here.** Under
   `preferred_transfer_client = crt`, a download whose file cannot be put in
   place - a name longer than the filesystem allows, a directory already
@@ -402,6 +454,20 @@ comes out differently, listed in section 1.
   command reports the item as `download failed:` / `move failed:` with the
   operating system's error, exits 1, and keeps the object - the classic
   engine's outcome on both tools.
+- **A download replaces its file in one step on Windows.** `aws` puts a
+  downloaded file in place on Windows by removing the file at the destination
+  and then renaming the downloaded temporary file onto it. Two downloads of
+  one run whose names differ only in case - onto a case-insensitive
+  filesystem, under `--case-conflict ignore` (the default) or `warn` - can
+  interleave between those two steps, and then one fails with `[WinError
+  183]` and the run exits 1 (36 of 60 runs on a Windows host). Here the
+  classic engine replaces the file in one step, which leaves no gap between
+  the steps for the other download to fall into: the run exited 0 in 449 of
+  450 runs (and 2 once), leaving one of the two files. Where Windows
+  refuses the one-step replacement, the two steps run as on `aws`, so a
+  read-only file, a directory or a file another process holds open fails as
+  it does there, and a link to a directory is replaced as there. Under the
+  CRT engine both tools take the two steps.
 - **A `mv` between two spellings of one Outposts object is refused here.** An
   Outposts access point's key can be set off from the ARN with `:` or with `/`,
   and a name the access-point pattern cuts short at a character a name may not
@@ -409,11 +475,11 @@ comes out differently, listed in section 1.
   point `myap` and the key `_x`, also spelled `accesspoint/myap/_x`).
   `aws` compares its two arguments as text, takes
   `mv s3://<arn>:k s3://<arn>/k` (or the two spellings of a cut-short name) for
-  a move between two objects and sends it — onto itself. This command recognizes the one object and stops: after the
-  same "may resolve to same underlying s3 object(s)" warning `aws` prints, it
-  ends with `fatal error: Cannot mv a file onto itself: ...` and exit code 1.
-  (A `mv` whose two arguments are the same text is refused earlier, as a usage
-  error with exit code 252, on both tools.)
+  a move between two objects and sends it — onto itself. This command
+  recognizes the one object and refuses the move before it starts, without
+  the "may resolve to same underlying s3 object(s)" warning `aws` prints:
+  `Cannot mv a file onto itself: ...`, a usage error with exit code 252 — the
+  report both tools give a `mv` whose two arguments are the same text.
 - **An S3 Express access point is treated as its directory bucket by `sync`
   and `--case-conflict`, and as an access point alias by `mv`.** `aws`
   refuses `sync` on an S3 Express
@@ -436,60 +502,28 @@ comes out differently, listed in section 1.
   it prints `aws`'s "may resolve to same underlying s3 object(s)" warning,
   and under `--validate-same-s3-paths` resolves the access point and refuses
   the move with exit code 252.
-- **Copying a directory without `--recursive`.** A `cp` or `mv` whose local
-  source is a directory fails — exit code 1 on both tools, the source left in
-  place — unless a filter excludes the source (`--exclude 'd/'`, its
-  trailing-separator form, or `--exclude '*'`), when both tools do nothing and
-  exit 0; only the failed line's wording differs (and, against real S3, a
-  progress line `aws`'s CRT engine prints for a keyless destination). `aws`
-  threads
-  the source through in its trailing-separator form: its line names the
-  source `d/` and, on the classic engine, ends with `[Errno 21] Is a
-  directory: '/path/to/d/'` when the destination carries a key (over HTTPS,
-  as against real S3, with `Need to rewind the stream
-  <botocore.httpchecksum.AwsChunkedWrapper object at 0x…>, but stream is not
-  seekable.` instead) — or, when the
-  destination folds the key away as `s3://bkt/` does, with `Parameter
-  validation failed:` and `Invalid length for parameter Key, value: 0, valid
-  min length: 1`, the empty key its request reaches botocore with. Under the
-  CRT engine it ends the same way for that destination, and with `Unknown
-  Error Code: Unknown Error Code` — the native error its renderer cannot
-  translate — for one that carries a key. Here the directory is detected
-  before submission, so the line names the source `./d` and ends with
-  `[Errno 21] Is a directory: '/path/to/d'` on either engine and for either
-  destination. The `Unknown Error Code` and `Need to rewind the stream`
-  endings are rendering accidents, so this command keeps the errno report
-  instead of copying them. Under `--dryrun`
-  both tools instead exit 0 and preview the
-  doomed upload, and the same threading difference shows in the previewed
-  line: `aws` prints `(dryrun) upload: d/ to s3://bkt/` — the
-  trailing-separator form, with the destination key folded away — where this
-  command prints `(dryrun) upload: ./d to s3://bkt/d`.
+- **Glob characters in a filtered command's path are literal here.** `aws`
+  joins the path a command names into every `--exclude` / `--include`
+  pattern, so a `[`, `*` or `?` in that path is read as part of the pattern:
+  `rm s3://bkt/f[1]/ --recursive --exclude '*'` matches nothing and deletes
+  every object, and `cp --recursive 'dir[1]' s3://bkt/ --exclude '*'` still
+  uploads (measured on 2.36.40; aws-cli issues #7330 and #5452). A relative
+  local path counts from the working directory, so glob characters there do
+  the same: in `Album [2020]`, `aws s3 sync . s3://bkt --exclude '*.tmp'`
+  uploads the `.tmp` files. The AWS reference allows no wildcards in a path
+  argument and documents a filter as relative to the source directory, so
+  this command takes the path - the working directory included - literally:
+  those runs exclude what the patterns name. This holds until AWS documents
+  the behavior as intended.
 - **The `--version` line.** `aws` names itself and its interpreter; this
   command names the four packages that decide its behavior —
   `boto3-s3-cli/<v> boto3-s3/<v> boto3/<v> botocore/<v> Python/<v>
   <System>/<release>` — and has no `exe/<machine>` install-source token to
   report. Anything keying on the `aws-cli/<version>` token will not match.
-- **Three argument-parsing corners.** When an abbreviated option is ambiguous,
-  the candidates are listed in a different order than `aws` lists them. On
-  Python 3.10 and 3.11 only, an ambiguous abbreviation is reported by the
-  parse that meets it before that parse reports anything else, wherever the
-  abbreviation sits: a value that itself ambiguously abbreviates one of the
-  command's options (`--exclude --ss`) is rejected here where `aws` takes it
-  as the value, another error of the same parse gives way to it
-  (`ls --output bad --no-c`), and so does a `--version` before it
-  (`ls --version --c` exits 252 here and prints the version on `aws`). What
-  is settled earlier — `--profile` without a value, `--debug=1`, the two
-  auto-prompt flags together — still comes first, as on `aws`. And on
-  a terminal `aws` colors the usage block that closes a usage error, which
-  this command does only when it runs on Python 3.14 or later — the coloring
-  is the interpreter's. None of the three changes which options exist;
-  [`../../design/cli.md`](../../design/cli.md) section 2 records why.
-- **Interactive prompt.** `--cli-auto-prompt` needs the `autoprompt` extra, and
-  its completions are not the same as aws's: values of every option that has a
-  fixed choice list are completed (`aws` omits some), bucket and key names are
-  not completed from the server, and shell completion is not provided. Nothing
-  about the prompt is covered by parity.
+- **No interactive prompt.** `--cli-auto-prompt` and `--no-cli-auto-prompt`
+  are accepted and ignored, and `AWS_CLI_AUTO_PROMPT` and the profile's
+  `cli_auto_prompt` are not read: the command runs as typed, where `aws`
+  would prompt for the rest.
 - **`cli_history` is not read.** With `cli_history = enabled` in the selected
   profile, `aws` records the run in a history database, and when it cannot
   open that database it writes one line to stderr ahead of everything else —
@@ -510,212 +544,47 @@ comes out differently, listed in section 1.
   swallows every failure of that machinery, so a directory it cannot write
   changes nothing observable there either — the file simply stops being touched
   once a script switches over.
-- **A `[toplevel]` alias can only lead back to `s3`.** An `s3` entry in the
-  `[toplevel]` section of `~/.aws/cli/alias` replaces `aws s3` on both tools,
-  and this command follows it the same way: the global options in its value,
-  an external (`!`) command, a chain through other `[toplevel]` entries. Where
-  the chain names another command instead — another service
-  (`s3 = s3api ...`), `help`, or an entry proxying a built-in service of its
-  own name — `aws` runs that command; this one has none to run and stops with
-  exit code 252 (`argument command: Found invalid choice '<name>'`). That
-  report, for a name neither tool knows, also carries no near-miss suggestion
-  here, where `aws` may suggest one of its services.
-- **An alias keeps the timeouts typed with it.** On `aws`, running any
-  internal alias — a `[command s3]` one, or any command under a `[toplevel]`
-  `s3` entry — drops `--cli-read-timeout` and `--cli-connect-timeout` typed on
-  the command line unless the alias's value sets them itself: rereading the
-  value resets both to their defaults. This command keeps the
-  typed values, so a run that times out here can complete there.
-- **An `aws` plugin's hooks into `aws` itself do not run.** Both tools load
-  `[plugins]` alike — with `cli_legacy_plugin_path` set, every other entry is
-  imported and its `awscli_initialize` called on every invocation, and a
-  plugin that cannot be imported or initialized stops the run before anything
-  happens (exit code 255, or 252 for a parameter-validation error). What a
-  plugin registers on the SDK's own events (`before-call.s3.PutObject`,
-  `after-call`, `needs-retry` and the like) runs as it does on `aws`. Two
-  parts of a plugin are written against `aws`'s own code and cannot run here:
-  handlers on `aws`'s own events (`building-command-table`,
-  `top-level-args-parsed`, `session-initialized` and the rest) are registered
-  but never called, and **a plugin that imports `awscli` modules fails to
-  import here** — exit code 255 with `No module named 'awscli'`, where `aws`
-  runs it and the command.
-- **A plugin meets the installed SDK, not `aws`'s bundled one.** The events
-  only `aws`'s bundled SDK emits (`before-create-client`,
-  `after-create-client`) never fire; fewer clients are built, so the events
-  of building one (`creating-client-class`, `choose-service-name`) fire fewer
-  times; and a recursive `rm`, `sync --delete` and `rb --force` delete
-  through `DeleteObjects`, so no per-key `DeleteObject` event fires for those
-  keys. While the plugins initialize, an event a plugin emits reaches only
-  the handlers plugins registered — on `aws` it reaches `aws`'s own too — and
-  an `unregister` aimed at one of the SDK's own handlers takes effect, or
-  fails, when the run first builds a client: a `--version` or a usage error
-  that builds none is unaffected, where `aws` already applied it, or stopped
-  at exit code 255. Which built-in functions can be a handler is the
-  interpreter's call: under Python 3.10 one such as `print` is accepted while
-  the plugins load and fails when its event fires, where `aws` (on Python
-  3.14) refuses it at load.
-- **A plugin that exits or raises outside `Exception` is not ignored.** A
-  plugin — while it loads, or from a handler — that calls
-  `sys.exit()` ends the run with the status it asked for, and one that raises
-  a `BaseException` that is not an `Exception` (`GeneratorExit`, its own
-  subclass) is reported like any other failure: exit code 255 with its
-  message, or the failed line of the transfer it stopped. An
-  `AssertionError` from a handler is such an ordinary failure on both tools.
-  This holds wherever the handler runs, a transfer's worker thread included.
-  `aws` handles neither of the first two the way Python would: one that
-  reaches its entry point (an `ls` listing) ends the run at exit code 0 with
-  nothing written, one raised while it lists or heads for a transfer or
-  delete ends it with `fatal error: 7` (the status as the message) at 1, and
-  one raised inside a request it sends for an item reports that item done -
-  a `mv` then deletes its source though nothing was sent (measured).
+- **`~/.aws/cli/alias` is not read.** `aws` reads that file on every
+  invocation: its `[command s3]` entries add or replace `aws s3` subcommands,
+  and a `[toplevel]` `s3` entry replaces `aws s3` itself. This command applies
+  none of them, and a file there is no error; a shell alias or function does
+  the same job.
+- **`[plugins]` is not read.** `aws` loads the plugins the config file's
+  `[plugins]` section names (with `cli_legacy_plugin_path` set, every other
+  entry is imported and its `awscli_initialize` called on every invocation),
+  so their handlers run and a plugin that cannot be loaded stops `aws` before
+  anything happens. This command loads none: the section is ignored, a broken
+  entry is no error, and no plugin's handler runs.
+- **A `[s3]` key named `self` is ignored.** On `cp`, `mv`, `sync`, `rm` and
+  `rb --force`, which read the `[s3]` transfer settings, `aws` stops before
+  any transfer or delete, at exit code 255 (`RuntimeConfig.build_config() got
+  multiple values for argument 'self'`), on a bug of its own; the other
+  commands do not read the section and run as usual. This command ignores the
+  key, as both tools ignore any `[s3]` key they do not use, and the run goes
+  ahead.
 - **User-Agent.** Requests identify themselves as the installed
-  `Boto3`/`Botocore`, not as `aws-cli`, and carry none of aws's command
+  `Boto3`/`Botocore`, not as `aws-cli`, and carry none of aws-cli's command
   metadata (`md/command#s3.ls` and the like). Visible only to the server and
   in `--debug` traces; anything keying on the aws-cli User-Agent (bucket
   policies, access-log analytics) will classify these requests differently.
-- **Messages botocore itself writes can be worded differently.** Where a report
-  comes from the SDK rather than from either tool, the sentence is the
-  installed botocore's, not the one in aws's bundled copy — the two are
-  separate codebases. The one reachable instance is a rejected `max_attempts`,
-  which `aws` ends "greater than or equal to one." and this command ends
-  "greater than or equal to 1."; the exit code is the same either way. It is
-  the only one left because the order around it agrees: the retry settings are
-  resolved and validated where `aws` resolves them, so a configuration carrying
-  several mistakes at once — an out-of-range `max_attempts` (`0`, `-1`)
-  together with an invalid `retry_mode`, or either of them beside a broken
-  `[s3]` section — reports the same one of them on both tools. The
-  invalid-bucket-name report belongs to the same SDK-owned family, including
-  the ones for names this command refuses before any request (`mb s3://`,
-  `website s3://bkt/key`): it asks the installed botocore to word them. The two
-  copies word that report identically today.
-- **A listing entry missing two required elements is blamed on a different
-  one.** When a service returns an entry without `Key` *and* without
-  `LastModified` or `Size`, `ls` stops and quotes the name of an element it
-  could not read — and the two tools quote different names. `aws` reads them in
-  one order while displaying a listing (`LastModified`, `Size`, `Key`) and in
-  another while enumerating a transfer (`Key`, `LastModified`, `Size`); this
-  command has a single listing converter, which follows the transfer order. So
-  an entry missing `Key` and `LastModified` ends `'LastModified'` on `aws` and
-  `'Key'` here. The exit code, the entries printed before the bad one and the
-  stream they go to all agree, and `cp` / `mv` / `sync` / `rm` agree
-  completely, their order being the shared one. An entry missing exactly one
-  required element names that element on both tools.
-- **`AWS_DEFAULTS_MODE` is read here and not by `aws`.** The installed botocore
-  implements defaults modes; `aws` v2's bundled botocore ignores the variable —
-  and the `defaults_mode` config key — entirely. A *valid* mode nonetheless
-  changes nothing you can observe here, because every setting a mode vends is
-  one this command already fixes to the same value: the connect timeout stays
-  at 60 s (the session names it explicitly, so a mode's 3.1 s or 30 s never
-  applies), the retry posture stays `standard` with 3 attempts, and both the
-  `[s3]` section's `us_east_1_regional_endpoint` and the profile's
-  `sts_regional_endpoints` are already `regional`. What does differ is an invalid or empty value: an error here
-  (exit code 255) where `aws` runs as if the variable were unset.
-- **A malformed instance-metadata endpoint is judged by the installed
-  Python.** Whether `AWS_EC2_METADATA_SERVICE_ENDPOINT` (or the profile key
-  `ec2_metadata_service_endpoint`) is a usable URL is botocore's check, and
-  that check leans on the interpreter's URL parser, whose rules have moved
-  between Python releases. A value only some releases refuse — a scheme that
-  starts with a digit (`1http://…`, taken below Python 3.11), a bracketed
-  host that is not an IPv6 address (taken by older patch releases) — ends
-  every run at 255 on `aws` and may run normally here, or the reverse,
-  depending on the Python this command is installed under. Every endpoint
-  that is a well-formed URL, and every one that plainly is not, is treated
-  alike on both. (The S3 endpoint itself, and the STS or SSO endpoint the
-  credential chain uses, wherever they come from, are checked for that
-  leading digit by the rule `aws`'s Python applies, and read the same on
-  every host.)
-- **`sts_regional_endpoints` is validated.** The installed botocore still
-  validates this config key (and `AWS_STS_REGIONAL_ENDPOINTS`); `aws` v2's
-  bundled botocore dropped it. An invalid value is an error here (exit
-  code 255) where `aws` runs as if it were unset.
-- **A failing stream download under `response_checksum_validation =
-  when_required` is blamed on a different request.** With that config key (or
-  `AWS_RESPONSE_CHECKSUM_VALIDATION=when_required` — not the default), the
-  installed `s3transfer` skips the `HeadObject` it would otherwise send before
-  a download and opens the object with a ranged `GetObject` straight away,
-  where `aws`'s bundled copy still heads first. A download to a file is
-  unaffected — both tools resolve the source with their own `HeadObject`
-  before the transfer starts — and a stream download that succeeds is byte
-  for byte the same. But `cp s3://bkt/k -` resolves nothing of its own, so
-  when the object cannot be read the failure line names the request that
-  failed: `download failed: s3://bkt/k to - An error occurred (NoSuchKey)
-  when calling the GetObject operation: The specified key does not exist.`
-  here, against `... An error occurred (404) when calling the HeadObject
-  operation: Not Found` on `aws` — for a missing key, and for an SSE-C
-  object read without its key. Exit code 1 on both, nothing written. This
-  lives in the installed `s3transfer`, the same family as the mid-stream
-  retry above, so no option here changes it.
-- **Where a failing stdout stops a stream download.** `cp s3://bkt/k -` hands
-  the object's bytes to the process's stdout and never flushes them, exactly as
-  `aws` does, so a stdout that cannot take them fails in one of two places:
-  inside the transfer, as a `download failed:` line and exit code 1, or at
-  interpreter shutdown when the buffered bytes are finally flushed, which ends
-  the *process* at 120 with no failure line at all. Which one you get depends on
-  whether the object outgrows the interpreter's own stdout buffer, and that size
-  belongs to the interpreter rather than to either tool: `aws`'s frozen 3.14
-  buffers about 128 KiB against a `/dev/full` stdout, where a host CPython 3.10
-  gives it 4096 bytes. Objects between those two sizes therefore report the
-  failure and exit 1 here while `aws` reports nothing and exits 120; smaller and
-  larger ones agree, and so does every size once the two buffers are the same
-  (measured). A closed pipe and a stdout opened read-only fail in those same two
-  places, by the same rule.
-- **When the error report itself cannot be written.** Both tools deliberately
-  leave the report *about* a failed report unguarded. That is what replaces a
-  run's own exit code with 255 on both when the report carries a character the
-  output codec cannot encode (`AWS_CLI_OUTPUT_ENCODING`, whose codec is
-  described in [`configuration.md`](./configuration.md)) — there the second
-  report still gets written. With stderr broken, though — `2>/dev/full`, or
-  `ls s3://bkt/ 2>&1 |` a reader that closes at once — there is nothing left to
-  catch it: `aws` lets the failure escape and its interpreter exits **1**,
-  while here the process ends at **120** on the shutdown flush that fails on
-  the same stream. Neither tool has managed to write anything you can read, so
-  only the code differs.
-- **The `PYTHON*` environment variables reach this command and not `aws`.**
-  The official `aws` distribution is a frozen interpreter running in isolated
-  mode, so the interpreter ignores that whole family; this command runs on
-  your own Python, which does not. `PYTHONIOENCODING` therefore re-codes what
-  is printed here while `aws` keeps its own codec (UTF-8 on Linux, the host
-  code page on Windows): under `PYTHONIOENCODING=ascii` a `café.txt` result
-  line comes out `caf?.txt`, and under `latin-1` it comes out in latin-1
-  bytes. One member `aws`'s own code
-  reads back: `PYTHONUTF8=1`, kept as a compatibility fallback for the streams
-  it writes error reports on, and honored here the same way — so setting it
-  brings an error report into agreement again, while result lines stay as they
-  were. `PYTHONUTF8=0` with `PYTHONCOERCECLOCALE=0` under a C locale goes the
-  other way and makes a UTF-8 config file unreadable here — exit code 255 —
-  where `aws` still reads it. The same packaging decides one thing more: an
-  argument carrying a byte that is not valid UTF-8 is accepted here and the
-  run proceeds, while `aws`'s bootloader rejects it before Python starts,
-  exiting 255 with `Failed to set sys.argv: decoding error`. Leave the family
-  unset and the two agree: under a plain C, ISO-8859-1 or ASCII locale, config
-  reading, `file://` decoding, and the scanning and display of file names all
-  match. One last packaging split needs no environment at all: give the process
-  a standard stream it cannot set up — `cp - s3://bkt/k < /some/directory` —
-  and `aws`'s bootloader fails to start its embedded interpreter and exits 255,
-  while here CPython dies in `init_sys_streams` and exits 1 with a
-  `Fatal Python error:` block. No code from either tool has run at that point,
-  and nothing is created either way.
-- **Which CA certificates are trusted.** Both tools verify every TLS connection
-  against an explicit CA file — never the operating system's trust store — but
-  not the same file: `aws` uses the `cacert.pem` bundled in its own
-  installation, while this command uses the bundle shipped with the installed
-  botocore/certifi. Both are derived from Mozilla's CA list, so the trusted
-  roots are the same in practice; they are separate snapshots and can differ in
-  age, so a very recently added or removed root may be known to one and not the
-  other. `--ca-bundle` and `AWS_CA_BUNDLE` override the file on both tools
-  identically, and `--no-verify-ssl` disables verification on both;
-  `REQUESTS_CA_BUNDLE` is honored here whichever transfer engine runs, while
-  `aws` honors it on its classic engine only (its CRT transfers ignore it).
-  That last one can change a run's outcome: under
-  `preferred_transfer_client = crt`, a `REQUESTS_CA_BUNDLE` the CRT cannot
-  read or use — a missing path, a file that is not a PEM bundle — fails the
-  command here at exit code 255 with awscrt's or the operating system's own
-  message, where `aws`, never reading it on that engine, runs the command as
-  if the variable were unset (measured on `cp`, `rm`, `sync` and their
-  dryruns).
+- **Non-ASCII text in the config and credentials files is decoded as boto3
+  decodes it.** Both files are read by botocore, which opens them with
+  Python's default text encoding: the locale's, or UTF-8 in Python's UTF-8
+  mode — the default from Python 3.15 on, and under `PYTHONUTF8=1` on any
+  version. `aws` always decodes them with the locale's encoding. So in UTF-8
+  mode a file whose non-ASCII text (a comment, a profile name) is in a
+  non-UTF-8 locale's encoding — cp932 on Japanese Windows, EUC-JP under a
+  `ja_JP.eucJP` locale — fails to load here (`Unable to parse config file`,
+  exit code 255) where `aws` reads it, and one written in UTF-8 loads here
+  where `aws` fails. Under a C or POSIX locale both read UTF-8, except under
+  `PYTHONUTF8=0` with the locale left uncoerced (`LC_ALL=C`, or
+  `PYTHONCOERCECLOCALE=0`), where a UTF-8 file fails here. A file in plain ASCII reads the same everywhere, and any
+  `boto3` program run by the same Python reads the files as this command
+  does.
 
 Differences that depend on which dependencies are installed — the CRT engine,
-CRT-family checksums, conditional writes, and more — are in
+the default checksum and the CRT-family checksums, conditional writes, and
+more — are in
 [`compatibility.md`](../compatibility.md).
 
 ## 3. Options that do nothing
@@ -727,11 +596,11 @@ Where an option has a fixed choice list the value is still validated, so an
 invalid one is still an error, and `--query` is still compiled as a JMESPath
 expression and rejected if malformed.
 
-Having no effect here is not the same as having no effect on `aws`:
-`--cli-error-format` — like `AWS_CLI_ERROR_FORMAT` and the profile key
-`cli_error_format` — does change how `aws` renders an error report, so a script reading `aws`'s `json` or
-`text` error output gets this command's usual one-line report instead
-(section 1).
+`--cli-error-format` is the one of them that changes `aws`'s output: under
+`legacy` `aws` drops the `An error occurred (<code>):` part of an error
+report, and under `json`, `yaml`, `text` and `table` it re-renders the report.
+Here every report keeps `aws`'s default form whatever the option,
+`AWS_CLI_ERROR_FORMAT` or the profile key `cli_error_format` says.
 
 ## 4. Options limited by one direction
 
@@ -749,7 +618,9 @@ uniform. These are rejected outright on the wrong route:
 Every other direction-specific option is accepted anywhere and simply has no
 effect off its route. The write-side options in particular — `--acl`,
 `--storage-class`, the content headers, `--metadata`, `--grants`, the SSE
-family — are silently ignored on a download rather than rejected.
+family — are silently ignored on a download rather than rejected, with one
+exception: a malformed `--grants` is refused (252) on every route, a download
+included (section 2).
 
 ## 5. Filtering on Windows
 
@@ -757,5 +628,6 @@ family — are silently ignored on a download rather than rejected.
 `aws`. A backslash is treated as a separator there, in a pattern and in an S3
 key alike: `logs\*.txt` matches `logs/x.txt`, and `logs/*` matches a key
 spelled `logs\x.txt`. On Linux and macOS a backslash stays a literal
-character. The `boto3-s3` Python library applies neither rule — that
-tightening belongs to this command.
+character. The `boto3-s3` Python library's `GlobFilter` applies the same
+rules, as it applies `aws`'s reading of drive and root forms (`C:x`, `\x`,
+`*:*`) on Windows.

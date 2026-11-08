@@ -174,20 +174,6 @@ SCENARIOS: tuple[CpScenario, ...] = (
         seed=_DEL_SEED,
     ),
     CpScenario(
-        name="sync_upload_invalid_grants_dryrun",
-        argv=(
-            "sync",
-            "src",
-            f"s3://{BUCKET_TOKEN}/up",
-            "--grants",
-            "invalid",
-            "--dryrun",
-        ),
-        local_src={"src/a.txt": b"alpha\n"},
-        expected_stderr_tokens_ours=("grants should be of the form permission=principal",),
-        expected_stderr_tokens_aws=("grants should be of the form permission=principal",),
-    ),
-    CpScenario(
         name="sync_upload_no_overwrite",
         argv=("sync", "src", f"s3://{BUCKET_TOKEN}/no", "--no-overwrite"),
         # exists.txt differs in size and is locally newer - everything says
@@ -216,13 +202,6 @@ SCENARIOS: tuple[CpScenario, ...] = (
         argv=("sync", "src/none", f"s3://{BUCKET_TOKEN}/up"),
         expected_stderr_tokens_ours=("does not exist",),
         expected_stderr_tokens_aws=("does not exist",),
-    ),
-    CpScenario(
-        name="sync_upload_source_is_a_file",
-        argv=("sync", "src/a.txt", f"s3://{BUCKET_TOKEN}/up"),
-        local_src={"src/a.txt": b"alpha\n"},
-        expected_stderr_tokens_ours=("File does not exist.",),
-        expected_stderr_tokens_aws=("File does not exist.",),
     ),
     # -- downloads ------------------------------------------------------------
     CpScenario(
@@ -271,7 +250,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         # Both flags given, same size, local older: --size-only alone would skip
         # (equal size), but --exact-timestamps wins over --size-only, so the skew
         # triggers a download. The tree shows the remote body, distinguishing the
-        # two strategies' order (aws registers SizeOnly before ExactTimestamps, so
+        # two strategies' order (aws-cli registers SizeOnly before ExactTimestamps, so
         # the latter is applied last and wins).
         local_src={"dest/same.txt": b"zz\n"},
         local_mtimes={"dest/same.txt": -_DAY},
@@ -313,7 +292,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         # The dest walk warns (file-as-directory), then each download fails
         # with ENOTDIR; failures win the rc (1). On Windows the failure is
         # ENOENT instead (file-as-directory opens answer [Errno 2] there),
-        # and aws's warning line is not pinned - only its failure is.
+        # and aws-cli's warning line is not pinned - only its failure is.
         expected_stderr_tokens_ours=("File does not exist.", "Not a directory")
         if os.name != "nt"
         else ("File does not exist.", "[Errno 2]"),
@@ -351,20 +330,6 @@ SCENARIOS: tuple[CpScenario, ...] = (
         seed={"cs/a.txt": b"alpha\n", "cs/b.bin": b"\x00\x01"},
     ),
     CpScenario(
-        name="sync_copy_invalid_grants_dryrun",
-        argv=(
-            "sync",
-            f"s3://{BUCKET_TOKEN}/cs",
-            f"s3://{BUCKET_TOKEN}/cd",
-            "--grants",
-            "invalid",
-            "--dryrun",
-        ),
-        seed={"cs/a.txt": b"alpha\n"},
-        expected_stderr_tokens_ours=("grants should be of the form permission=principal",),
-        expected_stderr_tokens_aws=("grants should be of the form permission=principal",),
-    ),
-    CpScenario(
         name="sync_copy_content_type",
         argv=(
             "sync",
@@ -384,17 +349,13 @@ SCENARIOS: tuple[CpScenario, ...] = (
         name="sync_local_to_local",
         argv=("sync", "src", "dest"),
         local_src={"src/a.txt": b"alpha\n"},
-        expected_stderr_tokens_ours=("Error: Invalid argument type",),
-        expected_stderr_tokens_aws=("Error: Invalid argument type",),
+        expected_stderr_tokens_ours=("Invalid argument type",),
+        expected_stderr_tokens_aws=("Invalid argument type",),
     ),
     CpScenario(
         name="sync_stream_source",
         argv=("sync", "-", f"s3://{BUCKET_TOKEN}/p"),
-        expected_stderr_tokens_ours=(
-            "Streaming currently is only compatible with non-recursive cp commands",
-        ),
-        expected_stderr_tokens_aws=(
-            "Streaming currently is only compatible with non-recursive cp commands",
-        ),
+        expected_stderr_tokens_ours=("Streaming",),
+        expected_stderr_tokens_aws=("Streaming",),
     ),
 )

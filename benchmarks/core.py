@@ -1,20 +1,14 @@
-"""Mode-independent benchmark plumbing: sides, statistics, result records.
+"""Mode-independent benchmark plumbing: sides, errors, result records.
 
 The timing loops themselves live in the mode modules (`e2e.py`,
 `inprocess.py`); this module holds what both share - the A/B side model,
-sample statistics, and the result shape `results.py` serializes.
+the harness's errors, and the result shape `results.py` serializes.
 """
 
 from __future__ import annotations
 
 import enum
-import statistics
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from collections.abc import Sequence
-
 
 # Single-object transfer size (MB) for the default, local dev stack lane. Both
 # modes size their large-file scenarios from it; `--large-transfer-mb`
@@ -28,10 +22,12 @@ class BenchmarkError(Exception):
 
 
 class VerificationError(BenchmarkError):
-    """A scenario's warmup verification failed, so its timings cannot be trusted.
+    """A scenario's verification failed, so its timings cannot be trusted.
 
-    Raised before any timed sample is recorded: a run that silently did no
-    work (wrong prefix, empty tree) would otherwise produce fake-fast numbers.
+    Raised on a warmup, or on a timed invocation of a scenario that verifies
+    each one; either way the scenario records no result. A run that silently
+    did no work (wrong prefix, empty tree) would otherwise produce fake-fast
+    numbers.
     """
 
 
@@ -40,32 +36,6 @@ class Side(enum.Enum):
 
     OURS = "boto3-s3"
     AWS = "aws"
-
-
-@dataclass(frozen=True)
-class Stats:
-    """Summary of one sample list; the median is the headline number."""
-
-    median: float
-    minimum: float
-    maximum: float
-    n: int
-
-    @property
-    def spread(self) -> float:
-        """Half the min-max range - the ``±`` printed next to the median."""
-        return (self.maximum - self.minimum) / 2.0
-
-
-def summarize(samples: Sequence[float]) -> Stats:
-    if not samples:
-        raise BenchmarkError("cannot summarize an empty sample list")
-    return Stats(
-        median=statistics.median(samples),
-        minimum=min(samples),
-        maximum=max(samples),
-        n=len(samples),
-    )
 
 
 def round_order(round_index: int) -> tuple[Side, Side]:

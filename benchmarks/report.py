@@ -10,7 +10,7 @@ flagged) on raw medians, since startup growth is its own regression class.
 
 Flag rules (threshold defaults to 1.10):
 - E2E work scenario with a baseline: ``(ratio now) / (ratio baseline)`` over
-  the threshold - the aws side is the same-run control, so this survives
+  the threshold - the aws-cli side is the same-run control, so this survives
   host noise between runs. Without a baseline: the ratio itself.
 - Startup probes and in-process scenarios: median now / median baseline over
   the threshold (in-process runs are network-free and deterministic enough
@@ -147,8 +147,9 @@ def _resource_table(records: Sequence[_Record], index: dict[_Key, _Record], adju
     Throughput divides the recorded payload by the *net* median - the same
     startup-adjusted figure the ratio uses - so it reads as the rate at which
     the tool moved bytes once it was ready to. Rows with no payload (listing,
-    rm, the probes) leave those cells empty; every row with RSS samples shows
-    the per-side median and their ratio.
+    rm, the probes) leave those cells empty, and so do the `RAW_ROWS`, whose
+    net the main table already declines to show as noise; every row with RSS
+    samples shows the per-side median and their ratio.
     """
     rows: list[list[str]] = []
     for record in records:
@@ -161,7 +162,7 @@ def _resource_table(records: Sequence[_Record], index: dict[_Key, _Record], adju
         cells = [scenario, engine]
         for side in (Side.OURS, Side.AWS):
             rate: float | None = None
-            if isinstance(payload, (int, float)) and payload > 0:
+            if isinstance(payload, (int, float)) and payload > 0 and scenario not in RAW_ROWS:
                 net = _net(_median(record, side), index, engine, side, adjust)
                 if net:
                     rate = float(payload) / _MIB / net

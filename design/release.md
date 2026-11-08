@@ -3,8 +3,7 @@
 Every package-index upload is triggered from this repo and nothing else: a
 matching tag publishes to PyPI, a manual workflow dispatch publishes only to
 TestPyPI, and an ordinary push publishes nothing. The two packages are
-versioned independently ([`overview.md`](./overview.md) section 3), and the tag
-selects which one publishes. Publishing runs in
+versioned independently, and the tag selects which one publishes. Publishing runs in
 [`.github/workflows/release.yml`](../.github/workflows/release.yml) via Trusted
 Publishing (OIDC), so no token is needed.
 
@@ -38,6 +37,31 @@ index side; no API token is stored anywhere.
 The environment name registered on (Test)PyPI must match the workflow's
 `environment:` value exactly, or the token exchange is refused and nothing
 uploads.
+
+## Choosing the version
+
+What a release promises is what `docs/` promises ([`overview.md`](./overview.md)
+section 4), so the version number follows the `docs/` changes since the last
+release.
+
+- While the version is 0.x, a change to a `docs/` promise takes a minor
+  version, an incompatible one included. Anything else - a reworked mechanism,
+  an internal refactoring, a performance gain, a fix that leaves the promises
+  as they were - takes a patch. CHANGELOG lines do not decide it: a patch
+  release lists its fixes and reworks too. This is what lets the CLI's
+  `boto3-s3>=X.Y.Z,<X.Y+1.0` range (step 1 below) take the library's later
+  patch releases.
+- Performance is part of the promise only where `docs/` states a guarantee.
+- Raising the SDK floor takes a minor version: the floor is a requirement on
+  the environment, not a change to the API.
+- For the CLI, following `aws s3` - a change of behavior, exit code or wording
+  to match it - is never a breaking change, since matching `aws s3` is what the
+  CLI is for: a fix to a compatibility bug takes a patch, a change made for
+  compatibility a minor, never a major. Every option the CLI takes is an
+  `aws s3` option, so its version promise covers only the deliberate
+  differences from `aws s3` that
+  [`aws-differences.md`](../docs/cli/aws-differences.md) records, such as a
+  protection it keeps on.
 
 ## Releasing
 
@@ -131,9 +155,12 @@ treat the PR like a hotfix:
 2. Merge it into `main`; this is what flips the alert to fixed. Applying the
    bump on `develop` instead leaves the alert open until the next release,
    because alert state tracks `main` only.
-3. Immediately merge `main` back into `develop` so both branches stay on one
-   history (unlike release step 5 this is a true merge, since `develop` is
-   usually ahead).
+3. Leave `develop` as it is. The next release brings the bump in: its step 2
+   merges `develop` into `main`, which already holds the bump, and its step 5
+   brings `develop` level with that merge. Until then `develop` locks the
+   version from before the bump; if `develop` changes `uv.lock` meanwhile, the
+   two locks conflict in release step 2, and the lock is regenerated there
+   (with the pinned uv, below).
 
 Two notes for perspective: `uv.lock` serves development and CI only — the
 published packages declare version ranges, so a lock-only advisory does not

@@ -21,7 +21,7 @@ trailing separator on either argument changes nothing.
 Four routes are accepted: local to S3 (upload), S3 to local (download), S3 to
 S3 (copy), and the open route — a custom `Storage` on one side paired with S3
 on the other. A local-to-local pair, a custom backend paired with anything but
-S3, and a stream endpoint (`IOStorage` / `StdioStorage`, which declares no
+S3, and a stream endpoint (an `IOStorageBase`, which declares no
 scan capability) are each rejected with `ValidationError`.
 
 The call runs two layers. First, visibility: each side's listing is enumerated
@@ -59,6 +59,7 @@ def sync(
     cancel_token: CancelToken | None = None,
     transfer_config: TransferConfig | None = None,
     capture_response: bool = False,
+    source_region: str | None = None,
     **options: Unpack[TransferOptions],
 ) -> None: ...
 ```
@@ -78,9 +79,12 @@ enumeration, before pairing. It is a `FileFilter`
 `compare_key` is stamped by the producing scan; `None` (the default) keeps
 everything. A predicate that reads only the compare key prunes the two sides
 identically, so an entry it excludes is invisible on both sides and is
-therefore neither transferred nor deleted; a predicate that reads side-specific
+therefore neither transferred nor deleted (a compiled `GlobFilter` too, except
+for a local side rooted at a filesystem root, whose entries it matches with a
+leading `/`, as `aws s3` does; see [`../filters.md`](../filters.md)); a predicate that reads side-specific
 state prunes per side instead — notably a `GlobFilter` whose pattern is
-root-anchored, which matches the entry's full key rather than its compare key.
+root-anchored, which matches the entry's full path rather than its compare
+key.
 Folder markers — zero-byte `/`-terminated objects — are dropped from an S3
 side's listing before `filter` sees them, and the local walk does not produce
 them, so `sync` neither transfers nor deletes markers. `filter` is evaluated
@@ -192,6 +196,14 @@ with, for this call only ([`../options.md`](../options.md)).
 `OpResult.extra_info` ([`../results.md`](../results.md)); for the delete side
 see below.
 
+`source_region` is `aws s3`'s `--source-region`. For an S3-to-S3 run whose
+source is a string, the source side gets [`source_client`](../s3.md#source_clientregion)
+in that region: built without this instance's `endpoint_url`, which names the
+destination's, as aws-cli builds its source client (an endpoint from the
+environment or the config file still applies). An empty value, any other route,
+and a source `Storage` — which keeps its own client — ignore it, as aws-cli
+does.
+
 `**options` are the shared `TransferOptions`
 ([`../options.md`](../options.md)); an unrecognized key raises
 `ValidationError` before any listing. Several of them have `sync`-specific
@@ -237,28 +249,35 @@ The observable order before any transfer: unrecognized `**options` keys are
 rejected; a `pair_filter` that conflicts with another argument is rejected;
 `src` and `dest` are resolved and validated; an already-cancelled
 `cancel_token` raises; the route is classified, which for an upload checks
-that the local source path exists; a missing local destination directory is
-created; an S3 Express directory bucket or one of its access points on either
-side is rejected; a client
+that the local source path exists and that the walk can read it as a
+directory; an S3 Express directory bucket or one of
+its access points on either side is rejected; a client
 is built for an S3 side that still has none; an open-route side is checked for
 the capabilities the route needs; an unrecognized `case_conflict` value is
-rejected. The destination directory is therefore created even by a run that
-transfers nothing, by one the directory-bucket check goes on to reject, and by
-one the `case_conflict` check rejects. The check is a bare existence test,
+rejected; the transfer engine is set up, which outside a dry run builds it
+(a CRT engine that cannot be built is rejected there); and a missing local
+destination directory is created. The destination directory is therefore
+created even by a run that transfers nothing, but not by one any of those
+checks rejects. The check is a bare existence test,
 so a destination that already exists as a file — written without a trailing
-separator — passes it and every item fails afterwards. The source check is a
-bare existence test too: a local source that
-is a file passes it, the directory-style walk then enumerates nothing and emits
-one `WARNED` record, and the run completes with warnings rather than raising.
+separator — passes it and every item fails afterwards. A local source the
+walk would skip as a directory root — a file, a special file, a directory it
+cannot read, a symbolic link the storage does not follow — raises
+[`NotFoundError`](../exceptions.md#notfounderror) (an unreadable directory
+[`AccessDeniedError`](../exceptions.md#accessdeniederror)) before anything is
+listed or deleted, where the AWS CLI runs on an empty source and a delete
+filter then deletes everything at the destination. The walker's own
+`should_ignore_file` decides, and a storage with `enumerate_all_entries=True`,
+whose walk vets no root, is not checked.
 
 Both local checks ask about the path as typed (`exists` and
 `ensure_directory` of [`LocalStorage`](../storage.md#localstorage)), as the AWS
 CLI's do, while the walk works on the absolutized form. The two can name
 different places when the path carries a `..` or a trailing separator
-([`storage.md`](../storage.md#localstorage) lists the cases), and there the
-outcome is the AWS CLI's, hazard included: with `..` after a symlinked
-directory, a source the kernel finds but the absolutized form does not is
-admitted, walked as missing (a warning, exit code 2 on the command) and so
+([`storage.md`](../storage.md#localstorage) lists the cases). With `..` after
+a symlinked directory, a source the kernel finds but the absolutized form does
+not passes the existence check and is then refused as a root the walk would
+skip, where the AWS CLI walks it as missing (a warning, exit code 2) and so
 contributes nothing — which under a delete filter means everything at the
 destination is deleted.
 
@@ -340,7 +359,10 @@ order rather than in compare-key order.
   settings with `preferred_transfer_client="crt"`, rejected when the transfer
   engine is built and therefore not under `dryrun`.
 - [`NotFoundError`](../exceptions.md#notfounderror) — the local source path of
-  an upload does not exist.
+  an upload does not exist, or is one the walk would skip as a directory root
+  (a file, a special file, a symbolic link the storage does not follow), with
+  [`AccessDeniedError`](../exceptions.md#accessdeniederror) for a directory it
+  cannot read; both before anything is listed or deleted.
 - [`ConfigurationError`](../exceptions.md#configurationerror), or its
   [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement —
   a profile, region, endpoint or partial credentials that will not resolve
@@ -354,10 +376,13 @@ order rather than in compare-key order.
   destination directory failed, mapped by the same rules as any other local
   failure.
 - [`CancelledError`](../exceptions.md#cancellederror) — `cancel_token` was
-  cancelled. Graceful cancellation stops taking new pair actions and drains
-  the transfers and delete batches already accepted; immediate cancellation
-  also asks their futures to cancel. Either way, decisions outstanding on a
-  `ParallelFilter` pool are awaited first, and that pool is never shut down.
+  cancelled. Graceful cancellation stops taking new pair actions, awaits the
+  decisions outstanding on a `ParallelFilter` pool, and drains the transfers
+  and delete batches already accepted. Immediate cancellation raises at once:
+  what has not started never starts, and running decisions, transfers and
+  delete batches finish behind the caller, unreported
+  ([`../results.md`](../results.md#canceltoken)). Either way, that pool is never
+  shut down.
 - [`BatchError`](../exceptions.md#batcherror) — at least one item failed. Its
   `succeeded` and `failed` are the sums of the transfer and the delete side,
   while `warned` and `skipped` come from the transfer side only. `__cause__`

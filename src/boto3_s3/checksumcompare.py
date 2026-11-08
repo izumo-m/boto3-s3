@@ -22,12 +22,12 @@ pages only when a many-part COMPOSITE ``ObjectParts`` listing truncates).
 This is a standalone, opt-in building block: it lives in its own module and is
 reachable either from the package root (``from boto3_s3 import ChecksumComparison``)
 or by submodule path (``from boto3_s3.checksumcompare import ChecksumComparison``).
-It imports no AWS SDK module at import time; the SDK touches - the boto3 client (via
-``s3.resolve``), ``botocore``'s ``ClientError``, and the optional ``awscrt`` fast
-checksums - are all deferred into the construct / compute paths.
+It imports no AWS SDK module at import time; the SDK touches - the boto3 client (from
+the S3 entry's ``storage``), ``botocore``'s ``ClientError``, and the optional
+``awscrt`` fast checksums - are all deferred into the compute paths.
 
 It is a replacement ``update_filter=`` strategy, not composed with the default:
-``S3.sync(update_filter=ChecksumComparison(s3, src, dest))`` decides every update pair by content.
+``S3.sync(update_filter=ChecksumComparison())`` decides every update pair by content.
 That catches what the size + mtime default misses (notably the download
 asymmetry: a same-size object updated only on the S3 source is never pulled
 down by the default), at the price of a GetObjectAttributes + readable-side
@@ -35,23 +35,31 @@ hash on every upload / download pair - an s3-to-s3 pair instead costs one
 GetObjectAttributes per side and reads no bytes (the size pre-check still
 skips differing sizes for free).
 
-Checksum computation. ``crc32`` (zlib) and ``sha1`` / ``sha256`` (hashlib) are
-always available. ``crc32c`` / ``crc64nvme`` use ``awscrt`` when it is installed
-(a C path ~1000x faster than Python and the same one S3 uses) and fall back to a
-bundled pure-Python slicing-by-8 implementation otherwise (~15-20 MiB/s). Because
-that fallback is slow, the ``pure_max_size`` arg can cap it: above the cap, with no
-``awscrt``, a ``crc32c`` / ``crc64nvme`` object is treated as indeterminate
-(copied) rather than hashed.
+Checksum computation. ``crc32`` (zlib) and ``sha1`` / ``sha256`` / ``sha512``
+(hashlib) are always available, and so is ``md5`` (hashlib, built as a
+non-security use) wherever hashlib builds it. ``crc32c`` / ``crc64nvme`` use
+``awscrt`` when it is installed (a C path ~1000x faster than Python and the same
+one S3 uses) and fall back to a bundled pure-Python slicing-by-8 implementation
+otherwise (~15-20 MiB/s). Because that fallback is slow, the ``pure_max_size``
+arg can cap it: above the cap, with no ``awscrt``, a ``crc32c`` / ``crc64nvme``
+object is treated as indeterminate (copied) rather than hashed. ``xxhash64`` /
+``xxhash3`` / ``xxhash128`` have no fallback: they compute through ``awscrt``
+(0.31.2 or later, botocore's own gate) or not at all.
 
-Caveats. An object with **no** native checksum, an unknown algorithm, or a
-``crc32c`` / ``crc64nvme`` checksum beyond ``pure_max_size`` when ``awscrt`` is
-unavailable is treated as differing (copied) - the strategy never skips on an
-indeterminate comparison. An upload / download comparison reads the
+Caveats. An object with **no** native checksum or an unknown algorithm is
+treated as differing (copied) - the strategy never skips on an indeterminate
+comparison. So is, on an upload / download (an s3-to-s3 pair computes
+nothing), a ``crc32c`` / ``crc64nvme`` checksum beyond ``pure_max_size`` when
+``awscrt`` is unavailable, an ``xxhash*`` checksum without ``awscrt``, or an
+``md5`` one hashlib refuses to build (a strict FIPS build).
+The SHA512 / MD5 / XXHASH members are in botocore's S3 model from 1.42.94;
+under an older one ``GetObjectAttributes`` parses none of them, so such an
+object reads as carrying no checksum. An upload / download comparison reads the
 **readable** (non-S3) side through its ``Storage.open`` on whatever thread
 drives the ``update_filter`` lane (``sync``'s calling thread, or a pool worker
 under ``ParallelFilter``) - any backend, not just a
-local file - so a read failure surfaces as that backend's error (a
-``Boto3S3Error`` for a local file). SSE-C objects need the customer key to
+local file - and a read failure leaves the strategy as a ``Boto3S3Error``
+(`ContentComparison`'s ``_read_readable``). SSE-C objects need the customer key to
 ``GetObjectAttributes`` and are not supported (they read as indeterminate ->
 copy).
 """
@@ -67,14 +75,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from boto3_s3.comparator import READ_CHUNK, ContentComparison
-from boto3_s3.types import TransferType
+from boto3_s3.comparator import READ_CHUNK, ContentComparison, hash_part
 
 if TYPE_CHECKING:
     from typing import BinaryIO
 
-    from boto3_s3.s3 import S3
-    from boto3_s3.storage import Location, Storage
     from boto3_s3.types import FileInfo
 
 # GetObjectAttributes ``Checksum.<key>`` -> our algorithm name. An object carries
@@ -85,7 +90,15 @@ _ALGO_BY_KEY = {
     "ChecksumCRC64NVME": "crc64nvme",
     "ChecksumSHA1": "sha1",
     "ChecksumSHA256": "sha256",
+    "ChecksumSHA512": "sha512",
+    "ChecksumMD5": "md5",
+    "ChecksumXXHASH64": "xxhash64",
+    "ChecksumXXHASH3": "xxhash3",
+    "ChecksumXXHASH128": "xxhash128",
 }
+
+# S3's ceiling on an object's parts: part numbers run from 1 to 10,000.
+_MAX_PARTS = 10_000
 
 _MASK32 = 0xFFFFFFFF
 _MASK64 = 0xFFFFFFFFFFFFFFFF
@@ -110,16 +123,17 @@ class ChecksumComparison(ContentComparison):
     returned ``ObjectParts`` sizes for a ``COMPOSITE`` one. An s3-to-s3 (COPY)
     pair compares the two objects' stored checksums directly (both via
     ``GetObjectAttributes``; no bytes read). A missing checksum, a mismatched or
-    unknown algorithm, or a ``crc32c`` / ``crc64nvme`` checksum beyond
-    ``pure_max_size`` when ``awscrt`` is unavailable is treated as differing
-    (copy), so it never skips on an indeterminate comparison. It is a replacement
+    unknown algorithm, or - on an upload / download, the pairs that compute -
+    a checksum it cannot compute locally (`_can_compute`: ``crc32c`` /
+    ``crc64nvme`` beyond ``pure_max_size`` without ``awscrt``, ``xxhash*``
+    without ``awscrt``, ``md5`` where hashlib refuses it) is treated as
+    differing (copy), so it never skips on an indeterminate comparison. It is a replacement
     ``update_filter=`` strategy, selected instead of the size+time default.
 
-    The S3 client and bucket for each S3 side are taken by resolving ``src`` /
-    ``dest`` against ``s3`` (``s3.resolve`` - the same values passed to
-    ``s3.sync``); pass ``S3Storage`` instances for a cross-account s3-to-s3 sync,
-    exactly as ``sync`` does. ``bucket`` is not on a ``FileInfo``, which is why
-    the endpoint is injected explicitly here rather than read from the pair.
+    The S3 client and bucket for each S3 side come from that entry's
+    ``storage`` - the ``S3Storage`` its listing ran through, so a cross-account
+    s3-to-s3 sync reaches each side with that side's own client. A hand-built
+    pair must set ``storage`` on each S3 entry.
 
     When ``check_size`` is true (the default) a pair whose two sides have
     known, differing sizes is treated as differing (copy) before any
@@ -133,91 +147,40 @@ class ChecksumComparison(ContentComparison):
     without ``awscrt``.
     """
 
-    __slots__ = ("_dest_storage", "_request_payer", "_src_storage", "check_size", "pure_max_size")
+    __slots__ = ("_request_payer", "check_size", "pure_max_size")
 
     check_size: bool
     pure_max_size: int | None
-    # The SDK boundary: ``s3.resolve`` returns a ``Storage`` whose S3 side carries
-    # ``.bucket`` / ``.get_client()``. Held as ``Any`` so this module needs no
-    # ``S3Storage`` import (which would drag ``botocore`` at import time); the
-    # route (``pair.transfer_type``) tells which side is the S3 one.
-    _src_storage: Any
-    _dest_storage: Any
     _request_payer: str | None
 
     def __init__(
         self,
-        s3: S3,
-        src: Location,
-        dest: Location,
         *,
         check_size: bool = True,
         pure_max_size: int | None = None,
         request_payer: str | None = None,
     ) -> None:
-        # Construct-path SDK touch (the module import stays SDK-free).
-        from boto3_s3.s3storage import S3Storage
-
-        self._src_storage = s3.resolve(src)
-        self._dest_storage = s3.resolve(dest)
-        # Build each S3 side's client now (get_client memoizes): the decides
-        # may run on a ParallelFilter pool, and a lazy first build there would
-        # race boto3's non-thread-safe client construction (design/s3.md). An
-        # eager build here is what keeps the strategy's documented
-        # thread-safety true for S3Storage sides passed without a client.
-        for side in (self._src_storage, self._dest_storage):
-            if isinstance(side, S3Storage):
-                side.get_client()
         self.check_size = check_size
         self.pure_max_size = pure_max_size
         self._request_payer = request_payer
 
-    def _readable_remote_differ(
-        self,
-        storage: Storage | None,
-        readable: FileInfo,
-        remote: FileInfo,
-        transfer_type: TransferType,
-    ) -> bool:
-        # The remote (S3) entry belongs to the endpoint the direction names; its
-        # storage carries the client/bucket GetObjectAttributes needs.
-        s3_storage = (
-            self._dest_storage if transfer_type is TransferType.UPLOAD else self._src_storage
-        )
-        remote_checksum = self._remote_checksum(s3_storage, remote.key)
+    def _readable_remote_differ(self, readable: FileInfo, remote: FileInfo) -> bool:
+        remote_checksum = self._remote_checksum(remote)
         if remote_checksum is None:
             return True
         if not _can_compute(remote_checksum.algorithm, readable.size, self.pure_max_size):
             return True
-        key = readable.compare_key
-        if storage is None or key is None:
-            return True  # cannot open the readable side -> treat as differing (copy)
         part_sizes = remote_checksum.part_sizes
-        if part_sizes is not None and remote_checksum.part_count not in (
-            None,
-            str(len(part_sizes)),
-        ):
-            # The value's own part count disagrees with the part listing: the
-            # two describe different objects, so nothing read here could match.
-            return True
-        try:
-            with storage.open(key, "rb") as fh:
-                if part_sizes is not None:
-                    # None = the readable side outruns the parts sum (an appended
-                    # tail): definitely different content, whatever the digests say.
-                    readable_value = _composite_b64(fh, remote_checksum.algorithm, part_sizes)
-                else:
-                    readable_value = _whole_b64(fh, remote_checksum.algorithm)
-        except OSError as exc:
-            # LocalStorage.open translates its own open failure, but a fault
-            # *mid-read* (or on close) is a raw OSError from the stream; keep
-            # the module's promise that a local read failure surfaces as a
-            # taxonomy error. A custom backend's own exceptions pass through
-            # as that backend's error, unchanged. (Deferred import: this
-            # module stays SDK-free at import time.)
-            from boto3_s3.localstorage import translate_os_error
+        algorithm = remote_checksum.algorithm
 
-            raise translate_os_error(exc, operation="sync", key=key) from exc
+        def digest(fh: BinaryIO) -> str | None:
+            if part_sizes is not None:
+                # None = the readable side outruns the parts sum (an appended
+                # tail): definitely different content, whatever the digests say.
+                return _composite_b64(fh, algorithm, part_sizes)
+            return _whole_b64(fh, algorithm)
+
+        readable_value = self._read_readable(readable, digest)
         return readable_value != remote_checksum.value
 
     def _copy_differs(self, src: FileInfo, dest: FileInfo) -> bool:
@@ -235,8 +198,8 @@ class ChecksumComparison(ContentComparison):
         whole, a CRC64NVME one, or a COMPOSITE one copied with its algorithm and
         part layout compares equal to its copy (docs/reference/comparator.md).
         """
-        a = self._remote_checksum(self._src_storage, src.key, need_parts=False)
-        b = self._remote_checksum(self._dest_storage, dest.key, need_parts=False)
+        a = self._remote_checksum(src, need_parts=False)
+        b = self._remote_checksum(dest, need_parts=False)
         if a is None or b is None or a.algorithm != b.algorithm or a.composite != b.composite:
             return True
         if None not in (a.part_count, b.part_count) and a.part_count != b.part_count:
@@ -244,12 +207,17 @@ class ChecksumComparison(ContentComparison):
         return a.value != b.value
 
     def _remote_checksum(
-        self, storage: Any, key: str, *, need_parts: bool = True
+        self, info: FileInfo, *, need_parts: bool = True
     ) -> _RemoteChecksum | None:
+        # The SDK boundary: an S3 entry's storage is the S3Storage its listing
+        # ran through, carrying ``.bucket`` / ``.get_client()``. Read as ``Any``
+        # so this module needs no ``S3Storage`` import (which would drag
+        # ``botocore`` at import time).
+        storage: Any = info.storage
         return _fetch_remote(
             storage.get_client(),
             storage.bucket,
-            key,
+            info.key,
             request_payer=self._request_payer,
             need_parts=need_parts,
         )
@@ -270,7 +238,7 @@ class _RemoteChecksum:
     ``part_sizes`` the part byte sizes when they were asked for.
     """
 
-    algorithm: str  # crc32 / crc32c / crc64nvme / sha1 / sha256
+    algorithm: str  # one of _ALGO_BY_KEY's names
     value: str
     composite: bool
     part_count: str | None
@@ -283,7 +251,7 @@ def _fetch_remote(
     """GetObjectAttributes -> the object's checksum, or ``None`` (indeterminate).
 
     ``None`` means "cannot compare, copy": no checksum on the object, a COMPOSITE
-    object whose part listing cannot be relied on (`_part_sizes`), or any
+    object whose part listing would not end (`_part_sizes`), or any
     ``ClientError`` anywhere in the read (a 404, a denied
     ``s3:GetObjectAttributes``, an SSE-C object needing a key, a failure mid
     part-size pagination, ...) - a per-object rejection never aborts the sync.
@@ -294,7 +262,7 @@ def _fetch_remote(
     """
     from botocore.exceptions import BotoCoreError, ClientError
 
-    from boto3_s3.s3storage import translate_boto_error
+    from boto3_s3.sdkerrors import translate_boto_error
 
     extra: dict[str, Any] = {"RequestPayer": request_payer} if request_payer else {}
     try:
@@ -349,17 +317,17 @@ def _get_object_attributes(client: Any, **kwargs: Any) -> Any:
 
     The boto family is `_fetch_remote`'s to sort (a ``ClientError`` is
     per-object, a ``BotoCoreError`` aborts). Anything else the call raises
-    from inside botocore - its parser failing on a ``LastModified`` that is no
-    timestamp, an ``ObjectSize`` that is no integer - is this request failing
-    all the same, and becomes the base ``Boto3S3Error`` with the original as
+    from inside botocore - a refreshing ``credential_process`` whose program
+    is gone (``FileNotFoundError``) - is this request failing all the same,
+    and becomes the base ``Boto3S3Error`` with the original as
     ``__cause__``, the shape every other request point gives it
-    (`s3storage.request_failure`). ``AssertionError`` passes: an invariant or
+    (`sdkerrors.request_failure`). ``AssertionError`` passes: an invariant or
     a test double's guard, never a request outcome.
     """
     from botocore.exceptions import BotoCoreError, ClientError
 
     from boto3_s3.exceptions import Boto3S3Error
-    from boto3_s3.s3storage import request_failure
+    from boto3_s3.sdkerrors import request_failure
 
     try:
         return client.get_object_attributes(**kwargs)
@@ -380,32 +348,21 @@ def _part_sizes(
 ) -> tuple[int, ...] | None:
     """The COMPOSITE object's part byte sizes, in order (paginated past 1000).
 
-    ``None`` when the listing cannot be trusted to describe the object - no
-    ``ObjectParts`` at all, a part without a usable ``Size``, a truncated page
-    with no marker to continue from or with one that does not move past the
-    page just read (following it would ask for the same page forever), or no
-    parts in the end. The caller reads that as indeterminate (copy): a part
-    split that is not known exactly cannot reproduce the checksum.
+    ``None`` when a truncated page's marker does not move past the page just
+    read, or runs past S3's last part number: following it could page
+    forever. The caller reads that as indeterminate (copy).
     """
-    parts_info: Any = first.get("ObjectParts")
-    if not parts_info:
-        return None
+    parts_info: Any = first["ObjectParts"]
     extra: dict[str, Any] = {"RequestPayer": request_payer} if request_payer else {}
     sizes: list[int] = []
     followed = 0  # the marker the page in hand was asked with (0: the first page)
     while True:
         parts: list[Any] = parts_info.get("Parts") or []
-        try:
-            sizes.extend(int(part["Size"]) for part in parts)
-        except (KeyError, TypeError, ValueError):
-            return None
+        sizes.extend(part["Size"] for part in parts)
         if not parts_info.get("IsTruncated", False):
-            break
-        try:
-            marker = int(parts_info.get("NextPartNumberMarker") or 0)
-        except (TypeError, ValueError):
-            return None
-        if marker <= followed:
+            return tuple(sizes)
+        marker: int = parts_info.get("NextPartNumberMarker") or 0
+        if not followed < marker < _MAX_PARTS:
             return None
         followed = marker
         resp: Any = _get_object_attributes(
@@ -416,25 +373,27 @@ def _part_sizes(
             PartNumberMarker=marker,
             **extra,
         )
-        parts_info = resp.get("ObjectParts") or {}
-    # An empty part list is degenerate (S3 multipart objects have >= 1 part);
-    # treat it as indeterminate rather than hashing a digest that cannot match.
-    return tuple(sizes) if sizes else None
+        parts_info = resp["ObjectParts"]
 
 
 def _can_compute(algorithm: str, size: int | None, pure_max_size: int | None) -> bool:
     """Whether we can compute ``algorithm`` locally for an object of ``size``.
 
-    ``crc32`` / ``sha1`` / ``sha256`` always. ``crc32c`` / ``crc64nvme`` always
-    with ``awscrt``; without it the bundled pure-Python path can, but
-    ``pure_max_size`` may cap it (a larger - or unknown-size - object reads as
-    indeterminate -> copy; the cap is a hard bound on the slow fallback, so a
-    size it cannot check counts as above it).
-    Any other (future) algorithm is uncomputable.
+    ``crc32`` always, and the hashlib algorithms whenever hashlib builds them
+    (a FIPS build may refuse ``md5``). ``xxhash*`` only with an ``awscrt``
+    that has them. ``crc32c`` / ``crc64nvme`` always with ``awscrt``; without
+    it the bundled pure-Python path can, but ``pure_max_size`` may cap it (a
+    larger - or unknown-size - object reads as indeterminate -> copy; the cap
+    is a hard bound on the slow fallback, so a size it cannot check counts as
+    above it). Any other (future) algorithm is uncomputable.
     """
-    if algorithm in ("crc32", "sha1", "sha256"):
+    if algorithm == "crc32":
         return True
-    if algorithm not in ("crc32c", "crc64nvme"):
+    if algorithm in _HASHLIB_ALGOS:
+        return _hashlib_builds(algorithm)
+    if algorithm in _CRT_XXHASHES:
+        return _xxhash_factory(algorithm) is not None
+    if algorithm not in _CRT_CRCS:
         return False
     if _crc_has_awscrt(algorithm):
         return True
@@ -471,13 +430,7 @@ def _composite_b64(fh: BinaryIO, algorithm: str, part_sizes: tuple[int, ...]) ->
     for size in part_sizes:
         part = _new_hasher(algorithm)
         assert part is not None
-        remaining = size
-        while remaining > 0:
-            block = fh.read(min(READ_CHUNK, remaining))
-            if not block:
-                break
-            part.update(block)
-            remaining -= len(block)
+        hash_part(fh, part, size)
         combined += part.digest()
     if fh.read(1):
         return None
@@ -504,32 +457,64 @@ class _IntCrc:
         return self._v.to_bytes(self._width, "big")
 
 
+class _CrtXXHash:
+    """A hashlib-shaped wrapper over an awscrt ``XXHash`` (``finalize`` as ``digest``)."""
+
+    __slots__ = ("_hash",)
+
+    def __init__(self, xxhash: Any) -> None:
+        self._hash = xxhash
+
+    def update(self, chunk: bytes) -> None:
+        self._hash.update(chunk)
+
+    def digest(self) -> bytes:
+        return self._hash.finalize()
+
+
 def _new_hasher(algorithm: str) -> Any | None:
     """A fresh incremental hasher (``.update(bytes)`` / ``.digest() -> bytes``)."""
     if algorithm == "crc32":
         return _IntCrc(zlib.crc32, 4)
-    if algorithm in ("sha1", "sha256"):
-        return hashlib.new(algorithm)
-    if algorithm in ("crc32c", "crc64nvme"):
+    if algorithm in _HASHLIB_ALGOS:
+        return _hashlib_new(algorithm)
+    if algorithm in _CRT_XXHASHES:
+        factory = _xxhash_factory(algorithm)
+        return None if factory is None else _CrtXXHash(factory())
+    if algorithm in _CRT_CRCS:
         return _IntCrc(*_crc_backend(algorithm))
     return None
 
 
-_CRC_PARAMS = {
-    "crc32c": (_POLY_CRC32C, _MASK32, 4),
-    "crc64nvme": (_POLY_CRC64NVME, _MASK64, 8),
-}
+def _hashlib_new(algorithm: str) -> Any:
+    # A checksum, not a security use: a FIPS build refuses a plain md5.
+    return hashlib.new(algorithm, usedforsecurity=False)
+
+
+@functools.cache
+def _hashlib_builds(algorithm: str) -> bool:
+    try:
+        _hashlib_new(algorithm)
+    except ValueError:
+        return False
+    return True
+
+
+def _xxhash_factory(name: str) -> Callable[[], Any] | None:
+    """awscrt's constructor for the ``xxhash*`` ``name``, or ``None`` without one."""
+    xxhash = getattr(_awscrt_checksums(), "XXHash", None)
+    return getattr(xxhash, _CRT_XXHASHES[name], None)
 
 
 def _crc_backend(name: str) -> tuple[Callable[[bytes, int], int], int]:
     """The (update, width) for ``crc32c`` / ``crc64nvme``: awscrt if present, else pure."""
-    width = _CRC_PARAMS[name][2]
+    width, pure = _CRT_CRCS[name]
     crt = _awscrt_checksums()
     if crt is not None:
         fn = getattr(crt, name, None)
         if fn is not None:
             return fn, width
-    return _PURE_CRC[name], width
+    return pure, width
 
 
 @functools.lru_cache(maxsize=1)
@@ -616,10 +601,24 @@ def _pure_crc64nvme(chunk: bytes, prev: int = 0) -> int:
     return c ^ _MASK64
 
 
-_PURE_CRC: dict[str, Callable[[bytes, int], int]] = {
-    "crc32c": _pure_crc32c,
-    "crc64nvme": _pure_crc64nvme,
+# The CRCs awscrt computes when it is installed and the bundled pure-Python
+# code above computes otherwise (the slow fallback `pure_max_size` caps):
+# name -> (digest width in bytes, pure-Python fallback).
+_CRT_CRCS: dict[str, tuple[int, Callable[[bytes, int], int]]] = {
+    "crc32c": (4, _pure_crc32c),
+    "crc64nvme": (8, _pure_crc64nvme),
 }
+
+# The XXHASH family, computed only by awscrt (its ``XXHash``, 0.31.2 and
+# later): name -> that class's constructor.
+_CRT_XXHASHES = {
+    "xxhash64": "new_xxhash64",
+    "xxhash3": "new_xxhash3_64",
+    "xxhash128": "new_xxhash3_128",
+}
+
+# The algorithms hashlib computes.
+_HASHLIB_ALGOS = ("md5", "sha1", "sha256", "sha512")
 
 
 __all__ = ["ChecksumComparison"]

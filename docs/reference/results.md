@@ -44,8 +44,8 @@ reaches the operation produces nothing: one a filter excluded during
 enumeration, one a `sync` decision declined to act on (`create_filter`,
 `update_filter`, `delete_filter`, or the `pair_filter` that replaces all three,
 [`operations/sync.md`](./operations/sync.md)), or one never enumerated because
-the run ended first. Three carve-outs exist, items consumed before submission,
-discarded after acceptance, or lost the way `aws s3` loses them:
+the run ended first. Two carve-outs exist, items consumed before submission or
+discarded after acceptance:
 
 - an item a pre-transfer gate rejects with an advisory instead of an outcome:
   the glacier gate without `ignore_glacier_warnings` (one `WARNED` record), a
@@ -57,26 +57,22 @@ discarded after acceptance, or lost the way `aws s3` loses them:
 - deletes the deleter accepted but whose own request never went out, which
   produce no record at all: its unsent buffer, discarded by a cancellation or
   by an exception that ends the run (a listing failure part-way through,
-  say), and, under `CancelMode.IMMEDIATE`, a dispatched batch whose request
-  had not started — or, inside a started batch, a key due a request of its
-  own (one the XML round trip cannot carry, a re-send of a transient per-key
-  failure, any key of a batch request that failed as a whole) that had not
-  gone out when the run was abandoned, even where S3 had already answered the
-  batch for it ([`../../design/deleter.md`](../../design/deleter.md));
-- an item whose botocore request died without any response — botocore's
-  closed-connection and read-timeout errors — on a transfer, a per-key
-  delete, or a single-key `rm`. It produces no record
-  and is in no count, because `aws s3` loses it too: its per-item completion
-  handler fails on the missing response, so the item prints no line and the
-  run exits 0 when nothing else failed. A refused connection, a download's
-  read timeout (s3transfer retries it and then fails), a service error
-  response, and a failure the CRT engine reports itself — a delete sent on
-  the CRT client included, as a run that selects the CRT engine sends them —
-  are ordinary `FAILED` records. A batched
-  `DeleteObjects` that dies without a response is not itself lost or failed,
-  on either client: its keys are sent again one `DeleteObject` each, the
-  request `aws s3` sends, and each takes its own outcome. The dropped failure is logged at debug level on the
-  `boto3_s3.s3storage` logger.
+  say), and, under `CancelMode.IMMEDIATE`, a dispatched batch: one whose
+  request had not started never runs, and one already sent finishes behind
+  the caller without reporting, starting none of the requests its keys
+  would still need on their own (one the XML round trip cannot carry, a
+  re-send of a transient per-key failure, any key of a batch request that
+  failed as a whole) ([`../../design/deleter.md`](../../design/deleter.md)).
+
+An item whose request died without any response — the connection closed, the
+read timed out — is an ordinary `FAILED` record, although `aws s3` on its
+classic engine loses it (no output line, exit code 0) unless it was a
+download's read of the object, which it retries and then reports. Such a record does not say S3 left the object
+alone: the request may have reached S3, and the object been written, copied
+or deleted, before the response was lost; a listing, or running the
+operation again, shows which. A batched `DeleteObjects` that dies this way is not itself a
+failure: its keys are sent again one `DeleteObject` each, the request
+`aws s3` sends, and each takes its own outcome.
 
 `WARNED` and `NOTICE` sit outside that rule in the other direction as well.
 Being advisories rather than outcomes, they are not tied one-to-one to an item:
@@ -124,7 +120,8 @@ here — the same shape as that fallback. It is the same key space the
 operations' filters match against ([`filters.md`](./filters.md)). Outside those
 two cases it is not the full object key; read `src_info.key` for that, on a
 record that carries a source entry. Advisory records that belong to no item — a
-directory-walk warning — carry `""`.
+directory-walk warning — carry `""`, as does the item of a single local
+source that is a directory ([`filters.md`](./filters.md#filefilter)).
 
 `outcome` is the record kind; see [`OpOutcome`](#opoutcome).
 
@@ -157,14 +154,18 @@ operation has one endpoint. Advisory records set neither.
 transfer's source, or the object a delete removes. `dest_info` is populated only
 by `sync`, where it is the pre-existing destination object the decision compared
 against; `cp` and `mv` never list the destination, so it stays `None` for them.
-A streaming `cp` lists nothing, so both are `None`. Advisory records carry
-neither, and a glacier `SKIPPED` record carries `src_info` but no `dest` or
+A streaming `cp` lists nothing, so both are `None`. A `WARNED` or `NOTICE`
+record about an item carries that item's source entry as `src_info` — the
+glacier and parent-directory gates, a source over S3's upload size limit, the
+case-conflict notices, a failed mtime stamp — while one that belongs to no
+item, such as a directory-walk warning, carries none; neither carries
+`dest_info`. A glacier `SKIPPED` record carries `src_info` but no `dest` or
 `dest_info` — its gate runs before the destination is derived.
 
 `src_storage` and `dest_storage` are the run's two sides as `Storage` backends
 ([`storage.md`](./storage.md)). They are populated where the corresponding entry
-is absent as well — a `cp` / `mv` destination, a streaming side, and every
-warning and notice — which is why they exist beside `FileInfo.storage`. Where
+is absent as well — a `cp` / `mv` destination, a streaming side, and a warning
+that belongs to no item — which is why they exist beside `FileInfo.storage`. Where
 `src_info` or `dest_info` is present, its `storage` is the same backend as the
 matching field here. A delete record puts the deleted-from side on `src_storage`
 (for `rm` the target bucket, for `sync`'s delete lane the run's destination) and
@@ -255,28 +256,30 @@ mutating API call does not occur. It affects no `BatchError` counter.
 
 `NOTICE` — display-only text carried on `error`, used where `aws s3` prints an
 advisory straight to stderr without counting it as a warning (the case-conflict
-messages). It affects no counter, and it may precede the same item's real
+messages, and `mv`'s warning that two S3 paths may name the same object, which
+belongs to no item and comes before the run's records). It affects no counter, and it may precede the same item's real
 outcome, so a consumer must not assume one callback per key. The body already
 carries its own `warning: ` prefix.
 
 `CANCELLED` — an accepted item revoked before it could complete, because a fatal
-error elsewhere in the run, an immediate cancellation, or Ctrl-C shut the engine
-down. On the CRT engine only a cancellation this run's `CancelToken` ordered
-reports `CANCELLED`: every other CRT cancellation reports `FAILED`, and a Ctrl-C
-the CRT manager swallows during its transfer drain ends the run in `BatchError`
-([`../../design/opresult.md`](../../design/opresult.md)). One case does not
-depend on the token: an item whose outcome the engine holds as an interrupt —
-a `KeyboardInterrupt` or `SystemExit` that landed in, or was raised by, code
-running for that item — reports `CANCELLED`, and that interrupt is then raised
-to the caller. Not every engine route keeps an interrupt raised by a caller's
-stream as the outcome, though: `use_threads=False`, a threaded upload and a CRT
-download do; a threaded download and a CRT upload do not, and what happens
-there is the engine's. `error` is a
+error elsewhere in the run shut the engine down, on either transfer engine; a
+CRT cancellation the run did not order itself reports `FAILED`
+([`../../design/opresult.md`](../../design/opresult.md)). An immediate
+cancellation revokes items too, but its records stop with it, so only an item
+revoked before the operation raised reports `CANCELLED`.
+On the CRT engine, a `mv` from S3 whose download has finished but whose source
+delete has not started is such an item: its file is in place, its source stays,
+and its `error` reads `cancelled before the source delete`.
+An item whose outcome the engine holds as an interrupt — a `KeyboardInterrupt`
+or `SystemExit` that landed in, or was raised by, code running for that item —
+reports `CANCELLED`, and that interrupt is then raised to the caller - on every
+route, a CRT upload whose reader awscrt runs on its own thread included. A
+`KeyboardInterrupt` is raised at once and nothing more is reported, so an item
+not settled by then has no record.
+`error` is a
 [`CancelledError`](./exceptions.md#cancellederror) naming the cause where the
-canceller supplied one; an immediate-mode escalation arriving during a drain
-revokes without a message and those records carry the bare `canceled`, while the
-CRT manager cancels without the message and its records carry awscrt's
-cancellation wording. It is deliberately distinct from `FAILED`: nothing is
+canceller supplied one; the CRT manager cancels without the message, and its
+records carry awscrt's cancellation wording. It is deliberately distinct from `FAILED`: nothing is
 wrong with the item itself, so it is not counted as a failure, it appears in no
 `BatchError` counter, and it is not sampled as `BatchError`'s `__cause__`. A run
 that produced such records ends by raising — the fatal that triggered the
@@ -378,7 +381,9 @@ name, or — on a `LocalFileInfo` — the absolute filesystem path with `os.sep`
 normalized to `/`. It is never a relative path and never carries the platform
 separator, so entries from two backends share one sort order; that is what lets
 `sync` merge-join two scans. Any backend must emit `/`-separated keys regardless
-of host OS.
+of host OS. It is the backend's own address of the entry, never a URL naming the
+backend (no `s3://` or other scheme in front); which backend the entry belongs
+to is `storage` ([`storage.md`](./storage.md#storage)).
 
 `kind` says what the entry is; see [`FileKind`](#filekind).
 
@@ -386,9 +391,7 @@ of host OS.
 time. Both are populated for `FILE` entries. A `DIRECTORY` entry may leave
 either `None` — an S3 common prefix leaves both — and a `BUCKET` entry carries
 the bucket's creation date as `mtime` with `size` left `None`. These are
-invariants the producers enforce, not the field types. An S3-compatible
-endpoint that sends a timestamp with no zone has it read as local time, the
-way `aws s3` reads it, and the entry still carries the aware UTC value.
+invariants the producers enforce, not the field types.
 
 `compare_key` is the relative form of the entry's key, the key space filters
 match against and the axis `sync` merge-joins on: for a local scan, the key
@@ -398,15 +401,20 @@ name unchanged. Each backend's `scan_pages` stamps it on every entry it yields �
 a contract of the backend's listing rather than of the base `Storage.scan` — so
 a `ScanOptions.filter` predicate, `GlobFilter` in particular, can match it
 without re-deriving it from `key`. The built-in single-entry lookups use the
-basename. A hand-built `FileInfo` may leave it `None`.
+basename; an operation shows its filter the AWS CLI's form of a single source
+instead (and of the few recursive bases where the two differ), on a copy,
+while the record keeps its own ([`filters.md`](./filters.md#filefilter)). A
+local directory's own lookup is already in the AWS CLI's form: a trailing
+separator on its `key`, and `""` as its `compare_key`. A
+hand-built `FileInfo` may leave it `None`.
 
 `storage` is the backend the entry was listed from, stamped by the producer
 during the scan and before any filter runs. It lets a filter predicate reach
 behind the entry — a `HeadObject` for a tag the listing omits — and it is the
 handle `sync` reads through a pair's `src` / `dest` to open the non-S3 side for
 a content compare ([`comparator.md`](./comparator.md)). It is `None` on a
-hand-built `FileInfo`; `Storage.scan` fills it as a backstop for a backend whose
-`scan_pages` did not.
+hand-built `FileInfo`; `Storage.scan` fills it on an entry its `scan_pages`
+left `None`, so a backend need not stamp it.
 
 The class is a mutable dataclass with `slots=True` and keyword-only fields.
 
@@ -611,40 +619,43 @@ external synchronization.
 What each mode guarantees depends on the lane the work is in, because a request
 already issued to S3 cannot be aborted safely.
 
-For the transfer lanes of `cp` / `mv` / `sync`, `GRACEFUL` is a drain: the
-operation stops accepting new work and lets everything it already accepted run
-to completion, so those items report their real outcomes and no `CANCELLED`
-record arises. `IMMEDIATE` additionally cancels pending and in-flight transfers
-(whenever it arrives once the engine is built, a submission waiting on the
-engine's backpressure included), and then an accepted item that had not started — or was abandoned mid-flight —
-reports `CANCELLED`, while an in-flight request that completes despite the
-cancellation reports its real outcome, since its bytes really landed. Work never
-accepted, because the submission loop stopped before reaching it, produces no
-record either way. An escalation to `IMMEDIATE` that arrives while a graceful
-drain is already running is honored.
+`GRACEFUL` is a drain: the operation stops accepting new work and finishes what
+it already accepted before it raises.
 
-For the delete lanes of `rm` and `sync`, `GRACEFUL` discards the deleter's
-unsent buffer and drains the batch already dispatched; `IMMEDIATE` additionally
-cancels a dispatched batch that has not started, and starts none of the
-per-key requests a started batch still had to send (its XML-incompatible keys,
-its re-sends). A batch whose S3 request has started otherwise completes and
-delivers its per-key records first. Discarded buffered entries, the entries of
-a cancelled batch and a key whose own request was left unsent produce no
-records
-([`../../design/deleter.md`](../../design/deleter.md)).
+- On the transfer lanes of `cp` / `mv` / `sync`, everything accepted runs to
+  completion, so those items report their real outcomes and no `CANCELLED`
+  record arises.
+- On the delete lanes of `rm` and `sync`, the deleter's unsent buffer is
+  discarded without records, and the batch already dispatched is drained
+  ([`../../design/deleter.md`](../../design/deleter.md)).
+- In `sync`'s pair loop, the decisions already handed to a `ParallelFilter`
+  executor ([`comparator.md`](./comparator.md)) are awaited.
 
-For `ls`, both modes behave identically: cancellation stops entry delivery,
-drops prefetched pages, waits for a page request already in progress, reclaims
-the prefetch worker, and raises. The service-root bucket listing iterates its
-pages directly, so cancellation there simply stops between pages.
+`IMMEDIATE` raises at once, without waiting for the requests already sent. The
+operation starts nothing new and cancels what has not started; the requests
+already out, and their cleanup (a multipart upload aborted, a download's
+temporary file removed), finish behind the caller. What they do can still
+change S3 or local files after the operation has raised: on the classic engine,
+a `mv` whose copy completes still deletes its source, for one. Records stop with
+the cancel: once the `CancelledError` is on its way the operation makes no more
+`on_result` or `on_progress` calls, so an accepted item that ends after it gets
+no record. A call another thread had already begun may still be running, or
+just entering your callback, when the exception reaches you. An escalation to `IMMEDIATE` while a graceful drain is running ends the
+drain the same way. The same `S3` can run the next operation; see
+[`s3.md`](./s3.md#thread-safety) for the client the requests still out use.
 
-For `sync`'s pair loop, the token is polled before each decision and each
-action. `GRACEFUL` awaits the decisions already handed to a `ParallelFilter`
-executor ([`comparator.md`](./comparator.md)); `IMMEDIATE` first cancels those
-futures. The caller's executor is never shut down.
+In both modes, work never accepted, because the operation stopped before
+reaching it, produces no record, and a cancel ends a listing at once: `ls` (and
+the listings of the other operations) stops delivering entries, drops prefetched
+pages, tells the prefetch worker to stop (it ends by itself after a page request
+already in progress) and raises. The service-root bucket listing iterates its
+pages directly, so cancellation there stops between pages.
 
-Under either mode, external I/O already running may still have to finish before
-the operation can return.
+No mode cuts short a request the operation's own thread is waiting on: the
+`HeadObject` a single-object `cp` / `mv` sends first, the service-root bucket
+listing, a single-key `rm`, `mb`, `rb`, and a listing page under
+`read_ahead=False`. The operation raises once that request returns. The
+caller's executor is never shut down.
 
 ### cancel(\*, mode=CancelMode.GRACEFUL)
 
@@ -685,8 +696,7 @@ accepted items report their real outcomes and produce no `CANCELLED` records;
 on the delete lanes the deleter's unsent buffer is discarded without records,
 and only the batch already dispatched is drained.
 
-`IMMEDIATE` additionally asks each engine to cancel pending and in-flight work
-wherever its implementation supports cancellation. What that yields per lane is
-listed under [`CancelToken`](#canceltoken); external I/O already running may
-still have to finish, and an operation is free to report the real outcome of a
-request that completed despite the request to cancel.
+`IMMEDIATE` raises at once: the operation starts nothing new, cancels what has
+not started, and leaves the requests already sent to finish behind the caller,
+reporting nothing more. A request the operation's own thread is waiting on is
+still waited for. The details are listed under [`CancelToken`](#canceltoken).

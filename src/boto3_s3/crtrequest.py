@@ -32,10 +32,11 @@ from __future__ import annotations
 
 import io
 import re
-import threading
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
+
+from boto3_s3.concurrency import Wake
 
 __all__ = ["CrtRequestSender"]
 
@@ -124,7 +125,11 @@ class CrtRequestSender:
         response_headers: list[tuple[str, str]] = []
         body = bytearray()
         outcome: list[BaseException | None] = []
-        done = threading.Event()
+        # Sent by awscrt's thread once the request is done. The caller waits on
+        # a `Wake`, as every wait on another thread does: a Ctrl-C landing in a
+        # `threading.Event`'s wait could leave it so that this send blocks
+        # awscrt's thread for good.
+        done = Wake()
 
         # awscrt passes every argument by keyword, so the names are its own.
         def on_headers(status_code: int, headers: list[tuple[str, str]], **_kwargs: Any) -> None:
@@ -136,7 +141,7 @@ class CrtRequestSender:
 
         def on_done(error: BaseException | None = None, **_kwargs: Any) -> None:
             outcome.append(error)
-            done.set()
+            done.send()
 
         args: dict[str, Any] = {
             "type": awscrt.s3.S3RequestType.DEFAULT,
@@ -153,27 +158,13 @@ class CrtRequestSender:
             args["signing_config"] = signing_config
         # Held until done: the request object is what keeps it running.
         request = self._crt_client.make_request(**args)
-        done.wait()
+        done.wait_until(lambda: bool(outcome))
         del request
         error = outcome[0]
         if error is not None:
             raise self._translate(error, operation) or error
         code = status[0] if status else 200
-        payload = bytes(body)
-        if code < 300 and operation != "DeleteObjects":
-            # A single DeleteObject's answer lives in its headers alone, and
-            # aws's CRT client never reads the body of one that succeeded: it
-            # takes the 200 as the delete done whatever follows (measured).
-            payload = b""
-        elif code == 200 and _special_case_error(payload):
-            # botocore's rule for a 200 answer whose body is S3's error, or
-            # does not parse at all: a 500. The CRT client already fails an
-            # `Error` document itself (re-sending a passing fault first), so
-            # what reaches here is a body that is not XML - read as a
-            # DeleteObjects result it would list no failure, which says every
-            # key was deleted.
-            code = 500
-        parsed = self._parse(operation, code, response_headers, payload)
+        parsed = self._parse(operation, code, response_headers, bytes(body))
         if code >= 300:
             raise self._client_error(parsed, operation)
         return parsed
@@ -276,18 +267,3 @@ def _signing_config(bucket: Any) -> Any | None:
             algorithm=express, use_double_uri_encode=False, should_normalize_uri_path=False
         )
     return None
-
-
-def _special_case_error(body: bytes) -> bool:
-    """botocore's ``_looks_like_special_case_error`` for a 200 answer's body."""
-    if not body:
-        return False
-    import xml.etree.ElementTree as ETree
-
-    try:
-        parser = ETree.XMLParser(target=ETree.TreeBuilder(), encoding="utf-8")
-        parser.feed(body)
-        root = parser.close()
-    except ETree.ParseError:
-        return True
-    return root.tag == "Error"

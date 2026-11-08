@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from tests.utils.host import is_case_insensitive
+from tests.utils.strictproxy import StrictProxy
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -90,12 +91,19 @@ def _classic_aws_config(tmp_path_factory: pytest.TempPathFactory) -> Path:
 @pytest.fixture(autouse=True)
 def _moto_isolation(monkeypatch: pytest.MonkeyPatch, _classic_aws_config: Path) -> None:
     """Force fake AWS credentials so moto never sees the host's real ones."""
-    # The dispatch reads ~/.aws/cli/alias on every invocation (aws's hardcoded
-    # path) and the credential cache writes ~/.aws/cli/cache, so ~ must point
-    # away from the developer's home: their own alias file would change what
-    # every CLI test dispatches, and an unreadable one would fail them all.
+    # The credential cache writes ~/.aws/cli/cache, and botocore reads the
+    # files under ~/.aws, so ~ must point away from the developer's home.
     home = _classic_aws_config.parent / "home"
     home.mkdir(exist_ok=True)
+    # Nothing of the host's AWS environment reaches a test: every AWS_*
+    # variable steers botocore, aws-cli or this CLI somehow - the profile, the
+    # endpoint a request goes to (AWS_DEFAULTS_MODE, the regional and
+    # FIPS/dual-stack switches), retries, checksums, the CA bundle (an empty
+    # one is refused outright, `s3storage.reject_empty_ca_bundle`) - and the
+    # tests pin each. The ones a test needs are set below or by the test.
+    for leak in [name for name in os.environ if name.upper().startswith("AWS_")]:
+        monkeypatch.delenv(leak, raising=False)
+    monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
@@ -107,22 +115,20 @@ def _moto_isolation(monkeypatch: pytest.MonkeyPatch, _classic_aws_config: Path) 
     monkeypatch.setenv(
         "AWS_SHARED_CREDENTIALS_FILE", str(_classic_aws_config.parent / "credentials-absent")
     )
-    # AWS_DEFAULT_PROFILE leaks as surely as AWS_PROFILE: it is the second link
-    # of the same chain, so a developer exporting it would name a profile the
-    # fixture config does not declare - which silently strips the
-    # ParamValidation envelope off every CLI error report (design/cli.md
-    # section 6) as well as steering the session.
-    # The CA bundle variables steer every client too, and an empty one is
-    # refused outright (`s3storage.reject_empty_ca_bundle`).
-    for leak in (
-        "AWS_PROFILE",
-        "AWS_DEFAULT_PROFILE",
-        "AWS_ENDPOINT_URL",
-        "AWS_ENDPOINT_URL_S3",
-        "AWS_CA_BUNDLE",
-        "REQUESTS_CA_BUNDLE",
-    ):
-        monkeypatch.delenv(leak, raising=False)
+    # No request leaves the host. Every HTTP(S) connection botocore or urllib3
+    # opens is sent to a proxy nothing listens on, and fails at once; the
+    # loopback endpoints tests run their own fakes on bypass it. Without
+    # this, a test that misses a fake reaches real AWS with the fake keys
+    # above (it happened: a dry run's HeadObject, a directory bucket's
+    # CreateSession). The EC2 metadata probe is turned off too. The proxy
+    # tests set their own (`proxy_environment`); the e2e suite, which must
+    # reach its endpoint, overrides this fixture.
+    for proxy_var in ("https_proxy", "http_proxy", "no_proxy", "all_proxy", "ALL_PROXY"):
+        monkeypatch.delenv(proxy_var, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost,::1")
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
     # A prior test's boto3.client() / session-less S3() installs a
     # process-global default session built under THAT test's env, and
     # AwsConfig.from_session(None) deliberately reuses the installed session
@@ -131,20 +137,6 @@ def _moto_isolation(monkeypatch: pytest.MonkeyPatch, _classic_aws_config: Path) 
     import boto3
 
     monkeypatch.setattr(boto3, "DEFAULT_SESSION", None)
-
-
-@pytest.fixture(autouse=True)
-def _reset_interrupt_unwinding(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Clear the process-fatal interrupt marker between tests.
-
-    ``concurrency.mark_interrupt_unwinding`` is monotonic on purpose - the
-    posture's contract is that the process is about to die - but the test
-    process survives its simulated Ctrl-Cs, and a marker leaked from one test
-    would make every later posture-False scan teardown abandon its worker.
-    """
-    from boto3_s3 import concurrency
-
-    monkeypatch.setattr(concurrency, "_interrupt_unwinding", False)
 
 
 @pytest.fixture(autouse=True)
@@ -183,3 +175,24 @@ def _pin_classic_engine(monkeypatch: pytest.MonkeyPatch) -> None:
     # the library never calls it there (has_minimum_crt_version gates first),
     # and erroring the autouse fixture would fail every test at the SDK floor.
     monkeypatch.setattr(awscrt.s3, "is_optimized_for_system", lambda: False, raising=False)
+
+
+@pytest.fixture
+def proxy() -> Iterator[StrictProxy]:
+    server = StrictProxy()
+    try:
+        yield server
+    finally:
+        server.close()
+
+
+@pytest.fixture
+def proxy_environment(monkeypatch: pytest.MonkeyPatch, proxy: StrictProxy) -> StrictProxy:
+    """Route HTTPS through the fake proxy (`StrictProxy`), with nothing of the host's left."""
+    for leak in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(leak, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", proxy.url)
+    # One attempt: a retry would open a second tunnel and slow the test down
+    # without adding anything - the first block is what is under test.
+    monkeypatch.setenv("AWS_MAX_ATTEMPTS", "1")
+    return proxy

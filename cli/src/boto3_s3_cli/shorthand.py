@@ -2,28 +2,33 @@
 
 aws-cli parses map-typed options with its shorthand grammar (``awscli/
 shorthand.py`` ``ShorthandParser``) and also accepts the equivalent JSON object.
-`_Parser` is a port of that grammar - the whole of it, csv lists, explicit
-lists and hash literals included - so the CLI matches aws on the corner cases
-the naive ``split(",")``/``partition("=")`` got wrong:
+`_Parser` ports the part of that grammar a map of strings can take, so the CLI
+accepts exactly what aws-cli accepts, including the corner cases the naive
+``split(",")``/``partition("=")`` got wrong:
 
 - a duplicate key is rejected (``Second instance of key ...`` -> rc 252), not
   silently last-write-wins,
 - backslash-escaped commas in an unquoted value (``k=a\\,b`` -> ``a,b``),
 - single/double-quoted values that contain commas (``k="a,b"`` -> ``a,b``),
-- the ``@=`` paramfile operator (``k@=file://path`` loads the file's text,
-  ``fileb://`` its bytes; a prefix-less value passes through - aws's
-  "file-optional-values"),
-- the non-scalar shapes (``k=a,b``, ``k=[a,b]``, ``k={a=b}``) parse and are
-  then rejected by the *schema*, not by the grammar - a map of strings cannot
-  hold a list or a nested map, so they draw botocore's ``Parameter validation
-  failed`` report rather than a syntax error.
+- an empty segment between pairs is absorbed (``a=b,,c=d`` is two pairs),
+- the ``@=`` paramfile operator (``k@=file://path`` loads the file's text; a
+  prefix-less value passes through - aws-cli's "file-optional-values").
 
-Two error vocabularies therefore reach the user, exactly as in aws. A grammar
-failure is the parser's own ``Error parsing parameter '<name>'`` (rc 252 via
-``ValidationError``); a well-formed value of the wrong type is botocore's
-schema report, which carries no option name at all. A failure to *load* an
-``@=`` paramfile is neither: it leaves this module unwrapped and exits 255
-(`paramfile.named_argument`).
+aws-cli's grammar also builds lists (``k=a,b``, ``k=[a,b]``) and nested maps
+(``k={a=b}``), which a map of strings cannot hold; aws-cli parses them and then
+rejects them with botocore's type report (``Parameter validation failed:\\n
+Invalid type for parameter k, value: ['a', 'b'], type: <class 'list'>, valid
+types: <class 'str'>``). Here they are rejected while parsing, in words of
+this parser's own that say how to write the value instead. That difference
+in the report is kept on purpose (design/overview.md section 3, Messages):
+matching it would take porting the list and map grammar back, for inputs
+both tools refuse at the same rc. A ``fileb://`` value loaded through
+``@=`` is rejected while parsing too. Every rejection is rc 252 via
+``ValidationError``: botocore's ``Parameter validation failed:`` report for
+a JSON object value that is not a string, as on aws-cli, and otherwise an
+``Error parsing parameter '<name>'`` usage error, a failure to *load* an
+``@=`` paramfile included (`paramfile.named_argument`), like a paramfile
+named by any other argument.
 """
 
 from __future__ import annotations
@@ -31,14 +36,16 @@ from __future__ import annotations
 import json
 import re
 import string
-from typing import TypeAlias, cast
+from collections import OrderedDict
+from collections.abc import Mapping
+from typing import Any, TypeAlias, cast
 
 from boto3_s3 import ValidationError
 from boto3_s3_cli import paramfile, usage
 
-# What one shorthand key can carry: a scalar, a `fileb://` load, or - through
-# the csv / explicit-list / hash-literal forms - a nesting of those.
-_ShorthandValue: TypeAlias = "str | bytes | list[_ShorthandValue] | dict[str, _ShorthandValue]"
+# What one shorthand value can carry: text, or the bytes of an `@=fileb://`
+# load (refused by `parse_map_option` once the whole value has parsed).
+_ShorthandValue: TypeAlias = "str | bytes"
 
 # Keys are alphanumeric plus ``-_.#/:`` (aws-cli awscli/shorthand.py); any other
 # character terminates the key and is read as a delimiter or a syntax error.
@@ -73,122 +80,117 @@ class _ShorthandParseError(ValueError):
 def parse_map_option(value: str, *, name: str, operation: str) -> dict[str, str]:
     """Parse ``k1=v1,k2=v2`` shorthand or a JSON object into a string map.
 
-    A value whose leading non-whitespace character is ``{`` or ``[`` never
-    reaches the shorthand grammar: aws short-circuits both to its JSON
-    unpacker, which then insists on ``{`` and rejects a ``[`` lead with a bare
-    ``Invalid JSON:`` echo of the value.
-
-    Everything else is parsed with `_Parser`, and the result is schema-checked
-    the way aws checks it afterwards - a map value must be a string. So a
-    ``bytes`` (from ``@=fileb://``), a csv or explicit list, and a hash literal
-    all raise botocore's ``Parameter validation failed`` report, one line per
-    offending key in the map's own order, with no option name in it. Grammar
-    failures raise the parser's ``Error parsing parameter '<name>'`` instead.
-    Both are aws's usage rc (252) via ``ValidationError``. A paramfile the
-    ``@=`` operator cannot *load* is not this function's error at all - see
-    `_Parser._resolve`.
+    A value whose leading non-whitespace character is ``{`` or ``[`` is read
+    as JSON (aws-cli's short-circuit to its JSON unpacker), and only an object
+    whose values are all strings is accepted. Everything else is parsed with
+    `_Parser`; a value loaded as bytes through ``@=fileb://`` is then refused,
+    since a map value must be text. Every refusal is rc 252 via
+    ``ValidationError``: botocore's ``Parameter validation failed:`` report
+    for a JSON value that is not a string, and the ``Error parsing parameter
+    '<name>'`` usage error for the rest, a paramfile the ``@=`` operator
+    cannot *load* included. aws-cli reports that
+    one load failure at 255 instead - its shorthand parser calls
+    ``get_paramfile`` outside the handler that names the argument - an
+    accident of its call path that is not copied: a file named on the
+    command line that cannot be read is a command-line error wherever it is
+    named.
     """
     text = value.strip()
     if text.startswith(("{", "[")):
         return _parse_json_map(value, name=name, operation=operation)
     try:
-        parsed = _Parser(value, operation=operation).parse()
+        with paramfile.named_argument(name, operation=operation):
+            parsed = _Parser(value, operation=operation).parse()
     except _ShorthandParseError as exc:
-        raise ValidationError(
-            f"Error parsing parameter '{name}': {exc}", operation=operation
-        ) from exc
-    invalid = {key: item for key, item in parsed.items() if not isinstance(item, str)}
-    if invalid:
-        # botocore renders the offending value with str(), which for every
-        # non-string shape the grammar can build (bytes, list, dict) is its
-        # repr; unlike the JSON route there is no OrderedDict to hand-format.
-        raise ValidationError(
-            "Parameter validation failed:\n"
-            + "\n".join(
-                f"Invalid type for parameter {key}, value: {item!r}, "
-                f"type: {type(item)}, valid types: <class 'str'>"
-                for key, item in invalid.items()
-            ),
-            operation=operation,
-        )
+        raise ValidationError(usage.param_error(name, exc), operation=operation) from exc
+    for key, item in parsed.items():
+        if isinstance(item, bytes):
+            # aws-cli lets botocore's type check refuse the bytes, and its
+            # report prints them (``value: b'...'``); a file's content may be a
+            # secret, so this one names the key instead (design/overview.md
+            # section 3, Security before compatibility).
+            raise ValidationError(
+                usage.param_error(
+                    name, f"the value of key {key!r} must be text, not the bytes of a fileb:// file"
+                ),
+                operation=operation,
+            )
     return cast("dict[str, str]", parsed)
 
 
 def _parse_json_map(value: str, *, name: str, operation: str) -> dict[str, str]:
-    """aws's map branch of ``_unpack_complex_cli_arg``: JSON object, or nothing.
+    """aws-cli's map branch of ``_unpack_complex_cli_arg``: a JSON object of strings.
 
-    The branch is reached for a ``[`` lead as well as a ``{`` one, and answers
-    the ``[`` with an ``Invalid JSON:`` line followed by the value verbatim -
-    not lstripped, and with none of the decoder detail or ``JSON received:``
-    line a real decode failure carries.
+    A ``[`` lead is refused: no array can be a map. aws-cli's report there is
+    ``Invalid JSON:\\n<value>``, kept for a value that is not JSON; for a
+    valid JSON array it says something untrue, so this one says what was
+    expected instead (design/overview.md section 3, Messages). The object is
+    decoded as aws-cli decodes it (``OrderedDict`` pairs) and then checked by
+    botocore against the string map, as aws-cli's
+    ``_validate_value_against_schema`` does, so a value that is not a string
+    is botocore's report.
     """
     if value.lstrip()[0] != "{":
-        raise ValidationError(
-            f"Error parsing parameter '{name}': Invalid JSON:\n{value}", operation=operation
-        )
+        try:
+            json.loads(value)
+        except (ValueError, RecursionError):
+            # Not decoded at all by aws-cli: a value Python's decoder cannot
+            # take - an integer past its digit limit, nesting past the
+            # recursion limit - is not one this report calls untrue.
+            message = f"Invalid JSON:\n{value}"
+        else:
+            message = f"expected a JSON object, received: {value}"
+        raise ValidationError(usage.param_error(name, message), operation=operation)
     try:
-        data = json.loads(value)
-    except json.JSONDecodeError as exc:
+        data = json.loads(value, object_pairs_hook=OrderedDict)
+    except ValueError as exc:  # aws-cli's catch: the digit limit included
         raise ValidationError(
-            f"Error parsing parameter '{name}': Invalid JSON: {usage.json_error_message(exc)}\n"
-            f"JSON received: {value}",
+            usage.param_error(name, f"Invalid JSON: {exc}\nJSON received: {value}"),
             operation=operation,
         ) from exc
     entries = cast("dict[str, object]", data)  # a `{`-led document decodes to an object
-    invalid = {key: item for key, item in entries.items() if not isinstance(item, str)}
-    if invalid:
-        # botocore's schema report, like the one in `parse_map_option`: aws
-        # parses the JSON and then fails its schema validation with one line
-        # per offending key, in document order.
-        reports = "\n".join(
-            f"Invalid type for parameter {key}, value: {_json_value_repr(item)}, "
-            f"type: {_json_type_repr(item)}, valid types: <class 'str'>"
-            for key, item in invalid.items()
-        )
-        raise ValidationError("Parameter validation failed:\n" + reports, operation=operation)
-    return cast("dict[str, str]", entries)
+    _validate_string_map(entries, operation=operation)
+    return dict(cast("dict[str, str]", entries))
 
 
-def _json_value_repr(value: object) -> str:
-    """Render a JSON-decoded value the way aws's schema report prints it.
+def _validate_string_map(value: Mapping[str, object], *, operation: str) -> None:
+    """botocore's validation of *value* against aws-cli's ``--metadata`` schema.
 
-    aws parses the JSON with ``object_pairs_hook=OrderedDict``, so an object
-    value prints in ``OrderedDict`` form. Formatting that by hand - rather
-    than parsing into ``OrderedDict`` and calling ``repr`` - keeps the text
-    identical across host interpreters: ``OrderedDict.__repr__`` changed
-    form in Python 3.12, and aws's official build ships the new one.
+    aws-cli builds the argument's model from the schema (a map of string to
+    string) and hands the unpacked value to botocore's
+    ``validate_parameters``; a failure is botocore's ``Parameter validation
+    failed:`` report at 252.
     """
-    if isinstance(value, dict):
-        mapping = cast("dict[object, object]", value)
-        if not mapping:
-            return "OrderedDict()"
-        items = ", ".join(f"{key!r}: {_json_value_repr(item)}" for key, item in mapping.items())
-        return "OrderedDict({" + items + "})"
-    if isinstance(value, list):
-        elements = cast("list[object]", value)
-        return "[" + ", ".join(_json_value_repr(item) for item in elements) + "]"
-    return repr(value)
+    from botocore.exceptions import ParamValidationError
+    from botocore.model import ShapeResolver
+    from botocore.validate import validate_parameters
 
-
-def _json_type_repr(value: object) -> str:
-    if isinstance(value, dict):
-        return "<class 'collections.OrderedDict'>"
-    return str(type(value))
+    # The shape definitions ShapeResolver reads, which its stubs type as Shape
+    # objects.
+    definitions: Any = {
+        "InputShape": {"type": "map", "key": {"shape": "Key"}, "value": {"shape": "Value"}},
+        "Key": {"type": "string"},
+        "Value": {"type": "string"},
+    }
+    shape = ShapeResolver(definitions).get_shape_by_name("InputShape")
+    try:
+        validate_parameters(value, shape)
+    except ParamValidationError as exc:
+        raise ValidationError(str(exc), operation=operation) from exc
 
 
 class _Parser:
-    """Recursive-descent port of aws-cli's ``ShorthandParser``.
+    """Recursive-descent port of aws-cli's ``ShorthandParser``, scalars only.
 
-    The whole grammar is here - ``parameter = keyval *("," keyval)`` over
-    ``keyval = key ("=" / "@=") values`` and ``values = csv-list /
-    explicit-list / hash-literal`` - because aws's diagnostics depend on it:
-    a value the grammar accepts but the map's schema cannot hold is reported
-    as a type error, and only a value the grammar rejects is a syntax error.
-    Narrowing the grammar to flat scalars would move that boundary.
+    ``parameter = keyval *("," keyval)`` over ``keyval = key ("=" / "@=")
+    value``. aws-cli's grammar goes on to build lists and nested maps, which no
+    map of strings can hold; here a value that would start one is refused
+    where it starts (`_values`, `_csv_value`). What is accepted is unchanged:
+    the csv second-value probe that tells a list from the next pair is kept,
+    since it is what absorbs ``a=b,,c=d``.
 
     The returned dict preserves insertion order, so a caller can keep the
-    user's pair order; nested hash literals do the same and, like aws, accept
-    a repeated key by overwriting (only the top level rejects duplicates).
+    user's pair order.
     """
 
     def __init__(self, value: str, *, operation: str) -> None:
@@ -198,7 +200,7 @@ class _Parser:
         self._resolve_paramfiles = False
 
     def parse(self) -> dict[str, _ShorthandValue]:
-        """Parse the complete map, rejecting duplicate keys with aws-cli wording."""
+        """Parse the complete map, rejecting duplicate keys."""
         params: dict[str, _ShorthandValue] = {}
         key, val = self._keyval()
         params[key] = val
@@ -220,11 +222,10 @@ class _Parser:
         """Parse one key/value pair, arming the optional `@=` paramfile operator."""
         # No empty-key guard - aws-cli's _keyval has none: with the cursor on
         # "=" the key is "" ("=bar" parses to {"": "bar"} and the transfer
-        # proceeds, rc 0), and anything else fails _expect with aws's
-        # "Expected: '='" wording (rc 252 either way).
+        # proceeds, rc 0), and anything else fails _expect (rc 252).
         key = self._key()
-        # aws grammar: keyval = key "=" [values] / key "@=" [file-optional-values].
-        # '@' opts the value into paramfile resolution; aws probes it with the
+        # aws-cli grammar: keyval = key "=" [values] / key "@=" [file-optional-values].
+        # '@' opts the value into paramfile resolution; aws-cli probes it with the
         # same try/expect shape (whitespace consumed either way).
         self._resolve_paramfiles = False
         try:
@@ -242,111 +243,60 @@ class _Parser:
         return self._value[start : self._index]
 
     def _values(self) -> _ShorthandValue:
-        """aws's ``values = csv-list / explicit-list / hash-literal`` dispatch."""
+        """aws-cli's ``values`` dispatch, without its list and hash-literal branches."""
         if self._at_eof():
             return ""
         char = self._value[self._index]
-        if char == "[":
-            return self._explicit_list()
-        if char == "{":
-            return self._hash_literal()
+        if char in "[{":
+            # aws-cli's explicit list / hash literal: never a string.
+            raise _ShorthandParseError(
+                f"A value starting with '{char}' must be quoted for input:\n "
+                f"{self._error_marker(self._index)}"
+            )
         return self._csv_value()
 
     def _csv_value(self) -> _ShorthandValue:
-        """aws's ``_csv_value``: one scalar, or the comma-separated list after it.
+        """aws-cli's ``_csv_value``: one scalar, refusing the list that may follow it.
 
-        The second-value probe is observable even when no list survives the
-        schema. On failure aws backtracks only to the nearest ',', which
-        absorbs an empty segment between pairs (``a=b,,c=d`` is two pairs) and
-        can land inside an escaped comma (``k=,\\,a=b``); an at-EOF failure
-        propagates instead, which is why ``a=b,`` is a parse error.
+        After a ',' aws-cli probes for a second value; the probe failing on
+        anything but EOF means the ',' ended the pair, and aws-cli backtracks only
+        to the nearest ',' - which absorbs an empty segment between pairs
+        (``a=b,,c=d`` is two pairs) and can land inside an escaped comma
+        (``k=,\\,a=b``). An at-EOF failure propagates instead, which is why
+        ``a=b,`` is a parse error. A probe that succeeds would make a csv
+        list, which a map of strings cannot hold.
         """
         first_value = self._first_value()
         self._consume_whitespace()
         if self._at_eof() or self._value[self._index] != ",":
             return first_value
         self._expect(",", consume_whitespace=True)
-        csv_list: list[_ShorthandValue] = [first_value]
-        while True:
-            try:
-                current = self._second_value()
-                self._consume_whitespace()
-                if self._at_eof():
-                    csv_list.append(current)
-                    break
+        list_start = self._index
+        try:
+            self._second_value()
+            self._consume_whitespace()
+            if not self._at_eof():
                 self._expect(",", consume_whitespace=True)
-                csv_list.append(current)
-            except _ShorthandParseError:
-                if self._at_eof():
-                    raise
-                self._backtrack_to(",")
-                break
-        if len(csv_list) == 1:
+        except _ShorthandParseError:
+            if self._at_eof():
+                raise
+            self._backtrack_to(",")
             return first_value
-        return csv_list
-
-    def _explicit_list(self) -> list[_ShorthandValue]:
-        """aws's ``explicit-list``: ``"[" [value *("," value)] "]"``.
-
-        The loop re-checks for the closer after every separator, so a trailing
-        comma before ``]`` is accepted (``k=[a,]`` is ``['a']``).
-        """
-        self._expect("[", consume_whitespace=True)
-        values: list[_ShorthandValue] = []
-        while self._current() != "]":
-            values.append(self._explicit_values())
-            self._consume_whitespace()
-            if self._current() != "]":
-                self._expect(",")
-                self._consume_whitespace()
-        self._expect("]")
-        return values
-
-    def _explicit_values(self) -> _ShorthandValue:
-        char = self._current()
-        if char == "[":
-            return self._explicit_list()
-        if char == "{":
-            return self._hash_literal()
-        return self._first_value()
-
-    def _hash_literal(self) -> dict[str, _ShorthandValue]:
-        """aws's ``hash-literal``: ``"{" key ("=" / "@=") value ... "}"``.
-
-        The ``@=`` operator is re-armed per inner key, so an outer ``@=`` does
-        not reach the nested values, and a repeated inner key overwrites
-        rather than raising the top level's duplicate error.
-        """
-        self._expect("{", consume_whitespace=True)
-        keyvals: dict[str, _ShorthandValue] = {}
-        while self._current() != "}":
-            key = self._key()
-            self._resolve_paramfiles = False
-            try:
-                self._expect("@", consume_whitespace=True)
-                self._resolve_paramfiles = True
-            except _ShorthandParseError:
-                pass
-            self._expect("=", consume_whitespace=True)
-            value = self._explicit_values()
-            self._consume_whitespace()
-            if self._current() != "}":
-                self._expect(",")
-                self._consume_whitespace()
-            keyvals[key] = value
-        self._expect("}")
-        return keyvals
+        raise _ShorthandParseError(
+            "A value cannot be a list; write a literal comma as \\, or quote "
+            f"the value, for input:\n {self._error_marker(list_start)}"
+        )
 
     def _first_value(self) -> str | bytes:
         if self._current() == "'":
-            # "singled quoted" reproduces aws-cli's _NamedRegex name verbatim
-            # (typo included) so the unterminated-quote wording matches byte for byte.
+            # "singled quoted" is aws-cli's token name, misspelling and all:
+            # the parse error quotes it (design/overview.md section 3).
             return self._quoted_value(_SINGLE_QUOTED_RE, escaped_char="'", name="singled quoted")
         if self._current() == '"':
             return self._quoted_value(_DOUBLE_QUOTED_RE, escaped_char='"', name="double quoted")
         match = _FIRST_VALUE_RE.match(self._value[self._index :])
         if match is None:
-            # aws returns the empty value unresolved, without consuming anything.
+            # aws-cli returns the empty value unresolved, without consuming anything.
             return ""
         return self._resolve(self._consume_match(match).replace("\\,", ",").rstrip())
 
@@ -370,13 +320,10 @@ class _Parser:
         return self._resolve(body.replace("\\\\", "\\"))
 
     def _resolve(self, value: str) -> str | bytes:
-        """aws's ``_resolve_paramfiles``: load the value when ``@=`` armed the pair.
+        """aws-cli's ``_resolve_paramfiles``: load the value when ``@=`` armed the pair.
 
-        Outside `paramfile.named_argument` on purpose: aws's shorthand parser
-        calls `get_paramfile` itself, so a load failure here is not the
-        option's parse error but a bare `ResourceLoadingError` reaching its
-        general handler - rc 255 without the ParamValidation envelope
-        (measured: ``--metadata k@=file:///no/x``).
+        A load failure is reported as the option's parse error by
+        `parse_map_option`'s `paramfile.named_argument` scope.
         """
         if not self._resolve_paramfiles:
             return value
@@ -426,7 +373,7 @@ class _Parser:
             self._index += 1
 
     def _current(self) -> str | None:
-        """The character under the cursor, or None at EOF (aws's ``_EOF`` sentinel)."""
+        """The character under the cursor, or None at EOF (aws-cli's ``_EOF`` sentinel)."""
         if self._index < len(self._value):
             return self._value[self._index]
         return None

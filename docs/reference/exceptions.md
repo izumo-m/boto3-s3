@@ -12,7 +12,7 @@ from the command will find its exit codes specified separately in
 [`../cli/exit-codes.md`](../cli/exit-codes.md); they are a CLI concept and play
 no part in the library contract below.
 
-All eleven classes are exported from the `boto3_s3` root and from
+All ten classes are exported from the `boto3_s3` root and from
 `boto3_s3.exceptions`.
 
 ```
@@ -22,7 +22,6 @@ Boto3S3Error
 ├── ValidationError
 │   └── InvalidValueError
 ├── TransportError
-├── MalformedResponseError
 ├── ConfigurationError
 │   └── InvalidConfigError
 ├── CancelledError
@@ -67,10 +66,11 @@ that entry in the address space it came from, not necessarily an S3 key: a
 locally-originating error puts a filesystem path there and leaves `bucket`
 unset.
 
-The message is available as `str(exc)` and is display only. It tracks
-`aws s3` wording and changes whenever parity requires, so branch on the class
-and read the attributes; do not parse it. What is stable is class identity and
-the structured attributes — those two, and `BatchError`'s counters.
+The message is available as `str(exc)` and is display only. It may change in
+any release, so branch on the class and read the attributes; do not parse
+it. What is stable is class
+identity and the structured attributes — those two, and `BatchError`'s
+counters.
 
 No raise site constructs this class for a failure it can classify; a
 classified failure is always raised as one of the subclasses below. Direct base
@@ -81,21 +81,28 @@ instances exist only where no classification applies:
   category for (a cancellation, an unknown error), or an `OSError` a request
   raises from a credential provider (a `credential_process` executable or a
   web identity token file that is missing), say;
-- whatever an S3 request raised from inside botocore that is none of
-  botocore's own exceptions — a redirect loop ending in `RecursionError`, an
-  S3 Express session reply without `Credentials` (`KeyError`), a response
-  value its parser cannot convert (`ValueError`). The request failed all the
-  same, so every request the library issues reports it as the base error
-  with that exception on `__cause__` and its text — what the AWS CLI prints —
-  as the message;
+- whatever else an S3 request raised from inside botocore that is none of
+  botocore's own exceptions. The request failed all the same, so every
+  request the library issues reports it as the base error with that
+  exception on `__cause__` and its text — what the AWS CLI prints — as the
+  message;
+- a single download's local destination file whose name the operating
+  system refuses before asking the filesystem (an embedded NUL, a lone
+  surrogate), which fails that item (see [`ValidationError`](#validationerror));
+- an exception a stream raises (a stream endpoint, an `IOStorageBase`, as a side) that is
+  not already a `Boto3S3Error`, an `OSError` included — a download to a full
+  disk, say; where the SDK reads the stream itself, the SDK's category applies
+  instead ([`storage.md`](./storage.md#iostorage));
 - the status-widening fallback for a `ClientError` whose error code is not in
   the category table and whose HTTP status is not one the widening rules cover
   (403, 404, 5xx, other 4xx);
 - a per-key `DeleteObjects` failure whose code is not in the category table
   (such an entry carries no HTTP status to widen on);
-- the deleter's fail-closed failure for a key whose deletion an unattributable
-  `DeleteObjects` error entry leaves unconfirmed (see
-  [`S3Deleter`](./misc.md#s3deleter));
+- the guards that keep a server answering outside S3's API from making a
+  run loop or grow without bound: a copy's source annotations past S3's
+  limits (more than 1,000, or a payload over 1 MiB), a multi-region access
+  point listing that repeats its `NextToken`
+  ([`../../design/exceptions.md`](../../design/exceptions.md) section 3.1);
 - the message envelope on `WARNED` and `NOTICE` `OpResult` records, where the
   instance is a carrier for display text and is never raised (see
   [`results.md`](./results.md)).
@@ -110,27 +117,35 @@ for a failed S3 request carries the originating botocore `ClientError` on
 stamps the original exception onto the record error's `__cause__`, and an error
 that was already a `Boto3S3Error` passes through keeping whatever cause it had.
 The exception-free paths are the deleter's per-key failures synthesized from a
-`DeleteObjects` response body — an error entry, and the unconfirmed-deletion
-failure above — with no exception object behind them, so their `__cause__` is
-`None` and only the message carries the S3 error code.
+`DeleteObjects` response body's error entries, and the guards' failures above,
+with no exception object behind them, so their `__cause__` is `None` and only
+the message says what happened.
 
 Some exceptions stay outside the hierarchy by design. Programming bugs
 (`TypeError`, `AssertionError`) propagate unwrapped on the synchronous paths —
 the library's own code, that is: what botocore raises from inside a request is
 the request failing, reported as above, with `AssertionError` alone left
-untranslated there too. `KeyboardInterrupt` and `SystemExit` always propagate. A response the service
-returned incomplete, or a timestamp the host cannot represent, is inside it:
-[`MalformedResponseError`](#malformedresponseerror) carries the `KeyError` /
-`OverflowError` the AWS CLI dies with on `__cause__` and its text as the
-message. Selecting the CRT engine
-explicitly with `TransferConfig.preferred_transfer_client="crt"` while awscrt
-is absent (or older than boto3's minimum) propagates botocore's `MissingDependencyException`, matching what
-boto3 does — that pass-through is scoped to engine selection, and the same
+untranslated there too (bar the CRT signer's refusal of a non-positive
+`expires_in` in `presign`, an `InvalidValueError`). `KeyboardInterrupt` and
+`SystemExit` always propagate. What a response outside S3's API leads to —
+a missing element, a value the API does not define, a value that cannot be
+read — is not specified: it may be any failure, the bare exception the
+library's reading of the response raised included, or none
+([`../../design/exceptions.md`](../../design/exceptions.md) section 3.1).
+Selecting the CRT engine
+explicitly with `preferred_transfer_client="crt"` while awscrt is absent (or
+older than boto3's minimum) is a [`ConfigurationError`](#configurationerror)
+when the library resolves the config (`S3.resolve_transfer_config`, which
+every `cp` / `mv` / `sync` / `rm` calls); a plain boto3 `TransferConfig`, used
+as it is, propagates botocore's `MissingDependencyException` instead, matching
+what boto3 does — that pass-through is scoped to engine selection, and the same
 exception surfacing inside a translated S3 call becomes a `ConfigurationError`.
 
 An exception raised by a custom `Storage` backend that is not already a
 `Boto3S3Error` is wrapped into this base class when it surfaces as a per-item
-failure, but one raised during enumeration (`scan`) or on the fatal path
+failure, and so is one raised while a `sync` content comparison
+(`EtagComparison` / `ChecksumComparison`) reads that backend, which aborts the
+`sync`; one raised during enumeration (`scan`) or elsewhere on the fatal path
 propagates as-is (see [`storage.md`](./storage.md)). Attribution on a per-item
 failure is filled in the same best-effort spirit: a family error raised
 in-pipeline, from a backend's `open` or its reads and writes, arrives with
@@ -181,6 +196,8 @@ operation's `**options`; a malformed `s3://` URI, or a bucket name that is
 empty where the operation requires one; a `mv` whose source and destination
 name the same object; a stream used where the operation does not accept one
 (both sides at once, a `mv` source, a recursive stream destination); an
+`io.TextIOBase` handed to `IOStorage`, or an `io.RawIOBase` /
+`io.BufferedIOBase` to `TextIOStorage`; an
 unrecognized value for a mode option such as `copy_props`,
 `annotation_copy_mode` or `case_conflict`, or for `presign`'s `method`; a
 case-fold collision under `CaseConflictMode.ERROR`; and `stdin` unavailable
@@ -188,7 +205,11 @@ where a stream needs it (there is no `stdout` counterpart — matching the AWS
 CLI, a missing one fails that item from inside the transfer instead); a local
 path the operating system refuses before asking the filesystem (an embedded
 NUL, a lone surrogate the filesystem encoding cannot carry), with the
-`ValueError` on `__cause__`. It is also the class for botocore's
+`ValueError` on `__cause__`, where `LocalStorage` itself is asked about it
+(`get_fileinfo`, `open`, a recursive download's destination directory) - as a
+single transfer's local file it fails the item with the base `Boto3S3Error`,
+and as an upload source it is a missing source (`NotFoundError`). It is also
+the class for botocore's
 `ParamValidationError` — client-side validation, so no request was sent — and
 for an S3 4xx other than 403 and 404 whose code is not in the category table.
 
@@ -211,10 +232,14 @@ those two failure modes; a library consumer can ignore it and catch
 class InvalidValueError(ValidationError): ...
 ```
 
-Adds no attributes and no constructor of its own. No code path inside
-`boto3_s3` raises it — it is raised by the `boto3-s3-cli` distribution (and is
-available to callers who want the same refinement) — so a handler around
-library calls need only catch `ValidationError`.
+Adds no attributes and no constructor of its own. Inside `boto3_s3` these
+paths raise it: [`presign`](./operations/presign.md) with a non-positive
+`expires_in` the CRT signer refuses, a `TextIOStorage` (or another
+`TextIOStorageBase`) given an unknown `encoding`, and an [`S3`](./s3.md) or a `LocalStorage` given an unknown
+`filename_encoding` ([`storage.md`](./storage.md)). Otherwise it is raised by the
+`boto3-s3-cli` distribution (and is available to callers who want the same
+refinement); a handler around library calls need only catch
+`ValidationError`.
 
 ## TransportError
 
@@ -222,8 +247,9 @@ A network or local I/O failure. Raised for an S3 5xx or a throttling response
 (`InternalError`, `SlowDown`, `ServiceUnavailable`, `RequestTimeout`), for
 botocore's connection and HTTP-client failures (endpoint or connect failure,
 proxy failure, read timeout, a dropped connection, a response body that ends
-short of its `Content-Length`), and for a local `OSError`
-that is neither `FileNotFoundError` nor `PermissionError`, including a failed
+short of its `Content-Length`), and for a local `OSError` (not one a stream
+raises, which is the base class; see above) that is neither
+`FileNotFoundError` nor `PermissionError`, including a failed
 directory creation and one raised inside the classic transfer engine (the
 AWS CLI's message text kept as it is), and an `OSError` while a client is
 built that is not a configured path failing (out of file descriptors, say). On the CRT engine the same events
@@ -233,51 +259,6 @@ engine gave up retrying, a local file it cannot open, read or write.
 
 ```python
 class TransportError(Boto3S3Error): ...
-```
-
-Adds no attributes and no constructor of its own. It has no subclasses in the
-hierarchy.
-
-## MalformedResponseError
-
-The service answered, but with a response the library cannot consume. Raised
-where the AWS CLI itself dies reading the same response: a `ListObjectsV2`
-entry missing `Key`, `LastModified` or `Size`, a `CommonPrefixes` entry
-missing `Prefix`, a `ListBuckets` entry missing `CreationDate` or `Name`, or a
-single-object `HeadObject` missing `ContentLength` or `LastModified` — each
-element read in the CLI's own order, so a doubly incomplete entry is blamed on
-the same element (the exact rules are under `scan_pages`, `list_buckets` and
-`get_fileinfo` in [`storage.md`](./storage.md); the access point replies
-[`S3PathResolver`](./misc.md#s3pathresolver) reads are listed there), a copy's
-source `GetObjectTagging` reply missing `TagSet` or a tag's `Key` / `Value`, or
-its source annotation listing or `GetObjectAnnotation` reply missing
-`AnnotationName` / `AnnotationPayload` (attributed to the source) — and a
-`LastModified` the
-host's local zone cannot represent (years 1 and 9999, within the zone's offset
-of `datetime`'s range; on Windows also every timestamp before 1970 or past the
-year 3000, which its local-time conversion refuses), which the CLI's
-conversion of every S3 timestamp to local time rejects. A truncating proxy or
-a partial S3 implementation is the usual source of the first kind. An element
-that is present but unreadable — a
-`LastModified` that is no timestamp, a `Size` that is no integer — is not this
-class: botocore's own parser fails on it before the library reads anything,
-and that arrives as the base [`Boto3S3Error`](#boto3s3error) carrying the
-parser's `ValueError`.
-
-The run stops where the CLI's stops: the entries ahead of the bad one are
-already delivered — an `ls` has reported them, a transfer has submitted them —
-and nothing after it is read. The message is the text the AWS CLI prints for
-the same response: the `KeyError`'s `str()`, which is the element name in
-quotes (`'LastModified'`), or `date value out of range` (on Windows,
-`[Errno 22] Invalid argument` for the timestamps only it refuses); that
-original exception is on `__cause__`. `bucket` and `key` name the entry when the
-response carried them (an entry missing `Key` names only its bucket; a bucket
-entry puts its name in `bucket`), and `operation` names the operation that
-was reading the response and is left unset on a storage-level call, like
-every other error those raise.
-
-```python
-class MalformedResponseError(Boto3S3Error): ...
 ```
 
 Adds no attributes and no constructor of its own. It has no subclasses in the
@@ -302,8 +283,9 @@ Adds no attributes and no constructor of its own. `except ConfigurationError`
 also catches `InvalidConfigError`.
 
 Note the engine-selection carve-out described under `Boto3S3Error`: requesting
-the CRT engine explicitly without a usable awscrt installed propagates botocore's
-`MissingDependencyException` rather than this class.
+the CRT engine explicitly in a plain boto3 `TransferConfig` without a usable
+awscrt installed propagates botocore's `MissingDependencyException` rather than
+this class.
 
 ## InvalidConfigError
 
@@ -313,7 +295,13 @@ a size, a rate), for a config key that names a section where a value is
 expected, for botocore's `ProfileNotFound`, `PartialCredentialsError` and
 `InvalidConfigError` (a `source_profile` loop, say), and for any other botocore
 failure to read the config file while the library reads AWS configuration (a
-`ConfigParseError`, say). It is also the class for a
+`ConfigParseError`, say). It is the class too for a setting value botocore
+refuses while it builds a client (`retry_mode`, `max_attempts`,
+`addressing_style`, `us_east_1_regional_endpoint`, `sts_regional_endpoints`,
+`defaults_mode`, the EC2 instance metadata endpoint and its mode, the checksum
+settings), and for settings S3's endpoint rules refuse for a request's target
+(Accelerate with FIPS, an access point ARN of another region while
+`use_arn_region` is off, or of another partition). It is also the class for a
 malformed `endpoint_url` — one passed to `S3`, or one taken from
 `AWS_ENDPOINT_URL` / `AWS_ENDPOINT_URL_S3` when a default client is built —
 and for a malformed or empty region, both of which botocore rejects with a
@@ -370,13 +358,11 @@ hierarchy.
 
 A run that a cancellation actually cut short ends by raising — either the error
 that triggered the shutdown, or this class — and never with `BatchError`;
-cancelled items are not counted as failures. The CRT engine is the exception: a
-Ctrl-C its manager swallows during the transfer drain leaves the cut-short items
-counted as failures and ends the run in `BatchError` ([`s3.md`](./s3.md#s3)).
-The class also appears as `OpResult.error` on `CANCELLED` records without being
-raised, for accepted items revoked when the engine shut down: on the classic
-engine a fatal error elsewhere in the run, an immediate cancellation, or Ctrl-C;
-on the CRT engine only a cancellation this run's `CancelToken` ordered. The
+cancelled items are not counted as failures. The class also appears as
+`OpResult.error` on `CANCELLED` records without being raised, for accepted
+items revoked when the engine shut down: a fatal error elsewhere in the run,
+on either transfer engine, or an immediate cancellation before the operation
+raised. The
 cancellation modes and the resulting record shapes are in
 [`results.md`](./results.md) and
 [`../library/results.md`](../library/results.md).

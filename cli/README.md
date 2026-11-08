@@ -5,7 +5,10 @@
 [![License](https://img.shields.io/pypi/l/boto3-s3-cli)](https://github.com/izumo-m/boto3-s3/blob/main/LICENSE)
 
 An `aws s3`-compatible command line, built on the
-[`boto3-s3`](https://pypi.org/project/boto3-s3/) library.
+[`boto3-s3`](https://pypi.org/project/boto3-s3/) library. The library is the
+product and this command is a by-product of it: anyone who just wants the
+`aws s3` command can use aws-cli itself. It can still help where aws-cli is
+slow to start or too large to install (below).
 
 ```bash
 pip install boto3-s3-cli
@@ -30,27 +33,32 @@ boto3-s3 sync ./build s3://my-bucket/build/ --delete
 
 ## What it is
 
-`boto3-s3-cli` installs one command, **`boto3-s3`**, designed as a
-command-for-command replacement for `aws s3` with every subcommand:
+`boto3-s3-cli` installs one command, **`boto3-s3`**, with every `aws s3`
+subcommand:
 
 ```
 cp   ls   mb   mv   presign   rb   rm   sync   website
 ```
 
 It takes the `aws s3` arguments and global options, reads the same `~/.aws`
-configuration, and treats an exit-code mismatch as a bug. Existing commands and
-scripts can generally replace the `aws s3` prefix with `boto3-s3`; argument
-handling, resulting S3 state, and exit codes are tested against `aws s3`. The
-codes a script can branch on are listed in
+configuration, and does what `aws s3` does: the same transfers and `sync`
+decisions, and on success the same result lines. Argument handling, resulting
+S3 state, and exit codes are tested against `aws s3`. Exit codes carry the
+meanings aws-cli gives them; the codes a script can branch on are listed in
 [`docs/cli/exit-codes.md`](https://github.com/izumo-m/boto3-s3/blob/main/docs/cli/exit-codes.md).
 
-This CLI is the strict compatibility layer over the more permissive Python
-library. It applies aws-compatible path validation, configuration resolution,
-transfer defaults, output behavior, and error handling. Human-readable wording
-is not guaranteed to be byte-for-byte identical. The interactive UI,
-differences that come from the installed `s3transfer` rather than the fork
-aws-cli bundles, and a few aws-cli edge-case failures that were deliberately
-cleaned up, are the other documented exceptions.
+Over the more permissive Python library, this CLI narrows the inputs to what
+`aws s3` accepts and owns argument validation, output, and exit codes.
+Compatibility is functional rather than full: when something fails, the
+outcome follows `aws s3` (a failed item leaves the others running; a run that
+cannot proceed stops before it starts). Messages `aws`'s own code writes read
+the same, apart from the few that `aws` words wrongly; an error's other
+details, such as which of two mistakes is reported or the text botocore or
+Python writes, may differ. Deliberate
+differences, such as batched deletes and credentials masked in debug output,
+are listed in
+[`docs/cli/aws-differences.md`](https://github.com/izumo-m/boto3-s3/blob/main/docs/cli/aws-differences.md);
+there is no interactive auto-prompt.
 
 ## Packaging & startup
 
@@ -66,12 +74,12 @@ region, from an m7i.xlarge EC2 instance (Ubuntu 26.04, Python 3.14). Each tool
 ran as a fresh process 5 times, with a different destination for every run and
 alternating execution order:
 
-| Operation | `boto3-s3-cli` 0.8.0 | aws-cli 2.36.40 |
+| Operation | `boto3-s3-cli` 0.9.0 | aws-cli 2.36.40 |
 | --- | ---: | ---: |
-| One-file `sync` (median) | 352 ms | 594 ms |
+| One-file `sync` (median) | 409 ms | 659 ms |
 
 The measurement includes SDK setup, remote listing, and the actual upload; the
-five runs spanned 339-363 ms and 582-600 ms respectively.
+five runs spanned 407-416 ms and 645-663 ms respectively.
 
 Installed package sizes were measured on an x86-64 Linux host with `du` using
 Python 3.10 and the same pinned dependency versions, with bytecode caches
@@ -102,15 +110,11 @@ the measured package set was about 31.5 MiB.
 pip install boto3-s3-cli
 ```
 
-Optional extras:
+Optional extra:
 
 ```bash
-pip install "boto3-s3-cli[crt]"          # AWS Common Runtime transfer engine + CRT checksums
-pip install "boto3-s3-cli[autoprompt]"   # --cli-auto-prompt interactive completion
+pip install "boto3-s3-cli[crt]"   # AWS Common Runtime transfer engine + CRT checksums
 ```
-
-With the autoprompt extra, run `boto3-s3 --cli-auto-prompt` to complete
-arguments interactively as you type.
 
 Installing the package also makes a `boto3_s3_cli` Python package importable,
 but that is an implementation detail with no API guarantee: the supported

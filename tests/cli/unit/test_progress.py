@@ -1,6 +1,6 @@
 """``TransferPrinter``: aws-style result lines, the ``\\r`` protocol, suppression.
 
-The printable shapes are pinned against aws's output: result
+The printable shapes are pinned against `aws`'s output: result
 lines render local sides cwd-relative (``./a.txt``), progress statements are
 left-justified over the previous one and end with ``\\r``, and a following
 result line blots the progress out with padding before its newline.
@@ -54,84 +54,100 @@ def _progress(key: str, done: int, total: int | None) -> TransferProgress:
 
 @skip_without_pthread_kill
 class TestFinishInterrupted:
-    """A Ctrl-C landing in finish() - past the run, where aws's recorder waits
-    for its printer thread - escapes once the printer is done (measured: aws
-    writes every queued line and exits 130)."""
+    """A Ctrl-C landing in finish() stops the output and leaves at once."""
 
-    def _slow_printer(self, monkeypatch: pytest.MonkeyPatch, count: int) -> TransferPrinter:
+    @staticmethod
+    def _slow_printer(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> tuple[TransferPrinter, threading.Event]:
+        """A printer still writing when an interrupt lands, and an event its thread's end sets.
+
+        The tests wait for that end before reading what was captured: left
+        running, the thread would write one more line into the next test's.
+        """
         printer = TransferPrinter(progress=False)
         render = printer._render_result  # pyright: ignore[reportPrivateUsage]
-
-        def slow_render(record: Any) -> None:
-            time.sleep(0.005)  # still writing when the interrupt lands
-            render(record)
-
-        monkeypatch.setattr(printer, "_render_result", slow_render)
-        printer.__enter__()
-        for i in range(count):
-            printer.on_result(_result(OpOutcome.SUCCEEDED, key=f"k{i}", src=f"s3://b/k{i}"))
-        return printer
-
-    def test_the_first_interrupt_waits_for_every_line(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        printer = self._slow_printer(monkeypatch, 200)
-        threading.Thread(target=interrupt_main_in, args=("finish",)).start()
-        with pytest.raises(KeyboardInterrupt):
-            printer.finish()
-        assert printer._drained.is_set()  # pyright: ignore[reportPrivateUsage]
-        assert len(capsys.readouterr().out.splitlines()) == 200
-
-    def test_a_second_interrupt_stops_the_output_but_still_waits(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # Left writing, the daemon printer can be caught mid-write by
-        # interpreter shutdown, which aborts the process (`Fatal Python
-        # error: _enter_buffered_busy`, rc 134).
-        printer = self._slow_printer(monkeypatch, 2000)
-
-        def twice() -> None:
-            interrupt_main_in("finish")
-            interrupt_main_in("finish")
-
-        threading.Thread(target=twice).start()
-        with pytest.raises(KeyboardInterrupt):
-            printer.finish()
-        assert printer._drained.is_set()  # pyright: ignore[reportPrivateUsage]
-        assert len(capsys.readouterr().out.splitlines()) < 2000
-
-    @pytest.mark.parametrize(
-        ("outcome", "closing"),
-        [
-            (None, ""),
-            ("failed", ""),
-            ("fatal", "fatal error: boom\n"),
-            ("interrupted", "cancelled: ctrl-c received\n"),
-        ],
-    )
-    def test_finish_transfer_lets_a_drain_interrupt_reach_the_dispatcher(
-        self,
-        outcome: str | None,
-        closing: str,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        # Whatever the run ended with, the interrupt is the dispatcher's 130
-        # (and its newline) rather than the run span's rc 1 - after the run's
-        # own closing line, which aws's printer thread still writes (measured:
-        # a mid-run Ctrl-C and one in the drain print `cancelled:` and exit
-        # 130).
-        from boto3_s3 import BatchError
-        from boto3_s3_cli.commands.transferargs import finish_transfer
-
-        printer = TransferPrinter(progress=False)  # finish_transfer starts it
-        render = printer._render_result  # pyright: ignore[reportPrivateUsage]
+        drain = printer._drain  # pyright: ignore[reportPrivateUsage]
+        ended = threading.Event()
 
         def slow_render(record: Any) -> None:
             time.sleep(0.005)
             render(record)
 
+        def drain_then_tell() -> None:
+            drain()
+            ended.set()
+
         monkeypatch.setattr(printer, "_render_result", slow_render)
+        monkeypatch.setattr(printer, "_drain", drain_then_tell)
+        return printer, ended
+
+    def test_an_interrupt_stops_the_output(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        printer, ended = self._slow_printer(monkeypatch)
+        printer.__enter__()
+        for i in range(2000):
+            printer.on_result(_result(OpOutcome.SUCCEEDED, key=f"k{i}", src=f"s3://b/k{i}"))
+        threading.Thread(target=interrupt_main_in, args=("finish",)).start()
+        with pytest.raises(KeyboardInterrupt):
+            printer.finish()
+        assert ended.wait(10)
+        assert len(capsys.readouterr().out.splitlines()) < 2000
+
+    def test_an_interrupt_leaves_a_stalled_printer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        stalled = threading.Event()
+        rendered = threading.Event()
+
+        def render(_record: Any) -> None:
+            stalled.wait(30)
+            rendered.set()
+
+        printer = TransferPrinter(progress=False)
+        monkeypatch.setattr(printer, "_render_result", render)
+        printer.__enter__()
+        printer.on_result(_result(OpOutcome.SUCCEEDED, key="k", src="s3://b/k"))
+        threading.Thread(target=interrupt_main_in, args=("finish",)).start()
+        with pytest.raises(KeyboardInterrupt):
+            printer.finish()
+        assert not rendered.is_set()
+        stalled.set()
+
+    def test_a_runs_interrupt_does_not_wait_for_the_queue(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from boto3_s3_cli.commands.transferargs import finish_transfer
+
+        stalled = threading.Event()
+        printer = TransferPrinter(progress=False)  # finish_transfer starts it
+        monkeypatch.setattr(printer, "_render_result", lambda _record: stalled.wait(30))
+
+        def run() -> None:
+            printer.on_result(_result(OpOutcome.SUCCEEDED, key="k", src="s3://b/k"))
+            raise KeyboardInterrupt
+
+        started = time.monotonic()
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                finish_transfer(printer, quiet=False, run=run)
+            assert time.monotonic() - started < 5
+            assert capsys.readouterr().err == ""
+        finally:
+            stalled.set()
+
+    @pytest.mark.parametrize("outcome", [None, "failed", "fatal"])
+    def test_finish_transfer_lets_a_drain_interrupt_reach_the_dispatcher(
+        self,
+        outcome: str | None,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Whatever the run ended with, the interrupt is the dispatcher's 130
+        # rather than the run span's rc 1.
+        from boto3_s3 import BatchError
+        from boto3_s3_cli.commands.transferargs import finish_transfer
+
+        printer, ended = self._slow_printer(monkeypatch)  # finish_transfer starts it
 
         def run() -> None:
             for i in range(200):
@@ -141,14 +157,41 @@ class TestFinishInterrupted:
                 raise BatchError("1 of 201 failed", succeeded=200, failed=1, warned=0, skipped=0)
             if outcome == "fatal":
                 raise RuntimeError("boom")
-            if outcome == "interrupted":
-                raise KeyboardInterrupt
 
         with pytest.raises(KeyboardInterrupt):
             finish_transfer(printer, quiet=False, run=run)
+        assert ended.wait(10)
         captured = capsys.readouterr()
-        assert len(captured.out.splitlines()) == 200
-        assert captured.err == closing
+        assert len(captured.out.splitlines()) < 200
+        assert captured.err == ""
+
+
+class TestFinish:
+    def test_finish_waits_for_room_in_a_full_queue(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The shutdown record waits for the printer to take one; woken by
+        # that take, not by a look of its own.
+        from boto3_s3_cli import progress
+
+        monkeypatch.setattr(progress, "_QUEUE_MAX", 3)
+        stalled = threading.Event()
+        printer = TransferPrinter(progress=False)
+        monkeypatch.setattr(printer, "_render_result", lambda _record: stalled.wait(10))
+        printer.__enter__()
+        for i in range(4):  # one in the printer's hands, three filling the queue
+            printer.on_result(_result(OpOutcome.SUCCEEDED, key=f"k{i}", src=f"s3://b/k{i}"))
+        queue = printer._queue  # pyright: ignore[reportPrivateUsage]
+        for _ in range(500):
+            if queue.full():
+                break
+            time.sleep(0.01)
+        assert queue.full()
+        finisher = threading.Thread(target=printer.finish, daemon=True)
+        finisher.start()
+        finisher.join(0.2)
+        assert finisher.is_alive()
+        stalled.set()
+        finisher.join(5)
+        assert not finisher.is_alive()
 
 
 class TestResultLines:
@@ -167,7 +210,7 @@ class TestResultLines:
         assert capsys.readouterr().out == f"upload: .{os.sep}a.txt to s3://b/k\n"
 
     def test_stream_token_renders_verbatim(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # The stream endpoint token "-" is not a local path: aws prints
+        # The stream endpoint token "-" is not a local path: `aws` prints
         # `upload: - to s3://...`, never a cwd-relative `<cwd>/-`.
         with TransferPrinter() as printer:
             printer.on_result(_result(OpOutcome.SUCCEEDED, src="-", dest="s3://b/k"))
@@ -186,7 +229,6 @@ class TestResultLines:
         captured = capsys.readouterr()
         assert captured.out == ""
         assert captured.err == "upload failed: s3://b/a.txt to s3://b/copy.txt boom\n"
-        assert printer.failed == 1
 
     def test_warning_line_prints_the_body_verbatim(
         self, capsys: pytest.CaptureFixture[str]
@@ -204,50 +246,45 @@ class TestResultLines:
         captured = capsys.readouterr()
         assert (captured.out, captured.err) == ("", "")
 
-    def test_cancelled_is_silent_and_not_counted_failed(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # aws surfaces only the run's single fatal line for a cancellation
+    def test_cancelled_is_silent(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # aws-cli surfaces only the run's single fatal line for a cancellation
         # (measured live: a fatal mid-listing prints zero per-item lines for
-        # the cancelled set, and its recorder never counts them as failures).
+        # the cancelled set).
         with TransferPrinter() as printer:
             printer.on_result(_result(OpOutcome.CANCELLED, error=RuntimeError("fatal elsewhere")))
         captured = capsys.readouterr()
         assert (captured.out, captured.err) == ("", "")
-        assert printer.failed == 0
 
-    def test_nothing_after_the_first_cancelled_record_is_printed_or_counted(
+    def test_records_after_a_cancelled_one_still_print(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws's ResultProcessor disables its handlers once it has processed
-        # the first error result (the CtrlCResult / fatal ErrorResult a
-        # cancelled future mints) and only drains the queue after it - which
-        # is how an interrupted `mv` there can delete a source whose `move:`
-        # line never prints. The case-conflict notices bypass the processor
-        # on aws, so they still print.
-        with TransferPrinter() as printer:
-            printer.on_result(
-                _result(OpOutcome.SUCCEEDED, key="a", src="s3://b/a", dest="s3://c/a")
-            )
+        # aws-cli's ResultProcessor goes silent after the first error result, so
+        # a failure settling after the cancel there is never shown. Every
+        # outcome is reported here: a failure line keeps its cause, and a
+        # success that completed (an mv whose source is gone) keeps its line.
+        with TransferPrinter(progress=False) as printer:
             printer.on_result(_result(OpOutcome.CANCELLED, key="b", error=RuntimeError("ctrl-c")))
             printer.on_result(
                 _result(OpOutcome.SUCCEEDED, key="c", src="s3://b/c", dest="s3://c/c")
             )
-            printer.on_result(_result(OpOutcome.FAILED, key="d", error=RuntimeError("boom")))
-            printer.on_result(_result(OpOutcome.WARNED, key="e", error=RuntimeError("warned")))
-            printer.on_progress(_progress("f", 5, 10))
-            printer.on_result(_result(OpOutcome.NOTICE, key="g", error=RuntimeError("notice")))
+            printer.on_result(
+                _result(
+                    OpOutcome.FAILED,
+                    key="d",
+                    src="s3://b/d",
+                    dest="s3://c/d",
+                    error=RuntimeError("boom"),
+                )
+            )
         captured = capsys.readouterr()
-        assert captured.out == "upload: s3://b/a to s3://c/a\n"
-        assert captured.err == "notice\n"
-        assert (printer.failed, printer.warned) == (0, 0)
-        assert "f" not in printer._inflight  # pyright: ignore[reportPrivateUsage]
+        assert captured.out == "upload: s3://b/c to s3://c/c\n"
+        assert captured.err == "upload failed: s3://b/d to s3://c/d boom\n"
 
     def test_cancelled_backfills_untransferred_remainder(self) -> None:
         # A queued-then-cancelled transfer closes its meter share like a
         # failed one, so the byte progress still reaches the expected total -
         # through the failed-bytes counter, which the meter displays but the
-        # transfer speed leaves out (aws's split).
+        # transfer speed leaves out (aws-cli's split).
         with TransferPrinter() as printer:
             printer.on_progress(_progress("a", 0, 10))  # queued
             printer.on_result(_result(OpOutcome.CANCELLED, key="a", error=RuntimeError("fatal")))
@@ -267,7 +304,7 @@ class TestSuppression:
             printer.on_progress(_progress("a.txt", 10, 10))
         captured = capsys.readouterr()
         assert (captured.out, captured.err) == ("", "")
-        assert (printer.failed, printer.warned) == (1, 1)
+        assert printer.warned == 1
 
     def test_only_show_errors_keeps_dryrun_failures_and_warnings(
         self, capsys: pytest.CaptureFixture[str]
@@ -314,7 +351,7 @@ class TestCarriageReturnProtocol:
     def test_padding_holds_the_longest_statement_since_the_last_result(
         self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # aws records the *padded* width (results.py: len(statement) - 1 of an
+        # aws-cli records the *padded* width (results.py: len(statement) - 1 of an
         # already-padded statement), so once a statement shrinks - here
         # "1000 Bytes" becoming "1.0 KiB" - the width stays at the longest one
         # painted since the last result line, and the result line is padded to
@@ -343,7 +380,7 @@ class TestCarriageReturnProtocol:
     def test_unknown_size_grows_the_expected_total_with_the_bytes(
         self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # With no known total, aws grows the expected total with the bytes as
+        # With no known total, aws-cli grows the expected total with the bytes as
         # they arrive (_update_ongoing_transfer_size_if_unknown), keeping the
         # meter in byte form with done == expected. Unreachable from the CLI
         # today (its only sizeless route is streaming, which paints nothing),
@@ -360,7 +397,7 @@ class TestCarriageReturnProtocol:
     def test_size_known_mid_transfer_tops_up_the_expected_total(
         self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # aws tops the expected total up by total - progressed once a size
+        # aws-cli tops the expected total up by total - progressed once a size
         # arrives mid-transfer, so the per-delta additions are not counted
         # twice and the denominator lands on the true sum.
         clock = iter([0.0, 1.0, 2.0, 4.0])
@@ -382,7 +419,7 @@ class TestCarriageReturnProtocol:
     def test_omitted_total_after_a_known_size_adds_nothing(
         self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # aws gates the unknown-size additions on the *stored* size
+        # aws-cli gates the unknown-size additions on the *stored* size
         # (_update_ongoing_transfer_size_if_unknown runs only while it is
         # None), so a notification that omits an already-known total must not
         # grow the expected total again.
@@ -402,7 +439,7 @@ class TestCarriageReturnProtocol:
     def test_speed_is_not_computed_from_a_zero_elapsed_clock(
         self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # aws recomputes the rate only on a strictly-later timestamp
+        # aws-cli recomputes the rate only on a strictly-later timestamp
         # (ResultRecorder guards `result.timestamp > self.start_time`), so a
         # coarse clock's first paint shows the initial 0 Bytes/s. Dividing by
         # a clamped epsilon instead would paint a nonsense multi-GiB/s figure
@@ -418,32 +455,10 @@ class TestCarriageReturnProtocol:
         assert "(0 Bytes/s)" in first
         assert "(1.0 KiB/s)" in second
 
-    def test_dryrun_lines_keep_the_meter_width(
-        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # aws's _print_dry_run pads to the meter's width but does not reset it
-        # (only success / failure / warning printers do), so every dryrun line
-        # in a row blots the meter out. Latent today - a dryrun run paints no
-        # meter - but pinned at the printer so the widths cannot drift.
-        clock = iter([0.0, 1.0])
-        monkeypatch.setattr("boto3_s3_cli.progress.time.monotonic", lambda: next(clock))
-        with TransferPrinter() as printer:
-            printer.on_progress(_progress("a", 0, 4096))  # queued
-            printer.on_progress(_progress("a", 2048, 4096))
-            printer.on_result(_result(OpOutcome.DRYRUN, key="b", src="s3://b/b", dest=None))
-            printer.on_result(_result(OpOutcome.DRYRUN, key="c", src="s3://b/c", dest=None))
-            printer.on_result(_result(OpOutcome.SUCCEEDED, key="a", src="s3://b/a", dest=None))
-        meter, rest = capsys.readouterr().out.split("\r", 1)
-        first, second, result_line = rest.split("\n")[:3]
-        assert first.startswith("(dryrun)") and len(first) == len(meter)
-        assert second.startswith("(dryrun)") and len(second) == len(meter)
-        # The result line still blots the meter width out (and resets it).
-        assert len(result_line) == len(meter)
-
     def test_notice_prints_raw_and_leaves_the_meter_width(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws uni_prints the case-conflict advisories straight to stderr,
+        # aws-cli uni_prints the case-conflict advisories straight to stderr,
         # bypassing its printer: they are neither padded to the meter's width
         # nor allowed to reset it, so the next result line still blots the
         # meter out.
@@ -466,7 +481,7 @@ class TestCarriageReturnProtocol:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # A cp/mv upload/copy 412-skipped under --no-overwrite is queued
-        # (on_queued counts it), then SKIPPED. The meter must reconcile it (aws
+        # (on_queued counts it), then SKIPPED. The meter must reconcile it (aws-cli
         # subtracts files_skipped) so "remaining" reaches 0 and _inflight clears.
         with TransferPrinter() as printer:
             for key in ("a", "b"):
@@ -492,7 +507,7 @@ class TestCarriageReturnProtocol:
         # sync's deletes ride on_result alone (no queue-time progress signal),
         # so each terminal joins the expected total as it finishes - the
         # meter's "remaining" stays non-negative and the file total counts
-        # deletes, as aws's queued delete results do.
+        # deletes, as aws-cli's queued delete results do.
         with TransferPrinter() as printer:
             printer.on_progress(_progress("c", 0, 10))  # one real, queued transfer
             for key in ("d1", "d2", "d3"):
@@ -571,7 +586,7 @@ class TestPrinterThread:
         self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # A closed pipe (BrokenPipeError on write) must not kill the drain,
-        # and drops only the lines bound for it: aws's ResultProcessor goes on
+        # and drops only the lines bound for it: aws-cli's ResultProcessor goes on
         # past each handler's failure, so the failure line stderr can still
         # take is written (measured: stdout at /dev/full, a closed pipe or
         # fd 1 closed). The rc inputs - counted on the worker side - are
@@ -589,7 +604,7 @@ class TestPrinterThread:
             printer.on_result(_result(OpOutcome.FAILED, error=RuntimeError("boom")))
             printer.on_result(_result(OpOutcome.SUCCEEDED))
         assert "failed:" in capsys.readouterr().err
-        assert (printer.failed, printer.warned) == (1, 0)
+        assert printer.warned == 0
         assert printer._queue.qsize() == 0  # pyright: ignore[reportPrivateUsage]
 
     def test_a_dead_stderr_keeps_the_success_lines(
@@ -645,7 +660,7 @@ class TestProgressAccounting:
     def test_speed_anchors_at_first_progress_not_construction(
         self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # aws anchors the transfer-speed denominator at the first queued result,
+        # aws-cli anchors the transfer-speed denominator at the first queued result,
         # not at printer construction (results.py _record_queued_result).
         # Construction reads no clock; the first on_progress sets the anchor, and
         # the speed uses (paint_time - first_progress_time).
@@ -667,7 +682,7 @@ class TestProgressAccounting:
         # A run whose tail records are SKIPPED (cp/mv --no-overwrite 412 skips
         # paint nothing and do not reset the padding) would leave the last
         # \r-terminated meter on screen. finish() blots it out with a blank
-        # padded line ending in \r (aws _clear_progress_if_no_more_expected...).
+        # padded line ending in \r (aws-cli _clear_progress_if_no_more_expected...).
         with TransferPrinter() as printer:
             printer.on_progress(_progress("a", 0, 10))  # queued
             printer.on_progress(_progress("b", 0, 10))  # queued
@@ -684,10 +699,10 @@ class TestProgressAccounting:
     def test_failed_backfills_untransferred_remainder(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws adds a failed file's untransferred remainder to the meter
+        # aws-cli adds a failed file's untransferred remainder to the meter
         # (bytes_failed_to_transfer) so byte progress still reaches the expected
         # total. a failed at 3/10 contributes its missing 7 bytes - kept in its
-        # own counter, since aws displays it but keeps it out of the speed.
+        # own counter, since aws-cli displays it but keeps it out of the speed.
         with TransferPrinter() as printer:
             printer.on_progress(_progress("a", 0, 10))  # queued
             printer.on_progress(_progress("b", 0, 10))  # queued

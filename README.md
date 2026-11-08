@@ -11,10 +11,14 @@ that currently shell out to `aws s3 sync` can make the same default
 size/timestamp decisions, transfers, filters, and deletions through `S3.sync`
 without starting a CLI process. Every subcommand — `cp` / `ls` / `mb` / `mv` /
 `presign` / `rb` / `rm` / `sync` / `website` — has a corresponding Python API.
+Transfers go through the engines `aws s3` itself uses (`s3transfer` and the
+CRT), and the package stays small enough for a Lambda function or a slim
+container, where aws-cli can be too large to install.
 
-The library provides the building blocks for `aws s3` compatibility and is
-occasionally more permissive for Python callers. The companion CLI is the layer
-that applies the command's strict argument validation and exit-code behavior.
+The library is the product: it is held to what `aws s3` does for every input
+`aws s3` accepts, and is occasionally more permissive for Python callers. The
+companion CLI is a by-product that narrows the inputs to `aws s3`'s and owns
+argument validation, output, and exit codes.
 
 Each command is a method on a single `S3` object, taking ordinary keyword
 arguments; bring a boto3 client when you need a specific profile, region, or
@@ -29,7 +33,8 @@ Two packages:
 - **`boto3-s3`** — the library. Run `aws s3`-equivalent operations from Python
   with your own boto3 clients and credentials.
 - **[`boto3-s3-cli`](https://pypi.org/project/boto3-s3-cli/)** — the `boto3-s3`
-  command, a drop-in for `aws s3`.
+  command, an `aws s3`-compatible command line built on the library. It is a
+  by-product: anyone who just wants the command can use aws-cli itself.
 
 ## Why
 
@@ -56,7 +61,8 @@ output. boto3-s3 brings those command semantics into a direct Python API.
   the optional CRT engine, retaining their multipart and concurrency machinery
   instead of introducing another byte-transfer implementation.
 - **Familiar behavior.** Path rules, options, and default sync decisions follow
-  `aws s3`; the CLI additionally owns strict validation and exit-code parity.
+  `aws s3`; the CLI additionally owns strict argument validation, output, and
+  exit codes.
 
 ## Install
 
@@ -122,14 +128,14 @@ s3.sync("./site", "s3://my-bucket/site/")        # upload
 s3.sync("s3://my-bucket/site/", "./site")        # download
 s3.sync("s3://src/data/", "s3://dest/data/")     # S3-to-S3
 
-s3.sync("./site", "s3://my-bucket/site/", delete_filter=True)   # aws's --delete
+s3.sync("./site", "s3://my-bucket/site/", delete_filter=True)   # aws-cli's --delete
 ```
 
 It asks one question per entry, and each has its own argument: create an entry
 that is new (`create_filter`), overwrite one present on both sides
 (`update_filter`), delete one the source no longer has (`delete_filter`). The
-defaults are exactly `aws s3 sync`, and `create_filter` is a knob aws does not
-expose.
+defaults are exactly `aws s3 sync`, and `create_filter` is a knob aws-cli does
+not expose.
 
 Unlike `aws s3 sync`, updates can be decided by **content** rather than size and
 timestamp — either against S3's ETag or against the checksum S3 already stores:
@@ -137,7 +143,7 @@ timestamp — either against S3's ETag or against the checksum S3 already stores
 ```python
 from boto3_s3.checksumcompare import ChecksumComparison
 
-s3.sync(src, dest, update_filter=ChecksumComparison(s3, src, dest))
+s3.sync(src, dest, update_filter=ChecksumComparison())
 ```
 
 Because it runs in-process, results come back as objects rather than console
@@ -219,7 +225,7 @@ The [user guide](https://github.com/izumo-m/boto3-s3/blob/main/docs/README.md) c
 | [Sync](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/sync.md) · [by content](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/sync-content.md) | the three decisions, and content comparison |
 | [Filtering](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/filters.md) | `filter=`, glob patterns, which key they match |
 | [Transfer options](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/transfer-options.md) | the `cp` / `mv` / `sync` options and multipart tuning |
-| [Streams](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/streams.md) | `IOStorage` / `StdioStorage` |
+| [Streams](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/streams.md) | `IOStorage` / `TextIOStorage` / `StdioStorage` |
 | [`S3Deleter`](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/deleter.md) | driving batch deletion yourself |
 | [Custom backends](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/custom-storage.md) | a `Storage` as one side of a transfer |
 | [Logging](https://github.com/izumo-m/boto3-s3/blob/main/docs/library/logging.md) | debug output and credential masking |
@@ -232,7 +238,7 @@ For the `boto3-s3` command, see its
 what differs from `aws s3`, the exit codes, and the configuration it reads.
 
 The design documents behind all of this are indexed in
-[`design/overview.md`](https://github.com/izumo-m/boto3-s3/blob/main/design/overview.md).
+[`design/README.md`](https://github.com/izumo-m/boto3-s3/blob/main/design/README.md).
 
 ## Compatibility
 

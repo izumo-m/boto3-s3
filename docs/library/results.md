@@ -25,16 +25,13 @@ never enumerated because the run ended first. The S3 delete lane of `rm` and
 `sync` is an exception: entries the deleter accepted but had not yet sent can
 be dropped without a record when a cancellation or an error ends the run.
 
-The other exception follows `aws s3`: an item whose request, sent through
-botocore, died without any response — the connection closed, or the read
-timed out (bar a download's read of the object, which is retried and then
-fails) — produces no record and is not counted, so the
-run can finish without an error although that item did not happen. `aws s3`
-loses such a failure the same way (no output line, exit code 0). A refused
-connection, that retried read, an error the
-service answered with, and a failure the CRT engine reports itself — a delete
-sent on the CRT client included — are ordinary `FAILED` records.
-Turn on debug logging for `boto3_s3` to see a dropped failure.
+An item whose request died without any response — the connection closed, or
+the read timed out — is an ordinary `FAILED` record, where `aws s3` on its
+classic engine loses it (no output line, exit code 0) unless it was a
+download's read of the object, which it retries and then reports. Such a failure does not mean nothing happened:
+the request may have reached S3, and the object been written, copied or
+deleted, before the response was lost. A listing, or running the operation
+again, shows which.
 
 Three checks that run *before* an item is submitted turn it away with an
 advisory and nothing else, so those items get no terminal record either: an
@@ -50,7 +47,7 @@ case-insensitive filesystem. Neither counts as a failure, and a notice can
 precede the same item's real outcome, so do not assume one callback per key.
 
 The callback may run **on a worker thread**, and several may run at once:
-transfers report from `s3transfer`'s threads and batched deletes from the
+transfers report from the transfer engine's threads and batched deletes from the
 deleter's, while dry runs, single-key `rm` and local deletes report inline on
 your own thread. Keep it fast, keep it thread-safe, and do not let it raise.
 
@@ -109,7 +106,10 @@ and the stream endpoint displays as `-`.
 `extra_info` is a mapping carrying the affected object's S3 response metadata.
 By default it holds a single `"ETag"` key, in S3's raw quoted form:
 
-- **copy** and **download** — the source object's ETag.
+- **copy** and **download** — the source object's ETag. A download on the CRT
+  engine leaves it out, as does an s3transfer older than 0.13.0
+  ([`compatibility.md`](../compatibility.md#1-features-by-required-version)),
+  so `extra_info` is then `None`.
 - **upload** — `None`. Pass `capture_response=True` when you need the written
   object's ETag.
 - **delete** and advisories — `None`.
@@ -148,7 +148,7 @@ token = CancelToken()
 s3.sync("./site", "s3://bucket/site/", cancel_token=token)
 ...
 token.cancel()                          # graceful: drain what was accepted
-token.cancel(mode=CancelMode.IMMEDIATE) # also try to stop what is in flight
+token.cancel(mode=CancelMode.IMMEDIATE) # stop at once
 ```
 
 **Graceful** (the default) is a drain: the operation stops taking new work,
@@ -156,21 +156,26 @@ finishes the transfers it already accepted (the delete lanes of `rm` / `sync`
 drop their unsent buffered deletes instead), reclaims its workers, and raises
 `CancelledError`. No `CANCELLED` records appear.
 
-**Immediate** additionally asks pending and in-flight work to stop. Then the
-records resolve like this:
+**Immediate** raises `CancelledError` at once. The operation starts nothing new
+and cancels what has not started, but a request already sent cannot be safely
+interrupted, so it finishes behind your back, along with its cleanup. That
+has two consequences:
 
-- accepted but not yet running, or abandoned mid-flight — one `CANCELLED`
-  record whose `error` names the cause;
-- in flight and completing anyway — its **real** outcome. A running request
-  cannot be safely interrupted, and if its bytes landed, that is the truth;
-- never accepted — no record at all.
+- the records stop with the cancel: an item that ends after the operation
+  raised reports nothing, whatever its real outcome;
+- S3 and your files can still change after the operation raised — a `mv`
+  whose copy completes still deletes its source on the classic engine.
 
-Cancelling twice is safe, and an immediate request upgrades a graceful one.
-Nothing ever downgrades it.
+The same `S3` can run the next operation; a client you passed in is still in
+use by the requests left behind
+([`../reference/s3.md`](../reference/s3.md#thread-safety)). Neither mode cuts
+short a request the operation's own thread is waiting on, such as the single
+request of `rm s3://bucket/key`: the operation raises once it returns.
+
+Cancelling twice is safe, and an immediate request upgrades a graceful one,
+ending a drain already under way. Nothing ever downgrades it.
 
 A run that a cancellation actually cut short **always ends by raising** — the
 triggering error, or `CancelledError`. It never ends with the partial-failure
 error described in [`errors.md`](./errors.md), and `CANCELLED` records are
-counted in neither. The one exception is the CRT engine's: a Ctrl-C its manager
-swallows during the transfer drain reports the cut-short items as `FAILED` and
-ends the run with that partial-failure error.
+counted in neither.

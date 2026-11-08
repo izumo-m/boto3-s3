@@ -24,14 +24,14 @@ client (design/crt.md):
   covers ``AWS_ENDPOINT_URL_S3`` for non-AWS hosts - an env endpoint under
   an AWS DNS suffix still derives ``None``, the explicit-``--endpoint-url``
   VPC-endpoint caveat).
-- **verify / signing**: the TLS verification setting is recovered from the
-  client (aws-cli wires it from a CLI param; boto3 ignores it), riding on
-  private botocore attributes at the same level as
-  ``client._get_credentials()``, which boto3 itself uses. Whether the CRT
-  client signs at all is derived from the client the same way by default,
-  with one opt-out - ``sign_requests`` - for a caller that owns that decision
-  the way aws-cli's ``sign_request`` parameter does (see
-  `create_crt_transfer_manager`).
+- **verify / signing**: by default the TLS verification setting is
+  recovered from the client (boto3 ignores it), riding on private botocore
+  attributes at the same level as ``client._get_credentials()``, which boto3
+  itself uses. A caller that owns the decision, as aws-cli's CRT factory
+  does with its own ``verify_ssl`` / ``ca_bundle`` reading, states it in
+  ``CrtClientOptions`` instead (see `create_crt_transfer_manager`). Whether
+  the CRT client signs at all is the client's answer (an ``UNSIGNED`` client
+  signs nothing), as for boto3.
 - **compatibility**: the singleton additionally pins the derived endpoint and
   the signed/unsigned mode; a later client that disagrees falls back to
   classic, same as boto3's region/credentials mismatch. The credentials half
@@ -39,20 +39,11 @@ client (design/crt.md):
   wraps without resolving it (one session's clients share it), so a
   refreshable credential is first resolved inside the delegate, per request,
   as aws-cli's factory lets it be - boto3's value comparison, kept for a
-  client holding another object, would resolve it ahead of the transfer. It
-  also has one opt-out, ``allow_absent_credentials``, for a caller
-  that wants aws-cli's posture rather than boto3's (see
-  `create_crt_transfer_manager`); ``boto3-s3-cli`` is the caller that sets it
-  and the default keeps every library caller boto3-faithful.
-- **region**: boto3 takes the CRT region from the built client, aws-cli from
-  its own region chain - which resolves to ``None`` where the client carries
-  the ``aws-global`` pseudo-region (the regional us-east-1 endpoint mode the
-  CLI pins; a stock botocore client falls back to us-east-1 instead), and
-  ``None`` is what trips awscrt's own ``assert isinstance(region, str)``.
-  The ``region`` argument carries a caller's already-resolved value
-  (``None`` included); the `CLIENT_REGION`
-  default keeps boto3's source. ``boto3-s3-cli`` is again the caller that sets
-  it (design/crt.md section 6).
+  client holding another object, would resolve it ahead of the transfer. A
+  signing client that resolved no credentials at all never gets the CRT
+  engine (boto3's rule), so its transfer runs classic and fails there.
+
+The CRT client's region is the built client's own, as in boto3.
 
 Nothing here imports awscrt or ``s3transfer.crt`` at module import time; the
 classic path never pays for them (design/imports.md).
@@ -60,12 +51,14 @@ classic path never pays for them (design/imports.md).
 
 from __future__ import annotations
 
-import enum
 import logging
 import threading
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Final, Literal
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Final, TypedDict
 from urllib.parse import urlsplit
+
+from boto3_s3.types import CrtClientOptions
 
 if TYPE_CHECKING:
     from boto3.session import Session
@@ -85,9 +78,7 @@ if not any(isinstance(h, logging.NullHandler) for h in _package_logger.handlers)
     _package_logger.addHandler(logging.NullHandler())
 
 __all__ = [
-    "CLIENT_REGION",
     "PROCESS_LOCK_NAME",
-    "CrtRegion",
     "acquire_process_lock",
     "caller_endpoint",
     "create_crt_request_sender",
@@ -101,28 +92,6 @@ __all__ = [
 ]
 
 PROCESS_LOCK_NAME = "boto3-s3"
-
-
-class _CrtRegionSource(enum.Enum):
-    """The type behind `CLIENT_REGION`.
-
-    A single-member enum rather than a bare ``object()`` so type checkers can
-    narrow ``str | None | Literal[...]`` on an identity test - the standard
-    typed-sentinel shape. Never instantiated by callers; `CLIENT_REGION` is
-    the one member.
-    """
-
-    CLIENT = "client"
-
-
-# Default of every CRT ``region`` posture here: take the region from the built
-# client (client.meta.region_name), boto3's own source. Distinct from None,
-# which is a *declared* absent region - what makes awscrt refuse to build.
-CLIENT_REGION: Final = _CrtRegionSource.CLIENT
-
-# A caller's CRT region declaration: a concrete region, a declared-absent
-# ``None``, or `CLIENT_REGION` for "not declared - read it off the client".
-CrtRegion = str | None | Literal[_CrtRegionSource.CLIENT]
 
 _MINIMUM_CRT_VERSION = (0, 19, 18)
 
@@ -144,50 +113,81 @@ _crt_s3_client: _CrtS3Client | None = None
 _crt_serializer: Any | None = None
 
 
+@dataclass(frozen=True)
+class _Pins:
+    """What the CRT client and the shared serializer bake in at creation.
+
+    None of it can be swapped per request, so a later client rides the
+    singleton only when its own pins are equal (`_is_compatible_request`);
+    otherwise it falls back to classic rather than transfer under the first
+    client's settings - silently reusing the first client's ``verify`` would
+    flip TLS verification behind the caller's back. Each facet is compared
+    as botocore resolves it, not as the caller spelled it:
+
+    - ``region``: the client's ``region_name``, boto3's own pin.
+    - ``endpoint``: the endpoint the CRT wiring dials (`_resolve_endpoint`)
+      in `_endpoint_key`'s form.
+    - ``verify``: what the CRT client trusts (`_effective_verify`: ``None`` /
+      ``False`` / a CA path).
+    - ``config_shape``: `_serializer_config_shape`'s tuple, the ``Config``
+      facets the shared serializer bakes in (the ``s3`` dict, the fips /
+      dualstack endpoint flags).
+
+    The signing mode and the credentials are not pins of this kind: the
+    singleton's ``cred_wrapper`` records the mode, and the credentials half
+    of the check compares the identity.
+    """
+
+    region: str | None
+    endpoint: tuple[str, str, str] | None
+    verify: Any
+    config_shape: tuple[tuple[tuple[str, Any], ...], bool, bool]
+
+    @classmethod
+    def of(cls, client: S3Client, endpoint: str | None, crt: CrtClientOptions) -> _Pins:
+        """``client``'s pins under the caller's explicit ``endpoint`` and ``crt`` options."""
+        return cls(
+            region=client.meta.region_name,
+            endpoint=_endpoint_key(_resolve_endpoint(client, endpoint)),
+            verify=_effective_verify(client, crt.verify),
+            config_shape=_serializer_config_shape(client),
+        )
+
+
 class _CrtS3Client:
     """The held CRT client plus the identity it was created for.
 
     Mirrors boto3's ``CRTS3Client``: the CRT client can only sign for one
     region/credentials (and, in our wiring, one endpoint, signing mode, TLS
-    ``verify`` setting, and serializer-relevant ``Config.s3`` shape), so the
-    tuple is pinned to reject incompatible later clients. ``verify`` and
-    ``s3_config`` are baked into the CRT client / the shared request
-    serializer at creation and cannot be swapped per request, so a later
-    client differing in either must fall back to classic - silently reusing
-    the first client's ``verify`` would flip TLS verification behind the
-    caller's back.
+    ``verify`` setting, and serializer-relevant ``Config`` shape), so these
+    are pinned to reject incompatible later clients: ``pins`` (`_Pins`)
+    holds what the CRT client and the shared serializer bake in, and
+    ``cred_wrapper`` / ``credentials`` the signing mode and the identity.
     """
 
     def __init__(
         self,
+        *,
         crt_client: Any,
         process_lock: Any,
-        region: str | None,
-        endpoint_url: str | None,
+        pins: _Pins,
         credentials: Any | None,
         cred_wrapper: Any | None,
-        verify: Any,
-        s3_config: Any,
         serializer_args: tuple[Any, dict[str, Any]] = (None, {}),
     ) -> None:
         self.crt_client = crt_client
         # None = built under the lockless opt-in; `_get_crt_s3_client`
         # upgrades it in place once a lock-respecting request re-acquires.
         self.process_lock = process_lock
-        self.region = region
-        self.endpoint_url = endpoint_url
+        self.pins = pins
         # The botocore credentials object the delegate below wraps (None when
         # the client signs nothing, or resolved none): the identity
         # `_is_compatible_request` recognizes by object, before any resolving.
         self.credentials = credentials
         # None = this CRT client signs nothing (the client resolved as
-        # unsigned, or the caller declared `sign_requests=False`), which is
+        # unsigned), which is
         # also the signing mode `_is_compatible_request` pins on.
         self.cred_wrapper = cred_wrapper
-        self.verify = verify  # _derive_verify's form: None / False / CA path
-        # _serializer_config_shape's tuple: the Config facets the shared
-        # serializer bakes in (the `s3` dict, fips / dualstack endpoint flags).
-        self.s3_config = s3_config
         # The botocore session and client arguments the shared serializer was
         # built from, for `request_sender` to address requests the same way.
         self.serializer_args = serializer_args
@@ -238,8 +238,9 @@ def is_optimized_for_system() -> bool:
     """awscrt's host-optimization probe; ``False`` without a usable awscrt.
 
     The aws-cli auto-resolution gate (aws-cli's ``TransferManagerFactory``): a
-    host the CRT is tuned for. Separate from ``should_use_crt`` so the
-    CLI can port the aws-cli decision tree primitive-by-primitive.
+    host the CRT is tuned for. Separate from ``should_use_crt`` so
+    ``transferconfig.resolve_transfer_client`` can port the aws-cli decision
+    tree primitive-by-primitive.
     """
     if not has_minimum_crt_version():
         return False
@@ -252,21 +253,25 @@ def acquire_process_lock() -> bool:
     """Claim this process's CRT slot; ``False`` if another process holds it.
 
     The lock is process-global in ``s3transfer`` (stored and reused), so the
-    CLI's auto-resolution claim and the library's later
+    claim ``transferconfig.resolve_transfer_client`` makes and the later
     ``create_crt_transfer_manager`` acquisition return the same lock.
     """
     from s3transfer.crt import acquire_crt_s3_process_lock
 
-    # Typed as the lock object, but the documented contract returns None when
-    # another process holds it (same Any-cast as _initialize).
-    lock: Any = acquire_crt_s3_process_lock(PROCESS_LOCK_NAME)
+    # Under the creation lock, as `_initialize` acquires it: s3transfer
+    # checks for its stored lock and then creates one, so two threads
+    # resolving at once would each create one, and the second acquisition in
+    # one process fails. Typed as the lock object, but the documented contract
+    # returns None when another process holds it (same Any-cast as _initialize).
+    with _CREATION_LOCK:
+        lock: Any = acquire_crt_s3_process_lock(PROCESS_LOCK_NAME)
     return lock is not None
 
 
 def should_use_crt(preferred: str) -> bool:
     """boto3's ``_should_use_crt`` over an already-extracted preference.
 
-    Raises botocore's ``MissingDependencyException`` (boto3's wording) when
+    Raises botocore's ``MissingDependencyException``, as boto3 does, when
     ``'crt'`` is explicit but awscrt is missing or too old; otherwise answers
     whether the CRT manager should be attempted (``'auto'`` requires
     ``awscrt.s3.is_optimized_for_system()``).
@@ -346,16 +351,47 @@ def selects_crt(config: Any | None) -> bool:
     return should_use_crt(str(preferred))
 
 
+class _EngineArguments(TypedDict):
+    """`create_crt_transfer_manager`'s posture keywords, as `CrtPostures` fills them."""
+
+    endpoint: str | None
+    session: Session | None
+    crt: CrtClientOptions
+
+
+@dataclass(frozen=True)
+class CrtPostures:
+    """A caller's CRT engine postures, carried as one value.
+
+    ``S3`` builds one from its own arguments and hands it to the transfer
+    engine (``Transferrer``) and the deletes (`crt_delete_sender`, sync's
+    delete lane); ``S3Deleter`` builds one from its public keywords. Each
+    field is the keyword of the same name that `create_crt_transfer_manager`
+    documents, except ``endpoint``, which is the caller's explicit endpoint
+    before `caller_endpoint` keeps it for the client built from it - applied
+    by `engine_arguments`, so no holder can pin it onto another client.
+    """
+
+    endpoint: str | None = None
+    session: Session | None = None
+    crt: CrtClientOptions = field(default_factory=CrtClientOptions)
+
+    def engine_arguments(self, client: S3Client) -> _EngineArguments:
+        """The keywords this module's engine builders take, for a run on ``client``."""
+        return {
+            "endpoint": caller_endpoint(client, self.endpoint),
+            "session": self.session,
+            "crt": self.crt,
+        }
+
+
 def create_crt_transfer_manager(
     client: S3Client,
     config: Any | None,
     *,
     endpoint: str | None = None,
     session: Session | None = None,
-    allow_absent_credentials: bool = False,
-    allow_lockless: bool = False,
-    region: CrtRegion = CLIENT_REGION,
-    sign_requests: bool | None = None,
+    crt: CrtClientOptions | None = None,
 ) -> Any | None:
     """Return a ``CRTTransferManager`` for ``client``, or ``None`` for classic.
 
@@ -364,23 +400,14 @@ def create_crt_transfer_manager(
     region / credentials / endpoint / signing mode / TLS ``verify`` /
     ``Config.s3`` shape.
 
-    ``allow_absent_credentials`` opts out of one half of that identity check:
-    boto3 refuses the CRT engine to a client that resolved *no* credentials,
-    while aws-cli hands the CRT client a delegate wrapping the same ``None``
-    and lets the transfer fail inside it. Only the "both sides have no
-    credentials" case is admitted - every other identity mismatch, and every
-    other pin, still falls back to classic. Default ``False`` = boto3's rule;
-    ``boto3-s3-cli`` sets it because the CLI layer owes aws-cli parity
-    (design/crt.md section 4).
-
-    ``allow_lockless`` opts out of the lock half of the fallback, for an
-    **explicit** ``'crt'`` preference only: aws-cli's factory acquires the
-    cross-process lock best-effort and builds the CRT client regardless, so
-    a construction-time failure (a bad CA bundle, an unresolved region)
-    surfaces under contention exactly as it does without it, where boto3 -
-    and the default here - silently selects classic and hides it. An
-    ``'auto'`` preference keeps the lock requirement under this opt-in too:
-    that is aws-cli's own ``auto``, which resolves classic when another
+    ``crt`` is the caller's `CrtClientOptions` (``None`` is its defaults,
+    boto3's behavior). ``crt.allow_lockless`` opts out of the lock half of the
+    fallback, for an **explicit** ``'crt'`` preference only: aws-cli
+    documents that preference as the way to run the CRT client in concurrent
+    processes, and its factory builds the CRT client whether or not it got
+    the lock, where boto3 - and the default here - silently selects classic.
+    An ``'auto'`` preference keeps the lock requirement under this opt-in
+    too: that is aws-cli's own ``auto``, which resolves classic when another
     process holds the lock (design/crt.md section 6).
 
     ``endpoint`` is the caller's explicit endpoint (the CLI threads its
@@ -395,24 +422,12 @@ def create_crt_transfer_manager(
     the ``Transferrer``); the CRT request serializer is built from it rather
     than a fresh one - see ``_botocore_session`` for why that matters.
 
-    ``region`` is the caller's already-resolved CRT region. `CLIENT_REGION`
-    (the default) reads it off the client, boto3's own source; an explicit
-    value - ``None`` included - is used verbatim, which is how aws-cli's region
-    chain reaches awscrt's ``assert isinstance(region, str)`` instead of the
-    ``aws-global`` pseudo-region the CLI's regional-mode client carries.
+    Whether the CRT client signs is the client's answer, boto3's rule: an
+    ``UNSIGNED`` client gets no credentials provider and everything else gets
+    one.
 
-    ``sign_requests`` is the caller's signing declaration, aws-cli's
-    ``sign_request`` parameter. ``None`` (the default) derives it from the
-    client, boto3's rule: an ``UNSIGNED`` client gets no credentials provider
-    and everything else gets one. ``False`` builds the CRT client without a
-    provider whatever the client says, ``True`` always with one. The
-    declaration exists because aws-cli's CRT factory reads only its own
-    ``--no-sign-request`` while the per-client ``Config(signature_version=
-    's3v4')`` that ``--sse aws:kms`` adds reaches its *botocore* client alone:
-    an unsigned KMS run is anonymous on aws's CRT lane and signed on its
-    classic lane, and only a declaration can reproduce that split from a
-    client that already resolved to signing. Only the CLI distribution sets it
-    (design/crt.md section 4).
+    ``crt.verify`` is the CRT client's trust source; ``None`` derives it from
+    the client (`_effective_verify`).
     """
     # First of all, before the cross-process lock and whatever state the
     # singleton is in: a CA bundle setting that would turn TLS verification
@@ -431,27 +446,21 @@ def create_crt_transfer_manager(
         from boto3_s3.transferconfig import TransferConfig
 
         config = TransferConfig()
+    options = crt if crt is not None else CrtClientOptions()
     crt_s3_client = _get_crt_s3_client(
-        client, config, endpoint, session, region, allow_lockless, sign_requests
+        client, config, CrtPostures(endpoint=endpoint, session=session, crt=options)
     )
-    if not _is_compatible_request(
-        client,
-        crt_s3_client,
-        endpoint,
-        allow_absent_credentials=allow_absent_credentials,
-        region=region,
-        sign_requests=sign_requests,
+    if crt_s3_client is None or not _is_compatible_request(
+        client, crt_s3_client, endpoint, crt=options
     ):
-        return None
-    if crt_s3_client is None:
-        # Unreachable: `_is_compatible_request` refuses a None singleton, so
-        # the branch above already returned. Narrowed with a plain `if` rather
-        # than an `assert` because the CLI converts an `AssertionError` raised
-        # anywhere under this call into aws's empty rc-255 region report - a
-        # broken invariant here would masquerade as an unresolved region.
         return None
     from s3transfer.crt import CRTTransferManager
 
+    # No osutil: CRTTransferManager never stores one handed to it and then
+    # reads the attribute it would have set, so its construction fails with
+    # AttributeError. A CRT filename download therefore commits with
+    # s3transfer's own rename, as on aws-cli, not with the classic engine's
+    # one-step replace (`transfer._ReplacingOSUtils`).
     kwargs: dict[str, Any] = {
         "crt_s3_client": crt_s3_client.crt_client,
         "crt_request_serializer": _crt_serializer,
@@ -483,17 +492,13 @@ def materialize_crt_engine(
     *,
     endpoint: str | None = None,
     session: Session | None = None,
-    allow_absent_credentials: bool = False,
-    allow_lockless: bool = False,
-    region: CrtRegion = CLIENT_REGION,
-    sign_requests: bool | None = None,
+    crt: CrtClientOptions | None = None,
 ) -> None:
     """Build the engine *config* selects now, for a caller that will not transfer.
 
     ``aws s3 rm`` constructs its transfer manager before it knows whether the
-    run deletes anything, so every construction-time failure - awscrt's own
-    ``assert isinstance(region, str)`` on an unresolved region above all -
-    surfaces there rather than inside the operation. This library's ``rm``
+    run deletes anything, so every construction-time failure - a CA bundle the
+    CRT cannot read, say - surfaces there rather than inside the operation. This library's ``rm``
     builds the engine later - with its deleter, just before the listing, or
     just before a single key's request, and never for a dryrun - so a caller
     owing that order pays the same construction here (cross-process lock
@@ -511,10 +516,7 @@ def materialize_crt_engine(
         config,
         endpoint=endpoint,
         session=session,
-        allow_absent_credentials=allow_absent_credentials,
-        allow_lockless=allow_lockless,
-        region=region,
-        sign_requests=sign_requests,
+        crt=crt,
     )
 
 
@@ -524,10 +526,7 @@ def create_crt_request_sender(
     *,
     endpoint: str | None = None,
     session: Session | None = None,
-    allow_absent_credentials: bool = False,
-    allow_lockless: bool = False,
-    region: CrtRegion = CLIENT_REGION,
-    sign_requests: bool | None = None,
+    crt: CrtClientOptions | None = None,
 ) -> CrtRequestSender | None:
     """The CRT engine's client as a sender of single S3 requests, or ``None``.
 
@@ -544,10 +543,7 @@ def create_crt_request_sender(
             config,
             endpoint=endpoint,
             session=session,
-            allow_absent_credentials=allow_absent_credentials,
-            allow_lockless=allow_lockless,
-            region=region,
-            sign_requests=sign_requests,
+            crt=crt,
         )
         is None
     ):
@@ -577,26 +573,20 @@ def caller_endpoint(client: S3Client, endpoint: str | None) -> str | None:
 
 
 def _get_crt_s3_client(
-    client: S3Client,
-    config: Any | None,
-    endpoint: str | None,
-    session: Session | None,
-    region: CrtRegion,
-    allow_lockless: bool,
-    sign_requests: bool | None,
+    client: S3Client, config: Any | None, postures: CrtPostures
 ) -> _CrtS3Client | None:
     global _crt_s3_client, _crt_serializer
     with _CREATION_LOCK:
         if _crt_s3_client is None:
-            serializer, crt_s3_client = _initialize(
-                client, config, endpoint, session, region, allow_lockless, sign_requests
-            )
+            serializer, crt_s3_client = _initialize(client, config, postures)
             _crt_serializer = serializer
             _crt_s3_client = crt_s3_client
-        elif _crt_s3_client.process_lock is None and not (allow_lockless and _prefers_crt(config)):
+        elif _crt_s3_client.process_lock is None and not (
+            postures.crt.allow_lockless and _prefers_crt(config)
+        ):
             # A singleton built under the lockless opt-in holds no lock, and
             # the opt-in is scoped to explicit-'crt' requests (design/crt.md
-            # section 6) - a lock-respecting request keeps aws's own lock
+            # section 6) - a lock-respecting request keeps aws-cli's own lock
             # semantics by re-attempting the acquisition: s3transfer stores
             # the lock process-globally, so a success upgrades this singleton
             # for every later request, while live contention resolves this
@@ -634,24 +624,8 @@ def _botocore_session(session: Session | None) -> Any:
     return BotocoreSession()
 
 
-def _resolve_region(client: S3Client, region: CrtRegion) -> str | None:
-    """The region this request's CRT client is (or must be) pinned to.
-
-    `CLIENT_REGION` means the caller declared nothing, so the client's own
-    resolved region answers - boto3's rule. Any other value is the caller's
-    declaration and rides verbatim, ``None`` included.
-    """
-    return client.meta.region_name if region is CLIENT_REGION else region
-
-
 def _initialize(
-    client: S3Client,
-    config: Any | None,
-    endpoint: str | None,
-    session: Session | None,
-    region_source: CrtRegion,
-    allow_lockless: bool,
-    sign_requests: bool | None,
+    client: S3Client, config: Any | None, postures: CrtPostures
 ) -> tuple[Any, _CrtS3Client] | tuple[None, None]:
     """Acquire the process lock and construct the shared CRT serializer and client."""
     from s3transfer.crt import (
@@ -663,20 +637,20 @@ def _initialize(
     # Annotated Any: s3transfer types the return as the lock object, but the
     # documented contract is "None when another process holds it".
     lock: Any = acquire_crt_s3_process_lock(PROCESS_LOCK_NAME)
-    if lock is None and not (allow_lockless and _prefers_crt(config)):
+    if lock is None and not (postures.crt.allow_lockless and _prefers_crt(config)):
         # Another process of this application holds the CRT client; classic.
         # Under the `allow_lockless` opt-in an *explicit* 'crt' preference
         # builds on regardless (aws-cli's factory ignores its own acquisition
-        # result), so construction-time failures surface under contention too;
-        # 'auto' keeps the lock requirement, aws-cli's own auto resolution.
+        # result); 'auto' keeps the lock requirement, aws-cli's own auto
+        # resolution.
         return None, None
 
-    region = _resolve_region(client, region_source)
-    endpoint_url = _resolve_endpoint(client, endpoint)
+    region = client.meta.region_name
+    endpoint_url = _resolve_endpoint(client, postures.endpoint)
     # The caller's client Config rides into the serializer's nested botocore
     # client (the serializer merges signature_version=UNSIGNED on top). Without
     # it, a None endpoint re-resolves under *stock botocore's* defaults, which
-    # send us-east-1 to the legacy global endpoint (s3.amazonaws.com) - aws v2's
+    # send us-east-1 to the legacy global endpoint (s3.amazonaws.com) - aws-cli v2's
     # bundled botocore is regional-only there, and the CLI pins the classic
     # engine to regional the same way (its us_east_1_regional_endpoint
     # override, clientfactory), so the CRT lane must serialize with the same
@@ -684,7 +658,7 @@ def _initialize(
     # accelerate/dualstack settings carry over for the same reason - pinned,
     # so the serializer's own session cannot fill in what the client's left
     # out (`_serializer_config`).
-    botocore_session = _botocore_session(session)
+    botocore_session = _botocore_session(postures.session)
     serializer_kwargs: dict[str, Any] = {
         "region_name": region,
         "endpoint_url": endpoint_url,
@@ -696,31 +670,27 @@ def _initialize(
     create_kwargs: dict[str, Any] = {
         "region": region,
         "use_ssl": _derive_use_ssl(endpoint_url),
-        "verify": _derive_verify(client),
+        "verify": _effective_verify(client, postures.crt.verify),
         # aws-cli passes None when multipart_chunksize is not explicit so the
         # CRT picks the part size dynamically; s3transfer's own default is a
         # fixed 8 MiB, hence always passing the key.
         "part_size": _explicit_chunksize(config),
         "target_throughput": getattr(config, "target_bandwidth", None),
     }
-    cred_wrapper = _credentials_wrapper(client, sign_requests)
+    cred_wrapper = _credentials_wrapper(client)
     if cred_wrapper is not None:
         create_kwargs["crt_credentials_provider"] = cred_wrapper.to_crt_credentials_provider()
     # The object the wrapper holds, kept beside it for the identity
     # short-circuit (`_is_compatible_request`); neither resolves it here.
     credentials = _client_credentials(client) if cred_wrapper is not None else None
-    _add_fio_options(create_kwargs, config, create_s3_crt_client)
     crt_client = create_s3_crt_client(**create_kwargs)
     return serializer, _CrtS3Client(
-        crt_client,
-        lock,
-        region,
-        endpoint_url,
-        credentials,
-        cred_wrapper,
-        create_kwargs["verify"],
-        _serializer_config_shape(client),
-        (botocore_session, serializer_kwargs),
+        crt_client=crt_client,
+        process_lock=lock,
+        pins=_Pins.of(client, postures.endpoint, postures.crt),
+        credentials=credentials,
+        cred_wrapper=cred_wrapper,
+        serializer_args=(botocore_session, serializer_kwargs),
     )
 
 
@@ -751,7 +721,7 @@ def _serializer_config(client: S3Client) -> Any:
       ``user_agent``, which freezes the header in its legacy form -
       ``app/<id>`` (``sdk_ua_app_id`` / ``AWS_SDK_UA_APP_ID``) and
       ``cfg/retry-mode`` dropped, ``Botocore/<v>`` doubled, where the classic
-      requests and aws's CRT ones carry them (measured). What the caller
+      requests and aws-cli's CRT ones carry them (measured). What the caller
       supplied, which botocore keeps aside, goes back in its place.
     - what the serializer's session can fill in: a key the ``s3`` dict leaves
       out, a fips / dualstack flag left unset, and an app id the client has
@@ -850,12 +820,10 @@ def _is_compatible_request(
     crt_s3_client: _CrtS3Client | None,
     endpoint: str | None,
     *,
-    allow_absent_credentials: bool = False,
-    region: CrtRegion = CLIENT_REGION,
-    sign_requests: bool | None = None,
+    crt: CrtClientOptions,
 ) -> bool:
     """boto3's ``is_crt_compatible_request`` plus the endpoint / signing /
-    TLS-``verify`` / Config-shape pins.
+    TLS-``verify`` / Config-shape pins (`_Pins` holds all but the signing mode).
 
     The last two go beyond boto3's own check (region + credentials): the
     singleton CRT client holds the first client's ``verify`` and the shared
@@ -868,17 +836,10 @@ def _is_compatible_request(
     Incompatible means classic for that run, never a wrong-config CRT
     transfer.
 
-    ``allow_absent_credentials`` is the caller's opt-in described on
-    `create_crt_transfer_manager`. It relaxes exactly one branch - a client
-    with no credentials against a singleton that also has none - and never
-    the region / endpoint / verify / Config pins, which protect a *second*
-    client from riding the first one's baked-in wiring. ``region`` and
-    ``sign_requests`` must be the same declarations the singleton was built
-    under, so the region and signing pins compare like with like
-    (`_resolve_region`, `_signs_requests`): the singleton's ``cred_wrapper``
-    already records the mode it was created in, so a later request whose
-    declaration disagrees falls back to classic rather than transferring
-    under the first one's signing mode.
+    ``crt`` holds the caller's options; its ``verify`` feeds the pins. The
+    singleton's ``cred_wrapper`` records the signing mode it was created in,
+    so a later client that signs differently (`_is_unsigned`) falls back to
+    classic rather than transferring under the first one's signing mode.
 
     The credentials half compares by object before it compares by value: a
     client whose credentials object is the very one the singleton's delegate
@@ -894,19 +855,9 @@ def _is_compatible_request(
     live upload). The resolution a value comparison performs raises whatever
     botocore raises; the engine seams classify it (`transfer.crt_engine_errors`).
     """
-    if crt_s3_client is None:
+    if crt_s3_client is None or _Pins.of(client, endpoint, crt) != crt_s3_client.pins:
         return False
-    if _resolve_region(client, region) != crt_s3_client.region:
-        return False
-    if _endpoint_key(_resolve_endpoint(client, endpoint)) != _endpoint_key(
-        crt_s3_client.endpoint_url
-    ):
-        return False
-    if _derive_verify(client) != crt_s3_client.verify:
-        return False
-    if _serializer_config_shape(client) != crt_s3_client.s3_config:
-        return False
-    if not _signs_requests(client, sign_requests):
+    if _is_unsigned(client):
         return crt_s3_client.cred_wrapper is None
     if crt_s3_client.cred_wrapper is None:
         return False
@@ -914,38 +865,10 @@ def _is_compatible_request(
     if boto3_creds is None:
         # boto3's rule: no credentials means no CRT, so the run drops to
         # classic and fails with botocore's own "Unable to locate credentials".
-        # Under the opt-in the two sides are instead compared as identities -
-        # "no credentials" matches a singleton that resolves none either, and
-        # the transfer proceeds into the CRT delegate exactly like aws-cli's.
-        return allow_absent_credentials and _resolves_no_credentials(crt_s3_client.cred_wrapper)
+        return False
     if boto3_creds is crt_s3_client.credentials:
         return True
     return _compare_identity(boto3_creds.get_frozen_credentials(), crt_s3_client.cred_wrapper)
-
-
-def _resolves_no_credentials(cred_wrapper: Any) -> bool:
-    """Whether the singleton's credentials delegate has nothing to sign with.
-
-    ``BotocoreCRTCredentialsWrapper`` raises ``NoCredentialsError`` when it was
-    built from ``None``, which is the same probe `_compare_identity` already
-    performs - asked here for its own sake rather than to compare key material.
-    Only that exception answers "resolves none": any other credential-provider
-    failure (``CredentialRetrievalError`` and friends, from a wrapper built
-    around a real provider) propagates, as it does out of `_compare_identity`.
-    Reached only under the ``allow_absent_credentials`` opt-in - the CLI's
-    posture - and only for a client that itself resolved no credentials, so
-    the propagating variant would need the singleton's wrapper to hold a real
-    provider while this client resolves none; the CLI's clients share one
-    session (`build_session`), so the two sides resolve alike and that split
-    does not arise there.
-    """
-    from botocore.exceptions import NoCredentialsError
-
-    try:
-        cred_wrapper()
-    except NoCredentialsError:
-        return True
-    return False
 
 
 def _compare_identity(frozen_creds: Any, cred_wrapper: Any) -> bool:
@@ -963,8 +886,14 @@ def _compare_identity(frozen_creds: Any, cred_wrapper: Any) -> bool:
 
 
 def _validate_crt_transfer_config(config: Any) -> None:
-    """boto3's explicit-'crt' validation: classic-only options must be unset."""
-    if config.preferred_transfer_client != "crt":
+    """boto3's explicit-'crt' validation: classic-only options must be unset.
+
+    A config `transferconfig.resolve_transfer_config` settled on CRT without
+    the caller asking for it (``auto``, or ``[s3]``'s choice) is not checked:
+    the CRT engine ignores classic-only options there, as boto3's ``auto``
+    and aws-cli's CRT manager do.
+    """
+    if config.preferred_transfer_client != "crt" or not getattr(config, "_crt_requested", True):
         return
     invalid_crt_args = [
         param
@@ -1049,6 +978,11 @@ def _derive_use_ssl(endpoint_url: str | None) -> bool:
     return urlsplit(endpoint_url).scheme != "http"
 
 
+def _effective_verify(client: S3Client, verify: str | bool | None) -> Any:
+    """The CRT client's trust source: ``CrtClientOptions.verify``, else the client's own."""
+    return _derive_verify(client) if verify is None else verify
+
+
 def _derive_verify(client: S3Client) -> Any:
     """Map botocore's verify setting onto ``create_s3_crt_client``'s contract.
 
@@ -1057,9 +991,9 @@ def _derive_verify(client: S3Client) -> Any:
     uses for its own default. A client that never named a bundle therefore
     maps to ``None``, exactly as plain boto3 does (it passes no ``verify`` to
     the CRT at all): the library stays boto3-faithful even though the platform
-    store is not the certifi bundle the classic engine would have used.
-    ``boto3-s3-cli`` avoids that split by resolving an explicit CA file into
-    every client it builds, so its clients arrive here carrying a path.
+    store is not the certifi bundle the classic engine would have used. A
+    caller that wants a file there names it in ``CrtClientOptions.verify``,
+    as ``boto3-s3-cli`` does with aws-cli's own resolution.
 
     An empty or whitespace-only string never arrives here:
     `create_crt_transfer_manager` refuses such a client first
@@ -1080,35 +1014,20 @@ def _is_unsigned(client: S3Client) -> bool:
     return config.signature_version is UNSIGNED
 
 
-def _signs_requests(client: S3Client, sign_requests: bool | None) -> bool:
-    """Whether the CRT client for this request signs at all.
-
-    ``None`` means the caller declared nothing, so the client answers -
-    boto3's rule, where an ``UNSIGNED`` client is the only unsigned one. A
-    declared value is the caller's own answer and rides verbatim, which is how
-    aws-cli's posture is reproduced: its CRT factory attaches a credentials
-    provider on its ``sign_request`` parameter (``--no-sign-request``) alone
-    and never looks at the client, so ``--no-sign-request --sse aws:kms``
-    transfers anonymously there even though the same run's botocore client
-    signs.
-    """
-    return not _is_unsigned(client) if sign_requests is None else sign_requests
-
-
 def _client_credentials(client: S3Client) -> Any:
     accessor: Any = client  # boto3/crt.py rides the same private accessor
     return accessor._get_credentials()
 
 
-def _credentials_wrapper(client: S3Client, sign_requests: bool | None) -> Any | None:
+def _credentials_wrapper(client: S3Client) -> Any | None:
     """The CRT credentials delegate, or ``None`` for a client that signs nothing.
 
-    A declared ``sign_requests=False`` short-circuits before
-    ``_client_credentials``, so an unsigned run never resolves credentials at
-    all - aws-cli's own behavior, where a credential-less anonymous CRT
-    upload succeeds instead of failing inside the delegate.
+    An ``UNSIGNED`` client short-circuits before ``_client_credentials``, so an
+    unsigned run never resolves credentials at all - aws-cli's own behavior,
+    where a credential-less anonymous CRT upload succeeds instead of failing
+    inside the delegate.
     """
-    if not _signs_requests(client, sign_requests):
+    if _is_unsigned(client):
         return None
     from s3transfer.crt import BotocoreCRTCredentialsWrapper
 
@@ -1122,33 +1041,6 @@ def _explicit_chunksize(config: Any | None) -> int | None:
     if value is config.UNSET_DEFAULT:
         return None
     return value
-
-
-def _add_fio_options(kwargs: dict[str, Any], config: Any | None, create_fn: Any) -> None:
-    """aws-cli's file-I/O options, applied only once s3transfer can take them.
-
-    No released pip s3transfer has a ``fio_options`` parameter (still absent at
-    0.19.0); the settings are accepted on the config today and start flowing
-    automatically when the installed s3transfer grows the parameter (aws-cli's
-    bundled fork already has it).
-    """
-    import inspect
-
-    if "fio_options" not in inspect.signature(create_fn).parameters:
-        return
-    fio_options: dict[str, Any] = {}
-    should_stream = getattr(config, "should_stream", None)
-    if should_stream is not None:
-        fio_options["should_stream"] = should_stream
-    disk_throughput = getattr(config, "disk_throughput", None)
-    if disk_throughput is not None:
-        # Bytes per second to gigabits per second, aws-cli's conversion.
-        fio_options["disk_throughput_gbps"] = disk_throughput * 8 / 1_000_000_000
-    direct_io = getattr(config, "direct_io", None)
-    if direct_io is not None:
-        fio_options["direct_io"] = direct_io
-    if fio_options:
-        kwargs["fio_options"] = fio_options
 
 
 def _reset_for_tests() -> None:  # pyright: ignore[reportUnusedFunction] # test seam

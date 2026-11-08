@@ -24,6 +24,21 @@ the complete view warns and falls back to lstat. These settings ride
 ``LocalScanOptions`` (seeded from the ``LocalStorage`` constructor), so every scan
 and high-level operation preserves the configured candidate enumeration policy.
 
+Names under a ``filename_encoding`` (``LocalStorage``, POSIX only): the storage
+holds its local names as *text* - the name's bytes decoded with that encoding -
+while Python's OS calls take and return the *OS form* (the bytes decoded with
+the file system encoding). The conversion is made only where a name crosses
+into or out of the OS, and not at all when the encoding is the file system
+encoding (`_filename_codec`). The walk itself runs on the OS form: every path it
+hands to the OS and every path in a warning it builds is that form, so the
+override seams keep their plain ``os`` semantics. ``scan_children`` turns each
+child's ``sort_name`` and ``key`` into text before ``compare_key`` is stamped
+and the children are sorted - so the order is the text's (S3's key order) and
+everything the walk emits is text - ``walk_dir`` descends a sub-directory by its
+text name encoded back, and ``list_file_pages`` turns its warnings into text. The
+walk finds the encoding through ``LocalScanOptions.storage``; a hand-built
+options object without a storage walks in the OS form throughout.
+
 An app customizes the walk by subclassing ``LocalFileGenerator``, overriding
 its **public** methods, and passing an instance to
 ``LocalStorage(path, walker=MyWalker())`` - no protected-method surgery on
@@ -107,6 +122,9 @@ single-path point op) reuses them too.
 
 from __future__ import annotations
 
+import codecs
+import contextlib
+import errno
 import os
 import stat as stat_module
 import sys
@@ -119,6 +137,7 @@ from typing_extensions import override
 from boto3_s3.exceptions import (
     AccessDeniedError,
     Boto3S3Error,
+    InvalidValueError,
     NotFoundError,
     TransportError,
     ValidationError,
@@ -156,29 +175,127 @@ def _warn_unrepresentable_mtime(info: LocalFileInfo, notify: Callable[[str], Non
         notify(_INVALID_TIMESTAMP)
 
 
-# Boundary thresholds for the full-path fallback (see
-# LocalFileGenerator.crosses_full_path_boundary). The fast walk vets each entry
-# through the owning directory's fd (fstatat / openat), which re-anchors resolution
-# and so hides the ancestor symlink chain / long-path length that aws-cli's full-path
-# stat would trip on (ELOOP / ENAMETOOLONG). Near either OS limit a dir_fd-relative
-# probe can therefore admit a child the transfer then fails to open (rc 1) where
-# aws warn-skips it (rc 2). These floors gate a full-path re-vetting so the two
-# agree; they sit well below the common OS limits (SYMLOOP_MAX ~32-40, PATH_MAX
-# 1024-4096) so a normal walk never crosses them, and correctness rests on the
-# actual full-path probe, not the exact floor. The length floor counts bytes
-# (os.fsencode), because PATH_MAX is a byte limit and a multibyte path reaches
-# a 1024-byte PATH_MAX at a few hundred characters.
-_SYMLINK_DEPTH_PROBE = 20
-_PATH_LEN_PROBE = 1000
-
-
 def to_native_path(key: str) -> str:
     """Native form of a ``/``-separated ``FileInfo`` key.
 
     Lossless because no supported filesystem allows ``/`` inside a file name
-    (it is the separator on POSIX and rejected on Windows).
+    (it is the separator on POSIX and rejected on Windows). Only the separator
+    changes: under a ``filename_encoding`` the result is still text, which
+    `LocalStorage.os_path` turns into what the OS calls take.
     """
     return key.replace("/", os.sep)
+
+
+class _FilenameCodec:
+    """Local names between text in a named encoding and Python's OS form (POSIX).
+
+    ``to_os`` encodes the text with ``encoding`` and decodes the bytes the way
+    Python's own path calls do (``os.fsdecode``: the file system encoding,
+    ``surrogateescape``), so handing the result to any ``os`` function reaches
+    exactly those bytes; ``to_text`` is the reverse. Both carry undecodable
+    bytes as ``surrogateescape`` surrogates. ``to_os`` raises
+    ``UnicodeEncodeError`` (a ``ValueError``) for a character the encoding
+    cannot represent - where Python's own call with the file system encoding
+    would raise the same.
+    """
+
+    __slots__ = ("encoding",)
+
+    def __init__(self, encoding: str) -> None:
+        self.encoding = encoding
+
+    def to_os(self, path: str) -> str:
+        return os.fsdecode(path.encode(self.encoding, "surrogateescape"))
+
+    def to_text(self, path: str) -> str:
+        return os.fsencode(path).decode(self.encoding, "surrogateescape")
+
+    def message(self, body: str) -> str:
+        """A warning built from OS-form paths, as text (unchanged if it cannot be)."""
+        try:
+            return self.to_text(body)
+        except UnicodeError:
+            return body
+
+
+def name_files_as_text(exc: BaseException, text_path: Callable[[str], str]) -> None:
+    """Turn the file names an ``OSError`` carries into a local side's text, in place.
+
+    The OS reports the names it was handed, in the OS form; ``str(exc)``
+    formats them when a report is built, so this makes every report built
+    from the error afterwards name the files the way the results do.
+    ``text_path`` is the side's conversion (`LocalStorage.text_path`, or a
+    codec's ``to_text``); a name it cannot convert (``UnicodeError``) stays
+    as it is, and any other exception is left alone.
+    """
+    if not isinstance(exc, OSError):
+        return
+    for attr in ("filename", "filename2"):
+        name = getattr(exc, attr)
+        if isinstance(name, str):
+            with contextlib.suppress(UnicodeError):
+                setattr(exc, attr, text_path(name))
+
+
+def _filename_codec(encoding: str | None) -> _FilenameCodec | None:
+    """The conversion a ``filename_encoding`` asks for, or ``None`` for none.
+
+    An unknown codec name is an ``InvalidValueError`` on every platform (as
+    ``TextIOStorage(encoding=...)``). ``None`` - no conversion at all - for no
+    encoding, on Windows (the OS names files in Unicode, so there is no byte
+    form to choose), and for the file system encoding itself (compared by
+    ``codecs.lookup`` name), so the common case costs nothing per name.
+    """
+    if encoding is None:
+        return None
+    try:
+        name = codecs.lookup(encoding).name
+    except LookupError as exc:
+        raise InvalidValueError(str(exc)) from exc
+    if sys.platform == "win32" or name == codecs.lookup(sys.getfilesystemencoding()).name:
+        return None
+    return _FilenameCodec(name)
+
+
+def _walk_codec(options: LocalScanOptions) -> _FilenameCodec | None:
+    """The filename conversion of the storage a walk runs for (``options.storage``)."""
+    storage = options.storage
+    if isinstance(storage, LocalStorage):
+        return storage._codec  # pyright: ignore[reportPrivateUsage]
+    return None
+
+
+def _text_notify(notify: Callable[[str], None], codec: _FilenameCodec) -> Callable[[str], None]:
+    """``notify`` for warnings that name OS-form paths, handing them on as text."""
+
+    def text_notify(body: str) -> None:
+        notify(codec.message(body))
+
+    return text_notify
+
+
+def _complete_root(
+    walker: LocalFileGenerator,
+    root: str,
+    options: LocalScanOptions,
+    notify: Callable[[str], None],
+    codec: _FilenameCodec | None,
+) -> LocalFileInfo | None:
+    """The complete view's scanned-path entry as a scan hands it on, or ``None``.
+
+    ``walker.root_info``'s record for the OS-form anchor ``root`` (so an
+    override applies), its key turned into text and its producing storage
+    (``options.storage``) stamped. One rule for the recursive walk
+    (``list_file_pages``) and the one-level scan (``_scan_one_level``), so the
+    two name the scanned path identically. ``codec`` is the scanning
+    storage's conversion, ``None`` for none.
+    """
+    record = walker.root_info(root, options=options, notify=notify)
+    if record is not None:
+        if codec is not None:
+            record.key = codec.to_text(record.key)
+        record.storage = options.storage
+    return record
 
 
 def _is_special_mode(mode: int) -> bool:
@@ -244,55 +361,19 @@ def _is_readable_child(name: str, full: str, dir_fd: int | None, *, is_dir: bool
     return True
 
 
-def _local_zone_representable(ts: float) -> bool:
-    """Whether aws-cli's local-zone rendering of ``ts`` succeeds.
-
-    aws-cli derives a file's mtime as ``datetime.fromtimestamp(st_mtime,
-    tzlocal())`` and treats any failure as an invalid timestamp, so what counts
-    as representable is the *local* calendar's range - UTC's, shifted by the
-    zone's offset. dateutil's ``tzlocal`` is rebuilt per call the way aws-cli
-    does, so a process that changes ``TZ`` (and calls ``time.tzset``) follows;
-    the import is deferred because the whole dateutil package costs about as
-    much to import as boto3-s3 itself. dateutil ships with botocore, so it is
-    always installed.
-    """
-    from dateutil.tz import tzlocal
-
-    try:
-        datetime.fromtimestamp(ts, tzlocal())
-    except (ValueError, OSError, OverflowError):
-        return False
-    return True
-
-
-# datetime.min / datetime.max as epoch seconds, pulled in by two days - more
-# than any zone's UTC offset, so the local and UTC renderings of a timestamp
-# strictly between them either both succeed or both fail.
-_LOCAL_CHECK_FREE_LOW = -62135596800 + 172800
-_LOCAL_CHECK_FREE_HIGH = 253402300800 - 172800
-
-# Windows has no such quiet range: dateutil's DST probe goes through
-# time.localtime, which fails outright below the epoch there.
-_ALWAYS_CHECK_LOCAL_ZONE = sys.platform == "win32"
-
-
 def _size_mtime(st: os.stat_result) -> tuple[int, datetime | None]:
     """Size and tz-aware UTC mtime from a stat result (the shared derivation).
 
-    An unrepresentable timestamp returns ``None`` for mtime - the caller's cue
-    for the epoch fallback. Whether it is representable is decided the way
-    aws-cli decides it, in the host's local zone (``_local_zone_representable``);
-    the value itself is kept in UTC per the ``FileInfo.mtime`` contract. The two
-    zones only disagree near the ends of ``datetime``'s range, so outside those
-    bands the local rendering is skipped - this runs once per walked file.
+    An mtime UTC cannot hold (outside ``datetime``'s range, or outside the
+    platform's ``gmtime`` - on Windows from about half a day before 1970 back,
+    or after about 3001) returns
+    ``None`` for mtime - the caller's cue for the epoch fallback. aws-cli
+    renders the mtime in the host's local zone and falls back wherever that
+    fails; one only the local zone cannot hold is read as its UTC value here,
+    per the ``FileInfo.mtime`` contract (docs/cli/aws-differences.md).
     """
-    ts = st.st_mtime
     try:
-        if (
-            _ALWAYS_CHECK_LOCAL_ZONE or not _LOCAL_CHECK_FREE_LOW <= ts <= _LOCAL_CHECK_FREE_HIGH
-        ) and not _local_zone_representable(ts):
-            return st.st_size, None
-        mtime: datetime | None = datetime.fromtimestamp(ts, tz=timezone.utc)
+        mtime: datetime | None = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc)
     except (ValueError, OSError, OverflowError):
         mtime = None
     return st.st_size, mtime
@@ -473,9 +554,10 @@ class LocalFileGenerator:
         e.g. ``Storage.scan``'s prefetch worker - overlaps the next
         read on a network-mounted path, the reason the walk is paged at all. The
         pages concatenate to ``list_files``'s flat stream. The ``root`` parameter
-        is the absolute directory path with a trailing ``os.sep``; each
-        ``LocalFileInfo.key`` is the absolute path (``os.sep`` folded to ``/``)
-        and ``compare_key`` is relative to that directory, stamped in
+        is the absolute directory path with a trailing ``os.sep``, in the OS
+        form under a converting ``filename_encoding`` (module docstring); each
+        ``LocalFileInfo.key`` is the absolute path (``os.sep`` folded to ``/``,
+        as text) and ``compare_key`` is relative to that directory, stamped in
         ``scan_children`` (so a custom
         ``finalize_children`` can already filter on it) - the axis
         ``options.filter`` matches.
@@ -501,12 +583,15 @@ class LocalFileGenerator:
         notify: Callable[[str], None] = (
             options.on_warning if options.on_warning is not None else (lambda body: None)
         )
+        codec = _walk_codec(options)
+        if codec is not None:
+            # The walk names OS-form paths in its warnings (module docstring).
+            notify = _text_notify(notify, codec)
         follow_symlinks = options.follow_symlinks
         if options.enumerate_all_entries:
-            root_record = self.root_info(root, options=options, notify=notify)
+            root_record = _complete_root(self, root, options, notify, codec)
             if root_record is None:
                 return
-            root_record.storage = options.storage
             if options.filter is None or options.filter(root_record):
                 yield [root_record]
             if root_record.kind is not FileKind.DIRECTORY:
@@ -518,8 +603,9 @@ class LocalFileGenerator:
         detector = LoopDetector(root) if options.detect_symlink_loops and follow_symlinks else None
         # root ends in os.sep, so its normalized directory path ends in "/" and
         # the slice (in scan_children) never leaves a leading separator;
-        # compare_key is relative to that directory.
-        strip = len(root.replace(os.sep, "/"))
+        # compare_key is relative to that directory - the text root's length,
+        # as the keys it is cut from are text (scan_children).
+        strip = len((root if codec is None else codec.to_text(root)).replace(os.sep, "/"))
         item_filter = options.filter
         storage = options.storage
         pages = self.walk_dir(root, options, strip=strip, notify=notify, detector=detector)
@@ -530,16 +616,16 @@ class LocalFileGenerator:
             # content compare - can reach it. Then the filter runs; no filter (or a
             # custom finalize_children that already pruned) -> the page passes
             # untouched. storage is None only for a hand-built options object
-            # (Storage.scan's backstop fills FileInfo.storage afterwards).
+            # (Storage.scan fills FileInfo.storage afterwards).
             if storage is not None:
                 for info in page:
                     info.storage = storage
             if item_filter is None:
                 yield page
                 continue
-            kept = [info for info in page if item_filter(info)]
-            if kept:
-                yield kept
+            # Yielded even when emptied, so the scan can stop between pages
+            # (`storage.sieve_pages`).
+            yield [info for info in page if item_filter(info)]
 
     def walk_dir(
         self,
@@ -549,7 +635,6 @@ class LocalFileGenerator:
         strip: int,
         notify: Callable[[str], None],
         detector: LoopDetector | None,
-        sym_depth: int = 0,
     ) -> Iterator[list[LocalFileInfo]]:
         """Recursively yield the files under ``dir_path`` as byte-order pages (an override seam).
 
@@ -580,24 +665,21 @@ class LocalFileGenerator:
         of it in the complete view) instead of submitted as a file, and a leaf
         that is still a leaf is emitted with the ``size`` / ``mtime`` it has at
         that moment - all on the bare name the leaf sorted under.
-
-        ``sym_depth`` is the number of followed symlinks on the path from the walk
-        root down to ``dir_path`` (each descent into a symlinked directory adds
-        one); it is threaded to ``scan_children`` so a leaf near the OS
-        symlink-loop limit is re-vetted by full path (see there).
         """
         run: list[LocalFileInfo] = []
         # One join per directory rather than per child: dir_path is an absolute
         # directory path, so a child's path is this prefix plus its sort name.
         prefix = dir_path if dir_path.endswith(os.sep) else dir_path + os.sep
+        codec = _walk_codec(options)
         for sort_name, info, loop_key in self.scan_children(
-            dir_path, strip=strip, options=options, notify=notify, sym_depth=sym_depth
+            dir_path, strip=strip, options=options, notify=notify
         ):
             # sort_name carries the trailing os.sep for a sub-directory (the sort
             # suffix) and is the bare name for a leaf, so this path is spelled the
             # way the child is addressed - which the loop warning and the warnings
-            # raised by the descent keep.
-            sub = prefix + sort_name
+            # raised by the descent keep. Under a converting filename encoding
+            # the name is text (scan_children) and the path the OS form.
+            sub = prefix + (sort_name if codec is None else codec.to_os(sort_name))
             if info.kind != FileKind.DIRECTORY:
                 fresh = self.restat_leaf(sub, info, options=options, notify=notify)
                 if fresh is None:
@@ -636,10 +718,6 @@ class LocalFileGenerator:
             if run:
                 yield run
                 run = []
-            # A followed symlink component lengthens the ancestor chain the kernel
-            # re-resolves for every full path under sub - tracked so scan_children
-            # can full-path-vet leaves near the symlink-loop limit.
-            child_depth = sym_depth + (1 if info.is_symlink else 0)
             if detector is not None:
                 if detector.is_cycle_key(loop_key):
                     notify(f"Skipping file {sub.rstrip(os.sep)}. Symbolic link loop detected.")
@@ -651,7 +729,6 @@ class LocalFileGenerator:
                         strip=strip,
                         notify=notify,
                         detector=detector,
-                        sym_depth=child_depth,
                     )
                 finally:
                     detector.leave()
@@ -662,7 +739,6 @@ class LocalFileGenerator:
                     strip=strip,
                     notify=notify,
                     detector=detector,
-                    sym_depth=child_depth,
                 )
         if run:
             yield run
@@ -688,9 +764,11 @@ class LocalFileGenerator:
 
         - it fails (``ENOENT`` and the rest): the ``triggers_warning`` battery
           runs on the path - normally ``File does not exist.``, rc 2 - and the
-          leaf is dropped, warned or not, like aws-cli's ``_safely_get_file_stats``
-          returning nothing. Without this the stale record was submitted and the
-          transfer failed to open it (rc 1). The complete view first tries the
+          leaf is dropped, like aws-cli's ``_safely_get_file_stats`` returning
+          nothing. A battery that finds nothing (the race healed since the
+          stat) warns with the stat's own error instead, where aws-cli drops
+          the leaf silently. Without this the stale record was submitted and
+          the transfer failed to open it (rc 1). The complete view first tries the
           link's own lstat (``_lstat_leaf``): a leaf that became a dangling
           link or a loop is kept as that lstat leaf, warned only when this
           walk follows links - ``classify_child``'s failed-follow rule, at
@@ -705,11 +783,9 @@ class LocalFileGenerator:
           compares are the file as of its turn - aws-cli takes every leaf's size
           and timestamp here, never at scan time. The unrepresentable-timestamp
           fallback stamps ``EPOCH_TIME`` as ``stat_info`` does and sends the one
-          warning aws-cli sends for the file, here rather than at scan time:
-          so it sorts among the walk's other warnings as aws-cli's does (a
-          sibling directory's warnings come first), and a timestamp that
-          became representable since the scan draws none (``stat_info`` stamps
-          the scan-time record silently).
+          warning aws-cli sends for the file, here rather than at scan time, so
+          a timestamp that became representable since the scan draws none
+          (``stat_info`` stamps the scan-time record silently).
 
         ``is_symlink`` is left as classified: re-testing it would cost a second
         syscall per leaf, and aws-cli carries no such flag.
@@ -733,7 +809,7 @@ class LocalFileGenerator:
             return info
         try:
             st = os.stat(path)
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
             if options.enumerate_all_entries:
                 # The complete view's rule for a link whose follow fails
                 # (classify_child's): warn when this walk follows links, keep
@@ -744,9 +820,13 @@ class LocalFileGenerator:
                 if fallback is not None:
                     return fallback
             # aws-cli runs its battery on the path the stat failed on and skips
-            # the leaf either way (a battery that finds nothing wrong - the race
-            # healed between the two calls - still yields no file stats).
-            self.triggers_warning(path, notify)
+            # the leaf either way. A battery that finds nothing wrong - the race
+            # healed between the two calls - still leaves no file stats, so the
+            # leaf is skipped then too, but with the stat's own error as its
+            # warning: aws-cli drops a file that exists without a word.
+            if not self.triggers_warning(path, notify):
+                reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
+                notify(f"Skipping file {path}. {reason}.")
             return None
         if stat_module.S_ISDIR(st.st_mode):
             is_link = os.path.islink(path)
@@ -761,11 +841,10 @@ class LocalFileGenerator:
             return self.promoted_directory(info, st, is_symlink=is_link)
         size, mtime = _size_mtime(st)
         if mtime is None:
-            # aws-cli's one warning for the file, sent where aws-cli sends it -
-            # at the leaf's turn, from this stat (the scan-time record was
-            # stamped silently), so it sorts among the other warnings as
-            # aws-cli's does and a timestamp that healed since the scan draws
-            # none.
+            # aws-cli's one warning for the file, sent where aws-cli takes the
+            # timestamp - at the leaf's turn, from this stat (the scan-time
+            # record was stamped silently), so a timestamp that healed since
+            # the scan draws none.
             notify(_INVALID_TIMESTAMP)
             mtime = self.EPOCH_TIME
         info.size = size
@@ -860,10 +939,13 @@ class LocalFileGenerator:
         is_symlink = os.path.islink(path)
         try:
             st = os.stat(path, follow_symlinks=follow_symlinks)
-        except OSError:
+        except OSError as exc:
             if not (options.enumerate_all_entries and is_symlink and follow_symlinks):
                 if self.triggers_warning(path, notify):
                     return None
+                codec = _walk_codec(options)
+                if codec is not None:
+                    name_files_as_text(exc, codec.to_text)
                 raise
             notify(f"Skipping file {path}. File does not exist.")
             try:
@@ -899,7 +981,6 @@ class LocalFileGenerator:
         strip: int,
         options: LocalScanOptions,
         notify: Callable[[str], None],
-        sym_depth: int = 0,
     ) -> list[WalkChild]:
         """Return one directory's vetted children as final `WalkChild` entries.
 
@@ -907,7 +988,9 @@ class LocalFileGenerator:
         it scans ``dir_path`` once with ``os.scandir``, turns each entry into
         a ``WalkChild`` via ``classify_child`` (skips return ``None``),
         stamps each child's ``compare_key`` (the key with the ``strip``-long
-        directory prefix removed, aws-cli's ``src_path[len(src['path']):]``), then hands
+        directory prefix removed, aws-cli's ``src_path[len(src['path']):]``) -
+        after turning each child's ``sort_name`` and ``key`` into text under a
+        converting ``filename_encoding`` (module docstring) - then hands
         the list to
         ``finalize_children`` (which sorts, and is the override point for
         pruning / registration). ``options`` carries the per-walk context the
@@ -923,12 +1006,11 @@ class LocalFileGenerator:
         first strips the separator and tests the name itself, as aws-cli's
         ``should_ignore_file`` does at the top of each descent: a directory
         that became a symlink is skipped silently rather than followed, and
-        the battery names the stripped path. ``sym_depth`` (the
-        number of followed symlinks from the walk root down to ``dir_path``) lets
-        a child near the symlink-loop / path-length limit be re-vetted by full
-        path (``crosses_full_path_boundary``), so it warn-skips like aws-cli
-        rather than being admitted to fail at transfer-open or at its own
-        descent.
+        the battery names the stripped path. The battery also takes the
+        stripped path, symlinks followed or not, when the open failed on a
+        symlink loop or the path-length limit and the bare path is not a
+        directory either: aws-cli's parent listing, whose ``isdir`` fails
+        the same way, never added the separator.
 
         The fast path scans through the directory's own fd where the platform
         allows (``have_dir_fd``), so each entry's stat and readability probe
@@ -941,7 +1023,8 @@ class LocalFileGenerator:
         synthetic entries or read a different source - reusing
         ``classify_child`` / ``dir_child`` / ``normalize_sort`` so the
         sort key and directory-info shape need not be reproduced (an injected
-        child still needs its ``compare_key`` stamped - ``info.key[strip:]``;
+        child still needs its ``compare_key`` stamped - ``info.key[strip:]``,
+        and under a converting ``filename_encoding`` its name and key as text;
         ``FileInfo.storage`` need not be set - the caller stamps the producing
         backend after the walk yields a page). To prune / register / re-order after
         the fact, override the finer ``finalize_children`` instead; for a
@@ -967,33 +1050,47 @@ class LocalFileGenerator:
             if use_fd:
                 dir_fd = os.open(dir_path, self.dir_open_flags)
             scan = os.scandir(dir_fd if dir_fd is not None else dir_path)
-        except OSError:
+        except OSError as exc:
             # The directory stopped being an openable directory between its
             # parent's scan and this descent - replaced by a file, deleted, or
             # chmod'd away. aws-cli re-tests the child immediately before
-            # recursing into it, on the *separator-terminated* path its sort key
-            # carries: no longer a directory falls to ``_safely_get_file_stats``,
+            # recursing into it: no longer a directory falls to
+            # ``_safely_get_file_stats``,
             # whose ``os.stat`` raises ``ENOTDIR`` / ``ENOENT`` and warns through
             # the battery, and still-a-directory-but-unreadable warns through the
             # ``should_ignore_file`` at the top of the recursion. Establishing
-            # this scan *is* that re-test, so run the same battery on ``probe``:
-            # ``dir_path`` as given - it keeps the separator every descended
-            # child was addressed with, and aws-cli's warning keeps it too - or,
-            # when symlinks are not followed, the separator-stripped form
-            # aws-cli's should_ignore_file rebinds - then keep
-            # walking (a warning, rc 2) instead of failing the run. If the probes
+            # this scan *is* that re-test, so run the same battery on ``probe``
+            # (``dir_path`` as given, or the separator-stripped form when
+            # symlinks are not followed), then keep walking (a warning, rc 2)
+            # instead of failing the run. If the probes
             # see nothing wrong (e.g. fd exhaustion resolved by the probe's
             # close), re-raise like aws-cli's ``listdir`` would - never prune
-            # silently. The deterministic full-path limits this fd-relative walk
-            # hides (``ELOOP`` / an over-long path) are caught one level up
-            # instead, at vetting time, by ``crosses_full_path_boundary``, so
-            # they carry aws-cli's vetting-time wording. Scoped to the
-            # open/scandir establishment only - a per-entry OSError (from a race
-            # mid-scan or an override's classify_child) propagates rather than
-            # dropping the directory.
+            # silently. This open is by full path, so a directory past the
+            # kernel's symlink-loop or path-length limit - which the parent's
+            # fd-relative vetting cannot see - is warned here, under the name
+            # aws-cli's full-path listing warns it by (a leaf past it, by
+            # ``restat_leaf``'s full-path stat at its turn). Scoped to the open/scandir
+            # establishment only - a per-entry OSError (from a race mid-scan or
+            # an override's classify_child) propagates rather than dropping the
+            # directory.
             if dir_fd is not None:
                 os.close(dir_fd)
+            if (
+                exc.errno in (errno.ELOOP, errno.ENAMETOOLONG)
+                and probe.endswith(os.sep)
+                and not os.path.isdir(probe[:-1])
+            ):
+                # aws-cli's parent listing already finds such a path not to
+                # be a directory (its ``isdir`` fails the same way), so it is
+                # never given the separator and is warned as a file. A path
+                # that is a directory there - one byte short of the limit,
+                # which only the separator takes past it - keeps the
+                # separator, as aws-cli's descent names it.
+                probe = probe[:-1]
             if not self.triggers_warning(probe, notify):
+                codec = _walk_codec(options)
+                if codec is not None:
+                    name_files_as_text(exc, codec.to_text)
                 raise
             return []
         try:
@@ -1003,59 +1100,33 @@ class LocalFileGenerator:
                     child = self.classify_child(entry, full, dir_fd, options=options, notify=notify)
                     if child is None:
                         continue
-                    if not options.enumerate_all_entries and self.crosses_full_path_boundary(
-                        child.info, full, sym_depth=sym_depth, notify=notify
-                    ):
-                        continue
                     children.append(child)
         finally:
             if dir_fd is not None:
                 os.close(dir_fd)
+        codec = _walk_codec(options)
+        if codec is not None:
+            # The OS-form names become the storage's text here, before the key
+            # is cut and the children sorted: the order is the text's. A name
+            # whose text encodes back to other bytes (a codec that maps several
+            # byte sequences to one character, as cp932 does) would address
+            # another file, so it is skipped with a warning.
+            converted: list[WalkChild] = []
+            for child in children:
+                os_key = child.info.key
+                text_key = codec.to_text(os_key)
+                if codec.to_os(text_key) != os_key:
+                    notify(
+                        f"Skipping file {os_key}. File name does not survive "
+                        f"{codec.encoding} unchanged."
+                    )
+                    continue
+                child.info.key = text_key
+                converted.append(child._replace(sort_name=codec.to_text(child.sort_name)))
+            children = converted
         for child in children:
             child.info.compare_key = child.info.key[strip:]
         return self.finalize_children(children)
-
-    def crosses_full_path_boundary(
-        self,
-        info: LocalFileInfo,
-        full: str,
-        *,
-        sym_depth: int,
-        notify: Callable[[str], None],
-    ) -> bool:
-        """Whether a vetted child must be dropped as aws-cli's full-path stat would.
-
-        The fast walk vets each entry through the owning directory's fd
-        (``fstatat`` / ``openat``), which re-anchors resolution: it resolves a
-        child's own symlink relative to the already-open directory, hiding the
-        ancestor symlink chain, and it addresses the entry by its short name,
-        hiding the full-path length. aws-cli instead stats every entry by full
-        path, so a child whose full-path resolution crosses ``SYMLOOP_MAX`` (an
-        ancestor chain plus the child's own link) or ``PATH_MAX`` fails there -
-        ``os.path.exists`` is ``False``, its warn-skip counts toward rc 2 - while
-        the fd-relative probe admits it and the transfer then fails to open it
-        (rc 1). Near either limit (``sym_depth`` for a symlink child, the full
-        path's byte length for any child - the floors sit well below the OS
-        limits, so a normal walk never reaches this probe) re-run the full-path
-        warning battery
-        (``triggers_warning``); a child it warns away is dropped here so the two
-        agree.
-
-        Directories take the same probe as file leaves, and by the same path:
-        aws-cli's vetting names a child by its bare full path, while the descent
-        addresses it with the trailing separator - so a boundary-crossing
-        directory left to fail its own ``os.open`` in ``scan_children`` would be
-        warned there, where the battery reproduces aws-cli's *descent* wording
-        (separator included) rather than its vetting wording.
-        """
-        # PATH_MAX is a byte limit, so the length floor is measured in bytes
-        # (a multibyte path crosses a 1024-byte PATH_MAX at a few hundred
-        # characters); the character pre-check (UTF-8 spends at most 4 bytes
-        # per character) keeps fsencode off the per-entry hot path.
-        near_boundary = (
-            len(full) >= _PATH_LEN_PROBE // 4 and len(os.fsencode(full)) >= _PATH_LEN_PROBE
-        ) or (info.is_symlink and sym_depth >= _SYMLINK_DEPTH_PROBE)
-        return near_boundary and self.triggers_warning(full, notify)
 
     def entry_stat_result(self, entry: os.DirEntry[str]) -> os.stat_result | None:
         """The single stat snapshot for one entry (an override seam), or ``None``.
@@ -1107,10 +1178,10 @@ class LocalFileGenerator:
         only in the complete view and otherwise skips it - silently when
         ``os.path.islink`` agrees, else through the full-path battery, the way
         aws-cli's lstat-based test lands where the directory grants no search
-        permission. A followed stat that
-        comes back ``None`` warns; the complete view then falls back to the link's
-        lstat (whose own timestamp warning still goes out), while the normal
-        view skips it. A stat that
+        permission. A followed
+        stat that comes back ``None`` warns; the complete view then falls back
+        to the link's lstat (whose own timestamp warning still goes out), while
+        the normal view skips it. A stat that
         says ``S_IFLNK`` (only an lstat-style override produces one) is its own
         vetting-free leaf, like ``symlink_child``; then
         the normal view's ``should_ignore_entry`` vets that valid stat, and the kind is keyed on
@@ -1132,8 +1203,10 @@ class LocalFileGenerator:
                 # search permission, or the entry raced away), so aws-cli takes
                 # it for a non-link and vets it by full path: normally "File
                 # does not exist.", a warning and rc 2 rather than the silent
-                # skip. Only when the battery finds nothing wrong does the entry
-                # go on to be classified.
+                # skip. Whether the warning is written is aws-cli's part of the
+                # report, so it is written here too (design/overview.md
+                # section 3, Messages). Only when the battery finds nothing
+                # wrong does the entry go on to be classified.
                 if self.triggers_warning(full, notify):
                     return None
         st = self.entry_stat_result(entry)
@@ -1251,19 +1324,17 @@ class LocalFileGenerator:
         if not follow_symlinks:
             if os.path.isdir(path) and path.endswith(os.sep):
                 # A trailing separator must be removed to test the link itself.
-                # aws-cli rebinds the stripped path, so the warning wording
-                # below drops the separator too; mirror that.
                 path = path[:-1]
             if os.path.islink(path):
                 return True
         return self.triggers_warning(path, notify)
 
     def triggers_warning(self, path: str, notify: Callable[[str], None]) -> bool:
-        """Warn-and-skip checks on a *path*, aws-cli order and wording (``triggers_warning``).
+        """Warn-and-skip checks on a *path* (aws-cli's ``triggers_warning``).
 
         Path-based: the root vetting (``should_ignore_file``), a directory
-        whose scandir establishment failed, and the near-symlink-boundary
-        re-vet. The per-entry hot path checks the same
+        whose scandir establishment failed, and a leaf whose re-stat at its
+        turn failed (``restat_leaf``). The per-entry hot path checks the same
         conditions from the ``DirEntry``'s cached stat in
         ``should_ignore_entry``; a mid-scan race (``entry_stat_result`` ->
         ``None``) is warned in ``classify_child`` directly.
@@ -1300,15 +1371,15 @@ class LocalFileGenerator:
         ignorable: a character/block/FIFO/socket special file, or one the process
         cannot read. The readability probe is dir-relative (``openat`` through
         ``dir_fd`` where the platform allows, ``None`` off POSIX). ``full`` is the
-        entry's absolute path (warning wording). Same order / wording as
-        ``triggers_warning``, with one refinement on the probe's failure path:
+        entry's absolute path, which the warnings name. The checks are
+        ``triggers_warning``'s, with one refinement on the probe's failure path:
         aws-cli vets by full path and probes existence *first*, so an entry
         whose full-path resolution fails - over ``MAX_PATH`` on a Windows host
         without long-path support (the length is invisible to the scandir-cached
-        stat above), or raced away since - warns ``File does not exist.`` there,
-        never ``not readable``. A full-path existence re-check on this rare
-        branch picks the same wording; a genuinely unreadable present entry
-        still warns ``not readable``.
+        stat above), or raced away since - is reported there as missing, never
+        as unreadable. A full-path existence re-check on this rare branch does
+        the same; a genuinely unreadable present entry is still reported as
+        unreadable.
         """
         if _is_special_mode(st.st_mode):
             notify(
@@ -1371,7 +1442,7 @@ def translate_os_error(
     message: str | None = None,
 ) -> Boto3S3Error:
     """Map an ``OSError`` to the library taxonomy (the local mirror of
-    ``s3storage.translate_boto_error``): missing path -> ``NotFoundError``,
+    ``sdkerrors.translate_boto_error``): missing path -> ``NotFoundError``,
     permission -> ``AccessDeniedError``, everything else -> ``TransportError``.
     A ``ValueError`` is a path the OS calls refuse before asking the
     filesystem - an embedded NUL, a lone surrogate the filesystem encoding
@@ -1384,7 +1455,7 @@ def translate_os_error(
     handling is separate: it warns-and-skips through the vetting battery, and
     an ``OSError`` its probes cannot attribute re-raises untranslated rather
     than dropping a directory silently. ``message`` overrides
-    ``str(exc)`` when the caller carries aws-cli wording of its own.
+    ``str(exc)`` when the caller carries a message of its own.
     """
     text = str(exc) if message is None else message
     if isinstance(exc, ValueError):
@@ -1403,6 +1474,17 @@ class LocalStorage(Storage):
     the fast ``os.scandir`` walk). Pass ``walker=`` a custom subclass to change
     the traversal - e.g. to resolve Cygwin ``!<symlink>`` files on a
     native-Python Windows build - without subclassing ``LocalStorage`` itself.
+
+    ``filename_encoding`` names the encoding of the local names on POSIX
+    (``None``, the default: Python's file system encoding). Every name the
+    storage holds - ``path`` and ``abspath``, each ``FileInfo.key`` /
+    ``compare_key`` it lists, the key an ``open`` / ``get_fileinfo`` /
+    ``delete`` takes, and the paths in its warnings and errors - is then the
+    name's bytes decoded with it (``surrogateescape`` for bytes it cannot
+    decode), and the OS gets that text encoded with it. `os_path` and
+    `text_path` convert between that text and the form Python's own OS calls
+    take and return. On Windows the OS names files in Unicode and the setting
+    has no effect; an unknown codec is an ``InvalidValueError``.
 
     Class attributes: ``sep`` is the host-native separator (``os.sep``;
     ``format`` returns ``os.sep`` forms, unlike every other backend's ``/``
@@ -1434,7 +1516,7 @@ class LocalStorage(Storage):
 
         aws-cli splits first and joins the basename back on, so an in-tree
         path always carries a directory prefix (``./a.txt``, ``../x/a.txt``) -
-        the form aws prints in transfer result lines and warnings. Where no
+        the form ``aws`` prints in transfer result lines and warnings. Where no
         relative path exists (different Windows drives), the absolute path is
         returned instead of raising.
         """
@@ -1454,23 +1536,40 @@ class LocalStorage(Storage):
         detect_symlink_loops: bool = False,
         enumerate_all_entries: bool = False,
         fsync: bool = False,
+        filename_encoding: str | None = None,
     ) -> None:
+        # The conversion between this storage's text names and the OS form
+        # (None: none at all - see _filename_codec). Checked first, so an
+        # unknown codec fails the construction.
+        self._filename_encoding = filename_encoding
+        self._codec = _filename_codec(filename_encoding)
         self._path = os.fspath(path)
         # Absolutize once, at construction (against the cwd then): every scan /
         # get_fileinfo anchors here so ``FileInfo.key`` comes out absolute, and
         # ``os.path.abspath`` calls ``os.getcwd()`` - too costly to repeat per
         # entry. Binding the cwd here also keeps a relative path resolving
         # consistently if the process later chdir's.
-        self._abspath = os.path.abspath(self._path)
         # The same anchor without abspath's lexical normalization, for
         # ``exists``: ``..`` folded by abspath and ``..`` resolved by the
         # kernel name different files once a symlinked directory is involved.
         # An absolute path needs no anchor, and must not ask for one: getcwd
         # fails in a process whose working directory has been removed, where
-        # abspath above - which consults it for a relative path only - works.
-        self._unnormalized = (
-            self._path if os.path.isabs(self._path) else os.path.join(os.getcwd(), self._path)
-        )
+        # abspath - which consults it for a relative path only - works.
+        if self._codec is None:
+            self._abspath = os.path.abspath(self._path)
+            self._unnormalized = (
+                self._path if os.path.isabs(self._path) else os.path.join(os.getcwd(), self._path)
+            )
+        else:
+            # POSIX only (the codec is None on Windows), where abspath is the
+            # normalized join onto the cwd - taken here as text, so the anchor
+            # and the typed path share one form.
+            self._unnormalized = (
+                self._path
+                if os.path.isabs(self._path)
+                else os.path.join(self._codec.to_text(os.getcwd()), self._path)
+            )
+            self._abspath = os.path.normpath(self._unnormalized)
         # How this local source is read: symlink interpretation, whether every
         # metadata-readable native entry is enumerated before filtering, and
         # whether recursive descent guards against symlink cycles. Seeded into
@@ -1481,7 +1580,7 @@ class LocalStorage(Storage):
         self._detect_symlink_loops = detect_symlink_loops
         self._enumerate_all_entries = enumerate_all_entries
         # A library-only durability knob for this local backend as a *destination*
-        # (default off = aws parity). When set, a ``mv`` whose download lands here
+        # (default off = aws-cli parity). When set, a ``mv`` whose download lands here
         # fsyncs the file (and its parent directory) before deleting the S3 source,
         # closing the window where aws-cli / s3transfer delete the durable S3 copy
         # while the download is still only in the page cache. Read by the transfer
@@ -1511,6 +1610,60 @@ class LocalStorage(Storage):
         """
         return self._abspath
 
+    @property
+    def filename_encoding(self) -> str | None:
+        """The ``filename_encoding`` given at construction (see the class docstring)."""
+        return self._filename_encoding
+
+    def os_path(self, path: str) -> str:
+        """``path``, a local path in this storage's text form, as the OS calls take it.
+
+        The text form is what the storage holds and reports - `abspath`, a
+        ``FileInfo.key`` (in either separator). Without a converting
+        ``filename_encoding`` this returns ``path`` itself; with one, the text
+        encoded with that encoding and decoded the way Python's own ``os``
+        functions read a path, so ``os.stat(storage.os_path(key))`` reaches the
+        file the key names. A character the encoding cannot represent raises
+        ``UnicodeEncodeError`` (a ``ValueError``), as Python's own call does
+        for one its file system encoding cannot represent.
+        """
+        codec = self._codec
+        return path if codec is None else codec.to_os(path)
+
+    def text_path(self, path: str) -> str:
+        """``path``, as Python's OS calls return it, in this storage's text form.
+
+        The reverse of `os_path`: a name from ``os.listdir`` or ``os.getcwd``
+        becomes the text this storage would report for it. Without a
+        converting ``filename_encoding`` this returns ``path`` itself.
+        """
+        codec = self._codec
+        return path if codec is None else codec.to_text(path)
+
+    def _os_root(self, path: str | None = None) -> str:
+        """`abspath` (or the text ``path``) in the OS form: a walk's root, or `_stat_one`'s path.
+
+        A character the ``filename_encoding`` cannot represent is the
+        caller's path: the ``ValueError`` an OS call raises for a name its
+        encoding cannot represent, a ``ValidationError`` (`_os_failure`).
+        """
+        text = self._abspath if path is None else path
+        try:
+            return self.os_path(text)
+        except ValueError as exc:
+            raise self._os_failure(exc, text) from exc
+
+    def _single_filter_root(self) -> str:
+        """aws-cli's ``_get_local_root`` for this location as a single (non-``dir_op``) source.
+
+        The base aws-cli joins ``--exclude`` / ``--include`` patterns onto:
+        ``abspath(dirname(path))`` of the path as typed - so ``d`` roots at
+        the working directory, while ``d/``, ``.`` and ``../`` root at the
+        location itself and ``..`` at the working directory below it -
+        anchored at the construction-time working directory like `abspath`.
+        """
+        return os.path.abspath(os.path.dirname(self._unnormalized))
+
     def exists(self) -> bool:
         """Whether the location exists, asked the way aws-cli's pre-check asks.
 
@@ -1519,10 +1672,10 @@ class LocalStorage(Storage):
         for the lexical ``abspath`` form. The two differ once ``..`` follows a
         symlinked directory: ``lsub/../x`` is ``sub/x`` to the kernel and
         ``<cwd>/x`` to ``abspath``. aws-cli admits such a source and its
-        generator warns "File does not exist." (rc 2); testing ``abspath``
-        here refused it up front instead (rc 1). This asks the kernel, anchored
-        at the construction-time working directory like `abspath`, so the
-        operations admit what aws-cli admits and the walk / `get_fileinfo`
+        generator warns "File does not exist." (rc 2). This asks the kernel,
+        anchored at the construction-time working directory like `abspath`, so the
+        operations admit what aws-cli admits (a recursive source is then
+        vetted as a walk root by the operation) and the walk / `get_fileinfo`
         then answer for the lexical form. Windows has no such gap - it folds
         ``..`` out of a path before the filesystem sees it, so the typed path
         is already the lexical one - and there ``aws.exe`` refuses that
@@ -1532,7 +1685,14 @@ class LocalStorage(Storage):
         """
         if not self._path:
             return False
-        return os.path.exists(self._unnormalized)
+        try:
+            target = self.os_path(self._unnormalized)
+        except ValueError:
+            # A name the filename encoding cannot represent names no file -
+            # what os.path.exists answers for one the file system encoding
+            # cannot represent.
+            return False
+        return os.path.exists(target)
 
     def ensure_directory(self) -> None:
         """Create the location as a directory unless it exists, as aws-cli's pre-check does.
@@ -1553,10 +1713,16 @@ class LocalStorage(Storage):
         resolves it. Each of these is aws-cli's own outcome, measured. (The
         ``..`` cases are POSIX's: Windows folds ``..`` before the filesystem
         sees the path, leaving the trailing separator the only difference.)
-        An ``OSError`` propagates for the caller to translate.
+        An ``OSError`` (naming its files as text) or the ``ValueError`` of a
+        name the ``filename_encoding`` cannot represent propagates for the
+        caller to translate.
         """
         if not self.exists():
-            os.makedirs(self._unnormalized)
+            try:
+                os.makedirs(self.os_path(self._unnormalized))
+            except OSError as exc:
+                self._text_names(exc)
+                raise
 
     @property
     def fsync(self) -> bool:
@@ -1613,11 +1779,18 @@ class LocalStorage(Storage):
         the source's name.
         """
         full_path = self._abspath
-        if (os.path.exists(full_path) and os.path.isdir(full_path)) or dir_op:
+        if dir_op or self._is_directory(full_path):
             return full_path + os.sep, True
         if self._path.endswith(os.sep):
             return full_path + os.sep, True
         return full_path, False
+
+    def _is_directory(self, path: str) -> bool:
+        """``os.path.isdir`` for a text path (``False`` for one the encoding cannot carry)."""
+        try:
+            return os.path.isdir(self.os_path(path))
+        except ValueError:
+            return False
 
     @override
     def default_scan_options(self) -> LocalScanOptions:
@@ -1627,8 +1800,8 @@ class LocalStorage(Storage):
         ``follow_symlinks`` / ``detect_symlink_loops`` /
         ``enumerate_all_entries`` come from the constructor, so every scan reads the walk
         configured once on this ``LocalStorage``; an operation overlays only its
-        own knobs (``recursive`` / ``sort`` / ``filter`` / ``on_warning``, plus
-        the application's ``reusable_after_interrupt`` posture) onto this.
+        own knobs (``recursive`` / ``sort`` / ``filter`` / ``on_warning``) onto
+        this.
         The single-path ``get_fileinfo`` does not build these options - it reads
         ``follow_symlinks`` directly and ignores the enumeration / loop knobs.
         """
@@ -1679,7 +1852,9 @@ class LocalStorage(Storage):
         # entries are this storage's. (walk_local sets it the same way.)
         options = replace(options, storage=self)
         if options.recursive:
-            yield from self._walker.list_file_pages(self._abspath + os.sep, options)
+            # The walk runs on the OS form and finds this storage's encoding
+            # through options.storage (module docstring).
+            yield from self._walker.list_file_pages(self._os_root() + os.sep, options)
             return
         page = list(self._scan_one_level(self._abspath, options))
         if page:
@@ -1711,7 +1886,7 @@ class LocalStorage(Storage):
         # directory being enumerated) and, from options.storage below, each
         # entry's producing backend.
         yield from self._walker.list_files(
-            self._abspath + os.sep,
+            self._os_root() + os.sep,
             replace(self.default_scan_options(), on_warning=on_warning, storage=self),
         )
 
@@ -1730,36 +1905,35 @@ class LocalStorage(Storage):
         scanned path first, then its immediate children when it is a directory.
         Every entry has its ``compare_key`` stamped, its producing backend set
         (``options.storage``), and ``options.filter`` applied.
+
+        ``root`` is text; the walker's methods get it in the OS form, and the
+        warnings they build (which name that form) reach ``on_warning`` as
+        text, like the recursive walk's (module docstring).
         """
         notify: Callable[[str], None] = (
             options.on_warning if options.on_warning is not None else (lambda body: None)
         )
+        codec = self._codec
+        walk_notify = notify if codec is None else _text_notify(notify, codec)
+        os_root = self._os_root(root)
         item_filter = options.filter
+        # The anchor (root + a separator), not the bare root, is what the root
+        # step classifies or vets and what the children step scans: it names
+        # each child the same way (os.path.join collapses a doubled separator)
+        # and it is the path a failed scan warns about, so this one-level scan
+        # and the recursive walk - which descends from that same anchor - name
+        # the scanned directory identically.
+        root_anchor = os.path.join(root, "")
+        os_anchor = os.path.join(os_root, "")
         if options.enumerate_all_entries:
-            root_anchor = os.path.join(root, "")
-            root_record = self._walker.root_info(root_anchor, options=options, notify=notify)
+            root_record = _complete_root(self._walker, os_anchor, options, walk_notify, codec)
             if root_record is None:
                 return
-            root_record.storage = options.storage
             if item_filter is None or item_filter(root_record):
                 yield root_record
             if root_record.kind is not FileKind.DIRECTORY:
                 return
-            strip = len(root_anchor.replace(os.sep, "/"))
-            # The anchor, not the bare root: it names each child the same way
-            # (os.path.join collapses the doubled separator) and it is the path a
-            # failed scan warns about, so this one-level scan and the recursive
-            # walk - which descends from that same anchor - name the scanned
-            # directory identically.
-            for _sort_name, info, _loop_key in self._walker.scan_children(
-                root_anchor, strip=strip, options=options, notify=notify
-            ):
-                info.storage = options.storage
-                _warn_unrepresentable_mtime(info, notify)
-                if item_filter is None or item_filter(info):
-                    yield info
-            return
-        if not os.path.isdir(root):
+        elif not os.path.isdir(os_root):
             # A single-file non-recursive scan honors the passed options'
             # follow_symlinks (like the directory branch below), so it stats
             # through _stat_one directly rather than get_fileinfo (which reads the
@@ -1771,25 +1945,23 @@ class LocalStorage(Storage):
                 if item_filter is None or item_filter(info):
                     yield info
             return
-        # Vet the root the way the recursive walk does (should_ignore_file on the
-        # anchor, before any descent or scanned-path record): a no-follow symlink
-        # root is silently skipped, and an unreadable / special root
-        # warns-and-skips. So a one-level scan agrees with the recursive walk
-        # instead of descending a link follow_symlinks=False forbids or emitting
-        # a record the recursive walk's vetting would drop.
-        root_anchor = os.path.join(root, "")  # root + separator (the walk anchor)
-        if self._walker.should_ignore_file(
-            root_anchor, follow_symlinks=options.follow_symlinks, notify=notify
+        elif self._walker.should_ignore_file(
+            os_anchor, follow_symlinks=options.follow_symlinks, notify=walk_notify
         ):
+            # Vet the root the way the recursive walk does (should_ignore_file on
+            # the anchor, before any descent or scanned-path record): a no-follow
+            # symlink root is silently skipped, and an unreadable / special root
+            # warns-and-skips. So a one-level scan agrees with the recursive walk
+            # instead of descending a link follow_symlinks=False forbids or
+            # emitting a record the recursive walk's vetting would drop.
             return
         # scan_children stamps compare_key as info.key[strip:]; strip is the
         # normalized prefix length of the directory being enumerated
         # (root_anchor = root + a sep, the prefix of every child key). One level
-        # down this equals the name. The anchor is also what is scanned, so a
-        # failed scan names the scanned directory as the recursive walk would.
+        # down this equals the name.
         strip = len(root_anchor.replace(os.sep, "/"))
         for _sort_name, info, _loop_key in self._walker.scan_children(
-            root_anchor, strip=strip, options=options, notify=notify
+            os_anchor, strip=strip, options=options, notify=walk_notify
         ):
             # scan_children stamps compare_key only; stamp the producing backend
             # here (options.storage == self, forced by scan_pages) before the filter.
@@ -1801,18 +1973,20 @@ class LocalStorage(Storage):
                 yield info
 
     def _stat_one(
-        self, path: str, *, follow_symlinks: bool, notify: Callable[[str], None]
+        self,
+        path: str,
+        *,
+        follow_symlinks: bool,
+        notify: Callable[[str], None],
+        directory_form: bool = False,
     ) -> LocalFileInfo | None:
         """One path's ``LocalFileInfo``, or ``None`` when there is no transferable entry.
 
         The local side of ``Storage.get_fileinfo``'s contract: a
         ``follow_symlinks=False`` symlink, or a definitively absent path (``ENOENT`` /
         ``ENOTDIR`` - including a broken symlink when following), is a silent ``None``; a special /
-        unreadable file warns via ``notify`` and returns ``None`` (aws-cli's
-        warn-and-skip; an unreadable directory is named with the trailing
-        separator aws-cli's ``local_format`` gives a directory source, except
-        when symlinks are not followed, where aws-cli strips it again before
-        its battery); a regular file or directory returns a ``LocalFileInfo`` (no
+        unreadable file or directory warns via ``notify`` and returns ``None``
+        (aws-cli's warn-and-skip); a regular file or directory returns a ``LocalFileInfo`` (no
         type check, so a directory is returned and fails later at open). A stat error
         other than absence (e.g. a permission error reaching the path) is raised -
         existence could not be determined. ``compare_key`` is the caller's to stamp.
@@ -1823,12 +1997,25 @@ class LocalStorage(Storage):
         opens between them (the walk's single-stat design via
         ``entry_stat_result`` / ``classify_child``). The info carries that
         one followed ``stat_result`` and the ``is_symlink`` flag.
+
+        ``path`` is text: the OS calls take its OS form, while the key and the
+        warnings keep the text. ``directory_form`` (the location itself, see
+        `get_fileinfo`) names a directory with a trailing separator, from the
+        same stat: in the key, and in the warnings when symlinks are followed
+        (aws-cli warns about a no-follow directory without it).
         """
-        is_symlink = os.path.islink(path)
+        native = self._os_root(path)
+        # The location typed with a trailing separator is stat'd with it
+        # (`get_fileinfo`); aws-cli's should_ignore_file looks at a directory
+        # so named without that separator, since the OS follows a symlink
+        # named with one.
+        typed_separator = directory_form and self._path.endswith(os.sep)
+        link = native[:-1] if typed_separator and os.path.isdir(native) else native
+        is_symlink = os.path.islink(link)
         if not follow_symlinks and is_symlink:
             return None
         try:
-            st = os.stat(path)  # the one snapshot, reused below (followed)
+            st = os.stat(native)  # the one snapshot, reused below (followed)
         except (FileNotFoundError, NotADirectoryError):
             # ENOENT and ENOTDIR (a path component along the way is a file, not a
             # directory) both mean the entry is definitively absent - os.path.exists
@@ -1836,36 +2023,35 @@ class LocalStorage(Storage):
             # None per get_fileinfo's contract, not a raised transport error.
             return None
         except (OSError, ValueError) as exc:
-            # operation=None, like open / delete: the storage cannot know which
-            # operation resolves the path, so the operation layer fills the
-            # name in (attribute_failure); key names the path, the entry's own
-            # address space (exceptions.md).
-            raise translate_os_error(exc, operation=None, key=path.replace(os.sep, "/")) from exc
+            raise self._os_failure(exc, path) from exc
+        is_directory = stat_module.S_ISDIR(st.st_mode)
+        # aws-cli's local_format names a directory with a separator appended
+        # (a root's included: "/" is "//"), and its should_ignore_file hands a
+        # no-follow directory to the warnings with that separator removed.
+        if directory_form and is_directory and not typed_separator:
+            path += os.sep
+        if directory_form and is_directory and not follow_symlinks:
+            shown = path[:-1]
+        else:
+            shown = path
         if _is_special_mode(st.st_mode):
             notify(
-                f"Skipping file {path}. File is character special device, "
+                f"Skipping file {shown}. File is character special device, "
                 "block special device, FIFO, or socket."
             )
             return None
-        is_dir = stat_module.S_ISDIR(st.st_mode)
-        if not is_readable(path, is_dir):
-            # aws-cli's local_format names a directory source with a trailing
-            # separator, and its no-follow check strips it again before the
-            # battery - so the warning keeps the separator only when following
-            # (measured: `.../d/. File/Directory is not readable.` by default,
-            # `.../d.` under --no-follow-symlinks).
-            shown = path + os.sep if is_dir and follow_symlinks else path
+        if not is_readable(native, is_directory):
             notify(f"Skipping file {shown}. File/Directory is not readable.")
             return None
-        size, mtime = get_file_stat(path, st)
+        size, mtime = get_file_stat(native, st)
         if mtime is None:
             notify(_INVALID_TIMESTAMP)
             mtime = _EPOCH
         return LocalFileInfo(
             key=path.replace(os.sep, "/"),
             # A directory target carries its real kind (the FileInfo contract;
-            # the transfer routes still hand it through to fail like aws).
-            kind=FileKind.DIRECTORY if stat_module.S_ISDIR(st.st_mode) else FileKind.FILE,
+            # the transfer routes still hand it through to fail like aws-cli).
+            kind=FileKind.DIRECTORY if is_directory else FileKind.FILE,
             size=size,
             mtime=mtime,
             stat_result=st,
@@ -1902,28 +2088,45 @@ class LocalStorage(Storage):
         # target file's own path before the open fails.
         target = self._abspath if not key else os.path.join(self._abspath, to_native_path(key))
         try:
+            native = self.os_path(target)
             if mode == "rb":
-                return cast("BinaryIO", open(target, "rb"))
-            parent = os.path.dirname(target)
+                return cast("BinaryIO", open(native, "rb"))
+            parent = os.path.dirname(native)
             if parent:
                 os.makedirs(parent, exist_ok=True)
-            return cast("BinaryIO", open(target, "wb"))
+            return cast("BinaryIO", open(native, "wb"))
         except (OSError, ValueError) as exc:
-            # operation=None: the storage cannot know which operation opened
-            # it; the operation layer fills the name in (attribute_failure).
-            # key names the file opened, as get_fileinfo / delete name theirs.
-            raise translate_os_error(exc, operation=None, key=target.replace(os.sep, "/")) from exc
+            raise self._os_failure(exc, target) from exc
 
     @override
     def delete(self, info: FileInfo) -> None:
-        """Remove the file at ``info.key`` (an absolute local path)."""
-        target = to_native_path(info.key)
+        """Remove the file at ``info.key`` (an absolute local path, as text)."""
         try:
-            os.remove(target)
+            os.remove(self.os_path(to_native_path(info.key)))
         except (OSError, ValueError) as exc:
-            # operation=None, like open: an mv's source delete and a sync's
-            # orphan removal both reach this and stamp their own name.
-            raise translate_os_error(exc, operation=None, key=info.key) from exc
+            raise self._os_failure(exc, info.key) from exc
+
+    def _text_names(self, exc: BaseException) -> None:
+        """Name an OS error's files as this storage's text (no-op without a conversion)."""
+        codec = self._codec
+        if codec is not None:
+            name_files_as_text(exc, codec.to_text)
+
+    def _os_failure(self, exc: OSError | ValueError, path: str) -> Boto3S3Error:
+        """This storage's error for an OS call's failure on the text ``path``.
+
+        The one rule of the single-entry primitives (`_os_root` - so
+        `_stat_one` - ``open`` and ``delete``), each of which raises the
+        result ``from exc``: the files the error names are this storage's text
+        (`_text_names`); ``operation`` is ``None``, as the storage cannot know
+        which operation resolves, opens or deletes the path - the operation
+        layer fills the name in (``attribute_failure``), so an mv's source
+        delete and a sync's orphan removal each stamp their own; and ``key``
+        names the path acted on, ``/``-separated, the entry's own address space
+        (exceptions.md).
+        """
+        self._text_names(exc)
+        return translate_os_error(exc, operation=None, key=path.replace(os.sep, "/"))
 
     @override
     def get_fileinfo(
@@ -1936,7 +2139,12 @@ class LocalStorage(Storage):
 
         Anchored at the absolutized path (``self._abspath``, joined with ``key``
         for a child), so ``FileInfo.key`` is absolute; ``compare_key`` is its
-        basename. As with ``open``, ``key`` is joined under the location and
+        basename. The location itself (``key=""``) is looked up in aws-cli's
+        ``local_format`` form (`format`): a path typed with a trailing
+        ``os.sep`` is stat'd with one, so a file so named is absent (``None``),
+        and a directory is named with one, so its key ends in ``/`` and its
+        ``compare_key`` is ``""`` - as aws-cli finds and names them. As with
+        ``open``, ``key`` is joined under the location and
         a ``..`` / absolute ``key`` deliberately resolves outside it (a building
         block an app drives, not a confinement boundary - see ``open``).
         Whether a symlink is followed is the storage's own ``follow_symlinks``
@@ -1947,10 +2155,15 @@ class LocalStorage(Storage):
         notify: Callable[[str], None] = (
             on_warning if on_warning is not None else (lambda body: None)
         )
-        target = self._abspath
         if key:
-            target = os.path.join(target, to_native_path(key))
-        info = self._stat_one(target, follow_symlinks=self._follow_symlinks, notify=notify)
+            target = os.path.join(self._abspath, to_native_path(key))
+        elif self._path.endswith(os.sep):
+            target = self._abspath + os.sep
+        else:
+            target = self._abspath
+        info = self._stat_one(
+            target, follow_symlinks=self._follow_symlinks, notify=notify, directory_form=not key
+        )
         if info is not None:
             info.compare_key = info.key.rsplit("/", 1)[-1]
         return info

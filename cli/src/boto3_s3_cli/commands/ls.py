@@ -6,16 +6,15 @@ import argparse
 import sys
 
 from boto3_s3 import FileInfo, FileKind, S3Storage
-from boto3_s3_cli import clientfactory, globalargs, output
+from boto3_s3_cli import output
 from boto3_s3_cli.commands.base import (
     Command,
     Context,
     add_page_size_argument,
     add_request_payer_argument,
-    expand_integer_paramfile,
     expand_option_paramfile,
     expand_positional_paramfile,
-    parse_integer_option,
+    resolve_integer_option,
 )
 
 
@@ -60,31 +59,10 @@ class LsCommand(Command):
 
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """List objects/prefixes (or all buckets) and return an ``aws s3``-style code."""
-        # aws's parse-time order (measured, design/cli.md section 6): the --query
-        # JMESPath compile (252) leads, then the --endpoint-url scheme check
-        # (252), then each option at its own slot in aws's option-table order -
-        # the positional, then --page-size (paramfile load 252, then the bare
-        # int() coercion 255), then the bucket-listing filters. So a bad
-        # --page-size value fires ahead of a bad --bucket-name-prefix /
-        # --bucket-region paramfile (measured on the pinned aws-cli).
-        globalargs.validate_query(args)
-        clientfactory.validate_endpoint_url(args)
         expand_positional_paramfile(args, "paths", name="paths", operation="ls")
-        expand_integer_paramfile(args, "page_size", operation="ls")
-        page_size = parse_integer_option(args.page_size, operation="ls")
+        page_size = resolve_integer_option(args, "page_size", operation="ls")
         expand_option_paramfile(args, "bucket_name_prefix", operation="ls")
         expand_option_paramfile(args, "bucket_region", operation="ls")
-        # Everything above is aws's parse layer; the client comes next, in
-        # aws's own slot (S3Command._run_main), ahead of all path handling. So
-        # an empty region is its "Invalid endpoint" 255 rather than the bytes
-        # crash just below, and a merely absent region still builds.
-        s3 = ctx.s3(args)
-        client = s3.client()
-        # Intentional aws-cli bug parity: a readable positional fileb:// is
-        # still bytes here. Calling bytes.startswith(str) raises TypeError,
-        # which the general handler maps to 255.
-        if isinstance(args.paths, bytes):
-            raise TypeError("startswith first arg must be bytes or a tuple of bytes, not str")
         target: str = args.paths
         # A target with no bucket lists all buckets. aws-cli even discards a key
         # left after an empty bucket ("s3:///k"), so normalize every such form to
@@ -93,6 +71,8 @@ class LsCommand(Command):
         if not rest.partition("/")[0]:
             target = "s3://"
 
+        s3 = ctx.s3(args)
+        client = s3.client()
         storage = S3Storage(target, client=client, page_size=page_size)
         storage.validate()
         key_specified = bool(storage.key)
@@ -108,8 +88,8 @@ class LsCommand(Command):
             line = output.format_entry(
                 info, recursive=args.recursive, human_readable=args.human_readable
             )
-            # uni_write (aws's uni_print): an unencodable key on a narrow
-            # console/pipe encoding must not abort the listing mid-way - aws
+            # uni_write (aws-cli's uni_print): an unencodable key on a narrow
+            # console/pipe encoding must not abort the listing mid-way - aws-cli
             # prints it with replacements and finishes rc 0.
             output.uni_write(sys.stdout, line + "\n")
             if info.kind is FileKind.FILE:

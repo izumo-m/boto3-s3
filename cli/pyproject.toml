@@ -1,6 +1,6 @@
 [project]
 name = "boto3-s3-cli"
-version = "0.9.0"
+version = "0.10.0"
 description = "An `aws s3` compatible CLI built on the boto3-s3 library."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,11 +27,11 @@ classifiers = [
 ]
 dependencies = [
     # Versioned independently; the range pins the library API this CLI is built against.
-    "boto3-s3>=0.12.0,<0.13.0",
-    # Imported directly (the Session in build_client and the [s3] config read,
-    # the autoprompt completers); floor matches boto3-s3's pin.
+    "boto3-s3>=0.13.0,<0.14.0",
+    # Named directly in type annotations (TransferConfig); floor matches boto3-s3's pin.
     "boto3>=1.28",
-    # Imported directly by build_client (Config / UNSIGNED / signer pin); floor matches boto3-s3's botocore pin.
+    # Imported directly (the exception classes, the SSO token provider's cache class);
+    # floor matches boto3-s3's botocore pin.
     "botocore>=1.31",
     # Imported directly (the ls timestamp rendering uses dateutil's tzlocal,
     # like aws-cli); floor matches botocore's own dateutil pin.
@@ -41,8 +41,6 @@ dependencies = [
 [project.optional-dependencies]
 # Opt-in CRT support, forwarding down the stack to boto3-s3[crt] (see design/crt.md).
 crt = ["boto3-s3[crt]"]
-# Opt-in --cli-auto-prompt interactive UI via prompt_toolkit (see design/autoprompt.md).
-autoprompt = ["prompt_toolkit>=3.0"]
 
 [project.scripts]
 boto3-s3 = "boto3_s3_cli.cli:main"

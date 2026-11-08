@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import argparse
-import os
 
-# Loaded at dispatch once sync is determined (stage 2 of the lazy dispatch) -
-# or up front when auto-prompt builds the full command model.
-from boto3_s3 import NotFoundError, ValidationError
+# Loaded at dispatch once sync is determined (stage 2 of the lazy dispatch).
+from boto3_s3 import ValidationError
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3_cli import filters
 from boto3_s3_cli.commands import transferargs
@@ -23,7 +21,7 @@ class SyncCommand(Command):
     def configure(self, parser: argparse.ArgumentParser) -> None:
         """Add the ``sync`` arguments: the shared transfer surface without
         ``--recursive`` / ``--expected-size`` (sync is inherently recursive
-        and has no streaming form - aws rejects both as unknown options),
+        and has no streaming form - aws-cli rejects both as unknown options),
         plus the strategy flags."""
         transferargs.add_transfer_arguments(parser, include_recursive=False)
         parser.add_argument(
@@ -45,51 +43,30 @@ class SyncCommand(Command):
     def run(self, args: argparse.Namespace, ctx: Context) -> int:
         """Sync and return an ``aws s3 sync``-style exit code.
 
-        The shape is cp's (design/cli.md section 6) with sync's own usage errors in
-        aws-cli order: the local-local pair 252, any
-        ``-`` path 252 ("Streaming currently is only compatible with
+        The shape is cp's (design/cli.md section 6) with sync's own usage
+        errors: the local-local pair 252, a path that names no bucket 252,
+        any ``-`` path 252 ("Streaming currently is only compatible with
         non-recursive cp commands" - cp-worded even here), the checksum /
         SSE-C pairings 252, and an S3 Express directory bucket or one of
         its access points on either side 252 ("Cannot use sync command with
-        a directory bucket."; aws refuses the bucket only) - all
-        after the S3 client is built, the way aws orders them. A missing local source exits 255; the
+        a directory bucket."; aws-cli refuses the bucket only). A missing local
+        source, and one whose root the walk would skip (a file, an
+        unreadable directory, a symlink under ``--no-follow-symlinks``),
+        exit 255; the
         ``--exclude`` / ``--include`` patterns compile once and apply to both
-        sides (rootless anchoring; design/sync.md section 1).
+        sides (design/sync.md section 1).
         """
         head = transferargs.classify_paths(args, ctx, operation="sync")
-        page_size, progress_frequency = head.page_size, head.progress_frequency
         src, dest = head.src, head.dest
-        src_type, dest_type = head.src_type, head.dest_type
-        if src == "-" or dest == "-":
-            # aws-cli's _validate_streaming_paths: only cp streams, and its
-            # wording names cp even from sync.
-            raise ValidationError(
-                "Streaming currently is only compatible with non-recursive cp commands",
-                operation="sync",
-            )
+        transferargs.validate_streaming_paths(head, recursive=True, operation="sync")
         paths_type = head.paths_type  # "locals3" | "s3local" | "s3s3" here
         transferargs.validate_checksum_paths_type(args, paths_type, operation="sync")
-        # aws-cli's _validate_path_args (one function) does BOTH the missing-source
-        # check and the s3local dest-dir creation, and runs entirely BEFORE
-        # _validate_sse_c_args and the directory-bucket check. So both 255 checks
-        # below precede the SSE-C / S3 Express 252 checks: when more than one
-        # fails, that order decides the exit code.
-        if src_type == "local" and not os.path.exists(src):
-            # Missing local source: aws's bare RuntimeError -> rc 255
-            # (NotFoundError without a ClientError cause maps the same).
-            raise NotFoundError(f"The user-provided path {src} does not exist.", operation="sync")
-        if dest_type == "local":
-            # aws creates the s3local destination during validation (before
-            # run): a creation failure is the pre-pipeline rc 255.
-            transferargs.create_local_dest_dir(dest, operation="sync")
+        transferargs.check_local_source(args, head, recursive=True, operation="sync")
         transferargs.validate_sse_c_pairing(args, paths_type, operation="sync")
-        if any(
-            transferargs.is_s3express_path(path) or transferargs.is_s3express_accesspoint_path(path)
-            for path in (src, dest)
-        ):
+        if any(transferargs.lists_unordered(path) for path in (src, dest)):
             # aws-cli's _validate_not_s3_express_bucket_for_sync: directory-bucket
             # listings are not lexicographic, so sync rejects them outright.
-            # aws tests only the --x-s3 suffix and so runs a sync through an
+            # aws-cli tests only the --x-s3 suffix and so runs a sync through an
             # access point of a directory bucket (--xa-s3), whose listing is
             # just as unordered: --delete then removes destination keys the
             # source has too. That is refused here as well (a deliberate
@@ -103,47 +80,29 @@ class SyncCommand(Command):
         s3 = head.s3
         client = head.client
 
-        src_location, dest_location = transferargs.resolve_locations(
-            args,
-            ctx,
-            s3,
-            client,
-            src,
-            dest,
-            src_type=src_type,
-            dest_type=dest_type,
-            page_size=page_size,
-        )
+        src_location, dest_location = transferargs.resolve_locations(args, ctx, head)
 
-        # One filter applied to both sides by S3.sync (design/sync.md section 1),
-        # compiled with both sides as its bases: aws joins every pattern onto
-        # the source AND destination rootdir and applies both joined forms to
-        # every entry, which compile_filter reproduces (delegating to the
-        # symmetric compare_key match when provably identical).
-        item_filter = filters.compile_filter(
-            args.filters, src=src_location, dest=dest_location, dir_op=True
-        )
-        transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
-        # aws builds the transfer manager here, before it decides anything about
-        # the run: a CRT selection pays its construction even for a --dryrun.
-        transferargs.materialize_transfer_engine(s3, client, transfer_config, operation="sync")
+        # One filter applied to both sides by S3.sync (design/sync.md section
+        # 1): each side's entries carry their path below that side's base, as
+        # aws-cli joins every pattern onto each side's rootdir.
+        item_filter = filters.compile_filter(args.filters)
+        transfer_config = transferargs.build_transfer_engine(ctx, s3, client, paths_type=paths_type)
         # After the engine is resolved: the upload checksum default is the
-        # engine's (nothing in build_transfer_options can fail, so the move
-        # past resolve_locations / compile_filter changes no error order).
+        # engine's.
         options = transferargs.build_transfer_options(
             args,
             case_conflict,
-            operation="sync",
-            default_checksum_algorithm=transferargs.default_upload_checksum(
-                client, paths_type, transfer_config
-            ),
         )
-        printer = transferargs.build_printer(args, progress_frequency)
+        if head.dest_type == "local":
+            # The s3local destination aws-cli's _validate_path_args creates, once
+            # every check above has passed (transferargs.create_local_dest_dir).
+            transferargs.create_local_dest_dir(dest, operation="sync")
+        printer = transferargs.build_printer(args, head.progress_frequency)
 
         def run_sync() -> None:
             s3.sync(
-                src_location,  # type: ignore[arg-type]
-                dest_location,  # type: ignore[arg-type]
+                src_location,  # pyright: ignore[reportArgumentType]
+                dest_location,  # pyright: ignore[reportArgumentType]
                 delete_filter=args.delete,
                 update_filter=AwsCliComparison(
                     size_only=args.size_only, exact_timestamps=args.exact_timestamps

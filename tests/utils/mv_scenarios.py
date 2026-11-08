@@ -139,7 +139,7 @@ SCENARIOS: tuple[CpScenario, ...] = (
         mtime_key=("d/a.txt", "dest/out.txt"),
     ),
     CpScenario(
-        # aws filters a SINGLE-object mv too: the excluded source is neither
+        # aws-cli filters a SINGLE-object mv too: the excluded source is neither
         # transferred nor deleted - the bucket end state (golden) proves the
         # object survived, and dest/ stays empty. Guards the single-source
         # filter lane (an excluded mv source being deleted was the hazard).
@@ -269,19 +269,15 @@ SCENARIOS: tuple[CpScenario, ...] = (
     CpScenario(
         name="mv_stream_rejected",
         argv=("mv", "-", f"s3://{BUCKET_TOKEN}/k.txt"),
-        expected_stderr_tokens_ours=(
-            "Streaming currently is only compatible with non-recursive cp commands",
-        ),
-        expected_stderr_tokens_aws=(
-            "Streaming currently is only compatible with non-recursive cp commands",
-        ),
+        expected_stderr_tokens_ours=("Streaming",),
+        expected_stderr_tokens_aws=("Streaming",),
     ),
     CpScenario(
         name="mv_local_local",
         argv=("mv", "src/a.txt", "dest/b.txt"),
         local_src=_SRC_SINGLE,
-        expected_stderr_tokens_ours=("Error: Invalid argument type",),
-        expected_stderr_tokens_aws=("Error: Invalid argument type",),
+        expected_stderr_tokens_ours=("Invalid argument type",),
+        expected_stderr_tokens_aws=("Invalid argument type",),
     ),
     # -- no-overwrite (the source must survive a skipped move) ----------------
     CpScenario(

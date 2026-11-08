@@ -3,7 +3,8 @@
 The public symbols that stand outside the `S3` object and its options, results
 and filters: the tuned session factory and the timestamp parser it installs,
 the AWS config-file reader and the sections it hands out, the masked
-debug-logging entry point, the CRT engine resolution the command shares, the
+debug-logging entry point, the HTTPS-proxy CONNECT pin, the CRT engine
+resolution the command shares, the
 access-point path resolver, the batch-deletion driver and its batch limit,
 and the package version. The narrative
 counterparts are [`../library/s3-object.md`](../library/s3-object.md) for the
@@ -77,8 +78,9 @@ rejects with `ValueError` — falls through to botocore's own `parse_timestamp`
 untouched. The form is a deliberate guard: Python 3.11+'s `fromisoformat`
 reads much more than S3 sends — a digit-only `"20200101"`, which botocore reads
 as epoch seconds, a week date (`2025-W01-1`), and on 3.14 an hour of `24` —
-where botocore answers differently or refuses, so the guard keeps every other
-spelling on botocore's interpretation on every supported Python.
+where botocore answers differently or refuses, and the session builds the
+clients of every service, so the guard keeps every other spelling on
+botocore's interpretation on every supported Python.
 
 The return is a `datetime`. For every input both paths accept, the two agree in
 value; the difference is the tzinfo class — `datetime.timezone` on the fast
@@ -171,12 +173,12 @@ non-`None` default narrows the return to that type, while omitting it (or
 passing `None`) admits `None`.
 
 The reader holds no defaults table of its own — every getter takes the
-caller's default — and the operations never consult it, so none of `aws s3`'s
-own `[s3]` transfer settings applies to an operation implicitly
-([`S3.aws_config()`](./s3.md#aws_config)). The `[s3]` values are readable here
-all the same, as `cfg.profile().get_size("s3.multipart_chunksize", default)`;
-applying `aws s3`'s own interpretation of that section — its defaults table,
-its validation, its engine choice — is the `boto3-s3` command's job.
+caller's default. The transfer operations read the `[s3]` section through it
+and apply `aws s3`'s own interpretation of it — its defaults table, its
+validation, its engine choice
+([`S3.resolve_transfer_config`](./s3.md#resolve_transfer_configtransfer_confignone--copyfalse)); the values
+are readable here all the same, as
+`cfg.profile().get_size("s3.multipart_chunksize", default)`.
 
 **Caching.** The full config is parsed on first access and held, and the
 active profile's section is built once and held; both caches are per instance.
@@ -190,8 +192,9 @@ an unparsable file; and from a value a getter cannot convert. Its parent is
 `except ConfigurationError` covers all of them.
 
 The same module also carries `SIZE_SUFFIX`, the 1024-based suffix table the
-size and rate getters share with the `boto3-s3` command's own parser, and
-`split_size_suffix`; neither is exported from the package root.
+size and rate getters share with the `[s3]` reading of
+[`S3.resolve_transfer_config`](./s3.md#resolve_transfer_configtransfer_confignone--copyfalse),
+and `split_size_suffix`; neither is exported from the package root.
 
 ## ConfigSection
 
@@ -321,6 +324,38 @@ exception traceback attached to a record is masked on the same handler too.
 keys are deliberately left visible. The pattern-by-pattern table is
 [`../../design/masking.md`](../../design/masking.md) section 4.1.
 
+## pin_proxy_connect
+
+```python
+def pin_proxy_connect() -> None
+```
+
+Makes botocore open an HTTPS-proxy tunnel with the CONNECT request aws-cli
+sends: `CONNECT host:port HTTP/1.1` carrying a `Host` header. Python 3.10 and
+3.11 — and the copy of their opener urllib3 carries — send `HTTP/1.0` with no
+`Host`, which a proxy that holds HTTP/1.1 to RFC 9110 refuses, so behind such a
+proxy every request from those interpreters fails where `aws` succeeds (aws-cli
+ships its own Python 3.14). Python 3.12 and later already send the new shape,
+and there the call does nothing (3.12.0 to 3.12.2 still put an IPv6 literal in
+brackets in that `Host` header, which aws-cli's interpreter does not; that is
+left as it is).
+
+The change is process-wide, which is why the library never makes it on its
+own: call it once, before the first request. It reaches every botocore client
+in the process — the library's, the STS and SSO clients a credential chain
+builds for itself, and those of any other boto3 code the application runs —
+and nothing that is not botocore, such as urllib3 used directly or requests.
+Calling it again changes nothing. It declines quietly, leaving the
+interpreter's own request in place, when there is nothing it recognizes to
+replace: a botocore or urllib3 it cannot import, a tunnel opener that already
+writes the new shape, a botocore whose connections open tunnels themselves, or
+a standard library without the private header reader (`http.client._read_headers`)
+the replacement reads the proxy's answer with. The replacement writes the
+request line and the headers botocore hands it as they are, without the
+control-character checks newer interpreters and urllib3 apply there: botocore
+validates the endpoint, region and bucket name it builds them from. The
+`boto3-s3` command calls it.
+
 ## crtsupport
 
 `boto3_s3.crtsupport` is the CRT transfer-engine resolution the library and the
@@ -336,8 +371,6 @@ its own path (`from boto3_s3 import crtsupport`) and imports no awscrt or
 `s3transfer.crt` until a function that needs them runs. Its stable surface is
 its `__all__`:
 
-- `CLIENT_REGION` and `CrtRegion` — the region declaration `S3(crt_region=...)`
-  takes, [documented with `S3`](./s3.md#crtregion).
 - `has_minimum_crt_version()` — whether awscrt is importable at boto3's minimum
   version for the engine; `has_crt_s3transfer()` — whether the installed
   s3transfer exposes the CRT surface the engine needs (it arrived in 0.8.0,
@@ -364,9 +397,9 @@ its `__all__`:
   process-wide CRT client for `client` and returns an s3transfer
   `CRTTransferManager`, or `None` where boto3 would fall back to classic (the
   lock held elsewhere, a client incompatible with the one the engine was built
-  for). The keyword arguments — `endpoint`, `session`,
-  `allow_absent_credentials`, `allow_lockless`, `region`, `sign_requests` —
-  are the postures [`S3`](./s3.md#s3) declares and threads through; the
+  for). The keyword arguments — `endpoint`, `session` and `crt` (a
+  [`CrtClientOptions`](./options.md#crtclientoptions)) — are the postures
+  [`S3`](./s3.md#s3) declares and threads through; the
   failures it raises are classified at `S3`'s seams, not here.
   `materialize_crt_engine(client, config, ...)` — the same construction with
   the result dropped, after `selects_crt`; `caller_endpoint(client, endpoint)`
@@ -380,8 +413,10 @@ Multi-Region Access Point ARN, or an access point of an S3 Express directory
 bucket can hide the bucket a path really addresses, so two different-looking
 paths can name the same object; resolving both sides first lets a caller
 compare the real pairs (with [`S3Storage.same_path`](./storage.md#s3storage))
-before moving anything. This is a port of the AWS CLI's own resolver, the
-machinery behind `aws s3 mv --validate-same-s3-paths`, with one shape added:
+before moving anything — which
+[`S3.mv(validate_same_s3_paths=True)`](./operations/mv.md#what-mv-rejects-that-cp-accepts)
+does for a move. This is a port of the AWS CLI's own resolver, the machinery
+behind `aws s3 mv --validate-same-s3-paths`, with one shape added:
 the AWS CLI does not resolve an S3 Express access point (`--xa-s3`), whose
 same-key move onto its directory bucket deletes the object on real S3 (the
 directory bucket accepts the copy onto itself). The AWS CLI's `from_session`
@@ -437,8 +472,7 @@ Raises:
 
 - [`ValidationError`](./exceptions.md#validationerror) for a `--op-s3` Outposts
   access point alias, which no API can resolve, and for a Multi-Region Access
-  Point alias not found in the account after the listing is exhausted. Both
-  carry the AWS CLI's wording.
+  Point alias not found in the account after the listing is exhausted.
 - [`ConfigurationError`](./exceptions.md#configurationerror) for an S3 Express
   access point on a botocore older than 1.37.24, which would send the lookup
   to an endpoint that does not know the access point; no request is sent.
@@ -448,13 +482,12 @@ Raises:
   [`TransportError`](./exceptions.md#transporterror) — for a failing
   `GetAccessPoint`, `GetCallerIdentity` or `ListMultiRegionAccessPoints`, with
   whatever the request raised kept as `__cause__` — a botocore error, or
-  anything else botocore died of inside it (a reply value its parser cannot
-  convert), which is the base class carrying that exception's text.
-- [`MalformedResponseError`](./exceptions.md#malformedresponseerror) for a reply
-  missing an element the AWS CLI reads by subscript (`GetAccessPoint`'s
-  `Bucket`, `GetCallerIdentity`'s `Account`, the listing's `AccessPoints` and
-  each access point's `Alias`, `Regions` and region `Bucket`), with the AWS
-  CLI's text: the element's name in quotes.
+  anything else botocore died of inside it (a refreshing `credential_process`
+  whose program is gone), which is the base class carrying that exception's
+  text.
+- [`Boto3S3Error`](./exceptions.md#boto3s3error) itself for a
+  `ListMultiRegionAccessPoints` listing that repeats its `NextToken`, which
+  would otherwise page forever (botocore's paginator rule).
 
 All of the above carry `operation="mv"`: the tag is fixed in this class rather
 than taken as a parameter.
@@ -478,24 +511,13 @@ Nothing is validated: a string that is not an S3 path simply reports `False`,
 unless its first segment happens to end in one of those three suffixes.
 
 The same module, `boto3_s3.pathresolver`, also carries the string probes
-`is_mrap_path`, `is_outpost_path`, `is_outpost_alias_path`,
 `is_s3express_path` and `is_s3express_accesspoint_path`, which are not
-re-exported from the package root. They name the target shapes whose signing
-scheme botocore has to resolve for itself — asymmetric SigV4a for the first
-three (a Multi-Region Access Point, and an S3 on Outposts access point in
-either notation, ARN or `--op-s3` alias), `sigv4-s3express` for the last two
-(a directory bucket, `--x-s3`, and an access point of one, `--xa-s3`; the two
-stay separate because the AWS CLI's own `is_s3express_bucket` tests only the
-bucket suffix, while this project's `sync` rejection and `--case-conflict`
-branch take both) —
-so a caller that pins a symmetric
-`signature_version` on its client (as the `boto3-s3` command does) can stand
-that pin down for them. They test what botocore's endpoint rules test rather
-than the ARN spellings above: an MRAP is an `s3` access-point ARN with an
-empty region field, and the alias probe reads the fixed-width slices the rules
-read. The suffix probes, `is_outpost_alias_path`, `is_s3express_path` and
-`is_s3express_accesspoint_path`, require the `s3://` scheme, since a local
-path can plausibly end in `--op-s3` or `--x-s3`.
+re-exported from the package root. They name an S3 Express directory bucket
+(`--x-s3`) and an access point of one (`--xa-s3`); the two stay separate
+because the AWS CLI's own `is_s3express_bucket` tests only the bucket suffix,
+while this project's `sync` rejection and `--case-conflict` branch take both.
+Both require the `s3://` scheme, since a local path can plausibly end in
+`--x-s3`.
 
 ## S3Deleter
 
@@ -505,7 +527,7 @@ one `DeleteObjects` call for the keys XML 1.0 can carry, plus one
 `DeleteObject` call per key it cannot. It is the machinery behind
 [`rm`](./operations/rm.md) and
 [`sync(delete_filter=...)`](./operations/sync.md), and is usable directly. The
-rationale, the parity analysis and the error model in full are
+rationale, the comparison with aws-cli and the error model in full are
 [`../../design/deleter.md`](../../design/deleter.md).
 
 ```python
@@ -522,10 +544,7 @@ S3Deleter(
     transfer_config: TransferConfig | None = None,
     session: Session | None = None,
     crt_endpoint: str | None = None,
-    crt_allow_absent_credentials: bool = False,
-    crt_allow_lockless: bool = False,
-    crt_region: CrtRegion = CLIENT_REGION,
-    crt_sign_requests: bool | None = None,
+    crt: CrtClientOptions | None = None,
 )
 ```
 
@@ -548,12 +567,17 @@ to botocore where a transfer would fall back to classic; an explicit `'crt'`
 without a usable awscrt raises botocore's `MissingDependencyException`). On
 the CRT client a request is serialized by botocore and signed and sent by the
 CRT, so the CRT's retry policy and error text apply, as they do to `aws s3`'s
-deletes under that engine. `session` and the `crt_*` arguments are the CRT
-engine's postures, with [`S3`](./s3.md#s3)'s meaning (`crt_endpoint` is its
+deletes under that engine. `session`, `crt_endpoint` and `crt` (a
+[`CrtClientOptions`](./options.md#crtclientoptions)) are the CRT engine's
+postures, with [`S3`](./s3.md#s3)'s meaning (`crt_endpoint` is its
 `endpoint_url` pin, applied only to the client built from it); `S3.rm` and `sync`
 pass their instance's, and `sync` passes a classic config for an S3-to-S3 run,
 which `aws s3` always runs on its classic client. A `dryrun` deleter builds no
 engine.
+
+A `KeyboardInterrupt` leaves the context at once: the batch in flight finishes
+behind the caller, reports nothing and starts no further per-key request, and
+the worker ends by itself ([`s3.md`](./s3.md#s3)).
 
 `on_result` is a [`ResultCallback`](./results.md#resultcallback) receiving one
 [`OpResult`](./results.md#opresult) per dispatched entry — see
@@ -649,8 +673,10 @@ def close(self, *, flush: bool = True) -> None
 
 Flush, wait for in-flight work, shut the worker down. Idempotent. The flush is
 skipped when `flush=False` or when the token is already cancelled. Afterwards
-the rollup counters are final and `submit` / `flush` raise
-[`ValidationError`](./exceptions.md#validationerror).
+`submit` / `flush` raise [`ValidationError`](./exceptions.md#validationerror),
+and the rollup counters are final — but for a close an immediate cancel or a
+Ctrl-C ended, which waits for nothing: a batch already sent then finishes behind
+it, still counting.
 
 An unexpected worker exception — or one raised by `on_result` — re-raises here;
 the deleter still ends up closed and the worker shut down either way. Entries
@@ -662,8 +688,9 @@ are abandoned without any result being emitted for them.
 `__enter__` returns the deleter; `__exit__` calls
 `close(flush=exc_type is None)`. Leaving the block normally flushes; leaving it
 because of an exception abandons the unsent buffer while still waiting for the
-batch already in flight, and a worker error raised at that point propagates
-with the body's exception chained as its `__context__`.
+batch already in flight - but for a Ctrl-C and an immediate cancel, which wait
+for nothing - and a worker error raised at that point propagates with the
+body's exception chained as its `__context__`.
 
 Closing matters: interpreter shutdown joins the worker thread whichever thread
 started it (the executor registers the join itself, so a daemon caller is no
@@ -693,9 +720,7 @@ inline, where an exception it raises propagates out of `submit` directly.
 
 One [`OpResult`](./results.md#opresult) per dispatched entry, emitted in
 submission order within a batch (bar a per-key request an abandoned run never
-sent — the last paragraph of this section — and, on the botocore client, a
-key whose own `DeleteObject` died without a response, dropped as `aws s3`
-drops it). `transfer_type` is
+sent — the last paragraph of this section). `transfer_type` is
 [`TransferType.DELETE`](./results.md#transfertype) and `bytes_transferred`
 stays `0`. `compare_key` is the entry's own `compare_key` when it has one and
 its `key` otherwise. `src` is `s3://<bucket>/<key>`, `src_info` is the
@@ -708,8 +733,8 @@ all.
 
 The library prints nothing. Beyond the results, the deleter logs to the
 `boto3_s3.deleter` logger: batch dispatches, the per-key fallback, and
-request-level and per-key failures at DEBUG, and unattributable response
-entries as warnings ([`../library/logging.md`](../library/logging.md)).
+request-level and per-key failures at DEBUG
+([`../library/logging.md`](../library/logging.md)).
 
 ### Captured responses
 
@@ -721,12 +746,8 @@ the entry minus its `Key`, with a `DeleteMarkerVersionId` renamed to
 `VersionId` (which is how a single `DeleteObject` reports the same id), plus
 the batch-wide `RequestCharged` when the response carries one. The per-key
 fallback route uses its real `DeleteObject` response with `ResponseMetadata`
-stripped. Either way the caller sees the same shape. Failed keys get no slot
-— a key the response lists under both `Deleted[]` and `Errors[]` is a failure —
-and neither does a successful key the response's `Deleted[]` leaves out:
-success on the batch route is absence from `Errors[]` whichever way `Quiet` was
-sent, so an endpoint that answers `Quiet=False` without listing every key
-yields successes with nothing to show. With `capture_response=False` (the
+stripped. Either way the caller sees the same shape. Failed keys get no
+slot. With `capture_response=False` (the
 default) the batch is sent with `Quiet=True` and no slot is produced at all.
 
 One limitation: `DeleteObjects` reports per key spelling, so when the same key
@@ -790,19 +811,7 @@ started. A `DeleteObjects` request that fails as a whole sends its
 keys the same way, whatever the policy, as described below.
 
 Successes on the batch route are synthesized as the submitted keys minus the
-keys in `Errors[]`. An entry that cannot be attributed to a submitted key,
-because it has no `Key` or a key spelled differently from the one sent, is
-logged as a warning and **voids that synthesis for its batch**: every key of
-the batch that the response did not account for is instead recorded as failed,
-carrying a plain [`Boto3S3Error`](./exceptions.md#boto3s3error) with
-`operation` / `bucket` / `key` and a message quoting the offending entry and
-stating that the key's deletion cannot be confirmed. Otherwise the key that
-entry was about would be reported deleted on no evidence. A key that has an
-attributable error of its own keeps it, and with `capture_response=True` a key
-listed in `Deleted[]` stays a success with its slot, because `Quiet=False`
-makes that entry positive per-key evidence. These synthesized failures count in
-`failed` and can become `first_error`. S3 answers only for the keys the request
-carried, so this is a guard rather than a behavior a real run reaches.
+keys in `Errors[]`.
 
 A request-level failure — the `delete_objects` call itself failing, whatever
 the failure: an error the service answered with, a dropped or refused
@@ -818,7 +827,8 @@ dispatch that took the per-key fallback route are unaffected by it: there, that
 call's own success or translated exception is the key's result directly.
 
 An exception a request of either route raises outside the botocore family —
-botocore choking on a malformed response, a redirect loop — is the request
+the `FileNotFoundError` of a refreshing `credential_process` whose program is
+gone, say — is the request
 failing the same way: a batch's keys are sent again one by one, and a single
 key's request fails the key, as a plain
 [`Boto3S3Error`](./exceptions.md#boto3s3error) carrying the original as
@@ -831,16 +841,14 @@ or at `close()`.
 ### Cancellation
 
 A cancelled [`CancelToken`](./results.md#canceltoken) stops further batches
-from being dispatched. A batch whose request has already started completes and
-delivers its per-key results — a graceful cancel drains all of it, while an
-immediate one (like `close(flush=False)` for any other reason) starts none of
-the batch's remaining per-key requests, and a key left unsent that way gets
-no record.
-Buffered entries that were never sent are
-discarded without results, and
-[`CancelMode.IMMEDIATE`](./results.md#cancelmode) may additionally cancel a
-dispatched batch that has not started, whose entries likewise produce no
-records. The deleter does not raise
+from being dispatched, and buffered entries that were never sent are discarded
+without results. A graceful cancel waits for a batch whose request has already
+started, which completes and delivers its per-key results.
+[`CancelMode.IMMEDIATE`](./results.md#cancelmode) waits for nothing: a
+dispatched batch that has not started never runs, and one already sent
+finishes on its own without delivering its results and, like
+`close(flush=False)` for any other reason, starts none of its remaining per-key
+requests. The entries of such batches produce no records. The deleter does not raise
 [`CancelledError`](./exceptions.md#cancellederror) itself; the operations
 driving it do.
 

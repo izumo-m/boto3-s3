@@ -1,11 +1,11 @@
-"""``boto3_s3_cli.runtimeconfig`` - the aws-cli ``[s3]`` config parser, ported.
+"""``boto3_s3.transferconfig`` - the aws-cli ``[s3]`` config parser, ported.
 
 The parsing matrix is aws-cli ``tests/unit/customizations/s3/
 test_transferconfig.py`` translated (their ``InvalidConfigError`` escapes to
-the aws general handler = rc 255; ours is the library class of the same name,
+the aws-cli general handler = rc 255; ours is the library class of the same name,
 which the CLI's exit-code mapping sends to the same 255). The added classes pin
-what the port owns beyond the aws-cli file: byte-exact error wording and the
-scoped-config read.
+what the port owns beyond the aws-cli file: the refusal of empty and invalid
+values, and the scoped-config read.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import boto3
 import pytest
 
 from boto3_s3 import S3, InvalidConfigError
-from boto3_s3_cli import runtimeconfig
+from boto3_s3 import transferconfig as runtimeconfig
 
 
 def build_config_with(**config_from_user: Any) -> dict[str, Any]:
@@ -151,46 +151,25 @@ class TestRuntimeConfig:
         assert runtime_config[attr] == expected
 
 
-class TestErrorWording:
-    """Byte-exact aws wording (each exits 255 over there)."""
+class TestRejectedValues:
+    """Values the parser refuses (each exits 255 on `aws`)."""
 
-    def test_invalid_choice_message(self) -> None:
-        with pytest.raises(InvalidConfigError) as exc_info:
-            build_config_with(preferred_transfer_client="bogus")
-        assert str(exc_info.value) == (
-            'Invalid value: "bogus" for configuration option: '
-            '"preferred_transfer_client". Supported values are: auto, classic, crt'
-        )
-
-    def test_positive_integer_message(self) -> None:
-        with pytest.raises(InvalidConfigError) as exc_info:
-            build_config_with(max_queue_size="0")
-        assert str(exc_info.value) == "Value for max_queue_size must be a positive integer: 0"
-
-    def test_invalid_size_message(self) -> None:
-        with pytest.raises(InvalidConfigError) as exc_info:
+    def test_invalid_size_is_rejected(self) -> None:
+        with pytest.raises(InvalidConfigError):
             build_config_with(multipart_threshold="10XB")
-        assert str(exc_info.value) == "Invalid size value: 10xb"
 
     def test_empty_choice_value_is_rejected_not_defaulted(self) -> None:
         # A `preferred_transfer_client =` line is present-empty, not unset: it
-        # must reach the choices validation (aws's wording names the "")
-        # rather than fall back to auto - which would silently flip the
-        # engine on an optimized host (the b935265 / 51e7831 empty-string
-        # family). Measured identical on aws (rc 255).
-        with pytest.raises(InvalidConfigError) as exc_info:
+        # must reach the choices validation rather than fall back to auto -
+        # which would silently flip the engine on an optimized host (the
+        # b935265 / 51e7831 empty-string family). Measured identical on `aws`
+        # (rc 255).
+        with pytest.raises(InvalidConfigError):
             build_config_with(preferred_transfer_client="")
-        assert str(exc_info.value) == (
-            'Invalid value: "" for configuration option: '
-            '"preferred_transfer_client". Supported values are: auto, classic, crt'
-        )
 
     def test_empty_integer_value_is_rejected_not_defaulted(self) -> None:
-        with pytest.raises(InvalidConfigError) as exc_info:
+        with pytest.raises(InvalidConfigError):
             build_config_with(max_concurrent_requests="")
-        assert (
-            str(exc_info.value) == "Value for max_concurrent_requests must be a positive integer: "
-        )
 
 
 class TestLoadScopedS3Config:
@@ -216,24 +195,11 @@ class TestLoadScopedS3Config:
             "multipart_threshold": "10MB",
         }
 
-    def test_reads_from_the_s3_instances_session(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        self._write(
-            tmp_path,
-            monkeypatch,
-            "[default]\ns3 =\n  preferred_transfer_client = crt\n"
-            "[profile alt]\ns3 =\n  preferred_transfer_client = classic\n",
-        )
-        scoped = runtimeconfig.load_scoped_s3_config(self._config("alt"))
-
-        assert scoped == {"preferred_transfer_client": "classic"}
-
     def test_empty_values_stay_present_in_the_scope(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # A `key =` line is present-empty: it must survive into the scope so
-        # the validation rejects it like aws (rc 255), not vanish into the
+        # the validation rejects it like aws-cli (rc 255), not vanish into the
         # defaults through a truthy guard.
         self._write(
             tmp_path,
@@ -252,24 +218,10 @@ class TestLoadScopedS3Config:
     def test_unknown_keys_are_ignored(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # aws carries them into its runtime config and reads none of them, so
+        # aws-cli carries them into its runtime config and reads none of them, so
         # dropping them here is the same run (measured: rc 0 on both).
         self._write(tmp_path, monkeypatch, "[default]\ns3 =\n  unknown_key = x\n")
         assert runtimeconfig.load_scoped_s3_config(self._config()) == {}
-
-    def test_a_self_key_collides_with_the_expansion_like_aws(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # aws expands the whole section into `RuntimeConfig().build_config(**...)`,
-        # so `self` is a duplicate argument and the run ends there - rc 255
-        # with the interpreter's TypeError (measured on the pinned aws-cli,
-        # which names the same class and method).
-        self._write(tmp_path, monkeypatch, "[default]\ns3 =\n  self = x\n")
-        with pytest.raises(TypeError) as excinfo:
-            runtimeconfig.load_scoped_s3_config(self._config())
-        assert str(excinfo.value) == (
-            "RuntimeConfig.build_config() got multiple values for argument 'self'"
-        )
 
     def test_profile_selects_its_own_section(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

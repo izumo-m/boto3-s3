@@ -3,23 +3,21 @@
 The mb exit-code shape (aws-cli MbCommand): usage errors - a non-s3 path, an
 S3 Express (``--x-s3``) bucket, rejected ARN forms - are 252; everything after
 the operation starts is rc 1 with one ``make_bucket failed:`` line, never 254
-(aws catches every create_bucket exception locally).
+(aws-cli catches every create_bucket exception locally).
 """
 
 from __future__ import annotations
 
+import io
 import sys
 from typing import Any
 
 import pytest
 from botocore.exceptions import ClientError
 
-from boto3_s3 import Boto3S3Error
 from boto3_s3_cli import cli
-from boto3_s3_cli.commands.base import Context
 from tests.utils.fakes3 import client_error
 from tests.utils.harness import (
-    bucket_name_report,
     client_ctx,
     run_cli_in_process,
     run_recorded,
@@ -51,15 +49,15 @@ class TestOutput:
         assert [(c.operation, c.params) for c in calls] == [("CreateBucket", {"Bucket": "b"})]
 
     def test_key_part_is_silently_dropped(self) -> None:
-        # aws mb keeps only the bucket of the path (split_s3_bucket_key).
+        # `aws s3 mb` keeps only the bucket of the path (split_s3_bucket_key).
         result, calls = run_recorded([{}], ["mb", "s3://b/some/key"])
         assert (result.rc, result.stdout) == (0, "make_bucket: b\n")
         assert calls[0].params == {"Bucket": "b"}
 
     def test_dash_led_tag_tokens_are_taken_as_the_pair(self) -> None:
-        # aws declares --tags with a two-token count, so both tokens are the
+        # aws-cli declares --tags with a two-token count, so both tokens are the
         # pair however they look and the bucket is created (measured: `mb
-        # --tags -k -v s3://a` reaches CreateBucket on aws, where our pre-3.12
+        # --tags -k -v s3://a` reaches CreateBucket on `aws`, where our pre-3.12
         # argparse used to report a missing value instead).
         result, calls = run_recorded([{}], ["mb", "s3://b", "--tags", "-k", "-v"])
         assert result.rc == 0
@@ -88,7 +86,7 @@ class TestOutput:
 
 
 class TestUsageErrors:
-    # mb builds the client before the path checks (aws order), so these paths
+    # mb builds the client before the path checks (aws-cli order), so these paths
     # consult the factory; a benign one (returns None, never used before the
     # rejection) keeps the assertion on the path usage error (252).
     def test_no_scheme_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
@@ -96,8 +94,8 @@ class TestUsageErrors:
         assert rc == 252
         err = capsys.readouterr().err
         assert "<S3Uri>\nError: Invalid argument type" in err
-        # aws's MbCommand raises the bare form - only rm's CommandParameters
-        # path gets the "usage: aws s3 <cmd> ..." prefix (measured on the pinned aws-cli).
+        # aws-cli's MbCommand raises the bare form - only rm's CommandParameters
+        # path gets the "usage: `aws s3` <cmd> ..." prefix (measured on the pinned aws-cli).
         assert "usage:" not in err
 
     def test_bare_bucket_key_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
@@ -111,16 +109,7 @@ class TestUsageErrors:
     def test_express_bucket_is_252(self, path: str, capsys: pytest.CaptureFixture[str]) -> None:
         rc = cli.main(["mb", path], ctx=client_ctx(None))
         assert rc == 252
-        assert "Cannot use mb command with a directory bucket." in capsys.readouterr().err
-
-    def test_client_construction_error_beats_path_usage_error(self) -> None:
-        # aws builds the client before the path check, so a construction error
-        # (bad --profile / unresolved creds) wins over the path 252.
-        def boom(_args: Any) -> Any:
-            raise Boto3S3Error("Unable to locate credentials")
-
-        rc = cli.main(["mb", "bucket"], ctx=Context(client_factory=boom))
-        assert rc == 255  # the construction error, not the scheme 252
+        assert "directory bucket" in capsys.readouterr().err
 
     def test_object_lambda_arn_is_252_not_1(self, capsys: pytest.CaptureFixture[str]) -> None:
         # The S3Storage.validate() rejection must stay outside mb's rc-1 catch.
@@ -130,28 +119,19 @@ class TestUsageErrors:
         assert "make_bucket failed" not in capsys.readouterr().err
 
     def test_slash_form_express_arn_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # A slash-form accesspoint ARN whose name ends --x-s3: aws's ARN-aware
+        # A slash-form accesspoint ARN whose name ends --x-s3: aws-cli's ARN-aware
         # split makes the whole ARN the bucket, so is_s3express_bucket sees the
         # suffix -> 252 (a naive partition on the first "/" would miss it).
         arn = "arn:aws:s3:us-east-1:123456789012:accesspoint/foo--x-s3"
         rc = cli.main(["mb", f"s3://{arn}"], ctx=client_ctx(None))
         assert rc == 252
-        assert "Cannot use mb command with a directory bucket." in capsys.readouterr().err
+        assert "directory bucket" in capsys.readouterr().err
 
     def test_positional_missing_paramfile_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # aws expands the positional file:// at parse time, before the client
-        # build (so a bad reference beats a bad --profile). Names it 'path'.
+        # aws-cli expands the positional file:// at parse time. Names it 'path'.
         rc = cli.main(["mb", "file:///no/x"], ctx=unused_ctx())
         assert rc == 252
         assert "Error parsing parameter 'path': Unable to load paramfile" in capsys.readouterr().err
-
-    def test_invalid_query_beats_client_construction(self) -> None:
-        # --query is compiled before the client is built, so its 252 wins over
-        # a construction failure's 255 (guards the head order).
-        def boom(_args: Any) -> Any:
-            raise Boto3S3Error("Unable to locate credentials")
-
-        assert cli.main(["mb", "s3://b", "--query", "]["], ctx=Context(client_factory=boom)) == 252
 
     def test_tags_missing_value_is_252(self) -> None:
         result = run_cli_in_process(["mb", "s3://b", "--tags", "K"], ctx=unused_ctx())
@@ -167,31 +147,14 @@ class TestUsageErrors:
 
 
 class TestPostStartErrors:
-    @pytest.mark.parametrize("path", ["s3://", "s3:///k"])
-    def test_empty_bucket_is_rc_1(self, path: str) -> None:
-        # aws sends Bucket="" and botocore's client-side validation fails
-        # inside mb's local catch -> rc 1 (the empty-bucket check short-circuits
-        # before the client is used, so a benign factory suffices).
-        result = run_cli_in_process(["mb", path], ctx=client_ctx(None))
-        assert result.rc == 1
-        # botocore's own report for the name "", regex tail included (aws's bytes).
-        assert result.stderr == f"make_bucket failed: {path} {bucket_name_report('')}\n"
-
-    def test_a_name_botocore_rejects_keeps_the_whole_report(self) -> None:
-        # The report above is written before any request for the empty-bucket
-        # form; a name that reaches botocore's own check carries the same
-        # whole report, regex tail included, byte for byte as aws prints it
-        # (measured). A real client is needed for the client-side validation,
-        # and none of it hits the network.
-        import boto3
-
-        client = boto3.session.Session().client("s3", region_name="us-east-1")
-        result = run_cli_in_process(["mb", "s3://in!valid"], ctx=client_ctx(client))
-        assert result.rc == 1
-        assert result.stderr.startswith(
-            "make_bucket failed: s3://in!valid Parameter validation failed:\n"
-            'Invalid bucket name "in!valid": Bucket name must match the regex '
-        )
+    @pytest.mark.parametrize("uri", ["s3://", "s3:///k"])
+    def test_a_path_with_no_bucket_is_a_usage_error(self, uri: str) -> None:
+        # Refused before the client is built (252); aws-cli sends Bucket="" and
+        # reports an mb failure at rc 1. mb drops the key, so "s3:///k" is
+        # the same missing bucket.
+        result = run_cli_in_process(["mb", uri], ctx=unused_ctx())
+        assert result.rc == 252
+        assert 'Invalid bucket name ""' in result.stderr
 
     def test_create_failure_is_rc_1_not_254(self) -> None:
         client = _RaisingCreateClient(client_error("BucketAlreadyOwnedByYou", 409, "CreateBucket"))
@@ -201,19 +164,33 @@ class TestPostStartErrors:
         assert result.stderr.startswith("make_bucket failed: s3://b ")
         assert "BucketAlreadyOwnedByYou" in result.stderr
 
-    def test_an_unwritable_success_line_is_rc_1(
+    def test_a_success_line_stdout_cannot_take_is_lost_output(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # aws's local catch spans the success line, so failing to write it is
-        # just another mb failure. Measured on the pinned aws with a closed
-        # stdout (`aws s3 mb s3://b 1>&-`, where sys.stdout is None): rc 1 and
-        # this exact line, where reaching the dispatcher would give 255.
+        # The bucket was created, so it is not reported as an mb failure (aws-cli's
+        # catch spans the line and does: rc 1, `make_bucket failed:`); the
+        # lost line is reported as lost output, 255.
+        class _FullStdout(io.StringIO):
+            def write(self, text: str) -> int:
+                raise OSError(28, "No space left on device")
+
+        client, calls = make_recording_client([{}])
+        monkeypatch.setattr(sys, "stdout", _FullStdout())
+        rc = cli.main(["mb", "s3://b"], ctx=client_ctx(client))
+        assert rc == 255
+        assert (
+            capsys.readouterr().err == "\nboto3-s3: [ERROR]: [Errno 28] No space left on device\n"
+        )
+        assert [c.operation for c in calls] == ["CreateBucket"]
+
+    def test_a_run_without_a_stdout_keeps_its_code(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # `1>&-` leaves sys.stdout None: nothing to write the line to, and the
+        # code is the work's.
         client, calls = make_recording_client([{}])
         monkeypatch.setattr(sys, "stdout", None)
         rc = cli.main(["mb", "s3://b"], ctx=client_ctx(client))
-        assert rc == 1
-        assert capsys.readouterr().err == (
-            "make_bucket failed: s3://b 'NoneType' object has no attribute 'write'\n"
-        )
-        # The bucket exists all the same - only the report was lost, like aws.
+        assert rc == 0
+        assert capsys.readouterr().err == ""
         assert [c.operation for c in calls] == ["CreateBucket"]

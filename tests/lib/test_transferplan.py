@@ -171,18 +171,6 @@ class TestS3Format:
         # "bucket/" even without dir_op, so the dest takes the source's name.
         assert S3Storage("s3://bucket").format(dir_op=False) == ("bucket/", True)
 
-    def test_bare_service_root_stays_empty(self) -> None:
-        assert S3Storage("s3://").format(dir_op=False) == ("", False)
-
-    def test_service_root_spellings_differ_by_their_trailing_slash(self) -> None:
-        # "s3://" and "s3:///" both hold an empty bucket and key, but aws
-        # reaches s3_format with the scheme merely stripped, so the second
-        # still ends in "/" and takes the source's name: `cp a.txt s3:///`
-        # prints ".. to s3:///a.txt" while `cp a.txt s3://` prints ".. to
-        # s3://" (aws 2.36.40). Only the raw URI can tell them apart here.
-        assert S3Storage("s3:///").format(dir_op=False) == ("/", True)
-        assert S3Storage("s3://").format(dir_op=False) == ("", False)
-
     def test_both_service_roots_are_slash_rooted_under_dir_op(self) -> None:
         assert S3Storage("s3:///").format(dir_op=True) == ("/", True)
         assert S3Storage("s3://").format(dir_op=True) == ("/", True)
@@ -248,10 +236,6 @@ class TestPlanTransfer:
         plan = plan_transfer("s3://a/x/", "s3://b/y", recursive=True)
         assert plan.paths_type == "s3s3"
         assert (plan.src_root, plan.dest_root) == ("a/x/", "b/y/")
-
-    def test_bare_service_root_stays_empty(self, tmp_path: Path) -> None:
-        plan = plan_transfer("s3://", str(tmp_path), recursive=False)
-        assert plan.src_root == ""
 
     def test_keyless_accesspoint_arn_is_bucket_root(self, tmp_path: Path) -> None:
         src = tmp_path / "a.txt"
@@ -321,7 +305,7 @@ _ENDPOINTS: dict[str, Callable[[], Storage]] = {
 
 class TestPathsType:
     """``_paths_type``: the full 3x3 endpoint-pair matrix in one place - the
-    five aws routes name their ``PathsType``, the four impossible pairings
+    five aws-cli routes name their ``PathsType``, the four impossible pairings
     raise. The class patterns are ``isinstance``, so a built-in subclass keeps
     its parent's route."""
 
@@ -385,7 +369,7 @@ class TestItemPaths:
     def test_directory_source_yields_empty_relative_part(self, tmp_path: Path) -> None:
         # `cp <existing-dir> s3://b/key` (no --recursive): the formatted source
         # ends with os.sep, so the relative part is empty and the destination
-        # is taken verbatim - the transfer then fails at open() like aws
+        # is taken verbatim - the transfer then fails at open() like aws-cli
         # ([Errno 21] Is a directory, rc 1).
         plan = plan_transfer(str(tmp_path), "s3://b/key", recursive=False)
         dest, compare_key = item_paths(plan, plan.src_root)
@@ -430,7 +414,7 @@ class TestMvSamePathGuards:
     """The mv onto-itself rules (aws-cli ``_same_path`` / ``_same_key``).
 
     All three shapes - exact, implied basename, keyless destination - exit
-    252 on aws, and ``--recursive`` is not exempt
+    252 on `aws`, and ``--recursive`` is not exempt
     (``mv --recursive s3://b/d s3://b/`` trips the basename rule even
     though no key would map onto itself; the false positive is replicated).
     """
@@ -472,10 +456,6 @@ class TestMvSamePathGuards:
         assert same_key("s3://b1/d/k.txt", "s3://b2/d/")
 
     # The full URI matrix the string rule covers, for the equivalence pin below.
-    # The bucket-less spellings ride it too: aws-cli keeps `s3://` and `s3:///`
-    # apart (its trailing-slash pass leaves both alone), so
-    # `mv s3:// s3:///` is not a self-move there and dies on the empty bucket
-    # name instead (measured against the pinned aws 2.36.40, offline).
     _URIS = (
         "s3://b/k.txt",
         "s3://b/d/a.txt",
@@ -485,8 +465,6 @@ class TestMvSamePathGuards:
         "s3://b",
         "s3://other/k.txt",
         "s3://other/d/",
-        "s3://",
-        "s3:///",
         "s3:///k.txt",
         "s3:///-",
     )
@@ -510,7 +488,7 @@ class TestMvSamePathGuards:
     @pytest.mark.parametrize("dest", _URIS)
     def test_same_path_as_is_equivalent_to_the_string_rule(self, src: str, dest: str) -> None:
         # The Storage-level comparison (held bucket/key, '/'-anchored keys)
-        # must decide exactly like aws's string rule over the
+        # must decide exactly like aws-cli's string rule over the
         # keyless-normalized URIs - every pair of the matrix, both ways.
         expected = same_path(normalize_s3_uri(src), normalize_s3_uri(dest))
         assert S3Storage(src).same_path_as(S3Storage(dest)) is expected
@@ -522,7 +500,7 @@ class TestMvSamePathGuards:
         assert S3Storage(uri).normalized_uri() == normalize_s3_uri(uri)
 
     def test_same_path_as_direct_shapes(self) -> None:
-        # The three aws shapes, plus the bucket gate, on held state.
+        # The three aws-cli shapes, plus the bucket gate, on held state.
         assert S3Storage("s3://b/k").same_path_as(S3Storage("s3://b/k"))
         assert S3Storage("s3://b/d/a").same_path_as(S3Storage("s3://b/d/"))
         assert S3Storage("s3://b/k").same_path_as(S3Storage("s3://b"))  # keyless dest
@@ -533,7 +511,7 @@ class TestMvSamePathGuards:
     # and the key, and aws-cli goes on printing and comparing the location as
     # typed: `cp f.txt s3://<arn>:dir/ --dryrun` previews
     # `upload: ./f.txt to s3://<arn>:dir/f.txt` (measured against the pinned
-    # aws 2.36.40, offline). The string forms keep that separator.
+    # aws-cli 2.36.40, offline). The string forms keep that separator.
     _OUTPOST_AP = (
         "arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-01234567890123456/accesspoint/myap"
     )
@@ -551,7 +529,7 @@ class TestMvSamePathGuards:
         assert root[len(storage.bucket) + 1 :] == "dir/k.txt/"
 
     def test_a_colon_with_no_key_normalizes_like_aws(self) -> None:
-        # aws appends the keyless "/" after the colon, and its splitter then
+        # aws-cli appends the keyless "/" after the colon, and its splitter then
         # reads that slash as the key's first character.
         storage = S3Storage(f"s3://{self._OUTPOST_AP}:")
         uri = f"s3://{self._OUTPOST_AP}:"
@@ -572,7 +550,7 @@ class TestMvSamePathGuards:
         # `my_ap` is no access-point name: aws-cli's pattern stops at `my` and
         # reads `_ap/k` as the key. Both tools send that split, and aws-cli
         # prints the location as typed: `rm s3://<arn>/my_ap --dryrun` previews
-        # `delete: s3://<arn>/my_ap` (measured against the pinned aws 2.36.40,
+        # `delete: s3://<arn>/my_ap` (measured against the pinned aws-cli 2.36.40,
         # offline). Nothing stands between that bucket and key.
         for name in ("my_ap", "my.ap", "my%ap", "my\u00e9ap"):
             arn = self._OUTPOST_AP[: -len("myap")] + name

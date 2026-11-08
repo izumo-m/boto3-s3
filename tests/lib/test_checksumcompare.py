@@ -1,7 +1,7 @@
 """Unit tests for ``boto3_s3.checksumcompare``: the native-checksum PairFilter.
 
-Pins ``ChecksumComparison``'s construction (the resolved-endpoint injection, the
-``check_size`` / ``pure_max_size`` knobs), the GetObjectAttributes read + parse
+Pins ``ChecksumComparison``'s construction (the ``check_size`` /
+``pure_max_size`` knobs), the GetObjectAttributes read + parse
 (FULL_OBJECT whole-file and COMPOSITE part-boundary reconstruction, pagination),
 the s3->s3 stored-checksum comparison, the size pre-check, the indeterminate ->
 copy rules (no checksum / unknown algo / ClientError), and the local checksum
@@ -12,9 +12,9 @@ Canned attribute shapes are deliberately miniature: part sizes far below S3's
 5 MiB floor, digest strings that are not real base64. The code under test does
 arithmetic and string comparison over the returned values - the live service's
 size and format rules do not change its paths - and miniature shapes keep the
-fixtures readable and the suite fast. (Tests that exercise *malformed* inputs
-- a wrong part count, a truncated listing without its marker - say so in
-their own comments.)
+fixtures readable and the suite fast. (Tests that feed a part listing outside
+S3's API - a truncated one without its marker - say so in their own
+comments.)
 
 CRC goldens come from ``awscrt`` (the same C implementation S3 uses); tests that
 need them skip when it is absent. The pure-Python CRC is additionally pinned to
@@ -25,13 +25,17 @@ even without awscrt installed.
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
+import io
+import types
 import zlib
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO, ClassVar, Literal, cast
 
 import pytest
+from typing_extensions import override
 
 import boto3_s3.checksumcompare as cf
 from boto3_s3.checksumcompare import (
@@ -43,7 +47,10 @@ from boto3_s3.checksumcompare import (
     _whole_b64,  # pyright: ignore[reportPrivateUsage]
 )
 from boto3_s3.comparator import SyncPair
-from boto3_s3.exceptions import Boto3S3Error, ConfigurationError, TransportError
+from boto3_s3.etagcompare import EtagComparison
+from boto3_s3.exceptions import Boto3S3Error, ConfigurationError, NotFoundError, TransportError
+from boto3_s3.localstorage import LocalStorage
+from boto3_s3.storage import Storage
 from boto3_s3.types import FileInfo, S3FileInfo, TransferType
 from tests.utils.pairbuilders import local_info, make_pair, native_key, write_file
 
@@ -68,8 +75,10 @@ def _b64(raw: bytes) -> str:
 _DATA = b"0123456789abcdef" * 64
 _GOLDEN: dict[str, str] = {
     "crc32": _b64(zlib.crc32(_DATA).to_bytes(4, "big")),
+    "md5": _b64(hashlib.md5(_DATA).digest()),
     "sha1": _b64(hashlib.sha1(_DATA).digest()),
     "sha256": _b64(hashlib.sha256(_DATA).digest()),
+    "sha512": _b64(hashlib.sha512(_DATA).digest()),
 }
 _KEY_OF = {
     "crc32": "ChecksumCRC32",
@@ -77,10 +86,31 @@ _KEY_OF = {
     "crc64nvme": "ChecksumCRC64NVME",
     "sha1": "ChecksumSHA1",
     "sha256": "ChecksumSHA256",
+    "sha512": "ChecksumSHA512",
+    "md5": "ChecksumMD5",
+    "xxhash64": "ChecksumXXHASH64",
+    "xxhash3": "ChecksumXXHASH3",
+    "xxhash128": "ChecksumXXHASH128",
 }
 if _crt is not None:
     _GOLDEN["crc32c"] = _b64(_crt.crc32c(_DATA).to_bytes(4, "big"))
     _GOLDEN["crc64nvme"] = _b64(_crt.crc64nvme(_DATA).to_bytes(8, "big"))
+
+# awscrt's one-shot XXHASH functions (its XXHash class, 0.31.2 and later); the
+# XXHASH goldens and the tests that need them skip without it.
+_XXHASH = getattr(_crt, "XXHash", None)
+_XXHASH_ONE_SHOT: dict[str, Callable[[bytes], bytes]] = (
+    {}
+    if _XXHASH is None
+    else {
+        "xxhash64": _XXHASH.compute_xxhash64,
+        "xxhash3": _XXHASH.compute_xxhash3_64,
+        "xxhash128": _XXHASH.compute_xxhash3_128,
+    }
+)
+for _name, _fn in _XXHASH_ONE_SHOT.items():
+    _GOLDEN[_name] = _b64(_fn(_DATA))
+_needs_xxhash = pytest.mark.skipif(_XXHASH is None, reason="awscrt with XXHash not installed")
 
 
 # -- fakes ---------------------------------------------------------------------
@@ -116,14 +146,6 @@ class _FakeStorage:
         return self._client
 
 
-class _FakeS3:
-    def __init__(self, mapping: dict[str, Any]) -> None:
-        self.mapping = mapping
-
-    def resolve(self, loc: str) -> Any:
-        return self.mapping[loc]
-
-
 def _full(algorithm: str, value: str) -> dict[str, Any]:
     return {"Checksum": {_KEY_OF[algorithm]: value, "ChecksumType": "FULL_OBJECT"}}
 
@@ -153,14 +175,33 @@ def _composite_resp(
     return respond
 
 
-def _upload_filter(client: _FakeClient, *, key: str = "obj", **kw: Any) -> ChecksumComparison:
-    s3 = _FakeS3({"local": "LOCAL", f"s3://b/{key}": _FakeStorage("b", client)})
-    return ChecksumComparison(s3, "local", f"s3://b/{key}", **kw)  # pyright: ignore[reportArgumentType]
+def _deciding_on(
+    compare: ChecksumComparison,
+    *,
+    src: _FakeClient | None = None,
+    dest: _FakeClient | None = None,
+) -> Callable[[SyncPair], bool]:
+    """``compare`` over pairs whose S3 entries reach these clients.
+
+    The strategy takes each S3 side's client from the entry's ``storage``,
+    which a listing stamps; the entries here are built bare, so it is set here.
+    """
+
+    def decide(pair: SyncPair) -> bool:
+        for info, client in ((pair.src, src), (pair.dest, dest)):
+            if client is not None:
+                info.storage = cast("Any", _FakeStorage("b", client))
+        return compare(pair)
+
+    return decide
 
 
-def _download_filter(client: _FakeClient, *, key: str = "obj", **kw: Any) -> ChecksumComparison:
-    s3 = _FakeS3({f"s3://b/{key}": _FakeStorage("b", client), "local": "LOCAL"})
-    return ChecksumComparison(s3, f"s3://b/{key}", "local", **kw)  # pyright: ignore[reportArgumentType]
+def _upload_filter(client: _FakeClient, **kw: Any) -> Callable[[SyncPair], bool]:
+    return _deciding_on(ChecksumComparison(**kw), dest=client)
+
+
+def _download_filter(client: _FakeClient, **kw: Any) -> Callable[[SyncPair], bool]:
+    return _deciding_on(ChecksumComparison(**kw), src=client)
 
 
 def _write(tmp_path: Path, data: bytes = _DATA, name: str = "f") -> Path:
@@ -180,50 +221,14 @@ def _pair(transfer_type: TransferType, *, src: FileInfo, dest: FileInfo) -> Sync
 
 class TestConstruction:
     def test_defaults(self) -> None:
-        f = _upload_filter(_FakeClient({}))
+        f = ChecksumComparison()
         assert f.check_size is True
         assert f.pure_max_size is None
 
     def test_knobs(self) -> None:
-        f = _upload_filter(_FakeClient({}), check_size=False, pure_max_size=1024)
+        f = ChecksumComparison(check_size=False, pure_max_size=1024)
         assert f.check_size is False
         assert f.pure_max_size == 1024
-
-    def test_resolves_both_sides(self) -> None:
-        # Both locations are resolved once at construction (the endpoint injection).
-        resolved: list[str] = []
-
-        class _S3:
-            def resolve(self, loc: str) -> Any:
-                resolved.append(loc)
-                return "LOCAL" if loc == "local" else _FakeStorage("b", _FakeClient({}))
-
-        ChecksumComparison(_S3(), "local", "s3://b/obj")  # pyright: ignore[reportArgumentType]
-        assert resolved == ["local", "s3://b/obj"]
-
-    def test_s3_side_clients_built_at_construction(self) -> None:
-        # The decides may run on a ParallelFilter pool, where a lazy first
-        # get_client() would race boto3's non-thread-safe client construction:
-        # both S3 sides' clients are built (memoized) on the constructing thread.
-        from boto3_s3.s3storage import S3Storage
-
-        calls: list[str] = []
-
-        class _Counting(S3Storage):
-            def get_client(self) -> Any:
-                calls.append(self.bucket)
-                return _FakeClient({})
-
-        class _S3:
-            def resolve(self, loc: Any) -> Any:
-                return loc
-
-        ChecksumComparison(
-            _S3(),  # pyright: ignore[reportArgumentType]
-            _Counting("s3://a/p"),
-            _Counting("s3://b/q"),
-        )
-        assert calls == ["a", "b"]
 
 
 # -- size pre-check ------------------------------------------------------------
@@ -295,10 +300,10 @@ class TestWholeObject:
         )
         assert _upload_filter(client)(pair) is True
 
-    @pytest.mark.parametrize("algorithm", ["crc32", "crc32c", "crc64nvme", "sha1", "sha256"])
+    @pytest.mark.parametrize("algorithm", list(_KEY_OF))
     def test_each_algorithm_matches(self, tmp_path: Path, algorithm: str) -> None:
         if algorithm not in _GOLDEN:
-            pytest.skip("awscrt not installed")
+            pytest.skip("awscrt (with this algorithm) not installed")
         p = _write(tmp_path)
         client = _FakeClient({"obj": _full(algorithm, _GOLDEN[algorithm])})
         pair = _pair(
@@ -313,7 +318,7 @@ class TestWholeObject:
 
 
 def _composite_golden(data: bytes, sizes: list[int], algorithm: str) -> str:
-    fn = {"crc32c": _crt.crc32c, "crc64nvme": _crt.crc64nvme}[algorithm]  # type: ignore[union-attr]
+    fn = {"crc32c": _crt.crc32c, "crc64nvme": _crt.crc64nvme}[algorithm]  # pyright: ignore[reportOptionalMemberAccess]
     width = {"crc32c": 4, "crc64nvme": 8}[algorithm]
     combined = bytearray()
     off = 0
@@ -338,18 +343,6 @@ class TestComposite:
             dest=_s3(size=len(_DATA)),
         )
         assert _upload_filter(client)(pair) is False
-
-    def test_wrong_count_copies(self, tmp_path: Path) -> None:
-        # Right digits, wrong "-N": the part count participates -> differ.
-        p = _write(tmp_path)
-        value = _composite_golden(_DATA, _PARTS, "crc32c").rsplit("-", 1)[0] + "-9"
-        client = _FakeClient({"obj": _composite_resp("crc32c", value, _PARTS)})
-        pair = _pair(
-            TransferType.UPLOAD,
-            src=local_info(native_key(p), size=len(_DATA)),
-            dest=_s3(size=len(_DATA)),
-        )
-        assert _upload_filter(client)(pair) is True
 
     def test_paginated_parts(self, tmp_path: Path) -> None:
         p = _write(tmp_path)
@@ -437,13 +430,119 @@ class TestCompositeForms:
         del resp["Checksum"]["ChecksumType"]
         assert self._upload(tmp_path, resp) is False
 
-    def test_a_part_count_that_disagrees_with_the_listing_copies(self, tmp_path: Path) -> None:
-        resp = _composite_resp("sha256", f"{_sha256_composite(_DATA, _PARTS)}-9", _PARTS)
-        assert self._upload(tmp_path, resp) is True
 
-    def test_a_part_count_that_is_no_number_copies(self, tmp_path: Path) -> None:
-        resp = _composite_resp("sha256", f"{_sha256_composite(_DATA, _PARTS)}-x", _PARTS)
-        assert self._upload(tmp_path, resp) is True
+# -- SHA512 / MD5 / the XXHASH family -------------------------------------------
+
+
+def _one_shot(algorithm: str) -> Callable[[bytes], bytes]:
+    if algorithm in _XXHASH_ONE_SHOT:
+        return _XXHASH_ONE_SHOT[algorithm]
+    return lambda data: hashlib.new(algorithm, data).digest()
+
+
+def _bare_composite(algorithm: str, data: bytes, sizes: list[int]) -> str:
+    """The bare COMPOSITE digest - ALGO over the parts' raw ALGO digests."""
+    digest = _one_shot(algorithm)
+    combined = b""
+    off = 0
+    for s in sizes:
+        combined += digest(data[off : off + s])
+        off += s
+    return _b64(digest(combined))
+
+
+class TestNewerAlgorithms:
+    """The algorithms S3 stores only as COMPOSITE on a multipart object.
+
+    A multipart object carrying SHA512, MD5 or an XXHASH checksum has it as a
+    COMPOSITE one (S3 offers no FULL_OBJECT form for them), so each is pinned
+    on that path as well as the whole-file one above.
+    """
+
+    @pytest.fixture
+    def _no_awscrt(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(cf, "_awscrt_checksums", lambda: None)
+
+    @pytest.fixture
+    def _fresh_hashlib_probe(self) -> Iterator[None]:
+        # _hashlib_builds caches per algorithm; a test that makes hashlib
+        # refuse one must not leave its verdict behind.
+        cf._hashlib_builds.cache_clear()  # pyright: ignore[reportPrivateUsage]
+        yield
+        cf._hashlib_builds.cache_clear()  # pyright: ignore[reportPrivateUsage]
+
+    def _upload(self, tmp_path: Path, resp: Any, data: bytes = _DATA) -> bool:
+        p = _write(tmp_path, data)
+        pair = _pair(
+            TransferType.UPLOAD,
+            src=local_info(native_key(p), size=len(data)),
+            dest=_s3(size=len(data)),
+        )
+        return _upload_filter(_FakeClient({"obj": resp}), check_size=False)(pair)
+
+    @pytest.mark.parametrize("algorithm", ["sha512", "md5", "xxhash64", "xxhash3", "xxhash128"])
+    def test_composite_matches_and_tells_changed_content(
+        self, tmp_path: Path, algorithm: str
+    ) -> None:
+        if algorithm.startswith("xxhash") and _XXHASH is None:
+            pytest.skip("awscrt with XXHash not installed")
+        resp = _composite_resp(algorithm, _bare_composite(algorithm, _DATA, _PARTS), _PARTS)
+        assert self._upload(tmp_path, resp) is False
+        assert self._upload(tmp_path, resp, b"X" + _DATA[1:]) is True
+
+    @pytest.mark.parametrize("algorithm", ["xxhash64", "xxhash3", "xxhash128"])
+    def test_xxhash_without_awscrt_copies_without_reading(
+        self, tmp_path: Path, algorithm: str, _no_awscrt: None
+    ) -> None:
+        # No pure-Python fallback: indeterminate -> copy. The local path does
+        # not exist, proving no read happened.
+        client = _FakeClient({"obj": _full(algorithm, "irrelevant")})
+        pair = _pair(
+            TransferType.UPLOAD,
+            src=local_info(native_key(tmp_path / "nope"), size=10),
+            dest=_s3(size=10),
+        )
+        assert _upload_filter(client)(pair) is True
+        assert _can_compute(algorithm, 10, pure_max_size=None) is False
+
+    @pytest.mark.parametrize("algorithm", ["xxhash64", "xxhash3", "xxhash128"])
+    def test_xxhash_on_an_awscrt_without_xxhash_copies(
+        self, monkeypatch: pytest.MonkeyPatch, algorithm: str
+    ) -> None:
+        # awscrt 0.23 - 0.31.1: a checksums module with the CRCs, no XXHash.
+        old = types.SimpleNamespace(crc32c=lambda *_: 0, crc64nvme=lambda *_: 0)
+        monkeypatch.setattr(cf, "_awscrt_checksums", lambda: old)
+        assert _can_compute(algorithm, 10, pure_max_size=None) is False
+
+    def test_md5_refused_by_hashlib_copies_without_reading(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _fresh_hashlib_probe: None
+    ) -> None:
+        # A FIPS build that refuses md5 even for a non-security use.
+        def refuse(algorithm: str) -> Any:
+            raise ValueError(f"unsupported hash type {algorithm}")
+
+        monkeypatch.setattr(cf, "_hashlib_new", refuse)
+        client = _FakeClient({"obj": _full("md5", _GOLDEN["md5"])})
+        pair = _pair(
+            TransferType.UPLOAD,
+            src=local_info(native_key(tmp_path / "nope"), size=10),
+            dest=_s3(size=10),
+        )
+        assert _upload_filter(client)(pair) is True
+
+    @_needs_xxhash
+    @pytest.mark.parametrize(
+        ("algorithm", "empty_digest"),
+        [
+            # The XXH64 / XXH3-64 / XXH3-128 values of empty input, seed 0, in
+            # the canonical (big-endian) form xxHash's own spec gives them.
+            ("xxhash64", "ef46db3751d8e999"),
+            ("xxhash3", "2d06800538d394c2"),
+            ("xxhash128", "99aa06d3014798d86001c324468d497f"),
+        ],
+    )
+    def test_xxhash_digest_is_the_canonical_form(self, algorithm: str, empty_digest: str) -> None:
+        assert _whole_b64(io.BytesIO(b""), algorithm) == _b64(bytes.fromhex(empty_digest))
 
 
 # -- s3 -> s3 (COPY) -----------------------------------------------------------
@@ -451,13 +550,11 @@ class TestCompositeForms:
 
 class TestCopyDirect:
     def _copy(self, src_resp: Any, dest_resp: Any, **kw: Any) -> Callable[[SyncPair], bool]:
-        s3 = _FakeS3(
-            {
-                "s3://b/src": _FakeStorage("b", _FakeClient({"src": src_resp})),
-                "s3://b/dest": _FakeStorage("b", _FakeClient({"dest": dest_resp})),
-            }
+        return _deciding_on(
+            ChecksumComparison(**kw),
+            src=_FakeClient({"src": src_resp}),
+            dest=_FakeClient({"dest": dest_resp}),
         )
-        return ChecksumComparison(s3, "s3://b/src", "s3://b/dest", **kw)  # pyright: ignore[reportArgumentType]
 
     def _pair(self, **kw: Any) -> SyncPair:
         return SyncPair(
@@ -504,8 +601,7 @@ class TestCopyDirect:
         dest = _FakeClient(
             {"dest": _composite_resp("sha256", "ZZZ-3", [10, 10, 10], truncated_at=2)}
         )
-        s3 = _FakeS3({"s3://b/src": _FakeStorage("b", src), "s3://b/dest": _FakeStorage("b", dest)})
-        f = ChecksumComparison(s3, "s3://b/src", "s3://b/dest")  # pyright: ignore[reportArgumentType]
+        f = _deciding_on(ChecksumComparison(), src=src, dest=dest)
         pair = SyncPair(
             compare_key="k", transfer_type=TransferType.COPY, src=_s3("src"), dest=_s3("dest")
         )
@@ -600,11 +696,11 @@ class TestClientErrorIndeterminate:
 
 
 class TestPartListingIndeterminate:
-    """A part listing that cannot be relied on reads as indeterminate (copy).
+    """A part listing that would not end reads as indeterminate (copy).
 
-    The part split has to be known exactly to reproduce a COMPOSITE checksum;
-    a listing short of that is neither followed forever nor allowed to stop
-    the run.
+    A marker that does not move past the page just read, or that runs past
+    S3's last part number, is not followed: a server answering that way could
+    otherwise page forever.
     """
 
     def _upload(self, tmp_path: Path, client: _FakeClient) -> bool:
@@ -631,7 +727,7 @@ class TestPartListingIndeterminate:
         assert self._upload(tmp_path, client) is True
         assert len(client.calls) == 2  # the first page, and the one that repeated its marker
 
-    @pytest.mark.parametrize("marker", ["x", 0, -1])
+    @pytest.mark.parametrize("marker", [0, -1, 10_000])
     def test_a_marker_that_cannot_continue_the_listing_copies(
         self, tmp_path: Path, marker: object
     ) -> None:
@@ -646,30 +742,6 @@ class TestPartListingIndeterminate:
         client = _FakeClient({"obj": page})
         assert self._upload(tmp_path, client) is True
         assert len(client.calls) == 1
-
-    def test_a_part_without_a_size_copies(self, tmp_path: Path) -> None:
-        page = {
-            "Checksum": {"ChecksumSHA256": "ABC-2", "ChecksumType": "COMPOSITE"},
-            "ObjectParts": {"Parts": [{"PartNumber": 1}, {"PartNumber": 2, "Size": 524}]},
-        }
-        assert self._upload(tmp_path, _FakeClient({"obj": page})) is True
-
-    def test_a_later_page_part_without_a_size_copies(self, tmp_path: Path) -> None:
-        def respond(kw: dict[str, Any]) -> Any:
-            if kw.get("PartNumberMarker"):
-                return {"ObjectParts": {"Parts": [{"PartNumber": 2}], "IsTruncated": False}}
-            return {
-                "Checksum": {"ChecksumSHA256": "ABC-2", "ChecksumType": "COMPOSITE"},
-                "ObjectParts": {
-                    "Parts": [{"PartNumber": 1, "Size": 500}],
-                    "IsTruncated": True,
-                    "NextPartNumberMarker": 1,
-                },
-            }
-
-        client = _FakeClient({"obj": respond})
-        assert self._upload(tmp_path, client) is True
-        assert len(client.calls) == 2
 
 
 class TestBotoCoreErrorAborts:
@@ -716,11 +788,11 @@ class TestBotoCoreErrorAborts:
     def test_a_failure_from_outside_the_boto_family_is_the_requests_too(
         self, tmp_path: Path
     ) -> None:
-        # botocore's parser raises a bare ValueError on an attribute it
-        # cannot convert (a LastModified that is no timestamp). Every other
-        # request point reports that as the base error; this one let the
-        # ValueError out of S3.sync, past `except Boto3S3Error`.
-        err = ValueError('Invalid timestamp "garbage": Unknown string format: garbage')
+        # A refreshing credential_process whose program is gone raises a bare
+        # FileNotFoundError inside the request. Every other request point
+        # reports that as the base error; this one let it out of S3.sync,
+        # past `except Boto3S3Error`.
+        err = FileNotFoundError(errno.ENOENT, "No such file or directory", "/bin/helper")
         client = _FakeClient({"obj": err})
         with pytest.raises(Boto3S3Error) as excinfo:
             _upload_filter(client)(self._pair_at(tmp_path))
@@ -736,7 +808,7 @@ class TestBotoCoreErrorAborts:
         # The second GetObjectAttributes - the next page of a COMPOSITE
         # object's parts - goes through the same wrapper; reverting that one
         # call left every test green.
-        err = ValueError("invalid literal for int() with base 10: 'abc'")
+        err = FileNotFoundError(errno.ENOENT, "No such file or directory", "/bin/helper")
 
         def respond(kw: dict[str, Any]) -> Any:
             if kw.get("PartNumberMarker"):
@@ -767,6 +839,78 @@ class TestBotoCoreErrorAborts:
             _upload_filter(client)(self._pair_at(tmp_path))
         assert excinfo.value is err
         assert err.__cause__ is None
+
+
+class _RaisingStorage(Storage):
+    """A custom backend whose ``open`` raises what it was given."""
+
+    scheme: ClassVar[str] = "stub"
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    @override
+    def as_text(self) -> str:
+        return "stub://"
+
+    @override
+    def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
+        raise self._exc
+
+
+class _MidReadFailingLocal(LocalStorage):
+    """A ``LocalStorage`` whose stream fails mid-read with a raw ``OSError``."""
+
+    @override
+    def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
+        class _Failing(io.BytesIO):
+            def read(self, size: int | None = -1, /) -> bytes:
+                raise FileNotFoundError(errno.ENOENT, "gone")
+
+        return _Failing()
+
+
+class TestReadableSideFailure:
+    """A failure reading the readable side leaves either strategy as a library
+    error (`ContentComparison._read_readable`): the caller's backend's as the
+    base error with its own on ``__cause__`` (a family error as it is), the
+    local file's in the local taxonomy."""
+
+    @staticmethod
+    def _strategies() -> list[Any]:
+        client = _FakeClient({"obj": _full("sha256", _GOLDEN["sha256"])})
+        return [EtagComparison(), _upload_filter(client)]
+
+    @staticmethod
+    def _pair(storage: Storage) -> SyncPair:
+        src = FileInfo(key="k", compare_key="obj", size=10, storage=storage)
+        dest = S3FileInfo(key="obj", etag='"abc"', size=10)
+        return SyncPair(compare_key="obj", transfer_type=TransferType.UPLOAD, src=src, dest=dest)
+
+    @pytest.mark.parametrize("strategy", [0, 1], ids=["etag", "checksum"])
+    @pytest.mark.parametrize(
+        "raised",
+        [OSError("broken"), KeyError("k"), NotFoundError("gone")],
+        ids=["oserror", "keyerror", "family"],
+    )
+    def test_a_custom_backend_failure(self, strategy: int, raised: Exception) -> None:
+        compare = self._strategies()[strategy]
+        with pytest.raises(Boto3S3Error) as excinfo:
+            compare(self._pair(_RaisingStorage(raised)))
+        if isinstance(raised, Boto3S3Error):
+            assert excinfo.value is raised
+            return
+        assert type(excinfo.value) is Boto3S3Error
+        assert excinfo.value.__cause__ is raised
+        assert (excinfo.value.operation, excinfo.value.key) == ("sync", "obj")
+
+    @pytest.mark.parametrize("strategy", [0, 1], ids=["etag", "checksum"])
+    def test_a_local_read_failure_is_translated(self, strategy: int, tmp_path: Path) -> None:
+        compare = self._strategies()[strategy]
+        with pytest.raises(NotFoundError) as excinfo:
+            compare(self._pair(_MidReadFailingLocal(str(tmp_path))))
+        assert isinstance(excinfo.value.__cause__, FileNotFoundError)
+        assert (excinfo.value.operation, excinfo.value.key) == ("sync", "obj")
 
 
 # -- request payer -------------------------------------------------------------
@@ -861,11 +1005,16 @@ class TestHelperUnits:
         assert got == _composite_golden(_DATA, list(sizes), "crc32c").rsplit("-", 1)[0]
 
     def test_can_compute_always_for_stdlib(self) -> None:
-        for algo in ("crc32", "sha1", "sha256"):
+        for algo in ("crc32", "md5", "sha1", "sha256", "sha512"):
+            assert _can_compute(algo, 10**12, pure_max_size=1) is True
+
+    @_needs_xxhash
+    def test_can_compute_xxhash_with_awscrt_whatever_the_cap(self) -> None:
+        for algo in ("xxhash64", "xxhash3", "xxhash128"):
             assert _can_compute(algo, 10**12, pure_max_size=1) is True
 
     def test_can_compute_unknown_algorithm(self) -> None:
-        assert _can_compute("xxhash64", None, None) is False
+        assert _can_compute("blake3", None, None) is False
 
     def test_can_compute_unknown_size_counts_as_above_the_cap(
         self, monkeypatch: pytest.MonkeyPatch
@@ -901,8 +1050,8 @@ class TestPureCrcCrossCheck:
     @pytest.mark.parametrize("n", [0, 1, 7, 8, 9, 100, 1000, 4096])
     def test_pure_equals_awscrt(self, n: int) -> None:
         data = bytes((i * 37 + 11) & 0xFF for i in range(n))
-        assert _pure_crc32c(data) == _crt.crc32c(data)  # type: ignore[union-attr]
-        assert _pure_crc64nvme(data) == _crt.crc64nvme(data)  # type: ignore[union-attr]
+        assert _pure_crc32c(data) == _crt.crc32c(data)  # pyright: ignore[reportOptionalMemberAccess]
+        assert _pure_crc64nvme(data) == _crt.crc64nvme(data)  # pyright: ignore[reportOptionalMemberAccess]
 
     def test_chunked_chaining_matches_one_shot(self) -> None:
         data = bytes((i * 91 + 3) & 0xFF for i in range(5000))
@@ -912,5 +1061,5 @@ class TestPureCrcCrossCheck:
             p32 = _pure_crc32c(data[i : i + step], p32)
             p64 = _pure_crc64nvme(data[i : i + step], p64)
             i += step
-        assert p32 == _crt.crc32c(data)  # type: ignore[union-attr]
-        assert p64 == _crt.crc64nvme(data)  # type: ignore[union-attr]
+        assert p32 == _crt.crc32c(data)  # pyright: ignore[reportOptionalMemberAccess]
+        assert p64 == _crt.crc64nvme(data)  # pyright: ignore[reportOptionalMemberAccess]

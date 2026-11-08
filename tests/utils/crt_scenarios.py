@@ -126,6 +126,13 @@ SCENARIOS: tuple[CpScenario, ...] = (
         seed=_SMALL_SEED,
         capture_tree=True,
     ),
+    CpScenario(
+        # Enough keys for the source deletes to overlap (transfer._DoneWorkers).
+        name="crt_mv_download_recursive",
+        argv=("mv", f"s3://{BUCKET_TOKEN}/down", "dest", "--recursive"),
+        seed={f"down/f{index:02d}.txt": b"crt move body\n" for index in range(30)},
+        capture_tree=True,
+    ),
     # -- sync ---------------------------------------------------------------
     CpScenario(
         name="crt_sync_upload",

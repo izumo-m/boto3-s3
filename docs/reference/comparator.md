@@ -128,9 +128,9 @@ size-and-time judgment is one — without being told the route separately.
 backend it was listed from on its `storage` attribute, so a filter that needs
 bytes rather than listing metadata opens that side through `pair.src.storage` /
 `pair.dest.storage` ([`./storage.md`](./storage.md)) — which is how the content
-strategies compare against any backend, not only a local filesystem. It is
-`None` on a hand-built `FileInfo`, which the content strategies treat as
-unreadable and copy.
+strategies compare against any backend, not only a local filesystem. The
+content strategies rely on it and on `compare_key`, which every scan stamps; a
+hand-built pair must set both.
 
 The dataclass is frozen and keyword-only, so construction is
 `SyncPair(compare_key=..., transfer_type=..., src=..., dest=...)`. It defines
@@ -404,10 +404,9 @@ skip a copy — MD5 can collide, and the size is independent evidence.
 
 **What reads as differing**, so that the strategy never skips on a comparison
 it could not make: an absent `etag` on either side of an s3-to-s3 pair; an
-absent or empty `etag` on the S3 side of an upload or download; a readable side
-whose `storage` or `compare_key` is `None`, which is what a hand-built
-`FileInfo` gives; and a multipart ETag whose readable side reports no `size`,
-without which the part split cannot be reconstructed.
+absent or empty `etag` on the S3 side of an upload or download; and a
+multipart ETag whose readable side reports no `size`, without which the part
+split cannot be reconstructed.
 
 **The effective part size.** On the multipart branch the held `part_size` is a
 request rather than the split used: per file it is adjusted the way an upload
@@ -444,19 +443,22 @@ without `part_size` and the config read fails — a `[s3] multipart_chunksize`
 that is not a size, or a set-but-missing profile where the `S3` was built
 without a session.
 
-Raises, from a call: an `OSError` raised while reading the readable side is
-translated into the library taxonomy —
+Raises, from a call: a failure reading the readable side, as a
+[`Boto3S3Error`](./exceptions.md#boto3s3error). On a `LocalStorage` side an
+`OSError` is translated into the library taxonomy —
 [`NotFoundError`](./exceptions.md#notfounderror) for a missing file,
 [`AccessDeniedError`](./exceptions.md#accessdeniederror) for a permission
 failure, [`TransportError`](./exceptions.md#transporterror) otherwise —
-carrying `operation="sync"` and the entry's compare key. A `LocalStorage`
-readable side translates its own `open` failure first, the same way but
-unnamed, so a file removed between the listing and the compare surfaces as a
-`NotFoundError` whose `operation` is `"sync"` when the strategy ran under
-`sync` and `None` when it was called directly. Whatever else a
-custom backend raises propagates unchanged. Either way the exception aborts the
-`sync` run rather than being recorded as a per-item failure, as
-[`PairFilter`](#pairfilter) states for any raising predicate.
+carrying `operation="sync"` and the entry's compare key; its own `open`
+failure is translated first, the same way but unnamed, so a file removed
+between the listing and the compare surfaces as a `NotFoundError` whose
+`operation` is `"sync"` when the strategy ran under `sync` and `None` when it
+was called directly. On any other backend a `Boto3S3Error` the backend raises
+passes as it is, and anything else becomes the `Boto3S3Error` base with the
+original on `__cause__`, carrying `operation="sync"` and the compare key.
+Either way the exception aborts the `sync` run rather than being recorded as a
+per-item failure, as [`PairFilter`](#pairfilter) states for any raising
+predicate.
 
 The object holds no mutable state, so it is safe to wrap in
 [`ParallelFilter`](#parallelfilter), which is how the per-pair reads are
@@ -526,9 +528,6 @@ the two content strategies is
 class ChecksumComparison:
     def __init__(
         self,
-        s3: S3,
-        src: Location,
-        dest: Location,
         *,
         check_size: bool = True,
         pure_max_size: int | None = None,
@@ -538,20 +537,14 @@ class ChecksumComparison:
     def __call__(self, pair: SyncPair) -> bool: ...
 ```
 
-`s3`, `src` and `dest` are required and positional: pass the same three values
-the `sync` call gets. Each location is resolved through
-[`S3.resolve`](./s3.md#resolveloc), so a subclass that overrides `resolve`
-reaches this strategy too, and a cross-account s3-to-s3 sync works by passing
-the same two [`S3Storage`](./storage.md#s3storage) objects here that are passed
-to `sync`. The endpoint cannot be read off a pair — a `FileInfo` carries no
-bucket — which is why it is injected explicitly.
-
-The constructor also builds the client of each resolved side that is an
-`S3Storage`, rather than leaving it to the first decision. The decisions may
-run on a [`ParallelFilter`](#parallelfilter) pool, where a first client build
-would race boto3's client construction; building here is what makes the
-strategy safe to wrap. It also means a client-build failure surfaces on the
-constructing thread.
+Each S3 side's `GetObjectAttributes` goes to the bucket and client of that
+entry's `storage`: the [`S3Storage`](./storage.md#s3storage) the side was
+listed through, so a cross-account s3-to-s3 sync reaches each side with that
+side's own client. Inside `sync` each side's listing has built its client
+before any pair is decided, so the decisions may run on a
+[`ParallelFilter`](#parallelfilter) pool. A pair built by hand sets `storage`
+on each `S3FileInfo` side to its `S3Storage`; on a pool, that storage's client
+must already be built (`get_client`, which takes no lock).
 
 `check_size`, `True` by default, behaves as it does for
 [`EtagComparison`](#etagcomparison): differing known sizes are treated as
@@ -564,8 +557,8 @@ is reached only when `awscrt` is not installed. An object of one of those two
 algorithms whose size is above the cap — or whose size is unknown, which the
 cap counts as above it — is treated as indeterminate and copied instead of
 being hashed. `None`, the default, never caps. It affects nothing else:
-`crc32`, `sha1` and `sha256` always compute, and so do `crc32c` / `crc64nvme`
-when `awscrt` is present.
+`crc32`, `sha1`, `sha256`, `sha512` and (wherever `hashlib` builds it) `md5`
+always compute, and so do `crc32c` / `crc64nvme` when `awscrt` is present.
 
 `request_payer` is forwarded as the `RequestPayer` parameter of every
 `GetObjectAttributes` call, including the `ObjectParts` continuation pages;
@@ -596,9 +589,7 @@ runs first.
   readable side's bytes are read through its `storage`
   ([`./storage.md`](./storage.md)) and hashed with the same algorithm —
   whole-file for a `FULL_OBJECT` checksum, part by part at the sizes
-  `GetObjectAttributes` reported for a `COMPOSITE` one. Which endpoint the
-  fetch addresses is taken from `pair.transfer_type`: the `dest` location for
-  `UPLOAD`, the `src` location for anything else.
+  `GetObjectAttributes` reported for a `COMPOSITE` one.
 - neither side `S3FileInfo`: the pair is copied.
 
 A `COMPOSITE` checksum is recognized by the response's `ChecksumType` or by a
@@ -613,34 +604,38 @@ download of that object is copied on every run (two S3 sides that both send
 it bare still compare equal).
 
 **What reads as indeterminate**, and is therefore copied rather than skipped:
-an object carrying no native checksum; an algorithm outside `crc32`, `crc32c`,
-`crc64nvme`, `sha1` and `sha256`; a `crc32c` / `crc64nvme` object past
-`pure_max_size` with no `awscrt`; a `COMPOSITE` object whose part sizes could
-not be read in full (no part listing, a part without a size, a continuation
-marker that does not move past the page it came with); two S3 sides whose
+an object carrying no native checksum; an algorithm outside the ten S3 names
+(`crc32`, `crc32c`, `crc64nvme`, `sha1`, `sha256`, `sha512`, `md5`,
+`xxhash64`, `xxhash3`, `xxhash128`); a `crc32c` / `crc64nvme` object past
+`pure_max_size` with no `awscrt`, an `xxhash64` / `xxhash3` / `xxhash128`
+object with no `awscrt`, and an `md5` object where `hashlib` refuses MD5 even
+for a non-security use (a strict FIPS build) — these three on an upload or
+download only, since an S3-to-S3 pair computes nothing; a `COMPOSITE` object whose part listing
+would not end (a continuation marker that does not move past the page it came
+with, or runs past S3's 10,000-part ceiling); two S3 sides whose
 stored checksums use different algorithms or are of different kinds; a
-readable side whose `storage` or `compare_key` is `None`; a
 readable side longer than the sum of the parts, an appended tail the per-part
 digests would not otherwise see; and any `ClientError` from a
 `GetObjectAttributes` call — a 404, a denied `s3:GetObjectAttributes`, an
 SSE-C object (no customer key is sent), a failure part way through the
 pagination. A per-object rejection never aborts the run.
 
-Checksum computation is `zlib` for `crc32` and `hashlib` for `sha1` / `sha256`.
-`crc32c` and `crc64nvme` use `awscrt` when it is installed and a bundled
-pure-Python implementation otherwise, which is what `pure_max_size` bounds.
-
-Raises, from the constructor: whatever `S3.resolve` and the client build raise
-for a profile, a region, an `endpoint_url` or partial credentials that do not
-resolve — [`InvalidConfigError`](./exceptions.md#invalidconfigerror) or the
-[`Boto3S3Error`](./exceptions.md#boto3s3error) base — plus the `TypeError`
-`os.fspath` raises for an argument that is not a `Location`.
+Checksum computation is `zlib` for `crc32` and `hashlib` for `md5` / `sha1` /
+`sha256` / `sha512`. `crc32c` and `crc64nvme` use `awscrt` when it is installed
+and a bundled pure-Python implementation otherwise, which is what
+`pure_max_size` bounds. The `XXHASH` family has no such fallback: it is
+computed through `awscrt` (0.31.2 or later) or not at all. On a multipart
+object S3 stores `sha512`, `md5` and the `XXHASH` family as `COMPOSITE` only,
+so these are hashed part by part. boto3 1.42.94 is the first whose S3 model
+carries these checksums; under an older one `GetObjectAttributes` parses none
+of them, so such an object reads as carrying no checksum
+([`../compatibility.md`](../compatibility.md)).
 
 Raises, from a call: a `BotoCoreError` from `GetObjectAttributes` — absent
 credentials, an unreachable endpoint, a read timeout — is not a per-object
 verdict but a broken environment, so it is translated into the taxonomy and
-raised, aborting the run instead of silently copying everything. An `OSError`
-reading the readable side is translated exactly as it is for
+raised, aborting the run instead of silently copying everything. A failure
+reading the readable side is raised exactly as it is for
 [`EtagComparison`](#etagcomparison).
 
 ## ParallelFilter
@@ -730,9 +725,10 @@ entries reach it. The update lane never touches that gate.
 **Failure and cancellation.** A decision that raises aborts the run as the
 serial path would: the exception surfaces when that decision's result is
 consumed, decisions that have not started are cancelled, and running ones are
-awaited first. Cancellation through `cancel_token` behaves the same way —
-graceful mode awaits outstanding decisions, immediate mode first asks their
-futures to cancel — and in neither case is the caller's executor shut down.
+awaited first. Cancellation through `cancel_token` stops the same way —
+graceful mode awaits outstanding decisions, while immediate mode cancels the
+ones not started and leaves the running ones to end by themselves — and in
+neither case is the caller's executor shut down.
 
 ## all_of
 

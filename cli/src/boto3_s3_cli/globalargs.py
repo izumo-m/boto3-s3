@@ -6,17 +6,13 @@ registers them on the top-level parser and on each subparser, so a global may
 sit before or after the subcommand (``boto3-s3 --profile foo ls s3://b`` and
 ``boto3-s3 ls s3://b --profile foo``, matching ``aws s3``). Turning the parsed
 connection / auth values into a boto3 client is ``clientfactory``'s
-job. The presentation globals are accepted and
-ignored (``design/aws-cli-option-handling.md`` section 2), except the
-auto-prompt pair: ``--cli-auto-prompt`` launches the interactive prompt and
-``--no-cli-auto-prompt`` forces it off, both resolved from raw argv by the
-dispatcher before parsing (section 3).
+job. The presentation globals and the auto-prompt pair are accepted and
+ignored (``design/aws-cli-option-handling.md`` sections 2 and 3).
 """
 
 from __future__ import annotations
 
 import argparse
-import contextlib
 import sys
 from collections.abc import Sequence
 from typing import Any
@@ -31,34 +27,18 @@ _COLOR_CHOICES = ["on", "off", "auto"]
 _CLI_ERROR_FORMAT_CHOICES = ["legacy", "json", "yaml", "text", "table", "enhanced"]
 _BINARY_FORMAT_CHOICES = ["base64", "raw-in-base64-out"]
 
-# aws-cli resolves the active profile as --profile > AWS_PROFILE >
-# AWS_DEFAULT_PROFILE > default: its bundled botocore lists the env vars as
-# ['AWS_PROFILE', 'AWS_DEFAULT_PROFILE'], whereas stock botocore reverses them to
-# ['AWS_DEFAULT_PROFILE', 'AWS_PROFILE'] - a long-standing divergence (botocore
-# #1725). A bare boto3.Session(profile_name=None) would inherit stock order, so
-# the two CLIs would pick *different* profiles when both env vars are set.
-# The single home of that ordering; every profile read goes through it.
-PROFILE_ENV_VARS = ("AWS_PROFILE", "AWS_DEFAULT_PROFILE")
-
 
 def validate_query(args: argparse.Namespace) -> None:
-    """Reject an invalid ``--query`` JMESPath with aws's wording (rc 252).
+    """Reject an invalid ``--query`` JMESPath (rc 252).
 
-    aws-cli compiles ``--query`` at ``top-level-args-parsed`` (its globalargs
-    ``_resolve_query``) - before it resolves ``--endpoint-url`` and before any
-    paramfile expansion - so a bad expression is its ParamValidation 252 ahead
-    of every other head check (measured against the pinned aws-cli: it beats a bad
-    ``--endpoint-url``, a bad ``--page-size`` paramfile, and a bad
-    ``--profile``). Every command's ``run()`` calls this first. ``jmespath`` is
-    a botocore dependency that is always importable, and it is loaded only when
-    ``--query`` is actually present.
+    aws-cli compiles ``--query`` once the globals are parsed (its globalargs
+    ``_resolve_query``), so a bad expression stops the run with its
+    ParamValidation 252; the dispatcher calls this once the command line is
+    parsed. ``jmespath`` is a botocore dependency that is always importable,
+    and it is loaded only when ``--query`` is actually present.
 
     Every failure of the compile is that 252, not just the ``JMESPathError``
-    family: aws's ``_resolve_query`` catches bare ``Exception``, so an
-    expression deep enough to exhaust the interpreter's stack (2000 leading
-    ``!``) is its ParamValidation report too, carrying the ``RecursionError``'s
-    own text - measured. Narrowing this to ``JMESPathError`` would let that
-    escape as a traceback with rc 1, which the exit-code charter forbids.
+    family, as aws-cli's ``_resolve_query`` catches bare ``Exception``.
     """
     value = getattr(args, "query", None)
     if value is None:
@@ -144,22 +124,16 @@ class _VersionAction(argparse.Action):
         values: Any,
         option_string: str | None = None,
     ) -> None:
-        # Written the way argparse's own version action writes on the Python
-        # aws's build runs (3.14): a missing stdout - a closed descriptor
-        # leaves `sys.stdout` None - falls back to stderr, and a write that
-        # fails is dropped, so the run still exits 0 (measured on aws:
-        # `--version >&-` puts the line on stderr).
-        stream = sys.stdout or sys.stderr
-        with contextlib.suppress(AttributeError, OSError):
-            stream.write(_version_string() + "\n")
+        # A missing stdout (a closed descriptor leaves `sys.stdout` None)
+        # falls back to stderr, as argparse's own version action does.
+        (sys.stdout or sys.stderr).write(_version_string() + "\n")
         parser.exit()
 
 
 def add_common_arguments(
     parser: argparse.ArgumentParser, *, suppress_defaults: bool = False
 ) -> None:
-    """Register the effective globals (connection/auth and the auto-prompt pair
-    the dispatcher reads off raw argv) and the ignored presentation globals.
+    """Register the effective globals (connection/auth) and the ignored ones.
 
     Added to BOTH the top-level parser (with real defaults) and each subparser
     (``suppress_defaults=True``). Suppressing the subparser-side defaults stops an
@@ -204,11 +178,10 @@ def add_common_arguments(
         default=flag,
         help="send requests without credentials",
     )
-    # Not argparse type=int on purpose: aws coerces these in a post-parse session
+    # Not argparse type=int on purpose: aws-cli coerces these in a post-parse session
     # handler (globalargs._resolve_timeout), so a non-integer value raises there
-    # and exits 255 - not the parse-time 252 a type=int would give. The dispatch
-    # pre-pass coerces both up front at aws's top-level-args-parsed timing (read
-    # before connect), and the client builders coerce again when they build.
+    # and exits 255 - not the parse-time 252 a type=int would give. The session
+    # and client builders coerce them (clientfactory).
     conn.add_argument(
         "--cli-read-timeout",
         metavar="SECONDS",
@@ -264,7 +237,7 @@ def add_common_arguments(
         default=value,
         help="validated, then ignored: errors always use the default format",
     )
-    # Recognized for parity; consumed by no command - aws s3's own blob
+    # Recognized for parity; consumed by no command - `aws s3`'s own blob
     # argument (cp --sse-c-key) ignores it too (verbatim pass-through with
     # fileb:// file loading; option-handling section 2).
     ignored.add_argument(
@@ -283,19 +256,17 @@ def add_common_arguments(
         help="show the boto3-s3-cli, boto3-s3, Python and SDK versions, then exit",
     )
 
-    # Opt-in interactive UI (section 3, the "autoprompt" extra). Both are
-    # resolved from raw argv before parsing, so they are effective options, not
-    # members of the ignored group; argparse still has to declare them so they
-    # parse and appear on the help page (aws lists both).
+    # aws-cli's interactive auto-prompt pair (section 3): accepted, so a command
+    # line carrying either still runs, and ignored - there is no prompt.
     parser.add_argument(
         "--cli-auto-prompt",
         action="store_true",
         default=flag,
-        help="prompt interactively for arguments (needs the autoprompt extra)",
+        help="accepted and ignored: there is no interactive prompt",
     )
     parser.add_argument(
         "--no-cli-auto-prompt",
         action="store_true",
         default=flag,
-        help="do not prompt interactively, whatever the environment or profile asks for",
+        help="accepted and ignored: there is no interactive prompt",
     )

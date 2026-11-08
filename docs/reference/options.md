@@ -2,8 +2,9 @@
 
 The value objects that configure a call: the object-shaping options
 `cp` / `mv` / `sync` accept as keyword arguments, the `TransferConfig` that
-tunes the transfer engine, the `ScanOptions` family a `Storage` enumeration
-takes, and the mode enums those carry. The narrative treatment — which options
+tunes the transfer engine, the `CrtClientOptions` that set up the CRT engine's
+own S3 client, the `ScanOptions` family a `Storage` enumeration takes, and the
+mode enums those carry. The narrative treatment — which options
 matter when, with worked examples — is in
 [`../library/transfer-options.md`](../library/transfer-options.md); this page is
 the per-field contract. Every symbol below is exported from the `boto3_s3` root.
@@ -77,12 +78,14 @@ read by presence rather than truthiness and are called out individually:
 or a copy. `grants` is a sequence of `permission=grantee` strings whose
 `permission` is one of `read`, `readacl`, `writeacl` or `full`, becoming
 `GrantRead` / `GrantReadACP` / `GrantWriteACP` / `GrantFullControl` on the same
-write. Both default to unset. `grants` is validated per item at submission
-rather than up front, matching the AWS CLI: a string with no `=`, or an
-unrecognized permission, raises `ValidationError` from inside the running
-operation — including under `dryrun`, which still runs the upload and copy
-mappers — so it propagates out of the call instead of being aggregated into
-[`BatchError`](./exceptions.md#batcherror).
+write. Both default to unset. `grants` is validated before the run, on every
+route (a download's included) and under `dryrun` too: a string with no `=`, or
+an unrecognized permission, raises `ValidationError` before anything is
+listed, sent or deleted. The AWS CLI finds it only as it maps the first
+upload or copy. The same check is available on its own as
+`boto3_s3.requestparams.validate_grants(grants, *, operation)`, which raises
+that `ValidationError` naming `operation` and accepts `None` or an empty
+sequence as no grants.
 
 `storage_class` is sent as `StorageClass` on an upload or copy write. When the
 key is unset no `StorageClass` parameter is sent at all, leaving the service to
@@ -182,8 +185,9 @@ value is rejected with [`ValidationError`](./exceptions.md#validationerror).
 the destination is left alone rather than overwritten. How that is enforced,
 and what it leaves behind, differs by route and operation. An upload or copy
 carries `IfNoneMatch: "*"` on its write (on `CompleteMultipartUpload` for a
-multipart write) and the server's `PreconditionFailed` becomes an
-`OpOutcome.SKIPPED` record, not a failure; a `cp` / `mv` download to a local
+multipart write) and the server's `PreconditionFailed` answer to that write
+becomes an `OpOutcome.SKIPPED` record, not a failure (the same answer to any
+other request of the transfer fails it); a `cp` / `mv` download to a local
 destination is guarded by an existence check before the transfer starts and
 reports the same skip. A download into a custom (open-route) backend has no
 existence probe and overwrites, since the backend owns its key space, while a
@@ -196,13 +200,14 @@ at the destination produces no record of any kind
 
 Raises, over and above what each operation raises on its own:
 
-- [`ValidationError`](./exceptions.md#validationerror) — an unknown key,
-  `no_overwrite` on a `cp` / `mv` download into a stream destination, and an
-  unrecognized `case_conflict` on any `cp` / `mv` / `sync` run whatever its
-  paths (all before any transfer starts, which is not before every side effect
-  — a recursive `cp` / `mv` or a `sync` creates its missing destination
-  directory first); a malformed `grants` entry (in flight); an unrecognized
-  `copy_props` or `annotation_copy_mode` on a copy (as the run is set up).
+- [`ValidationError`](./exceptions.md#validationerror) — an unknown key, a
+  malformed `grants` entry, `no_overwrite` on a `cp` / `mv` download into a
+  stream destination, and an unrecognized `case_conflict` on any `cp` / `mv` /
+  `sync` run whatever its paths; an unrecognized `copy_props` or
+  `annotation_copy_mode` on a copy (as the run is set up). All of them come
+  before any transfer starts and before the missing destination directory a
+  recursive `cp` / `mv` or a `sync` creates, so a refused run changes
+  nothing.
 - [`ConfigurationError`](./exceptions.md#configurationerror) — `no_overwrite`
   on an upload or copy whose SDK cannot express a conditional write, and
   `copy_props=CopyPropsMode.ALL` on an SDK without the annotations model
@@ -240,9 +245,6 @@ class TransferConfig(boto3.s3.transfer.TransferConfig):
         preferred_transfer_client: str | None = None,
         *,
         target_bandwidth: int | None = None,
-        should_stream: bool | None = None,
-        disk_throughput: int | None = None,
-        direct_io: bool | None = None,
         annotation_temp_dir: str | os.PathLike[str] | None = None,
     ) -> None: ...
 ```
@@ -252,21 +254,26 @@ passing `None` is exactly equivalent to omitting the argument and lets the base
 class supply its own default across every supported boto3. The resulting
 defaults match `aws s3`: an 8 MiB multipart threshold, 8 MiB parts, a
 concurrency of 10, and a 1000-deep download IO queue. That last one is the sole
-default that leaves boto3's own value (100): it caps the read parts buffered
-for the disk writer, so boto3's figure would give a slow disk a tenth of
-`aws s3`'s readahead. Pass `max_io_queue=100` for boto3's ceiling — a plain
+default that leaves boto3's own value (100), set through the `DEFAULTS` table
+boto3 resolves its defaults from (a boto3 that predates the table keeps its
+100): it caps the read parts buffered for the disk writer, so boto3's figure
+would give a slow disk a tenth of `aws s3`'s readahead. Pass `max_io_queue=100` for boto3's ceiling — a plain
 `boto3.s3.transfer.TransferConfig` keeps it, as it keeps all of boto3's
 defaults. (Not under an explicit `preferred_transfer_client="crt"`: an
 explicitly-set `max_io_queue` is a classic-only option there and fails
 boto3's own CRT validation; the default needs no override on that lane.) `use_threads=False` selects a non-threaded executor for the
 classic engine, as in boto3.
 
-The library never reads the `[s3]` section of `~/.aws/config` — tuning comes
-from this object alone. `S3.aws_config()` is the explicit way to lift those
-file values into one ([`s3.md`](./s3.md)).
+A `cp` / `mv` / `sync` / `rm` run fills the settings this object leaves unset
+from the `[s3]` section of `~/.aws/config`, as `aws s3` reads it: a value
+passed to the constructor wins, then the `[s3]` value, then the default
+([`S3.resolve_transfer_config`](./s3.md#resolve_transfer_configtransfer_confignone--copyfalse)). A plain
+`boto3.s3.transfer.TransferConfig` is used as it is.
 
 `preferred_transfer_client` selects the transfer engine — `"auto"` (the
-default), `"classic"`, or `"crt"` — with boto3's own resolution semantics. It
+default), `"classic"`, or `"crt"` — resolved as `aws s3` resolves it
+([`S3.resolve_transfer_config`](./s3.md#resolve_transfer_configtransfer_confignone--copyfalse)); a plain
+boto3 config keeps boto3's own resolution. It
 is accepted on every supported boto3, including one whose base constructor does
 not take the parameter. Two settings override the choice: an S3-to-S3 copy runs
 on the classic engine regardless, since the CRT engine has no copy operation,
@@ -276,20 +283,17 @@ requires is in [`../compatibility.md`](../compatibility.md); the engine
 resolution itself is specified in
 [`../../design/transfer.md`](../../design/transfer.md) section 2.
 
-The five extras are plain attributes rather than participants in the base
+The two extras are plain attributes rather than participants in the base
 class's default-sentinel machinery, and each defaults to `None`.
 
 `target_bandwidth` is the target throughput for the CRT engine in bytes per
 second, becoming the CRT client's `target_throughput`. It does not cap the
 classic engine — `max_bandwidth` is that engine's limit.
 
-`should_stream`, `disk_throughput` and `direct_io` are the CRT file-I/O
-settings (`disk_throughput` in bytes per second, converted to the gigabits per
-second the CRT client takes). They are accepted and stored, and are passed to
-the CRT client only where the installed s3transfer's `create_s3_crt_client`
-accepts a `fio_options` parameter. No released pip s3transfer does, so on a
-pip-installed s3transfer the three are inert
-([`../compatibility.md`](../compatibility.md)).
+aws-cli's CRT file-I/O settings (`should_stream`, `disk_throughput`,
+`direct_io`) have no field here: no released s3transfer takes the file-I/O
+options that carry them. In the `[s3]` section they are accepted and validated
+and have no effect ([`../compatibility.md`](../compatibility.md)).
 
 `annotation_temp_dir` is the directory used by
 `AnnotationCopyMode.PRELOAD_TEMPFILE`; `None` delegates to the operating
@@ -297,8 +301,8 @@ system's standard temporary-directory selection. The classic multipart-copy
 path reads it whenever `copy_props=ALL` staging is set up, and uses it only
 under `PRELOAD_TEMPFILE`.
 
-All five are ignored by the classic engine except `annotation_temp_dir`, which
-is a classic-path setting. An auto-selected CRT engine ignores the base
+`target_bandwidth` is ignored by the classic engine; `annotation_temp_dir` is
+a classic-path setting. An auto-selected CRT engine ignores the base
 classic-only knobs; requesting `preferred_transfer_client="crt"` explicitly
 while any of them is set is rejected when the CRT manager is built, surfacing
 as [`ValidationError`](./exceptions.md#validationerror) that carries boto3's
@@ -307,9 +311,60 @@ s3transfer refuses when an item is handed to it — a `checksum_algorithm` outsi
 the set awscrt computes — is the same `ValidationError`, carrying the engine's
 `ValueError`. Requesting `"crt"`
 explicitly without a usable awscrt — absent or older than the version the CRT
-path needs — or on an s3transfer that lacks the CRT surface propagates
-botocore's `MissingDependencyException`, which stays outside the
-`Boto3S3Error` hierarchy by design ([`exceptions.md`](./exceptions.md)).
+path needs — or on an s3transfer that lacks the CRT surface is a
+[`ConfigurationError`](./exceptions.md#configurationerror) when the config is
+resolved (`S3.resolve_transfer_config`, which the operations call); a config
+used without that resolution — a plain boto3 one, or one handed to
+`Transferrer` directly — propagates botocore's `MissingDependencyException`
+instead, which stays outside the `Boto3S3Error` hierarchy by design
+([`exceptions.md`](./exceptions.md)).
+
+## CrtClientOptions
+
+The settings of the CRT transfer engine's own S3 client, kept apart from the
+botocore client's. On the CRT engine, transfers and deletes go through
+awscrt's S3 client, while listings and `HeadObject` stay on the botocore
+client. aws-cli builds the two clients separately, each from its own reading
+of the command line and the session; an application that wants aws-cli's
+answers states the CRT side here. It is passed as
+[`S3(crt=...)`](./s3.md#s3) and [`S3Deleter(crt=...)`](./misc.md#s3deleter).
+
+```python
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CrtClientOptions:
+    allow_lockless: bool = False
+    verify: str | Literal[False] | None = None
+```
+
+Every default keeps boto3's behavior, which derives the CRT client from the
+botocore client in hand. None of the fields has an effect unless
+[`TransferConfig.preferred_transfer_client`](#transferconfig) selects the CRT
+engine.
+
+`allow_lockless` decides what an **explicit**
+`preferred_transfer_client="crt"` does when another process of this
+application already holds the cross-process CRT slot. `False` (the default) is
+boto3's rule: the run silently selects the classic engine. `True` is
+`aws s3`'s: the CRT client is built regardless, as the AWS CLI documents an
+explicit `crt` for processes that run at the same time. An `"auto"`
+preference respects the lock either way — that is `aws s3`'s own `auto`
+resolution.
+
+`verify` is the CRT client's TLS trust source. The default `None` derives it
+from the botocore client: a client that names a CA bundle — its `verify`,
+`AWS_CA_BUNDLE`, a profile's `ca_bundle`, `REQUESTS_CA_BUNDLE` — hands that
+file to the CRT, and one that names none leaves the CRT on the platform trust
+store, as boto3 does. `False` turns certificate verification off, and a string
+is the path of a CA bundle file. `True` is refused, since botocore reads it as
+its own bundled CA file and awscrt as the platform store; an empty or
+whitespace-only path is refused too, as the botocore client's setting is. Both
+are a [`ValidationError`](./exceptions.md#validationerror) at construction.
+
+Whether the CRT client signs is the botocore client's answer, as for boto3: a
+client configured with botocore's `UNSIGNED` signature transfers anonymously,
+with no credentials resolved. The CRT client is one per process, and it is
+pinned to the signing mode and the trust source it was built with: an operation
+whose client or options disagree runs on the classic engine instead.
 
 ## ScanOptions
 
@@ -329,7 +384,6 @@ class ScanOptions:
     sort: bool = False
     filter: Callable[[FileInfo], bool] | None = None
     on_warning: Callable[[str], None] | None = None
-    reusable_after_interrupt: bool = True
     read_ahead: bool = True
 ```
 
@@ -358,7 +412,7 @@ transfers, lists or deletes independently. A backend that declares
 backends ignore the flag, because the recursive listing each performs is
 already in that order: S3's `ListObjectsV2` is byte-ordered (S3 Express
 directory buckets and their access points excepted, whose unordered listings
-are why `sync` rejects them) and the local walk sorts for parity with `aws s3`. A non-recursive S3
+are why `sync` rejects them) and the local walk sorts as `aws s3` does. A non-recursive S3
 listing keeps its native shape instead, emitting a page's common prefixes ahead
 of its objects; a one-level local listing is sorted like the recursive walk.
 So a custom backend whose sort is expensive is the only
@@ -366,14 +420,14 @@ one that pays for it, and may stream natural order when `sort=False`.
 
 `filter` (default `None`, meaning no filtering) is a per-entry predicate over
 the entry's `FileInfo` that returns `True` to keep it. Each producer's
-`scan_pages` applies it and returns already-filtered pages, and `scan` re-sieves
-as a safety net for a backend that has not declared it filters
+`scan_pages` applies it and returns already-filtered pages, and `scan` applies
+it itself for a backend that has not declared it filters
 ([`storage.md`](./storage.md)). `FileInfo.storage` is set before the predicate
 runs, and a backend's listing stamps `FileInfo.compare_key` as part of its own
 contract, so a [`GlobFilter`](./filters.md#globfilter) matches the relative key
 directly and a richer predicate can reach the entry's backend. This slot
-carries the item filter of `cp` / `mv` / `rm` and `sync`'s visibility layer,
-where each side's listing is pruned independently before the pairs are formed —
+carries the item filter of `cp` / `mv` / `rm` / `ls` and `sync`'s visibility
+layer, where each side's listing is pruned independently before the pairs are formed —
 which is why an entry a filter removed from the destination listing is not a
 candidate for `sync`'s delete lane at all. The operations compose their own
 conditions with the caller's predicate: an S3 transfer source additionally
@@ -389,19 +443,6 @@ rollup, so those skips surface as warnings on the run instead of vanishing;
 consuming thread under `read_ahead=False`), and because `sync` walks both of
 its sides through one sink the two walks can invoke it concurrently — keep it
 thread-safe.
-
-`reusable_after_interrupt` (default `True`) is the scan's Ctrl-C exit policy. `True`
-makes the scan's teardown wait for a page pull already in flight, so no
-enumeration worker survives the scan — what an application that may catch
-`KeyboardInterrupt` and keep using the process needs. `False` lets a
-`KeyboardInterrupt` unwind abandon the daemon prefetch worker rather than wait,
-which matters when an in-flight network pull would otherwise hold the exit for
-a full timeout; it suits an application that treats Ctrl-C as process-fatal.
-The policy is scoped to `KeyboardInterrupt` alone — every other exit,
-`SystemExit` included, reclaims fully. The high-level operations overlay this
-field from `S3(reusable_after_interrupt=...)`, where the application declares the
-posture once ([`s3.md`](./s3.md)), so it reaches every scan they start; set it
-here only when calling `Storage.scan` directly.
 
 `read_ahead` (default `True`) is whether `scan` may read pages ahead of the
 consumer. `True` runs the page producer on a background worker, so the next
@@ -472,10 +513,9 @@ instance through this field so the shared, stateless walker can stamp each
 entry's `FileInfo.storage` before the filter runs, without the walker holding a
 back-reference to any one storage. It is `None` on a hand-built options object,
 but `LocalStorage.scan_pages` replaces it with itself before walking, so the
-walker stamps every entry a `LocalStorage` scan produces. `Storage.scan`'s
-backstop fills `FileInfo.storage` afterwards only for entries a `scan_pages`
-left `None` — a custom backend that drives the walker itself and leaves this
-field unset.
+walker stamps every entry a `LocalStorage` scan produces. `Storage.scan`
+fills `FileInfo.storage` afterwards for entries a `scan_pages` left `None` — a
+custom backend that drives the walker itself and leaves this field unset.
 
 ## S3ScanOptions
 
@@ -489,7 +529,6 @@ class S3ScanOptions(ScanOptions):
     request_payer: str | None = None
     fetch_owner: bool = False
     prefix: str | None = None
-    include_common_prefixes: bool = False
 ```
 
 `page_size` (default `None`) is the listing page size. `None` sends no
@@ -514,12 +553,6 @@ key — a recursive `cp` / `mv` / `sync` / `rm` source, where the plan appends a
 trailing `/` — so that the storage instance the caller passed is the one
 scanned, rather than a fresh one rebuilt from a URI. A custom `S3Storage`
 subclass and its `scan_pages` override therefore survive the operation.
-
-`include_common_prefixes` (default `False`) widens a *recursive* listing to also
-emit one `DIRECTORY`-kind entry per `CommonPrefixes` entry the response
-carries, ahead of that page's objects. It has no effect on a non-recursive
-listing, which always emits them. `S3.ls` sets it; the transfers leave it off
-([`storage.md`](./storage.md#s3storage)).
 
 `page_size`, `request_payer` and `fetch_owner` are not validated here. Like
 `aws s3`, they pass through to the service, which decides: `page_size=0` lists
@@ -633,13 +666,13 @@ option says.
 Under `DEFAULT` and `ALL`, a multipart copy whose tag set is too large for the
 create request applies it after the copy succeeds; if that call fails, the
 destination is deleted on a best-effort basis and the item is reported as
-failed — except when the cleanup itself also fails, where the item is reported
-successful with the destination left carrying no tags, as `aws s3` reports it.
+failed. When that cleanup fails too, the item is still reported as failed, with
+the tagging error, and the destination is left in place without its tags.
 `ALL` additionally
 requires an SDK that models S3 object annotations — botocore 1.43.31 or newer.
 A multipart copy under `ALL` writes the annotations after the copy, behind that
-post-copy tag write, as `aws s3` does: a tag write whose failure deleted the
-destination leaves no annotation written, and an annotation write that fails
+post-copy tag write, as `aws s3` does: a tag write that fails leaves no
+annotation written, and an annotation write that fails
 leaves the copied object in place. On an older SDK the transfer engine refuses `ALL`
 up front with [`ConfigurationError`](./exceptions.md#configurationerror), unless
 `metadata_directive` has disabled the chain so that the annotations path is

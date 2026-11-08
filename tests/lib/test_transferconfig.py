@@ -36,7 +36,7 @@ class TestSdkFloorCompat:
         def spy(this: object, *args: object, **kwargs: object) -> None:
             captured.clear()
             captured.update(kwargs)
-            real_init(this, *args, **kwargs)  # type: ignore[arg-type]
+            real_init(this, *args, **kwargs)
 
         monkeypatch.setattr(Boto3TransferConfig, "__init__", spy)
         TransferConfig(max_concurrency=5)
@@ -45,20 +45,12 @@ class TestSdkFloorCompat:
             "multipart_threshold",
             "multipart_chunksize",
             "num_download_attempts",
+            "max_io_queue",
             "io_chunksize",
             "use_threads",
             "max_bandwidth",
         ):
             assert omitted not in captured, f"{omitted} must be omitted, not forwarded as None"
-        # The moved download IO queue depth is the one exception: on a modern
-        # boto3 it rides the overridden DEFAULTS table and stays omitted; the
-        # floor has no table (the base ctor's own 100 would win), so there the
-        # ctor forwards the concrete library default in its place - a real
-        # value on both paths, never None.
-        if hasattr(Boto3TransferConfig, "DEFAULTS"):
-            assert "max_io_queue" not in captured
-        else:
-            assert captured.get("max_io_queue") == 1000
 
 
 class TestReExport:
@@ -117,7 +109,9 @@ class TestDownloadIoQueueDepth:
     def test_default_is_the_depth_aws_runs_at(self) -> None:
         # s3transfer defaults the download IO queue to 1000 and aws-cli runs
         # there (no [s3] key maps to it); boto3 alone dials it to 100, which
-        # would give a slow disk a tenth of aws's readahead.
+        # would give a slow disk a tenth of aws-cli's readahead.
+        if not hasattr(Boto3TransferConfig, "DEFAULTS"):
+            pytest.skip("installed boto3 predates the DEFAULTS table the default rides")
         config = TransferConfig()
         assert config.max_io_queue_size == 1000
         assert config.max_io_queue == 1000
@@ -162,21 +156,10 @@ class TestCrtExtras:
     def test_extras_default_to_none(self) -> None:
         config = TransferConfig()
         assert config.target_bandwidth is None
-        assert config.should_stream is None
-        assert config.disk_throughput is None
-        assert config.direct_io is None
 
     def test_extras_are_keyword_only(self) -> None:
-        config = TransferConfig(
-            target_bandwidth=100_000_000,
-            should_stream=False,
-            disk_throughput=1_000_000_000,
-            direct_io=True,
-        )
+        config = TransferConfig(target_bandwidth=100_000_000)
         assert config.target_bandwidth == 100_000_000
-        assert config.should_stream is False
-        assert config.disk_throughput == 1_000_000_000
-        assert config.direct_io is True
         # The extras sit past the `*` barrier: nine positional slots fill the
         # base params through preferred_transfer_client, so a tenth positional
         # (target_bandwidth) has no slot and raises rather than being accepted.
@@ -188,7 +171,6 @@ class TestCrtExtras:
         # boto3 TransferConfig keeps working wherever a config is accepted.
         plain = Boto3TransferConfig()
         assert getattr(plain, "target_bandwidth", None) is None
-        assert getattr(plain, "direct_io", None) is None
 
 
 class TestAnnotationTempDir:

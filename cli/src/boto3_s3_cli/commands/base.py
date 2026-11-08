@@ -16,12 +16,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 # These exception names do not themselves import the AWS SDK.
 from boto3_s3 import InvalidValueError, ValidationError
 from boto3_s3_cli import paramfile, usage
-from boto3_s3_cli.clientfactory import (
-    build_client,
-    build_s3,
-    build_service_client,
-    validate_profile,
-)
+from boto3_s3_cli.clientfactory import build_s3, cli_s3_class
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -30,7 +25,6 @@ if TYPE_CHECKING:
     from mypy_boto3_s3 import S3Client
 
     from boto3_s3 import S3
-    from boto3_s3_cli.autoprompt.prompter import AutoPrompter
 
     ClientFactory = Callable[[argparse.Namespace], S3Client]
     S3Factory = Callable[[argparse.Namespace], S3]
@@ -43,17 +37,16 @@ class Context:
     """Runtime dependencies ``main()`` hands to the dispatched ``Command``.
 
     ``client_factory`` builds the boto3 S3 client from the parsed
-    connection/auth globals (default: ``boto3_s3_cli.clientfactory.build_client``).
-    Tests inject a factory returning a fake client.
-    ``service_client_factory`` does the same for the non-S3 clients ``mv``'s
-    path validation needs (default:
-    ``boto3_s3_cli.clientfactory.build_service_client``). ``transfer_config``
-    overrides the transfer engine's defaults (aws-equivalent 8 MiB
+    connection/auth globals in place of the CLI's own construction - the
+    run's client and, for a namespace naming another region, the source client
+    of ``--source-region``; ``None`` (the default) leaves it to the command's
+    `S3` (``boto3_s3_cli.clientfactory.build_s3``). Tests inject a factory
+    returning a fake client. ``service_client_factory`` does the same for the
+    non-S3 clients ``mv``'s path validation needs (``None``: the `S3`'s own
+    ``service_client``). ``transfer_config``
+    overrides the transfer engine's defaults (aws-cli-equivalent 8 MiB
     threshold/chunk); tests inject ``TransferConfig(use_threads=False, ...)``
     to make multipart call order deterministic against canned clients.
-    ``auto_prompter`` overrides the ``--cli-auto-prompt`` backend (default: the
-    real ``prompt_toolkit`` prompter, built lazily by ``main``); tests inject a
-    fake returning a canned argv to exercise the re-dispatch without a terminal.
     """
 
     def __init__(
@@ -63,110 +56,90 @@ class Context:
         s3_factory: S3Factory | None = None,
         service_client_factory: ServiceClientFactory | None = None,
         transfer_config: TransferConfig | None = None,
-        auto_prompter: AutoPrompter | None = None,
     ) -> None:
-        self.client_factory: ClientFactory = (
-            build_client if client_factory is None else client_factory
-        )
-        self._client_factory_injected = client_factory is not None
+        self._client_factory = client_factory
         self._s3_factory = s3_factory
-        self.service_client_factory: ServiceClientFactory = (
-            build_service_client if service_client_factory is None else service_client_factory
-        )
-        self._service_client_factory_injected = service_client_factory is not None
+        self._service_client_factory = service_client_factory
         self.transfer_config: TransferConfig | None = transfer_config
-        self.auto_prompter: AutoPrompter | None = auto_prompter
 
     def s3(self, args: argparse.Namespace) -> S3:
-        """Build the command's `S3`, adapting an injected client factory if present.
-
-        Every command calls this once its own parse layer is done - the
-        paramfile expansions, the integer coercions, the shorthand parse - and
-        before anything else, which is the slot aws's ``_run_main`` occupies.
-        aws reports the tokens its leaf parse could not place at exactly that
-        boundary, so this is where `reject_unknown_options` runs.
-        """
-        reject_unknown_options(args)
+        """Build the command's `S3`, adapting an injected client factory if present."""
         if self._s3_factory is not None:
             return self._s3_factory(args)
 
-        from boto3_s3 import S3
-
-        if not self._client_factory_injected:
+        client_factory = self._client_factory
+        service_client_factory = self._service_client_factory
+        if client_factory is None and service_client_factory is None:
             return build_s3(args)
 
-        validate_profile(args)
-        client_factory = self.client_factory
+        # The command's own S3 class, so what is not injected stays the
+        # command's (aws-cli's error-message rewriter on its S3 clients).
+        base = cli_s3_class()
 
-        class InjectedClientS3(S3):
+        class InjectedClientS3(base):
             def client(self) -> S3Client:
-                return client_factory(args)
+                if client_factory is None:
+                    return super().client()
+                return _stand_in(client_factory(args), self, args.region)
 
-        # reusable_after_interrupt=False like build_s3: the injected-client seam must
-        # keep the CLI's process-fatal Ctrl-C posture.
-        return InjectedClientS3(reusable_after_interrupt=False)
+            def source_client(self, region: str) -> S3Client:
+                if client_factory is None:
+                    return super().source_client(region)
+                # The namespace a source client is built from: the region
+                # named, without --endpoint-url (aws-cli's ClientFactory).
+                source_args = argparse.Namespace(**vars(args))
+                source_args.region = region
+                source_args.endpoint_url = None
+                return _stand_in(client_factory(source_args), self, region)
+
+            def service_client(self, service: str, *, region: str | None = None) -> Any:
+                if service_client_factory is not None:
+                    return service_client_factory(service, args, region=region)
+                return super().service_client(service, region=region)
+
+        # Built as build_s3 builds the command's own - the session, the
+        # region, the CRT client's settings, the local names, the cli_*
+        # format checks - with the clients the factories hand out.
+        return build_s3(args, s3_class=InjectedClientS3)
 
     def with_s3(self, s3: S3) -> Context:
         """A view of this context whose ``s3`` always returns *s3*.
 
-        ``rb --force``'s session-sharing seam: aws hands its one CLI session
+        ``rb --force``'s session-sharing seam: aws-cli hands its one CLI session
         to the inner rm (``RmCommand(self._session)``), so the inner run must
         not build a second session - a ``credential_process`` helper would run
         twice, an MFA / assume-role flow would prompt twice, and the object
         deletes could then run under a different identity than the final
-        ``DeleteBucket``. Every other dependency (factories, transfer config,
-        prompter) carries over unchanged.
+        ``DeleteBucket``. Every other dependency (factories, transfer config)
+        carries over unchanged.
         """
         clone = Context(
-            client_factory=self.client_factory if self._client_factory_injected else None,
+            client_factory=self._client_factory,
             s3_factory=lambda _args: s3,
-            service_client_factory=(
-                self.service_client_factory if self._service_client_factory_injected else None
-            ),
+            service_client_factory=self._service_client_factory,
             transfer_config=self.transfer_config,
-            auto_prompter=self.auto_prompter,
         )
         return clone
 
-    def client(self, args: argparse.Namespace, s3: S3) -> S3Client:
-        """Build an additional S3 client from the command's bound session
-        (an injected test factory builds from its own wiring instead)."""
-        if self._client_factory_injected:
-            return self.client_factory(args)
-        return build_client(args, session=s3.session)
 
-    def service_client(
-        self,
-        service: str,
-        args: argparse.Namespace,
-        s3: S3,
-        *,
-        region: str | None = None,
-    ) -> Any:
-        """Build a non-S3 client from the command's bound session
-        (an injected test factory builds from its own wiring instead)."""
-        if self._service_client_factory_injected:
-            return self.service_client_factory(service, args, region=region)
-        return build_service_client(service, args, region=region, session=s3.session)
+def _stand_in(client: Any, s3: S3, region: str | None) -> Any:
+    """*client* marked as the assembly's own, for an injected test client.
 
-
-def reject_unknown_options(args: argparse.Namespace) -> None:
-    """Raise aws's ``Unknown options`` usage error for what the leaf parse left over.
-
-    The dispatcher parks those tokens on the namespace (``unknown_options``)
-    instead of reporting them on the spot, because aws does not either: its
-    ``BasicCommand.__call__`` first expands every argument's value - paramfile
-    load, integer coercion, shorthand and JSON parse - and only then raises
-    for the remainder, right before the command body runs. A value that fails
-    to expand therefore wins over an unknown option (measured:
-    ``presign s3://b/k --expires-in abc --bogus`` is the ``int()`` failure's
-    255, not this report's 252), while everything the command body checks
-    still loses to it. The wording is aws's customizations command layer's:
-    joined with "," and no space.
+    The library applies aws-cli's run-level defaults - the upload checksum,
+    the CRT region stop - to the clients `S3.from_aws_cli`'s assembly builds
+    (``awsclisession.assembled``); an injected client stands for one, so it
+    carries the mark with the region the assembly would have built it for. A
+    stand-in refusing attributes keeps no mark.
     """
-    extras: list[str] | None = getattr(args, "unknown_options", None)
-    if extras:
-        raise ValidationError(f"Unknown options: {','.join(extras)}")
+    from contextlib import suppress
+
+    from boto3_s3.awsclisession import ASSEMBLED_BY, Assembled, resolve_region
+
+    if region is None and s3.session is not None:
+        region = resolve_region(None, s3.session._session)  # pyright: ignore[reportPrivateUsage]
+    with suppress(AttributeError):
+        setattr(client, ASSEMBLED_BY, Assembled(region))
+    return client
 
 
 def parse_integer_option(value: object, *, operation: str) -> int | None:
@@ -177,25 +150,23 @@ def parse_integer_option(value: object, *, operation: str) -> int | None:
     ``--page-size abc`` exits 255, not 252. argparse's
     ``type=int`` would turn the same mistake into a usage error (252), so
     integer options are declared without it and converted here at ``run()``
-    start, before the client factory builds anything (aws fails at parse
+    start, before the client factory builds anything (aws-cli fails at parse
     time, before its client exists). ``None`` (the option not given) passes
-    through unconverted, like aws's unset-integer handling.
+    through unconverted, like aws-cli's unset-integer handling.
     """
     if value is None:
         return None
     if isinstance(value, int):  # an argparse integer default, already converted
         return value
     # argparse hands us a str, a fileb:// paramfile hands us bytes; both go
-    # straight into int() the way aws does. int() coerces str and bytes alike,
-    # and its ValueError repr differs (``'abc'`` vs ``b'abc'``), so the failure
-    # message matches aws's for a file:// vs a fileb:// source.
+    # straight into int() the way aws-cli does. int() coerces str and bytes alike.
     text = value if isinstance(value, (str, bytes)) else str(value)
     try:
         return int(text)
     except ValueError as exc:
-        # InvalidValueError: main() maps it to 255 (aws's general handler),
-        # not ValidationError's 252, and the text mirrors aws's message.
-        raise InvalidValueError(usage.int_error_message(exc), operation=operation) from exc
+        # InvalidValueError: main() maps it to 255 (aws-cli's general handler),
+        # not ValidationError's 252.
+        raise InvalidValueError(str(exc), operation=operation) from exc
 
 
 def _expand_string_paramfile(
@@ -203,38 +174,25 @@ def _expand_string_paramfile(
 ) -> None:
     """Load a paramfile reference on a string-typed ``args.<dest>`` in place.
 
-    Shared body of the string option and positional helpers below. aws expands
-    both prefixes at parse time, so a missing reference is the load 252; a
-    ``file://`` yields text, while a ``fileb://`` yields bytes that botocore
-    then rejects for a string parameter with its own 252 (measured against the
-    pinned aws-cli: ``value: b'...', valid types: <class 'str'>``). A value without a
-    prefix (or a non-string, e.g. an integer default) is untouched. *name* is
-    the argument name aws reports in the load failure.
+    Shared body of the string option and positional helpers below. aws-cli expands
+    references at parse time, so a missing ``file://`` reference is the load
+    252; a ``file://`` yields text, and a ``fileb://`` is refused unread
+    (`paramfile.load_text_argument`). A value without a prefix (or a
+    non-string, e.g. an integer default) is untouched. *name* is the argument
+    name aws-cli reports in the load failure.
     """
     value = getattr(args, dest, None)
-    if not isinstance(value, str):
-        return
-    with paramfile.named_argument(name, operation=operation):
-        loaded = paramfile.get_paramfile(value, operation=operation)
-    if loaded is None:
-        return
-    if isinstance(loaded, bytes):
-        raise ValidationError(
-            "Parameter validation failed:\n"
-            f"Invalid type for parameter input, value: {loaded!r}, "
-            "type: <class 'bytes'>, valid types: <class 'str'>",
-            operation=operation,
-        )
-    setattr(args, dest, loaded)
+    if isinstance(value, str):
+        setattr(args, dest, paramfile.load_text_argument(value, name, operation=operation))
 
 
 def expand_option_paramfile(args: argparse.Namespace, option: str, *, operation: str) -> None:
-    """aws's parse-time paramfile expansion for a string-typed plain option (252).
+    """aws-cli's parse-time paramfile expansion for a string-typed plain option (252).
 
-    aws expands paramfile references on every plain option during argument
+    aws-cli expands paramfile references on every plain option during argument
     parsing, so a bad reference is its ParamValidation 252. Runs in place; a
     value without a prefix (or a non-string) is untouched. For an integer
-    option use ``expand_integer_paramfile``, whose loaded bytes feed
+    option use ``resolve_integer_option``, whose loaded bytes feed
     ``int()`` rather than being rejected as a string.
     """
     _expand_string_paramfile(
@@ -242,67 +200,86 @@ def expand_option_paramfile(args: argparse.Namespace, option: str, *, operation:
     )
 
 
-def expand_integer_paramfile(args: argparse.Namespace, option: str, *, operation: str) -> None:
-    """aws's parse-time paramfile expansion for a string-typed integer option (252).
+def resolve_integer_option(args: argparse.Namespace, option: str, *, operation: str) -> int | None:
+    """aws-cli's ``integer`` option: its paramfile expanded, then the bare ``int()``.
 
-    aws loads the paramfile before the bare ``int()`` coercion, so a missing
+    aws-cli loads the paramfile at parse time, before the coercion, so a missing
     reference is the load 252 *before* the coercion's 255 (measured:
     ``--page-size file:///no/x`` exits 252). Unlike the string helper it keeps
-    ``fileb://`` bytes rather than rejecting them: aws feeds them to ``int()``
+    ``fileb://`` bytes rather than rejecting them: aws-cli feeds them to ``int()``
     too (``--page-size fileb://<5>`` succeeds, ``<abc>`` fails 255 with a
-    ``b'abc'`` repr). ``parse_integer_option`` performs the coercion.
+    ``b'abc'`` repr). A value without a prefix falls through into ``int()``;
+    ``parse_integer_option`` performs the coercion. The loaded value replaces
+    ``args.<option>`` in place, as the string helpers do.
     """
     value = getattr(args, option, None)
     if isinstance(value, str):
         name = f"--{option.replace('_', '-')}"
-        with paramfile.named_argument(name, operation=operation):
-            loaded = paramfile.get_paramfile(value, operation=operation)
-        if loaded is not None:
-            setattr(args, option, loaded)
+        setattr(args, option, paramfile.load_argument(value, name, operation=operation))
+    return parse_integer_option(getattr(args, option), operation=operation)
 
 
 def expand_positional_paramfile(
     args: argparse.Namespace, dest: str, *, name: str, operation: str
 ) -> None:
-    """Apply aws's command-specific positional paramfile expansion in place.
+    """aws-cli's parse-time paramfile expansion for a path positional, ``file://`` only.
 
-    Missing files remain the loader's rc 252 for every command. Readable
-    `fileb://` values are deliberately less uniform: aws-cli leaves the
-    bytes in the parsed positional, after which mb / rb / presign reject them
-    as string parameters (252), rm decodes them back to a path, and ls /
-    website crash in their own path handling (255). The callers retain those
-    downstream quirks so the exit codes stay compatible.
+    A ``file://`` reference loads the path as text (a missing or undecodable
+    file is the load 252). A ``fileb://`` one is refused at 252 without being
+    read (`paramfile.load_text_argument`): aws-cli loads the bytes into the path, and
+    each command then mishandles them its own way - a crash on ls and
+    website, a delete of the decoded path on rm - an aws-cli bug this CLI does
+    not copy (docs/cli/aws-differences.md section 2). *name* is the argument
+    name the report carries.
     """
-    value = getattr(args, dest, None)
-    if not isinstance(value, str):
-        return
-    with paramfile.named_argument(name, operation=operation):
-        loaded = paramfile.get_paramfile(value, operation=operation)
-    if loaded is None:
-        return
-    if isinstance(loaded, bytes) and operation in {"mb", "rb", "presign"}:
-        # Intentional aws-cli bug parity: these three commands happen to route
-        # positional bytes through string-parameter validation, while rm, ls,
-        # and website mishandle the same bytes differently.
-        raise ValidationError(
-            "Parameter validation failed:\n"
-            f"Invalid type for parameter input, value: {loaded!r}, "
-            "type: <class 'bytes'>, valid types: <class 'str'>",
-            operation=operation,
-        )
-    setattr(args, dest, loaded)
+    _expand_string_paramfile(args, dest, name=name, operation=operation)
+
+
+def refuse_bucketless(bucket: str, *, operation: str | None = None) -> None:
+    """Refuse an S3 path that names no bucket (252).
+
+    aws-cli has no such check: it sends ``Bucket=""`` toward the API, and each
+    command fails wherever that first bites - a fatal error (rc 1) at a
+    listing or a single object's lookup, every upload or copy failing on its
+    own, a ``--dryrun`` upload or single ``rm`` reporting success at rc 0, an
+    ``mb`` / ``rb`` failure line at 1, ``rb --force`` at 255. A path with no
+    bucket names nothing to transfer to or from, so here it is a
+    command-line error before anything runs, on every command but ``ls``,
+    where ``s3://`` lists the buckets.
+    """
+    if not bucket:
+        raise ValidationError(usage.invalid_bucket_name_message(), operation=operation)
+
+
+def refuse_invalid_bucket_name(bucket: str, *, operation: str) -> None:
+    """Refuse a bucket name with botocore's own name check, before any request (252).
+
+    ``presign`` hands aws-cli's bucket name to botocore, whose
+    ``validate_bucket_name`` refuses it before signing - the empty name of
+    ``s3://`` or ``s3:///k`` above all - so the report is botocore's
+    ``Parameter validation failed:`` text, as on aws-cli (design/overview.md
+    section 3, Messages). It checks the bucket ``build_s3_storage`` split off,
+    as aws-cli's ``find_bucket_key`` splits it.
+    """
+    from botocore.exceptions import ParamValidationError
+    from botocore.handlers import validate_bucket_name
+
+    try:
+        validate_bucket_name({"Bucket": bucket})
+    except ParamValidationError as exc:
+        raise ValidationError(str(exc), operation=operation) from exc
 
 
 def add_page_size_argument(parser: argparse.ArgumentParser) -> None:
     """Register ``--page-size`` (shared by ls / rm and the transfer family).
 
     Not range-validated: aws-cli passes any int through and lets the server
-    decide, and the exit-code charter requires matching the resulting codes
+    decide, and the run's outcome follows from that answer
     (0 lists nothing - ls's empty listing exits 1, rm and the transfers 0;
     a negative value is the server's
     InvalidArgument -> rc 254 from ls, but rc 1 from rm and the transfer
     family, whose post-start errors are uniformly 1 - design/cli.md sections
-    5.2 / 6). No ``type=int``: a non-integer must exit 255 like aws's bare
+    5.2 / 6). No ``type=int``: a non-integer must exit 255 like aws-cli's bare
     ``int()`` conversion, not argparse's 252 (``parse_integer_option``
     converts at ``run()`` start). The default is ``None`` like aws-cli's,
     which sends **no** ``MaxKeys`` / ``MaxBuckets`` on the wire (the server

@@ -16,8 +16,7 @@ import pytest
 from boto3_s3_cli import cli
 from boto3_s3_cli.commands.base import Context
 from tests.cli.unit.test_output import local_zone, needs_tzset
-from tests.utils.fakemodel import model_meta
-from tests.utils.harness import built_client_ctx, unused_ctx
+from tests.utils.harness import unused_ctx
 
 _MTIME = dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc)
 
@@ -37,9 +36,6 @@ class _FakeS3Client:
         self._pages = pages
         self.calls: list[dict[str, Any]] = []
         self.paginator_names: list[str] = []
-        # The ListBuckets filter gate reads the model, so the fake carries the
-        # one a current botocore has.
-        self.meta = model_meta({"ListBuckets": {"Prefix", "BucketRegion"}})
 
     def can_paginate(self, name: str) -> bool:
         return True
@@ -107,7 +103,7 @@ class TestLs:
         assert cli.main(["ls", "s3://bucket"], ctx=ctx) == 0
 
     def test_non_integer_page_size_exits_255(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # aws converts integer options with a bare int(); the ValueError hits
+        # aws-cli converts integer options with a bare int(); the ValueError hits
         # its *general* handler -> 255, not argparse's usage error 252. The
         # conversion fails before the client factory runs.
         def factory(_args: Any) -> Any:
@@ -131,7 +127,7 @@ class TestLsAllBuckets:
         out = capsys.readouterr().out
         assert rc == 0
         assert client.paginator_names == ["list_buckets"]
-        # aws's bytes for this CreationDate under TZ=UTC: no size column.
+        # `aws`'s bytes for this CreationDate under TZ=UTC: no size column.
         assert out.splitlines() == ["2026-01-02 03:04:05 alpha", "2026-01-02 03:04:05 beta"]
 
     def test_bare_s3_uri_lists_buckets(self) -> None:
@@ -186,7 +182,7 @@ class TestLsAllBuckets:
 
 
 class TestListingTimestampEndToEnd:
-    """The stamp aws prints, asserted through the whole ``ls`` path.
+    """The stamp `aws` prints, asserted through the whole ``ls`` path.
 
     ``test_output`` pins the formatter; these pin that the value reaching it is
     the response's own timestamp, for both listing kinds. Each expectation is a
@@ -198,7 +194,7 @@ class TestListingTimestampEndToEnd:
     def test_object_line_in_a_zone_whose_rules_changed(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # Mexico abolished DST in 2022-10, so aws renders this 2022-07 object at
+        # Mexico abolished DST in 2022-10, so aws-cli renders this 2022-07 object at
         # today's -6 rather than the -5 in force back then.
         page = {"Contents": [{"Key": "stamps/stamp", "Size": 1, "LastModified": _at("2022-07-01")}]}
         ctx, _ = _fake_ctx([page])
@@ -209,7 +205,7 @@ class TestListingTimestampEndToEnd:
     @needs_tzset
     def test_bucket_lines_pad_a_short_year(self, capsys: pytest.CaptureFixture[str]) -> None:
         # A CreationDate below year 1000 keeps the name column where a
-        # four-digit one puts it (aws left-justifies the stamp into 19 columns).
+        # four-digit one puts it (aws-cli left-justifies the stamp into 19 columns).
         page = {
             "Buckets": [
                 {"Name": "y0999", "CreationDate": _at("0999-06-15")},
@@ -224,52 +220,28 @@ class TestListingTimestampEndToEnd:
             "1000-06-15 12:00:00 y1000",
         ]
 
-
-class TestMalformedListing:
-    """A listing entry ``ls`` cannot read stops it where aws-cli stops.
-
-    aws-cli reads the elements it needs off each entry by subscript, so a
-    response omitting one raises ``KeyError`` at that entry - the lines ahead of
-    it are already on stdout, and the general handler reports the element name at
-    rc 255. Each expectation below is what the pinned aws printed for the same
-    response (a 127.0.0.1 fake serving the crafted XML), under the program-token
-    rewrite of design/testing.md section 9.
-    """
-
-    def test_objects_before_the_bad_entry_are_printed(
+    @needs_tzset
+    def test_a_stamp_the_local_calendar_cannot_hold_stops_the_listing_at_it(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        # The library reads the stamp as UTC and lists it; the line renders
+        # local time, which year 9999 plus a positive offset cannot hold, so
+        # ls stops at that entry with the error at 255 - the lines ahead of it
+        # already printed (aws-cli stops there too, as its own conversion fails).
+        last = dt.datetime(9999, 12, 31, 23, 0, tzinfo=dt.timezone.utc)
         page = {
             "Contents": [
                 _obj("p/a.txt"),
-                {"Key": "p/bad.txt", "Size": 1},  # no LastModified
+                {"Key": "p/late.txt", "Size": 1, "LastModified": last},
                 _obj("p/z.txt"),
             ]
         }
         ctx, _ = _fake_ctx([page])
-        assert cli.main(["ls", "--summarize", "s3://bucket/p/"], ctx=ctx) == 255
+        with local_zone("Asia/Tokyo"):
+            assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 255
         captured = capsys.readouterr()
-        # The summary aws prints after a clean listing is not reached.
         assert [line.split()[-1] for line in captured.out.splitlines()] == ["a.txt"]
-        assert captured.err == "boto3-s3: [ERROR]: 'LastModified'\n"
-
-    def test_a_common_prefix_without_prefix_reports_it(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        ctx, _ = _fake_ctx([{"CommonPrefixes": [{}], "Contents": [_obj("p/a.txt")]}])
-        assert cli.main(["ls", "s3://bucket/p/"], ctx=ctx) == 255
-        captured = capsys.readouterr()
-        assert captured.out == ""  # common prefixes render ahead of the objects
-        assert captured.err == "boto3-s3: [ERROR]: 'Prefix'\n"
-
-    def test_buckets_before_the_bad_entry_are_printed(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        ctx, _ = _fake_ctx([{"Buckets": [_bucket("alpha"), {"Name": "zzz"}]}])
-        assert cli.main(["ls"], ctx=ctx) == 255
-        captured = capsys.readouterr()
-        assert [line.split()[-1] for line in captured.out.splitlines()] == ["alpha"]
-        assert captured.err == "boto3-s3: [ERROR]: 'CreationDate'\n"
+        assert captured.err.startswith("\nboto3-s3: [ERROR]: ")
 
 
 class TestGlobalOptionPosition:
@@ -295,7 +267,7 @@ class TestGlobalOptionPosition:
 
 
 class TestRecognizedExtraGlobals:
-    """The remaining aws s3 ls globals: --version, --cli-binary-format, --output off."""
+    """The remaining `aws s3 ls` globals: --version, --cli-binary-format, --output off."""
 
     def test_version_lists_all_components_on_one_line(
         self, capsys: pytest.CaptureFixture[str]
@@ -323,8 +295,8 @@ class TestRecognizedExtraGlobals:
 
 
 class TestParamfileExpansion:
-    """aws paramfile-expands the positional and the bucket-listing filters at
-    parse time (rc 252 on a bad reference), naming the argument as aws does."""
+    """aws-cli paramfile-expands the positional and the bucket-listing filters at
+    parse time (rc 252 on a bad reference), naming the argument as aws-cli does."""
 
     def test_positional_file_reference_is_expanded(self, tmp_path: Any) -> None:
         # Expands to a key prefix that matches nothing -> rc 1, proving the
@@ -361,35 +333,13 @@ class TestParamfileExpansion:
         assert "Error parsing parameter '--bucket-region'" in capsys.readouterr().err
 
     def test_bucket_name_prefix_reference_is_expanded(self, tmp_path: Path) -> None:
-        # aws paramfile-expands --bucket-name-prefix: a file:// reference
+        # aws-cli paramfile-expands --bucket-name-prefix: a file:// reference
         # forwards the file's contents as the Prefix.
         ref = tmp_path / "prefix.txt"
         ref.write_text("al")
         ctx, client = _fake_ctx([{"Buckets": []}])
         assert cli.main(["ls", "--bucket-name-prefix", f"file://{ref}"], ctx=ctx) == 0
         assert client.calls[0]["Prefix"] == "al"
-
-    def test_positional_missing_fileb_reference_is_252(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # aws expands fileb:// as well as file://, so a missing one is the same
-        # load 252 (not the 254/1 of a literal path reaching the client).
-        rc = cli.main(["ls", "fileb:///no/x"], ctx=unused_ctx())
-        assert rc == 252
-        assert (
-            "Error parsing parameter 'paths': Unable to load paramfile" in capsys.readouterr().err
-        )
-
-    def test_positional_fileb_reference_reproduces_aws_type_bug_255(
-        self, tmp_path: Any, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # aws-cli leaves positional bytes in ListCommand and crashes when its
-        # path code calls bytes.startswith(str). Keep this bug-shaped rc 255.
-        ref = tmp_path / "u.bin"
-        ref.write_bytes(b"s3://bucket/p/")
-        rc = cli.main(["ls", f"fileb://{ref}"], ctx=built_client_ctx())
-        assert rc == 255
-        assert "startswith first arg must be bytes" in capsys.readouterr().err
 
     def test_page_size_missing_fileb_reference_is_252(
         self, capsys: pytest.CaptureFixture[str]
@@ -404,7 +354,7 @@ class TestParamfileExpansion:
         assert "Error parsing parameter '--page-size'" in capsys.readouterr().err
 
     def test_page_size_fileb_digits_coerce_to_int(self, tmp_path: Any) -> None:
-        # aws feeds the loaded bytes to int() (b"5" -> 5), so a readable
+        # aws-cli feeds the loaded bytes to int() (b"5" -> 5), so a readable
         # digit fileb:// drives a normal listing with the coerced page size.
         ref = tmp_path / "n.bin"
         ref.write_bytes(b"5")
@@ -412,24 +362,10 @@ class TestParamfileExpansion:
         assert cli.main(["ls", "s3://b", "--page-size", f"fileb://{ref}"], ctx=ctx) == 0
         assert client.calls[0]["PaginationConfig"]["PageSize"] == 5
 
-    def test_page_size_fileb_non_digits_is_255(
-        self, tmp_path: Any, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # A non-integer fileb:// fails int() at 255 like aws, whose ValueError
-        # repr shows the bytes form (measured: ``... base 10: b'abc'``).
-        ref = tmp_path / "bad.bin"
-        ref.write_bytes(b"abc")
-        rc = cli.main(
-            ["ls", "s3://b", "--page-size", f"fileb://{ref}"],
-            ctx=unused_ctx(),
-        )
-        assert rc == 255
-        assert "invalid literal for int() with base 10: b'abc'" in capsys.readouterr().err
-
 
 class TestQueryValidation:
-    """aws compiles --query at parse time; a bad JMESPath is its 252, ahead of
-    every other head check (globalargs.validate_query)."""
+    """aws-cli compiles --query at parse time; a bad JMESPath is its 252
+    (globalargs.validate_query)."""
 
     def test_invalid_query_is_252(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = cli.main(["ls", "s3://b", "--query", "]["], ctx=unused_ctx())
@@ -441,34 +377,10 @@ class TestQueryValidation:
         assert cli.main(["ls", "s3://b/p/", "--query", "Contents[].Key"], ctx=ctx) == 0
 
 
-class TestScanInterruptPolicy:
-    def test_the_cli_posture_reaches_the_listing_scan(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Ctrl-C is process-fatal in the CLI: the S3 the CLI builds declares
-        # reusable_after_interrupt=False once, and ls threads it into its listing
-        # scan's ScanOptions; the library default keeps waiting.
-        import boto3_s3
-
-        scan_waits: list[bool] = []
-
-        class _Recording(boto3_s3.S3Storage):
-            def scan(self, options: Any = None, *, cancel_token: Any = None) -> Any:
-                assert options is not None
-                scan_waits.append(options.reusable_after_interrupt)
-                return super().scan(options, cancel_token=cancel_token)
-
-        # Patch the command module's binding: ls.py imports S3Storage at top.
-        monkeypatch.setattr("boto3_s3_cli.commands.ls.S3Storage", _Recording)
-        ctx, _client = _fake_ctx([{"Contents": []}])
-        assert cli.main(["ls", "s3://b/p/"], ctx=ctx) == 1
-        assert scan_waits == [False]
-
-
 class TestTimestampFormat:
     """`cli_timestamp_format` is validated, but neither value moves this output.
 
-    On aws the setting swaps botocore's timestamp parser for one that keeps the
+    On aws-cli the setting swaps botocore's timestamp parser for one that keeps the
     wire string (`wire`) or hands back an ISO-8601 string (`iso8601`), and its
     `s3` customization then re-parses whichever it got with a general date
     parser before rendering local time - so both settings, and the unset

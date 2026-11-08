@@ -11,13 +11,17 @@ deterministic.
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import errno
+import gc
 import io
 import os
 import re
+import sys
 import threading
 import time
-from collections.abc import Callable
+import weakref
+from collections.abc import Callable, Generator
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,6 +39,14 @@ from botocore.exceptions import (
 )
 from s3transfer import copies as s3transfer_copies
 from s3transfer.copies import CopySubmissionTask
+from s3transfer.download import (
+    DownloadNonSeekableOutputManager,
+    ImmediatelyWriteIOGetObjectTask,
+    IOWriteTask,
+)
+from s3transfer.futures import TransferCoordinator
+from s3transfer.manager import TransferManager
+from s3transfer.tasks import Task
 
 from boto3_s3 import transfer
 from boto3_s3.exceptions import (
@@ -43,12 +55,12 @@ from boto3_s3.exceptions import (
     CancelledError,
     ConfigurationError,
     InvalidConfigError,
-    MalformedResponseError,
     NotFoundError,
     TransportError,
     ValidationError,
 )
 from boto3_s3.localstorage import LocalStorage
+from boto3_s3.s3storage import S3Storage
 from boto3_s3.transfer import (
     TransferItem,
     Transferrer,
@@ -61,9 +73,11 @@ from boto3_s3.types import (
     CancelMode,
     CancelToken,
     CopyPropsMode,
+    CrtClientOptions,
     FileInfo,
     OpOutcome,
     OpResult,
+    S3FileInfo,
     TransferOptions,
     TransferProgress,
     TransferType,
@@ -127,6 +141,23 @@ class _OpenSink(io.BytesIO):
         pass
 
 
+def _listed_source(item: TransferItem, kind: TransferType, client: Any) -> None:
+    """Give ``item`` the source entry a producer stamps on a listed item.
+
+    ``mv`` deletes its source through ``src_info.storage``: the local file
+    system on an upload, the source bucket on ``client`` otherwise.
+    """
+    if kind is TransferType.UPLOAD:
+        assert item.src_path is not None
+        if item.src_info is None:
+            item.src_info = FileInfo(key=item.src_path.replace(os.sep, "/"))
+        if item.src_info.storage is None:
+            item.src_info.storage = LocalStorage(".")
+    elif item.src_info is None:
+        storage = S3Storage(f"s3://{item.src_bucket}", client=client)
+        item.src_info = S3FileInfo(key=cast("str", item.src_key), storage=storage)
+
+
 def _run(
     kind: TransferType,
     items: list[TransferItem],
@@ -143,20 +174,16 @@ def _run(
     source_calls: list[ApiCall] = []
     if source_responses is not None:
         source_client, source_calls = make_recording_client(source_responses)
-    # Mirror the orchestration: an mv upload deletes its source through the
-    # source storage's Storage.delete(info), so wire both like production does.
-    src_storage: LocalStorage | None = None
-    if is_move and kind is TransferType.UPLOAD:
-        src_storage = LocalStorage(".")
+    # Mirror the orchestration: an mv deletes its source through the source
+    # entry's own Storage.delete(info), so stamp the entry like a producer does.
+    if is_move:
         for it in items:
-            if it.src_info is None and it.src_path is not None:
-                it.src_info = FileInfo(key=it.src_path.replace(os.sep, "/"))
+            _listed_source(it, kind, source_client or client)
     results: list[OpResult] = []
     transferrer = Transferrer(
         kind,
         client,
         source_client=source_client,
-        src_storage=src_storage,
         dest_storage=dest_storage,
         transfer_config=config,
         options=options,
@@ -290,7 +317,7 @@ class TestUpload:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # boto3-faithful: the default is s3transfer's (CRC32 in its CRT module).
-        # aws's CRC64NVME default is the CLI's to name (boto3_s3_cli.checksumdefault,
+        # aws-cli's CRC64NVME default is the CLI's to name (boto3_s3_cli.checksumdefault,
         # design/crt.md section 1) - and it matters there, since aws-checksums
         # computes CRC32 in software (benchmarks/RESULTS.md 2026-09-06).
         extra_args = self._upload_on_crt(tmp_path, monkeypatch)
@@ -347,7 +374,6 @@ class TestUpload:
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         assert isinstance(transferrer.first_error, NotFoundError)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
-        assert str(results[0].error).startswith("An error occurred (NoSuchBucket)")
         # The attribute contract (exceptions.md section 2.1): an
         # exception-backed per-item failure links its original ClientError on
         # the record error's __cause__, matching the raise-from paths.
@@ -356,8 +382,9 @@ class TestUpload:
         assert isinstance(error.__cause__, ClientError)
 
     def test_invalid_grants_raise_at_submit_time(self, tmp_path: Path) -> None:
-        # aws maps request params per item inside its pipeline, so a bad
-        # --grants surfaces in-flight (fatal error, rc 1) - never upfront.
+        # The operation layer refuses a bad grants before the run; driven
+        # directly, the Transferrer's own per-item mapping still refuses it at
+        # submit, before any request.
         src = tmp_path / "a.bin"
         src.write_bytes(b"x")
         item = TransferItem(
@@ -472,14 +499,8 @@ class TestDownload:
         outcomes = [result.outcome for result in results]
         assert outcomes == [OpOutcome.WARNED, OpOutcome.SUCCEEDED]
         warned = results[0]
-        # aws's full fixed wording, the destination path twice, then the
-        # EPERM re-wording from aws-cli's set_file_utime.
-        assert str(warned.error) == (
-            f"Skipping file {item.dest_path}. Successfully Downloaded {item.dest_path} "
-            "but was unable to update the last modified time. "
-            "The file was downloaded, but attempting to modify the utime of the file "
-            "failed. Is the file owned by another user?"
-        )
+        # The warning names the file whose time could not be set.
+        assert item.dest_path is not None and item.dest_path in str(warned.error)
 
     def test_download_request_params(self, tmp_path: Path) -> None:
         item = self._item(tmp_path)
@@ -613,7 +634,7 @@ class TestCopy:
     def test_explicit_copy_directive_stays_on_a_single_part_copy(self) -> None:
         # Below the threshold the directive is a real CopyObject parameter -
         # S3 itself copies or replaces the metadata - so the multipart flip
-        # must not touch it: aws sends COPY verbatim.
+        # must not touch it: aws-cli sends COPY verbatim.
         calls, source_calls, _, _ = _run(
             TransferType.COPY,
             [self._item()],
@@ -742,46 +763,15 @@ class TestCopy:
                 TransferOptions(copy_props=CopyPropsMode.METADATA_DIRECTIVE),
                 [KeyError("Credentials")],
                 Boto3S3Error,
-                "'Credentials'",
+                "Credentials",
                 id="head-raises",
-            ),
-            pytest.param(
-                TransferOptions(), [{}, {}], MalformedResponseError, "'TagSet'", id="no-tagset"
-            ),
-            pytest.param(
-                TransferOptions(),
-                [{}, {"TagSet": [{"Value": "v"}]}],
-                MalformedResponseError,
-                "'Key'",
-                id="tag-without-key",
-            ),
-            pytest.param(
-                TransferOptions(),
-                [{}, {"TagSet": [{"Key": "k"}]}],
-                MalformedResponseError,
-                "'Value'",
-                id="tag-without-value",
-            ),
-            pytest.param(
-                TransferOptions(),
-                [{}, {"TagSet": [{}]}],
-                MalformedResponseError,
-                "'Key'",
-                id="tag-without-either-reads-key-first",
             ),
             pytest.param(
                 TransferOptions(copy_props=CopyPropsMode.ALL),
                 [{}, {"TagSet": []}, KeyError("Credentials")],
                 Boto3S3Error,
-                "'Credentials'",
+                "Credentials",
                 id="listing-raises",
-            ),
-            pytest.param(
-                TransferOptions(copy_props=CopyPropsMode.ALL),
-                [{}, {"TagSet": []}, {"Annotations": [{"Size": 1}]}],
-                MalformedResponseError,
-                "'AnnotationName'",
-                id="entry-without-name",
             ),
             pytest.param(
                 TransferOptions(copy_props=CopyPropsMode.ALL),
@@ -792,15 +782,8 @@ class TestCopy:
                     KeyError("Credentials"),
                 ],
                 Boto3S3Error,
-                "'Credentials'",
+                "Credentials",
                 id="annotation-raises",
-            ),
-            pytest.param(
-                TransferOptions(copy_props=CopyPropsMode.ALL),
-                [{}, {"TagSet": []}, {"Annotations": [{"AnnotationName": "n"}]}, {}],
-                MalformedResponseError,
-                "'AnnotationPayload'",
-                id="reply-without-payload",
             ),
             pytest.param(
                 TransferOptions(copy_props=CopyPropsMode.ALL),
@@ -811,7 +794,7 @@ class TestCopy:
                     {"AnnotationPayload": _BodyRaising(KeyError("Credentials"))},
                 ],
                 Boto3S3Error,
-                "'Credentials'",
+                "Credentials",
                 id="body-read-raises",
             ),
         ],
@@ -823,10 +806,10 @@ class TestCopy:
         error_type: type[Boto3S3Error],
         text: str,
     ) -> None:
-        # Whatever a source-side read raises - botocore's family or not - or
-        # a reply missing an element aws-cli reads by subscript (its KeyError's
-        # text) fails the item against the *source*, not the copy destination
-        # _record_failure would otherwise stamp on it.
+        # Whatever a source-side read raises - botocore's family or not -
+        # fails the item against the *source*, not the copy destination
+        # _record_failure would otherwise stamp on it; the message names the
+        # cause.
         _, _, results, transferrer = _run(
             TransferType.COPY,
             [self._item(size=9 * _MIB)],
@@ -838,7 +821,7 @@ class TestCopy:
         error = results[0].error
         assert error is not None
         assert type(error) is error_type
-        assert str(error) == text
+        assert text in str(error)
         assert isinstance(error.__cause__, KeyError)
         assert (error.bucket, error.key) == ("src-b", "d/a.bin")
 
@@ -910,7 +893,7 @@ class TestCopy:
         assert transferrer.succeeded == 1
 
     def test_annotation_write_drops_the_copy_checksum_algorithm(self) -> None:
-        # --checksum-algorithm rides the copy calls, but aws writes
+        # --checksum-algorithm rides the copy calls, but aws-cli writes
         # annotations from its own subscriber and maps only RequestPayer onto
         # PutObjectAnnotation; so does `_SetAnnotations` (this pins the wire).
         responses: list[dict[str, Any] | Exception] = [
@@ -1278,8 +1261,8 @@ class TestCopy:
 
     def test_a_partial_annotation_failure_keeps_the_tagged_object(self) -> None:
         # The tags are already on; ann2's write is denied: the object is kept
-        # (no rollback, no abort of the completed upload) and aws-cli's
-        # AnnotationCopyError is the reported failure.
+        # (no rollback, no abort of the completed upload) and the failure names
+        # the annotation that was not written.
         calls, results, transferrer = self._all_with_oversized_tags(
             [{}, {}, client_error("AccessDenied", 403, "PutObjectAnnotation")]
         )
@@ -1288,36 +1271,26 @@ class TestCopy:
         assert "AbortMultipartUpload" not in ops(calls)
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
-        assert "Annotations written: ann1. Annotations that failed: ann2" in str(results[0].error)
+        assert "ann2" in str(results[0].error)
 
-    def test_a_tagging_failure_rolls_back_before_any_annotation_is_written(self) -> None:
+    @pytest.mark.parametrize(
+        "rollback",
+        [{}, client_error("AccessDenied", 403, "DeleteObject")],
+        ids=["rollback-deletes", "rollback-fails"],
+    )
+    def test_a_tagging_failure_fails_before_any_annotation_is_written(
+        self, rollback: dict[str, Any] | BaseException
+    ) -> None:
+        # A rollback delete that fails too still leaves the item failed with
+        # the tagging error and no annotation written (aws-cli's future stays
+        # a success there, and it writes the annotations and exits 0).
         calls, results, _ = self._all_with_oversized_tags(
-            [client_error("AccessDenied", 403, "PutObjectTagging"), {}]
+            [client_error("AccessDenied", 403, "PutObjectTagging"), rollback, {}, {}]
         )
         assert ops(calls)[-3:] == ["CompleteMultipartUpload", "PutObjectTagging", "DeleteObject"]
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert isinstance(results[0].error, AccessDeniedError)
         assert "PutObjectTagging" in str(results[0].error)
-
-    def test_a_failed_rollback_leaves_a_success_that_still_gets_its_annotations(self) -> None:
-        # The rollback's own error escapes the tags subscriber before it
-        # settles the future (aws-cli's shape), so the annotations subscriber
-        # sees a success and writes them: annotations, no tags, rc 0.
-        calls, results, transferrer = self._all_with_oversized_tags(
-            [
-                client_error("AccessDenied", 403, "PutObjectTagging"),
-                client_error("AccessDenied", 403, "DeleteObject"),
-                {},
-                {},
-            ]
-        )
-        assert ops(calls)[-4:] == [
-            "PutObjectTagging",
-            "DeleteObject",
-            "PutObjectAnnotation",
-            "PutObjectAnnotation",
-        ]
-        assert transferrer.succeeded == 1
-        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
 
     def test_post_copy_tagging_failure_rolls_back_the_destination(self) -> None:
         big = "v" * 3000
@@ -1360,12 +1333,16 @@ class TestNonTransferOutcomes:
     def test_warn_and_skip_count_into_the_rollup(self) -> None:
         client, _ = make_recording_client([])
         results: list[OpResult] = []
+        info = FileInfo(key="d/k", compare_key="k")
         with Transferrer(TransferType.DOWNLOAD, client, on_result=results.append) as transferrer:
-            transferrer.warn("Skipping file s3://b/k. Object is of storage class GLACIER.", key="k")
+            transferrer.warner.warn(
+                "Skipping file s3://b/d/k. Object is of storage class GLACIER.", info=info
+            )
             transferrer.skip(TransferItem(compare_key="k2"))
         assert (transferrer.warned, transferrer.skipped) == (1, 1)
         assert [result.outcome for result in results] == [OpOutcome.WARNED, OpOutcome.SKIPPED]
         assert results[0].transfer_type is TransferType.DOWNLOAD
+        assert (results[0].compare_key, results[0].src_info) == ("k", info)
 
     def test_warner_sink_is_exposed_and_counts_into_the_rollup(self) -> None:
         # A backend walk's ScanOptions.on_warning targets transferrer.warner.warn
@@ -1374,7 +1351,7 @@ class TestNonTransferOutcomes:
         client, _ = make_recording_client([])
         results: list[OpResult] = []
         with Transferrer(TransferType.UPLOAD, client, on_result=results.append) as transferrer:
-            transferrer.warner.warn("Skipping file /tmp/x. File does not exist.", key="x")
+            transferrer.warner.warn("Skipping file /tmp/x. File does not exist.")
         assert transferrer.warned == 1
         assert [result.outcome for result in results] == [OpOutcome.WARNED]
         assert results[0].transfer_type is TransferType.UPLOAD
@@ -1517,11 +1494,10 @@ class _CrtCapturingManager(_CrtDrainManager):
 
 
 class TestCrtCancelClassification:
-    """A CRT cancellation is a per-item failure unless this run's cancel token
-    ordered it (design/crt.md section 6) - aws-cli's measured classification:
-    a fatal or Ctrl-C folding its CRT manager prints a failed line per
-    in-flight transfer, and only the token, which aws-cli has no counterpart
-    for, revokes as CANCELLED.
+    """A CRT cancellation this run ordered - its cancel token, a fatal or a
+    Ctrl-C folding the manager - revokes the item as CANCELLED, as on the
+    classic engine (design/crt.md section 6); aws-cli prints a failed line per
+    such item instead. A CRT cancellation nobody ordered stays a failure.
 
     Driven with a stand-in manager because the real CRT stack needs awscrt's
     event loop; the stand-in reproduces exactly the seam under test - futures
@@ -1543,10 +1519,8 @@ class TestCrtCancelClassification:
 
     def test_uninitiated_cancellations_are_failures(self, tmp_path: Path) -> None:
         # Nobody here ordered a cancel, yet the drain settled the item
-        # cancelled: the trace of an interrupt the CRT manager swallowed.
-        # aws-cli classifies exactly this as a per-item failure (its
-        # DoneResultSubscriber, rc 1); a silent CANCELLED would report the
-        # interrupted run as success.
+        # cancelled: a failure, so a run cut short by something the library
+        # cannot see is never reported as a success.
         client, _ = make_recording_client([])
         results: list[OpResult] = []
         with Transferrer(TransferType.UPLOAD, client, on_result=results.append) as transferrer:
@@ -1556,12 +1530,11 @@ class TestCrtCancelClassification:
         assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
         assert (transferrer.failed, transferrer.cancelled) == (1, 0)
 
-    def test_fatal_ordered_cancellations_are_failures(self, tmp_path: Path) -> None:
+    def test_fatal_ordered_cancellations_are_cancelled(self, tmp_path: Path) -> None:
         # The fatal path orders the cancel (Transferrer.__exit__ under the
-        # exception), and aws-cli still counts each folded in-flight transfer
-        # as a per-item failure (measured: a mid-listing fatal under the CRT
-        # engine prints "download failed: ... AWS_ERROR_S3_CANCELED" per item
-        # before the fatal error line).
+        # exception): each folded in-flight transfer is revoked, as on the
+        # classic engine. aws-cli prints "upload failed: ...
+        # AWS_ERROR_S3_CANCELED" per item there (measured), not copied.
         client, _ = make_recording_client([])
         results: list[OpResult] = []
         transferrer = Transferrer(TransferType.UPLOAD, client, on_result=results.append)
@@ -1570,15 +1543,15 @@ class TestCrtCancelClassification:
                 transferrer._manager = _CrtDrainManager()  # pyright: ignore[reportPrivateUsage]
                 self._submit_one(transferrer, tmp_path)
                 raise RuntimeError("fatal elsewhere")
-        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
         assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
-        assert (transferrer.failed, transferrer.cancelled) == (1, 0)
+        assert (transferrer.failed, transferrer.cancelled) == (0, 1)
+        assert transferrer.first_error is None
 
     def test_token_ordered_cancellations_stay_cancelled(self, tmp_path: Path) -> None:
         # The cancel-token escalation (`_cancel_futures`, as the drain-time
-        # watcher runs it) is the one CRT cancel aws-cli has no counterpart
-        # for: an ordered revocation, CANCELLED, outside the failure counts -
-        # the on_result contract (design/opresult.md).
+        # watcher runs it): an ordered revocation, CANCELLED, outside the
+        # failure counts - the on_result contract (design/opresult.md).
         client, _ = make_recording_client([])
         results: list[OpResult] = []
         with Transferrer(TransferType.UPLOAD, client, on_result=results.append) as transferrer:
@@ -1589,12 +1562,20 @@ class TestCrtCancelClassification:
         assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
         assert (transferrer.failed, transferrer.cancelled) == (0, 1)
 
-    def test_token_cancel_caught_mid_submission_stays_cancelled(self, tmp_path: Path) -> None:
-        # An immediate token cancel surfacing in the submission loop reaches
-        # __exit__ as the CancelledError that folds the manager
-        # (s3._raise_if_cancelled). That cancel is still the token's own
-        # order, so the in-flight item revokes CANCELLED exactly like the
-        # drain-time escalation above - not FAILED like a fatal's cancel.
+    def test_an_immediate_cancel_caught_mid_submission_leaves_the_manager(
+        self, tmp_path: Path
+    ) -> None:
+        # An immediate token cancel surfacing in the submission loop
+        # (s3._raise_if_cancelled) leaves at once (overview section 3): the
+        # manager is neither drained nor shut down, and the item still out
+        # reports nothing.
+        drained: list[bool] = []
+
+        class _Recording(_CrtDrainManager):
+            def _drain(self) -> None:
+                drained.append(True)
+                super()._drain()
+
         client, _ = make_recording_client([])
         results: list[OpResult] = []
         token = CancelToken()
@@ -1603,76 +1584,667 @@ class TestCrtCancelClassification:
         )
         with pytest.raises(CancelledError):
             with transferrer:
-                transferrer._manager = _CrtDrainManager()  # pyright: ignore[reportPrivateUsage]
+                transferrer._manager = _Recording()  # pyright: ignore[reportPrivateUsage]
                 self._submit_one(transferrer, tmp_path)
                 token.cancel(mode=CancelMode.IMMEDIATE)
                 raise CancelledError("cp was cancelled", operation="cp")
-        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
-        assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
-        assert (transferrer.failed, transferrer.cancelled) == (0, 1)
+        assert drained == []
+        assert results == []
 
-    def test_interrupt_folded_cancellations_are_failures(self, tmp_path: Path) -> None:
-        # A Ctrl-C forcing the fold classifies its cancels FAILED like a
-        # fatal (aws-measured); the interrupt itself propagates.
-        client, _ = make_recording_client([])
-        results: list[OpResult] = []
-        transferrer = Transferrer(TransferType.UPLOAD, client, on_result=results.append)
-        with pytest.raises(KeyboardInterrupt):
-            with transferrer:
-                transferrer._manager = _CrtDrainManager()  # pyright: ignore[reportPrivateUsage]
-                self._submit_one(transferrer, tmp_path)
-                raise KeyboardInterrupt
-        assert [result.outcome for result in results] == [OpOutcome.FAILED]
-        assert "AWS_ERROR_S3_CANCELED" in str(results[0].error)
-        assert (transferrer.failed, transferrer.cancelled) == (1, 0)
 
-    def test_interrupt_with_a_cancelled_token_still_fails_the_items(self, tmp_path: Path) -> None:
-        # The flag rises only under the token's *own* CancelledError: an
-        # interrupt that forces the fold - even with the token already
-        # cancelled - keeps the aws-measured FAILED classification. Which
-        # cancel "the token ordered" is decided by the exception that forced
-        # the fold, not by the token's state alone.
-        client, _ = make_recording_client([])
-        results: list[OpResult] = []
-        token = CancelToken()
-        transferrer = Transferrer(
-            TransferType.UPLOAD, client, on_result=results.append, cancel_token=token
+class _SettledCrtFuture(_FakeCrtFuture):
+    """A CRT transfer that succeeds, unless a cancel reaches it before it
+    finishes (``finished``) or a subscriber stores another outcome."""
+
+    def __init__(self) -> None:
+        super().__init__(RuntimeError("unused"))
+        self._stored: BaseException | None = None
+        self.finished = False
+        self.cancelled = False
+
+    def done(self) -> bool:
+        return self.finished
+
+    def result(self) -> None:
+        if self._stored is not None:
+            raise self._stored
+
+    def cancel(self) -> None:
+        self.cancelled = True
+        if not self.finished:
+            self._stored = _CrtCancelError("AWS_ERROR_S3_CANCELED: Request successfully cancelled")
+
+    def set_exception(self, exc: BaseException) -> None:
+        self._stored = exc
+
+
+class _CrtCallbackManager:
+    """The CRT manager's done path: every accepted transfer succeeds, and its
+    done subscribers run in turn on the one thread ``fire`` starts, as awscrt
+    runs them. The manager's shutdown returns once those calls have returned.
+    ``fired`` counts the transfers whose calls have. A run waits for its
+    transfers to settle before it shuts the manager down, so a test fires the
+    ones it lets finish before its block ends."""
+
+    def __init__(self) -> None:
+        self._accepted: list[tuple[_SettledCrtFuture, list[Any]]] = []
+        self.fired = 0
+
+    def _accept(self, **kwargs: Any) -> _SettledCrtFuture:
+        future = _SettledCrtFuture()
+        self._accepted.append((future, list(kwargs["subscribers"])))
+        return future
+
+    upload = _accept
+    download = _accept
+
+    def fire(self) -> threading.Thread:
+        accepted, self._accepted = self._accepted, []
+
+        def call_on_done() -> None:
+            for future, subscribers in accepted:
+                future.finished = True
+                for subscriber in subscribers:
+                    on_done = getattr(subscriber, "on_done", None)
+                    if on_done is not None:
+                        on_done(future=future, error=None)
+                self.fired += 1
+
+        thread = threading.Thread(target=call_on_done, name=_AWSCRT_THREAD)
+        thread.start()
+        return thread
+
+    def shutdown(self) -> None:
+        self.fire().join()
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self.fire().join()
+
+
+_AWSCRT_THREAD = "stand-in-awscrt"
+
+
+def _setting_max_request_concurrency(value: int) -> LibraryTransferConfig:
+    config = LibraryTransferConfig()
+    config.max_request_concurrency = value
+    return config
+
+
+class TestCrtMoveDoneWorkers:
+    """A CRT move's source deletes run on `_DoneWorkers`, not on awscrt's thread.
+
+    Driven with a stand-in manager, as `TestCrtCancelClassification` is; the
+    real CRT stack takes the same path in the e2e CRT lane.
+    """
+
+    def _item(self, tmp_path: Path, name: str, client: Any) -> TransferItem:
+        dest = tmp_path / name
+        dest.write_bytes(b"x")
+        item = TransferItem(
+            compare_key=name, size=1, src_bucket="bucket", src_key=name, dest_path=str(dest)
         )
-        with pytest.raises(KeyboardInterrupt):
-            with transferrer:
-                transferrer._manager = _CrtDrainManager()  # pyright: ignore[reportPrivateUsage]
-                self._submit_one(transferrer, tmp_path)
-                token.cancel(mode=CancelMode.IMMEDIATE)
-                raise KeyboardInterrupt
-        assert [result.outcome for result in results] == [OpOutcome.FAILED]
-        assert (transferrer.failed, transferrer.cancelled) == (1, 0)
+        _listed_source(item, TransferType.DOWNLOAD, client)
+        return item
 
-    def test_fatal_with_a_cancelled_token_still_fails_the_items(self, tmp_path: Path) -> None:
-        # The fatal variant of the same tiebreak: the token was cancelled, but
-        # the fatal forced the fold, so its cancels stay per-item failures.
+    def _move(
+        self, results: list[OpResult], *, manager: Any = None, **kwargs: Any
+    ) -> tuple[Transferrer, Any]:
         client, _ = make_recording_client([])
-        results: list[OpResult] = []
-        token = CancelToken()
         transferrer = Transferrer(
-            TransferType.UPLOAD, client, on_result=results.append, cancel_token=token
+            TransferType.DOWNLOAD, client, is_move=True, on_result=results.append, **kwargs
         )
+        stand_in = manager if manager is not None else _CrtCallbackManager()
+        transferrer._manager = stand_in  # pyright: ignore[reportPrivateUsage]
+        return transferrer, client
+
+    def _manager(self, transferrer: Transferrer) -> _CrtCallbackManager:
+        return transferrer._manager  # pyright: ignore[reportPrivateUsage]
+
+    def _fire_and_join(self, transferrer: Transferrer) -> None:
+        callback = self._manager(transferrer).fire()
+        callback.join(10)
+        assert not callback.is_alive()
+
+    def _block_the_first_delete(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> tuple[list[str], threading.Event, threading.Event]:
+        """A delete stub whose first call waits for the returned ``release``."""
+        deleted: list[str] = []
+        started = threading.Event()
+        release = threading.Event()
+
+        def delete(_self: Any, info: Any, request_payer: Any = None) -> dict[str, Any]:
+            deleted.append(info.key)
+            if not started.is_set():
+                started.set()
+                assert release.wait(10)
+            return {}
+
+        monkeypatch.setattr(S3Storage, "delete", delete)
+        return deleted, started, release
+
+    def test_deletes_run_side_by_side(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # One at a time, each would wait out the barrier and fail its item.
+        barrier = threading.Barrier(2, timeout=10)
+
+        def delete(_self: Any, info: Any, request_payer: Any = None) -> dict[str, Any]:
+            barrier.wait()
+            return {}
+
+        monkeypatch.setattr(S3Storage, "delete", delete)
+        results: list[OpResult] = []
+        transferrer, client = self._move(results)
+        with transferrer:
+            for name in ("a", "b"):
+                transferrer.submit(self._item(tmp_path, name, client))
+            self._fire_and_join(transferrer)
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED] * 2
+
+    def test_awscrts_thread_does_not_wait_for_a_delete_and_the_run_does(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _, started, release = self._block_the_first_delete(monkeypatch)
+        results: list[OpResult] = []
+        transferrer, client = self._move(results)
+        with transferrer:
+            transferrer.submit(self._item(tmp_path, "a", client))
+            self._fire_and_join(transferrer)
+            assert started.wait(10)
+            assert results == []  # the record follows its delete
+            release.set()
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+        assert transferrer.succeeded == 1
+
+    def test_an_item_keeps_its_order(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        steps: list[str] = []
+
+        def delete(_self: Any, info: Any, request_payer: Any = None) -> dict[str, Any]:
+            steps.append("delete")
+            return {}
+
+        monkeypatch.setattr(S3Storage, "delete", delete)
+        monkeypatch.setattr(transfer._FsyncDest, "_fsync", lambda _self: steps.append("fsync"))
+        results: list[OpResult] = []
+
+        def record(_result: OpResult) -> None:
+            steps.append("result")
+            results.append(_result)
+
+        client, _ = make_recording_client([])
+        with Transferrer(
+            TransferType.DOWNLOAD,
+            client,
+            is_move=True,
+            on_result=record,
+            dest_storage=LocalStorage(str(tmp_path), fsync=True),
+        ) as transferrer:
+            transferrer._manager = _CrtCallbackManager()  # pyright: ignore[reportPrivateUsage]
+            item = self._item(tmp_path, "a", client)
+            item.case_conflict_cleanup = lambda: steps.append("cleanup")
+            transferrer.submit(item)
+            self._fire_and_join(transferrer)
+        assert steps == ["fsync", "delete", "cleanup", "result"]
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+
+    def test_a_failed_delete_fails_its_item_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def delete(_self: Any, info: Any, request_payer: Any = None) -> dict[str, Any]:
+            if info.key == "a":
+                raise AccessDeniedError("denied", operation="mv", bucket="bucket", key="a")
+            return {}
+
+        monkeypatch.setattr(S3Storage, "delete", delete)
+        results: list[OpResult] = []
+        transferrer, client = self._move(results)
+        with transferrer:
+            for name in ("a", "b"):
+                transferrer.submit(self._item(tmp_path, name, client))
+            self._fire_and_join(transferrer)
+        outcomes = {result.compare_key: result.outcome for result in results}
+        assert outcomes == {"a": OpOutcome.FAILED, "b": OpOutcome.SUCCEEDED}
+        assert (transferrer.failed, transferrer.succeeded) == (1, 1)
+        assert isinstance(transferrer.first_error, AccessDeniedError)
+
+    def test_a_cancel_keeps_the_sources_still_waiting(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The delete already out finishes; the next one never starts, and its
+        # file stays beside its source.
+        deleted, started, release = self._block_the_first_delete(monkeypatch)
+        results: list[OpResult] = []
+        transferrer, client = self._move(
+            results, transfer_config=LibraryTransferConfig(max_concurrency=1)
+        )
+        with transferrer:
+            for name in ("a", "b"):
+                transferrer.submit(self._item(tmp_path, name, client))
+            self._fire_and_join(transferrer)
+            assert started.wait(10)
+            transferrer._cancel_futures()  # pyright: ignore[reportPrivateUsage]
+            release.set()
+        assert deleted == ["a"]
+        outcomes = {result.compare_key: result.outcome for result in results}
+        assert outcomes == {"a": OpOutcome.SUCCEEDED, "b": OpOutcome.CANCELLED}
+        assert (transferrer.succeeded, transferrer.cancelled, transferrer.failed) == (1, 1, 0)
+        assert (tmp_path / "b").read_bytes() == b"x"
+
+    def test_a_fatal_keeps_every_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        deleted, _, _ = self._block_the_first_delete(monkeypatch)
+        results: list[OpResult] = []
+        transferrer, client = self._move(results)
         with pytest.raises(RuntimeError, match="fatal elsewhere"):
             with transferrer:
-                transferrer._manager = _CrtDrainManager()  # pyright: ignore[reportPrivateUsage]
-                self._submit_one(transferrer, tmp_path)
-                token.cancel(mode=CancelMode.IMMEDIATE)
+                transferrer.submit(self._item(tmp_path, "a", client))
                 raise RuntimeError("fatal elsewhere")
-        assert [result.outcome for result in results] == [OpOutcome.FAILED]
-        assert (transferrer.failed, transferrer.cancelled) == (1, 0)
+        assert deleted == []
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+
+    def test_a_graceful_cancel_finishes_the_moves(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            S3Storage, "delete", lambda _self, info, request_payer=None: deleted.append(info.key)
+        )
+        deleted: list[str] = []
+        results: list[OpResult] = []
+        token = CancelToken()
+        transferrer, client = self._move(results, cancel_token=token)
+        with pytest.raises(CancelledError):
+            with transferrer:
+                transferrer.submit(self._item(tmp_path, "a", client))
+                token.cancel(mode=CancelMode.GRACEFUL)
+                # The drain waits for the accepted move, as a clean exit does.
+                self._manager(transferrer).fire()
+                raise CancelledError("mv was cancelled", operation="mv")
+        assert deleted == ["a"]
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+
+    def test_a_classic_manager_keeps_its_own_ctrl_c(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # It cancels and re-raises by itself; a second shutdown is not its shape.
+        real_shutdown = TransferManager.shutdown
+        shutdowns: list[Any] = []
+
+        def shutdown(manager: Any, *args: Any, **kwargs: Any) -> None:
+            shutdowns.append(manager)
+            real_shutdown(manager, *args, **kwargs)
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(TransferManager, "shutdown", shutdown)
+        client, _ = make_recording_client([])
+        with pytest.raises(KeyboardInterrupt):
+            with Transferrer(
+                TransferType.DOWNLOAD, client, transfer_config=_SYNC_CONFIG
+            ) as transferrer:
+                transferrer.prepare()
+        assert len(shutdowns) == 1
+
+    def test_an_immediate_token_cancels_what_is_still_held(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # With the real watcher, which needs the manager built the real way.
+        deleted, started, release = self._block_the_first_delete(monkeypatch)
+        manager = _CrtCallbackManager()
+        monkeypatch.setattr(Transferrer, "_create_crt_manager", lambda _self: manager)
+        token = CancelToken()
+        results: list[OpResult] = []
+        client, _ = make_recording_client([])
+        with Transferrer(
+            TransferType.DOWNLOAD,
+            client,
+            is_move=True,
+            on_result=results.append,
+            cancel_token=token,
+            transfer_config=LibraryTransferConfig(max_concurrency=1),
+        ) as transferrer:
+            for name in ("a", "b"):
+                transferrer.submit(self._item(tmp_path, name, client))
+            self._fire_and_join(transferrer)
+            assert started.wait(10)
+            token.cancel(mode=CancelMode.IMMEDIATE)
+            deadline = time.monotonic() + 10
+            while not transferrer._cancel_initiated:  # pyright: ignore[reportPrivateUsage]
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+        # The run left at once (overview section 3), "a"'s delete still held.
+        release.set()
+        workers = transferrer._done_workers  # pyright: ignore[reportPrivateUsage]
+        assert workers is not None
+        workers.close()  # what the run left behind settles by itself
+        assert deleted == ["a"]
+
+    def test_the_limit_holds_awscrts_thread(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(transfer, "_DONE_WORKERS_LIMIT", 2)
+        _, started, release = self._block_the_first_delete(monkeypatch)
+        results: list[OpResult] = []
+        transferrer, client = self._move(
+            results, transfer_config=LibraryTransferConfig(max_concurrency=1)
+        )
+        with transferrer:
+            for name in ("a", "b", "c"):
+                transferrer.submit(self._item(tmp_path, name, client))
+            manager = self._manager(transferrer)
+            callback = manager.fire()
+            assert started.wait(10)
+            deadline = time.monotonic() + 10
+            while manager.fired < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            callback.join(0.2)
+            assert callback.is_alive()  # "c" waits for a place
+            assert manager.fired == 2
+            release.set()
+            callback.join(10)
+            assert not callback.is_alive()
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED] * 3
+
+    @pytest.mark.parametrize(
+        ("config", "expected"),
+        [
+            (None, 10),
+            (LibraryTransferConfig(max_concurrency=2), 2),
+            (_setting_max_request_concurrency(3), 3),
+        ],
+        ids=["default", "max_concurrency", "max_request_concurrency"],
+    )
+    def test_the_workers_number_max_concurrency(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        config: Any,
+        expected: int,
+    ) -> None:
+        barrier = threading.Barrier(expected, timeout=10)
+        lock = threading.Lock()
+        running = [0, 0]  # now, peak
+
+        def delete(_self: Any, info: Any, request_payer: Any = None) -> dict[str, Any]:
+            with lock:
+                running[0] += 1
+                running[1] = max(running)
+            barrier.wait()
+            with lock:
+                running[0] -= 1
+            return {}
+
+        monkeypatch.setattr(S3Storage, "delete", delete)
+        results: list[OpResult] = []
+        transferrer, client = self._move(results, transfer_config=config)
+        with transferrer:
+            for index in range(expected * 3):
+                transferrer.submit(self._item(tmp_path, f"f{index}", client))
+            self._fire_and_join(transferrer)
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED] * (expected * 3)
+        assert running == [0, expected]
+
+    def test_what_on_result_raises_reaches_the_caller(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(S3Storage, "delete", lambda _self, info, request_payer=None: {})
+
+        def raising(_result: OpResult) -> None:
+            raise ValueError("the caller's")
+
+        client, _ = make_recording_client([])
+        with pytest.raises(ValueError, match="the caller's"):
+            with Transferrer(
+                TransferType.DOWNLOAD, client, is_move=True, on_result=raising
+            ) as transferrer:
+                transferrer._manager = _CrtCallbackManager()  # pyright: ignore[reportPrivateUsage]
+                transferrer.submit(self._item(tmp_path, "a", client))
+                self._fire_and_join(transferrer)
+
+    def test_a_local_source_stays_on_awscrts_thread(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        threads: list[str] = []
+        real_delete = LocalStorage.delete
+
+        def delete(self: Any, info: Any) -> None:
+            threads.append(threading.current_thread().name)
+            real_delete(self, info)
+
+        monkeypatch.setattr(LocalStorage, "delete", delete)
+        source = tmp_path / "a.bin"
+        source.write_bytes(b"x")
+        item = TransferItem(
+            compare_key="a.bin", size=1, src_path=str(source), dest_bucket="b", dest_key="k"
+        )
+        client, _ = make_recording_client([])
+        _listed_source(item, TransferType.UPLOAD, client)
+        results: list[OpResult] = []
+        with Transferrer(
+            TransferType.UPLOAD, client, is_move=True, on_result=results.append
+        ) as transferrer:
+            transferrer._manager = _CrtCallbackManager()  # pyright: ignore[reportPrivateUsage]
+            transferrer.submit(item)
+            self._fire_and_join(transferrer)
+        assert threads == [_AWSCRT_THREAD]
+        assert transferrer._done_workers is None  # pyright: ignore[reportPrivateUsage]
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+
+    def test_a_custom_source_goes_to_the_workers(self, tmp_path: Path) -> None:
+        threads: list[str] = []
+        storage: Any = SimpleNamespace(
+            delete=lambda _info: threads.append(threading.current_thread().name)
+        )
+        item = TransferItem(
+            compare_key="a.bin",
+            size=1,
+            src_fileobj=io.BytesIO(b"x"),
+            src_info=FileInfo(key="a.bin", storage=storage),
+            dest_bucket="b",
+            dest_key="k",
+        )
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        with Transferrer(
+            TransferType.UPLOAD, client, is_move=True, on_result=results.append
+        ) as transferrer:
+            transferrer._manager = _CrtCallbackManager()  # pyright: ignore[reportPrivateUsage]
+            transferrer.submit(item)
+            self._fire_and_join(transferrer)
+        assert [name.partition("_")[0] for name in threads] == ["boto3-s3-done"]
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+
+    def test_a_cp_builds_no_workers(self, tmp_path: Path) -> None:
+        threads: list[str] = []
+        client, _ = make_recording_client([])
+
+        def record(_result: OpResult) -> None:
+            threads.append(threading.current_thread().name)
+
+        with Transferrer(TransferType.DOWNLOAD, client, on_result=record) as transferrer:
+            transferrer._manager = _CrtCallbackManager()  # pyright: ignore[reportPrivateUsage]
+            transferrer.submit(self._item(tmp_path, "a", client))
+            self._fire_and_join(transferrer)
+        assert threads == [_AWSCRT_THREAD]
+        assert transferrer._done_workers is None  # pyright: ignore[reportPrivateUsage]
+
+    def test_a_classic_move_builds_no_workers(self, tmp_path: Path) -> None:
+        source = tmp_path / "a.bin"
+        source.write_bytes(b"x")
+        item = TransferItem(
+            compare_key="a.bin", size=1, src_path=str(source), dest_bucket="b", dest_key="k"
+        )
+        _, _, results, transferrer = _run(TransferType.UPLOAD, [item], [{}], is_move=True)
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+        assert transferrer._done_workers is None  # pyright: ignore[reportPrivateUsage]
+
+
+class TestDoneWorkers:
+    """`_DoneWorkers` on its own: what the run around it cannot easily reach."""
+
+    class _Noting:
+        def __init__(self) -> None:
+            self.threads: list[int] = []
+
+        def on_done(self, future: Any) -> None:
+            self.threads.append(threading.get_ident())
+
+    def _run_in_thread(self, call: Callable[[], None]) -> None:
+        """So a place never given back fails the test instead of hanging it."""
+        thread = threading.Thread(target=call, daemon=True)
+        thread.start()
+        thread.join(10)
+        assert not thread.is_alive()
+
+    def test_an_item_after_close_runs_in_line_and_gives_back_its_place(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(transfer, "_DONE_WORKERS_LIMIT", 1)
+        workers = transfer._DoneWorkers(1, lambda: False, lambda _exc: None)
+        workers.close()
+        noting = self._Noting()
+        idents: list[int] = []
+
+        def run_twice() -> None:
+            idents.append(threading.get_ident())
+            workers.run([noting], _SettledCrtFuture())
+            workers.run([noting], _SettledCrtFuture())
+
+        self._run_in_thread(run_twice)
+        assert noting.threads == idents * 2
+
+    def test_a_thread_that_cannot_start_settles_the_item_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ``submit`` raises with the work already queued: the item runs in line,
+        # and the worker that takes the queue next must not run it again.
+        real_start = threading.Thread.start
+        refused: list[Any] = []
+
+        def start(thread: Any) -> None:
+            if not refused:
+                refused.append(thread)
+                raise RuntimeError("can't start new thread")
+            real_start(thread)
+
+        monkeypatch.setattr(threading.Thread, "start", start)
+        noted: list[BaseException] = []
+        workers = transfer._DoneWorkers(2, lambda: False, noted.append)
+        first, second = self._Noting(), self._Noting()
+        workers.run([first], _SettledCrtFuture())
+        assert first.threads == [threading.get_ident()]
+        workers.run([second], _SettledCrtFuture())
+
+        self._run_in_thread(workers.close)
+        assert len(first.threads) == len(second.threads) == 1
+        assert noted == []
+
+    def test_a_cancel_ends_the_wait_at_the_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Held at the limit, awscrt's thread cannot run what a new `S3` asks of it.
+        monkeypatch.setattr(transfer, "_DONE_WORKERS_LIMIT", 1)
+        cancelled = threading.Event()
+        release = threading.Event()
+
+        class Held:
+            def on_done(self, future: Any) -> None:
+                release.wait(10)
+
+        workers = transfer._DoneWorkers(1, cancelled.is_set, lambda _exc: None)
+        workers.run([Held()], _SettledCrtFuture())
+        at_the_limit = threading.Thread(
+            target=workers.run, args=([], _SettledCrtFuture()), daemon=True
+        )
+        at_the_limit.start()
+        try:
+            at_the_limit.join(0.3)
+            assert at_the_limit.is_alive()
+            cancelled.set()
+            workers.note_cancel()
+            at_the_limit.join(5)
+            assert not at_the_limit.is_alive()
+        finally:
+            release.set()
+        self._run_in_thread(workers.close)
+
+    def test_the_runs_cancel_wakes_the_wait_at_the_limit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(transfer, "_DONE_WORKERS_LIMIT", 1)
+        release = threading.Event()
+
+        class Held:
+            def on_done(self, future: Any) -> None:
+                release.wait(10)
+
+        client, _ = make_recording_client([])
+        transferrer = Transferrer(TransferType.UPLOAD, client)
+        workers = transfer._DoneWorkers(
+            1,
+            lambda: transferrer._cancel_initiated,  # pyright: ignore[reportPrivateUsage]
+            lambda _exc: None,
+        )
+        transferrer._done_workers = workers  # pyright: ignore[reportPrivateUsage]
+        workers.run([Held()], _SettledCrtFuture())
+        at_the_limit = threading.Thread(
+            target=workers.run, args=([], _SettledCrtFuture()), daemon=True
+        )
+        at_the_limit.start()
+        try:
+            at_the_limit.join(0.3)
+            assert at_the_limit.is_alive()
+            transferrer._cancel_futures()  # pyright: ignore[reportPrivateUsage]
+            at_the_limit.join(5)
+            assert not at_the_limit.is_alive()
+        finally:
+            release.set()
+        self._run_in_thread(workers.close)
+
+    def test_an_item_after_close_is_cancelled_when_the_run_is(self) -> None:
+        workers = transfer._DoneWorkers(1, lambda: True, lambda _exc: None)
+        workers.close()
+        future = _SettledCrtFuture()
+        workers.run([], future)
+        with pytest.raises(transfer.S3TransferCancelledError):
+            future.result()
+
+    def test_a_failed_transfer_keeps_its_own_outcome_under_a_cancel(self) -> None:
+        workers = transfer._DoneWorkers(1, lambda: True, lambda _exc: None)
+        future = _SettledCrtFuture()
+        failure = OSError("the transfer's own")
+        future.set_exception(failure)
+        workers.run([], future)
+        workers.close()
+        with pytest.raises(OSError, match="the transfer's own"):
+            future.result()
+
+    def test_what_a_subscriber_lets_out_is_noted_and_the_place_given_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(transfer, "_DONE_WORKERS_LIMIT", 1)
+        noted: list[BaseException] = []
+        workers = transfer._DoneWorkers(1, lambda: False, noted.append)
+        escaped = AssertionError("an invariant")
+
+        class _Raising:
+            def on_done(self, future: Any) -> None:
+                raise escaped
+
+        noting = self._Noting()
+
+        def run_both() -> None:
+            workers.run([_Raising(), noting], _SettledCrtFuture())
+            workers.run([noting], _SettledCrtFuture())
+            workers.close()
+
+        self._run_in_thread(run_both)
+        assert noted == [escaped]
+        assert len(noting.threads) == 1  # only the second item's: the first stopped there
 
 
 class TestFatalCancellation:
     """A fatal escaping the submission loop cancels the accepted transfers
-    (aws's manager-context behavior, measured live: a mid-listing fatal
+    (aws-cli's manager-context behavior, measured live: a mid-listing fatal
     leaves every queued transfer unrun), and on the classic lane each revoked
     item reports one CANCELLED record naming the fatal (design/opresult.md;
-    the CRT lane's fatal cancels classify FAILED instead -
-    TestCrtCancelClassification)."""
+    the CRT lane's in TestCrtCancelClassification)."""
 
     @pytest.mark.parametrize(
         ("raise_exc", "raises", "match", "revoked_text"),
@@ -1683,18 +2255,6 @@ class TestFatalCancellation:
                 "listing died",
                 "listing died mid-enumeration",
                 id="fatal",
-            ),
-            pytest.param(
-                # An interrupt escaping the submission loop folds the manager
-                # the same way: the classic manager revokes the queued work
-                # with CancelledError (str(KI) is empty, so s3transfer's repr
-                # fallback names it) and the interrupt propagates - CANCELLED
-                # records, unlike the CRT lane's FAILED for the same window.
-                KeyboardInterrupt,
-                KeyboardInterrupt,
-                None,
-                "KeyboardInterrupt()",
-                id="interrupt",
             ),
         ],
     )
@@ -1736,14 +2296,14 @@ class TestFatalCancellation:
                 assert release_first.wait(5.0)
             return {}
 
-        client._make_api_call = api_call  # type: ignore[method-assign]
+        client._make_api_call = api_call
 
         # Release the blocked in-flight request only once the shutdown's
         # cancel has revoked every pending coordinator, so the "queued items
         # never reach the API" assertion cannot race the worker. The in-flight
         # one still finishes - a running request cannot be interrupted - and
         # reports SUCCEEDED: s3transfer lets a completing task overwrite the
-        # mid-flight cancel mark (the bytes really landed; aws's engine does
+        # mid-flight cancel mark (the bytes really landed; aws-cli's engine does
         # the same, its printer just never shows it).
         original_cancel = TransferCoordinatorController.cancel
 
@@ -1771,17 +2331,21 @@ class TestFatalCancellation:
                 assert first_started.wait(5.0)
                 raise raise_exc()
 
-        # Only the already-running first transfer reached the API; the queued
-        # two were revoked before ever becoming requests (aws's transfer set:
-        # its uploads in flight at the fatal land on S3 the same way). Record
-        # order is not part of the contract - a revoked item's record fires
-        # from the cancelling thread or the executor's skip path, whichever
-        # its submission had reached.
-        assert len(api_calls) == 1
+        # Only the already-running transfer reached the API; the queued two
+        # were revoked before ever becoming requests (aws-cli's transfer set:
+        # its uploads in flight at the fatal land on S3 the same way). Which
+        # item runs is not part of the contract: the manager's submission
+        # threads hand their requests to the one request thread in whatever
+        # order they are scheduled, so a.bin's can lose to a later item's.
+        # Record order is not part of it either - a revoked item's record
+        # fires from the cancelling thread or the executor's skip path,
+        # whichever its submission had reached.
+        assert len(api_calls) == 1 and api_calls[0].startswith("PutObject:p/")
+        in_flight = api_calls[0].removeprefix("PutObject:p/")
         by_key = {result.compare_key: result for result in results}
         assert len(results) == 3 and set(by_key) == {"a.bin", "b.bin", "c.bin"}
-        assert by_key["a.bin"].outcome is OpOutcome.SUCCEEDED
-        for key in ("b.bin", "c.bin"):
+        assert by_key[in_flight].outcome is OpOutcome.SUCCEEDED
+        for key in sorted(set(by_key) - {in_flight}):
             result = by_key[key]
             assert result.outcome is OpOutcome.CANCELLED
             assert isinstance(result.error, CancelledError)
@@ -1837,13 +2401,10 @@ class TestSerialExecutorInterrupt:
         on_result: Callable[[OpResult], None],
     ) -> tuple[list[ApiCall], Transferrer]:
         client, calls = make_recording_client(responses)
+        if is_move:
+            _listed_source(item, kind, client)
         transferrer = Transferrer(
-            kind,
-            client,
-            src_storage=LocalStorage(".") if kind is TransferType.UPLOAD else None,
-            transfer_config=_SYNC_CONFIG,
-            is_move=is_move,
-            on_result=on_result,
+            kind, client, transfer_config=_SYNC_CONFIG, is_move=is_move, on_result=on_result
         )
         with pytest.raises(KeyboardInterrupt), transferrer:
             transferrer.submit(item)
@@ -1932,6 +2493,215 @@ class TestSerialExecutorInterrupt:
         assert (tmp_path / "out" / "a.bin").read_bytes() == b"payload"
         assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
         assert (transferrer.succeeded, transferrer.cancelled) == (0, 1)
+
+    def _move_with_post_copy_writes(
+        self,
+        dest_tail: list[dict[str, Any] | BaseException],
+        source_tail: list[dict[str, Any] | BaseException],
+        *,
+        on_result: Callable[[OpResult], None],
+        annotation_copy_mode: AnnotationCopyMode | None = None,
+    ) -> tuple[list[ApiCall], list[ApiCall], Transferrer]:
+        """A ``mv`` multipart copy under ``copy_props=ALL`` whose tag set only
+        fits a post-copy write; the tails are what each side answers after
+        the copy completes and after the tag read."""
+        options = TransferOptions(copy_props=CopyPropsMode.ALL)
+        if annotation_copy_mode is not None:
+            options["annotation_copy_mode"] = annotation_copy_mode
+        client, calls = make_recording_client(
+            [
+                {"UploadId": "u"},
+                {"CopyPartResult": {"ETag": '"p1"'}},
+                {"CopyPartResult": {"ETag": '"p2"'}},
+                {"ETag": '"dest-etag"'},
+                *dest_tail,
+            ]
+        )
+        source_client, source_calls = make_recording_client(
+            [{}, {"TagSet": [{"Key": "k", "Value": "v" * 3000}]}, *source_tail]
+        )
+        transferrer = Transferrer(
+            TransferType.COPY,
+            client,
+            source_client=source_client,
+            transfer_config=_SYNC_CONFIG,
+            options=options,
+            is_move=True,
+            on_result=on_result,
+        )
+        item = TransferItem(
+            compare_key="a.bin",
+            size=9 * _MIB,
+            etag='"abc123"',
+            src_bucket="src-b",
+            src_key="d/a.bin",
+            dest_bucket="dest-b",
+            dest_key="cp/a.bin",
+        )
+        _listed_source(item, TransferType.COPY, source_client)
+        with pytest.raises(KeyboardInterrupt), transferrer:
+            transferrer.submit(item)
+        return calls, source_calls, transferrer
+
+    @staticmethod
+    def _fresh_annotations() -> list[dict[str, Any] | BaseException]:
+        """The source's two annotations, read when the copy is queued."""
+        return [
+            {
+                "Annotations": [
+                    {"AnnotationName": "ann1", "LastModified": MTIME, "Size": 1},
+                    {"AnnotationName": "ann2", "LastModified": MTIME, "Size": 1},
+                ]
+            },
+            {"AnnotationPayload": io.BytesIO(b"1")},
+            {"AnnotationPayload": io.BytesIO(b"2")},
+        ]
+
+    @pytest.mark.parametrize(
+        ("dest_tail", "sent"),
+        [
+            ([KeyboardInterrupt(), {}, {}, {}], ["PutObjectTagging"]),
+            (
+                [
+                    client_error("AccessDenied", 403, "PutObjectTagging"),
+                    KeyboardInterrupt(),
+                    {},
+                    {},
+                ],
+                ["PutObjectTagging", "DeleteObject"],
+            ),
+            (
+                [{}, KeyboardInterrupt(), {}, {}, {}],
+                ["PutObjectTagging", "PutObjectAnnotation"],
+            ),
+        ],
+        ids=["in-the-tagging-write", "in-the-rollback", "in-an-annotation-write"],
+    )
+    def test_interrupt_inside_a_post_copy_write_records_cancelled(
+        self, dest_tail: list[dict[str, Any] | BaseException], sent: list[str]
+    ) -> None:
+        # Past the copy, inside copy-props' own requests: stored as the item's
+        # outcome, not let escape - escaping, it would have upstream's second
+        # announce re-send the writes, record SUCCEEDED and delete the source.
+        # No rollback follows a tagging write it cut short.
+        results: list[OpResult] = []
+        calls, source_calls, transferrer = self._move_with_post_copy_writes(
+            dest_tail, [*self._fresh_annotations(), {}, {}, {}], on_result=results.append
+        )
+        assert ops(calls)[4:] == sent
+        assert ops(source_calls) == [
+            "HeadObject",
+            "GetObjectTagging",
+            "ListObjectAnnotations",
+            "GetObjectAnnotation",
+            "GetObjectAnnotation",
+        ]
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+        assert (transferrer.succeeded, transferrer.cancelled) == (0, 1)
+
+    def test_interrupt_inside_the_deferred_annotation_read_records_cancelled(self) -> None:
+        # The deferred mode reads the source's annotations only after the
+        # copy and its tag write: an interrupt there is stored the same way.
+        results: list[OpResult] = []
+        calls, source_calls, transferrer = self._move_with_post_copy_writes(
+            [{}, {}, {}],
+            [KeyboardInterrupt(), {}, {}],
+            on_result=results.append,
+            annotation_copy_mode=AnnotationCopyMode.DEFERRED,
+        )
+        assert ops(calls)[4:] == ["PutObjectTagging"]
+        assert ops(source_calls) == ["HeadObject", "GetObjectTagging", "ListObjectAnnotations"]
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+        assert (transferrer.succeeded, transferrer.cancelled) == (0, 1)
+
+    @pytest.mark.parametrize(
+        ("subscriber", "dest_sent"),
+        [
+            ("_SetTags", []),
+            ("_SetAnnotations", ["PutObjectTagging"]),
+            ("_DeleteSource", ["PutObjectTagging", "PutObjectAnnotation", "PutObjectAnnotation"]),
+        ],
+    )
+    def test_interrupt_past_a_subscribers_flag_records_cancelled(
+        self, monkeypatch: pytest.MonkeyPatch, subscriber: str, dest_sent: list[str]
+    ) -> None:
+        # An interrupt that lands past a post-copy subscriber's once-per-item
+        # flag but outside its request (here, in its read of the outcome so
+        # far) is stored all the same: escaping, it would let a second
+        # announce find the flag set and record a success.
+        real_outcome = transfer._outcome
+        fired: list[bool] = []
+
+        def outcome(future: Any) -> BaseException | None:
+            caller = sys._getframe(1).f_locals.get("self")
+            if type(caller).__name__ == subscriber and not fired:
+                fired.append(True)
+                raise KeyboardInterrupt
+            return real_outcome(future)
+
+        monkeypatch.setattr(transfer, "_outcome", outcome)
+        results: list[OpResult] = []
+        calls, source_calls, transferrer = self._move_with_post_copy_writes(
+            [{}, {}, {}], [*self._fresh_annotations(), {}], on_result=results.append
+        )
+        assert ops(calls)[4:] == dest_sent
+        assert "DeleteObject" not in ops(source_calls)
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+        assert (transferrer.succeeded, transferrer.cancelled) == (0, 1)
+
+    def test_interrupt_while_a_failed_rollback_is_logged_records_cancelled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The tag write and its rollback both fail, and the interrupt lands
+        # while the rollback's failure is logged: stored all the same.
+        real_debug = transfer.logger.debug
+
+        def debug(msg: object, *args: object, **kwargs: Any) -> None:
+            if isinstance(msg, str) and msg.startswith("deleting s3://"):
+                raise KeyboardInterrupt
+            real_debug(msg, *args, **kwargs)
+
+        monkeypatch.setattr(transfer.logger, "debug", debug)
+        results: list[OpResult] = []
+        calls, source_calls, transferrer = self._move_with_post_copy_writes(
+            [
+                client_error("AccessDenied", 403, "PutObjectTagging"),
+                client_error("AccessDenied", 403, "DeleteObject"),
+                {},
+                {},
+            ],
+            [*self._fresh_annotations(), {}],
+            on_result=results.append,
+        )
+        assert ops(calls)[4:] == ["PutObjectTagging", "DeleteObject"]
+        assert "DeleteObject" not in ops(source_calls)
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+        assert (transferrer.succeeded, transferrer.cancelled) == (0, 1)
+
+    def test_an_interrupt_after_the_post_copy_writes_sends_them_once(self) -> None:
+        # The interrupt escapes on_result, after every request: upstream
+        # re-runs the uncleared callback list, and the post-copy writes must
+        # not go out (or the annotations be read) a second time.
+        results: list[OpResult] = []
+
+        def on_result(result: OpResult) -> None:
+            results.append(result)
+            raise KeyboardInterrupt
+
+        calls, source_calls, transferrer = self._move_with_post_copy_writes(
+            [{}, {}, {}, {}, {}, {}], [*self._fresh_annotations(), {}, {}, {}], on_result=on_result
+        )
+        assert ops(calls)[4:] == ["PutObjectTagging", "PutObjectAnnotation", "PutObjectAnnotation"]
+        assert ops(source_calls) == [
+            "HeadObject",
+            "GetObjectTagging",
+            "ListObjectAnnotations",
+            "GetObjectAnnotation",
+            "GetObjectAnnotation",
+            "DeleteObject",
+        ]
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+        assert (transferrer.succeeded, transferrer.cancelled) == (1, 0)
 
     def test_interrupt_in_the_submission_stage_records_cancelled(self) -> None:
         # A non-seekable stream is read by upstream's submission task, outside
@@ -2088,11 +2858,11 @@ class TestWorkerRaise:
     ) -> None:
         item = self._upload_item(tmp_path)
         client, calls = make_recording_client([raised])
+        _listed_source(item, TransferType.UPLOAD, client)
         results: list[OpResult] = []
         transferrer = Transferrer(
             TransferType.UPLOAD,
             client,
-            src_storage=LocalStorage("."),
             transfer_config=TransferConfig(),
             is_move=True,
             on_result=results.append,
@@ -2129,7 +2899,13 @@ class TestWorkerRaise:
         )
         with pytest.raises(KeyboardInterrupt), transferrer:
             transferrer.submit(item)
-        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+        # The Ctrl-C leaves at once, so whether the record came first is not
+        # specified; once the transfer has settled, it counts as cancelled.
+        deadline = time.monotonic() + 10
+        while transferrer._futures and time.monotonic() < deadline:  # pyright: ignore[reportPrivateUsage]
+            time.sleep(0.01)
+        assert OpOutcome.SUCCEEDED not in [result.outcome for result in results]
+        assert (transferrer.succeeded, transferrer.cancelled) == (0, 1)
 
     @pytest.mark.parametrize("config", [TransferConfig(), _SYNC_CONFIG], ids=["threads", "serial"])
     def test_an_on_result_error_reaches_the_caller(
@@ -2152,6 +2928,35 @@ class TestWorkerRaise:
         )
         with pytest.raises(ValueError, match="from on_result"), transferrer:
             transferrer.submit(item)
+
+    @pytest.mark.parametrize("config", [TransferConfig(), _SYNC_CONFIG], ids=["threads", "serial"])
+    def test_an_on_progress_error_reaches_the_caller_and_leaves_the_item(
+        self, tmp_path: Path, config: TransferConfig
+    ) -> None:
+        # Progress fires inside the transfer, where raising would fail the
+        # item: the error is the caller's, so it ends the run without failing
+        # the item. The queued record fires at submit, so a threaded run
+        # raises there and cancels the item still waiting for its worker.
+        item = self._upload_item(tmp_path)
+        client, _calls = make_recording_client([{}])
+        results: list[OpResult] = []
+
+        def on_progress(progress: TransferProgress) -> None:
+            raise ValueError("from on_progress")
+
+        transferrer = Transferrer(
+            TransferType.UPLOAD,
+            client,
+            src_storage=LocalStorage("."),
+            transfer_config=config,
+            on_result=results.append,
+            on_progress=on_progress,
+        )
+        with pytest.raises(ValueError, match="from on_progress"), transferrer:
+            transferrer.submit(item)
+        assert len(results) == 1
+        assert results[0].outcome in (OpOutcome.SUCCEEDED, OpOutcome.CANCELLED)
+        assert transferrer.failed == 0
 
     def test_the_crt_body_hands_an_interrupt_back_instead_of_to_awscrt(self) -> None:
         class _Exiting:
@@ -2181,6 +2986,61 @@ class TestWorkerRaise:
         assert [type(exc) for exc in noted] == [SystemExit]
         assert [type(exc).__name__ for exc in raised] == ["_StreamInterruptedError"]
 
+    @pytest.mark.parametrize("raises", [True, False], ids=["body-raised", "body-fine"])
+    def test_a_crt_stream_upload_fails_with_what_its_body_raised(self, raises: bool) -> None:
+        # awscrt reads the body on its own thread and reports a read that
+        # raised as AWS_ERROR_UNKNOWN, dropping the exception; the item fails
+        # with it, as on the classic engine (base error, the raise on __cause__).
+        class _UnknownError(Exception):
+            # awscrt's AwsCrtError shape: matched by code / name, never imported.
+            code = 3
+            name = "AWS_ERROR_UNKNOWN"
+
+        class _ReadingManager(_CrtDrainManager):
+            def upload(self, **kwargs: Any) -> _FakeCrtFuture:
+                def read() -> None:
+                    with contextlib.suppress(Exception):
+                        kwargs["fileobj"].read(4)
+
+                worker = threading.Thread(target=read)
+                worker.start()
+                worker.join()
+                future = _FakeCrtFuture(_UnknownError("AWS_ERROR_UNKNOWN: Unknown error."))
+                self._accepted.append((future, list(kwargs["subscribers"])))
+                return future
+
+        encode_error = UnicodeEncodeError("ascii", "é", 0, 1, "ordinal not in range(128)")
+
+        class _Body:
+            def read(self, amount: int = -1) -> bytes:
+                if raises:
+                    raise encode_error
+                return b""
+
+        results: list[OpResult] = []
+        client, _ = make_recording_client([])
+        transferrer = Transferrer(TransferType.UPLOAD, client, on_result=results.append)
+        with transferrer:
+            transferrer._manager = _ReadingManager()  # pyright: ignore[reportPrivateUsage]
+            transferrer.submit(
+                TransferItem(
+                    compare_key="-",
+                    size=None,
+                    src_fileobj=cast("Any", _Body()),
+                    src_info=FileInfo(key="-"),
+                    dest_bucket="b",
+                    dest_key="k",
+                )
+            )
+        error = results[0].error
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert type(error) is Boto3S3Error
+        if raises:
+            assert error.__cause__ is encode_error
+            assert str(error) == str(encode_error)
+        else:
+            assert str(error) == "AWS_ERROR_UNKNOWN: Unknown error."
+
     def test_a_crt_stream_upload_hands_awscrt_the_guarded_body(self, tmp_path: Path) -> None:
         stream = io.BytesIO(b"payload")
         client, _ = make_recording_client([])
@@ -2208,6 +3068,50 @@ class TestWorkerRaise:
         assert isinstance(body, transfer._GuardedReader)  # pyright: ignore[reportPrivateUsage]
         assert body._raw is stream  # pyright: ignore[reportPrivateUsage]
         assert path == str(src)  # a file is sent by path, not read through Python
+
+    def test_a_crt_stream_interrupt_cancels_the_item_and_reaches_the_caller(self) -> None:
+        # awscrt reads the body on its own thread and fails the request with
+        # its own error in place of what the read raised; the guard kept the
+        # interrupt, so the item is CANCELLED like every interrupted item and
+        # the interrupt is re-raised to the caller.
+        class _Interrupting:
+            def read(self, amount: int = -1) -> bytes:
+                raise KeyboardInterrupt
+
+        class _ReadingDrain(_CrtDrainManager):
+            def upload(self, **kwargs: Any) -> _FakeCrtFuture:
+                future = _FakeCrtFuture(_CrtCancelError("AWS_ERROR_UNKNOWN: Unknown error"))
+                self._accepted.append((future, list(kwargs["subscribers"])))
+                self.body = kwargs["fileobj"]
+                return future
+
+            def shutdown(self) -> None:
+                def read_then_settle() -> None:
+                    with contextlib.suppress(Exception):
+                        self.body.read(1)
+                    self._drain()
+
+                worker = threading.Thread(target=read_then_settle)
+                worker.start()
+                worker.join()
+
+        client, _ = make_recording_client([])
+        results: list[OpResult] = []
+        transferrer = Transferrer(TransferType.UPLOAD, client, on_result=results.append)
+        with pytest.raises(KeyboardInterrupt), transferrer:
+            transferrer._manager = _ReadingDrain()  # pyright: ignore[reportPrivateUsage]
+            transferrer.submit(
+                TransferItem(
+                    compare_key="-",
+                    size=None,
+                    src_fileobj=cast("Any", _Interrupting()),
+                    src_info=FileInfo(key="-"),
+                    dest_bucket="b",
+                    dest_key="k",
+                )
+            )
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+        assert (transferrer.failed, transferrer.cancelled) == (0, 1)
 
     def test_an_on_result_error_off_the_calling_thread_does_not_stall_the_crt_drain(
         self, tmp_path: Path
@@ -2278,14 +3182,10 @@ class _CrtRenameFuture(_FakeCrtFuture):
         self._coordinator.set_exception(exception, override=True)
 
 
-class _CrtRenameFailing(_CrtDrainManager):
-    """The CRT manager's download whose rename into place fails: its done
-    handler (``RenameTempFileHandler``) runs before the subscribers and hands
-    the error to the already-done coordinator."""
-
-    def __init__(self, error: OSError) -> None:
-        super().__init__()
-        self._error = error
+class _CrtDownloading(_CrtDrainManager):
+    """The CRT manager's download that succeeds: the queued subscribers run at
+    submission and the done ones at the drain, on a coordinator that takes a
+    subscriber's late ``set_exception`` (mv's source delete)."""
 
     def download(self, **kwargs: Any) -> _FakeCrtFuture:
         future = _CrtRenameFuture(kwargs["fileobj"])
@@ -2297,26 +3197,23 @@ class _CrtRenameFailing(_CrtDrainManager):
         self._accepted.append((future, subscribers))
         return future
 
+
+class _CrtRenameFailing(_CrtDownloading):
+    """The CRT manager's download whose rename into place fails: its done
+    handler (``RenameTempFileHandler``) runs before the subscribers and hands
+    the error to the already-done coordinator."""
+
+    def __init__(self, error: OSError) -> None:
+        super().__init__()
+        self._error = error
+
     def _drain(self) -> None:
         for future, _subscribers in self._accepted:
             future._coordinator.set_exception(self._error)  # the rename handler
         super()._drain()
 
 
-class TestDirectoryCreatorWording:
-    def test_an_embedded_nul_reads_as_the_bundled_interpreter_words_it(
-        self, tmp_path: Path
-    ) -> None:
-        # aws's subscriber lets the ValueError through; its 3.14 names the
-        # path function, which 3.10 and 3.11 do not.
-        future = SimpleNamespace(
-            meta=SimpleNamespace(
-                call_args=SimpleNamespace(fileobj=str(tmp_path / "d\x00e" / "f.txt"))
-            )
-        )
-        with pytest.raises(ValueError, match=r"^mkdir: embedded null character in path$"):
-            transfer._DirectoryCreator().on_queued(future)  # pyright: ignore[reportPrivateUsage]
-
+class TestDirectoryCreator:
     def test_a_directory_it_cannot_create_names_the_file(self, tmp_path: Path) -> None:
         # A local failure carries the file in key and no bucket, as the
         # engine's own record of the item's local file does.
@@ -2331,7 +3228,7 @@ class TestDirectoryCreatorWording:
 
 class TestCrtDownloadRenameFailure:
     """A CRT download whose rename into place fails (a directory at the
-    destination, a name too long to create) read as a success: aws then
+    destination, a name too long to create) read as a success: aws-cli then
     prints it done, and a mv deletes the source with nothing written
     (measured). The failure now settles the item."""
 
@@ -2350,6 +3247,7 @@ class TestCrtDownloadRenameFailure:
             dest_path=str(dest),
         )
         client, calls = make_recording_client([])
+        _listed_source(item, TransferType.DOWNLOAD, client)
         results: list[OpResult] = []
         with Transferrer(
             TransferType.DOWNLOAD, client, is_move=is_move, on_result=results.append
@@ -2488,6 +3386,36 @@ class TestStreamDownloadRetry:
         assert bytes(sink.data) == payload
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
 
+    @pytest.mark.parametrize("config", [TransferConfig(), _SYNC_CONFIG], ids=["threads", "serial"])
+    def test_a_body_cut_on_every_attempt_is_transport(self, config: TransferConfig) -> None:
+        # s3transfer retries the read and gives up with RetriesExceededError;
+        # the same cut is TransportError on get_file and on the CRT engine.
+        payload = bytes(range(50))
+        item = TransferItem(
+            compare_key="a.bin",
+            size=len(payload),
+            etag='"abc123"',
+            src_bucket="bucket",
+            src_key="d/a.bin",
+            dest_fileobj=cast("Any", _WriteOnlySink()),
+        )
+        attempts = config.num_download_attempts
+        calls, _, results, _ = _run(
+            TransferType.DOWNLOAD,
+            [item],
+            [
+                {"Body": _CutBody(payload, cut=3), "ContentLength": len(payload)}
+                for _ in range(attempts)
+            ],
+            config=config,
+        )
+        assert ops(calls) == ["GetObject"] * attempts
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        error = results[0].error
+        assert type(error) is TransportError
+        assert str(error) == "Max Retries Exceeded"
+        assert type(error.__cause__).__name__ == "RetriesExceededError"
+
     def test_the_wrapper_trims_an_overlapping_chunk(self) -> None:
         written: list[tuple[bytes, int]] = []
 
@@ -2501,14 +3429,121 @@ class TestStreamDownloadRetry:
         assert written == [(b"abcd", 0), (b"ef", 4)]
 
 
-class TestFailureLostLikeAws:
-    """A per-item failure without a response vanishes, as it does on aws-cli.
+class _NotingTask(Task):
+    """A task whose main records the instance attributes it ran with."""
+
+    ran_with: frozenset[str] = frozenset()
+
+    def _main(self, **_kwargs: Any) -> None:
+        self.ran_with = frozenset(vars(self))
+
+
+class _NotingSubmissionTask(_NotingTask):
+    """`_TaskGuard` tells a submission task by its ``_submit``."""
+
+    def _submit(self) -> None:
+        raise AssertionError("not called")
+
+
+class _NotingSingleRequestTask(_NotingTask, ImmediatelyWriteIOGetObjectTask):
+    pass
+
+
+def _plain_task() -> _NotingTask:
+    return _NotingTask(TransferCoordinator())
+
+
+def _submission_task() -> _NotingTask:
+    return _NotingSubmissionTask(TransferCoordinator())
+
+
+def _single_request_task() -> _NotingTask:
+    coordinator = TransferCoordinator()
+    output = DownloadNonSeekableOutputManager(None, coordinator, None)
+    return _NotingSingleRequestTask(coordinator, main_kwargs={"download_output_manager": output})
+
+
+class TestTaskHooksComeOff:
+    """A task that has run is freed at once, without the garbage collector.
+
+    `_TaskGuard`'s hooks hold the task's own bound methods. A task keeping them
+    is a reference cycle, so what it holds - a download's written chunk - stays
+    in memory until a collection finds the cycle, past the IO queue's bound.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_collector(self) -> Generator[None, None, None]:
+        gc.collect()
+        gc.disable()
+        try:
+            yield
+        finally:
+            gc.enable()
+
+    @pytest.mark.parametrize(
+        "executor_cls",
+        [
+            transfer._ThreadedExecutor,  # pyright: ignore[reportPrivateUsage]
+            transfer._SerialExecutor,  # pyright: ignore[reportPrivateUsage]
+        ],
+        ids=["threads", "serial"],
+    )
+    @pytest.mark.parametrize(
+        ("make_task", "hook"),
+        [
+            (_plain_task, "_execute_main"),
+            (_submission_task, "_log_and_set_exception"),
+            (_single_request_task, "_handle_io"),
+        ],
+        ids=["main", "submission", "single-request"],
+    )
+    def test_a_task_that_ran_is_freed(
+        self, executor_cls: Any, make_task: Callable[[], _NotingTask], hook: str
+    ) -> None:
+        task = make_task()
+        freed = weakref.ref(task)
+        executor = executor_cls(lambda _exc: None, max_workers=1)
+        executor.submit(task).result()
+        executor.shutdown()
+        assert hook in task.ran_with
+        assert hook not in vars(task)
+        del task
+        assert freed() is None
+
+    @pytest.mark.parametrize("use_threads", [True, False], ids=["threads", "serial"])
+    def test_a_ranged_download_keeps_no_written_chunk(
+        self, tmp_path: Path, use_threads: bool
+    ) -> None:
+        part = 1024
+        item = TransferItem(
+            compare_key="a.bin",
+            size=4 * part,
+            etag='"abc123"',
+            src_bucket="bucket",
+            src_key="d/a.bin",
+            dest_path=str(tmp_path / "a.bin"),
+        )
+        _, _, results, _ = _run(
+            TransferType.DOWNLOAD,
+            [item],
+            [{"Body": io.BytesIO(bytes(part)), "ContentLength": part} for _ in range(4)],
+            config=TransferConfig(
+                multipart_threshold=part, multipart_chunksize=part, use_threads=use_threads
+            ),
+        )
+        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+        assert [task for task in gc.get_objects() if isinstance(task, IOWriteTask)] == []
+
+
+class TestFailureWithoutAResponse:
+    """A per-item failure without any response is FAILED like every other.
 
     aws-cli's completion handler reads ``exception.response.get(...)`` and
     raises on the ``None`` response botocore's closed-connection and timeout
-    errors carry; s3transfer swallows that, so the item gets no line and no
-    count (measured against the pinned aws through a 127.0.0.1 server that
-    closes every connection: cp, mv, recursive cp and rm all exit 0 silently).
+    errors carry; s3transfer swallows that, so `aws` prints no line and exits 0
+    for the item (measured on cp, mv, recursive cp and rm). A failure is never
+    reported as a success (design/overview.md section 3), so that is not
+    copied: the item fails as a refused connection does.
     """
 
     @staticmethod
@@ -2524,34 +3559,25 @@ class TestFailureLostLikeAws:
         [
             ConnectionClosedError(endpoint_url="http://h/"),
             ReadTimeoutError(endpoint_url="http://h/"),
+            EndpointConnectionError(endpoint_url="http://h/"),
         ],
-        ids=["connection-closed", "read-timeout"],
+        ids=["connection-closed", "read-timeout", "refused"],
     )
-    def test_an_upload_that_dies_without_a_response_leaves_no_record(
-        self, tmp_path: Path, raised: Exception
-    ) -> None:
+    def test_an_upload_whose_request_dies_fails(self, tmp_path: Path, raised: Exception) -> None:
         calls, _, results, transferrer = _run(
             TransferType.UPLOAD, [self._upload_item(tmp_path)], [raised]
         )
         assert ops(calls) == ["PutObject"]
-        assert results == []
-        assert (transferrer.succeeded, transferrer.failed, transferrer.skipped) == (0, 0, 0)
-        assert transferrer.first_error is None
-
-    def test_a_refused_connection_still_fails(self, tmp_path: Path) -> None:
-        # No response attribute at all: aws-cli's check answers normally and
-        # the item fails (`upload failed: ... Could not connect`, rc 1).
-        _, _, results, transferrer = _run(
-            TransferType.UPLOAD,
-            [self._upload_item(tmp_path)],
-            [EndpointConnectionError(endpoint_url="http://h/")],
-        )
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
-        assert transferrer.failed == 1
+        error = results[0].error
+        assert isinstance(error, TransportError)
+        assert error.__cause__ is raised
+        assert (transferrer.succeeded, transferrer.failed, transferrer.skipped) == (0, 1, 0)
+        assert transferrer.first_error is error
 
-    def test_a_move_whose_source_delete_dies_keeps_quiet(self) -> None:
-        # The source delete is translated in-pipeline (s3_errors); the check
-        # reads the botocore cause, the exception aws-cli's handler holds.
+    def test_a_move_whose_source_delete_dies_fails(self) -> None:
+        # S3 may have deleted the source before the connection closed; the
+        # client cannot tell, so the move is not reported as done.
         item = TransferItem(
             compare_key="a.bin",
             size=7,
@@ -2561,17 +3587,50 @@ class TestFailureLostLikeAws:
             dest_bucket="dest-b",
             dest_key="cp/a.bin",
         )
+        dead = ConnectionClosedError(endpoint_url="http://h/")
         calls, source_calls, results, transferrer = _run(
-            TransferType.COPY,
-            [item],
-            [{}],
-            source_responses=[ConnectionClosedError(endpoint_url="http://h/")],
-            is_move=True,
+            TransferType.COPY, [item], [{}], source_responses=[dead], is_move=True
         )
         assert ops(calls) == ["CopyObject"]
         assert ops(source_calls) == ["DeleteObject"]
-        assert results == []
-        assert (transferrer.succeeded, transferrer.failed) == (0, 0)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        error = results[0].error
+        assert isinstance(error, TransportError)
+        assert error.__cause__ is dead
+        assert (error.bucket, error.key) == ("src-b", "d/a.bin")
+        assert (transferrer.succeeded, transferrer.failed) == (0, 1)
+
+    def test_a_crt_move_whose_source_delete_dies_fails(self, tmp_path: Path) -> None:
+        # Under the CRT engine the download lands and the source goes through
+        # a botocore DeleteObject; aws-cli hangs there (aws-differences.md).
+        dest = tmp_path / "a.bin"
+        dest.write_bytes(b"payload")
+        item = TransferItem(
+            compare_key="a.bin",
+            size=7,
+            etag='"abc123"',
+            mtime=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            src_bucket="bucket",
+            src_key="d/a.bin",
+            dest_path=str(dest),
+        )
+        dead = ConnectionClosedError(endpoint_url="http://h/")
+        client, calls = make_recording_client([dead])
+        _listed_source(item, TransferType.DOWNLOAD, client)
+        results: list[OpResult] = []
+        with Transferrer(
+            TransferType.DOWNLOAD, client, is_move=True, on_result=results.append
+        ) as transferrer:
+            transferrer._manager = _CrtDownloading()  # pyright: ignore[reportPrivateUsage]
+            transferrer.submit(item)
+        assert ops(calls) == ["DeleteObject"]
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        error = results[0].error
+        assert isinstance(error, TransportError)
+        assert error.__cause__ is dead
+        assert (error.bucket, error.key) == ("bucket", "d/a.bin")
+        assert transferrer.failed == 1
+        assert dest.read_bytes() == b"payload"
 
 
 class TestNoOverwrite:
@@ -2649,10 +3708,131 @@ class TestNoOverwrite:
         )
         assert "IfNoneMatch" not in calls[0].params
         # The conditional write rides only the completing call: neither part
-        # copy may carry it (aws puts IfNoneMatch on CompleteMultipartUpload).
+        # copy may carry it (aws-cli puts IfNoneMatch on CompleteMultipartUpload).
         assert "IfNoneMatch" not in calls[1].params
         assert "IfNoneMatch" not in calls[2].params
         assert calls[3].params["IfNoneMatch"] == "*"
+
+    def test_a_multipart_completion_rejected_is_a_silent_skip(self, tmp_path: Path) -> None:
+        src = tmp_path / "big.bin"
+        src.write_bytes(b"x" * (9 * _MIB))
+        item = TransferItem(
+            compare_key="big.bin", size=9 * _MIB, src_path=str(src), dest_bucket="b", dest_key="big"
+        )
+        calls, _, results, transferrer = _run(
+            TransferType.UPLOAD,
+            [item],
+            [
+                {"UploadId": "u"},
+                {"ETag": '"p1"'},
+                {"ETag": '"p2"'},
+                client_error("PreconditionFailed", 412, "CompleteMultipartUpload"),
+                {},
+            ],
+            options=TransferOptions(no_overwrite=True),
+        )
+        assert ops(calls)[-2:] == ["CompleteMultipartUpload", "AbortMultipartUpload"]
+        assert (transferrer.failed, transferrer.skipped) == (0, 1)
+        assert [result.outcome for result in results] == [OpOutcome.SKIPPED]
+
+
+class TestPreconditionFailedElsewhere:
+    """A 412 to any request but no_overwrite's own conditional write fails the item.
+
+    aws-cli skips every ``PreconditionFailed`` silently; here only the
+    conditional write's rejection is the asked-for skip, and a 412 anywhere
+    else - the object changed under a ranged GET or a part copy, a tag write
+    refused - is a failure, even with ``no_overwrite`` set.
+    """
+
+    def _copy_item(self) -> TransferItem:
+        return TransferItem(
+            compare_key="a.bin",
+            size=9 * _MIB,
+            etag='"abc123"',
+            src_bucket="src-b",
+            src_key="d/a.bin",
+            dest_bucket="dest-b",
+            dest_key="cp/a.bin",
+        )
+
+    def test_a_write_412_without_no_overwrite_fails(self, tmp_path: Path) -> None:
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x")
+        item = TransferItem(
+            compare_key="a.bin", size=1, src_path=str(src), dest_bucket="b", dest_key="k"
+        )
+        _, _, results, transferrer = _run(
+            TransferType.UPLOAD, [item], [client_error("PreconditionFailed", 412, "PutObject")]
+        )
+        assert (transferrer.failed, transferrer.skipped) == (1, 0)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+
+    def test_a_ranged_get_412_fails_the_download(self, tmp_path: Path) -> None:
+        item = TransferItem(
+            compare_key="a.bin",
+            size=9 * _MIB,
+            etag='"abc123"',
+            src_bucket="bucket",
+            src_key="d/a.bin",
+            dest_path=str(tmp_path / "a.bin"),
+        )
+        first_part = {"Body": io.BytesIO(b"x" * (8 * _MIB)), "ETag": '"abc123"'}
+        calls, _, results, transferrer = _run(
+            TransferType.DOWNLOAD,
+            [item],
+            [first_part, client_error("PreconditionFailed", 412, "GetObject")],
+            options=TransferOptions(no_overwrite=True),
+        )
+        assert ops(calls) == ["GetObject", "GetObject"]
+        assert (transferrer.failed, transferrer.skipped) == (1, 0)
+        assert transferrer.first_error is not None
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert not (tmp_path / "a.bin").exists()
+
+    def test_a_part_copy_412_fails_the_copy(self) -> None:
+        calls, _, results, transferrer = _run(
+            TransferType.COPY,
+            [self._copy_item()],
+            [
+                {"UploadId": "u"},
+                client_error("PreconditionFailed", 412, "UploadPartCopy"),
+                {},
+            ],
+            source_responses=[],
+            options=TransferOptions(no_overwrite=True, metadata_directive="REPLACE"),
+        )
+        assert ops(calls) == [
+            "CreateMultipartUpload",
+            "UploadPartCopy",
+            "AbortMultipartUpload",
+        ]
+        assert (transferrer.failed, transferrer.skipped) == (1, 0)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+
+    def test_a_post_copy_tag_write_412_fails_the_copy(self) -> None:
+        responses: list[dict[str, Any] | BaseException] = [
+            {"UploadId": "u"},
+            {"CopyPartResult": {"ETag": '"p1"'}},
+            {"CopyPartResult": {"ETag": '"p2"'}},
+            {},
+            client_error("PreconditionFailed", 412, "PutObjectTagging"),
+            {},  # rollback DeleteObject
+        ]
+        source_responses: list[dict[str, Any] | BaseException] = [
+            {},
+            {"TagSet": [{"Key": "k", "Value": "v" * 3000}]},
+        ]
+        calls, _, results, transferrer = _run(
+            TransferType.COPY,
+            [self._copy_item()],
+            responses,
+            source_responses=source_responses,
+            options=TransferOptions(no_overwrite=True),
+        )
+        assert ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
+        assert (transferrer.failed, transferrer.skipped) == (1, 0)
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
 
 
 class TestMove:
@@ -2685,7 +3865,7 @@ class TestMove:
         assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
         assert all(result.transfer_type is TransferType.MOVE for result in results)
 
-    def test_download_move_deletes_on_the_managers_client(self, tmp_path: Path) -> None:
+    def test_download_move_deletes_through_the_source_entry(self, tmp_path: Path) -> None:
         item = self._download_item(tmp_path)
         calls, _, results, transferrer = _run(
             TransferType.DOWNLOAD, [item], [self._get_object_response(), {}], is_move=True
@@ -2694,7 +3874,7 @@ class TestMove:
         assert calls[1].params == {"Bucket": "bucket", "Key": "d/a.bin"}
         target = tmp_path / "out" / "a.bin"
         assert target.read_bytes() == b"payload"
-        # The mtime stamp lands (registered before the delete, aws's order).
+        # The mtime stamp lands (registered before the delete, aws-cli's order).
         assert item.mtime is not None
         assert os.stat(target).st_mtime == item.mtime.timestamp()
         assert transferrer.succeeded == 1
@@ -2711,6 +3891,7 @@ class TestMove:
         client, calls = make_recording_client([self._get_object_response(), {}])
         seen_at_release: list[list[str]] = []
         item = self._download_item(tmp_path)
+        _listed_source(item, TransferType.DOWNLOAD, client)
         item.case_conflict_cleanup = lambda: seen_at_release.append(ops(calls))
         transferrer = Transferrer(TransferType.DOWNLOAD, client, is_move=True)
         with transferrer:
@@ -2720,7 +3901,7 @@ class TestMove:
         assert seen_at_release == [["GetObject", "DeleteObject"]]
         assert transferrer.succeeded == 1
 
-    def test_copy_move_deletes_on_the_source_client(self) -> None:
+    def test_copy_move_deletes_through_the_source_entry(self) -> None:
         item = TransferItem(
             compare_key="a.bin",
             size=7,
@@ -2808,12 +3989,14 @@ class TestMove:
             is_move=True,
         )
         assert ops(calls) == ["GetObject", "DeleteObject"]
-        # The bytes are on disk (aws ditto), but the move reports failed.
+        # The bytes are on disk (aws-cli ditto), but the move reports failed.
         assert (tmp_path / "out" / "a.bin").read_bytes() == b"payload"
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         assert transferrer.first_error is not None
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
-        assert str(results[0].error).startswith("An error occurred (AccessDenied)")
+        error = results[0].error
+        assert error is not None
+        assert isinstance(error.__cause__, ClientError)
 
     def test_os_remove_failure_flips_the_move_to_failed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2830,10 +4013,10 @@ class TestMove:
         monkeypatch.setattr(os, "remove", _boom)
         _, _, results, transferrer = _run(TransferType.UPLOAD, [item], [{}], is_move=True)
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
-        # aws prints the OS's own wording after "move failed: ..." - compare via
-        # str(OSError(...)): that rendering quotes the filename with repr, so the
-        # expectation stays exact where the path itself contains backslashes.
-        assert str(results[0].error) == str(OSError(13, "Permission denied", str(src)))
+        error = results[0].error
+        assert error is not None
+        assert isinstance(error.__cause__, OSError)
+        assert str(error) == str(error.__cause__)  # the cause shows, its path included
 
     def test_transfer_failure_leaves_the_source(self, tmp_path: Path) -> None:
         src = tmp_path / "a.bin"
@@ -2870,9 +4053,18 @@ class TestMove:
         assert (transferrer.failed, transferrer.skipped) == (0, 1)
         assert [result.outcome for result in results] == [OpOutcome.SKIPPED]
 
-    def test_post_copy_tagging_failure_keeps_the_source(self) -> None:
+    @pytest.mark.parametrize(
+        "rollback",
+        [{}, client_error("AccessDenied", 403, "DeleteObject")],
+        ids=["rollback-deletes", "rollback-fails"],
+    )
+    def test_post_copy_tagging_failure_keeps_the_source(
+        self, rollback: dict[str, Any] | BaseException
+    ) -> None:
         # _SetTags settles (rolls back the destination, flips the future)
-        # before _DeleteSource looks at it: the source object survives.
+        # before _DeleteSource looks at it: the source object survives -
+        # also when the rollback delete fails, where aws-cli's future stays a
+        # success and its mv deletes the source.
         big = "v" * 3000
         item = TransferItem(
             compare_key="a.bin",
@@ -2883,17 +4075,18 @@ class TestMove:
             dest_bucket="dest-b",
             dest_key="cp/a.bin",
         )
-        responses: list[dict[str, Any] | Exception] = [
+        responses: list[dict[str, Any] | BaseException] = [
             {"UploadId": "u"},
             {"CopyPartResult": {"ETag": '"p1"'}},
             {"CopyPartResult": {"ETag": '"p2"'}},
             {},
             client_error("AccessDenied", 403, "PutObjectTagging"),
-            {},  # rollback DeleteObject (destination side)
+            rollback,  # rollback DeleteObject (destination side)
         ]
-        source_responses: list[dict[str, Any] | Exception] = [
+        source_responses: list[dict[str, Any] | BaseException] = [
             {},
             {"TagSet": [{"Key": "k", "Value": big}]},
+            {},  # a source-side DeleteObject, were one sent
         ]
         calls, source_calls, results, transferrer = _run(
             TransferType.COPY, [item], responses, source_responses=source_responses, is_move=True
@@ -2904,44 +4097,7 @@ class TestMove:
         assert ops(source_calls) == ["HeadObject", "GetObjectTagging"]
         assert (transferrer.succeeded, transferrer.failed) == (0, 1)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
-
-    def test_post_copy_tagging_and_rollback_both_fail_succeeds(self) -> None:
-        # aws parity: when the post-copy PutObjectTagging fails and the rollback
-        # DeleteObject also fails, aws-cli lets the delete error escape the done
-        # callback (swallowed) without flipping the future - the transfer is a
-        # success. We mirror that: the mv's source delete then proceeds.
-        big = "v" * 3000
-        item = TransferItem(
-            compare_key="a.bin",
-            size=9 * _MIB,
-            etag='"abc123"',
-            src_bucket="src-b",
-            src_key="d/a.bin",
-            dest_bucket="dest-b",
-            dest_key="cp/a.bin",
-        )
-        responses: list[dict[str, Any] | Exception] = [
-            {"UploadId": "u"},
-            {"CopyPartResult": {"ETag": '"p1"'}},
-            {"CopyPartResult": {"ETag": '"p2"'}},
-            {},
-            client_error("AccessDenied", 403, "PutObjectTagging"),
-            client_error("AccessDenied", 403, "DeleteObject"),  # rollback also fails
-        ]
-        source_responses: list[dict[str, Any] | Exception] = [
-            {},
-            {"TagSet": [{"Key": "k", "Value": big}]},
-            {},  # mv source-side DeleteObject
-        ]
-        calls, source_calls, results, transferrer = _run(
-            TransferType.COPY, [item], responses, source_responses=source_responses, is_move=True
-        )
-        assert ops(calls)[-2:] == ["PutObjectTagging", "DeleteObject"]
-        # The source delete proceeds - the transfer is recorded as a success.
-        assert ops(source_calls) == ["HeadObject", "GetObjectTagging", "DeleteObject"]
-        assert source_calls[-1].params == {"Bucket": "src-b", "Key": "d/a.bin"}
-        assert (transferrer.succeeded, transferrer.failed) == (1, 0)
-        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
+        assert "PutObjectTagging" in str(results[0].error)
 
     def test_non_transfer_outcomes_report_the_move_kind(self) -> None:
         client, calls = make_recording_client([])
@@ -2951,7 +4107,7 @@ class TestMove:
             TransferType.UPLOAD, client, is_move=True, on_result=results.append
         ) as transferrer:
             transferrer.dryrun(item)
-            transferrer.warn("Skipping file a. probe", key="a")
+            transferrer.warner.warn("Skipping file a. probe")
             transferrer.skip(TransferItem(compare_key="a2"))
         assert calls == []
         assert [result.outcome for result in results] == [
@@ -2965,7 +4121,7 @@ class TestMove:
 class TestDownloadMoveFsync:
     """``LocalStorage(fsync=True)``: the durability barrier before an mv's delete.
 
-    A library-only opt-in (off by default = aws parity): a ``mv`` whose download
+    A library-only opt-in (off by default = aws-cli parity): a ``mv`` whose download
     lands on a local destination fsyncs the file (and its parent dir on POSIX)
     before the S3 source is deleted, closing s3transfer's crash window (the source
     is deleted while the bytes may still be only in the page cache).
@@ -3057,7 +4213,7 @@ class TestDownloadMoveFsync:
             [item],
             [self._get_object_response(), {}],
             is_move=True,
-            dest_storage=LocalStorage(tmp_path),  # fsync defaults off = aws parity
+            dest_storage=LocalStorage(tmp_path),  # fsync defaults off = aws-cli parity
         )
         assert ops(calls) == ["GetObject", "DeleteObject"]
         assert fds == []
@@ -3222,7 +4378,7 @@ class TestStreams:
 
     def test_a_size_hint_sizes_a_non_seekable_stream_and_the_record_counts(self) -> None:
         # A reader without seek/tell is the hint's one target: s3transfer plans
-        # the parts from the provided size and reads to EOF regardless (aws's
+        # the parts from the provided size and reads to EOF regardless (aws-cli's
         # --expected-size, applied to its non-seekable stdin alone), so the
         # whole stream is sent and SUCCEEDED reports the bytes counted, not
         # the hint the engine was handed.
@@ -3310,7 +4466,7 @@ class TestStreams:
             src_display="s3://bucket/streaming.txt",
             dest_display="-",
         )
-        # Without size+etag s3transfer probes the object itself (the aws
+        # Without size+etag s3transfer probes the object itself (the aws-cli
         # stream wire shape: HeadObject then GetObject).
         calls, _, _, transferrer = _run(
             TransferType.DOWNLOAD,
@@ -3376,10 +4532,7 @@ class TestEngineSelection:
             *,
             endpoint: str | None = None,
             session: Any | None = None,
-            allow_absent_credentials: bool = False,
-            allow_lockless: bool = False,
-            region: Any = crtsupport.CLIENT_REGION,
-            sign_requests: bool | None = None,
+            crt: CrtClientOptions | None = None,
         ) -> Any:
             seen.append((client, config, endpoint, session))
             return sentinel
@@ -3403,10 +4556,7 @@ class TestEngineSelection:
             *,
             endpoint: str | None = None,
             session: Any | None = None,
-            allow_absent_credentials: bool = False,
-            allow_lockless: bool = False,
-            region: Any = crtsupport.CLIENT_REGION,
-            sign_requests: bool | None = None,
+            crt: CrtClientOptions | None = None,
         ) -> Any:
             seen.append(endpoint)
             return object()
@@ -3420,7 +4570,7 @@ class TestEngineSelection:
             TransferType.UPLOAD,
             client,
             transfer_config=TransferConfig(preferred_transfer_client="crt"),
-            crt_endpoint=vpce,
+            crt=crtsupport.CrtPostures(endpoint=vpce),
         )
         transferrer._get_manager()
         assert seen == [vpce]
@@ -3443,10 +4593,7 @@ class TestEngineSelection:
             *,
             endpoint: str | None = None,
             session: Any | None = None,
-            allow_absent_credentials: bool = False,
-            allow_lockless: bool = False,
-            region: Any = crtsupport.CLIENT_REGION,
-            sign_requests: bool | None = None,
+            crt: CrtClientOptions | None = None,
         ) -> Any:
             seen.append(endpoint)
             return object()
@@ -3457,7 +4604,7 @@ class TestEngineSelection:
             TransferType.UPLOAD,
             client,
             transfer_config=TransferConfig(preferred_transfer_client="crt"),
-            crt_endpoint="https://endpoint-a.example.com",
+            crt=crtsupport.CrtPostures(endpoint="https://endpoint-a.example.com"),
         )
         transferrer._get_manager()
         assert seen == [None]
@@ -3473,10 +4620,7 @@ class TestEngineSelection:
             *,
             endpoint: str | None = None,
             session: Any | None = None,
-            allow_absent_credentials: bool = False,
-            allow_lockless: bool = False,
-            region: Any = crtsupport.CLIENT_REGION,
-            sign_requests: bool | None = None,
+            crt: CrtClientOptions | None = None,
         ) -> Any:
             seen.append(session)
             return object()
@@ -3488,59 +4632,21 @@ class TestEngineSelection:
             TransferType.UPLOAD,
             client,
             transfer_config=TransferConfig(preferred_transfer_client="crt"),
-            session=caller_session,  # pyright: ignore[reportArgumentType]
+            crt=crtsupport.CrtPostures(session=caller_session),  # pyright: ignore[reportArgumentType]
         )
         transferrer._get_manager()
         assert seen == [caller_session]
 
-    @pytest.mark.parametrize("allow", [False, True], ids=["library-default", "cli-opt-in"])
-    def test_absent_credentials_posture_is_threaded_to_crtsupport(
-        self, monkeypatch: pytest.MonkeyPatch, allow: bool
-    ) -> None:
-        # The library default is boto3's (classic without credentials); only a
-        # caller that asks - boto3-s3-cli - gets aws-cli's CRT entry.
-        from boto3_s3 import crtsupport
-
-        seen: list[bool] = []
-
-        def fake_create(
-            client: Any,
-            config: Any,
-            *,
-            endpoint: str | None = None,
-            session: Any | None = None,
-            allow_absent_credentials: bool = False,
-            allow_lockless: bool = False,
-            region: Any = crtsupport.CLIENT_REGION,
-            sign_requests: bool | None = None,
-        ) -> Any:
-            seen.append(allow_absent_credentials)
-            return object()
-
-        monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", fake_create)
-        client, _ = make_recording_client([])
-        kwargs: dict[str, Any] = {"crt_allow_absent_credentials": True} if allow else {}
-        transferrer = Transferrer(
-            TransferType.UPLOAD,
-            client,
-            transfer_config=TransferConfig(preferred_transfer_client="crt"),
-            **kwargs,
-        )
-        transferrer._get_manager()
-        assert seen == [allow]
-
     @pytest.mark.parametrize(
-        "declaration", [None, False, True], ids=["library-default", "cli-unsigned", "cli-signed"]
+        "verify", [None, False, "/ca.pem"], ids=["derived", "disabled", "ca-bundle"]
     )
-    def test_sign_requests_posture_is_threaded_to_crtsupport(
-        self, monkeypatch: pytest.MonkeyPatch, declaration: bool | None
+    def test_crt_options_are_threaded_to_crtsupport(
+        self, monkeypatch: pytest.MonkeyPatch, verify: str | bool | None
     ) -> None:
-        # None keeps boto3's rule (derive the mode from the client); a
-        # declaration is aws-cli's `sign_request`, which is what keeps
-        # `--no-sign-request --sse aws:kms` anonymous on the CRT lane.
+        # The CRT client's own settings reach the engine builder as given.
         from boto3_s3 import crtsupport
 
-        seen: list[bool | None] = []
+        seen: list[CrtClientOptions | None] = []
 
         def fake_create(
             client: Any,
@@ -3548,25 +4654,21 @@ class TestEngineSelection:
             *,
             endpoint: str | None = None,
             session: Any | None = None,
-            allow_absent_credentials: bool = False,
-            allow_lockless: bool = False,
-            region: Any = crtsupport.CLIENT_REGION,
-            sign_requests: bool | None = None,
+            crt: CrtClientOptions | None = None,
         ) -> Any:
-            seen.append(sign_requests)
+            seen.append(crt)
             return object()
 
         monkeypatch.setattr(crtsupport, "create_crt_transfer_manager", fake_create)
         client, _ = make_recording_client([])
-        kwargs: dict[str, Any] = {} if declaration is None else {"crt_sign_requests": declaration}
         transferrer = Transferrer(
             TransferType.UPLOAD,
             client,
             transfer_config=TransferConfig(preferred_transfer_client="crt"),
-            **kwargs,
+            crt=crtsupport.CrtPostures(crt=CrtClientOptions(verify=verify)),  # pyright: ignore[reportArgumentType]
         )
         transferrer._get_manager()
-        assert seen == [declaration]
+        assert seen == [CrtClientOptions(verify=verify)]  # pyright: ignore[reportArgumentType]
 
     def test_copy_kind_is_unconditionally_classic(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from s3transfer.manager import TransferManager
@@ -3579,10 +4681,7 @@ class TestEngineSelection:
             *,
             endpoint: str | None = None,
             session: Any | None = None,
-            allow_absent_credentials: bool = False,
-            allow_lockless: bool = False,
-            region: Any = crtsupport.CLIENT_REGION,
-            sign_requests: bool | None = None,
+            crt: CrtClientOptions | None = None,
         ) -> Any:
             raise AssertionError("copy reached the CRT path")  # must not run
 
@@ -3613,8 +4712,8 @@ class TestCrtEngineErrors:
     The engine is built by third-party code (boto3's config validation,
     awscrt's client factory, a credential resolution), and
     `transfer.crt_engine_errors` gives each failure the category
-    design/exceptions.md names for its cause - awscrt's bare region assertion
-    alone passes through, for the CLI's single conversion site.
+    design/exceptions.md names for its cause - an `AssertionError` (an
+    invariant or a test double's guard) alone passes through.
     """
 
     @staticmethod
@@ -3740,7 +4839,7 @@ class TestCrtEngineErrors:
         with pytest.raises(InvalidConfigError):
             transferrer._get_manager()
 
-    def test_awscrts_region_assertion_passes_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_an_assertion_passes_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
         transferrer = self._transferrer_whose_engine_raises(monkeypatch, AssertionError())
         with pytest.raises(AssertionError):
             transferrer._get_manager()
@@ -3783,7 +4882,7 @@ class TestProvidedEtagIsTheResponseText:
 
     s3transfer puts the provided value on every ranged GET of a multipart
     download and on a multipart copy's ``CopySourceIfMatch``. Measured against
-    the pinned aws (2.36.40) through a 127.0.0.1 fake: an ETag served without
+    the pinned `aws` (2.36.40) through a 127.0.0.1 fake: an ETag served without
     quotes goes back without them, a weak ``W/"..."`` one as it came, and the
     usual quoted one quoted.
     """
@@ -3824,17 +4923,9 @@ class TestResponseCaptureExpectGate:
 class TestPublicSurface:
     def test_all_matches_the_documented_surface(self) -> None:
         # The module is a documented submodule-path surface (design/transfer.md):
-        # the engine pair, the Warner protocol its `warner` seam returns, and
-        # the SDK-floor probes (--no-overwrite, section 7; copy_props=ALL,
-        # section 4). A symbol added or dropped must be a deliberate
-        # __all__ / docs decision.
-        assert set(transfer.__all__) == {
-            "TransferItem",
-            "Transferrer",
-            "Warner",
-            "annotations_copy_unsupported_reason",
-            "conditional_write_unsupported_reason",
-        }
+        # the engine pair and the Warner protocol its `warner` seam returns. A
+        # symbol added or dropped must be a deliberate __all__ / docs decision.
+        assert set(transfer.__all__) == {"TransferItem", "Transferrer", "Warner"}
         for name in transfer.__all__:
             assert hasattr(transfer, name), name
 
@@ -4254,11 +5345,100 @@ class TestImmediateCancelWatcher:
             # Blocked on the slot "a" holds until the watcher cancels "a".
             transferrer.submit(item("b"))
             assert time.monotonic() - started < 5.0
-        assert manager.cancelled == ["a"]
-        assert {result.dest_info or result.dest: result.outcome for result in results} == {
-            "s3://b/a": OpOutcome.CANCELLED,
-            "s3://b/b": OpOutcome.SUCCEEDED,
-        } or [result.outcome for result in results] == [OpOutcome.CANCELLED, OpOutcome.SUCCEEDED]
+        # "b", handed over after the escalation, is cancelled as it is tracked.
+        assert manager.cancelled == ["a", "b"]
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED] * 2
+
+    @staticmethod
+    def _upload_item(tmp_path: Path, size: int) -> TransferItem:
+        src = tmp_path / "a.bin"
+        src.write_bytes(b"x" * size)
+        return TransferItem(
+            compare_key="a.bin", size=size, src_path=str(src), dest_bucket="b", dest_key="k"
+        )
+
+    def test_an_escalation_reaches_the_transfer_running_on_the_calling_thread(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Under use_threads=False the manager call runs the whole transfer
+        # before it returns; tracked only after it, the transfer ran to the
+        # end (measured against the dev stack: a 1 GiB upload cancelled at
+        # 3 s finished 6 s later as SUCCEEDED). Tracked from on_queued, the
+        # watcher's cancel lands while the first part is in flight: the second
+        # part and the completion are never sent, and the upload is aborted.
+        cancelled = threading.Event()
+        original_cancel_futures = Transferrer._cancel_futures
+
+        def cancel_futures(self: Transferrer) -> None:
+            original_cancel_futures(self)
+            cancelled.set()
+
+        monkeypatch.setattr(Transferrer, "_cancel_futures", cancel_futures)
+        client, calls = make_recording_client([{"UploadId": "u"}, {"ETag": '"e1"'}, {}])
+        canned = client._make_api_call
+        token = CancelToken()
+
+        def api_call(operation: str, params: dict[str, Any]) -> dict[str, Any]:
+            if operation == "UploadPart":
+                token.cancel(mode=CancelMode.IMMEDIATE)
+                assert cancelled.wait(5.0)
+            return canned(operation, params)
+
+        client._make_api_call = api_call
+        results: list[OpResult] = []
+        with Transferrer(
+            TransferType.UPLOAD,
+            client,
+            transfer_config=_SYNC_CONFIG,
+            cancel_token=token,
+            on_result=results.append,
+        ) as transferrer:
+            transferrer.submit(self._upload_item(tmp_path, 9 * _MIB))
+        assert ops(calls) == ["CreateMultipartUpload", "UploadPart", "AbortMultipartUpload"]
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+
+    def _submit_after_the_escalation(
+        self, kind: TransferType, item: TransferItem
+    ) -> tuple[list[ApiCall], list[OpResult]]:
+        # The watcher cancels what is tracked once and stops; the item is
+        # submitted only after it has.
+        client, calls = make_recording_client([])
+        token = CancelToken()
+        results: list[OpResult] = []
+        with Transferrer(
+            kind, client, transfer_config=_SYNC_CONFIG, cancel_token=token, on_result=results.append
+        ) as transferrer:
+            transferrer.prepare()
+            token.cancel(mode=CancelMode.IMMEDIATE)
+            for watcher in self._watchers():
+                watcher.join(5.0)
+            assert self._watchers() == []
+            transferrer.submit(item)
+        return calls, results
+
+    def test_a_transfer_queued_after_the_escalation_is_cancelled(self, tmp_path: Path) -> None:
+        # Cancelled as it is tracked, before its first request.
+        calls, results = self._submit_after_the_escalation(
+            TransferType.UPLOAD, self._upload_item(tmp_path, 7)
+        )
+        assert calls == []
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
+
+    def test_the_cancel_on_tracking_stops_the_rest_of_the_queued_work(self, tmp_path: Path) -> None:
+        # The download's parent directory is made on_queued, after the
+        # tracking; the cancel there stops it too.
+        item = TransferItem(
+            compare_key="a.bin",
+            size=7,
+            etag='"abc123"',
+            src_bucket="b",
+            src_key="a.bin",
+            dest_path=str(tmp_path / "out" / "a.bin"),
+        )
+        calls, results = self._submit_after_the_escalation(TransferType.DOWNLOAD, item)
+        assert calls == []
+        assert not (tmp_path / "out").exists()
+        assert [result.outcome for result in results] == [OpOutcome.CANCELLED]
 
 
 class TestHandOverRefusal:

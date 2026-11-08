@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 import pytest
 from boto3.s3.transfer import TransferConfig
 
-from boto3_s3 import GlobFilter, producers
+from boto3_s3 import Exclude, Include, globsieve, producers
 from boto3_s3.exceptions import (
     BatchError,
     Boto3S3Error,
@@ -115,8 +115,8 @@ class _MemStorage(Storage):
     def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
         self.opens.append((key, mode))
         if mode == "rb":
-            return io.BytesIO(self._store[key])  # type: ignore[return-value]
-        return _MemWriter(self._store, key)  # type: ignore[return-value]
+            return io.BytesIO(self._store[key])
+        return _MemWriter(self._store, key)  # pyright: ignore[reportReturnType]
 
     def scan_pages(self, options: ScanOptions) -> Iterator[Sequence[FileInfo]]:
         # scan_pages returns already-filtered pages (the contract): a real custom
@@ -191,7 +191,7 @@ class _CommitFailMem(_MemStorage):
 
     def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO:
         if mode == "wb":
-            return _FailingWriter(self._store, key)  # type: ignore[return-value]
+            return _FailingWriter(self._store, key)  # pyright: ignore[reportReturnType]
         return super().open(key, mode, size=size)
 
 
@@ -242,9 +242,9 @@ class TestOpenUploadRoute:
         )
         assert [call.params["Key"] for call in calls] == ["tree/a.txt", "tree/sub/b.txt"]
 
-    def test_upload_guesses_content_type_from_the_entry_key(self) -> None:
+    def test_upload_guesses_content_type_from_the_entry_compare_key(self) -> None:
         # Open-route uploads are shaped like local ones (design/transfer.md
-        # section 12): the default guess reads the entry's key, so a custom
+        # section 12): the default guess reads the entry's compare_key, so a custom
         # backend's .jpg lands as image/jpeg without the backend doing
         # anything. Only a true stream (no filename) skips the guess.
         src = _MemStorage({"img/photo.jpg": b"x"}, location="mem://data/")
@@ -279,7 +279,6 @@ class TestOpenUploadRoute:
         assert outcomes.count(OpOutcome.WARNED) == 1
         assert outcomes.count(OpOutcome.SUCCEEDED) == 1
         warned = next(r for r in results if r.outcome is OpOutcome.WARNED)
-        assert "exceeds s3 upload limit of 48.8 TiB." in str(warned.error)
         assert "big.bin" in str(warned.error)
 
     def test_recursive_upload_takes_the_backend_arrival_order(self) -> None:
@@ -343,7 +342,7 @@ class TestOpenUploadRoute:
 
     def test_glob_filter_matches_compare_keys(self) -> None:
         src = _MemStorage({"keep.txt": b"x", "drop.bin": b"y"}, location="mem://data/")
-        keep = GlobFilter().exclude("*").include("*.txt").compile()
+        keep = globsieve.compile([Exclude("*"), Include("*.txt")])
         client, calls = make_recording_client([{}])
         S3().cp(
             src,
@@ -363,7 +362,7 @@ class TestOpenUploadRoute:
         with pytest.raises(NotFoundError) as excinfo:
             S3().cp(src, S3Storage("s3://b/k", client=client), transfer_config=_SYNC)
         assert excinfo.value.__cause__ is None
-        assert str(excinfo.value) == "The user-provided path mem://data/gone.txt does not exist."
+        assert "mem://data/gone.txt" in str(excinfo.value)
         assert calls == []
 
     def test_recursive_empty_source_transfers_nothing(self) -> None:
@@ -460,12 +459,12 @@ class TestOpenDownloadRoute:
         assert store == {"a.txt": b"payload"}
 
     def test_single_download_is_filtered_too(self) -> None:
-        # The open route mirrors the built-in one: aws filters the
+        # The open route mirrors the built-in one: aws-cli filters the
         # single-object case as well - the excluded object is headed but
         # never fetched, and the backend is never opened.
         store: dict[str, bytes] = {}
         dest = _MemStorage(store, location="mem://data/out.bin")
-        drop = GlobFilter().exclude("*").compile()
+        drop = globsieve.compile([Exclude("*")])
         client, calls = make_recording_client([head_response()])
         S3().cp(
             S3Storage("s3://b/d/a.txt", client=client), dest, filter=drop, transfer_config=_SYNC
@@ -481,7 +480,7 @@ class TestOpenDownloadRoute:
         # alone left every test green.
         store: dict[str, bytes] = {}
         dest = _MemStorage(store, location="mem://data/")
-        only_b = GlobFilter().exclude("*").include("b")
+        only_b = globsieve.compile([Exclude("*"), Include("b")])
         client, calls = make_recording_client([head_response()])
         S3().cp(S3Storage("s3://b/a//b", client=client), dest, filter=only_b, transfer_config=_SYNC)
         assert ops(calls) == ["HeadObject"]
@@ -508,7 +507,7 @@ class TestOpenDownloadRoute:
         assert store == {"a.txt": b"AAA", "sub/b.txt": b"BBB"}
 
     def test_keyless_non_recursive_source_writes_nothing(self) -> None:
-        # `cp s3://bucket mem-dest`: aws lists the bucket and exact-matches
+        # `cp s3://bucket mem-dest`: aws-cli lists the bucket and exact-matches
         # nothing. The listing is issued like the built-in download route
         # (test_s3_cp.py pins the same shape) - a denied/failing ListBucket
         # must stay observable, not be optimized to a silent rc 0.
@@ -671,7 +670,7 @@ class TestOpenRouteContracts:
             ) -> BinaryIO:
                 if mode == "wb":
                     self.opens.append((key, mode))
-                    return _InterruptedCommitWriter(self._store, key)  # type: ignore[return-value]
+                    return _InterruptedCommitWriter(self._store, key)  # pyright: ignore[reportReturnType]
                 return super().open(key, mode, size=size)
 
         store: dict[str, bytes] = {}
@@ -781,7 +780,7 @@ class TestOpenRouteContracts:
                 self.opens.append((key, mode))
                 reader = io.BytesIO(self._store[key])
                 readers.append(reader)
-                return reader  # type: ignore[return-value]
+                return reader
 
         src = _TrackingMem({"": b"x" * 5}, location="mem://data/a.txt")
         client, put_calls = make_recording_client([{}])
@@ -849,7 +848,7 @@ class TestDeferredOpen:
 
     def test_writer_close_without_write_commits_an_empty_object(self) -> None:
         # The zero-byte-download shape: no chunk ever arrives, close still
-        # materializes the empty object (aws writes the empty local file).
+        # materializes the empty object (aws-cli writes the empty local file).
         store: dict[str, bytes] = {}
         backend = _MemStorage(store)
         producers._DeferredWriter(backend, "k", 0).close()
@@ -987,3 +986,21 @@ class TestMoveRoute:
             S3().mv(src, S3Storage("s3://gone/up/", client=client), transfer_config=_SYNC)
         assert src.deletes == []
         assert src._store == {"": b"x" * 7}
+
+
+class TestOpenSideDisplay:
+    @pytest.mark.parametrize(
+        ("location", "key", "expected"),
+        [
+            ("mem://data", "a.txt", "mem://data/a.txt"),
+            ("mem://data/", "a.txt", "mem://data/a.txt"),
+            # A location that is all scheme keeps its own slashes.
+            ("dict://", "sub/b.txt", "dict://sub/b.txt"),
+            ("dict://", "", "dict://"),
+        ],
+    )
+    def test_the_key_joins_the_location_with_one_separator(
+        self, location: str, key: str, expected: str
+    ) -> None:
+        storage = _MemStorage({}, location=location)
+        assert producers.open_side_display(storage, key) == expected

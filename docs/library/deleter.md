@@ -21,8 +21,7 @@ which are not objects; submitting them would try to delete prefixes.
 S3Deleter(storage, *, request_payer=None, on_result=None, cancel_token=None,
           batch_size=1000, operation="delete", capture_response=False,
           dryrun=False, transfer_config=None, session=None, crt_endpoint=None,
-          crt_allow_absent_credentials=False, crt_allow_lockless=False,
-          crt_region=CLIENT_REGION, crt_sign_requests=None)
+          crt=None)
 ```
 
 `storage` must be an `S3Storage`; anything else raises `ValidationError`. Only
@@ -37,6 +36,9 @@ until the first request is signed, so missing credentials arrive as per-key
 failures (`ConfigurationError`).
 
 `batch_size` must be between 1 and 1000, S3's own limit for one batch request.
+
+A `KeyboardInterrupt` leaves the context at once: the batch in flight finishes
+behind you and reports nothing.
 
 Deleting a specific `VersionId` is not provided, as `aws s3 rm` does not offer
 it either.
@@ -63,7 +65,7 @@ or — when it selects the CRT engine — the CRT client, built in the construct
 just as a transfer builds it. That is the client `aws s3` carries its deletes
 on under the same setting, so its retry policy and its error text are the
 deletes' here too; one difference it makes is spelled out under
-[Failures](#3-failures). `session` and the `crt_*` arguments are the CRT
+[Failures](#3-failures). `session`, `crt_endpoint` and `crt` are the CRT
 engine's postures, as on [`S3`](../reference/s3.md#s3); leave them alone
 unless you set them there. `rm` and `sync` pass their own `transfer_config`
 and postures (an S3-to-S3 `sync` always deletes on botocore, as `aws s3` runs
@@ -100,9 +102,7 @@ rehearsing; this flag is for code driving the deleter directly.
 
 `on_result` receives one `OpResult` per dispatched key, with `transfer_type`
 `delete` and `bytes_transferred` 0, in submission order within a batch. Keys
-discarded without being sent produce no record, and neither does a key whose
-own `DeleteObject` died without a response on the botocore client (see
-[Failures](#3-failures)).
+discarded without being sent produce no record (see [Failures](#3-failures)).
 
 **It is called from the worker thread.** Keep it fast and do not let it raise.
 If it does raise, the records already delivered are counted, the rest of that
@@ -113,18 +113,18 @@ calls it on your own thread — see [Rehearsing with
 
 `submit` / `flush` / `close` are meant to be called from **one** thread.
 
-Cancelling through `cancel_token` never discards a batch whose request has
-already started — it completes and delivers its results. Buffered entries not
-yet sent are dropped without records, and immediate mode may also cancel a
-dispatched batch that has not begun. One kind of entry inside a started batch
-can still go unsent: a key the batch sends as a request of its own (one XML
-cannot carry, or a re-send) that had not gone out when the run was abandoned — by
-`close(flush=False)` for anything but a graceful cancel, or by an immediate
-one. It is dropped without a record, like a buffered entry.
+Cancelling through `cancel_token` drops the buffered entries not yet sent,
+without records. A graceful cancel waits for a batch whose request has already
+started, which completes and delivers its results. An immediate cancel waits
+for nothing: a dispatched batch that has not begun never runs, and one already
+sent finishes on its own without delivering its results. One kind of entry
+inside a started batch can go unsent: a key the batch sends as a request of
+its own (one XML cannot carry, or a re-send) that had not gone out when the run
+was abandoned — by `close(flush=False)` for anything but a graceful cancel, or
+by an immediate one. It is dropped without a record, like a buffered entry.
 
-Nothing is printed. Beyond the result records, the deleter logs to the
-`boto3_s3.deleter` logger — batch dispatches and failures at debug level,
-unattributable responses as warnings.
+Nothing is printed. Beyond the result records, the deleter logs batch
+dispatches and failures to the `boto3_s3.deleter` logger at debug level.
 
 ## 3. Failures
 
@@ -153,26 +153,17 @@ request's outcome. The deleter then continues with the following batches. A
 wrong bucket name still fails everything, each key on its own request, and the
 counts show it. One batch request has one set of attempts, where `aws s3`
 gives each key its own, so a key can get more attempts here than there —
-never fewer. On botocore a re-sent key that dies without a response is
-dropped without a record, as `aws s3` drops it; on the CRT client it is a
-failure carrying the CRT's own error, as `aws s3` reports it. A key the run is
+never fewer. A re-sent key that dies without a response is a failure on
+either client, carrying that client's own error, where `aws s3` drops it
+without a line on botocore; S3 may still have deleted it. A key the run is
 abandoned before re-sending gets no record, like an entry still in the
 buffer.
 
-Success on the batch route is normally read as "not in the response's error
-list". If the response carries an error the deleter cannot pin on any key it
-sent — an entry with no key, or one naming a key it never submitted — that
-reading is no longer safe, so **every key of that batch that the response did
-not account for is recorded as failed**, with a message saying the deletion
-could not be confirmed and quoting the offending entry. A key with an error of
-its own keeps that error, and with `capture_response=True` a key the response
-lists as deleted stays a success. Failing closed matters if a delete success
-licenses you to drop your own record of the object: the object may still be
-there. S3 answers only for the keys you sent, so in practice this never fires;
-it is a guard, and it logs a warning as well.
+Success on the batch route is read as "not in the response's error list".
 
 An exception the delete request itself raises that is not a botocore error —
-botocore choking on a malformed response, a redirect loop — is that request
+the `FileNotFoundError` of a refreshing `credential_process` whose program is
+gone, say — is that request
 failing all the same: a batch's keys are sent again one by one, and a single
 key's request fails the key, as a plain `Boto3S3Error` carrying the original
 as `__cause__`. Anything outside that — a genuine programming error, or an
@@ -184,11 +175,8 @@ re-raised to you on the next non-empty `flush()` or `close()`.
 
 With `capture_response=True`, a successful key's `OpResult.extra_info` gains
 a `"delete"` slot holding a single-object-shaped response, regardless of which
-wire form was used. A success the batch response does not list under
-`Deleted[]` — an endpoint that leaves a key out, or answers quietly although
-asked not to — is still a success, with `extra_info` left at `None`, so read
-the slot defensively. One more limitation: if the same key was submitted twice
-in one batch, both records share a single slot.
+wire form was used. One limitation: if the same key was submitted twice in
+one batch, both records share a single slot.
 
 ## 4. Differences from `aws s3`
 

@@ -1,12 +1,13 @@
 # Endpoint fidelity
 
-Parity means boto3-s3 behaves like aws against real S3. Running the suite
-against real S3 every time costs too much, so the e2e tier runs both CLIs
-against a local S3 server, the dev stack (RustFS, `scripts/compose.dev.yaml`),
-with occasional real-AWS runs ([`testing.md`](./testing.md) section 3,
-endpoint policy). Wherever the dev stack answers differently from real S3, a
-pass on it is no evidence of parity on real S3. This file records those
-places (section 1), every test-side change made because the endpoint is not
+Compatibility means boto3-s3 behaves like aws-cli against real S3 (the policy is
+[`overview.md`](./overview.md) section 3). Running the suite against real S3
+every time costs too much, so the e2e tier runs both CLIs against a local S3
+server, the dev stack (RustFS, `scripts/compose.dev.yaml`), with occasional
+real-AWS runs ([`testing.md`](./testing.md) section 3, endpoint policy).
+Wherever the dev stack answers differently from real S3, a pass on it is no
+evidence that the two agree on real S3. This file records those places
+(section 1), every test-side change made because the endpoint is not
 real S3 (section 2 - each must be revisited when the endpoint changes), and
 how the dev stack's server was chosen (section 3).
 
@@ -14,25 +15,27 @@ how the dev stack's server was chosen (section 3).
 
 Every known way the dev stack answers differently from real S3, plus the
 places where moto does and a golden is affected. The dev stack column is the
-observed behavior of RustFS 1.0.2 (`rustfs/rustfs:1.0.2`, image revision
-`2b243d86`), probed on 2026-10-17. The compose file pins that release, so a
+observed behavior of RustFS 1.0.4 (`rustfs/rustfs:1.0.4`, image revision
+`46337942`): probed on 1.0.2 on 2026-10-17, again on 1.0.3, which keeps
+1.0.2's server code, on 2026-10-25, and on 1.0.4, whose probes match
+1.0.3's, on 2026-11-09. The compose file pins that release, so a
 newer one has not been checked against these rows until the probes are re-run;
 `docker exec boto3-s3-dev-s3-1 rustfs --version` prints the running one.
 
 The real-S3 column is measured where marked *measured* - by the real-AWS
 runs of `tests/run_e2e.sh` in ap-northeast-1 (2026-10-15: 237 of 248 e2e
 tests passed, all 11 failures test-side; 2026-10-17, after the section 2
-fixes: 248 of 248) plus probes from those days - and is S3's documented
+fixes: 248 of 248) plus probes from those days and from 2026-10-25 - and is S3's documented
 behavior otherwise; a row marked *unverified*
 has never been checked against real S3. The moto column matters because
 goldens replay on moto: a golden captured on one endpoint only works if moto
 answers the same way. The last column points to the test-side changes in
 section 2; the table doubles as the probe checklist for a new endpoint.
 
-| # | Surface | Dev stack (RustFS 1.0.2) | Real S3 | moto | Section 2 |
+| # | Surface | Dev stack (RustFS 1.0.4) | Real S3 | moto | Section 2 |
 |---|---|---|---|---|---|
 | G1 | PutBucketWebsite without an IndexDocument (error document only, or empty) | rejected, `MalformedXML` | rejected (`InvalidArgument`; the error-document-only shape *unverified*) | stored | T8 |
-| G2 | `--storage-class GLACIER` | `InvalidStorageClass`, rc 1 | accepted, rc 0 | accepted | T9 |
+| G2 | `--storage-class` other than STANDARD and REDUCED_REDUNDANCY (STANDARD_IA, ONEZONE_IA, INTELLIGENT_TIERING, GLACIER_IR, GLACIER, DEEP_ARCHIVE) | `InvalidStorageClass`, rc 1 | accepted, rc 0 (*measured*) | accepted | T9 |
 | G3 | Object annotations | ListObjectAnnotations `NotImplemented` | supported | not supported | T10 |
 | G4 | CreateBucket on a bucket you own | succeeds (us-east-1 rule) | us-east-1 succeeds; other regions `BucketAlreadyOwnedByYou` | us-east-1 rule | T11 |
 | G5 | `CreateBucketConfiguration.Tags` | accepted and ignored (empty tag set) | applied (*measured*) | ignored | T12 |
@@ -41,7 +44,7 @@ section 2; the table doubles as the probe checklist for a new endpoint.
 | G8 | Zero-byte PUT | the next PutObject with a body on the same pooled connection waits for the client's read timeout (HEAD, GET, and listings do not) | unaffected | unaffected | T1 |
 | G9 | GetObjectAttributes, COMPOSITE checksum | value with the `-N` suffix, as HeadObject | general purpose buckets omit the suffix there (HeadObject has it); S3 Express directory buckets add it (*measured*) | - | none |
 | G10 | UploadPartCopy (multipart copy) | destination carries no checksum | destination carries a CRC64NVME FULL_OBJECT checksum (*measured*) | - | none |
-| G11 | PutObject with a canned ACL or grant, new bucket | accepted, rc 0 | new buckets have ACLs disabled (BucketOwnerEnforced): rejected, rc 1 on both CLIs (*measured*) | accepted | T5 |
+| G11 | PutObject with a canned ACL or grant, new bucket | accepted, rc 0 | new buckets have ACLs disabled (BucketOwnerEnforced): a grant or a canned ACL other than `private` and `bucket-owner-full-control` is rejected (`AccessControlListNotSupported`), rc 1 on both CLIs; those two are accepted (*measured*) | accepted | T5 |
 | G12 | CopyObject with `If-None-Match: *` onto an existing key | honored, as real S3 | honored: neither CLI copies (*measured*) | condition ignored, the copy overwrites | T7 |
 | G13 | Bucket create and delete as HeadBucket sees them | immediate | lags behind ListBuckets: a name queried before it existed answers 404 for about 30 s after the create; a bucket that held objects answers 200 for over 2 minutes after `rb --force`; a delete and re-create under one name can answer `BucketAlreadyOwnedByYou`. ListBuckets reflects a create and a delete at once (*measured*) | immediate | T4 |
 | G14 | `LastModified` in listings | sub-second | whole seconds | - | none |
@@ -49,13 +52,28 @@ section 2; the table doubles as the probe checklist for a new endpoint.
 | G16 | HeadObject checksum of a PutObject with the default checksum | the CRC32 value without `ChecksumType` | `ChecksumType: FULL_OBJECT` alongside the value | - | none |
 | G17 | Transport of the dev stack (a setup property, not server behavior) | http | https | in-process | T2, T6 |
 | G18 | ListBuckets with a `Prefix` | the prefix is ignored: every bucket is listed | only the matching buckets | - | none |
+| G19 | Object ACL stored by a PutObject with a grant, on a bucket that allows ACLs (BucketOwnerPreferred) | not stored: GetObjectAcl answers the owner's FULL_CONTROL alone, whatever was sent | the grants sent (*measured*) | the grants sent | none |
+| G20 | ETag of an SSE-S3 object | differs on every write of the same bytes and is not the MD5 of the content, single PUT and multipart alike | the MD5 of the content (a multipart object: the MD5 of the part MD5s with `-N`), the same on every write (*measured*; an SSE-C or SSE-KMS object's ETag differs on every write on both) | the MD5 of the content | none |
+| G21 | ListObjectsV2 entry of a multipart object under SSE-S3 or SSE-C | no ETag | the ETag HeadObject answers (*measured*) | - | none |
+| G22 | `--sse aws:kms` | refused, `InvalidRequest` ("SSE-KMS requires a configured and running KMS service": the compose file configures none), rc 1 | accepted with the `aws/s3` key (*measured*) | accepted | none |
+| G23 | SSE-C on a new bucket | accepted | refused, `AccessDenied` ("this bucket has blocked upload requests that specify ... SSE-C"): new buckets block SSE-C (`BlockedEncryptionTypes`) until a PutBucketEncryption lifts it (*measured*) | - | none |
+| G24 | Anonymous PutObject sent aws-chunked with an unsigned trailer (`STREAMING-UNSIGNED-PAYLOAD-TRAILER`, as the CRT engine sends it), where a bucket policy allows anonymous writes | refused, `UnexpectedContent`, rc 1 | accepted: both CLIs' anonymous CRT uploads succeed (*measured*) | - | none |
+| G25 | DeleteObjects naming a key that holds a control character (U+0001), Quiet or not | deletes the key, then answers `InternalError` ("XML response contains a control character") | refuses the request as `MalformedXML`; the key stays (*measured*) | - | none |
+| G26 | An object uploaded with a `SHA512`, `MD5` or `XXHASH64` / `XXHASH3` / `XXHASH128` checksum, single PUT or multipart | accepted, but stored without it: `GetObjectAttributes` returns no checksum (a multipart object: `ChecksumType: COMPOSITE` and no value) | stored: `FULL_OBJECT` for a single PUT, `COMPOSITE` (the algorithm over the part digests) for a multipart one (*measured*) | stored for a single PUT (but `MD5`: none); a multipart object's `COMPOSITE` value is SHA256's whatever the algorithm | none |
 
 G14 changes no test - the e2e sync scenarios shift times by a day - but a
 behavior that depends on it (`sync --exact-timestamps` converging) looks
 different on the dev stack than on real S3. G17 matters because botocore
 puts the flexible checksum into an aws-chunked trailer only over https, so
-some failure paths differ by transport, and because aws's CRT client takes
-`use_ssl` from the command line only.
+some failure paths differ by transport, and because aws-cli's CRT client takes
+`use_ssl` from the command line only. G23 matters to a real-S3 run of the e2e
+suite: `tests/run_e2e.sh` creates a new bucket, so a scenario that uploads
+with SSE-C would need the block lifted first (none does today). G25 shows in
+no CLI run - aws-cli deletes one key per request, and the deleter sends a key
+XML cannot carry in a `DeleteObject` of its own (deleter.md) - only in a
+probe that batches such a key. G26 means `ChecksumComparison` copies every
+such object on the dev stack, and a test of it there or on moto cannot
+stand in for real S3 (`test_checksumcompare` serves the responses itself).
 
 ## 2. Test-side changes
 
@@ -70,7 +88,7 @@ a comment, or in a scenario's `frozen_golden` text - so
 `git grep -n "endpoint-fidelity T"` lists every site (T16, a rule, has
 none). The forms a change takes:
 
-- `diff_only` - no golden; only the live aws-vs-ours comparison runs, rc
+- `diff_only` - no golden; only the live aws-cli-vs-ours comparison runs, rc
   included.
 - `frozen_golden` - the committed golden matches real S3 and moto but not
   the dev stack, so the e2e tier neither rewrites nor drift-checks it; the
@@ -83,15 +101,15 @@ none). The forms a change takes:
 | T1 | `Connection: close` on zero-byte PUTs | `harness.seed_bucket` | G8 | drop on real S3 or moto (harmless if kept) |
 | T2 | the CRT lane passes `--endpoint-url` to both CLIs when `AWS_ENDPOINT_URL_S3` is set | `test_crt_parity._crt_invocation`, `benchmarks/e2e.py` (`_invoke`) | G17 | needed while the endpoint is http; `run_e2e.sh` unsets the variable, so real S3 skips it |
 | T3 | sibling bucket names never end in `-an` | `e2e/conftest.py` (`_sibling_buckets`) | - | keep on every endpoint until account-regional BucketNamespace semantics are verified |
-| T4 | every mb/rb scenario and side gets a sibling bucket of its own, never re-created under the same name; bucket existence is read from ListBuckets, and a bucket the account does not own is never named in a request before it exists; after a successful mb or rb the end state is read once the listing agrees (20 s at most) | `e2e/conftest.py` (`_sibling_buckets`), `test_mb_parity` / `test_rb_parity` (`_prepare`, `_settle`), `harness.bucket_exists` / `force_delete_bucket` / `settle_bucket_existence`, `run_e2e.sh` cleanup | G13 | needed on real S3; harmless elsewhere |
+| T4 | every mb/rb scenario and side gets a sibling bucket of its own, never re-created under the same name; bucket existence is read from ListBuckets, and a bucket the account does not own is never named in a request before it exists; after a successful mb or rb the end state is read once the listing agrees (20 s at most) | `e2e/conftest.py` (`_sibling_buckets`, `bucket_name`), `test_mb_parity` / `test_rb_parity` (`_prepare`, `_settle`), `harness.bucket_exists` / `force_delete_bucket` / `settle_bucket_existence`, `run_e2e.sh` cleanup | G13 | needed on real S3; harmless elsewhere |
 | T5 | `cp_upload_acl_public_read` / `cp_upload_grants_uri` are `diff_only` | `cp_scenarios.py` | G11 | stays while real S3 and moto disagree on ACLs for a new bucket |
-| T6 | the aws-side stderr token for a directory uploaded without `--recursive` is only `upload failed`: the cause after it is `Is a directory` over http, `Need to rewind the stream ...` over https | `cp_upload_dir_no_recursive` / `_exclude` in `cp_scenarios.py` | G17 | none: the token holds on every transport |
+| T6 | the aws-cli-side stderr token for a directory uploaded without `--recursive` is only `upload failed`: the cause after it is `Is a directory` over http, `Need to rewind the stream ...` over https | `cp_upload_dir_no_recursive` / `_exclude` in `cp_scenarios.py` | G17 | none: the token holds on every transport |
 | T7 | `cp_no_overwrite_copy_exists` / `mv_no_overwrite_copy_exists` are `diff_only` | `cp_scenarios.py`, `mv_scenarios.py` | G12 | stays while moto ignores the condition |
 | T8 | `website_error_only` / `website_no_options` are `diff_only` | `website_scenarios.py` | G1 | stays while moto stores a configuration without an IndexDocument |
 | T9 | `cp_upload_storage_class_glacier` is `diff_only`; the glacier gate shapes run on moto | `cp_scenarios.py`; `TestCpGlacierOnMoto`, `TestMvGlacierOnMoto`, `TestSyncGlacierOnMoto` | G2 | the scenario can carry a golden on an endpoint that accepts GLACIER; keep the gate shapes on moto (restores take hours on real S3) |
 | T10 | `cp_copy_props_all_multipart` is live-only | `cp_scenarios.py` | G3 | stays live-only: moto has no annotations either |
 | T11 | `mb_existing` is `diff_only` and checks no stderr tokens | `mb_scenarios.py` | G4 | stays: the outcome depends on the region |
-| T12 | `mb_tags` compares the tag set between aws and ours only; no golden records a tag set | `mb_scenarios.py` | G5 | stays while moto ignores the tags |
+| T12 | `mb_tags` compares the tag set between aws-cli and ours only; no golden records a tag set | `mb_scenarios.py` | G5 | stays while moto ignores the tags |
 | T13 | no e2e reaches an access point: `mv --validate-same-s3-paths` has no scenario, `ls_accesspoint_arn` is `diff_only` | `mv_scenarios.py`, `ls_scenarios.py` | G6 | real S3 could host an access point for `mv` (needs permissions and a cost estimate); `ls_accesspoint_arn` stays `diff_only` (a foreign ARN fails differently per endpoint) |
 | T14 | `cp_copy_props_none` probes only `Metadata`, leaving the default `ContentType` unchecked | `cp_scenarios.py` | - | the dev stack and moto both answer `binary/octet-stream`; check real S3, then probe `ContentType` too |
 | T15 | the dev stack itself: server and release, keys, us-east-1, the SSE-S3 master key, the readiness wait, the container name, the golden-regeneration hint, the benchmark guard | `scripts/compose.dev.yaml`, `compose-up.sh`, `dev-env.sh` / `.cmd`, `golden.py`, `benchmarks/awsenv.py` | - | rewrite for the new server; re-run the section 1 probes |
@@ -103,7 +121,7 @@ throwaway CloudServer 9.5.0 (`S3BACKEND=mem`), which accepts such keys
 (section 3), served keys with `..`, `.`, and `\` segments: ones that climb
 out of the prefix, ones that stay inside it, and ones that name the
 destination or its parent. `cp --recursive` and `sync` downloaded them side
-by side with the pinned aws on Linux and with `aws.exe` on Windows (this
+by side with the pinned `aws` on Linux and with `aws.exe` on Windows (this
 command on Python 3.10 and 3.14). Exit codes, output, and the downloaded
 tree matched on both systems. On Windows the `\` forms that climb out are
 skipped like the `/` ones, and on neither system was anything written
@@ -115,7 +133,7 @@ the negative page-size scenarios (the reason is moto, which raises
 presign normalization (path-style URLs, `<ENDPOINT>`, `<REGION>`, and the
 session token dropped from golden comparisons), which every endpoint needs
 because capture and replay differ in host form and credentials; the
-sorted rm lines, whose order comes from aws's parallel completion;
+sorted rm lines, whose order comes from aws-cli's parallel completion;
 nonexistent bucket names derived from the run's bucket (`<bucket>-no-such`),
 which stay absent on real S3 too because `run_e2e.sh` randomizes the base;
 the us-east-1 branch of `harness.create_bucket_in_region`, which is real
@@ -157,7 +175,7 @@ probes and the e2e suite side by side. The goldens had been captured on
 | XXHASH and SHA512 checksums | `pgsty/minio` accepts; Silo rejects (`InvalidArgument`) | accepted, as real S3 | rejected |
 | Default Content-Type (G15) | `binary/octet-stream`, as real S3 | guessed from the key | none |
 | `CreateBucketConfiguration.Tags` (G5) | ignored | ignored | rejected (`MalformedXML`) |
-| aws's CRT client, download | works | works | writes no file |
+| aws-cli's CRT client, download | works | works | writes no file |
 | `REDUCED_REDUNDANCY` upload | works | works | leaves no object |
 | e2e, 248 tests | `pgsty/minio` 248 passed; Silo 247 (the XXHASH64 rejection) | 244 passed; 3 failures were answers matching real S3 (G4, G12 twice), 1 was G15 | 238 passed, 10 failed: 3 as on RustFS, 7 answers further from real S3 |
 
@@ -167,10 +185,10 @@ honor `If-Match` on DeleteObject, where `pgsty/minio` deleted anyway;
 neither CLI sends it.
 
 CloudServer drops out: without conditional PutObject the `--no-overwrite`
-scenarios prove nothing, and aws's CRT downloads fail against it. RustFS
+scenarios prove nothing, and aws-cli's CRT downloads fail against it. RustFS
 answers as real S3 does on more surfaces than Silo and is further on two
-(G9, G15), so it became the dev stack. It is pinned to 1.0.2 because its 1.0
-release (2026-09-16) is recent.
+(G9, G15), so it became the dev stack. It is pinned to one release (section 1
+names it) because its 1.0 release (2026-09-16) is recent.
 
 ### Desk survey (2026-10-06)
 

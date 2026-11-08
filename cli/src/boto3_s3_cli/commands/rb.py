@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from typing import TYPE_CHECKING
 
 # Module-level imports are fine here: rb is loaded at dispatch (stage 2 of
 # the lazy dispatch), after the command is determined.
 from boto3_s3 import InvalidValueError, S3Storage, ValidationError
-from boto3_s3_cli import clientfactory, globalargs, output, usage
-from boto3_s3_cli.commands.base import Command, Context, expand_positional_paramfile
+from boto3_s3_cli import output, usage
+from boto3_s3_cli.commands.base import (
+    Command,
+    Context,
+    expand_positional_paramfile,
+    refuse_bucketless,
+)
 from boto3_s3_cli.commands.rm import RmCommand
 
 if TYPE_CHECKING:
@@ -31,7 +35,7 @@ class RbCommand(Command):
 
     def configure(self, parser: argparse.ArgumentParser) -> None:
         """Add the ``rb``-specific arguments to its subparser."""
-        parser.add_argument("path", metavar="<S3Uri>", help="the bucket to delete")
+        parser.add_argument("path", help="the bucket to delete")
         parser.add_argument(
             "--force",
             action="store_true",
@@ -42,62 +46,38 @@ class RbCommand(Command):
         """Delete the bucket and return an ``aws s3 rb``-style exit code.
 
         Exit-code shape (aws-cli RbCommand): usage errors - a non-``s3://``
-        path, a key part, a rejected ARN form - exit 252 via ``main``.
-        ``--force`` runs a full ``rm --recursive`` first; a failure there is
-        rc 255 (aws raises RuntimeError into the general handler) and the
-        bucket delete is not attempted. Every failure from delete_bucket
-        onwards is rc 1 with one ``remove_bucket failed:`` line - aws's local
-        catch spans the success line too, so an unwritable stdout is an rb
-        failure rather than the dispatcher's 255. aws builds the client
-        before validating the path (``S3Command._run_main``), so a
-        client-construction failure (a bad ``--profile``, partial credentials,
-        an empty region) takes precedence over a path usage error - we build it
-        first.
+        path, a path that names no bucket, a key part on a bucket, a rejected
+        ARN form - exit 252 via ``main``. ``--force`` runs a full ``rm
+        --recursive`` first; a failure there is rc 255 (aws-cli raises
+        RuntimeError into the general handler) and the bucket delete is not
+        attempted. Every failure of delete_bucket is rc
+        1 with one ``remove_bucket failed:`` line. The success line is past
+        that catch: the bucket is gone by then, so a stdout that cannot take
+        the line is lost output (rc 255 with the error, like every command's),
+        and a process without a stdout (``1>&-``) keeps rc 0 - where aws-cli's
+        catch spans the line and reports the removed bucket as an rb failure.
+        A client-construction
+        failure (a bad ``--profile``, partial credentials, an empty region)
+        reaches main's exit-code mapping (config -> 253, other botocore -> 255).
         """
-        # Parse-time head (measured, design/cli.md section 6): the --query compile
-        # (252), the --endpoint-url scheme check (252), and the positional
-        # paramfile expansion (252) all precede the client build - they beat a
-        # bad --profile (255) the way aws's parse-time load-cli-arg does.
-        globalargs.validate_query(args)
-        clientfactory.validate_endpoint_url(args)
         expand_positional_paramfile(args, "path", name="path", operation="rb")
-        # Build the client up front, like aws's super()._run_main(), so a
-        # construction error precedes the path checks (config -> 253, other
-        # botocore -> 255), then validate the path.
+        target: str = args.path
+        if not target.startswith("s3://"):
+            # aws-cli's rb: S3 paths only -> rc 252.
+            raise ValidationError(usage.bare_single_uri_usage(), operation="rb")
+
+        # A path that names no bucket (`s3://`, `s3:///k`) is a usage error
+        # (252), --force or not: aws-cli sends Bucket="" and reports an rb failure
+        # (rc 1), or with --force runs the inner rm first and ends at 255.
+        bucket_part = target[len("s3://") :].partition("/")[0]
+        refuse_bucketless(bucket_part, operation="rb")
+
         s3 = ctx.s3(args)
         client = s3.client()
 
-        target: str = args.path
-        if not target.startswith("s3://"):
-            # aws rb: S3 paths only -> rc 252.
-            raise ValidationError(usage.bare_single_uri_usage(), operation="rb")
-
-        bucket_part, _, key_part = target[len("s3://") :].partition("/")
-        if not bucket_part:
-            # aws splits the path first: an empty bucket carrying a key is the
-            # "specify a valid bucket name only" usage error (252, ending in a
-            # bare "s3://"); an empty bucket with no key goes to delete_bucket,
-            # where botocore's client-side validation fails inside rb's local
-            # catch -> rc 1 (the same botocore-shaped line as mb / rm). Both
-            # cases are handled before construction, which S3Storage.validate()
-            # would otherwise reject with library-internal wording.
-            if key_part:
-                raise ValidationError(
-                    f"Please specify a valid bucket name only. E.g. s3://{bucket_part}",
-                    operation="rb",
-                )
-            # aws has no empty-bucket short-circuit: --force still runs the
-            # inner rm --recursive first, and its (inevitable) failure aborts
-            # at rc 255 before delete_bucket is attempted.
-            if args.force and self._force_rm(target, args, ctx, s3) != 0:
-                raise InvalidValueError(_FORCE_FAILED, operation="rb")
-            message = usage.invalid_bucket_name_message()
-            sys.stderr.write(output.format_remove_bucket_failed(target, message) + "\n")
-            return 1
-
         # Rejected ARN forms -> 252 from S3Storage.validate (deferred from the now
-        # non-raising construction); a key on a valid bucket is the same usage
-        # error as above (aws's post-split key check).
+        # non-raising construction); a key on the bucket is aws-cli's post-split
+        # key check, also a usage error (252).
         storage = S3Storage(target, client=client)
         storage.validate()
         if storage.key:
@@ -107,34 +87,33 @@ class RbCommand(Command):
             )
 
         if args.force and self._force_rm(target, args, ctx, s3) != 0:
-            # aws raises RuntimeError into its general handler, which prints the
+            # aws-cli raises RuntimeError into its general handler, which prints the
             # 'aws: [ERROR]:'-prefixed line; route it as an InvalidValueError so
             # main emits the matching 'boto3-s3: [ERROR]:' prefix -> rc 255
             # (the inner rm already streamed its own failure output: per-key
             # 'delete failed:' lines, or one fatal-error line).
             raise InvalidValueError(_FORCE_FAILED, operation="rb")
 
-        # aws's RbCommand wraps the delete *and* its success line in one local
-        # `except Exception`, so a stdout that cannot take the line is reported
-        # as an rb failure like any other rather than reaching the dispatcher.
         try:
             s3.rb(storage)
-            output.uni_write(sys.stdout, output.format_remove_bucket(storage.bucket) + "\n")
-            return 0
         except Exception as exc:
-            sys.stderr.write(output.format_remove_bucket_failed(target, exc) + "\n")
+            output.write_stderr(output.format_remove_bucket_failed(target, exc) + "\n")
             return 1
+        # The bucket is gone from here, so the line is outside the failure
+        # catch (aws-cli's spans it, reporting a removed bucket as failed).
+        output.write_result_line(output.format_remove_bucket(storage.bucket))
+        return 0
 
     @staticmethod
     def _force_rm(target: str, args: argparse.Namespace, ctx: Context, s3: S3) -> int:
-        """Run the inner ``rm --recursive``, mirroring aws's ``RbCommand._force``.
+        """Run the inner ``rm --recursive``, mirroring aws-cli's ``RbCommand._force``.
 
         The rm parser fills the rm-only defaults; rb's parsed namespace seeds
         the parse so the rm-side validations read the invocation's globals
-        (aws hands its parsed_globals to a fresh RmCommand the same way) -
+        (aws-cli hands its parsed_globals to a fresh RmCommand the same way) -
         the client itself comes from the shared S3 below, built from those
         same globals. The inner run shares rb's `S3` (`Context.with_s3`) exactly as
-        aws's ``RmCommand(self._session)`` shares the one CLI session - a
+        aws-cli's ``RmCommand(self._session)`` shares the one CLI session - a
         second session would resolve credentials again (a
         ``credential_process`` / MFA flow re-prompting, possibly under a
         different identity than the final ``DeleteBucket``). Caveat: argparse

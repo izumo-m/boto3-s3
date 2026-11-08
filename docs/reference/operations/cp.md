@@ -44,6 +44,7 @@ def cp(
     cancel_token: CancelToken | None = None,
     transfer_config: TransferConfig | None = None,
     capture_response: bool = False,
+    source_region: str | None = None,
     **options: Unpack[TransferOptions],
 ) -> None: ...
 ```
@@ -62,7 +63,9 @@ Four pairings are accepted, and each of them has an
 [`S3Storage`](../storage.md#s3storage) on at least one side: local with S3 in
 either direction; S3 with S3; a custom `Storage` with S3 in either direction
 (the open route, [`../storage.md`](../storage.md)); and a stream endpoint —
-[`IOStorage`](../storage.md#iostorage) or
+an [`IOStorageBase`](../storage.md#iostoragebase) such as
+[`IOStorage`](../storage.md#iostorage),
+[`TextIOStorage`](../storage.md#textiostorage) or
 [`StdioStorage`](../storage.md#stdiostorage) — with S3 in either direction.
 Every other combination raises `ValidationError`: local to local, a custom
 backend paired with a local path or with another custom backend, a stream
@@ -91,7 +94,7 @@ local source is resolved by a single stat and is not checked for being a
 directory, so a directory named as a non-recursive source becomes an item the
 transfer fails with `[Errno 21] Is a directory` rather than an up-front
 rejection. An S3 source with a non-empty key is resolved by one `HeadObject`,
-and a 404 raises `NotFoundError` worded as the AWS CLI words it. An S3 source
+and a 404 raises `NotFoundError` naming the missing key. An S3 source
 with no key (`"s3://bucket"`) matches nothing and transfers nothing, but the
 bucket listing is still issued, so a `NoSuchBucket` or a denied `ListBucket`
 surfaces instead of a silent success. A custom source is resolved through its
@@ -103,10 +106,14 @@ walk, or an S3 listing under the source key normalized to a `/`-terminated
 prefix — so `cp("s3://b/data", …, recursive=True)` lists under `data/` and
 does not reach `data-sibling.txt`. Zero-byte `/`-terminated folder markers are
 dropped from that listing, so they never transfer on this path. An enumeration
-that yields nothing transfers nothing and does not raise. A recursive transfer
+that yields nothing transfers nothing and does not raise. A local source the
+walk would skip as a directory root — a file, a special file, a directory it
+cannot read, a symbolic link the storage does not follow — is refused before
+the run instead (below), where the AWS CLI runs on an empty source. A recursive transfer
 into a local destination that does not exist creates that directory before
-enumerating; this pre-create is not gated on `dryrun`, so a dry run of such a
-transfer still leaves the directory behind.
+enumerating, once every check before the run has passed, so a run refused
+before it starts leaves none; this pre-create is not gated on `dryrun`, so a
+dry run of such a transfer still leaves the directory behind.
 
 Listing and walk behavior is configured on the storage, not here: an
 `S3Storage`'s `page_size` and `fetch_owner`, and a `LocalStorage`'s
@@ -126,9 +133,11 @@ entry's `FileInfo` returning `True` to keep it
 all. A relative glob pattern is matched against the entry's stamped
 `compare_key` — for a recursive local source the path relative to the directory
 being enumerated, for a recursive S3 source the key with the listing's `Prefix`
-removed, and on the single-object routes the last `/`-separated component of
-the source key — while a root-anchored pattern is matched against the entry's
-full `key` instead. The same predicate is also applied to the destination walk
+removed, and on the single-object routes the AWS CLI's form of the source
+([`../filters.md`](../filters.md#filefilter): the key below its parent, or a
+local path below the typed path's parent) — while a root-anchored pattern is
+matched against the entry's full path instead (a local entry's absolute path,
+an S3 entry's `bucket/key`). The same predicate is also applied to the destination walk
 the `case_conflict` gate performs, so a pattern that hides destination entries
 changes what that gate considers already present. On the stream route there is
 no listing to prune and `filter` is not consulted.
@@ -137,8 +146,7 @@ no listing to prune and `filter` is not consulted.
 `cp` specifically: enumeration, the single-object `HeadObject` and the
 `case_conflict` destination walk still run; the missing local destination
 directory is still created; an upload's or copy's per-item request parameters
-are still mapped, so a malformed `grants` entry is still rejected; no transfer
-manager is built; and a stream endpoint is never opened, leaving a
+are still mapped; no transfer manager is built; and a stream endpoint is never opened, leaving a
 side-effecting stream untouched. Items the gates consume — a glacier
 skip, a parent-reference skip, a `no_overwrite` skip — keep their own record
 instead of becoming `DRYRUN` records.
@@ -167,9 +175,11 @@ before its own side effects — the destination pre-create, the `case_conflict`
 destination walk, a deferred client build — and again before pulling each item
 from the enumeration, so a cancelled run stops listing promptly instead of
 paging on. What each cancellation mode guarantees for the transfer lane — a
-graceful drain, an immediate revocation — is specified with the token itself.
-Under either mode the call ends by raising `CancelledError` once the engine and
-the enumeration workers have been reclaimed.
+graceful drain, an immediate return — is specified with the token itself.
+Either mode ends the call by raising `CancelledError`: a graceful one once the
+engine has been reclaimed, an immediate one at once, leaving the requests
+already sent to finish behind the caller (a listing's worker ends by itself
+either way).
 
 `transfer_config` overrides, for this call only, the `TransferConfig` the `S3`
 instance was constructed with; `None` uses that instance default, and a `None`
@@ -182,6 +192,14 @@ limit and the transfer engine selection.
 successful record's `extra_info` — `"write"` for an upload or copy, `"read"`
 for a download — and forces the classic transfer engine, since the CRT data
 plane does not expose them ([`../results.md`](../results.md)).
+
+`source_region` is `aws s3`'s `--source-region`. For an S3-to-S3 run whose
+source is a string, the source side gets [`source_client`](../s3.md#source_clientregion)
+in that region: built without this instance's `endpoint_url`, which names the
+destination's, as aws-cli builds its source client (an endpoint from the
+environment or the config file still applies). An empty value, any other route,
+and a source `Storage` — which keeps its own client — ignore it, as aws-cli
+does.
 
 `**options` are the transfer options `cp` / `mv` / `sync` share — object
 metadata and headers, ACLs and storage class, encryption, checksums,
@@ -216,8 +234,8 @@ The outcomes `cp` emits:
 - `FAILED` — the item's transfer failed; `error` is the translated exception.
   These are the items `BatchError` counts.
 - `SKIPPED` — a silent, non-warning skip: `no_overwrite` finding the local
-  destination file already present, S3 answering a conditional write with
-  `PreconditionFailed`, or an archived source under
+  destination file already present, S3 answering `no_overwrite`'s conditional
+  write with `PreconditionFailed`, or an archived source under
   `ignore_glacier_warnings=True`.
 - `WARNED` — an advisory that does not fail the run: local walk problems from
   the source walk or the `case_conflict` destination walk (unreadable, special
@@ -226,21 +244,23 @@ The outcomes `cp` emits:
   outside the destination directory, an upload above the S3 single-object size
   limit (warned, then attempted anyway), and a download that transferred but
   could not stamp the source's modification time — which produces a `WARNED`
-  record beside its `SUCCEEDED` one. A warning record is message-only: `error`
-  carries the text, the two `*_storage` fields are set, and `src` / `dest` /
-  `src_info` are not. Its `compare_key` follows its origin: the engine's own
-  per-item warnings (the archived source, the oversize upload, the parent
-  reference, the failed mtime stamp) carry the item's key, while one raised by
-  a source walk, by the single-object source resolution or by the
-  `case_conflict` destination walk carries `""`.
+  record beside its `SUCCEEDED` one. A warning record carries its text on
+  `error`, the two `*_storage` fields, and no `src` / `dest`. What else it
+  carries follows its origin: the engine's own per-item warnings (the archived
+  source, the oversize upload, the parent reference, the failed mtime stamp)
+  carry the item's source entry as `src_info` and its `compare_key`, while one
+  raised by a source walk, by the single-object source resolution or by the
+  `case_conflict` destination walk carries no `src_info` and `""`.
 - `NOTICE` — the `case_conflict` advisories under `CaseConflictMode.SKIP` and
-  `CaseConflictMode.WARN`. Display-only, counted nowhere, and it may precede
-  the same item's real outcome.
+  `CaseConflictMode.WARN`, carrying the item's `src_info` and `compare_key`.
+  Display-only, counted nowhere, and it may precede the same item's real
+  outcome.
 - `DRYRUN` — under `dryrun=True`, one per item that reached the submit step.
-- `CANCELLED` — an accepted item revoked before it could complete, by an
-  immediate cancellation, a fatal error elsewhere in the run, or `Ctrl-C`. On
-  the CRT engine only a cancellation `cancel_token` ordered reports it; every
-  other CRT cancellation reports `FAILED`.
+- `CANCELLED` — an accepted item revoked before it could complete, by a fatal
+  error elsewhere in the run, on either transfer engine, or by an immediate
+  cancellation before the call raised. An immediate cancellation and a Ctrl-C
+  report nothing more once they have been raised. A CRT cancellation the run did
+  not order itself reports `FAILED`.
 
 The archived-object gate behind that warning and its
 `ignore_glacier_warnings` skip runs on downloads and copies only; an upload
@@ -271,9 +291,10 @@ upload, the parent reference) are emitted inline on the calling thread
   stream destination; a location `Storage.validate` rejects, such as an
   unsupported ARN form or a key with no bucket; a custom backend that does not
   declare what its route needs (`OPEN_READ` plus `SCAN` or `GET_FILEINFO` for a
-  custom source, `OPEN_WRITE` for a custom destination); an option value the
-  request mapper rejects, such as a malformed `grants` entry or an unrecognized
-  `copy_props` / `annotation_copy_mode`; an unrecognized `case_conflict` value,
+  custom source, `OPEN_WRITE` for a custom destination); a malformed `grants`
+  entry, refused before the run on every route; an option value the request
+  mapper rejects, such as an unrecognized `copy_props` /
+  `annotation_copy_mode`; an unrecognized `case_conflict` value,
   refused on every route including the streaming one, whose single item builds
   no gate; a `TransferConfig` carrying classic-only settings with
   `preferred_transfer_client="crt"`, rejected when the CRT engine is built —
@@ -284,14 +305,17 @@ upload, the parent reference) are emitted inline on the calling thread
   enumeration. A `StdioStorage` *destination* has no such precondition,
   matching the AWS CLI — see `BatchError` below.
 - [`NotFoundError`](../exceptions.md#notfounderror) — a local source path that
-  does not exist, checked before any item work and worded as the AWS CLI words
-  it (the check asks the kernel about the path as typed, like the AWS CLI's:
-  a source typed through a symlinked directory and `..` is admitted, and the
-  walk or stat then warns "File does not exist." for the lexical form, exit
-  code 2, as the AWS CLI does — on Windows, which folds `..` before the
-  filesystem sees the path, both refuse it as missing); a single S3 source
-  whose `HeadObject` answers 404; a single custom-backend source
-  `get_fileinfo` cannot resolve.
+  does not exist, checked before any item work (the check asks the kernel
+  about the path as typed, like the AWS CLI's: a single source typed through a
+  symlinked directory and `..` is admitted, and the stat then warns "File
+  does not exist." for the lexical form, exit code 2, as the AWS CLI does —
+  on Windows, which folds `..` before the filesystem sees the path, both
+  refuse it as missing); under `recursive=True`, a local source the walk would
+  skip as a directory root (a file, a special file, a symbolic link the
+  storage does not follow, a path only the kernel finds), also before any
+  item work, with [`AccessDeniedError`](../exceptions.md#accessdeniederror)
+  for a directory it cannot read; a single S3 source whose `HeadObject`
+  answers 404; a single custom-backend source `get_fileinfo` cannot resolve.
 - [`ConfigurationError`](../exceptions.md#configurationerror), or its
   [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement —
   `no_overwrite` on an SDK without conditional writes, `copy_props=ALL` on
@@ -306,6 +330,11 @@ upload, the parent reference) are emitted inline on the calling thread
   needs them. Where the first request is an item's own transfer — an upload, or
   a download to a stream — missing credentials fail that item instead
   (`BatchError` below).
+- [`Boto3S3Error`](../exceptions.md#boto3s3error) itself — a stream source
+  whose `open` (or `open_text`) raises anything but the library's own
+  exceptions, which pass as they are: the run stops before it starts, no item
+  is recorded, and the stream's exception is on `__cause__`. An interrupt
+  (`KeyboardInterrupt`, `SystemExit`) passes as it is.
 - The enumeration's own rejection, translated to its category and propagated:
   [`AccessDeniedError`](../exceptions.md#accessdeniederror),
   [`NotFoundError`](../exceptions.md#notfounderror) or
@@ -323,14 +352,16 @@ upload, the parent reference) are emitted inline on the calling thread
   stream on each write, so the run starts and the item fails inside the
   transfer, with `'NoneType' object has no attribute 'write'` as the sampled
   failure's message and the operation, bucket and key of the object stamped on
-  it as usual.
+  it as usual, an empty object included: it writes nothing, and the writer's
+  `close` fails it the same way.
 - [`CancelledError`](../exceptions.md#cancellederror) — the run was cancelled
   through `cancel_token`. It supersedes `BatchError`.
 - Anything `filter` itself raises. A predicate's exception surfaces on the
   consuming side of the enumeration and aborts the run; the engine then cancels
-  the transfers it had accepted. `on_result` and `on_progress` must not raise —
-  `cp` states no contract for a callback that does
-  ([`README.md`](./README.md#on_result)).
+  the transfers it had accepted.
+- Anything `on_result` or `on_progress` raises, as it is: it ends the run
+  without failing the item the callback was reporting on. Keep both from
+  raising all the same ([`README.md`](./README.md#on_result)).
 
 ## boto3_s3.cp
 

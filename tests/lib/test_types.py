@@ -14,6 +14,7 @@ DT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 TYPE_NAMES = [
     "CancelMode",
     "CancelToken",
+    "CrtClientOptions",
     "FileInfo",
     "FileKind",
     "LocalFileInfo",
@@ -191,9 +192,6 @@ class TestS3ScanOptions:
             False,
             None,
         )
-        # The default is the transfer view: a recursive listing's common
-        # prefixes are dropped, so only ls opts into them.
-        assert opts.include_common_prefixes is False
         assert opts.recursive is False  # inherited common field
 
     def test_carries_all_values(self) -> None:
@@ -203,7 +201,6 @@ class TestS3ScanOptions:
             request_payer="requester",
             fetch_owner=True,
             prefix="p/",
-            include_common_prefixes=True,
         )
         assert (
             opts.recursive,
@@ -211,8 +208,7 @@ class TestS3ScanOptions:
             opts.request_payer,
             opts.fetch_owner,
             opts.prefix,
-            opts.include_common_prefixes,
-        ) == (True, 50, "requester", True, "p/", True)
+        ) == (True, 50, "requester", True, "p/")
 
     def test_page_size_passes_through_unvalidated(self) -> None:
         # aws-cli parity (exit-code charter): out-of-range values reach the
@@ -236,6 +232,33 @@ class TestLocalScanOptions:
             False,
             True,
         )
+
+
+class TestCrtClientOptions:
+    def test_defaults_keep_boto3s_behavior(self) -> None:
+        opts = t.CrtClientOptions()
+        assert (opts.allow_lockless, opts.verify) == (False, None)
+
+    @pytest.mark.parametrize("verify", [False, "/etc/ca.pem"], ids=["disabled", "ca-bundle"])
+    def test_accepts_off_and_a_path(self, verify: object) -> None:
+        assert t.CrtClientOptions(verify=verify).verify == verify  # pyright: ignore[reportArgumentType]
+
+    @pytest.mark.parametrize(
+        "verify",
+        [True, 0, b"/etc/ca.pem", Path("/etc/ca.pem")],
+        ids=["true", "int", "bytes", "path"],
+    )
+    def test_refuses_anything_else(self, verify: object) -> None:
+        # True is ambiguous (botocore: its bundled CA file; awscrt: the
+        # platform store), so it is refused rather than read either way.
+        with pytest.raises(boto3_s3.ValidationError, match="None, False or a CA bundle path"):
+            t.CrtClientOptions(verify=verify)  # pyright: ignore[reportArgumentType]
+
+    @pytest.mark.parametrize("verify", ["", "  "], ids=["empty", "whitespace"])
+    def test_refuses_an_empty_path(self, verify: str) -> None:
+        # Never read as "verification off".
+        with pytest.raises(boto3_s3.ValidationError, match="empty or whitespace-only"):
+            t.CrtClientOptions(verify=verify)
 
 
 class TestPublicReExport:

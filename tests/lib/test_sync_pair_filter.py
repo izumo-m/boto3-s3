@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from boto3.s3.transfer import TransferConfig
 
-from boto3_s3 import GlobFilter
+from boto3_s3 import Exclude, globsieve
 from boto3_s3.comparator import (
     DestOnlyPair,
     MergedPair,
@@ -157,7 +157,7 @@ class TestOnePairStream:
         S3().sync(
             str(src),
             S3Storage("s3://bucket/p", client=client),
-            filter=GlobFilter().exclude("*.log").compile(),
+            filter=globsieve.compile([Exclude("*.log")]),
             pair_filter=journal,
             transfer_config=_SERIAL,
         )

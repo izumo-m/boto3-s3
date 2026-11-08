@@ -71,7 +71,7 @@ import hashlib
 import os
 from typing import TYPE_CHECKING
 
-from boto3_s3.comparator import READ_CHUNK, ContentComparison
+from boto3_s3.comparator import READ_CHUNK, ContentComparison, hash_part
 from boto3_s3.exceptions import InvalidConfigError, ValidationError
 from boto3_s3.types import S3FileInfo
 
@@ -80,8 +80,7 @@ if TYPE_CHECKING:
 
     from boto3_s3.exceptions import Boto3S3Error
     from boto3_s3.s3 import S3
-    from boto3_s3.storage import Storage
-    from boto3_s3.types import FileInfo, TransferType
+    from boto3_s3.types import FileInfo
 
 # Default multipart part size: boto3 `TransferConfig.multipart_chunksize`.
 DEFAULT_PART_SIZE = 8 * 1024 * 1024
@@ -137,11 +136,11 @@ class EtagComparison(ContentComparison):
     hash. ``check_size=False`` restores pure-ETag semantics.
 
     An upload / download comparison reads the **readable** (non-S3) side through
-    its ``Storage.open`` - any backend, not just a local file - so a read failure
-    surfaces as that backend's error (a ``Boto3S3Error``
-    for a local file removed between the listing and the compare); the s3-to-s3
-    path reads nothing. A pair with no readable-side backend, or neither side an
-    S3 object, is treated as differing (copy).
+    its ``Storage.open`` - any backend, not just a local file - and a read
+    failure leaves the strategy as a ``Boto3S3Error`` (`ContentComparison`'s
+    ``_read_readable``: a ``NotFoundError`` for a local file removed between
+    the listing and the compare); the s3-to-s3 path reads nothing. A pair with
+    neither side an S3 object is treated as differing (copy).
 
     ``content_differs`` applies the same judgment to a **single** source - a
     local path or an open binary stream against an ETag the caller supplies -
@@ -171,7 +170,7 @@ class EtagComparison(ContentComparison):
         elif s3 is not None:
             part_size = s3.aws_config().get_size("s3.multipart_chunksize", DEFAULT_PART_SIZE)
             if part_size < 1:
-                # aws-cli's own check of this setting, in its words.
+                # aws-cli refuses this setting too.
                 raise InvalidConfigError(
                     f"Value for multipart_chunksize must be a positive integer: {part_size}"
                 )
@@ -267,34 +266,18 @@ class EtagComparison(ContentComparison):
         # Both sides are S3 listings: the stored ETags are directly comparable.
         return _etag_differs(_s3_etag(src), _s3_etag(dest))
 
-    def _readable_remote_differ(
-        self,
-        storage: Storage | None,
-        readable: FileInfo,
-        remote: FileInfo,
-        transfer_type: TransferType,
-    ) -> bool:
-        del transfer_type  # the listing ETag travels on the entry; no endpoint needed
+    def _readable_remote_differ(self, readable: FileInfo, remote: FileInfo) -> bool:
         remote_etag = _s3_etag(remote)
         if not remote_etag:
             return True
-        key = readable.compare_key
-        if storage is None or key is None:
-            return True  # cannot open the readable side -> treat as differing (copy)
         chunk: int | None = None
         if "-" in remote_etag:
             if readable.size is None:
                 return True  # need the size to reconstruct the multipart part split
             chunk = _effective_part_size(self.part_size, readable.size)
-        try:
-            with storage.open(key, "rb") as fh:
-                computed = self._computed_etag(fh, chunk_size=chunk)
-        except OSError as exc:
-            # LocalStorage.open translates its own open failure; a fault
-            # *mid-read* (or on close) is a raw OSError from the stream. Keep
-            # the promise that a local read failure surfaces as a taxonomy
-            # error; a custom backend's own exceptions pass through unchanged.
-            raise _taxonomy_error(exc, operation="sync", key=key) from exc
+        computed = self._read_readable(
+            readable, lambda fh: self._computed_etag(fh, chunk_size=chunk)
+        )
         return remote_etag != computed
 
     def _computed_etag(self, fh: BinaryIO, *, chunk_size: int | None) -> str:
@@ -316,8 +299,7 @@ def _taxonomy_error(exc: OSError, *, operation: str, key: str) -> Boto3S3Error:
     """A local read failure as a library error: missing -> ``NotFoundError``, and so on.
 
     Deferred import, so this module stays SDK-free at import time; ``operation``
-    names the caller's context (``"sync"`` for the pair filter, ``"compare"``
-    for ``content_differs``).
+    names the caller's context (``"compare"`` for ``content_differs``).
     """
     from boto3_s3.localstorage import translate_os_error
 
@@ -331,8 +313,8 @@ def _bare_etag(etag: str | None) -> str | None:
     an ETag computed from bytes is the bare hex - so the quotes come off here,
     at the comparison. Only a matched surrounding pair is removed: an already
     bare value passes through (``content_differs`` accepts both forms), and
-    anything else - a weak ``W/"..."`` validator, say - is left as it is, which
-    never equals a computed ETag and so reads as differing.
+    anything else is left as it is, which never equals a computed ETag and so
+    reads as differing.
     """
     if etag and len(etag) >= 2 and etag[0] == etag[-1] == '"':
         return etag[1:-1]
@@ -342,10 +324,8 @@ def _bare_etag(etag: str | None) -> str | None:
 def _s3_etag(info: object) -> str | None:
     """The bare ETag of an S3 listing entry, or ``None`` when there is none to compare.
 
-    ``None`` for a side that is not an S3 entry, for an entry without an ETag,
-    and for one whose ETag is empty once the quotes are off (``""`` or
-    ``'""'``): an empty value identifies no content, so two of them must not
-    read as the same object.
+    ``None`` for a side that is not an S3 entry and for an entry without an
+    ETag.
     """
     if not isinstance(info, S3FileInfo):
         return None
@@ -383,16 +363,7 @@ def _multipart_etag_at(fh: BinaryIO, *, chunk_size: int) -> str:
     parts = 0
     while True:
         part = hashlib.md5()
-        remaining = chunk_size
-        read_any = False
-        while remaining > 0:
-            block = fh.read(min(READ_CHUNK, remaining))
-            if not block:
-                break
-            read_any = True
-            part.update(block)
-            remaining -= len(block)
-        if not read_any:
+        if not hash_part(fh, part, chunk_size):
             break
         part_digests += part.digest()
         parts += 1

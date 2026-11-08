@@ -110,7 +110,9 @@ def _make_context(responder: stubs.S3Responder) -> Context:
 
     One session is shared (its loader cache keeps repeat client builds cheap,
     as in any long-lived process); a fresh client is built per CLI invocation,
-    like the production ``build_client`` path the injection replaces. The
+    like the production path (``clientfactory.build_s3``) the injection
+    replaces; the command's `S3` around it still opens its own session per
+    invocation (``S3.from_aws_cli``), as in production. The
     session is the library's tuned `boto3_s3.session()` - the production CLI
     installs the same fast timestamp parser on every session it builds, so
     the injected context must measure the same configuration.
@@ -275,6 +277,37 @@ def build_scenarios(quick: bool, *, large_mb: int = DEFAULT_LARGE_MB) -> list[In
         )
     )
 
+    mv_count = _scale(2_000, quick)
+
+    def mv_prepare(_workdir: Path) -> Prepared:
+        # One CopyObject and one DeleteObject per key, so the count matches the
+        # small-file upload's request count rather than rm's (whose deletes go
+        # 1000 to a request). The stub keeps no state, so every sample lists the
+        # same source again without a reset.
+        corpus = stubs.ListingCorpus(bucket=BUCKET, prefix="src/", count=mv_count, size=16)
+        ctx = _make_context(stubs.S3Responder(corpus=corpus))
+
+        def verify(result: CliResult) -> None:
+            lines = [line for line in result.stdout.splitlines() if line.startswith("move:")]
+            if len(lines) != mv_count:
+                raise VerificationError(
+                    f"[inproc_mv_s3_to_s3] expected {mv_count} move lines, got {len(lines)}"
+                )
+
+        return Prepared(
+            argv=["mv", "--recursive", f"s3://{BUCKET}/src/", f"s3://{BUCKET}/dst/"],
+            ctx=ctx,
+            verify=verify,
+        )
+
+    scenarios.append(
+        InProcScenario(
+            name="inproc_mv_s3_to_s3_2k",
+            dimensions={"key_count": str(mv_count)},
+            prepare=mv_prepare,
+        )
+    )
+
     cp_count = _scale(2_000, quick)
 
     def cp_small_prepare(workdir: Path) -> Prepared:
@@ -385,9 +418,10 @@ def run_scenarios(
     is added to every sample; it exists only for the regression-flag
     self-test (`--self-test-handicap-ms`).
 
-    Returns ``(results, failures)``: a failing scenario is logged and skipped
-    so the rest of the run's measurements survive (same contract as the E2E
-    runner).
+    Returns ``(results, failures)``: a failing scenario (an unexpected rc, a
+    verification mismatch, a local I/O error while preparing its input) is
+    logged and skipped so the rest of the run's measurements survive (same
+    contract as the E2E runner).
     """
     workroot = Path(tempfile.mkdtemp(prefix="boto3-s3-bench-inproc-"))
     results: list[ScenarioResult] = []
@@ -405,7 +439,7 @@ def run_scenarios(
                             log=log,
                         )
                     )
-                except BenchmarkError as exc:
+                except (BenchmarkError, OSError) as exc:
                     message = f"[inprocess] {scenario.name}: {exc}"
                     log(f"{message}\n[inprocess] {scenario.name}: scenario skipped")
                     failures.append(message)

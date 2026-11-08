@@ -1,6 +1,6 @@
 [project]
 name = "boto3-s3"
-version = "0.12.0"
+version = "0.13.0"
 description = "A Python library providing `aws s3`-equivalent operations through its own Python API."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,9 +33,6 @@ dependencies = [
     # section 2 (boto3 1.28 already requires it, so this is declarative).
     "botocore>=1.31",
     "s3transfer>=0.6.2",
-    # Imported directly (the local-mtime representability probe uses dateutil's
-    # tzlocal, like aws-cli); floor matches botocore's own dateutil pin.
-    "python-dateutil>=2.1",
     "typing-extensions>=4.6",
 ]
 
@@ -64,8 +61,8 @@ dev = [
     "moto[s3]>=5.0",
     # Keep awscrt present in tests, as aws v2 bundles it (see design/testing.md).
     "botocore[crt]>=1.34",
-    # Keep prompt_toolkit present in tests, as aws v2 bundles it (see design/testing.md).
-    "prompt_toolkit>=3.0",
+    # Runs the e2e suite on parallel workers (tests/cli/e2e/conftest.py).
+    "pytest-xdist>=3.6",
 ]
 
 [tool.uv.workspace]

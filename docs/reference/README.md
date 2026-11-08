@@ -26,21 +26,22 @@ their area but are not indexed here.
   [`mv`](./operations/mv.md), [`presign`](./operations/presign.md),
   [`rb`](./operations/rb.md), [`rm`](./operations/rm.md),
   [`sync`](./operations/sync.md), [`website`](./operations/website.md).
-- [`options.md`](./options.md) — `TransferOptions`, `TransferConfig`, the
-  `ScanOptions` family, and the mode enums they carry.
+- [`options.md`](./options.md) — `TransferOptions`, `TransferConfig`,
+  `CrtClientOptions`, the `ScanOptions` family, and the mode enums they carry.
 - [`results.md`](./results.md) — `OpResult` and `OpOutcome`, transfer progress,
   the listing entry types, the callback aliases, and `CancelToken`.
 - [`exceptions.md`](./exceptions.md) — `Boto3S3Error` and its subclasses: what
   each one means, when it is raised, and what it carries.
-- [`filters.md`](./filters.md) — `FileFilter`, and the `GlobFilter` /
-  `GlobPattern` include/exclude implementation of one.
+- [`filters.md`](./filters.md) — `FileFilter`, and `GlobFilter`, the
+  `Exclude` / `Include` implementation of one.
 - [`comparator.md`](./comparator.md) — the `sync` merge-join, the pair shapes
   it emits, the update strategies, and the predicate combinators.
 - [`storage.md`](./storage.md) — the `Storage` contract, the capabilities that
   gate it, the local / S3 / stream backends, and the local walk's override
   seams.
 - [`misc.md`](./misc.md) — the tuned session, the AWS config-file reader,
-  masked debug logging, the CRT engine resolution (`boto3_s3.crtsupport`),
+  masked debug logging, the HTTPS-proxy CONNECT pin, the CRT engine resolution
+  (`boto3_s3.crtsupport`),
   access-point path resolution, batch deletion, and `__version__`.
 
 ## Symbol index
@@ -63,25 +64,26 @@ that wraps it is documented on the same page.
 - [`CancelToken`](./results.md#canceltoken)
 - [`CaseConflictMode`](./options.md#caseconflictmode)
 - [`ChecksumComparison`](./comparator.md#checksumcomparison)
-- [`CLIENT_REGION`](./s3.md#client_region)
 - [`Comparator`](./comparator.md#comparator)
 - [`ConfigSection`](./misc.md#configsection)
 - [`ConfigurationError`](./exceptions.md#configurationerror)
 - [`CopyPropsMode`](./options.md#copypropsmode)
+- [`CrtClientOptions`](./options.md#crtclientoptions)
 - [`cp`](./operations/cp.md#s3cp)
-- [`CrtRegion`](./s3.md#crtregion)
 - [`DestOnlyPair`](./comparator.md#destonlypair)
 - [`EtagComparison`](./comparator.md#etagcomparison)
+- [`Exclude`](./filters.md#exclude)
 - [`fast_parse_timestamp`](./misc.md#fast_parse_timestamp)
 - [`FileFilter`](./filters.md#filefilter)
 - [`FileInfo`](./results.md#fileinfo)
 - [`FileKind`](./results.md#filekind)
 - [`GlobFilter`](./filters.md#globfilter)
-- [`GlobPattern`](./filters.md#globpattern)
 - [`has_underlying_s3_path`](./misc.md#has_underlying_s3_path)
+- [`Include`](./filters.md#include)
 - [`InvalidConfigError`](./exceptions.md#invalidconfigerror)
 - [`InvalidValueError`](./exceptions.md#invalidvalueerror)
 - [`IOStorage`](./storage.md#iostorage)
+- [`IOStorageBase`](./storage.md#iostoragebase)
 - [`ListingCallback`](./results.md#listingcallback)
 - [`LocalFileGenerator`](./storage.md#localfilegenerator)
 - [`LocalFileInfo`](./results.md#localfileinfo)
@@ -90,7 +92,6 @@ that wraps it is documented on the same page.
 - [`Location`](./storage.md#location)
 - [`LoopDetector`](./storage.md#loopdetector)
 - [`ls`](./operations/ls.md#s3ls)
-- [`MalformedResponseError`](./exceptions.md#malformedresponseerror)
 - [`mb`](./operations/mb.md#s3mb)
 - [`MergedPair`](./comparator.md#mergedpair)
 - [`MergedPairFilter`](./comparator.md#mergedpairfilter)
@@ -100,7 +101,7 @@ that wraps it is documented on the same page.
 - [`OpResult`](./results.md#opresult)
 - [`PairFilter`](./comparator.md#pairfilter)
 - [`ParallelFilter`](./comparator.md#parallelfilter)
-- [`PatternKind`](./filters.md#patternkind)
+- [`pin_proxy_connect`](./misc.md#pin_proxy_connect)
 - [`presign`](./operations/presign.md#s3presign)
 - [`ProgressCallback`](./results.md#progresscallback)
 - [`rb`](./operations/rb.md#s3rb)
@@ -123,6 +124,8 @@ that wraps it is documented on the same page.
 - [`StorageCapability`](./storage.md#storagecapability)
 - [`sync`](./operations/sync.md#s3sync)
 - [`SyncPair`](./comparator.md#syncpair)
+- [`TextIOStorage`](./storage.md#textiostorage)
+- [`TextIOStorageBase`](./storage.md#textiostoragebase)
 - [`TransferConfig`](./options.md#transferconfig)
 - [`TransferOptions`](./options.md#transferoptions)
 - [`TransferProgress`](./results.md#transferprogress)

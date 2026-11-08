@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import os
 
-# Loaded at dispatch once cp is determined (stage 2 of the lazy dispatch) -
-# or up front when auto-prompt builds the full command model.
-from boto3_s3 import NotFoundError, StdioStorage, ValidationError
+# Loaded at dispatch once cp is determined (stage 2 of the lazy dispatch).
+from boto3_s3 import StdioStorage, ValidationError
 from boto3_s3.transferplan import item_paths, plan_transfer
-from boto3_s3_cli import filters, usage
+from boto3_s3_cli import filters
 from boto3_s3_cli.commands import transferargs
 from boto3_s3_cli.commands.base import Command, Context
 
@@ -28,80 +26,56 @@ class CpCommand(Command):
         """Copy and return an ``aws s3 cp``-style exit code.
 
         Exit-code shape (design/cli.md section 5.7/6): pre-pipeline errors
-        keep their class, in aws's measured head order - the
-        ``--endpoint-url`` scheme, paramfile / blob loads, ``--metadata``
-        parsing (a readable
-        ``fileb://`` there decodes to 255 instead, the per-command
-        paramfile quirk), then the S3 client build (which an empty region
-        fails at 255, ahead of every usage error below), then path types,
+        keep their class - paramfile / blob loads, ``--metadata`` parsing, a
+        malformed ``--grants``, path types, a path that names no bucket, the
+        ``--endpoint-url`` scheme,
         the checksum/path-format pairing,
         SSE-C pairing,
         streaming with ``--recursive`` (either side) or a streaming
         *download* with ``--no-overwrite``, and the S3
         Express case-conflict rejection are 252; the bare integer
         conversion, the session profile resolution, the missing local
-        source, and the ``--recursive`` destination-directory pre-create
+        source, a ``--recursive`` local source whose root the walk would
+        skip, and the ``--recursive`` destination-directory pre-create
         are 255 - while everything raised by the transfer pipeline is rc 1,
         credentials that cannot be located included (the client builds
         without them; the first request fails)
         (``AssertionError`` excepted - an internal bug, re-raised):
         per-item failures stream ``<kind> failed:`` lines, anything that
-        kills the run (a listing error, the single-source 404, a bad
-        ``--grants`` shape, a non-integer ``--expected-size``, a missing
-        stdin) prints one ``fatal error:`` line - all suppressed by
+        kills the run (a listing error, the single-source 404, a
+        non-integer ``--expected-size``, a missing stdin) prints one
+        ``fatal error:`` line - all suppressed by
         ``--quiet`` with the exit codes kept - and a warnings-only run
         exits 2. The boundary is ``finish_transfer``'s run span: the
         ``S3().cp`` call plus the ``--expected-size`` integer conversion
         just ahead of it.
         """
         head = transferargs.classify_paths(args, ctx, operation="cp")
-        page_size, progress_frequency = head.page_size, head.progress_frequency
         src, dest = head.src, head.dest
         src_type, dest_type = head.src_type, head.dest_type
-        is_stream = src == "-" or dest == "-"
-        if is_stream:
-            # aws-cli's _validate_streaming_paths: cp-only, never recursive, and
-            # a streaming download cannot honor --no-overwrite.
-            if args.recursive:
-                raise ValidationError(
-                    "Streaming currently is only compatible with non-recursive cp commands",
-                    operation="cp",
-                )
-            if dest == "-" and args.no_overwrite:
-                raise ValidationError(
-                    "--no-overwrite parameter is not supported for streaming downloads",
-                    operation="cp",
-                )
+        is_stream = transferargs.validate_streaming_paths(
+            head, recursive=args.recursive, operation="cp"
+        )
+        if dest == "-" and args.no_overwrite:
+            # aws-cli's _validate_no_overwrite_for_download_streaming: a
+            # streaming download cannot honor --no-overwrite.
+            raise ValidationError(
+                "--no-overwrite parameter is not supported for streaming downloads",
+                operation="cp",
+            )
         paths_type = head.paths_type  # "locals3" | "s3local" | "s3s3" here
         transferargs.validate_checksum_paths_type(args, paths_type, operation="cp")
-        if src_type == "local" and src != "-" and not os.path.exists(src):
-            # aws-cli's _validate_path_args checks the missing local source (its bare
-            # RuntimeError -> rc 255) right after the checksum/path pairing and
-            # before SSE-C (rc 252), so when both fail that order decides the exit
-            # code; '-' is a stream, not a path. NotFoundError without a
-            # ClientError cause maps to the same rc 255.
-            raise NotFoundError(f"The user-provided path {src} does not exist.", operation="cp")
-        if args.recursive and paths_type == "s3local":
-            # The dir_op half of aws's _validate_path_args: the s3local
-            # destination is created during validation, so a creation
-            # failure is aws's pre-pipeline rc 255, not the pipeline's rc 1.
-            transferargs.create_local_dest_dir(dest, operation="cp")
+        transferargs.check_local_source(args, head, recursive=args.recursive, operation="cp")
         transferargs.validate_sse_c_pairing(args, paths_type, operation="cp")
 
         s3 = head.s3
         client = head.client
-        # --no-overwrite on uploads/copies needs a botocore with S3 conditional
-        # writes; reject up front (rc 252) on an older one (design/overview.md
-        # section 2). Placed after the client exists so its model can be probed.
-        transferargs.validate_no_overwrite_supported(
-            args.no_overwrite, paths_type, client, operation="cp"
-        )
         src_location: object
         dest_location: object
         if src == "-":
-            # The destination key reproduces aws's quirk of appending the
+            # The destination key reproduces aws-cli's quirk of appending the
             # source's basename - literally "-" - when the dest takes the source
-            # name. A missing stdin stays aws's in-flight fatal (rc 1): the check
+            # name. A missing stdin stays aws-cli's in-flight fatal (rc 1): the check
             # lives in StdioStorage.open, reached inside the transfer below.
             src_location = StdioStorage()
             plan = plan_transfer(
@@ -110,72 +84,48 @@ class CpCommand(Command):
                 recursive=False,
             )
             dest, _compare_key = item_paths(plan, plan.src_root)
-            # Strict aws-cli validation with the measured bucket-less
-            # carve-out (a dryrun stream upload to s3:///k is aws rc 0).
             dest_location = transferargs.build_s3_storage(f"s3://{dest}", client=client)
         elif dest == "-":
             src_location = transferargs.build_s3_storage(src, client=client)
             dest_location = StdioStorage()
         else:
-            src_location, dest_location = transferargs.resolve_locations(
-                args,
-                ctx,
-                s3,
-                client,
-                src,
-                dest,
-                src_type=src_type,
-                dest_type=dest_type,
-                page_size=page_size,
-            )
+            src_location, dest_location = transferargs.resolve_locations(args, ctx, head)
 
-        item_filter = None
-        if not is_stream:
-            # Non-stream: the locations are the resolve_locations pair, whose
-            # bases the filter joins its patterns onto (aws create_filter).
-            item_filter = filters.compile_filter(
-                args.filters, src=src_location, dest=dest_location, dir_op=args.recursive
-            )
-        transfer_config = transferargs.resolve_transfer_config(ctx, s3, paths_type=paths_type)
-        # aws builds the transfer manager here, before it decides anything about
-        # the run: a CRT selection pays its construction even for a --dryrun.
-        transferargs.materialize_transfer_engine(s3, client, transfer_config, operation="cp")
-        # After the [s3] runtime config: aws validates --case-conflict against
-        # S3 Express while building the run's instructions, past the transfer
-        # manager whose creation loads the config - so a bad [s3] value beats
-        # the invalid-mode 252 (measured: `Invalid size value: nope` rc 255
-        # wins over `--case-conflict skip` on a directory bucket).
+        # The stream route consults no filter (aws-cli applies none to a stream).
+        item_filter = None if is_stream else filters.compile_filter(args.filters)
+        transfer_config = transferargs.build_transfer_engine(ctx, s3, client, paths_type=paths_type)
+        # aws-cli validates --case-conflict against S3 Express while building the
+        # run's instructions, past the transfer manager.
         case_conflict = transferargs.resolve_case_conflict(args, src, paths_type, operation="cp")
         options = transferargs.build_transfer_options(
             args,
             case_conflict,
-            operation="cp",
-            default_checksum_algorithm=transferargs.default_upload_checksum(
-                client, paths_type, transfer_config
-            ),
         )
+        if args.recursive and paths_type == "s3local":
+            # The dir_op half of aws-cli's _validate_path_args, once every check
+            # above has passed (transferargs.create_local_dest_dir).
+            transferargs.create_local_dest_dir(dest, operation="cp")
         # Streams force the errors-only printer (aws-cli is_stream rule):
         # a streaming download owns stdout for the object bytes.
-        printer = transferargs.build_printer(args, progress_frequency, only_show_errors=is_stream)
+        printer = transferargs.build_printer(
+            args, head.progress_frequency, only_show_errors=is_stream
+        )
 
         def run_cp() -> None:
-            # Both conversions fail in-pipeline like aws: --expected-size is
+            # Both conversions fail in-pipeline like aws-cli: --expected-size is
             # a bare int() at submit time, stdin resolves when first needed.
-            # aws only ever converts --expected-size on the streaming-upload
+            # aws-cli only ever converts --expected-size on the streaming-upload
             # route (UploadStreamRequestSubmitter); on every other route the
             # value is untouched and ignored, so a non-integer there stays
-            # rc 0 - and a dryrun never converts either (aws branches to the
+            # rc 0 - and a dryrun never converts either (aws-cli branches to the
             # dryrun record before building the live subscribers, so
             # `cp - s3://b/k --expected-size abc --dryrun` is rc 0, measured).
             expected_size = None
             if src == "-" and args.expected_size is not None and not args.dryrun:
-                try:
-                    expected_size = int(args.expected_size)
-                except ValueError as exc:
-                    raise ValueError(usage.int_error_message(exc)) from None
+                expected_size = int(args.expected_size)
             s3.cp(
-                src_location,  # type: ignore[arg-type]
-                dest_location,  # type: ignore[arg-type]
+                src_location,  # pyright: ignore[reportArgumentType]
+                dest_location,  # pyright: ignore[reportArgumentType]
                 recursive=args.recursive,
                 filter=item_filter,
                 dryrun=args.dryrun,

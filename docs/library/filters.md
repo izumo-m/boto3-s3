@@ -1,60 +1,72 @@
 # Filtering which items take part
 
 `cp` / `mv` / `rm` / `sync` take a `filter=` that decides which items the
-operation acts on. It has one shape everywhere: a callable taking the entry's
-`FileInfo` and returning whether to keep it.
+operation acts on, and `ls` takes one that decides which entries it lists. It
+has one shape everywhere: a callable taking the entry's `FileInfo` and
+returning whether to keep it.
 
 ```python
 FileFilter = Callable[[FileInfo], bool]     # True = act on it, False = skip
 ```
 
 A skipped item is skipped silently — no record reaches `on_result`, matching
-`aws s3`. `ls` takes no `filter=` argument.
+`aws s3` — and an entry `ls` skips never reaches `on_entry`.
 
 ## 1. Glob patterns
 
-[`GlobFilter`](../reference/filters.md#globfilter) is the `aws s3`-style
-include/exclude matcher. Patterns are evaluated in order, **the last one that
+`globsieve.compile` turns an ordered list of
+[`Exclude`](../reference/filters.md#exclude) and
+[`Include`](../reference/filters.md#include) rules into a
+[`GlobFilter`](../reference/filters.md#globfilter), the `aws s3`-style
+include/exclude filter. Patterns are evaluated in order, **the last one that
 matches wins**, and an item that matches nothing is **included**:
 
 ```python
-from boto3_s3 import GlobFilter
+from boto3_s3 import Exclude, Include, globsieve
 
-keep = GlobFilter().exclude("*").include("*.tar.gz").compile()
+keep = globsieve.compile([Exclude("*"), Include("*.tar.gz")])
 s3.cp("./build", "s3://artifacts/", recursive=True, filter=keep)
 ```
 
-`exclude()` and `include()` each take one or more patterns and return the filter,
-so they chain. Call `compile()` when you are done adding rules; it is optional —
-an uncompiled filter compiles itself on first use.
+`Exclude` and `Include` each take one or more patterns. The compiled filter is
+immutable, so one instance serves several operations, both sides of a `sync`,
+and a predicate of your own:
+`filter=lambda f: keep(f) and (f.size or 0) < 10**8`.
 
 Patterns are `fnmatch` form, in which `*` is greedy and crosses `/`.
 
-## 2. Which key a pattern matches
+## 2. Which path a pattern matches
 
-Every key the filter sees is `/`-separated on **every** operating system. S3
-keys are natively; a local walk converts the host separator. That single key
-space is what lets `sync` pair the two sides.
+The filter decides as `aws s3` does, which joins each pattern onto the
+directory or prefix the operation names and matches the entry's full path
+against the result.
 
-A **relative** pattern matches the entry's `compare_key` — its key relative to
-the root the operation is enumerating. For a recursive `rm s3://bucket/logs/`,
-an object at `logs/app/x.txt` has a compare key of `app/x.txt`, so `app/*`
-matches it and `logs/*` does not.
+A **relative** pattern therefore matches the entry's `compare_key` — its key
+relative to the directory or prefix the operation is enumerating, `/`-separated on every
+operating system. For a recursive `rm s3://bucket/logs/`, an object at
+`logs/app/x.txt` has a compare key of `app/x.txt`, so `app/*` matches it and
+`logs/*` does not. A single source is shown to the filter in `aws s3`'s form:
+`s3.cp("d", "s3://b/k")` matches the directory as `d/` (so `Exclude("d/")`
+skips it and `Exclude("d")` does not), and the key `a//b` as `/b`
+([reference](../reference/filters.md#filefilter)).
 
-A pattern is **absolute** when it starts with `/` — on Windows, a
-drive-absolute form such as `C:/...`, a UNC path or a leading `\` counts too (a
-drive-relative `C:foo` does not). An absolute pattern matches the entry's full
-key instead. Since an S3 key normally has no leading `/`, one is inert against
-S3 entries; against local paths it works as written. This is what allows one
-`filter` to prune the two sides of a `sync` asymmetrically — a pattern rooted at
-the local source matches there and not on the S3 side. Relative patterns are
-symmetric across sides.
+A pattern the join takes in place of that directory or prefix — `/data/*` on Linux and macOS;
+`C:\data\*`, a UNC path or a rooted `\data\*` on Windows — matches the entry's
+full path instead: the absolute path of a local entry, `bucket/key` of an S3
+one. Such a pattern never matches an S3 entry, so one rooted at the local
+source of a `sync` prunes that side only; relative patterns are symmetric
+across sides, except where a local side is rooted at a filesystem root (`/`,
+`D:\`), whose entries are matched with a leading `/` as on `aws s3`, so
+`bin/*` then prunes the other side only. On Windows a drive-relative `C:foo` is relative for entries on
+drive C: and is matched as written against the full path of every other
+entry, so on Windows `*:*` matches every drive-letter path, every S3 key that
+holds a `:`, and every key under an access point or Outposts ARN (whose
+`bucket/key` starts with `arn:`). The
+[reference](../reference/filters.md#globfilter) has the full table.
 
-On **Windows** a backslash in a pattern is folded to `/` and works as a
-separator, so `logs\*.txt` matches `logs/x.txt`. On Linux and macOS a backslash
-stays a literal character. Matching in the library is byte-exact on every
-platform — the case-insensitive rule that `aws s3` applies on Windows belongs to
-the `boto3-s3` command, not here.
+Matching follows `aws s3` on each platform: byte-exact on Linux and macOS,
+where a backslash is an ordinary character; on Windows case-insensitive, with
+`/` and `\` one separator, in patterns and in S3 keys alike.
 
 ## 3. Filtering on anything else
 
@@ -97,23 +109,46 @@ decides *which entries take part at all*; `create_filter`, `update_filter` and
 `delete_filter` decide *what to do* with the entries that did. See
 [`sync.md`](./sync.md).
 
-## 5. The pattern engine on its own
+## 5. `filter` in `ls`
 
-The matcher behind `GlobFilter` is usable directly, for matching keys outside an
+`ls` offers its `filter` every entry it would deliver: besides the objects, the
+common prefixes of a non-recursive listing (`DIRECTORY` entries, whose
+`compare_key` ends in `/`) and, at the service root, the buckets (whose
+`compare_key` is the bucket name). A glob therefore drops directories too:
+
+```python
+from boto3_s3 import Exclude, FileKind, Include, globsieve
+
+keep = globsieve.compile([Exclude("*"), Include("*.log")])
+# Every .log object under app/.
+s3.ls("s3://bucket/app/", recursive=True, filter=keep, on_entry=print)
+# One level: the .log objects, and every sub-prefix.
+s3.ls("s3://bucket/app/", filter=lambda e: e.kind is FileKind.DIRECTORY or keep(e), on_entry=print)
+# The buckets whose names start with prod-.
+s3.ls(filter=globsieve.compile([Exclude("*"), Include("prod-*")]), on_entry=print)
+```
+
+For a target that ends in `/`, a recursive `ls` matches each key as a
+recursive `rm` / `cp` / `mv` of the same target does, so it shows which keys
+the same filter selects there. The predicate runs on the listing's prefetch
+worker for an object listing, as section 3 describes, and on the calling
+thread for the bucket listing. The [reference](../reference/operations/ls.md)
+has the details.
+
+## 6. The pattern engine on its own
+
+A compiled filter also decides on plain strings, for matching paths outside an
 operation:
 
 ```python
-from boto3_s3 import globsieve
+from boto3_s3 import Exclude, Include, globsieve
 
-m = globsieve.compile([
-    globsieve.GlobPattern.exclude("*"),
-    globsieve.GlobPattern.include("*.txt"),
-])
+m = globsieve.compile([Exclude("*"), Include("*.txt")])
 m.included("foo.txt")   # True
 m.included("foo.log")   # False
 ```
 
-`Matcher.included(compare_key, full_key=None)` applies the same last-match-wins
-rule; `full_key` is only consulted by absolute patterns. `GlobFilter`,
-`GlobPattern` and `PatternKind` are also available at the package root;
-everything else lives in `boto3_s3.globsieve`.
+`included(relative, full=None)` takes the path below the directory or prefix being enumerated and, for the
+patterns matched against a full path, that full path. `globsieve.normcase` is
+the fold `aws s3` applies to both strings before matching on this platform.
+`Exclude`, `Include` and `GlobFilter` are also available at the package root.

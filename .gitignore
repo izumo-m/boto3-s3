@@ -32,6 +32,7 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+screenlog.*
 
 # Claude Code
 CLAUDE.local.md

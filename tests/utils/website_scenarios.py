@@ -72,14 +72,16 @@ SCENARIOS: tuple[WebsiteScenario, ...] = (
         ("website", f"s3://{BUCKET_TOKEN}/", "--index-document", "index.html"),
     ),
     # --- client-side errors (rc 252, no server contact): golden-backed ------
-    # aws folds the key into the Bucket parameter; botocore's name regex
+    # aws-cli folds the key into the Bucket parameter; botocore's name regex
     # rejects it.
     WebsiteScenario(
         "website_with_key",
         ("website", f"s3://{BUCKET_TOKEN}/some/key", "--index-document", "index.html"),
-        expected_stderr_tokens_ours=("Parameter validation failed",),
-        expected_stderr_tokens_aws=("Parameter validation failed",),
+        expected_stderr_tokens_ours=("Invalid bucket name",),
+        expected_stderr_tokens_aws=("Invalid bucket name",),
     ),
+    # No bucket: botocore's name check refuses the empty name before the
+    # request - 252 on both, in botocore's words.
     WebsiteScenario(
         "website_empty_uri",
         ("website", "s3://", "--index-document", "index.html"),

@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from typing_extensions import TypedDict
 
+from boto3_s3.concurrency import WakeAll
+
 if TYPE_CHECKING:
     from boto3_s3.exceptions import Boto3S3Error
     from boto3_s3.storage import Storage
@@ -51,8 +53,11 @@ class FileInfo:
     cross-backend merge/sort key: two ``Storage.scan`` streams
     ordered by ``key`` can be merge-joined (the basis of ``sync``) once each side
     is expressed as ``compare_key``, so every backend must emit ``/``-separated
-    keys regardless of host OS. ``size`` (bytes) and ``mtime`` (tz-aware UTC) are
-    populated for ``FILE`` entries and may be ``None`` for directories /
+    keys regardless of host OS. It is the backend's own address of the entry,
+    never a URL naming the backend (no ``s3://`` or other scheme in front):
+    ``storage`` says which backend it belongs to. ``size`` (bytes) and ``mtime``
+    (tz-aware UTC) are populated for ``FILE`` entries and may be ``None`` for
+    directories /
     prefixes; ``BUCKET`` entries carry the bucket's ``CreationDate`` as ``mtime``
     (``size`` stays ``None``). Producers enforce these invariants - the field
     types alone do not.
@@ -68,7 +73,11 @@ class FileInfo:
     yields (a contract of the backend's listing, not of the base ``Storage.scan``),
     so a custom ``ScanOptions.filter`` predicate - notably ``GlobFilter`` - matches
     it directly without re-deriving it from ``key``. The built-in
-    ``get_fileinfo`` methods use the basename for a single entry. The name mirrors
+    ``get_fileinfo`` methods use the basename for a single entry (``""`` for a
+    local directory looked up as the location itself, ``key=""``, which
+    aws-cli names with a trailing separator; an operation
+    shows a filter aws-cli's form of a single source instead,
+    design/globsieve.md section 5). The name mirrors
     aws-cli's ``FileInfo.compare_key``; a hand-built ``FileInfo`` may leave it as
     ``None``.
 
@@ -82,7 +91,7 @@ class FileInfo:
     ``SyncPair.dest`` to open a pair's non-S3 side for a
     content compare (so ``pair.src.storage`` replaces a separately threaded
     backend). ``None`` on a hand-built ``FileInfo``; ``Storage.scan`` sets it
-    as a safety net for a backend whose ``scan_pages`` did not.
+    on an entry its ``scan_pages`` left ``None``, so a backend need not.
     """
 
     key: str
@@ -175,12 +184,12 @@ class ScanOptions:
 
     ``filter`` is a per-entry predicate (``True`` keeps the entry) applied by
     each ``Storage.scan_pages`` producer, which returns already-filtered pages
-    (``scan`` flattens + prefetches them, re-sieving only as a safety net for a
+    (``scan`` flattens + prefetches them, and applies the predicate itself for a
     backend that does not declare ``scan_pages_filters``). A backend may
     push the predicate to its source (a REST listing filtering server-side) or
     wrap its raw pages with ``storage.sieve_pages``; the built-ins run it on the
     prefetch worker, page by page. It carries the item filter of ``rm`` / ``cp``
-    / ``mv``, and sync's *visibility* layer: each side's listing is pruned
+    / ``mv`` / ``ls``, and sync's *visibility* layer: each side's listing is pruned
     independently (its own ``--exclude`` / ``--include`` matching space) before the
     comparator pairs the streams - which is exactly why filtered-out destination
     entries are protected from ``--delete`` (an entry a producer does not return
@@ -194,7 +203,7 @@ class ScanOptions:
     ``StorageCapability.SORTABLE_SCAN`` MUST honor
     ``sort=True``; the built-ins ignore the flag and always sort (S3's listing is
     byte-ordered - except S3 Express directory buckets, whose unordered
-    listings are why ``sync`` rejects them - and the local walk sorts for aws
+    listings are why ``sync`` rejects them - and the local walk sorts for aws-cli
     parity), so it costs nothing for
     them. A custom backend whose sort is expensive may stream natural order when
     ``sort=False`` and pay the sort only for ``sync``.
@@ -207,19 +216,6 @@ class ScanOptions:
     because ``sync`` walks both sides through one shared sink, the two side-walks
     can invoke it concurrently - keep it thread-safe.
 
-    ``reusable_after_interrupt`` is the scan's Ctrl-C exit policy. ``True`` (the
-    default): the scan's teardown always waits for a page pull already in
-    flight, so no enumeration worker survives it - required for an app that
-    may catch ``KeyboardInterrupt`` and keep using the process. ``False``: a
-    ``KeyboardInterrupt`` unwind abandons the daemon prefetch worker instead
-    of waiting (an in-flight network pull can otherwise hold the exit for a
-    full timeout) - only for an app that treats Ctrl-C as process-fatal. It
-    scopes to the interrupt alone: every other exit, ``SystemExit`` included
-    (``sys.exit()`` requests an orderly termination), reclaims fully. The
-    high-level operations overlay it from ``S3(reusable_after_interrupt=...)`` - the
-    application declares the posture once there - so it reaches every scan an
-    operation starts; set it here only when calling ``Storage.scan`` directly.
-
     ``read_ahead`` is whether ``scan`` may read pages ahead of the consumer.
     ``True`` (the default) runs the page producer on a background worker, so the
     next page's I/O overlaps the current page's consumption. ``False`` pulls each
@@ -227,7 +223,7 @@ class ScanOptions:
     for a consumer that **mutates the container it is enumerating**, where a page
     read early would describe state that consumer has since changed. ``sync
     --delete`` sets it on the local destination walk for exactly that reason: the
-    walk must see the orphans it has already deleted as gone (aws lists its
+    walk must see the orphans it has already deleted as gone (aws-cli lists its
     destination lazily too, so a file reached through one path and deleted is
     never listed again under another - a symlinked self-alias names one file
     twice). It costs the enumeration's I/O overlap, so leave it on everywhere
@@ -240,7 +236,6 @@ class ScanOptions:
     sort: bool = False
     filter: Callable[[FileInfo], bool] | None = None
     on_warning: Callable[[str], None] | None = None
-    reusable_after_interrupt: bool = True
     read_ahead: bool = True
 
 
@@ -250,8 +245,8 @@ class S3ScanOptions(ScanOptions):
 
     ``page_size`` / ``request_payer`` / ``fetch_owner`` are not validated here:
     like aws-cli, they pass through to the service, which decides (``page_size=0``
-    lists nothing, negative values fail with ``InvalidArgument`` - the exit-code
-    charter requires reproducing both). The default ``None`` sends no
+    lists nothing, negative values fail with ``InvalidArgument``, as on
+    aws-cli). The default ``None`` sends no
     ``MaxKeys`` at all, exactly like aws-cli's unset ``--page-size`` (the
     server pages at its own default, 1000). ``fetch_owner`` sends
     ``FetchOwner=True`` to populate ``S3FileInfo.owner``.
@@ -263,28 +258,12 @@ class S3ScanOptions(ScanOptions):
     the plan appends a trailing ``/``), so the *passed* storage instance is
     scanned rather than rebuilt from a URI - a custom ``S3Storage`` subclass (and
     its ``scan_pages`` override) survives. ``None`` uses the storage's key.
-
-    ``include_common_prefixes`` widens a *recursive* listing to also emit one
-    ``DIRECTORY``-kind entry per ``CommonPrefixes`` entry the response carries
-    (ahead of that page's objects, the order the response lists them in). It has
-    no effect on a non-recursive listing, which always emits them - the
-    ``Delimiter`` it sends is what asks the service for them. ``False``
-    (default) is the transfer view: a recursive listing sends no ``Delimiter``,
-    so a conforming service returns no prefixes, and a service that returns
-    them anyway must not feed directory records to a transfer stream (``sync``
-    merge-joins on ``compare_key`` byte order, which a page's leading prefix
-    entry would break). ``True`` is the listing view, which ``S3.ls`` sets
-    because ``aws s3 ls`` prints every page's common prefixes as ``PRE`` lines
-    whether or not the listing is recursive. Like
-    ``LocalScanOptions.enumerate_all_entries``, the widened enumeration leaves
-    filtering to the caller that enabled it.
     """
 
     page_size: int | None = None
     request_payer: str | None = None
     fetch_owner: bool = False
     prefix: str | None = None
-    include_common_prefixes: bool = False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -324,8 +303,10 @@ class LocalScanOptions(ScanOptions):
     ``LocalFileGenerator`` can stamp each entry's
     ``FileInfo.storage`` before the visibility filter runs, without holding a
     back-reference to any one storage (which would misfire when one walker is
-    shared across storages). ``None`` on a hand-built options object -
-    ``Storage.scan``'s backstop fills ``FileInfo.storage`` afterwards instead.
+    shared across storages); the walk also reads that storage's
+    ``filename_encoding`` from it. ``None`` on a hand-built options object -
+    ``Storage.scan`` fills ``FileInfo.storage`` afterwards instead, and the
+    walk converts no names.
     """
 
     follow_symlinks: bool = True
@@ -363,8 +344,9 @@ class OpOutcome(enum.Enum):
     ``DRYRUN`` reports an item a dry run *would* have acted on - its mutating
     API call does not occur (enumeration and the single-object HeadObject
     still run) and the exit code is unaffected. ``NOTICE`` carries display-only
-    text on ``error`` (aws prints some advisories - the case-conflict
-    messages - straight to stderr without counting them as warnings); it
+    text on ``error`` (aws-cli prints some advisories - the case-conflict
+    messages, ``mv``'s same-underlying-path warning - straight to stderr
+    without counting them as warnings); it
     never affects counts or the exit code, and may precede the same item's
     real outcome. ``CANCELLED`` reports an accepted item revoked before it
     could complete - a fatal error elsewhere in the run, an immediate cancel,
@@ -476,9 +458,10 @@ class CancelMode(enum.Enum):
     """How an operation shuts down after a `CancelToken` request.
 
     `GRACEFUL` stops accepting new work and drains work already accepted by
-    the operation. `IMMEDIATE` additionally asks each engine to cancel pending
-    and in-flight work where its implementation supports cancellation; external
-    I/O already running may still have to finish.
+    the operation. `IMMEDIATE` returns at once: it cancels what has not started
+    and leaves the requests already sent to finish behind the caller, reporting
+    nothing more; a request the operation's own thread waits on is still waited
+    for (`CancelToken`).
     """
 
     GRACEFUL = "graceful"
@@ -491,8 +474,12 @@ class CancelToken:
     `cancel()` may be called from any thread or a signal handler. The default
     is graceful cancellation; a later `IMMEDIATE` request upgrades it, while a
     later graceful request never downgrades it. The operation observes the
-    effective `mode`, performs that shutdown policy, and raises
-    `CancelledError` after reclaiming its resources.
+    effective `mode` and raises `CancelledError`: a graceful cancel once the
+    work already accepted has finished, an immediate one at once, starting
+    nothing new and leaving the requests already sent to finish behind the
+    caller - but for a request the operation's own thread is waiting on,
+    which no cancel cuts short (design/overview.md section 3). The `S3`
+    stays usable either way.
     """
 
     def __init__(self) -> None:
@@ -506,17 +493,20 @@ class CancelToken:
         # downgraded. The flags are plain bools, not threading.Events:
         # Event.set() takes the Event's own
         # non-reentrant Condition lock, so a nested signal-handler cancel()
-        # landing inside an outer set() would deadlock the main thread - and
-        # nothing ever wait()s on the flags, so the Event bought nothing.
+        # landing inside an outer set() would deadlock the main thread.
         self._lock = threading.RLock()
         self._immediate = False
         self._cancelled = False
+        # The operation's waits that look at this token, woken by each cancel()
+        # (`concurrency.Wake.wait_until`); as signal-handler-safe as the above.
+        self._waiters = WakeAll()
 
     def cancel(self, *, mode: CancelMode = CancelMode.GRACEFUL) -> None:
         with self._lock:
             if mode is CancelMode.IMMEDIATE:
                 self._immediate = True
             self._cancelled = True
+        self._waiters.send()
 
     @property
     def cancelled(self) -> bool:
@@ -548,7 +538,7 @@ class TransferOptions(TypedDict, total=False):
     ``SSECustomerKey``: ``aws`` passes the CLI string through verbatim (only
     ``fileb://`` loads bytes). ``no_overwrite`` is the conditional write
     (``--no-overwrite``): ``IfNoneMatch="*"`` on uploads / copies (the server's
-    ``PreconditionFailed`` becomes a silent skip), and an existence check before
+    ``PreconditionFailed`` to that write becomes a silent skip), and an existence check before
     downloads to a *local* destination - a ``cp`` / ``mv`` download into a
     custom (open-route) backend has no existence probe and overwrites (the
     backend owns its key space; ``sync`` still skips destination-present pairs
@@ -593,16 +583,79 @@ class TransferOptions(TypedDict, total=False):
     no_overwrite: bool
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CrtClientOptions:
+    """Settings of the CRT transfer engine's own S3 client, apart from botocore's.
+
+    The CRT engine sends transfers and deletes through awscrt's S3 client, not
+    the botocore client the operation was given; listings and ``HeadObject``
+    stay on botocore. aws-cli builds the two clients separately, each from its
+    own reading of the command line and the session, so an application that
+    wants aws-cli's answers states the CRT side here (``S3(crt=...)``,
+    ``S3Deleter(crt=...)``). Every default keeps boto3's own behavior, where
+    the CRT client is derived from the botocore client.
+
+    ``allow_lockless`` is for cross-process lock contention under an
+    **explicit** ``'crt'`` preference. ``False`` (the default) is boto3's
+    rule: another process of this application holding the CRT slot silently
+    selects the classic engine. ``True`` is aws-cli's: its factory builds the
+    CRT client regardless, as aws-cli documents an explicit ``'crt'`` for
+    processes that run at the same time. An ``'auto'`` preference respects the
+    lock either way - aws-cli's own ``auto`` resolution (design/crt.md
+    section 6).
+
+    ``verify`` is the CRT client's TLS trust source. ``None`` (the default)
+    derives it from the botocore client: a client that names a CA bundle (its
+    ``verify``, ``AWS_CA_BUNDLE``, a profile's ``ca_bundle``,
+    ``REQUESTS_CA_BUNDLE``) hands that file over, and one that names none
+    leaves the CRT on the platform trust store, as boto3 does. ``False``
+    turns certificate verification off, and a string is the path of a CA
+    bundle file. ``True`` is refused: botocore reads it as its own bundled CA
+    file and awscrt as the platform store, so either reading would mislead.
+    An empty or whitespace-only path is refused too, as the botocore client's
+    setting is (it would read as "verification off"). Both are a
+    ``ValidationError`` at construction.
+
+    Whether the CRT client signs is the botocore client's answer, as it is
+    for boto3: one configured with botocore's ``UNSIGNED`` signature
+    transfers anonymously. The CRT client is one per process: an operation
+    whose settings differ from the ones it was built with runs on the classic
+    engine instead.
+    """
+
+    allow_lockless: bool = False
+    verify: str | Literal[False] | None = None
+
+    def __post_init__(self) -> None:
+        verify = self.verify
+        if verify is None or verify is False:
+            return
+        # Deferred: exceptions is light, but this module stays import-free.
+        from boto3_s3.exceptions import ValidationError
+
+        # Runtime guard for untyped callers: ``True`` and non-strings.
+        if not isinstance(verify, str):  # pyright: ignore[reportUnnecessaryIsInstance]
+            raise ValidationError(
+                f"CrtClientOptions.verify must be None, False or a CA bundle path (got {verify!r})"
+            )
+        if not verify.strip():
+            raise ValidationError(
+                "CrtClientOptions.verify must not be an empty or whitespace-only CA bundle path"
+            )
+
+
 ProgressCallback = Callable[[TransferProgress], None]
 ResultCallback = Callable[[OpResult], None]
 ListingCallback = Callable[[FileInfo], None]
 
 # A per-entry filter used across operations (``rm`` / ``cp`` / ``mv`` / ``sync``
-# visibility, and ``sync``'s ``create_filter`` / ``delete_filter`` lanes): a
+# visibility, the entries ``ls`` delivers, and ``sync``'s ``create_filter`` /
+# ``delete_filter`` lanes): a
 # predicate over the ``FileInfo`` returning True to keep the entry. The operation
-# stamps ``info.compare_key`` (aws-cli's --exclude/--include matching space)
-# before consulting it, so a glob predicate matches
-# ``compare_key`` while a richer predicate can decide on ``size`` / ``mtime`` /
+# stamps ``info.compare_key`` (aws-cli's --exclude/--include matching space;
+# for ``ls``, its own listing's relative key) before consulting it, so a glob predicate matches
+# ``compare_key`` (and an absolute pattern the full path: a local ``key``, an S3
+# ``bucket/key``) while a richer predicate can decide on ``size`` / ``mtime`` /
 # ``storage_class`` / ``key``, or reach the entry's backend through ``info.storage``
 # (e.g. a HeadObject for a tag the listing omits).
 # ``GlobFilter`` is the ready-made glob implementation.
@@ -629,6 +682,7 @@ __all__ = [
     "CancelToken",
     "CaseConflictMode",
     "CopyPropsMode",
+    "CrtClientOptions",
     "FileFilter",
     "FileInfo",
     "FileKind",

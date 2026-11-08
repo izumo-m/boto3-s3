@@ -14,9 +14,7 @@ S3().cp("local.txt", "s3://bucket/key")
 
 ```python
 S3(session=None, *, endpoint_url=None, config=None,
-   transfer_config=None, reusable_after_interrupt=True,
-   crt_allow_absent_credentials=False, crt_allow_lockless=False,
-   crt_region=CLIENT_REGION, crt_sign_requests=None)
+   transfer_config=None, crt=None, filename_encoding=None)
 ```
 
 - **`session`** — a `boto3.Session`. Omit it for a default session.
@@ -27,47 +25,72 @@ S3(session=None, *, endpoint_url=None, config=None,
   S3-compatible endpoint or a `botocore.config.Config`.
 - **`transfer_config`** — the default `TransferConfig` for `cp` / `mv` / `sync`
   / `rm` (for `rm`, the engine its deletes ride). Any call can override it.
-- **`reusable_after_interrupt`** — how Ctrl-C is handled: clean up first, or exit fast.
-  `True` (the default) re-raises `KeyboardInterrupt` only after every resource
-  has been reclaimed, so the next operation still works. `False` treats Ctrl-C
-  as fatal to the process and lets the unwind abandon an in-flight listing page.
-  Either way the interrupt is re-raised, never swallowed — with one
-  engine-imposed exception: pip s3transfer's CRT manager discards an interrupt
-  that lands in its transfer drain, so a CRT run cut short there raises
-  `BatchError` with the cancelled items counted as failures instead. Only
-  `KeyboardInterrupt` is affected — every other exception reclaims fully.
-- **`crt_allow_absent_credentials`** — whether the CRT transfer engine (which
-  carries the deletes too, when selected) may be used by a client that
-  resolved no credentials. `False` (the default) drops
-  to the classic engine and reports `Unable to locate credentials`; `True`
-  attempts the transfer and lets it fail inside the CRT credentials delegate,
-  which is what `aws s3` does. Only reproducing aws's output needs it.
-- **`crt_allow_lockless`** — what an explicit
-  `preferred_transfer_client="crt"` does when another process of this
-  application already holds the cross-process CRT slot. `False` (the default)
-  silently selects the classic engine, boto3's rule; `True` builds the CRT
-  client regardless, which is what `aws s3` does — so a construction-time
-  failure surfaces under contention too. `"auto"` respects the lock either
-  way. Only reproducing aws's behavior needs it.
-- **`crt_region`** — where the CRT transfer engine takes its region from.
-  `CLIENT_REGION` (the default) reads it off the client that was built, which
-  is what boto3 does. Passing your own already-resolved region uses that value
-  instead, `None` included — and `None` is the whole point: when nothing
-  configures a region, botocore quietly gives the client one anyway
-  (`us-east-1` by default, the `aws-global` pseudo-region under the regional
-  endpoint mode the `boto3-s3` command pins), while `aws s3` resolves its own
-  chain to `None` and awscrt then refuses to build a client at all. Only
-  reproducing that refusal needs
-  it. Like the flag above it does nothing unless
-  `TransferConfig.preferred_transfer_client` selects the CRT engine.
-- **`crt_sign_requests`** — whether the CRT transfer engine signs its
-  requests. `None` (the default) derives the answer from the built client,
-  boto3's rule. An explicit `False` builds the CRT client with no credentials
-  provider (nothing is resolved, every CRT request goes out anonymous);
-  `True` forces a provider. Only reproducing `aws s3` needs it — aws's CRT
-  factory decides from its own `sign_request` flag and never from the client,
-  which is how `--no-sign-request --sse aws:kms` transfers anonymously on
-  aws's CRT engine while its classic engine signs.
+- **`crt`** — the CRT transfer engine's own client settings, a
+  `CrtClientOptions`. `None` (the default) keeps boto3's behavior, which
+  derives them from the client in hand. Only reproducing `aws s3` needs it,
+  since aws-cli reads them for its CRT client apart from its botocore client:
+  - `allow_lockless` — what an explicit `preferred_transfer_client="crt"`
+    does when another process of this application already holds the
+    cross-process CRT slot. `False` (the default) silently selects the
+    classic engine, boto3's rule; `True` builds the CRT client regardless,
+    which is what `aws s3` does for processes that run at the same time.
+    `"auto"` respects the lock either way.
+  - `verify` — what the CRT client trusts for TLS. `None` (the default)
+    takes the CA bundle the client names, or the platform trust store when it
+    names none. `False` turns verification off, and a string is a CA bundle
+    path.
+- **`filename_encoding`** — the encoding of local file names on POSIX, for
+  every `LocalStorage` built from a string path. `None` (the default) is
+  Python's file system encoding. It has no effect on Windows, and an unknown
+  codec raises `InvalidValueError`.
+
+### Ctrl-C
+
+A Ctrl-C re-raises `KeyboardInterrupt` at once, with requests still out: the
+cleanup goes on behind you. Every other exception waits for the transfers and
+deletes first.
+
+"At once" is as far as Python lets the library see the interrupt, not a
+promise. Python raises it only where your main thread runs Python code, so
+when the main thread waits inside another library and the interrupt does not
+wake that wait, it comes when the wait ends; and code outside the library,
+Python's own included, can lose it or raise another exception in its place. The next Ctrl-C then stops the operation, except where that wait cannot
+be woken at all: on Windows, boto3 waiting for an answer holds every Ctrl-C
+until the answer or its read timeout comes, as it does for `aws s3`. The
+details are under [`S3`](../reference/s3.md).
+
+Once a Ctrl-C — or any exception a signal handler raises — has interrupted an
+operation, do not use that `S3` again; build a new one. To stop an operation and
+keep using the same `S3`, cancel it with a `CancelToken` instead: its `cancel`
+may be called from a signal handler, and the operation raises `CancelledError`
+— an immediate cancel at once, as a Ctrl-C does
+([Cancelling](./results.md#5-cancelling)).
+
+### The way `aws s3` builds it
+
+`S3()` takes boto3's defaults for everything you leave out. To get what an
+`aws s3` command would do in the same environment instead, build it with
+`S3.from_aws_cli`, passing the `aws` options you would have typed:
+
+```python
+from boto3_s3 import S3
+
+# aws s3 sync ./site s3://my-bucket/site --delete --profile dev --region ap-northeast-1
+s3 = S3.from_aws_cli(profile="dev", region="ap-northeast-1")
+s3.sync("./site", "s3://my-bucket/site", delete_filter=True)
+```
+
+The keywords are the `aws` common options in snake_case (`profile`, `region`,
+`endpoint_url`, `no_verify_ssl`, `ca_bundle`, `no_sign_request`,
+`cli_read_timeout`, `cli_connect_timeout`). What you leave out is resolved
+as `aws` resolves it — `AWS_REGION` and `AWS_PROFILE` read in its order, its
+retries, `us-east-1` on its regional endpoint, `CRC64NVME` as the default
+checksum, its CA file for the CRT engine, its local file-name encoding, and
+temporary credentials shared with `aws` through `~/.aws/cli/cache` (pass
+`cache_credentials=False` to keep them in memory). The full list is in
+[`../reference/s3.md`](../reference/s3.md#from_aws_cli). Behind an HTTPS proxy
+that requires a `Host` header, on Python 3.10 or 3.11, also call
+`boto3_s3.pin_proxy_connect()` once at start-up.
 
 ## 2. Which client a location uses
 
@@ -79,9 +102,10 @@ as given, with its own client.
 | --- | --- |
 | `"s3://bucket/key"` | an `S3Storage` using this instance's client |
 | `"./local/path"` | a `LocalStorage` |
-| `"bucket/key"` to `ls` / `rm` / `mb` / `rb` / `presign` / `website` | an `S3Storage` — these accept a missing `s3://` prefix |
+| `"bucket/key"` to `ls` / `rm` / `mb` / `rb` / `presign` | an `S3Storage` — these accept a missing `s3://` prefix |
+| `"bucket"` or `"s3://bucket"` to `website` | the bucket name, read whole as `aws s3 website` reads its argument |
 | `S3Storage(uri, client=...)` | itself, with the client you gave it |
-| `IOStorage(stream)` / `StdioStorage()` | itself, as one side of a `cp` (the other side must be S3) |
+| `IOStorage(stream)` / `TextIOStorage(stream)` / `StdioStorage()` | itself, as one side of a `cp` (the other side must be S3) |
 
 For a specific profile, region or endpoint, configure the `S3` object once and
 every bare `"s3://..."` string follows:
@@ -194,11 +218,12 @@ transfer, with the other side always S3**.
 
 ## 6. Reading the AWS config file
 
-Operations never read the `[s3]` tuning section of `~/.aws/config` on their own:
-transfer settings come from arguments, never from ambient configuration.
-Credentials, region and profile still resolve through boto3's usual chain, which
-does read the file, and so do botocore's own client-level `s3` settings such as
-`addressing_style`. When you want a value from it yourself, ask:
+`cp` / `mv` / `sync` / `rm` read the `[s3]` tuning section of `~/.aws/config`
+the way `aws s3` does, filling the transfer settings you did not pass
+([`transfer-options.md`](./transfer-options.md)). Credentials, region and
+profile resolve through boto3's usual chain, which reads the file too, and so do
+botocore's own client-level `s3` settings such as `addressing_style`. When you
+want a value from it yourself, ask:
 
 ```python
 cfg = s3.aws_config()
@@ -217,8 +242,9 @@ sizes and rates are 1024-based, matching `aws s3`) and take your own default.
 A missing key returns that default; a value that will not convert raises
 `InvalidConfigError`, which `except ConfigurationError` catches.
 
-If you want `aws s3`'s own interpretation of `[s3]` — its defaults, its
-validation, its engine choice — use the `boto3-s3` command.
+`s3.resolve_transfer_config()` returns the config a run would use, with
+`aws s3`'s own interpretation of `[s3]` applied — its defaults, its validation,
+its engine choice.
 
 ## 7. One small file, one request
 
@@ -272,8 +298,8 @@ What this pair deliberately does not do:
   large for a single `PutObject` fails with S3's own error.
 - **no `Content-Type` guessing** on upload, and no other object shaping —
   `put_file` sends the bytes and nothing else.
-- **no mtime stamping** on a download, and none of `cp`'s `aws s3` parity gates
-  (glacier, `--no-overwrite`, case conflicts).
+- **no mtime stamping** on a download, and none of the checks `cp` makes as
+  `aws s3` does (glacier, `--no-overwrite`, case conflicts).
 
 So reach for `cp` / `sync` for large objects, for whole trees, and whenever you
 want the `aws s3` behavior; reach for these two when one small object is the

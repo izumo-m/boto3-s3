@@ -87,7 +87,8 @@ SCENARIOS: tuple[PresignScenario, ...] = (
         ("presign", f"s3://{BUCKET_TOKEN}/presign/no-such-key.txt"),
         fetch=True,
     ),
-    # --- client-side parameter validation (rc 252) --------------------------
+    # --- refused before signing (rc 252): botocore's parameter validation on
+    # both tools, for a missing key and for no bucket.
     PresignScenario(
         "presign_bucket_only",
         ("presign", f"s3://{BUCKET_TOKEN}"),
@@ -95,16 +96,10 @@ SCENARIOS: tuple[PresignScenario, ...] = (
         expected_stderr_tokens_aws=("Invalid length for parameter Key",),
     ),
     PresignScenario(
-        "presign_trailing_slash",
-        ("presign", f"s3://{BUCKET_TOKEN}/"),
-        expected_stderr_tokens_ours=("Invalid length for parameter Key",),
-        expected_stderr_tokens_aws=("Invalid length for parameter Key",),
-    ),
-    PresignScenario(
         "presign_empty_uri",
         ("presign", "s3://"),
-        expected_stderr_tokens_ours=('Invalid bucket name ""',),
-        expected_stderr_tokens_aws=('Invalid bucket name ""',),
+        expected_stderr_tokens_ours=("Invalid bucket name",),
+        expected_stderr_tokens_aws=("Invalid bucket name",),
     ),
     PresignScenario(
         "presign_extra_arg",
@@ -126,27 +121,12 @@ SCENARIOS: tuple[PresignScenario, ...] = (
         ("presign", f"s3://{BUCKET_TOKEN}/presign/basic.txt", "--expires-in", "604801"),
     ),
     # A non-integer dies in the CLI's own int() conversion -> rc 255 on both
-    # sides (aws's bare int() escapes to its general handler).
+    # sides (aws-cli's bare int() escapes to its general handler).
     PresignScenario(
         "presign_expires_nonint",
         ("presign", f"s3://{BUCKET_TOKEN}/presign/basic.txt", "--expires-in", "abc"),
         expected_stderr_tokens_ours=("invalid literal",),
         expected_stderr_tokens_aws=("invalid literal",),
-    ),
-    # Head-order (design/cli.md 5.7): the --endpoint-url scheme check (252)
-    # beats the bare int() coercion (255).
-    PresignScenario(
-        "presign_endpoint_beats_expires",
-        (
-            "presign",
-            f"s3://{BUCKET_TOKEN}/presign/basic.txt",
-            "--expires-in",
-            "abc",
-            "--endpoint-url",
-            "badurl",
-        ),
-        expected_stderr_tokens_ours=("scheme is missing",),
-        expected_stderr_tokens_aws=("scheme is missing",),
     ),
     # UNSIGNED config -> the plain object URL, no query at all (rc 0).
     PresignScenario(

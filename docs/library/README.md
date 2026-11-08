@@ -36,8 +36,8 @@ anything failed. That is the one structural difference from most Python APIs,
 and [`results.md`](./results.md) covers it.
 
 The library is **more permissive than `aws s3`**. It accepts input the command
-would reject — the S3-only operations (`ls` / `rm` / `mb` / `rb` / `presign` /
-`website`) take `"bucket/key"` without the `s3://` prefix, for instance. The
+would reject — `rm`, `mb` and `rb` take `"bucket/key"` without the `s3://`
+prefix, for instance. The
 strict validation and the exit codes belong to the
 [`boto3-s3-cli`](../cli/README.md) command that sits on top of it. If you need
 `aws s3`'s exact rejections, use the command; if you are writing an application,
@@ -63,7 +63,7 @@ every operation shares.
   match against.
 - [`transfer-options.md`](./transfer-options.md) — the `cp` / `mv` / `sync`
   options and multipart tuning.
-- [`streams.md`](./streams.md) — `IOStorage` and `StdioStorage`.
+- [`streams.md`](./streams.md) — `IOStorage`, `TextIOStorage` and `StdioStorage`.
 - [`deleter.md`](./deleter.md) — driving batch deletion yourself with
   `S3Deleter`.
 - [`custom-storage.md`](./custom-storage.md) — using a `Storage` as one side of

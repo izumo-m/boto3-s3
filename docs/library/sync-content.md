@@ -67,7 +67,7 @@ section 5.
 ## 3. `ChecksumComparison`
 
 ```python
-s3.sync(src, dest, update_filter=ChecksumComparison(s3, src, dest))
+s3.sync(src, dest, update_filter=ChecksumComparison())
 ```
 
 It asks S3 for the checksum it already stores and recomputes the same algorithm
@@ -77,9 +77,9 @@ for multipart objects the exact part boundaries come back from S3 — nothing is
 guessed. An SSE-C object is the exception: reading its checksum needs the
 customer key, which the strategy never sends, so it is copied every run.
 
-Pass the same `src` and `dest` you passed to `sync`. It needs them to reach each
-S3 side's client and bucket, which a `FileInfo` alone does not carry. For a
-cross-account S3-to-S3 sync, pass the same `S3Storage` objects.
+Each S3 side is reached through the `S3Storage` that side was listed through,
+so a cross-account S3-to-S3 sync needs nothing more than the two `S3Storage`
+objects passed to `sync`.
 
 **Cost.** One `GetObjectAttributes` per object consulted — the S3 side on upload
 and download, both sides on S3-to-S3 — plus the local hash. Section 4 makes
@@ -89,9 +89,10 @@ these run concurrently.
 whose two sides used different algorithms or kinds (on S3-to-S3, often an
 object and its own copy — see
 [`ChecksumComparison`](../reference/comparator.md#checksumcomparison) for when a
-copy stays comparable), an unknown algorithm, or a
-`GetObjectAttributes` that fails with a client error such as a 404, a denied
-permission, or an SSE-C object (no customer key is sent).
+copy stays comparable), an unknown algorithm, an `XXHASH` checksum on an
+upload or download without `awscrt`, or a `GetObjectAttributes` that fails
+with a client error such as a 404, a denied permission, or an SSE-C object (no
+customer key is sent).
 
 **One class of failure is not per-object.** A missing credential, an unreachable
 endpoint or a timeout aborts the whole sync rather than being treated as
@@ -103,7 +104,9 @@ only without `awscrt`: the `CRC32C` and `CRC64NVME` algorithms then fall back to
 a pure-Python implementation that is roughly a thousand times slower, so this
 caps how large an object it will attempt — above the cap the object is treated
 as indeterminate and copied. The default, `None`, never caps. Installing the
-`crt` extra removes the concern.
+`crt` extra removes the concern. It is also what an upload or download needs
+to compare an object with an `XXHASH` checksum, which has no pure-Python
+fallback (S3-to-S3 compares the stored values and needs neither).
 
 ## 4. Running the decisions in parallel
 
@@ -118,7 +121,7 @@ from boto3_s3 import ParallelFilter
 with ThreadPoolExecutor(16, thread_name_prefix="sync-cmp") as pool:
     s3.sync(
         src, dest,
-        update_filter=ParallelFilter(ChecksumComparison(s3, src, dest), executor=pool),
+        update_filter=ParallelFilter(ChecksumComparison(), executor=pool),
         delete_filter=ParallelFilter(is_expired, executor=pool),
     )
 ```

@@ -13,8 +13,8 @@ Reference points:
   rarely shift within the v2 line.
 - The effective (functional) options and their mapping to S3 API
   parameters are derived from aws-cli's
-  `awscli/customizations/s3/`, the canonical parity
-  reference.
+  `awscli/customizations/s3/`, the canonical reference for
+  compatibility.
 
 ---
 
@@ -28,15 +28,16 @@ different things at each:
   sees presentation/transport CLI options. The only library-level
   "does not apply" case is an option that is valid only on certain
   transfer directions (section 4).
-- **CLI (`boto3-s3-cli`)** is the surface that must accept the full
-  `aws s3` flag set for parity. It maps the effective flags down to the
+- **CLI (`boto3-s3-cli`)** is the surface that accepts the full
+  `aws s3` flag set, as `aws s3` does. It maps the effective flags down to the
   library and is responsible for the options that have *no effect*
   (section 2) or are *not supported* (section 3).
 
 ## 2. Recognized-and-ignored (no-op) options - CLI
 
 Several `aws s3` global options have **no observable effect** on any
-`aws s3` subcommand. For parity, `boto3-s3-cli` **accepts them after
+`aws s3` subcommand's outcome (`--cli-error-format` changes only how aws-cli
+renders an error report, below). As aws-cli does, `boto3-s3-cli` **accepts them after
 parsing and then ignores them** (validating `choices` where aws-cli
 does, so an invalid value still errors the same way). Passing them
 changes nothing about the operation.
@@ -44,7 +45,7 @@ changes nothing about the operation.
 | Option | Handling |
 |---|---|
 | `--output <fmt>` | Accept & ignore. Validates `choices`. |
-| `--query <jmespath>` | Accept, but validate: aws compiles the value as JMESPath at parse time and rejects a bad expression (rc 252) before dispatch. The *result* is still ignored - there is no response payload to apply it to (section 2.1). |
+| `--query <jmespath>` | Accept, but validate: aws-cli compiles the value as JMESPath at parse time and rejects a bad expression (rc 252) before dispatch. The *result* is still ignored - there is no response payload to apply it to (section 2.1). |
 | `--no-paginate` | Accept & ignore. |
 | `--no-cli-pager` | Accept & ignore. |
 | `--color {on,off,auto}` | Accept & ignore. Validates `choices`. |
@@ -69,9 +70,8 @@ nothing to act on.
 the JMESPath expression at `top-level-args-parsed`, independent of the
 response-formatter pipeline, so a malformed expression is still a usage error
 (rc 252) even though the compiled value is never applied to anything.
-`boto3-s3-cli`'s `globalargs.validate_query` matches this - every
-subcommand's `run()` calls it first, ahead of the `--endpoint-url` check
-(cli.md sections 5.7 and 6).
+`boto3-s3-cli`'s `globalargs.validate_query` matches this - the dispatcher
+calls it once the command line is parsed (cli.md sections 5.7 and 6).
 
 `--color` is a no-op for a related reason: the parsed `color` global is
 consulted only by other parts of aws-cli (the table formatter, the error
@@ -82,11 +82,13 @@ and prints its `upload:` / `download:` / progress lines unconditionally.
 `aws s3 ... --color on` therefore produces no color, and `boto3-s3-cli`
 matches that.
 
-`--cli-error-format` controls the top-level CLI exception rendering in
-aws-cli. `boto3-s3-cli` accepts the flag but always uses aws-cli's
-default enhanced-style rendering; alternate legacy, text, JSON, YAML, and
-table renderings remain outside the parity target. In particular, parameter
-validation failures use `An error occurred (ParamValidation): <message>`.
+`--cli-error-format` selects how aws-cli renders an error report: `enhanced`,
+the default, envelopes the reports of its dedicated handlers as `An error
+occurred (<code>): <message>`, `legacy` drops the envelope, and `json`,
+`yaml`, `text` and `table` re-render the report. `boto3-s3-cli` accepts the
+flag and ignores it, as it ignores `AWS_CLI_ERROR_FORMAT` and the profile key
+`cli_error_format`: its reports keep the default form whatever the value
+([`cli.md`](./cli.md) section 6).
 
 `--cli-binary-format base64` (the default) base64-decodes only the parameters
 the *API operation model* declares as a `blob` shape:
@@ -110,119 +112,89 @@ positional and optional alike - so `file://` (text) and `fileb://` (binary)
 load from disk for any *single-string* arg, not just the SSE-C keys, all
 resolved at parse time before the command runs. (A list-valued argument - the
 `--exclude` / `--include` filter accumulation, `mb`'s two-token `--tags` - is
-not expanded: aws's paramfile hook rewrites only a plain string value, and
+not expanded: aws-cli's paramfile hook rewrites only a plain string value, and
 boto3-s3-cli keeps those verbatim too.) `boto3-s3-cli` matches this on the positional
-too: `ls` / `rm` / `website`'s `<S3Uri>` positional (dest `paths`, aws's own
-`cli_name` for it) and `mb` / `rb` / `presign`'s (dest `path`) are both
-`file://`- / `fileb://`-expanded before dispatch (`expand_positional_paramfile`,
-`commands/base.py`), and so are the free-value options `--bucket-name-prefix`
+too: `ls` / `rm`'s `<S3Uri>` positional (dest `paths`, aws-cli's own `cli_name`
+for it) and `mb` / `rb` / `presign`'s (dest `path`) are `file://`-expanded
+before dispatch (`expand_positional_paramfile`, `commands/base.py`; a
+`fileb://` there, and either prefix on `website`'s, is refused - below), and
+so are the free-value options `--bucket-name-prefix`
 / `--bucket-region` (`ls`) and `--index-document` / `--error-document`
 (`website`). On the transfer family (`cp` / `mv` / `sync`) the same expansion
 covers the free-string transfer options (`--content-type`,
 `--website-redirect`, `--cache-control`, `--content-disposition`,
 `--content-encoding`, `--content-language`, `--expires`, `--source-region`,
-`--sse-kms-key-id`, and `--expected-size` - a plain string in aws's table, so
-a readable `fileb://` is rejected with the bytes 252 while its `int()` runs
-only on the stream route at submit), the string-typed integer options
-(`--page-size` / `--progress-frequency` / `--expires-in`, expanded before
+`--sse-kms-key-id`, and `--expected-size` - a plain string in aws-cli's table,
+whose `int()` runs only on the stream route at submit), the string-typed
+integer options (`--page-size` / `--progress-frequency` / `--expires-in`, expanded before
 their `int()` coercions - cli.md section 5.7), and `--metadata` (resolved
 after both integer coercions, before its shorthand parse; the shorthand also
-accepts aws's `key@=file://...` operator). The choices-validated options
+accepts aws-cli's `key@=file://...` operator). The choices-validated options
 (`--acl`, `--storage-class`, `--sse`, ...) cannot carry a `file://` value -
-argparse rejects it as an invalid choice first - matching the practical aws
+argparse rejects it as an invalid choice first - matching the practical aws-cli
 result. A load failure on any of these - a missing file, or a binary file via
-the text `file://` prefix - is a usage error (rc 252) with aws's wording
+the text `file://` prefix - is a usage error (rc 252) with aws-cli's wording
 (`Error parsing parameter '<name>': Unable to load paramfile ...`; `<name>` is
 the positional's `paths`/`path` or the option's `--flag` form).
 
 `fileb://` is not a free pass-through wherever it is accepted, though: only
 the two SSE-C key blobs (`--sse-c-key`, `--sse-c-copy-source-key`) take the
 loaded *bytes* verbatim into the request (a `string`-shaped request parameter
-untouched, as above). `--grants` also keeps its loaded bytes, but they flow
-into the grant *parsing* rather than a request parameter (as in aws, whose
-paramfile hands its grant handling the same bytes). Every other free-string
-option in the list above still runs a
-`fileb://` value through the same string-typed parameter check aws applies:
-`--content-type fileb://x` loads the bytes and then fails botocore's
-client-side check for a `string`-typed parameter (`Invalid type for
-parameter ...`, rc 252) rather than passing them through unchanged.
-`--metadata` is the one further exception: a *whole-value* `--metadata
-fileb://...` loads the bytes and then crashes indexing them inside aws's own
-shorthand parser (`'in <string>' requires string as left operand, not int`).
-`boto3-s3-cli` reproduces that crash verbatim: a missing file is still the
-paramfile's rc 252, but an *existing* one is aws's rc 255, not a clean usage
-error.
+untouched, as above), and the string-typed integer options feed them to
+`int()`. A `fileb://` on any other single-string argument in the list above
+is refused at 252 without reading the file (`paramfile.load_text_argument`):
+no bytes can be a string value. On a free-string option aws-cli reaches the same
+252 after loading the bytes (botocore's client-side check for a
+`string`-typed parameter); the uses it mishandles are below.
 
-The `key@=...` shorthand form splits the same two outcomes differently, because
-the load happens one level down. aws wraps a paramfile failure into the
-`Error parsing parameter '<name>'` form only in the `load-cli-arg` handler it
-registers for *named* arguments; its shorthand parser calls the loader itself,
-so a reference it cannot load - missing, or binary through the text `file://` -
-skips that wrapping and reaches the general handler as **rc 255 with the bare
-`Unable to load paramfile ...` line**, naming no option. A reference that
-*does* load is then schema-checked like any map value, so a `fileb://` one is
-rejected for being bytes (rc 252, botocore's `Parameter validation failed:`
-wording rather than the parser's). `boto3-s3-cli` keeps that split by scoping
-its wrapper the same way (`paramfile.named_argument`, entered by the option and
-positional resolution and skipped by `shorthand.py`).
+Four paramfile uses are refused at 252 without reading the file, because aws-cli
+mishandles them - aws-cli bugs this CLI does not copy
+([`aws-differences.md`](../docs/cli/aws-differences.md) section 2):
 
-**How far the operator reaches** follows from where aws arms it: per key/value
-pair, not per scalar. So it covers every element of a csv or explicit list -
-`a@=[file://f,plain]` loads the first and passes the second through, and the
-list is then the schema's error - while a hash literal re-arms it for each
-inner key, which *disarms* the outer one: in `a@={b=file://f}` the inner value
-stays the unresolved text. Both shapes end at the same schema report, since a
-map of strings holds neither a list nor a nested map, but which references
-were loaded on the way there is observable in it - and in whether a missing
-file turns the run into the bare rc 255 above.
+- **A `fileb://` path positional** (`ls`, `rm`, `mb`, `rb`, `presign`,
+  `website`). aws-cli loads the bytes into the path and each command breaks its
+  own way: `mb` / `rb` / `presign` reject them as a string parameter (252),
+  `ls` and `website` crash in path handling (255), and `rm` decodes them
+  back into a path and deletes it.
+- **A `file://` path positional on `website`.** aws-cli indexes the loaded text
+  as though it were still a one-element list, so its first character
+  becomes the bucket: a file holding `s3://mybucket` configures bucket `s`.
+- **A whole-value `--metadata fileb://...`.** aws-cli loads the bytes and then
+  crashes indexing them in its shorthand parser (255).
+- **A lone `--grants file://...` or `fileb://...`.** aws-cli unwraps the
+  one-element list before its paramfile hook, so its grant parser walks the
+  loaded text character by character (bytes int by int) and fails in flight,
+  or sends no grant at all for an empty file. With more than one `--grants`
+  value nothing is loaded on either tool.
 
-A **readable `fileb://` on a positional** (binary bytes where an `s3://` URI is
-expected) exposes inconsistent aws-cli bugs that `boto3-s3-cli` intentionally
-reproduces. aws loads the bytes into the positional and lets each command
-mishandle them differently: `mb` / `rb` / `presign` reject the bytes through
-string-parameter validation (rc 252); the transfer-command base decodes `rm`'s
-bytes back through the filesystem encoding, so it continues to the ordinary
-delete path (the invalid `s3://` regression case exits 1); and `ls` / `website`
-raise a `TypeError` / `AttributeError` inside path handling (rc 255, e.g.
-`'int' object has no attribute 'startswith'`). The implementation comments mark
-these branches as intentional bug compatibility. A dedicated subprocess e2e
-test asserts both the pinned aws-cli result and equality with `boto3-s3-cli`, so
-an aws-cli fix fails visibly and prompts a compatibility review. The
-missing-file case is unaffected: a `fileb:///nonexistent` positional is the
-parse-time load 252 on every subcommand.
+The `key@=...` shorthand form reports the same way: a reference it cannot
+load - missing, or binary through the text `file://` - is the option's
+`Error parsing parameter '<name>'` usage error (rc 252), and a `fileb://` one
+that *does* load is refused for being bytes, a map value being text (rc 252).
+aws-cli wraps a paramfile failure into that form only in the `load-cli-arg`
+handler it registers for *named* arguments, and its shorthand parser calls the
+loader itself, so there the load failure reaches the general handler as rc 255
+with the bare `Unable to load paramfile ...` line. That is its call path, not
+a meaning: a file named on the command line that cannot be read is a
+command-line error wherever it is named, so `shorthand.py` loads inside the
+option's `paramfile.named_argument` scope too (an exit code in an error path,
+not recorded as a difference - overview.md section 3).
+
+aws-cli's grammar also builds lists (`k=a,b`, `k=[a,b]`) and nested maps
+(`k={a=b}`) and arms the operator inside them; a map of strings holds
+neither, so aws-cli parses them and then rejects them with botocore's type
+report. `shorthand.py` refuses them where they start instead, with the
+parser's own 252, and accepts exactly the values aws-cli accepts.
 
 ## 3. Auto-prompt / completion UI
 
-`boto3-s3-cli` supports aws-cli's interactive **auto-prompt**
-(`--cli-auto-prompt`) as an **opt-in extra**: it is active when
-`prompt_toolkit` is installed (`boto3-s3-cli[autoprompt]`) and degrades to a
-rejection-with-install-hint otherwise. The full design - the completion-candidate
-spec, the port architecture, and the degradation - is in
-[`autoprompt.md`](./autoprompt.md). This section records only the option-level
-handling.
-
-| Option / feature | Handling |
-|---|---|
-| `--cli-auto-prompt` (with `prompt_toolkit`) | Launches an interactive prompt with `aws s3`-style completion (usability-tuned, see below), then re-dispatches the completed command. |
-| `--cli-auto-prompt` (without `prompt_toolkit`) | Rejected with an install hint and a non-zero exit code. |
-| `--no-cli-auto-prompt` | Forces the mode **off**, and pairing it with `--cli-auto-prompt` is a usage error, both matching aws-cli. |
-| `AWS_CLI_AUTO_PROMPT`, profile `cli_auto_prompt` | **Consulted**, matching aws-cli's chain, and read SDK-free. |
-| `on-partial` mode | **Supported.** |
-| Shell completion (the `aws_completer` equivalent) | **Not provided.** |
-
-This table records *which* aws-cli auto-prompt surface is covered. The
-precedence among these inputs, the meaning of each mode, and the behavior when
-`prompt_toolkit` is absent are specified in
-[`autoprompt.md`](./autoprompt.md) section 5.
-
-The exit codes above are **not contractual**: the auto-prompt UI is an
-interactive front-end, exempt from the exit-code charter (charter
-exception 2 - `overview.md` section 3), and aws-cli itself fails when it cannot acquire
-terminal control. The completion *candidates* are **not contractual either** -
-the whole auto-prompt surface is charter-exempt, so it favors **usability over
-aws parity** (it completes command-level choices like `--storage-class` that aws
-misses, and widens reachability where aws's parser drops completions - see
-[`autoprompt.md`](./autoprompt.md) section 2).
+There is no interactive auto-prompt: the CLI is a by-product of the library,
+and an interactive front-end has no place in either. `--cli-auto-prompt` and
+`--no-cli-auto-prompt` are **accepted and ignored**, so a command line that
+carries one still runs as typed, and `AWS_CLI_AUTO_PROMPT` and the profile's
+`cli_auto_prompt` are not read. Shell completion (the `aws_completer`
+equivalent) is not provided either. Recorded for users in
+[`aws-differences.md`](../docs/cli/aws-differences.md).
 
 ## 4. Direction-specific options
 
@@ -266,10 +238,15 @@ covers the write-side request options on a download - `--acl`,
 `--storage-class`, the content headers, `--metadata`, the SSE family,
 `--grants` - because the `GetObject` mapping emits only SSE-C / request-payer /
 checksum-mode: either the corresponding S3 request parameter is never emitted,
-or the route-specific logic just does not run. aws-cli applies the shared transfer arguments
-uniformly and acts only on the route-relevant ones. `boto3-s3` does the same:
-the internal snake->PascalCase translation only emits the parameters that are
-valid for the chosen direction.
+or the route-specific logic just does not run. aws-cli applies the shared
+transfer arguments uniformly and acts only on the route-relevant ones.
+`boto3-s3` does the same - the internal snake->PascalCase translation only
+emits the parameters that are valid for the chosen direction - with one
+exception: ignoring an option is not accepting a malformed one, so a
+`--grants` value that is not `<permission>=<grantee>` with a known permission
+is refused before the run (252) on every route, a download included, where
+aws-cli never parses it on a download (and on an upload or copy finds it only at
+the first item).
 
 The full direction matrix follows aws-cli; the canonical reference is
 aws-cli's `awscli/customizations/s3/`.
@@ -292,50 +269,41 @@ For completeness, the options that **do** have an effect:
   handler. The library itself attaches only a `NullHandler` to the
   `boto3_s3` package logger, and a stream handler when the caller asks for
   one through `set_stream_logger`.
-- **`--version`**: prints a single aws v2-style version line
+- **`--version`**: prints a single aws-cli v2-style version line
   (`boto3-s3-cli/<v> boto3-s3/<v> boto3/<v> botocore/<v> Python/<v>
   <System>/<release>`) and exits; handled entirely in `boto3-s3-cli`, with no
   library involvement.
 
-## 6. Console output: the parity target and its recorded deviations
+## 6. Console output: the compatibility target and its recorded deviations
 
-Console output is held to the **output parity charter**
+Console output is held to **functional compatibility**
 ([`overview.md`](./overview.md) section 3): under the same arguments and
-conditions the command writes what `aws s3` writes, byte for byte, after the
-normalization [`testing.md`](./testing.md) section 9 defines. A difference that
-survives that normalization is a divergence - a bug, or one of the deliberate
-deviations recorded below.
+conditions a successful run writes what `aws s3` writes, after the
+normalization of the output comparison criterion ([`testing.md`](./testing.md)
+section 9). A difference there that survives the normalization is a functional
+difference - a bug, or one of the deliberate deviations recorded below. A
+warning or an error report is held to the **Messages** rules of the same
+section; what they leave uncompared is neither a bug nor a deviation.
 
 The program name and the command hierarchy are **class 1** of that
 normalization rather than an exemption from it. The root tokens `aws` /
 `boto3-s3` and everything derived from them - usage lines, the `aws: [ERROR]:`
-/ `boto3-s3: [ERROR]:` prefixes, aws's `<command> <subcommand>` level collapsed
-onto our single one - are rewritten on aws's side before the comparison, and
-the surrounding message is then compared in full, byte for byte.
-
-The default enhanced-style parameter-validation envelope is therefore
-reproduced: parser failures, unknown options, path/option validation failures,
-and auto-prompt flag conflicts use
-`An error occurred (ParamValidation): <message>`. This target is the default
-output of aws-cli; selecting another `--cli-error-format` does not alter
-`boto3-s3-cli` output, as described in section 2.1.
-
-aws drops that envelope - keeping the exit code - when the run names a profile
-no config file declares, because it renders the envelope through the session
-that fails to resolve. That degradation is reproduced
-([`cli.md`](./cli.md) section 6). Its one gap follows from the paragraph above:
-aws consults neither the session nor the config once `--cli-error-format` or
-`AWS_CLI_ERROR_FORMAT` sets the format, so an undeclared profile plus an
-explicit `enhanced` keeps the envelope on aws and loses it here.
+/ `boto3-s3: [ERROR]:` prefixes, aws-cli's `<command> <subcommand>` level
+collapsed onto our single one - are rewritten on `aws`'s side before the
+comparison, and the surrounding message is then compared in full.
 
 ### Recorded deviations
 
 These are the places `boto3-s3-cli` deliberately displays something other than
-what `aws` displays. **The list is exhaustive for the display layer**: nothing
-here licenses an unrecorded difference, and a new one is added by the same
-explicit decision a new normalization rule takes. All but the last are
-user-reachable and are therefore carried in
-[`aws-differences.md`](../docs/cli/aws-differences.md) section 2 as well.
+what `aws` displays. **The list is exhaustive for the display layer's
+functional differences**: nothing here licenses an unrecorded one, and a new
+one is added by the same explicit decision a new normalization rule takes.
+Those a user sees on a successful run (the pipeline's five, the help pages
+and `--debug` traces, the `--version` line and the missing `cli_history`
+warning below) are
+carried in [`aws-differences.md`](../docs/cli/aws-differences.md) section 2
+as well. The rest are kept here only as implementation notes: an interrupted
+`mv`'s record, and the last, which no real run reaches.
 
 The first five are the output pipeline's (`progress.py`; the rendering thread
 itself mirrors aws-cli's `ResultProcessor`):
@@ -352,109 +320,52 @@ itself mirrors aws-cli's `ResultProcessor`):
   `--progress-frequency` when higher), so repaint records enter the queue at
   a chunk-independent rate. Display cadence only; the painted numbers are
   exact snapshots.
-- **No `~total (calculating...)` marker.** aws paints that marker on the
+- **No `~total (calculating...)` marker.** aws-cli paints that marker on the
   progress line while its enumeration is still running. The library has no
   enumeration-finished signal to drive it, so the total is painted plain
   ([`cli.md`](./cli.md) section 5.7).
-- **Progress is painted only from byte progress.** aws repaints the meter
+- **Progress is painted only from byte progress.** aws-cli repaints the meter
   after every result line it prints as well (`_redisplay_progress`), so a run
   that never reports a byte - every transfer failing before its first chunk,
   or a `sync --delete` that only deletes - still shows a meter there and none
   here. The printer thread renders snapshots taken on the worker side at
   progress time, so painting on a result would mean reading the live counters
   from the rendering thread; taken together with the repaint floor above, the
-  cadence is this pipeline's rather than aws's.
-- **Deletions stay out of the meter's byte totals.** aws queues a
+  cadence is this pipeline's rather than aws-cli's.
+- **Deletions stay out of the meter's byte totals.** aws-cli queues a
   `sync --delete` deletion like a transfer, so an S3-side deletion's size
   joins the expected bytes from the start — and only the expected: no bytes
-  are ever counted transferred for it, so aws's byte meter ends short of its
+  are ever counted transferred for it, so aws-cli's byte meter ends short of its
   denominator (a local-side deletion queues with size 0 and moves neither).
   The library's delete lane reports only terminals, so here a deletion joins
   the file count at its own completion and its size joins neither byte
   total: the byte meter reads done over expected for the real transfers
   alone, and the two meters disagree mid-run and at the end.
 
-Three more are in the result text itself rather than in its rendering:
-
-- **A batched delete's per-key failure line**, composed from a batch
-  response's own `Errors[]` entry, names the `DeleteObjects` operation and
-  never carries the `(reached max retries: N)` suffix, where aws's line names
-  `DeleteObject` and, on its classic client, carries the suffix botocore
-  appends once the request's attempts are spent. (A batch request failing as
-  a whole sends its keys on their own, whose lines are aws's.) It follows from the
-  accepted batching ([`deleter.md`](./deleter.md) section 4): the line is
-  composed from the batch response's own `Errors[]` entry rather than by
-  botocore. It reaches the batching routes alone - `rm --recursive`, an S3-side
-  `sync --delete`, `rb --force` - while a single-key `rm` still issues
-  `DeleteObject` and writes aws's bytes.
-- **The element a doubly-malformed listing entry is blamed on.** aws reads an
-  entry's required elements in one order while displaying a listing
-  (`LastModified` -> `Size` -> `Key`) and in another while enumerating a
-  transfer (`Key` -> `LastModified` -> `Size`); one shared listing converter
-  here follows the transfer order. So an `ls` against an entry missing `Key`
-  *together with* another required element quotes `'Key'` where aws quotes the
-  other name. Reproducing both orders would make a backend's read order depend
-  on its consumer. The exit code, the entries printed before it and the stream
-  they go to all agree, and the transfer commands agree entirely.
-- **An interrupted `mv`'s record.** aws can delete sources for which it
-  printed no `move:` line (measured); this command prints the line for every
-  source it deletes.
-
 The rest sit outside the pipeline:
 
-- **Help pages** are rendered from this CLI's own argparse parsers, while aws
-  renders its own documentation tree, so the two are laid out differently. The
-  options, their values and their meanings are the same - that is what the
-  page promises, not its typography.
-- **`--debug` traces** are the installed boto3 / botocore's, not aws's
-  bundled ones, and this project additionally masks credentials that aws
-  prints in full - a safety feature beyond aws-cli, not a parity item
-  ([`masking.md`](./masking.md)).
+- **Help pages** are rendered from this CLI's own argparse parsers, while
+  aws-cli renders its own documentation tree, so the two are laid out
+  differently. The options, their values and their meanings are the same - that
+  is what the page promises, not its typography.
+- **`--debug` traces** are the installed boto3 / botocore's, not aws-cli's
+  bundled ones, and this project additionally masks credentials that aws-cli
+  prints in full - a safety feature beyond aws-cli, taken deliberately because
+  security comes before compatibility ([`masking.md`](./masking.md)).
 - **The `--version` line** names the four packages that decide this command's
-  behavior (`boto3-s3-cli/<v> boto3-s3/<v> boto3/<v> botocore/<v>`) where aws
-  names one, and it carries no `exe/<machine>` install-source token. This is
-  the program identifying itself, but the shape of the line differs beyond a
-  token rewrite, so it is recorded here rather than folded into the
+  behavior (`boto3-s3-cli/<v> boto3-s3/<v> boto3/<v> botocore/<v>`) where
+  aws-cli names one, and it carries no `exe/<machine>` install-source token.
+  This is the program identifying itself, but the shape of the line differs
+  beyond a token rewrite, so it is recorded here rather than folded into the
   program-identity mapping.
-- **Ctrl-C's closing line.** `aws` produces its `cancelled: ctrl-c received`
-  closing line only from a cancelled classic transfer future; every other
-  interrupted shape closes with an empty `fatal error:` line (a rendering
-  accident), or with no closing line at all when the CRT manager swallows a
-  drain-time interrupt. This command keeps one uniform
-  `cancelled: ctrl-c received` ending wherever the interrupt reaches its
-  handler ([`crt.md`](./crt.md) section 6).
-- **The non-recursive directory-source failure line** keeps the up-front
-  `[Errno 21]` report (`./d`) where aws threads the trailing-separator form
-  through its engines — under CRT an untranslated `Unknown Error Code` —
-  because mirroring that rendering would cost the clear errno report
-  (decided 2026-08-01).
-- **A message botocore itself writes is the installed botocore's wording**,
-  where aws prints its bundled fork's. This is not class 2: the same aws
-  version installed from PyPI still carries the fork, so the difference is ours
-  to record. It reaches the console on exactly one input on this surface - a
-  `max_attempts` below the minimum, which aws ends `greater than or equal to
-  one.` and this ends `greater than or equal to 1.` (rc 255 on both, measured
-  2026-08-08). Rewriting an SDK sentence to match would be a fragile string
-  patch on a report neither tool authors, so the difference is taken. The
-  invalid-bucket-name report is the same family - the installed botocore words
-  it, the names refused before any request included - and the rest of the
-  fork's wording differences sit on aws's SSO / login paths, which this command
-  does not have.
 - **No `cli_history` warning.** This command has no history mechanism, so it
-  never writes aws's `Warning: Unable to record CLI history. ...` line.
-- **`--human-readable` past EiB.** aws's suffix loop falls through above EiB
+  never writes aws-cli's `Warning: Unable to record CLI history. ...` line.
+- **`--human-readable` past EiB.** aws-cli's suffix loop falls through above EiB
   and renders `None`; `human_readable_size` keeps counting in EiB instead
   (`output.py`). Unreachable in practice - a total below 1 EiB never gets
   there - which is why this one is not in the user-facing list.
 
-Two further differences reach stderr from the **parser** rather than the
-display layer: the candidate order of an ambiguous-abbreviation report, and an
-ambiguous abbreviation used as an option value on Python 3.10 / 3.11. Both are
-recorded with their rationale in [`cli.md`](./cli.md) section 2.
-
-The interactive auto-prompt is on no list at all, because it is outside the
-charter: the output parity charter carries its own interactive-UI exception,
-matching the exit code charter's second, and it covers the prompt's console
-output and its completion set alike
-([`overview.md`](./overview.md) section 3, section 3 of this document,
-[`autoprompt.md`](./autoprompt.md) section 1).
+One further difference comes from the **parser** rather than the display
+layer: an ambiguous abbreviation used as an option value is rejected on
+Python 3.10 / 3.11, recorded with its rationale in [`cli.md`](./cli.md)
+section 2.

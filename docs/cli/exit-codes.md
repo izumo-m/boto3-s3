@@ -12,7 +12,7 @@ the command produces them is recorded in
 | 0 | The command succeeded. `help` and `--version` also exit 0. |
 | 1 | The operation failed after it started. |
 | 2 | A transfer finished with warnings but no failures. |
-| 130 | Interrupted with Ctrl-C outside a running transfer or delete. |
+| 130 | Interrupted with Ctrl-C. |
 | 252 | The command line was rejected. |
 | 253 | The environment cannot supply what the command needs. |
 | 254 | A request reached S3 and S3 returned an error. |
@@ -20,12 +20,17 @@ the command produces them is recorded in
 
 ### 0 — success
 
-`help` and `--version` exit 0 as well. Piping into a reader that closes early
-(`ls | head`) is not one of them: the broken pipe is reported like any other
-write failure — `boto3-s3: [ERROR]: [Errno 32] Broken pipe`, exit code 255 —
-and the process then usually ends at 120 anyway, once Python fails to flush to
-the closed pipe at shutdown. `aws` does exactly the same, report included, so
-do not branch on it.
+`help` and `--version` exit 0 as well. Output that cannot be written is not a
+success: piping into a reader that closes early (`ls | head`) reports the
+broken pipe like any other write failure — `boto3-s3: [ERROR]: [Errno 32]
+Broken pipe`, exit code 255 — and so does a command whose work succeeded, with
+or without warnings, but whose output stdout could not take (a full disk, a
+reader gone), a help page included: the work is done, the exit code is 255
+with the error. With stdout closed (`1>&-`), `ls` and `presign`, which have
+result lines to write, fail at 255 as `aws` does; the other commands write
+nothing there and the code is the work's. An error report, failure line or
+warning that stderr cannot take (`2>&-`, a full disk, a reader gone) changes
+no code either, where `aws` exits 1.
 
 ### 1 — the operation failed after it started
 
@@ -34,15 +39,10 @@ at 1 — **including errors S3 itself returned** — except a failed object
 deletion under `rb --force`, which is 255 (section 2). The transfer commands
 deliberately do not report 254 once running, matching `aws s3`. Per-item
 failures were already printed as `... failed:` lines while the run proceeded;
-a failure that stops the whole run prints one `fatal error:` line.
-
-Ctrl-C during a running transfer or delete is also 1, with a
-`cancelled: ctrl-c received` line — the one line `aws` words differently when
-no transfer is left to cancel
-([`aws-differences.md`](./aws-differences.md) section 2). `rb --force` is the
-exception: Ctrl-C during its listing or its deletions is 255, the code of a
-deletion that fails there (section 2), and during the bucket removal itself
-130 (below).
+a failure that stops the whole run prints one `fatal error:` line. A download
+to stdout that stdout cannot take — full, or its reader gone, as in `cp
+s3://bucket/key - | head -c1` on an object larger than the pipe holds — is
+such a failure: `download failed: … [Errno 32] Broken pipe`.
 
 `ls` uses 1 for its own "nothing to show" case: a key or prefix that matched no
 entries.
@@ -55,24 +55,40 @@ modification time that could not be stamped onto a downloaded file. Everything
 else transferred normally. Warnings count toward this code, failures do not —
 if anything failed, the code is 1.
 
-### 130 — Ctrl-C outside a running transfer or delete
+### 130 — Ctrl-C
 
-Ctrl-C before a `cp` / `mv` / `rm` / `sync` run has started, or while `ls`,
-`mb`, `website`, `presign` or `rb` is at work — a request already in flight
-included, and for `rb --force` once its objects are deleted — exits 130. Once a transfer or delete is running,
-Ctrl-C reports 1 instead (above). After the run has ended, while its result
-lines are still being written (a slow terminal or pipe), Ctrl-C lets every
-line out and then exits 130, as `aws` does; a second Ctrl-C stops the
-remaining lines. The interactive prompt's own Ctrl-C and end-of-input also
-exit 130.
+Ctrl-C ends the command at once, with `cancelled: ctrl-c received`
+on stderr (none with `--quiet`) and exit code 130. It waits for nothing, a server
+that does not answer included, but for that line: a stderr nobody reads can hold
+it until a second Ctrl-C. One pressed while the command cleans up after another
+error can wait for the requests already out, as that cleanup does. The line and
+the code are a best effort, not a guarantee: a Ctrl-C can be discarded when it
+lands in code Python runs by itself (a finalizer, say), can end the command with
+another code, and can leave part of
+a traceback on stderr. If the command goes on, press Ctrl-C again. On Windows
+before Python 3.14, the wait on a lock cannot be interrupted, so a Ctrl-C can take
+effect only when that wait ends. Result lines already written stay, in a terminal, a pipe or a file; ones
+not yet written are dropped.
+
+Because it stops at once, it can leave behind what a finished command would not:
+an unfinished multipart upload, which S3 charges for until it is aborted (a
+bucket lifecycle rule can do that), and a download's temporary file beside its
+destination. The object or file being transferred is not left half-written under
+its own name, and `mv` keeps its source unless the destination is in place.
+
+In the first moments of a command, while Python itself is still starting, what
+happens is Python's own.
 
 ### 252 — the command line was rejected
 
 An unknown option, an invalid choice or value, a path that is not a usable S3
-URI, or an option that does not apply to the direction being run (for example
-`--checksum-algorithm` on a download). No transfer request was sent. The
-message uses the same envelope as `aws`:
-`An error occurred (ParamValidation): <message>`.
+URI (one that names no bucket, `s3://` or `s3:///key`, included - `ls`
+aside, where `s3://` lists the buckets), or an option that does not apply to
+the direction being run (for example `--checksum-algorithm` on a download).
+No transfer request was sent. The report takes `aws`'s form,
+`boto3-s3: [ERROR]: An error occurred (ParamValidation): <message>`, and a
+command line the parser rejects closes it with the usage line and the help
+commands to run.
 
 ### 253 — the environment cannot supply what is needed
 
@@ -83,31 +99,41 @@ carry it ([`compatibility.md`](../compatibility.md) lists what each feature
 needs). Not every such case lands here:
 
 - a CRT-only `--checksum-algorithm` without the extra fails per item (1);
-- `--copy-props all`, a `--checksum-algorithm` newer than the SDK, or a `cp` /
-  `mv` / `rm` on an S3 Express bucket or access point the SDK predates ends the
-  run with one `fatal error:` line (1) — `sync`, and `--case-conflict skip` /
-  `error` on a recursive download, refuse them at every SDK version (252);
+- `--copy-props all`, a `--checksum-algorithm` newer than the SDK,
+  `--no-overwrite` on an upload or copy the SDK cannot send, or a `cp` / `mv` /
+  `rm` on an S3 Express bucket or access point the SDK predates ends the run
+  with one `fatal error:` line (1) — `sync`, and `--case-conflict skip` /
+  `error` on a recursive download, refuse an S3 Express bucket at every SDK
+  version (252);
 - `mb` and `rb` report a too-old SDK — `mb`'s `--tags` or `-an` bucket name, an
   S3 Express bucket or access point — on their one `make_bucket failed:` /
   `remove_bucket failed:` line (1) like any of their failures, and `rb --force`
   as its failed delete (255);
-- `--no-overwrite` on an upload or copy with a too-old SDK is rejected up front
-  as a usage error (252).
+- `ls --bucket-name-prefix` / `--bucket-region` on an SDK that cannot send
+  them is refused before any request, as a usage error (252).
 
-Of the S3 Express refusals, then, only `ls`, `presign` and `website` land here.
-An unusable `cli_timestamp_format` in the profile lands here too, and
-it lands early: ahead of the command itself, a `help` page included
-([`configuration.md`](./configuration.md)).
+Of the S3 Express refusals, then, only `ls`, `presign`, `website` and an
+access point under `mv --validate-same-s3-paths` land here.
+An unusable `cli_timestamp_format` in the profile lands here too: every
+subcommand stops on it. `help` and `--version` do not read the config files,
+so they still work, where `aws` fails its `help` as well (its `--version`
+still works; [`configuration.md`](./configuration.md)).
 
-Unresolved credentials and an unresolved region are reported with the same
-envelope and hint as `aws` — `An error occurred (NoCredentials): Unable to
-locate credentials. You can configure credentials by running "aws login".`,
-and the `NoRegion` counterpart pointing at `aws configure`. The hints name
-`aws` because they are `aws`'s own wording and both tools read the same
-config files; see [`aws-differences.md`](./aws-differences.md). The
-dependency failures above are not something `aws` can report, so they have no
-envelope. Once a `cp` / `mv` / `sync` / `rm` run has started, a credential
-failure is exit code 1 with no envelope instead: a per-item
+Unresolved credentials, an unresolved region and an unusable
+`cli_timestamp_format` are reported as `aws` reports them (the region one
+also where a CRT run stops on it before starting, which `aws` reports with
+an empty message at 255) — `An error
+occurred (NoCredentials): Unable to locate credentials. You can configure
+credentials by running "aws login".`, its `NoRegion` counterpart pointing at
+`aws configure`, and `An error occurred (Configuration): Unknown
+cli_timestamp_format value: ...`. The hints name `aws` because they are
+`aws`'s own words and both tools read the same config files; see
+[`aws-differences.md`](./aws-differences.md). The dependency failures above
+are not something `aws` can report, so they carry no `An error occurred`
+part.
+
+Once a `cp` / `mv` / `sync` / `rm` run has started, a credential
+failure is exit code 1 instead: a per-item
 `upload failed:` / `move failed:` / `delete failed:` line when it lands on an
 upload or a delete, a per-item `download failed:` line on a download to stdout
 (`cp s3://… -`, which starts with no lookup of its own), and a whole-run
@@ -125,56 +151,52 @@ narrower than it first looks.
 
 ### 255 — everything else
 
-A network or local I/O failure, a missing local source, a `--profile` that does
+A network or local I/O failure, a missing local source (or one a recursive
+`cp` / `mv` or a `sync` cannot walk as a directory: a file, an unreadable
+directory, a symbolic link under `--no-follow-symlinks`), a `--profile` that does
 not exist or is incomplete, a non-integer value for an option that takes a
 number, or an unexpected internal error. `aws` documents 255 as a catch-all
 whose specific cases may narrow over time; treat it the same way and do not
 branch on it to identify a particular failure.
 
-A config file that cannot be parsed is 255 as well, and it outranks almost
-everything else: `~/.aws/config` (or `AWS_CONFIG_FILE`) and `~/.aws/credentials`
-(or `AWS_SHARED_CREDENTIALS_FILE`) are read before the command line is, so a
-broken one is reported instead of whatever else the command would have done —
-`help` and `--version` included. The one thing read earlier is `--profile` /
-`--debug`, so a malformed one of those (`--profile` with no value, `--debug=1`)
-is still the 252 you would get with a working config. `aws` behaves the same way
-on both counts.
+A config file that cannot be parsed is 255 as well — `~/.aws/config` (or
+`AWS_CONFIG_FILE`) or `~/.aws/credentials` (or `AWS_SHARED_CREDENTIALS_FILE`)
+— and so are an unusable `cli_binary_format` in the profile and an unusable
+instance-metadata setting (`AWS_METADATA_SERVICE_TIMEOUT=abc`). Every
+subcommand stops on them. `help` and `--version` do not read the config
+files, so they still work, where `aws` fails its `help` with 255 too, and its
+`--version` only for a config or credentials file it cannot parse.
 
-## 2. When more than one thing is wrong
+## 2. Which code a failure gets
 
 **Once a transfer command has started, every failure is 1.** `cp` / `mv` / `rm`
 / `sync` report 1 after they begin — including errors S3 itself returned. That
 is why 254 is narrower than it looks. A usage error caught *before* the
-operation starts is still 252. One kind of failure does not count, on either
-tool: an item whose request fails before any response arrives — its
-connection closed, its read timed out, a header value the HTTP layer refuses
-to send (a line break in `--cache-control`, say) — prints no line at all, so a
-run where only that happened ends at 0 although the item was not transferred
-or deleted. (A download's own read
-of the object is retried on a timeout and then fails, and what the CRT engine
-sends itself — its transfers, and the deletes of a run on it — reports such a
-failure.)
+operation starts is still 252. An item whose request fails before any
+response arrives — its connection closed, its read timed out, a header value
+the HTTP layer refuses to send (a line break in `--cache-control`, say) —
+counts too: it prints its failure line and the run ends at 1, where `aws`
+often prints nothing for it and ends at 0
+([`aws-differences.md`](./aws-differences.md)). S3 may still have acted on
+such a request before the response was lost.
 
 **Before that, whether the request reached S3 decides the code.** Anything the
 service answered is 254, whatever kind of error it is — a 400 from S3 is 254,
 not 252, because the request went out. Errors that never left your machine are
 classified by kind: 252, 253 or 255.
 
-The orderings worth knowing, because the answer is not the one you would guess:
+A few codes are not the ones you would guess:
 
 | You run | You get | Because |
 | --- | --- | --- |
-| `mb` / `rb` with both a bad path and a bad `--profile` | 255 | the profile error is detected before the path is validated |
-| a non-integer `--page-size`, `--expires-in` or `--progress-frequency`, with a bad path too | 255 | the number is parsed before the path is validated |
-| the same non-integer value, with an option the subcommand does not have too | 255 | option values are converted before the unknown option is reported; alone, the unknown option is 252 |
-| `help`, an unknown subcommand, or a usage error in a subcommand's own arguments, with an unusable instance-metadata setting (`AWS_METADATA_SERVICE_TIMEOUT=abc`) | 255 | the credential chain is set up, and its settings checked, once the global options are parsed and before any subcommand is looked at |
+| a non-integer `--page-size`, `--expires-in` or `--progress-frequency` | 255 | the number is converted after the command line is parsed, as on `aws s3` |
 | `cp --expected-size` with a non-integer | 1 when uploading a stream (0 under `--dryrun`), 0 otherwise | the value is read only on the streaming route, and never on a dry run |
 | `rb --force` whose object deletion fails | 255 | the bucket removal never runs |
-| a region set to an empty value, with a bad path or option pairing too | 255 without an endpoint URL; with one (`--endpoint-url` or the environment) the path or option check's own code, 252 or 1 | every subcommand builds its S3 client before it validates paths, and an empty region has no endpoint to derive; an explicit endpoint sidesteps the derivation and the build succeeds (a region merely *unset* builds fine either way, so those checks keep their own codes) |
-| an unusable `[s3]` value on `cp` / `mv` / `sync` / `rm`, with a bad path too | 252 | the path is validated first; without the path error it is 255 |
 | `mv --validate-same-s3-paths` whose lookup fails | 254 if the service answered, 255 if it could not be reached | the check calls out before the move begins |
 
-All of this matches `aws s3`, including the orderings above.
+Only what each code means is promised. When two things are wrong at once,
+which one is reported - and so which code you get - may differ from
+`aws s3`, so a script should not depend on it.
 
 ## 3. Where this differs from `aws s3`
 
@@ -183,21 +205,16 @@ Two cases where the codes are deliberately not identical:
 - **The CRT transfer engine without the `crt` extra** exits 253; a CRT-only
   `--checksum-algorithm` without it fails per item at exit code 1 instead.
   `aws` v2 bundles awscrt, so neither situation can arise there.
-- **A corrupted ranged download** exits 0 here and 1 under `aws`. See
-  [`aws-differences.md`](./aws-differences.md) for how to get that check back.
+- **A `file://` or `fileb://` reference that `aws` mishandles** exits 252:
+  a `fileb://` path argument (on `aws`, 252, 255 or an `rm` that deletes
+  the decoded path, by command), either prefix as `website`'s bucket, a
+  whole `--metadata fileb://...` (255 on `aws`), and a single `--grants`
+  value with either prefix (on `aws`, 1 in flight, or 0 for an empty file).
 
-A few other paths settle on different codes too — a download body cut
-mid-stream, a plain-HTTP
-endpoint taken from the environment under the CRT engine, an `aws` plugin that
-imports `awscli` modules, exits, raises outside Python's `Exception` family or
-unregisters one of the SDK's own handlers, a `[toplevel]` alias that leads to
-another `aws` command, a timeout typed beside an alias, a `cli_history`
-directory `aws` cannot create, an invalid
-`AWS_DEFAULTS_MODE` or `sts_regional_endpoints` value, the `PYTHON*`
-environment variables, a stdout or an error report that cannot be written, and
-a standard stream that cannot be set up at all. Section 2 of
-[`aws-differences.md`](./aws-differences.md) has each of them, with why it is
-not mirrored.
+A few other paths settle on different codes too. Section 1 of
+[`aws-differences.md`](./aws-differences.md) lists every run that comes out
+differently, and its section 2 has each of them, with why it is not
+mirrored.
 
 [`compatibility.md`](../compatibility.md) covers what else changes with the
 installed dependencies.

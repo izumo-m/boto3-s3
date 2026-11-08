@@ -55,7 +55,8 @@ Raises:
   target, whose client is this instance's `client()`, and an `S3Storage`
   constructed without a `client`, which builds its default on first use.
   Missing credentials fail no build: they raise `ConfigurationError` when the
-  `DeleteBucket` request is signed.
+  `DeleteBucket` request is signed. An S3 Express location the SDK predates
+  raises `ConfigurationError` naming the version, before any request.
 - The `DeleteBucket` rejection itself, translated to its category:
   `NoSuchBucket` becomes [`NotFoundError`](../exceptions.md#notfounderror), a
   403 becomes [`AccessDeniedError`](../exceptions.md#accessdeniederror), a 5xx
@@ -66,9 +67,9 @@ Raises:
   originating botocore `ClientError` is kept on `__cause__`. The full mapping
   is in [`../exceptions.md`](../exceptions.md).
 - [`Boto3S3Error`](../exceptions.md#boto3s3error) itself — any other exception
-  the `DeleteBucket` call raised from inside botocore, such as a redirect loop
-  ending in `RecursionError` or a response missing an element botocore reads;
-  the original is kept on `__cause__`, the same capture a per-item failure
+  the `DeleteBucket` call raised from inside botocore, such as the
+  `FileNotFoundError` of a refreshing `credential_process` whose program is
+  gone; the original is kept on `__cause__`, the same capture a per-item failure
   gets. `AssertionError` alone is not translated.
 
 ## boto3_s3.rb

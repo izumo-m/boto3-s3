@@ -2,12 +2,14 @@
 
 `boto3-s3` masks, by default, any credentials that flow into debug logs
 (`--debug` / `boto3_s3.set_stream_logger`). This is a **safety feature this
-project adds beyond aws-cli / boto3**, not a parity item (aws-cli / boto3 mask
-nothing other than the proxy URL via `mask_proxy_url`, and boto3 merely warns in
-its docstring "do not use in production"). This document is the source of truth
-for that design. The implementation lives in `src/boto3_s3/masking.py`, the CLI
-wiring in `cli/src/boto3_s3_cli/cli.py`, and the startup-cost contract in
-[`imports.md`](./imports.md).
+project adds beyond aws-cli / boto3** (aws-cli / boto3 mask nothing other than
+the proxy URL via `mask_proxy_url`, and boto3 merely warns in its docstring "do
+not use in production"): a deliberate deviation, since security comes before
+compatibility ([`overview.md`](./overview.md) section 3), recorded in
+[`aws-differences.md`](../docs/cli/aws-differences.md). This document is the
+source of truth for that design. The implementation lives in
+`src/boto3_s3/masking.py`, the CLI wiring in `cli/src/boto3_s3_cli/cli.py`, and
+the startup-cost contract in [`imports.md`](./imports.md).
 
 ## 1. Purpose and positioning
 
@@ -71,9 +73,9 @@ in the `http.client` wire dump (verified against live botocore).
 These all go through Python `logging`, so a **`logging.Filter` attached to the
 handler** can capture and mask all of them. The `http.client` wire dump
 (`send: b'...'`) appears only when `http.client.HTTPConnection.debuglevel >= 1`,
-but neither botocore, nor aws, nor this project raises debuglevel, so it does not
-appear under `--debug`. We therefore do not handle a monkeypatch of `http.client`
-(it would be a no-op).
+but neither botocore, nor aws-cli, nor this project raises debuglevel, so it does
+not appear under `--debug`. We therefore do not handle a monkeypatch of
+`http.client` (it would be a no-op).
 
 ## 3. Design
 
@@ -132,7 +134,7 @@ masked debug output the supported way (run the CLI with `--debug`, or call
 As in section 2, the `http.client` wire dump does not appear under the default
 `--debug`.
 
-## 4. Replacement notation (parity)
+## 4. Replacement notation
 
 **Secret values are replaced with `***`**, following the one masking mechanism
 aws-cli / boto3 do have: `botocore.httpsession.mask_proxy_url` (`mask = '*' * 3`,
@@ -210,8 +212,8 @@ one by the signature's shape instead (the table's SigV2 row).
   it is not masked (we do not rewrite other parties' handlers). This is the line we
   draw as a boto3-faithful superset: "add a safe path, but do not break boto3's
   path."
-- This is not a parity item (aws-cli / boto3 do not mask). It is independent of
-  the exit code charter.
+- Masking is a deliberate deviation from aws-cli / boto3, which do not mask
+  (security before compatibility, overview.md section 3).
 
 ## 7. Tests
 

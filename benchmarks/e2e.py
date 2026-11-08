@@ -102,8 +102,10 @@ class E2EScenario:
     scenarios purge the previous invocation's output, keeping the dev stack's
     tmpfs-backed storage bounded. `verify` runs on both warmup results only -
     it guards against a run that silently did no work, which would otherwise
-    record fake-fast timings. `top_level` marks argv for the program itself
-    (``--version``), where aws takes no ``s3`` token. `payload_bytes` is what
+    record fake-fast timings. `verify_each` extends it to every timed
+    invocation, for a scenario whose input is what the previous invocation
+    left. `top_level` marks argv for the program itself
+    (``--version``), where `aws` takes no ``s3`` token. `payload_bytes` is what
     one invocation moves (transfer scenarios only); the report turns it into
     throughput.
     """
@@ -114,6 +116,7 @@ class E2EScenario:
     setup: Callable[[E2EEnv], None] | None = None
     reset: Callable[[E2EEnv], None] | None = None
     verify: Callable[[E2EEnv, Side, CliResult], None] | None = None
+    verify_each: bool = False
     samples: int = 5
     crt_capable: bool = False
     top_level: bool = False
@@ -126,17 +129,25 @@ def check_environment() -> tuple[str, str]:
 
     Three shapes are accepted: the local dev stack (an `AWS_ENDPOINT_URL_S3` on
     a local host plus the static dev keys), a deliberate non-local endpoint, and real
-    S3 (no endpoint override, credentials from the default chain - a profile or
-    an instance role). The last two both require the explicit
+    S3 (no endpoint override). The last two both require the explicit
     `BOTO3_S3_BENCH_ALLOW_REMOTE` opt-in so a bare run cannot touch real AWS by
-    accident.
+    accident, and take their credentials from the environment or an instance
+    role (`_check_remote_credentials`). Real S3 also needs a region; another
+    endpoint is signed for us-east-1 unless one is set (`_build_client`).
+
+    Both executables come from the interpreter's own environment, so the run
+    measures the tree its results file names: `boto3-s3` is the console script
+    next to the running Python, and `aws` the pinned binary
+    scripts/install-awscli.sh installs there. Only when it is not there (on
+    Windows, where scripts/dev-env.cmd puts the pinned aws.exe first on PATH)
+    is `aws` taken from PATH.
     """
     endpoint = os.environ.get("AWS_ENDPOINT_URL_S3")
     opted_in = awsenv.remote_opted_in()
     if not endpoint:
         if not opted_in:
             raise BenchmarkError(f"no AWS_ENDPOINT_URL_S3 set; {_SETUP_HINT}")
-        _check_remote_credentials()
+        _check_remote_credentials(require_region=True)
     elif awsenv.targeting_local_stack():
         missing = [
             name
@@ -152,45 +163,81 @@ def check_environment() -> tuple[str, str]:
             f"purge a {BUCKET!r} bucket and transfer hundreds of MB. Set "
             f"{awsenv.ALLOW_REMOTE_ENV}=1 if that endpoint really is the intended target."
         )
-    ours = shutil.which("boto3-s3")
+    else:
+        _check_remote_credentials(require_region=False)
+    bindir = str(Path(sys.executable).parent)
+    ours = shutil.which("boto3-s3", path=bindir)
     if ours is None:
         raise BenchmarkError(
-            "boto3-s3 console script not on PATH; run via `uv run python -m benchmarks run`"
+            f"no boto3-s3 console script next to {sys.executable}; run via "
+            "`uv run python -m benchmarks run` after `uv sync --all-packages --locked`"
         )
-    aws = shutil.which("aws")
+    aws = shutil.which("aws", path=bindir) or shutil.which("aws")
     if aws is None:
-        raise BenchmarkError(f"aws binary not on PATH; {_SETUP_HINT}")
+        raise BenchmarkError(f"no aws binary next to {sys.executable} or on PATH; {_SETUP_HINT}")
     return ours, aws
 
 
-def _check_remote_credentials() -> None:
-    """Fail fast when a real-S3 run has no region or no resolvable credentials.
+# Environment variables that would point a CLI at the host's AWS profiles or
+# credentials file; every child runs without them (`_child_env`).
+_HOST_PROFILE_ENV = ("AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_SHARED_CREDENTIALS_FILE")
 
-    Better to stop here than after seeding a corpus: create_bucket_in_region
-    needs the region, and every call needs credentials the default chain (env,
-    profile, or instance role) can produce.
+
+def _check_remote_credentials(*, require_region: bool) -> None:
+    """Fail fast when a run off the dev stack has no credentials, or real S3 no region.
+
+    Better to stop here than after seeding a corpus: every call needs
+    credentials, and on real S3 create_bucket_in_region needs the region.
+    Both CLIs run with their home in the run's work root and
+    `AWS_CONFIG_FILE` at the per-engine config, so neither sees the host's
+    profiles or credentials file; the credentials are looked up the same way
+    here (`_harness_session`), and a profile is refused outright rather than
+    silently ignored - first, since resolving the region would otherwise
+    fail on a profile the host does not define.
     """
-    if awsenv.resolve_region() is None:
+    named = [name for name in ("AWS_PROFILE", "AWS_DEFAULT_PROFILE") if os.environ.get(name)]
+    if named:
         raise BenchmarkError(
-            "real-S3 run needs a region; set AWS_REGION or use a profile that has one"
+            f"a run off the dev stack cannot use {' or '.join(named)}: both CLIs run without "
+            "the host's ~/.aws, so a profile is invisible to them. Export the credentials "
+            "into the environment (e.g. `aws configure export-credentials --format env`) or "
+            "run from an instance role."
         )
-    if os.environ.get("AWS_PROFILE"):
-        # Both CLIs run with AWS_CONFIG_FILE pointed at the per-engine config,
-        # which hides every [profile ...] section from them; the harness's own
-        # pre-flight would pass and the first CLI invocation would fail.
+    if require_region and awsenv.resolve_region() is None:
         raise BenchmarkError(
-            "real-S3 run cannot use AWS_PROFILE: the harness pins AWS_CONFIG_FILE for both "
-            "CLIs, so a profile is invisible to them. Export the credentials into the "
-            "environment (e.g. `aws configure export-credentials --format env`) or run "
-            "from an instance role."
+            "real-S3 run needs a region; set AWS_REGION (or a region under [default] in the "
+            "host's AWS config)"
         )
+    if _harness_session().get_credentials() is None:
+        raise BenchmarkError(
+            "a run off the dev stack found no credentials (checked the environment and an "
+            "instance role)"
+        )
+
+
+def _harness_session() -> Any:
+    """The botocore session the harness's own S3 calls use.
+
+    On the dev stack, the default one (the dev keys are in the environment).
+    Anywhere else, one that reads no config or credentials file, so the
+    harness finds credentials exactly where the CLIs can: the environment or
+    an instance role. A credential in the host's ~/.aws would otherwise seed
+    a corpus that neither CLI could then reach.
+    """
     import botocore.session
 
-    session: Any = botocore.session.Session(profile=os.environ.get("AWS_PROFILE"))
-    if session.get_credentials() is None:
-        raise BenchmarkError(
-            "real-S3 run found no credentials (checked env, profile, and instance role)"
-        )
+    session: Any = botocore.session.Session()
+    if not awsenv.targeting_local_stack():
+        session.set_config_variable("config_file", os.devnull)
+        session.set_config_variable("credentials_file", os.devnull)
+    return session
+
+
+def _child_env(overlay: Mapping[str, str]) -> dict[str, str]:
+    """The environment one CLI invocation runs in: the host's, minus its profile, plus *overlay*."""
+    env = {key: value for key, value in os.environ.items() if key not in _HOST_PROFILE_ENV}
+    env.update(overlay)
+    return env
 
 
 def aws_version(aws_exe: str) -> str:
@@ -203,7 +250,7 @@ def _build_client() -> Any:
 
     # No endpoint override means real S3; the dev stack reports us-east-1, so that is
     # the only place the default applies.
-    return boto3.client(
+    return boto3.Session(botocore_session=_harness_session()).client(
         "s3",
         endpoint_url=os.environ.get("AWS_ENDPOINT_URL_S3"),
         region_name=awsenv.resolve_region() or "us-east-1",
@@ -226,9 +273,15 @@ def _bench_bucket() -> str:
     if override:
         # The EC2 launcher names the run's bucket so it can remove exactly that
         # one if the run is cut short; it must stay in the family the instance
-        # role is scoped to.
+        # role is scoped to, and never be the persistent hand-off bucket, which
+        # the run purges and deletes at its end.
         if not override.startswith(BUCKET + "-"):
             raise BenchmarkError(f"{BUCKET_ENV} must start with {BUCKET + '-'!r}: {override!r}")
+        if override.startswith(BUCKET + "-boot-"):
+            raise BenchmarkError(
+                f"{BUCKET_ENV} names the EC2 hand-off bucket family {BUCKET + '-boot-'!r}: "
+                f"{override!r}"
+            )
         return override
     import secrets
 
@@ -240,7 +293,7 @@ def _write_engine_config(workroot: Path, engine: str) -> Path:
 
     Same mechanism as the e2e test suite: pinning ``preferred_transfer_client``
     explicitly keeps the host's ``~/.aws/config`` tuning out and makes the
-    engine an explicit benchmark dimension for aws and boto3-s3 alike.
+    engine an explicit benchmark dimension for aws-cli and boto3-s3 alike.
     """
     config = workroot / f"aws-config-{engine}"
     config.write_text(f"[default]\ns3 =\n  preferred_transfer_client = {engine}\n")
@@ -253,7 +306,7 @@ def _invoke(
     """Run one side once: (wall-clock seconds, outcome, peak RSS in bytes or None)."""
     argv = scenario.make_argv(env, side)
     if env.engine == "crt" and not scenario.top_level:
-        # aws's CRT client reads use_ssl from the CLI argument only, so an
+        # aws-cli's CRT client reads use_ssl from the CLI argument only, so an
         # env-only AWS_ENDPOINT_URL_S3 makes it dial TLS to the dev stack's http
         # endpoint and fail (AWS_IO_SOCKET_CLOSED). Same workaround as the
         # e2e CRT parity lane (endpoint-fidelity T2): pass --endpoint-url
@@ -269,7 +322,7 @@ def _invoke(
     else:
         cmd = [env.aws_exe, "s3", *argv]
     try:
-        return _run_child(cmd, {**os.environ, **env.overlay})
+        return _run_child(cmd, _child_env(env.overlay))
     except subprocess.TimeoutExpired as exc:
         raise BenchmarkError(
             f"[{scenario.name}] {side.value} exceeded {_SUBPROCESS_TIMEOUT:.0f}s: {cmd}"
@@ -444,7 +497,7 @@ def build_scenarios(quick: bool, *, large_mb: int = DEFAULT_LARGE_MB) -> list[E2
         E2EScenario(
             name="startup_minimal",
             dimensions={},
-            # Both CLIs exit 1 on an empty listing (aws parity); accept 0 too
+            # Both CLIs exit 1 on an empty listing (aws-cli parity); accept 0 too
             # so the probe never breaks on an endpoint that differs there.
             ok_rcs=frozenset({0, 1}),
             make_argv=lambda env, _side: ["ls", env.s3_url(env.s3_prefix("nothing"))],
@@ -562,6 +615,10 @@ def build_scenarios(quick: bool, *, large_mb: int = DEFAULT_LARGE_MB) -> list[E2
 
     changed_total = _scale(10_000, quick)
     changed_count = _scale(2_000, quick)
+    # The changed subset's local size, alternating per invocation: each one
+    # uploads the subset, so the next needs the other size to differ again.
+    # Both sit a byte or two off the corpus's 1 KB.
+    changed_sizes = itertools.cycle((1025, 1026))
 
     def sync_changed_setup(env: E2EEnv) -> None:
         # Local tree a day old, remote seeded now at the same size: the
@@ -578,18 +635,15 @@ def build_scenarios(quick: bool, *, large_mb: int = DEFAULT_LARGE_MB) -> list[E2
         )
 
     def sync_changed_reset(env: E2EEnv) -> None:
-        # Re-stale the first `changed_count` keys by *size* (2 KB against a
-        # 1 KB local file): a size mismatch forces the upload whatever the
-        # timestamps say, and the previous invocation's uploads (which made
-        # them 1 KB again) are undone. Only the subset is rewritten, so the
-        # reset costs changed_count puts, not the whole corpus.
-        workload.seed_prefix(
-            env.client,
-            env.bucket,
-            env.s3_prefix("sync_changed") + "corpus/",
-            changed_count,
-            2048,
-        )
+        # Make the first `changed_count` local files differ by *size* from
+        # their remote copies (which the previous invocation, if any, uploaded
+        # at the other size): a size mismatch forces the upload whatever the
+        # timestamps say. The local side changes, not the remote one, so the
+        # reset costs no request.
+        body = b"x" * next(changed_sizes)
+        tree = env.dir_for("sync_changed") / "tree"
+        for rel in workload.rel_paths(changed_count):
+            (tree / rel).write_bytes(body)
 
     scenarios.append(
         E2EScenario(
@@ -599,7 +653,7 @@ def build_scenarios(quick: bool, *, large_mb: int = DEFAULT_LARGE_MB) -> list[E2
                 "changed_count": str(changed_count),
                 "file_size": "1KB",
             },
-            payload_bytes=changed_count * 1024,
+            payload_bytes=changed_count * 1025,
             crt_capable=True,
             setup=sync_changed_setup,
             reset=sync_changed_reset,
@@ -773,6 +827,90 @@ def build_scenarios(quick: bool, *, large_mb: int = DEFAULT_LARGE_MB) -> list[E2
         )
     )
 
+    # mv is cp plus the removal of each source. The download keeps
+    # cp_download_small_1k's shape, so the gap between the two rows is the
+    # removal's cost; it empties its source, so the source is re-seeded and
+    # the previous destination removed before every invocation (warmup
+    # included). The S3-to-S3 move instead moves the corpus back the other way
+    # each time - its copies are the next source - so it is seeded once. An
+    # S3-to-S3 copy runs on the classic engine in both tools, so that row has
+    # no CRT lane.
+    mv_count = _scale(1_000, quick)
+    mv_s3_ends = ("a/", "b/")
+    # Which end the next invocation moves from; the reset flips it first, so
+    # the first invocation moves a/ to b/.
+    mv_s3_from = [1]
+
+    def move_count_verify(name: str, expected: int) -> Callable[..., None]:
+        def verify(_env: E2EEnv, side: Side, result: CliResult) -> None:
+            moves = [line for line in result.stdout.splitlines() if line.startswith("move:")]
+            if len(moves) != expected:
+                raise VerificationError(
+                    f"[{name}] {side.value} reported {len(moves)} moves, expected {expected}"
+                )
+
+        return verify
+
+    def mv_s3_setup(env: E2EEnv) -> None:
+        mv_s3_from[0] = 1
+        workload.seed_prefix(
+            env.client, env.bucket, env.s3_prefix("mv_s3") + mv_s3_ends[0], mv_count, 4096
+        )
+
+    def mv_s3_reset(_env: E2EEnv) -> None:
+        mv_s3_from[0] = 1 - mv_s3_from[0]
+
+    def mv_s3_argv(env: E2EEnv, _side: Side) -> list[str]:
+        source = mv_s3_ends[mv_s3_from[0]]
+        dest = mv_s3_ends[1 - mv_s3_from[0]]
+        return [
+            "mv",
+            "--recursive",
+            env.s3_url(env.s3_prefix("mv_s3") + source),
+            env.s3_url(env.s3_prefix("mv_s3") + dest),
+        ]
+
+    scenarios.append(
+        E2EScenario(
+            name="mv_s3_to_s3_1k",
+            dimensions={"key_count": str(mv_count), "object_size": "4KB"},
+            setup=mv_s3_setup,
+            reset=mv_s3_reset,
+            make_argv=mv_s3_argv,
+            verify=move_count_verify("mv_s3_to_s3", mv_count),
+            # An invocation that moved nothing leaves the next one no source,
+            # and that one would be fake-fast with an rc of 0. Only stdout is
+            # read, so this costs no request.
+            verify_each=True,
+        )
+    )
+
+    def mv_dl_reset(env: E2EEnv) -> None:
+        from tests.utils.harness import delete_under
+
+        delete_under(env.client, env.bucket, env.s3_prefix("mv_dl"))
+        workload.seed_prefix(
+            env.client, env.bucket, env.s3_prefix("mv_dl") + "src/", mv_count, 4096
+        )
+        shutil.rmtree(env.dir_for("mv_dl") / "dest", ignore_errors=True)
+
+    scenarios.append(
+        E2EScenario(
+            name="mv_download_small_1k",
+            dimensions={"file_count": str(mv_count), "file_size": "4KB"},
+            payload_bytes=mv_count * 4096,
+            crt_capable=True,
+            reset=mv_dl_reset,
+            make_argv=lambda env, side: [
+                "mv",
+                "--recursive",
+                env.s3_url(env.s3_prefix("mv_dl") + "src/"),
+                str(env.dir_for("mv_dl") / "dest" / env.unique(side)),
+            ],
+            verify=move_count_verify("mv_download_small", mv_count),
+        )
+    )
+
     rm_count = _scale(2_000, quick)
 
     def rm_reset(env: E2EEnv) -> None:
@@ -837,7 +975,12 @@ def _run_scenario(
                 scenario.reset(env)
             elapsed, result, peak = _invoke(env, scenario, side)
             _require_rc(scenario, side, f"round {round_index}", result)
-            if side is Side.OURS:
+            if scenario.verify_each and scenario.verify is not None:
+                scenario.verify(env, side, result)
+            # The self-test handicap spares the probe every net subtracts:
+            # inflating it too would cancel out of each work row's net, and the
+            # ratio flags would never fire.
+            if side is Side.OURS and scenario.name != "startup_minimal":
                 elapsed += handicap
             samples[side.value].append(elapsed)
             if peak is None:
@@ -865,76 +1008,102 @@ def run_scenarios(
     handicap: float = 0.0,
     log: Callable[[str], None],
 ) -> tuple[list[ScenarioResult], list[str]]:
-    """Run the scenario set per engine against a freshly created `BUCKET`.
+    """Run the scenario set per engine against a bucket created for the run.
 
-    The bucket is force-deleted first (a leftover from an aborted run must
-    not skew seeding) and again in the finally, so no state survives the run.
     Non-``classic`` engines run only the ``crt_capable`` scenarios plus the
     startup probes their net adjustment needs.
 
     Returns ``(results, failures)``: one scenario failing (an unexpected rc,
-    a verification mismatch, a local I/O error such as a full work tree) is
-    logged and skipped rather than discarding every completed measurement
-    with it - a multi-minute run must not be lost to one flaky lane.
-    Environment/bucket errors still abort the whole run. Each engine's work
-    tree is removed before the next engine seeds its own, so the large
-    payloads of two engines never coexist: the EC2 lane's tmpfs is sized for
-    one engine's.
+    a verification mismatch, a local I/O error such as a full work tree, an
+    S3 error while staging its input) is logged and skipped rather than
+    discarding every completed measurement with it - a multi-minute run must
+    not be lost to one flaky lane. An environment error or a bucket that
+    cannot be created still aborts the whole run; a bucket that cannot be
+    deleted at the end is recorded as a failure, so the measurements are
+    kept. Each engine's work tree is removed before the next engine seeds its
+    own, so the large payloads of two engines never coexist: the EC2 lane's
+    tmpfs is sized for one engine's.
+
+    The bucket is purged and deleted at the end, so no state survives the
+    run. Only the dev stack's fixed name can still hold an aborted run's
+    leftovers, so only there is it cleared before it is created. Anywhere
+    else the name is this run's own (`_bench_bucket`): there is nothing to
+    clear, and the existence check would cost a ListBuckets the EC2 instance
+    role has no permission for. The end-of-run delete names the bucket only
+    once this run has created it (endpoint-fidelity T4).
     """
-    from tests.utils.harness import create_bucket_in_region, force_delete_bucket
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    from tests.utils.harness import create_bucket_in_region, delete_under, force_delete_bucket
 
     ours_exe, aws_exe = check_environment()
     client = _build_client()
     bucket = _bench_bucket()
     region = awsenv.resolve_region()
-    workroot = Path(tempfile.mkdtemp(prefix="boto3-s3-bench-e2e-"))
     results: list[ScenarioResult] = []
     failures: list[str] = []
-    force_delete_bucket(client, bucket)
-    create_bucket_in_region(client, bucket)
+    workroot = Path(tempfile.mkdtemp(prefix="boto3-s3-bench-e2e-"))
     try:
-        for engine in engines:
-            config = _write_engine_config(workroot, engine)
-            overlay = {
-                "AWS_CONFIG_FILE": str(config),
-                "AWS_CLI_AUTO_PROMPT": "off",
-                "AWS_PAGER": "",
-                # The engine config replaces ~/.aws/config, so hand both CLIs
-                # the region explicitly (real S3 needs it; harmless on the dev stack).
-                **({"AWS_REGION": region, "AWS_DEFAULT_REGION": region} if region else {}),
-            }
-            env = E2EEnv(
-                client=client,
-                bucket=bucket,
-                engine=engine,
-                workdir=workroot / engine,
-                ours_exe=ours_exe,
-                aws_exe=aws_exe,
-                overlay=overlay,
-            )
-            try:
-                for scenario in scenarios:
-                    if engine != "classic" and not (
-                        scenario.crt_capable or scenario.name.startswith("startup_")
-                    ):
-                        continue
-                    try:
-                        results.append(
-                            _run_scenario(
-                                env,
-                                scenario,
-                                samples_override=samples_override,
-                                handicap=handicap,
-                                log=log,
+        # The CLIs' home: neither reads the host's ~/.aws (the e2e suite's
+        # `_isolated_home`), and the pinned aws writes its session cache here
+        # instead of into the host's. USERPROFILE is what Windows reads.
+        home = workroot / "home"
+        home.mkdir()
+        if awsenv.targeting_local_stack():
+            force_delete_bucket(client, bucket)
+        create_bucket_in_region(client, bucket)
+        try:
+            for engine in engines:
+                config = _write_engine_config(workroot, engine)
+                overlay = {
+                    "HOME": str(home),
+                    "USERPROFILE": str(home),
+                    "AWS_CONFIG_FILE": str(config),
+                    "AWS_CLI_AUTO_PROMPT": "off",
+                    "AWS_PAGER": "",
+                    # The engine config replaces ~/.aws/config, so hand both CLIs
+                    # the region explicitly (real S3 needs it; harmless on the dev stack).
+                    **({"AWS_REGION": region, "AWS_DEFAULT_REGION": region} if region else {}),
+                }
+                env = E2EEnv(
+                    client=client,
+                    bucket=bucket,
+                    engine=engine,
+                    workdir=workroot / engine,
+                    ours_exe=ours_exe,
+                    aws_exe=aws_exe,
+                    overlay=overlay,
+                )
+                try:
+                    for scenario in scenarios:
+                        if engine != "classic" and not (
+                            scenario.crt_capable or scenario.name.startswith("startup_")
+                        ):
+                            continue
+                        try:
+                            results.append(
+                                _run_scenario(
+                                    env,
+                                    scenario,
+                                    samples_override=samples_override,
+                                    handicap=handicap,
+                                    log=log,
+                                )
                             )
-                        )
-                    except (BenchmarkError, OSError) as exc:
-                        message = f"[e2e/{engine}] {scenario.name}: {exc}"
-                        log(f"{message}\n[e2e/{engine}] {scenario.name}: scenario skipped")
-                        failures.append(message)
-            finally:
-                shutil.rmtree(env.workdir, ignore_errors=True)
+                        except (BenchmarkError, OSError, ClientError, BotoCoreError) as exc:
+                            message = f"[e2e/{engine}] {scenario.name}: {exc}"
+                            log(f"{message}\n[e2e/{engine}] {scenario.name}: scenario skipped")
+                            failures.append(message)
+                finally:
+                    shutil.rmtree(env.workdir, ignore_errors=True)
+        finally:
+            try:
+                delete_under(client, bucket, "")
+                client.delete_bucket(Bucket=bucket)
+            except (ClientError, BotoCoreError) as exc:
+                message = f"[e2e] could not delete bucket {bucket}: {exc}"
+                log(message)
+                failures.append(message)
     finally:
-        force_delete_bucket(client, bucket)
         shutil.rmtree(workroot, ignore_errors=True)
     return results, failures

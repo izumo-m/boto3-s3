@@ -3,7 +3,7 @@
 `Storage` is what each side of an operation resolves to: a local path, an S3
 bucket/prefix, a caller-supplied stream, or an application's own backend. This
 page specifies the abstract contract, the capability declaration that gates it,
-the four built-in implementations, and the override seams of the local
+the built-in implementations, and the override seams of the local
 directory walk.
 
 The walkthrough for writing a backend is
@@ -17,7 +17,8 @@ Every symbol below is exported from the `boto3_s3` root. Each is also
 importable from its own module: `Storage` / `Location` / `StorageCapability`
 from `boto3_s3.storage`, `LocalStorage` / `LocalFileGenerator` / `WalkChild` /
 `LoopDetector` from `boto3_s3.localstorage`, `S3Storage` from
-`boto3_s3.s3storage`, `IOStorage` / `StdioStorage` from `boto3_s3.iostorage`.
+`boto3_s3.s3storage`, and the stream storages (`IOStorageBase` / `IOStorage` /
+`StdioStorage` / `TextIOStorageBase` / `TextIOStorage`) from `boto3_s3.iostorage`.
 
 ## Storage
 
@@ -84,6 +85,15 @@ built-in keeps the built-in route whatever `scheme` says, and any other
 ([`./results.md`](./results.md)); `LocalStorage` overrides it with the host
 `os.sep`.
 
+`FileInfo.key` is this backend's own address of the entry — an S3 object key,
+an absolute local path, or whatever addresses the entry in a custom backend —
+and never a URL that names the backend: no scheme such as `s3://` or
+`http://` is put in front of the address. Which backend an entry
+belongs to is its `FileInfo.storage`. The address itself may hold any
+characters, so an S3 key that contains `://` and a Windows path `C:/...` are
+keys like any other. For a custom backend this is a contract on its own code:
+documented, and not checked.
+
 `capabilities` is the class-level flag set of transfer operations this storage
 *kind* implements. The default declares nothing, so a subclass that forgets it
 is refused every gated route rather than admitted by accident. A subclass may
@@ -101,10 +111,9 @@ backend that defines its own subclass sets this attribute and overrides
 nothing; a backend that takes the base `ScanOptions` sets nothing.
 
 `scan_pages_filters` declares that `scan_pages` already applies
-`options.filter` itself. When it is `False` (the default), `scan` re-applies
-the predicate after `scan_pages` as a safety net, so a backend that forgets to
-filter cannot leak excluded entries into an include/exclude run or, on a `sync`
-destination with deletes enabled, into deletion. Both built-ins set `True`.
+`options.filter` itself. When it is `False` (the default), `scan` applies the
+predicate after `scan_pages`, so such a backend need not filter at all; when it
+is `True`, filtering is the backend's to get right. Both built-ins set `True`.
 
 ### Capability gates
 
@@ -145,10 +154,10 @@ item — an S3 `403`, a local `EACCES` or `ENOENT` — not by this pre-check. Th
 one pre-flight exception is the transfer commands' missing-local-source check,
 which runs before items flow.
 
-`cp` with an `IOStorage` on either side is diverted to its stream path before a
-transfer plan exists, so no capability check runs on that route. A `mv` onto a
-stream destination does go through the S3-to-custom route and is gated on
-`OPEN_WRITE`, which `IOStorage` declares.
+`cp` with a stream storage (an `IOStorageBase`) on either side is diverted to
+its stream path before a transfer plan exists, so no capability check runs on
+that route. A `mv` onto a stream destination does go through the S3-to-custom
+route and is gated on `OPEN_WRITE`, which `IOStorageBase` declares.
 
 ### scan(options=None, \*, cancel_token=None)
 
@@ -162,15 +171,27 @@ raised by the producer surfaces on the consumer's pull.
 the base knobs must arrive on its own `ScanOptions` subclass; the built-ins
 reject a foreign options type.
 
-`cancel_token` ([`./results.md`](./results.md)) stops the producer before its
-next page pull. Entries already yielded to the consumer are unaffected.
+`cancel_token` ([`./results.md`](./results.md)) ends the entries at once when
+it is cancelled, without raising: pages already fetched are dropped, no further
+page pull starts, and one already in flight is not waited for (but under
+`read_ahead=False` that pull runs on the calling thread, so it is). The
+iteration then simply ends, so a direct caller checks the token to tell a
+cancelled scan from a complete listing. Entries already yielded to the consumer
+are unaffected.
+
+Closing the scan before its end does not wait for a page pull already in
+flight, which can take a full network timeout: the prefetch worker is told to
+stop, drops the page it brings back and ends by itself, so `options.filter` can
+still run on that page after the close.
 
 Two things happen between the producer and the consumer. Each entry whose
-`storage` is still `None` is stamped with this backend — a safety net for a
-`scan_pages` that did not stamp it, applied ahead of the filter so a predicate
-always sees the producing backend. Then, unless the class declares
+`storage` is still `None` is stamped with this backend, so a `scan_pages`
+need not stamp it; this runs ahead of the filter, so a predicate always sees
+the producing backend. Then, unless the class declares
 `scan_pages_filters`, `options.filter` is applied page by page on the prefetch
-worker; a page emptied by the predicate is dropped rather than yielded empty.
+worker. A page the predicate empties is not handed to the consumer, but its
+pull returns, so a stop or a cancel takes effect between pages even when a
+selective filter rejects page after page.
 
 `ScanOptions(read_ahead=False)` ([`./options.md`](./options.md)) drops the
 overlap: each page is pulled on the calling thread when the consumer reaches
@@ -184,16 +205,19 @@ backend implements and the point to override — including by calling
 `super().scan_pages(options)` and transforming its pages, which keeps the
 page-ahead overlap that re-implementing `scan` would lose.
 
-`options.filter` must be applied here, and the pages returned already filtered:
-whatever this producer omits is simply absent downstream. A backend that cannot
-push the predicate to its source wraps its raw pages with
-`boto3_s3.storage.sieve_pages`; one that can translates the predicate into a
-server-side query instead.
+A backend that declares `scan_pages_filters` applies `options.filter` here and
+returns the pages already filtered: whatever this producer omits is simply
+absent downstream. It either wraps its raw pages with
+`boto3_s3.storage.sieve_pages` or translates the predicate into a server-side
+query. A page the predicate empties should still be yielded, empty, as
+`sieve_pages` does: otherwise one pull runs on until the next kept entry, and
+a stop or a cancel waits for it. A backend that does not declare it leaves the
+filter to `scan`.
 
 `options.recursive` normally walks every transferable entry beneath the
 location, all of `FileKind.FILE` with no directory grouping; a backend-specific
 source setting may widen that view, as `LocalScanOptions.enumerate_all_entries`
-and `S3ScanOptions.include_common_prefixes` do. A non-recursive scan normally
+does. A non-recursive scan normally
 yields the immediate entries plus one `FileKind.DIRECTORY` entry per
 sub-"directory".
 
@@ -267,7 +291,9 @@ its skip messages and ignored by `S3Storage`.
 
 The outcomes are uniform across backends:
 
-- present — a `FileInfo` whose `compare_key` is the entry's basename, with
+- present — a `FileInfo` whose `compare_key` is the entry's basename (`""`
+  for a local directory at the location itself, named with a trailing
+  separator; see [`LocalStorage`](#localstorage)), with
   `kind` reflecting what was found (a local directory resolves as a
   `DIRECTORY`-kind entry that a transfer later fails on, matching `aws s3`);
 - definitively absent (an S3 `404`, a local `ENOENT` / `ENOTDIR`) — `None`,
@@ -310,9 +336,10 @@ their own held state.
 ### validate()
 
 Runs deferred strict validation on this location. Construction is permissive,
-so an operation — or the CLI at its parity point — calls this to reject a
-malformed location loudly before use. The base implementation is a concrete
-no-op; `S3Storage` and `LocalStorage` override it. Idempotent.
+so an operation — or the CLI at the point where `aws s3` makes the same check —
+calls this to reject a malformed location loudly before use. The base
+implementation is a concrete no-op; `S3Storage` and `LocalStorage` override it.
+Idempotent.
 
 When an operation runs the check, a `Boto3S3Error` raised here that names no
 operation is stamped with that operation's name; a direct call leaves
@@ -351,10 +378,9 @@ gates raise is built from this.
 
 `ScanOptions.sort` requests entries in UTF-8 byte order of their `compare_key`
 ([`./options.md`](./options.md)). **A backend declaring `SORTABLE_SCAN` must
-honor `sort=True`; nothing else promises any order.** The promise is not
-checked: a stream that breaks it is merged the way the AWS CLI merges an
-unsorted listing, mis-pairing — and with deletes on, removing destination
-entries the source has too ([`./comparator.md`](./comparator.md)).
+honor `sort=True`; nothing else promises any order.** Within one listing no two
+entries share a `compare_key`. Neither promise is checked: `sync`'s pairing, its
+deletes included, relies on both ([`./comparator.md`](./comparator.md)).
 
 `sync` is the only operation that sets `sort=True` — its merge-join walks both
 listings in ascending key order ([`./comparator.md`](./comparator.md)) — and it
@@ -365,7 +391,7 @@ may stream its natural order for those and pay the sort only for `sync`.
 
 The built-ins ignore the flag because they are ordered either way, with
 carve-outs worth stating exactly. `LocalStorage` sorts regardless of `sort`:
-its walk sorts every directory's children for `aws s3` parity, and its
+its walk sorts every directory's children to match `aws s3`, and its
 non-recursive one-level scan runs the same sort — but that ordering is the
 walker's, so an injected `walker` whose `finalize_children` re-orders or
 prunes decides it instead. `S3Storage` relies on `ListObjectsV2`
@@ -415,10 +441,11 @@ to enumerate anything.
 
 `OPEN_READ` and `OPEN_WRITE` promise `open(key, "rb")` and `open(key, "wb")`
 respectively; a backend that implements one mode declares only that one.
-`GET_FILEINFO` promises `get_fileinfo(key)`. `SCAN` promises `scan` /
-`scan_pages`. `SORTABLE_SCAN` promises that `scan` yields entries in UTF-8 byte
-order of their `compare_key` when `ScanOptions(sort=True)` asks for it.
-`DELETE` promises `delete(info)`.
+`GET_FILEINFO` promises `get_fileinfo(key="", *, on_warning=None)`, in that
+form, since the engine calls it with no `key` (the location itself) and with
+`on_warning`. `SCAN` promises `scan` / `scan_pages`. `SORTABLE_SCAN` promises
+that `scan` yields entries in UTF-8 byte order of their `compare_key` when
+`ScanOptions(sort=True)` asks for it. `DELETE` promises `delete(info)`.
 
 The three reading members form a lattice: `SORTABLE_SCAN` implies `SCAN`
 implies `GET_FILEINFO`, since ordered enumeration implies enumeration implies
@@ -460,6 +487,7 @@ class LocalStorage(Storage):
         detect_symlink_loops: bool = False,
         enumerate_all_entries: bool = False,
         fsync: bool = False,
+        filename_encoding: str | None = None,
     ) -> None: ...
 ```
 
@@ -492,18 +520,55 @@ every scan through `default_scan_options`, so an operation inherits them
 without being passed them; their per-entry meanings are on `LocalScanOptions`
 ([`./options.md`](./options.md)). `get_fileinfo` reads `follow_symlinks` only —
 the enumeration and loop settings shape a walk and do not apply to resolving
-one entry.
+one entry. It looks the location itself up in the AWS CLI's form: a path typed
+with a trailing `os.sep` (`\` on Windows, where `/` does not count) is looked
+up with one, so a file so named is absent, and a directory is named with one —
+its `key` ends in `/` and its `compare_key` is `""`. Its skip warnings name it
+the AWS CLI's way too: with the separator when symlinks are followed
+(`Skipping file /data/d/. ...`), without it when they are not.
 
-`fsync` is a destination-side durability knob, default off for `aws s3` parity.
+`fsync` is a destination-side durability knob, default off to match `aws s3`.
 When set, a `mv` whose download lands in this storage flushes the file to disk
 before the S3 source is deleted, and on POSIX its parent directory as well — a
 directory has no fsyncable handle on Windows, where the file flush alone is the
 durability step. The transfer engine reads it off the destination side and only
 on the `mv` download route.
 
-`path`, `abspath`, `fsync` and `walker` are read-only properties exposing the
-constructor input, the construction-time absolute form, the durability knob and
-the walk strategy respectively.
+`filename_encoding` names the encoding of local file names on POSIX. `None`,
+the default, is Python's own choice — the file system encoding
+(`sys.getfilesystemencoding()`), which depends on the Python version, the
+locale and UTF-8 mode — and converts nothing. With a name, every local name
+the storage holds is *text* in that encoding: `path` and `abspath`, the `key`
+and `compare_key` of each entry it lists, the `key` that `open`,
+`get_fileinfo` and `delete` take, and the paths its warnings and errors name
+are the name's bytes decoded with it (`surrogateescape` for bytes it cannot
+decode), and the OS gets that text encoded with it. A walk sorts by the text,
+so the order is S3's key order of the names the text becomes. Nothing is
+converted when the name is the file system encoding itself. A character the
+encoding cannot represent names no file: `exists()` is `False`, and an
+operation on it fails like Python's own call does for a character its file
+system encoding cannot represent (`ValidationError`, or the item's failure in
+a transfer). A listed name whose text encodes back to other bytes - an
+encoding that reads several byte sequences as one character, as cp932 does -
+would address another file, so the walk skips it with a warning. On Windows
+the OS names files in Unicode and the setting has no
+effect. An unknown codec raises `InvalidValueError` from the constructor.
+
+`path`, `abspath`, `fsync`, `walker` and `filename_encoding` are read-only
+properties exposing the constructor input, the construction-time absolute
+form, the durability knob, the walk strategy and the filename encoding
+respectively.
+
+### os_path(path) / text_path(path)
+
+Convert a local path between this storage's text form and the form Python's
+`os` functions take and return. `os_path` takes a path as the storage reports
+it — `abspath`, a `FileInfo.key` in either separator — and returns the string
+to hand to `os.stat`, `open` and the like, so they reach the file the text
+names; `text_path` is the reverse, for a name from `os.listdir` or
+`os.getcwd`. Without a converting `filename_encoding` both return the path
+unchanged. `os_path` raises `UnicodeEncodeError` (a `ValueError`) for a
+character the encoding cannot represent.
 
 ### exists()
 
@@ -629,7 +694,9 @@ translated `NotFoundError` / `AccessDeniedError` / `TransportError`.
 
 Stats a single path, anchored at the absolutized location and joined with `key`
 for a child, following the same deliberate `..` / absolute-key resolution as
-`open`. `FileInfo.key` is absolute and `compare_key` is its basename. Whether a
+`open`. `FileInfo.key` is absolute and `compare_key` is its basename — for the
+location itself, in the AWS CLI's form described under the constructor (a
+directory's `key` ends in `/` and its `compare_key` is `""`). Whether a
 symlink is followed is the storage's own `follow_symlinks`, not a parameter.
 
 One `os.stat` is taken and reused for the size, the mtime, the special-file
@@ -639,10 +706,7 @@ cannot disagree.
 Returns `None` for a definitively absent path (`ENOENT` / `ENOTDIR`, which
 includes a broken symlink when following), for a symlink when
 `follow_symlinks=False`, and — after warning through `on_warning` — for a
-special or unreadable file (an unreadable directory is named with the trailing
-separator the AWS CLI's `local_format` gives a directory source, except when
-symlinks are not followed, where the AWS CLI strips it again before its
-battery). A directory is returned with `FileKind.DIRECTORY`
+special or unreadable file or directory. A directory is returned with `FileKind.DIRECTORY`
 and no type check, and fails later at open the way `aws s3` fails. A stat error
 that is not absence is raised, translated, with `operation` unset for the
 operation layer to fill and the path as `key`.
@@ -706,8 +770,7 @@ does not share, since `resolve` must still route a bare `bucket/key` to local.
 The stored text is split once into `bucket` and `key`, which are the properties
 every operation reads and from which `as_text`, `normalized_uri`,
 `same_path_as` and `format` are derived — together with the one character the
-split found between them, and, for the bare service root, its spelling
-(below). So `uri` is the input as accepted, scheme filled in, while `as_text()`
+split found between them (below). So `uri` is the input as accepted, scheme filled in, while `as_text()`
 is the canonical rebuilt token; they differ when the input carried a trailing
 slash on a keyless bucket or on the service root. An Outposts access point ARN
 whose key follows a `:` rather than a `/` — a spelling the AWS CLI's pattern
@@ -767,17 +830,14 @@ work and its access point warning.
 ### same_path_as(dest)
 
 The instance form of `same_path`: `True` when `same_path` holds over the two
-`normalized_uri()` strings, or when the two storages name a bucket, the buckets
-are equal **and** their keys satisfy the `same_path` rule anchored at `/` (with
-equal buckets the URI prefix is inert, and the `/`-anchoring preserves
-`os.path`'s semantics exactly). The two agree except for one object spelled two
+`normalized_uri()` strings, or when the buckets are equal **and** their keys
+satisfy the `same_path` rule anchored at `/` (with equal buckets the URI prefix
+is inert, and the `/`-anchoring preserves `os.path`'s semantics exactly). The two agree except for one object spelled two
 ways — an Outposts access point key set off with `:` on one side and `/` on the
 other, or typed straight after an access point name the pattern cuts short
 (`accesspoint/my_ap` on one side, `accesspoint/my/_ap` on the other) — which the
 AWS CLI's string comparison takes for two objects, letting the move run onto
-itself; here it is a self-move like any other. Two locations
-without a bucket are compared as strings only, so `s3://` and `s3:///` are
-different, as they are to the AWS CLI.
+itself; here it is a self-move like any other.
 
 ### split_bucket_key(path) / strip_scheme(path) / normalize_s3_uri(path)
 
@@ -796,13 +856,14 @@ CLI's whole bucket/key splitter, which is how `same_key` uses it.
 kept: `s3://bucket`, including a keyless access point ARN, reads as the bucket
 root `s3://bucket/`. A bare `s3://` is returned as is, and so is any string
 that does not start with `s3://`. It is for raw strings; with an instance at
-hand, `normalized_uri` derives the same form from held state.
+hand, `normalized_uri` derives the same form from held state, except that it
+reads the service root as `s3:///` however it was typed.
 
 ### normalized_uri()
 
 The keyless-normalized `s3://` URI derived from the held state with no string
-round-trip: a keyless bucket reads as `s3://bucket/`, and the bare service root
-keeps the spelling it was given, `s3://` or `s3:///`. It equals
+round-trip: a keyless bucket reads as `s3://bucket/`, and the bare service root,
+`s3://` or `s3:///`, as `s3:///`. Past the service root it equals
 `normalize_s3_uri(uri)`: the separator between the bucket and the key is the
 one the location was typed with — `/`, `:` after an Outposts access point, or
 none where the AWS CLI's pattern cuts an access point name short
@@ -817,20 +878,18 @@ echoing the constructor input, so a keyless location normalizes to a slashless
 
 `format` returns the scheme-less `bucket/key` as the root — `normalized_uri()`
 without its scheme — with the same keyless-bucket normalization (`s3://bucket`
-formats as `bucket/`); only the bare service root formats empty — or as `/`,
-taking the source's name, when spelled `s3:///`, the one case where the stored
-text rather than the held bucket and key decides. A `dir_op` root is `/`-terminated and
-`use_src_name` is `True`; otherwise `use_src_name` is whether the root already
-ends in `/`, and a `dir_op` on the service root formats it as `/`.
+formats as `bucket/`, and the bare service root as `/`). A `dir_op` root is
+`/`-terminated and `use_src_name` is `True`; otherwise `use_src_name` is
+whether the root already ends in `/`.
 
 ### validate()
 
 Rejects the malformed forms deferred from construction, raising
 `ValidationError` ([`./exceptions.md`](./exceptions.md)) for an S3 Object
 Lambda ARN, an Outposts *bucket* ARN, or a key with no bucket. The library
-calls it before an operation and the CLI at its parity point, so a malformed
-location fails loudly instead of reaching the API as a cryptic botocore error.
-Idempotent.
+calls it before an operation and the CLI at the point where `aws s3` makes the
+same check, so a malformed location fails loudly instead of reaching the API as
+a cryptic botocore error. Idempotent.
 
 Each rejection carries what identifies the offending location. The two ARN
 forms report the whole ARN as `bucket` and leave `key` unset — the whole ARN,
@@ -872,27 +931,11 @@ Returns an `S3ScanOptions` seeded with the constructor's `page_size` and
 Yields one `list[S3FileInfo]` per `ListObjectsV2` page. Requires an
 `S3ScanOptions`; a foreign `ScanOptions` raises `TypeError`.
 
-An entry the service returned incomplete stops the listing rather than being
-dropped from it: a `Contents` entry missing `Key`, `LastModified` or `Size`, or
-a `CommonPrefixes` entry missing `Prefix`, raises
-[`MalformedResponseError`](./exceptions.md#malformedresponseerror) naming the
-element (the AWS CLI's `KeyError` text, that `KeyError` on `__cause__`), read
-in that order. The entries converted before it are still delivered — that
-page is emitted short and the error follows it — so a consumer sees them ahead
-of the failure exactly as the AWS CLI's entry-by-entry listing does. One shape
-loses the whole page instead: when the response echoes `EncodingType` (S3 and
-MinIO do), botocore URL-decodes every `Key` and `Prefix` of the page before
-handing it over, so an entry missing one fails there — the same class, element
-and cause, with none of that page's entries delivered, which is also where the
-AWS CLI's listing stops. A
-`LastModified` the host's local zone cannot represent raises the same class
-(`date value out of range`, the `OverflowError` on `__cause__`) at the same
-point, for the same reason — the AWS CLI converts every timestamp it reads to
-local time, so such an object ends the run there. Note the asymmetry with
-`LocalStorage`, which applies the same local-zone test to a file's mtime and
-*keeps* the file with a warning and `EPOCH_TIME`: that is the AWS CLI's own
-split between a local file it cannot represent and an S3 object it cannot
-represent.
+A `LastModified` the host's local zone cannot represent is listed with its UTC
+value, where the AWS CLI's conversion of every timestamp it reads to local
+time ends the run. (`LocalStorage` reads a file's mtime in UTC the same way;
+only an mtime UTC cannot represent either keeps the file with a warning and
+`EPOCH_TIME`, as the AWS CLI does.)
 
 This is object listing only — the openable-entity enumeration `scan` promises.
 A recursive scan omits `Delimiter` and yields every object as a `FILE` entry; a
@@ -901,18 +944,6 @@ non-recursive scan sends `Delimiter='/'` and additionally emits one
 `FileInfo.key` is the full S3 key, or the prefix for a directory entry, and
 `compare_key` is that key with the listing's `Prefix` removed.
 
-`options.include_common_prefixes` widens a *recursive* scan to emit directory
-entries too: whatever `CommonPrefixes` the service returns to a listing that
-sent no `Delimiter` — none, from a service that follows the API — ahead of that
-page's objects, the same shape a non-recursive page has. It has no effect on a
-non-recursive scan, which always emits them, since the `Delimiter` it sends is
-what asks for them. `S3.ls` sets it, because `aws s3 ls` prints a page's common
-prefixes recursive or not; the transfers leave it off, since a directory record
-is not transferable and a page's leading prefix entries would cost the recursive
-stream the byte order `sync` merge-joins on. As with
-`LocalScanOptions.enumerate_all_entries`, the caller that widens the enumeration
-owns the filtering.
-
 `options.prefix` overrides the storage's own key as the listing anchor, driving
 both the `Prefix` sent and the `compare_key` relativization, so a transfer
 lists through the storage instance it was handed rather than rebuilding one.
@@ -920,8 +951,8 @@ lists through the storage instance it was handed rather than rebuilding one.
 set, is forwarded. `options.page_size` becomes the paginator's page size.
 
 `options.filter` is applied here: the raw pages are sieved client-side before
-being yielded, and a page the predicate empties is skipped rather than yielded
-empty. This is also the override seam — filter or enrich each page, then defer
+being yielded, and a page the predicate empties is yielded empty, so the scan
+can stop between pages. This is also the override seam — filter or enrich each page, then defer
 to `super().scan_pages(options)` — and the work runs on `scan`'s prefetch
 worker.
 
@@ -944,15 +975,10 @@ container rather than an openable entity, so no transfer scan ever yields one.
 `name_prefix` and `region` map to `ListBuckets`'s `Prefix` and `BucketRegion`,
 omitted when falsy. The page size is the storage's own `page_size`.
 
-As in `scan_pages`, a bucket entry missing `CreationDate` or `Name` raises
-[`MalformedResponseError`](./exceptions.md#malformedresponseerror) naming the
-element, read in that order — the order the AWS CLI renders them in — at that
-bucket, with the buckets ahead of it already delivered.
-
 Requesting either filter on a botocore whose `ListBuckets` model lacks the
-matching input member raises `ConfigurationError` naming the version they need
-(see [`../compatibility.md`](../compatibility.md)), so a filtered listing
-either filters or fails. An unfiltered listing needs neither member: below the
+matching input member raises `ValidationError` before any request (see
+[`../compatibility.md`](../compatibility.md)), so a filtered listing either
+filters or fails. An unfiltered listing needs neither member: below the
 botocore version that added the `ListBuckets` paginator it is issued as a
 single unpaginated `ListBuckets` call. Errors surface on the consumer's pull.
 
@@ -993,9 +1019,10 @@ rm`'s single-key path. The object is `info.key`, a full bucket key.
 `Storage.delete` signature.
 
 Returns the `DeleteObject` response. `rm`'s blind single-key path surfaces it
-under `extra_info["delete"]` when `capture_response` is set; `mv` and the
-batched `rm` / `sync` lanes issue their own delete calls rather than this
-method.
+under `extra_info["delete"]` when `capture_response` is set. `mv`'s source
+delete goes through this method too, its response captured the same way. The
+batched `rm` / `sync` lanes, `rm`'s single key on the CRT engine and the
+copy-props rollback send their own deletes.
 
 ### get_fileinfo(key="", \*, on_warning=None)
 
@@ -1011,16 +1038,11 @@ its `compare_key` is the key's basename.
 
 Raises: a `404` returns `None` rather than raising. Any other error — `403`,
 transport, 5xx — is raised translated, because existence could not be
-determined, with `operation` unset like every storage-level call's. A response
-missing `ContentLength` or `LastModified` raises
-[`MalformedResponseError`](./exceptions.md#malformedresponseerror) naming the
-element, read in that order — the AWS CLI's own reading of its single-object
-HEAD, and the single-entry counterpart of the `scan_pages` rule. A
-`LastModified` the host's local zone cannot represent raises the same class
-(`date value out of range`) instead of being returned, the same test
-`scan_pages` applies and at the point the AWS CLI applies it to its own
-single-object HEAD. This is the generic HEAD; the SSE-C-aware single-source
-HEAD lives in the transfer engine, which applies the test at the same point.
+determined, with `operation` unset like every storage-level call's. A
+`LastModified` the host's local zone cannot represent is returned with its
+UTC value, as `scan_pages` lists it. This is the generic HEAD; the
+SSE-C-aware single-source HEAD lives in the transfer engine, which reads the
+stamp the same way.
 
 ### get_file(path, \*, key="")
 
@@ -1057,9 +1079,9 @@ s3transfer's own download lane has — so:
   destination: the call fails with `AccessDeniedError` and leaves it as it was;
 - missing parent directories are created.
 
-Nothing stamps the local file's mtime: that is the transfer lanes' AWS CLI
-parity behavior, and here the caller holds the returned info and decides. The
-returned `S3FileInfo` is shaped like `get_fileinfo`'s — the full key,
+Nothing stamps the local file's mtime: that is the transfer lanes' behavior,
+matching the AWS CLI, and here the caller holds the returned info and decides.
+The returned `S3FileInfo` is shaped like `get_fileinfo`'s — the full key,
 `ContentLength` as `size`, `LastModified` as `mtime`, the ETag as returned, the
 storage class, the key's basename as `compare_key` — and carries the whole
 `GetObject` response minus its transport metadata and its body under `head`.
@@ -1089,9 +1111,9 @@ single PUT fails with S3's own error rather than being split. Use `S3.cp` for
 multipart, parallelism or resumption.
 
 No `ContentType` is sent and no MIME guessing happens: guessing an upload's type
-from its name is the transfer lanes' AWS CLI parity behavior (`guess_mime_type`),
-not this lane's. Shape the object through `S3.cp`'s transfer options, or call
-`put_object` on the client directly.
+from its name is the transfer lanes' behavior, matching the AWS CLI
+(`guess_mime_type`), not this lane's. Shape the object through `S3.cp`'s
+transfer options, or call `put_object` on the client directly.
 
 `key` addresses the object exactly as `get_fileinfo`'s does. The returned
 `S3FileInfo` carries the full key, the local file's size (taken from the open
@@ -1111,82 +1133,57 @@ cannot be rewound for a retry either. The
 including a failure botocore hits while reading the body mid-request, which it
 reports as one of its own.
 
-## IOStorage
+## IOStorageBase
 
-One caller-supplied stream presented as a `Storage`: a single `open`-able
-endpoint, not a container.
+The base of the stream storages: one stream presented as a `Storage`, a single
+`open`-able endpoint rather than a container. `IOStorage`, `StdioStorage` and
+`TextIOStorageBase` derive from it; derive from it yourself for a binary stream
+endpoint of your own.
 
 ```python
-class IOStorage(Storage):
+class IOStorageBase(Storage):
     scheme: ClassVar[str] = "stream"
     capabilities: ClassVar[StorageCapability] = (
         StorageCapability.OPEN_READ | StorageCapability.OPEN_WRITE
     )
 
-    def __init__(
-        self,
-        stream: SupportsRead[bytes] | SupportsRead[str] | SupportsWrite[bytes] | SupportsWrite[str],
-        *,
-        encoding: str = "utf-8",
-    ) -> None: ...
+    @abstractmethod
+    def open(self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None) -> BinaryIO: ...
 ```
 
-`capabilities` is just the `OPEN_*` pair: a single stream supports byte I/O in
-both directions, chosen per `open` call, with no listing and no deletion.
+`capabilities` is just the `OPEN_*` pair: a stream supports byte I/O in both
+directions, chosen per `open` call, with no listing and no deletion. `open` is
+abstract, so a subclass that does not implement it cannot be instantiated.
 
-`stream` is the caller's file-like object: anything with a `read` for an
-upload or a `write` for a download (typeshed's `SupportsRead` /
-`SupportsWrite`), so a wrapper exposing only one of them is accepted. A binary
-stream is used as it is,
-behind a close-suppressing view — except one that cannot be positioned (a
-pipe, a socket, a console: `seekable()` answers False, or `os.fstat` reports
-its descriptor as a FIFO, character device or socket, which a Windows pipe is
-even though it claims to seek), which an upload reads through a view that
-offers nothing but `read`, so both transfer engines take their buffered path
-instead of probing it with `seek` / `tell`. A text stream — recognized either as an
-`io.TextIOBase` or by carrying an `encoding` attribute, which covers
-`codecs.open`'s reader/writer and a text-mode `SpooledTemporaryFile` — is
-wrapped with an incremental codec instead, encoding on read for an upload and
-decoding on write for a download.
+`open` returns the bytes the transfer reads (`"rb"`, an upload) or writes
+(`"wb"`, a download). `key` and `size` carry nothing for a single endpoint —
+what an operation passes differs — so an implementation ignores them. The
+transfer closes what `open` returns once the item settles, as for any
+[`Storage.open`](#openkey-mode--sizenone): a resource `open` acquires for the
+transfer is released that way, and a stream that must outlive the transfer
+goes back behind a view whose `close` only flushes, as `IOStorage` returns the
+caller's.
 
-`encoding` is that codec's encoding and applies only to a text stream; a name
-`codecs.lookup` does not know raises `InvalidValueError` from the constructor.
-A single incremental encoder or decoder spans the whole transfer, so a stateful
-codec behaves as one stream — utf-16 emits its BOM once, not per chunk.
+When `open` runs depends on the direction:
 
-A text stream carries the object as text: the encoding it was opened with and
-its newline translation apply to what is read and written. Text that will not
-convert fails the transfer — on a download, an object that is not valid text
-in `encoding` or a character the stream cannot write; on an upload, bytes the
-stream cannot read or a character `encoding` cannot encode. A failed download
-leaves in the stream whatever was decoded before the failure, and the item's
-`OpResult.error` is a `Boto3S3Error` with the `UnicodeDecodeError` or
-`UnicodeEncodeError` on `__cause__`. A text stream is never swapped for its
-`.buffer` — text it has read ahead would be skipped and the encoding it was
-opened with ignored — so pass a binary stream (a file opened `"rb"` or `"wb"`)
-or [`StdioStorage`](#stdiostorage) for the bytes as they are; `StdioStorage`
-writes standard output in order, where `IOStorage(sys.stdout.buffer)` on the
-classic engine writes a redirected file from offset 0.
-
-**The caller's stream is never closed by this class.** The transfer closes
-every file object `open` returns, since that close is how a real backend
-flushes a write; each view here absorbs that close into a flush of the wrapped
-stream at most. Lifecycle stays the caller's, and so does rewinding after a
-download, whose landing place depends on the stream and the engine: the binary
-view passes `seek` through, so on the classic engine `s3transfer` writes a
-seekable binary stream at absolute offsets from 0 — its prior position is
-ignored, and a multipart download can leave it anywhere — while a text stream,
-a stream that cannot seek (a pipe, a socket or a console, judged by its
-descriptor: a Windows pipe answers `seekable()` with `True`, and gets the
-write-only view all the same), a binary stream in append mode (`open(p, "ab")`, a
-`>>` redirected stdout's `.buffer`: it reports `seekable()` but every write
-lands at its end, so it gets a write-only view and the parts arrive in order),
-and any stream under the CRT engine are written in order from their current
-position. Append mode is read from the stream's `mode` string and, on POSIX
-only, from the descriptor's `O_APPEND` flag; Windows cannot be asked for the
-flag, so a stream that appends under another `mode` string is not recognized
-there, and a `>>` redirect from `cmd` — which appends nothing, it only starts
-at the end — is an ordinary seekable stream.
+- **A download** (`cp` or `mv`) calls it when the first byte arrives, through
+  a writer that offers only `write`: the stream is written in order, from
+  where it stands, on either engine, and a download that ends before its first
+  byte — a missing object, a cancel, a dry run — never calls it. An empty
+  object's successful download calls it as the download commits. A large
+  object's parts are still fetched in parallel; one that arrives early waits
+  in memory until the ones before it are written.
+- **An upload** (`cp` only — a stream is never a `mv` source) calls it as the
+  run starts, before any request, as the AWS CLI opens standard input. An
+  exception it raises stops the run there: one of the library's own is raised
+  as it is, and any other as a [`Boto3S3Error`](./exceptions.md#boto3s3error)
+  with it as `__cause__`; no item is recorded. An interrupt
+  (`KeyboardInterrupt`, `SystemExit`) passes as it is. What it returns reaches the
+  transfer engines as it is: one that offers `seek` / `tell` and answers
+  `seekable()` with `True` is read at offsets on the classic engine and has its
+  length probed through them on the CRT engine, so it must honour them — a
+  pipe does not; one that offers only `read` is read in order. If the run
+  fails before the transfer starts, `cp` closes what `open` returned.
 
 Of the four contract operations only `open` is implemented. `get_fileinfo` and
 `delete` keep `Storage`'s base implementations and raise `NotImplementedError`
@@ -1201,12 +1198,12 @@ sides at once, and never an `ls` or `rm` target. `S3.cp` and `S3.mv` raise
 [`./operations/mv.md`](./operations/mv.md)), and `S3.ls` and `S3.rm`, which
 take only an S3 location, for theirs.
 
-### open(key, mode, \*, size=None)
-
-Returns the wrapped stream as a binary stream. `key` and `size` are ignored — a
-single endpoint takes no key. `"rb"` yields a reader over the stream, `"wb"` a
-writer into it; for a text stream those are the encoding and decoding adapters
-built from `encoding`.
+What the stream raises fails the item: a `Boto3S3Error` is recorded as it is,
+any other exception becomes a `Boto3S3Error` with the original on `__cause__`,
+and an interrupt cancels the item and reaches the caller. Where the SDK reads
+the stream itself (the classic engine hands a seekable binary stream to the SDK
+as the request body), a failure there takes the SDK's category instead, with
+the original further down the exception chain.
 
 ### as_text()
 
@@ -1215,22 +1212,68 @@ messages only and is not round-trippable through `S3.resolve`. The default
 `Storage.format` reads it: `"-"` has no trailing `/`, so a single move onto a
 stream keeps its key.
 
+## IOStorage
+
+A binary stream the caller hands over, as a stream endpoint.
+
+```python
+class IOStorage(IOStorageBase):
+    def __init__(self, stream: SupportsRead[bytes] | SupportsWrite[bytes]) -> None: ...
+```
+
+`stream` is the caller's binary file-like object: anything with a `read` for
+an upload or a `write` for a download (typeshed's `SupportsRead` /
+`SupportsWrite`), so a wrapper exposing only one of them is accepted. A text
+stream goes through [`TextIOStorage`](#textiostorage) instead. One whose class
+makes it text — an `io.TextIOBase`, such as `io.StringIO`, a text-mode file or
+`sys.stdout` — raises `ValidationError` from the constructor; no other stream
+is checked, a text-mode `tempfile.NamedTemporaryFile` or
+`SpooledTemporaryFile` (on Windows, `TemporaryFile` too) or a `codecs` stream
+(none derives from an `io` class) included. Passing the wrong kind is passing the wrong type, whose
+outcome is not specified: a classic upload of such a text stream can stop
+responding.
+
+The stream is used as it is, behind a close-suppressing view — except a source
+that cannot be positioned (a pipe, a socket, a console: `seekable()` answers
+False, or `os.fstat` reports its descriptor as a FIFO, character device or
+socket, which a Windows pipe is even though it claims to seek), which an upload
+reads through a view that offers nothing but `read`, so both transfer engines
+take their buffered path instead of probing it with `seek` / `tell`. A
+download writes the stream in order from where it stands, whatever its kind
+(an append-mode file, a pipe, a `gzip` writer included), as
+[`IOStorageBase`](#iostoragebase) describes.
+
+**The caller's stream is never closed by this class.** The transfer closes
+every file object `open` returns; each view here absorbs that close into a
+flush of the wrapped stream at most. Lifecycle stays the caller's, and so does
+rewinding after a download, which leaves the stream at the end of what it
+wrote.
+
+The class relies on the stream keeping the `io` module's contract and does not
+check it: `read` returns bytes and an empty value at the end, `write` takes
+them, and `seekable()`, where present, answers `True` or `False`. A stream that
+breaks it is not supported — one whose `seekable()` raises, such as a `tarfile`
+member read in stream mode (`"r|"`), fails its transfer.
+
+### open(key, mode, \*, size=None)
+
+Returns the wrapped stream as a binary stream, behind one of the views above.
+`key` and `size` are ignored. `"rb"` yields a reader over the stream, `"wb"` a
+writer into it.
+
 ## StdioStorage
 
 The process's own standard streams as a `Storage` — `sys.stdin` to read,
-`sys.stdout` to write. A subclass of `IOStorage` that holds no stream of its
-own.
+`sys.stdout` to write. A stream endpoint that holds no stream of its own.
 
 ```python
-class StdioStorage(IOStorage):
+class StdioStorage(IOStorageBase):
     scheme: ClassVar[str] = "stdio"
-
-    def __init__(self) -> None: ...
 ```
 
 The constructor takes no arguments. `capabilities` and `as_text` are
-`IOStorage`'s, so this too declares `OPEN_READ | OPEN_WRITE` and renders as
-`"-"`; `scheme`, the constructor and `open` are what differ.
+`IOStorageBase`'s, so this too declares `OPEN_READ | OPEN_WRITE` and renders as
+`"-"`.
 
 ### open(key, mode, \*, size=None)
 
@@ -1247,22 +1290,125 @@ streams sequentially even when stdout is redirected to a seekable file: a
 `>>`-opened file lands every write at the end regardless of position, which a
 seek-based parallel download would interleave. That view holds nothing from
 `open` time — it reads `sys.stdout` again on every write, as the AWS CLI's
-writer does — and its `close` neither flushes nor closes, so the bytes a
-download hands over sit in the process stream's own buffer until the
-interpreter flushes it at exit. A caller that needs them out earlier flushes
-`sys.stdout` itself.
+writer does — and its `close` flushes `sys.stdout.buffer` without closing it.
+The transfer closes the view as the item settles, so a stdout that cannot take
+the bytes (a full disk, a reader that left the pipe) fails the item, and a
+`mv` keeps its source. The bytes a failed flush refused stay in that buffer,
+and Python tries them again when the process exits (exit status 120); what
+becomes of them is the application's, whose stdout it is.
 
 Raises: `ValidationError` ([`./exceptions.md`](./exceptions.md)) when `mode` is
-`"rb"` and this process has no `sys.stdin`, in the AWS CLI's own wording,
-rather than letting a transfer worker receive an unusable file object. The
-error names no operation of its own: the run that invoked the storage stamps
+`"rb"` and this process has no `sys.stdin`, rather than letting a transfer
+worker receive an unusable file object. The error names no operation of its
+own: the run that invoked the storage stamps
 the one it is performing — the streaming `cp` that reads stdin reports `"cp"`
 (`mv` rejects a stream source before opening it) — while a direct call leaves
 `operation` as `None`.
 Stdout has no such precondition, again like the AWS CLI: a process without one
 fails on the writer's first `write`, from inside the transfer, so it is that
 item's failure (`'NoneType' object has no attribute 'write'`) and not a reason
-for the run not to start.
+for the run not to start. An empty object, which writes nothing, fails the
+same way when the writer is closed.
+
+## TextIOStorageBase
+
+The base of a stream endpoint that trades in text. A subclass implements
+`open_text`, returning a text stream; `open` presents it to the transfer as
+bytes in `encoding`. Derive from it for a text source or destination of your
+own; [`TextIOStorage`](#textiostorage) is the one for a text stream you hand
+over.
+
+```python
+class TextIOStorageBase(IOStorageBase):
+    def __init__(self, *, encoding: str = "utf-8") -> None: ...
+
+    @abstractmethod
+    def open_text(self, key: str, mode: Literal["r", "w"]) -> TextIO: ...
+```
+
+`encoding` is the encoding of the object's bytes; a name `codecs.lookup` does
+not know raises `InvalidValueError` from the constructor. `open_text` is
+abstract, so a subclass that does not implement it cannot be instantiated.
+
+### open_text(key, mode)
+
+The text stream to read (`"r"`, an upload) or write (`"w"`, a download).
+`key` is `open`'s, which carries nothing for a single endpoint. The transfer closes what
+`open_text` returns once the item settles: a stream it opens for the transfer
+(a file, say) is closed for it, and one that must stay open goes back behind a
+view whose `close` only flushes, as `TextIOStorage` returns the caller's.
+
+```python
+class Cp932File(TextIOStorageBase):
+    def __init__(self, path):
+        super().__init__(encoding="utf-8")          # the object's encoding
+        self._path = path
+
+    def open_text(self, key, mode):
+        return open(self._path, mode, encoding="cp932", newline="")
+
+s3.cp(Cp932File("report.txt"), "s3://bucket/report.txt")
+```
+
+### open(key, mode, \*, size=None)
+
+Calls `open_text` with `"r"` for `"rb"` or `"w"` for `"wb"`, and returns its
+stream behind an incremental codec: encoding on read for an upload, decoding on
+write for a download. `size` is ignored. Each call builds a codec of its own,
+and a single encoder or decoder spans the whole transfer, so a stateful codec
+behaves as one stream per transfer — utf-16 emits its BOM once, not per chunk
+and not once per instance. Closing the codec closes the text stream, after a
+download's last characters are written, even when writing them fails.
+
+The stream is read and written in order (the codec offers no `seek`), so an
+upload takes the transfer engines' buffered path and a download lands in order
+from the stream's current position. Text that will not convert fails the
+transfer — on a download, an object that is not valid text in `encoding` or a
+character the stream cannot write; on an upload, bytes the stream cannot read
+in the encoding it was opened with, or a character `encoding` cannot encode. A failed download
+leaves in the stream whatever was decoded before the failure. Either way the
+item's `OpResult.error` is a `Boto3S3Error` with the `UnicodeDecodeError` or
+`UnicodeEncodeError` on `__cause__`, on either transfer engine.
+
+## TextIOStorage
+
+A text stream the caller hands over, as a stream endpoint.
+
+```python
+class TextIOStorage(TextIOStorageBase):
+    def __init__(
+        self, stream: SupportsRead[str] | SupportsWrite[str], *, encoding: str = "utf-8"
+    ) -> None: ...
+```
+
+`stream` is the caller's text file-like object: anything with a `read` that
+returns `str` for an upload or a `write` that takes `str` for a download,
+whatever class it is. A binary stream goes through [`IOStorage`](#iostorage)
+instead. One whose class makes it binary — an `io.RawIOBase` or
+`io.BufferedIOBase`, such as `io.BytesIO`, a file opened `"rb"` or `"wb"`, or
+`sys.stdout.buffer` — raises `ValidationError` from the constructor; no other
+stream is checked, a binary `tempfile.NamedTemporaryFile` or
+`SpooledTemporaryFile` included, and what the
+wrong kind leads to is not specified. `encoding` is
+[`TextIOStorageBase`](#textiostoragebase)'s.
+
+The stream carries the object as text: the encoding it was opened with and its
+newline translation apply to what is read and written. It is never swapped for
+its `.buffer` — text it has read ahead would be skipped and the encoding it was
+opened with ignored — so pass the bytes as they are through `IOStorage` or
+[`StdioStorage`](#stdiostorage) instead.
+
+**The caller's stream is never closed by this class.** `open_text` returns it
+behind a view whose `close` only flushes it.
+
+The class relies on the stream keeping the `io` module's contract and does not
+check it: `read` returns `str` and an empty string at the end, and `write`
+takes `str`.
+
+### open_text(key, mode)
+
+Returns the caller's stream behind that view, whichever `mode`. `key` is
+ignored.
 
 ## LocalFileGenerator
 
@@ -1305,7 +1451,6 @@ class LocalFileGenerator:
         strip: int,
         notify: Callable[[str], None],
         detector: LoopDetector | None,
-        sym_depth: int = 0,
     ) -> Iterator[list[LocalFileInfo]]: ...
     def restat_leaf(
         self,
@@ -1336,16 +1481,7 @@ class LocalFileGenerator:
         strip: int,
         options: LocalScanOptions,
         notify: Callable[[str], None],
-        sym_depth: int = 0,
     ) -> list[WalkChild]: ...
-    def crosses_full_path_boundary(
-        self,
-        info: LocalFileInfo,
-        full: str,
-        *,
-        sym_depth: int,
-        notify: Callable[[str], None],
-    ) -> bool: ...
     def entry_stat_result(
         self, entry: os.DirEntry[str]
     ) -> os.stat_result | None: ...
@@ -1402,10 +1538,11 @@ rather than an `os.name` test, so any platform missing the APIs degrades
 correctly; it is true on POSIX and false on Windows, whose directory scan
 returns entry attributes inline instead. `dir_open_flags` are the flags for the
 one `open()` that turns a directory path into that descriptor. `EPOCH_TIME` is
-the timestamp stamped on a file whose mtime cannot be represented — which the
-host's local zone decides, the same range the AWS CLI tests, so a timestamp
-close enough to `datetime`'s ends for the zone's offset to matter falls back
-here exactly when it falls back there.
+the timestamp stamped on a file whose mtime UTC cannot represent — outside
+`datetime`'s range, or on Windows from about half a day before 1970 back or
+after about 3001. The AWS CLI
+tests the mtime in the host's local zone instead, so an mtime within the
+zone's offset of those limits falls back there and keeps its UTC value here.
 
 **The override seams, finest first.** Extend at the smallest layer that fits:
 `should_ignore_entry` (one entry's vetting), `entry_stat_result` (the one stat
@@ -1426,6 +1563,18 @@ child injected as a leaf is stat'ed again by `restat_leaf` when its turn comes,
 so one that is not a live filesystem path needs that seam overridden too —
 otherwise the yield-time stat fails and warn-skips it as missing.
 
+**Under a converting `filename_encoding`.** The walk runs on the form Python's
+`os` functions take (`LocalStorage.os_path`): `root`, `dir_path`, `full` and
+`path` are that form, and so is every path in a warning a method builds —
+`list_file_pages` hands the warnings on as the storage's text. `scan_children`
+turns each child's `sort_name` and `info.key` into text before it stamps
+`compare_key` and calls `finalize_children`, so from `finalize_children` on —
+the sort, the filter, the yielded entries — everything is text, in the text's
+order, and `walk_dir` descends a sub-directory by its text name converted back.
+A `scan_children` that builds its own children converts them the same way. The
+walk reads the encoding from `options.storage`, so options built without a
+storage convert nothing.
+
 ### list_files(root, options)
 
 Yields every file under `root` recursively as a flat stream in byte order.
@@ -1441,7 +1590,8 @@ are handed off just before the next descent, so a page never spans two
 directory reads and a consumer can overlap the next read. The pages concatenate
 to `list_files`'s flat stream.
 
-`root` is the absolute directory path **with a trailing `os.sep`**. Each
+`root` is the absolute directory path **with a trailing `os.sep`**, in the OS
+form under a converting `filename_encoding` (see above). Each
 `LocalFileInfo.key` is the absolute path with `os.sep` folded to `/`, and
 `compare_key` is relative to that directory — the axis `options.filter`
 matches.
@@ -1461,7 +1611,7 @@ itself is vetted with `should_ignore_file`; its children per entry in
 a cycle requires a followed link; without both, no `LoopDetector` is built and
 the walk pays no per-directory stat for it.
 
-### walk_dir(dir_path, options, \*, strip, notify, detector, sym_depth=0)
+### walk_dir(dir_path, options, \*, strip, notify, detector)
 
 The depth-first recursion behind `list_file_pages`, and the seam for changing
 how the tree is descended. Each directory's `scan_children` is read and sorted
@@ -1482,9 +1632,6 @@ directory passed to `list_file_pages` and stays constant across the recursion;
 `scan_children` uses it to stamp `compare_key`. `notify` is the warning sink.
 `detector`, when present, guards symlink cycles: a sub-directory whose identity
 matches an ancestor is skipped with a `Symbolic link loop detected` warning.
-`sym_depth` is the number of followed symlinks between the walk root and
-`dir_path`, threaded down so a leaf near the OS symlink limit can be re-vetted
-by full path.
 
 Override it and return early for a directory to prune its subtree, or
 re-implement the loop to cap depth — preserving the depth-first byte order
@@ -1499,9 +1646,10 @@ AWS CLI takes per name in its own descent loop. Returns the record to yield.
 
 A single `os.stat` on `path` decides three outcomes. It fails: the
 `triggers_warning` battery runs on the path — normally "File does not exist.",
-a warning and exit code 2 — and the leaf is dropped whether or not the battery
-found anything, so a stale record is never submitted for a transfer that would
-then fail to open it (the complete view first tries the link's own lstat: a
+a warning and exit code 2 — and the leaf is dropped; a battery that finds
+nothing (the race healed since the stat) warns with the failed stat's own
+error instead, so the leaf is never dropped silently. A stale record is never
+submitted for a transfer that would then fail to open it (the complete view first tries the link's own lstat: a
 leaf that became a dangling link or a loop is kept as that lstat leaf, warned
 only when links are followed — `classify_child`'s failed-follow rule, applied
 at the leaf's turn). It reports a directory: the returned record is the
@@ -1512,10 +1660,9 @@ being submitted as a file. Otherwise: `info` itself with `size`, `mtime` and
 leaf's size and timestamp, so what is transferred and what `sync` compares is
 the file as of its turn. An mtime this stat cannot represent stamps
 `EPOCH_TIME` as `stat_info` does and sends the file's one invalid-timestamp
-warning from here, where the AWS CLI sends it: it sorts among the walk's other
-warnings as the AWS CLI's does (an earlier-sorting sibling directory's warnings
-come first), and a timestamp that became representable since the scan draws
-none — `stat_info` stamps the scan-time record silently.
+warning from here, where the AWS CLI takes the timestamp, so a timestamp that
+became representable since the scan draws none — `stat_info` stamps the
+scan-time record silently.
 
 `is_symlink` is left as classified — re-testing it would cost a second syscall
 per leaf. A record whose classification stat is a symlink's own (the complete
@@ -1545,7 +1692,7 @@ scanned path is the scan's sole leaf. `stat_result` is the followed stat, or
 the lstat selected when symlinks are not followed or a follow failed, and
 `is_symlink` reflects the scanned path itself.
 
-### scan_children(dir_path, \*, strip, options, notify, sym_depth=0)
+### scan_children(dir_path, \*, strip, options, notify)
 
 Returns one directory's vetted children as final `WalkChild` entries — the
 enumeration layer, and the seam for changing *how* a directory is read.
@@ -1563,41 +1710,25 @@ itself.
 
 A directory that cannot be opened or scanned — replaced, removed or locked away
 in the race between its parent's scan and this descent — is put through the
-`triggers_warning` battery and yields an empty list, so the walk goes on. The
-battery runs on `dir_path` as passed, which for a descended child carries the
-trailing separator the AWS CLI's own re-test names it by. With symlinks not
-followed, that re-test first strips the separator and tests the name itself,
-as the AWS CLI's `should_ignore_file` does at the top of each descent: a
-directory that became a symlink is skipped silently rather than followed, and
-the battery names the stripped path. If that battery finds
+`triggers_warning` battery and yields an empty list, so the walk goes on. With
+symlinks not followed, that re-test first strips the trailing separator a
+descended directory is addressed with and tests the
+name itself, as the AWS CLI's `should_ignore_file` does at the top of each
+descent: a directory that became a symlink is skipped silently rather than
+followed. If that battery finds
 nothing wrong, the `OSError` propagates instead of pruning silently. That
 handling is scoped to establishing the scan; a per-entry `OSError` raised
-mid-scan propagates. The deterministic full-path limits — a symlink cycle
-stopped by the kernel, an over-long path — are caught one level up instead, by
-`crosses_full_path_boundary`, which addresses the child by its bare full path,
-the way the AWS CLI words those two.
-
-`sym_depth` lets any child near the symlink-loop or path-length limit be
-re-vetted by full path, so it warn-skips the way the AWS CLI's full-path stat
-would rather than being admitted and failing at transfer time.
+mid-scan propagates. The directory-relative vetting cannot see the full-path
+limits — a symlink cycle stopped by the kernel, an over-long path — so a child
+past one is admitted here; the full-path open of its own descent, or a leaf's
+re-stat at its turn (`restat_leaf`), then fails and warn-skips it, as the AWS
+CLI's full-path stat would, rather than letting it fail at transfer time. A
+one-level scan, which has no descent and no re-stat, yields such a child as it
+is.
 
 An override should reuse `classify_child`, `dir_child` and `normalize_sort`
 rather than reproducing the sort key and directory-info shape, and must stamp
 `compare_key` on any child it injects.
-
-### crosses_full_path_boundary(info, full, \*, sym_depth, notify)
-
-Whether a vetted child must be dropped because a full-path stat would have
-rejected it. The fast walk vets each entry through the owning directory's
-descriptor, which re-anchors resolution and so hides both the ancestor symlink
-chain and the full path's length; near either OS limit this re-runs the
-full-path warning battery so the two agree. A directory takes the same probe as
-a file, and by the same bare full path: that is where the AWS CLI names a child
-it vets, while a descent addresses it with a trailing separator, so leaving a
-boundary-crossing directory to fail its own descent would warn with a separator
-the AWS CLI's message does not carry. `scan_children` consults this only in the
-normal view — under `enumerate_all_entries` the vetting is bypassed and this
-probe with it.
 
 ### entry_stat_result(entry)
 
@@ -1628,10 +1759,11 @@ the natural per-entry override point, and the owner of the single stat.
 
 Symlinks are decided first, on a free type test: with symlinks not followed,
 the complete view returns the link's own lstat leaf and the normal view skips
-it — silently when `os.path.islink` agrees, and otherwise through the full-path
-warning battery, which is where the AWS CLI's lstat-based test lands in a
-directory that grants no search permission ("File does not exist."). Then
-`entry_stat_result` is taken once. A `None` stat warns; the
+it — silently when `os.path.islink` on the full path agrees. When it does not
+(the directory grants no search permission, or the entry raced away), the
+entry is vetted by full path as aws-cli vets it, which normally warns "File
+does not exist." and skips; an entry the vetting passes goes on to be
+classified below. Then `entry_stat_result` is taken once. A `None` stat warns; the
 complete view falls back to the link's lstat and the normal view skips. A stat
 that itself reports a symlink — which only an lstat-style override produces —
 is its own vetting-free leaf. Otherwise the normal view vets the entry through
@@ -1682,8 +1814,9 @@ The list arrives **unsorted**, so pruning here happens before the sort; call
 `super().finalize_children` or `normalize_sort` for byte order. **Dropping a
 `DIRECTORY` child prunes its whole subtree**, because the walk never descends
 what this does not return — a saving `aws s3` cannot make, since it vets every
-file, which is why this is the right seam for a non-parity backup walk and not
-the default. A backup walker normally customizes only this method.
+file, which is why this is the right seam for a backup walk that need not
+match `aws s3`, and not the default. A backup walker normally customizes only
+this method.
 
 Note that a `finalize_children` override prunes by its own rules and never sees
 `options.filter`, so it does not by itself justify setting
@@ -1702,13 +1835,16 @@ The path-based vetting used for the walk root, which has no directory entry to
 read: a silent skip for a symlink when symlinks are not followed (with a
 trailing separator stripped first so the link itself is tested), then the
 `triggers_warning` battery. Returns whether the path is to be skipped. The
-per-entry hot path uses `should_ignore_entry` instead.
+per-entry hot path uses `should_ignore_entry` instead. A `sync` or a recursive
+`cp` / `mv` asks it about the source root before the run as well, and refuses
+a root it would skip rather than walking an empty source
+([`operations/sync.md`](./operations/sync.md)).
 
 ### triggers_warning(path, notify)
 
-The warn-and-skip battery on a path, in the AWS CLI's order and wording: the
-path does not exist, then it is a character or block special device, FIFO or
-socket, then it is not readable. Returns whether any check fired, having sent
+The warn-and-skip battery on a path, the AWS CLI's: the path does not exist,
+then it is a character or block special device, FIFO or socket, then it is not
+readable. Returns whether any check fired, having sent
 that check's message to `notify`. Used for the root, for a directory whose scan
 could not be established, for a leaf whose re-stat fails at its turn
 (`restat_leaf`), and for the near-boundary re-vetting.
@@ -1731,8 +1867,8 @@ still warns "not readable".
 
 Builds one file entry's `LocalFileInfo` from the stat `classify_child` already
 took, at scan time. It never fails: the race case was handled upstream, and an
-mtime the host's local zone cannot represent — the AWS CLI's own test, as
-above — keeps the file and stamps `EPOCH_TIME`. The warning for it is sent from
+mtime UTC cannot represent, as above, keeps the file and stamps
+`EPOCH_TIME`. The warning for it is sent from
 here only for a link's own stat, which no re-stat follows; a regular file's
 record is stamped silently and warns at its turn (`restat_leaf`), or from the
 scan when a one-level scan keeps this record. The info carries `st` as

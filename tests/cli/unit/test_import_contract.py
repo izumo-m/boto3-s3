@@ -12,7 +12,6 @@ already made by the test runner can't mask a regression.
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 import textwrap
@@ -45,10 +44,11 @@ _PRELUDE = """
         assert "logging" not in sys.modules
 
     def assert_no_library_modules():
-        # The lazy boto3_s3 root and the pure exceptions taxonomy are the only
-        # library modules these exits may touch; in particular the SDK-backed
-        # boto3_s3.s3 (which imports boto3 at module top) must not load.
-        allowed = {"boto3_s3", "boto3_s3.exceptions"}
+        # The lazy boto3_s3 root, the pure exceptions taxonomy and the
+        # stdlib-only text encoding the command decides at startup are the
+        # only library modules these exits may touch; in particular the
+        # SDK-backed boto3_s3.s3 (which imports boto3 at module top) must not load.
+        allowed = {"boto3_s3", "boto3_s3.exceptions", "boto3_s3.localencoding"}
         loaded = sorted(
             m
             for m in sys.modules
@@ -62,11 +62,8 @@ _PRELUDE = """
 def _run_fresh(code: str) -> str:
     """Run *code* (after the prelude) in a fresh interpreter; return its stdout."""
     source = textwrap.dedent(_PRELUDE) + textwrap.dedent(code)
-    # Pin the auto-prompt mode off so ambient configuration cannot divert an
-    # informational exit into the interactive prompt.
-    env = {**os.environ, "AWS_CLI_AUTO_PROMPT": "off"}
     result = subprocess.run(
-        [sys.executable, "-c", source], capture_output=True, text=True, check=False, env=env
+        [sys.executable, "-c", source], capture_output=True, text=True, check=False
     )
     assert result.returncode == 0, (
         f"\n--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
@@ -78,26 +75,6 @@ class TestCliImportContract:
     def test_top_level_help_token_is_sdk_and_command_free(self) -> None:
         _run_fresh(
             """
-            assert main(["help"]) == 0
-            assert_no_heavy_imports()
-            assert_no_command_modules()
-            assert_no_library_modules()
-            assert_no_logging()
-            """
-        )
-
-    def test_valid_imds_settings_keep_the_help_token_sdk_free(self) -> None:
-        # The dispatcher builds botocore's credential chain ahead of the help
-        # token only for a configuration that could make the build fail
-        # (ConfigScan.credential_chain_suspect); settings botocore accepts
-        # must not cost the informational exits their SDK-free start.
-        _run_fresh(
-            """
-            import os
-            os.environ["AWS_METADATA_SERVICE_TIMEOUT"] = "5"
-            os.environ["AWS_METADATA_SERVICE_NUM_ATTEMPTS"] = "3"
-            os.environ["AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE"] = "ipv6"
-            os.environ["AWS_EC2_METADATA_SERVICE_ENDPOINT"] = "http://[fd00:ec2::254]"
             assert main(["help"]) == 0
             assert_no_heavy_imports()
             assert_no_command_modules()

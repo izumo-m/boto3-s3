@@ -1,19 +1,19 @@
 # Testing
 
 This document describes how the test suite is organized, what runs by default,
-and how aws-cli parity is enforced. The exit-code and output-parity charters
-it enforces live in [`overview.md`](./overview.md) section 3; section 9 below
-is the operational definition every output comparison applies.
+and how functional compatibility with aws-cli is checked. The policy it checks
+is [`overview.md`](./overview.md) section 3; section 9 below is the criterion
+every output comparison applies.
 
 ## 1. Tiers
 
 | location | what | mechanism | runs |
 |---|---|---|---|
-| `tests/lib/` | `boto3-s3` library unit tests | hand-rolled fakes (two moto-backed spots: `test_capture_response.py` - the capture rides botocore's real event stream - and `test_s3storage.py`'s `TestSingleRequestTransferRoundTrip`) | always |
+| `tests/lib/` | `boto3-s3` library unit tests | hand-rolled fakes (two moto-backed spots: `test_capture_response.py` - the capture rides botocore's real event stream - and `test_s3storage.py`'s `TestSingleRequestTransferRoundTrip`), plus a loopback socket where a property is on the wire (`test_proxytunnel.py`: the CONNECT request a proxy receives from a real botocore client) | always |
 | `tests/cli/awscli/` | ports of aws-cli's own functional tests (one file per subcommand plus `test_s3_object_lambda.py`, diffable against aws-cli's `tests/functional/s3/`) | canned-response recording client (`tests/utils/recorder.py`) | always |
 | `tests/cli/unit/` | `boto3-s3-cli`'s own unit tests (everything the ports don't cover) | fake clients via `Context` injection, plus the few properties no in-runner fake can show: a subprocess where the property is per-process (the import contract, the environment botocore freezes at import) and a loopback socket where it is on the wire (the CONNECT request a proxy receives) | always |
 | `tests/cli/functional/` | golden replay: the CLI on moto must reproduce what aws-cli did on a real endpoint | in-process `moto.mock_aws` | always |
-| `tests/cli/e2e/` | differential parity: `boto3-s3` vs the real `aws` binary against the same live endpoint, plus golden capture | subprocesses against the dev stack (RustFS) / real S3 | opt-in (`BOTO3_S3_E2E_BUCKET`) |
+| `tests/cli/e2e/` | differential comparison: `boto3-s3` vs the real `aws` binary against the same live endpoint, plus golden capture | subprocesses against the dev stack (RustFS) / real S3 | opt-in (`BOTO3_S3_E2E_BUCKET`) |
 
 Directory = provenance (awscli port vs own), subdirectory = mechanism
 (stub / moto / live server). `uv run pytest` with no setup runs everything
@@ -53,31 +53,32 @@ tests' `max_concurrent_requests = 1`) - a NonThreadedExecutor finishes
 each twin before the next is judged (design/transfer.md section "case-conflict
 gate").
 
-## 2. Exit-code charter enforcement
+## 2. Exit-code comparison
 
-The e2e parity tests (`tests/cli/e2e/test_*_parity.py`) assert
+The e2e comparison tests (`tests/cli/e2e/test_*_parity.py`) assert
 `ours.rc == aws.rc` for **every** scenario - scenario flags can relax stdout
 comparison and golden handling, but by design the sole rc carve-out is
-`undefined_on_case_insensitive_dest` (on a case-insensitive destination aws's
-own rc is racy - the warn-mode note in section 3's "Platform variants" - so
-only `ours.rc == 0` is asserted there); no other flag can relax the rc
-comparison. The scenario sets (`tests/utils/<cmd>_scenarios.py`) are the
-charter's detection surface: extend them whenever a subcommand or option is added, including error paths
-(nonexistent bucket, out-of-range values). Which code a given failure is
-expected to produce differs by command family, so consult
-[`cli.md`](./cli.md) section 6 when adding an error scenario rather than
-assuming the shape of a neighbouring command's.
+`undefined_on_case_insensitive_dest` (on a case-insensitive destination
+aws-cli's own rc is racy - the warn-mode note in section 3's "Platform
+variants" - so only `ours.rc == 0` is asserted there); no other flag can
+relax the rc comparison. The scenario sets (`tests/utils/<cmd>_scenarios.py`)
+are the comparison's detection surface: extend them whenever a subcommand or
+option is added, including error paths (nonexistent bucket, out-of-range values). Which
+code a given failure is expected to produce differs by command family, so
+consult [`cli.md`](./cli.md) section 6 when adding an error scenario rather
+than assuming the shape of a neighbouring command's.
 
-Charter exceptions map naturally: the interactive prompt cannot run on the
-aws side, so it is unit-tested instead of diffed.
-
-`test_positional_fileb_bug_parity.py` is a dedicated drift tripwire rather
-than a golden scenario. It feeds a readable binary positional to all six
-single-path commands and asserts the explicit aws-cli bug-shaped exit codes
-before comparing the two CLIs. If aws-cli repairs one of those inconsistent
-paths, the aws-side assertion fails even if both implementations could
-otherwise be changed together; review and remove the matching compatibility
-branch instead of updating the expected code mechanically.
+The comparison is stricter than the policy it serves: the CLI follows the
+meaning aws-cli gives each exit code, not aws-cli's value in every corner
+(overview.md section 3). So a mismatch is judged before anything is changed.
+An exit code with another meaning - success where aws-cli reports a failure, a
+per-item failure where aws-cli stops before starting - is a bug, unless it is a
+deliberate deviation recorded in
+[`aws-differences.md`](../docs/cli/aws-differences.md) (the error rules in
+overview.md section 3 can call for one). A mismatch in an error's details
+(which of two mistakes is reported, say), or one that comes only from an SDK
+or Python version difference and breaks no error rule, is not a bug: the
+scenario is changed, not the code.
 
 ## 3. Golden contract
 
@@ -87,12 +88,12 @@ aws_version}` - plus `remaining_keys` (the bucket end state) for destructive
 commands. Committed to git.
 
 - **Capture** - under `UPDATE_GOLDENS=1` the e2e run writes goldens from what
-  the real aws did. It is only valid against a clean dev stack (tmpfs
+  the real `aws` did. It is only valid against a clean dev stack (tmpfs
   state), since a golden records an end state as well as an output;
   `aws_version` gives the provenance. The command and the review step are in
   [`CONTRIBUTING.md`](../CONTRIBUTING.md).
 - **Drift check** - without `UPDATE_GOLDENS`, the e2e suite asserts the live
-  aws output still matches the committed golden, so an aws-cli upgrade that
+  `aws` output still matches the committed golden, so an aws-cli upgrade that
   changes behavior fails visibly.
 - **Replay** - the functional suite seeds moto with the scenario's exact
   layout, runs the CLI in-process, and compares against the golden.
@@ -113,19 +114,20 @@ website, verified against `aws.exe` unchanged) skip Windows capture
 entirely. One scenario has no Windows golden by design:
 `cp_case_conflict_warn` (`undefined_on_case_insensitive_dest`) - the
 twin-download rename race makes the outcome undefined on a case-insensitive
-destination (aws's warn text says as much), so the golden tiers stand down
-there. The race is s3transfer's Windows rename (a remove, then a rename), a
-path both tools share, and both lose it: over 150 runs each on a Windows host
-aws ended at rc 1 67 times and at rc 2 three times, boto3-s3 twice and once.
-So e2e holds ours only to the outcomes the race allows (rc 0, 1 or 2) and to
-its warning. Where aws itself is nondeterministic no defined rc exists to
-match, so this does not breach the exit-code charter.
+destination (aws-cli's warn text says as much), so the golden tiers stand down
+there. The race is s3transfer's Windows rename (a remove, then a rename):
+over 150 runs on a Windows host `aws` ended at rc 1 67 times and at rc 2 three
+times. boto3-s3 commits with one replace instead (`transfer._ReplacingOSUtils`),
+which leaves that gap out - 449 of 450 runs at rc 0, one at rc 2 - but the
+twins still write one file, so e2e holds ours to the outcomes the race allows
+(rc 0, 1 or 2) and to its warning. Where aws-cli itself is nondeterministic no
+defined rc exists to match.
 
 ### Endpoint policy (dev stack goldens, occasional real-AWS verification)
 
-A golden is a **drift detector, not ground truth**: the truth the exit-code
-charter binds to is the pinned aws binary's behavior on the *same endpoint*
-as ours, which the parity tests compare directly and unconditionally. So
+A golden is a **drift detector, not ground truth**: the truth the comparison
+binds to is the pinned `aws` binary's behavior on the *same endpoint* as ours,
+which the e2e tests compare directly and unconditionally. So
 goldens are captured against the dev stack (section 4: fast, free,
 resettable state), and the suite is re-run occasionally against real AWS
 (`tests/run_e2e.sh`) using the **same pinned aws-cli**
@@ -139,21 +141,21 @@ the difference in this order:
    values, region strings) is folded into the normalizers so both endpoints
    produce one canonical form - the golden loses no detection power.
 2. **Accepted alternates**: a semantic difference where both shapes are
-   legitimately aws-correct (e.g. a field only real S3 returns) may be
+   legitimately aws-cli-correct (e.g. a field only real S3 returns) may be
    allow-listed per scenario. Any such relaxation **must** come with a direct
-   aws<->boto3-s3 same-run equality check on the relaxed field: comparing
-   both sides against one golden is what transitively guaranteed their
-   parity, and an allow-list breaks that transitivity (aws matching
+   aws-cli<->boto3-s3 same-run equality check on the relaxed field: comparing
+   both sides against one golden is what transitively guaranteed that they
+   agree, and an allow-list breaks that transitivity (aws-cli matching
    alternate X while ours matches alternate Y must still fail).
 3. **`frozen_golden`**: when the committed golden matches real S3 and moto
    but the dev stack answers otherwise, the scenario names the gap in
    `frozen_golden`; the e2e tier then neither rewrites nor drift-checks that
-   golden, while the moto replay and the live aws-vs-ours comparison still
+   golden, while the moto replay and the live aws-cli-vs-ours comparison still
    run.
 4. **`diff_only`** (last resort): a genuinely endpoint-relative outcome (the
    dev stack accepts what S3 rejects, or vice versa, or moto cannot replay
    what the capture recorded) is not recorded in a golden at all - rc
-   equality between the two CLIs remains asserted, per the charter.
+   equality between the two CLIs remains asserted (section 2).
 
 None of these relax the rc comparison between the two CLIs (section 2).
 Every use of 2-4 for an endpoint gap, and every other test-side change made
@@ -165,18 +167,17 @@ Normalization (`tests/utils/harness.py`): for **ls**
 (`normalize_ls_stdout`), leading timestamps are masked (`<TIMESTAMP>` -
 capture and replay happen at different times/timezones) and the bucket name
 becomes `<BUCKET>`; nothing else changes - lines are never sorted (ls order
-is deterministic and parity-relevant) and never dropped. For **rm**
+is deterministic and part of what ls prints) and never dropped. For **rm**
 (`normalize_rm_stdout`) the lines are **sorted** instead: aws-cli emits
 delete lines in parallel-completion order, which is nondeterministic run to
 run (observed on MinIO), so the line *set* is the contract; the end-state
 comparison (`remaining_keys`) pins down what sorting relaxes. Stderr is not
 part of a golden at all: the e2e tier probes it for stable tokens
-(`assert_stderr_tokens`), never byte-for-byte - the byte-level comparison
-section 9 defines is carried by the unit tier, whose expectations are the
-pinned aws's own measured bytes.
+(`assert_stderr_tokens`), never byte-for-byte - stderr bytes are pinned by
+the unit tier (section 9, "Where the criterion applies").
 
 Destructive commands cannot share one seeding between the two e2e sides:
-`test_rm_parity.py` seeds, runs aws, captures the end state, then resets and
+`test_rm_parity.py` seeds, runs `aws`, captures the end state, then resets and
 re-seeds before the boto3-s3 run, and finally compares rc / sorted stdout /
 end state. The functional replay verifies the moto end state against the
 golden's `remaining_keys` too.
@@ -186,10 +187,11 @@ goldens additionally record `bucket_exists` (the scenario bucket's existence
 after the run; `remaining_keys` is `null` when it is gone), their stdout
 shares rm's sorted normalization (no timestamps; `rb --force` interleaves
 nondeterministically ordered delete lines), and they run against
-**sibling** buckets derived from the suite's main bucket - the e2e main
-bucket must stay existing and empty. The `mb_buckets` / `rb_buckets`
+**sibling** buckets derived from the bucket the scenarios run in (the
+suite's main bucket, or under xdist a worker's own - section 4), which must
+stay existing and empty. The `mb_buckets` / `rb_buckets`
 fixtures hand each scenario two fresh names, one per side
-(`<main>-mb007-aws` / `<main>-mb007-ours`), and force-delete both around the
+(`<bucket>-mb007-aws` / `<bucket>-mb007-ours`), and force-delete both around the
 test: real S3 lags behind a delete and re-create under one name, so no name
 is used twice in a run. Whether a bucket exists is read from ListBuckets,
 not HeadBucket: on real S3, HeadBucket answers from a cache that can trail
@@ -213,7 +215,7 @@ For **cp** the scenario fixes the *local* tree too: each side of the e2e
 diff gets its own workdir (materialized from `local_src`), the CLI runs
 with `cwd` set there, and argv / result lines carry workdir-relative paths
 - goldens need no path masking. `normalize_cp_stdout` keeps, per physical
-line, only the segment after the last `\r` (aws repaints progress in place
+line, only the segment after the last `\r` (aws-cli repaints progress in place
 with no isatty gate, so piped stdout carries `Completed ...` segments and
 right-padding), drops those progress statements (time/speed-dependent), and
 **sorts** the remaining result lines (parallel completion order - the rm
@@ -292,7 +294,7 @@ the **endpoint policy**, in two steps:
 - **step 2** (e2e-only, `presign_scope_region`): masking a golden's region is
   a golden-stability concession, not license to stop checking it - the e2e
   suite pulls the raw, unmasked scope region straight out of both sides'
-  stdout from the *same run* and asserts aws's and ours are equal, so the
+  stdout from the *same run* and asserts `aws`'s and ours are equal, so the
   region the two CLIs actually signed with stays under test even where step
   1's golden comparison would hide a divergence.
 
@@ -300,12 +302,12 @@ Parameter order, `X-Amz-Expires`, `X-Amz-SignedHeaders`, and the
 key path are compared verbatim. `X-Amz-Security-Token` is dropped from both
 sides of a golden comparison only: it appears when the credentials are
 temporary, which can differ between capture and replay (the root conftest
-exports a session token for the replay), while the live aws-vs-ours
+exports a session token for the replay), while the live aws-cli-vs-ours
 comparison runs on one set of credentials and keeps it. The functional
 replay needs no moto backend (presign never contacts a server). The e2e
 suite adds a **fetch layer** for time-stable scenarios: both sides'
 URLs are actually GET and compared on status (and body when 200) - the
-endpoint accepting our signature like it accepts aws's is parity the URL
+endpoint accepting our signature like it accepts aws-cli's is agreement the URL
 string alone cannot prove.
 
 ## 4. The dev stack and the e2e gate
@@ -340,7 +342,8 @@ zip's self-contained `dist/` and symlinking
 `.venv/bin/aws` (it installs no Python package, so the env is untouched, and a
 matching install is reused rather than re-downloaded).
 
-e2e safety contract: at collection time the suite probes that the `aws`
+e2e safety contract: before any test runs (at collection, or under xdist in
+the controller as the session starts) the suite probes that the `aws`
 binary exists and that the bucket is reachable and **empty** of current
 objects (`list_objects_v2`; a versioned bucket's noncurrent versions / delete
 markers are not probed - the harness buckets are unversioned), refusing to run
@@ -348,6 +351,40 @@ against a populated bucket. Tests restore emptiness with a full-bucket purge
 (`delete_under("")` between the two sides' runs and at the end - safe because
 of that empty-bucket gate), and the `bucket` fixture asserts emptiness before
 and after every test.
+
+**Parallel runs** (`-n auto`, pytest-xdist; `tests/run_e2e.sh` always passes
+it). Each worker runs its scenarios in a bucket of its own, `<main>-gw<n>`
+(`<main>` being the env's `BOTO3_S3_E2E_BUCKET`), created as the worker
+enters the suite and force-deleted, without looking inside (as the mb/rb
+siblings are), as it leaves: the empty-before-and-after rule and the
+scenarios that work on the bucket root (`rm s3://<bucket> --recursive`,
+`ls s3://<bucket>`) rule out sharing one bucket, or splitting it by key
+prefix. The mb/rb siblings then derive from the worker's bucket, so
+`run_e2e.sh`'s `<main>-*` sweep covers both. The env's bucket is only
+probed. The gate and the probe run once in the xdist controller before any
+worker starts: a `pytest.exit` on a worker reads to xdist as a crashed
+worker, which it replaces in a loop without showing why. Where the e2e
+conftest loads too late for the controller (the whole suite,
+`uv run pytest -n auto`, with the env set), each worker probes and fails its
+e2e items with the reason instead. `ls_all_buckets` drops the `<main>-*`
+lines from both sides' listings, since other workers create and remove
+those buckets between the two CLIs' runs.
+
+The cross-process CRT lock does not reach the CRT lane: in both CLIs it
+decides only how `auto` resolves, and the lane names `crt`. It does reach the
+other scenarios on a host awscrt calls optimized for the CRT (some EC2
+types), where `auto` resolves to the CRT engine only while no other process
+of that CLI holds the lock, so `-n auto` starts one worker there - as the
+venv's awscrt judges the host, whose list can trail the one the pinned
+aws-cli bundles. Elsewhere it starts half the CPUs' worth, at most four (or
+xdist's own `PYTEST_XDIST_AUTO_NUM_WORKERS`); `BOTO3_S3_E2E_WORKERS`
+overrides both rules. They apply to a run that names `tests/cli/e2e`, whose
+conftest is then loaded in time; `-n auto` over the whole suite gets xdist's
+own count. The suite is CPU-bound and stops gaining early on the dev stack:
+on a 14-CPU laptop it took 207 s in one process, 108 s on 4 workers and 91 s
+on 10 or 14, with the CPU time the tests use growing with every worker
+(`tests/cli/e2e/conftest.py`, measured 2026-10-25). Each worker adds about
+230 MiB at its peak.
 
 **Payload-size budget** (the suite must stay cheap against real AWS): a
 scenario uses the smallest payload that exercises its behavior - byte-scale
@@ -368,7 +405,7 @@ fake credentials (and strips `AWS_PROFILE` / `AWS_ENDPOINT_URL*`) for
 everything except e2e, which overrides that fixture with a no-op and takes
 credentials, region and endpoint from the env alone while pointing `~` at a
 throwaway directory and dropping `AWS_CONFIG_FILE` / `AWS_SHARED_CREDENTIALS_FILE`
-(both tools read `~/.aws`, and the pinned aws writes its session database
+(both tools read `~/.aws`, and the pinned `aws` writes its session database
 under it on every command that builds a client); test
 fixtures build clients from fresh `boto3.session.Session()` objects because
 the process-global default session caches the first credentials it resolves.
@@ -379,15 +416,18 @@ path resolve the engine differently. The same root fixture points
 profile's `[s3]` section (cli.md section 8), this stops the host config from
 leaking tuning into the moto/recorder tiers and - on a CRT-optimized host -
 keeps `auto` from silently resolving to an engine moto cannot intercept. That
-config file only covers the CLI transfer tiers (`resolve_transfer_client`),
-not the library's own default `auto` path, which consults
-`awscrt.s3.is_optimized_for_system()` directly (`crtsupport.should_use_crt`);
-a second autouse fixture (`_pin_classic_engine`) monkeypatches that probe to `False`
-so the in-process/library transfer tests stay deterministic on a
-CRT-optimized host (`test_transferrer.py` depends on it).
+config file covers every run that reads `[s3]` - the CLI tiers and the
+library's own cp / mv / sync / rm alike (`S3.resolve_transfer_config`, whose
+engine choice is `resolve_transfer_client`) - but not a config that gives
+`preferred_transfer_client` itself (an explicit `auto`) or a `Transferrer`
+built directly, which consult `awscrt.s3.is_optimized_for_system()` directly
+(`crtsupport.should_use_crt`); a second autouse fixture
+(`_pin_classic_engine`) monkeypatches that probe to `False` so those tests
+stay deterministic on a CRT-optimized host (`test_transferrer.py` depends on
+it).
 
 The dev environment is always CRT-present (the dev dependency group installs
-`botocore[crt]`), matching aws v2 - the condition every parity tier runs
+`botocore[crt]`), matching aws-cli v2 - the condition every comparison tier runs
 under. The opposite - an install without awscrt - is pinned by
 `tests/cli/functional/test_crt_optional.py`: botocore freezes `HAS_CRT` and
 its checksum registry at import, so the test drives the CLI in a fresh
@@ -402,16 +442,16 @@ botocore's HTTP layer and cannot run on moto - only against a real endpoint.
 Both CLIs run with a temp `AWS_CONFIG_FILE` selecting
 `preferred_transfer_client = crt` (the harness subprocess runners gained an
 `env` overlay for this), and both sides get an explicit `--endpoint-url`
-(aws's CRT client reads `use_ssl` from the argument only, so an env-only
+(aws-cli's CRT client reads `use_ssl` from the argument only, so an env-only
 endpoint dials TLS to the http dev stack and dies; ours does not need the
 flag but receives the same one for symmetry). The lane is differential, no
 goldens: the CRT manager's stdout is byte-identical to classic (aws-cli
 `s3handler` has no CRT branch), so the signal is that our CRT mode agrees
-with aws's CRT mode on rc / stdout / bucket state / local tree / download
+with aws-cli's CRT mode on rc / stdout / bucket state / local tree / download
 mtime across upload and download (each single-part and 9 MiB multipart) plus
 mv and sync (small corpora). The same lane covers the missing CRT-configured deletion shapes:
 single/recursive `rm` and upload/download `sync --delete`. Those cases assert
-CLI-observable parity rather than transport identity: boto3-s3 sends the
+CLI-observable agreement rather than transport identity: boto3-s3 sends the
 S3-side deletions batched on the CRT client (`DeleteObjects`, with
 `DeleteObject` for single keys and per-key re-sends) where aws-cli sends one
 CRT `DeleteObject` per key, while download sync-delete removes local files on
@@ -423,31 +463,24 @@ which names the engine *after* any CRT->classic fallback - guarding against a
 silent classic fallback (the `s3transfer.crt` throughput log fires at CRT
 *client construction*, before the compatibility gate, so it cannot tell a
 real CRT transfer from a fallback). A further case
-(`test_crt_ignores_classic_only_config`) pins the charter: `[s3]` classic-only
-keys (`io_chunksize` / `max_bandwidth`) under CRT exit rc 0 like aws, not a
+(`test_crt_ignores_classic_only_config`) pins that `[s3]` classic-only
+keys (`io_chunksize` / `max_bandwidth`) under CRT exit rc 0 like aws-cli, not a
 traceback. The lane is gated by the e2e opt-in plus an `awscrt` import check.
 The selection matrix and `[s3]`
-parsing run as in-process units (`tests/cli/unit/test_engine_selection.py`,
-`test_runtimeconfig.py`, `tests/lib/test_crtsupport.py`) with awscrt and the
+parsing run as in-process units (`tests/lib/test_engine_selection.py`,
+`tests/lib/test_runtimeconfig.py`, `tests/lib/test_crtsupport.py`, and the
+CLI wiring in `tests/cli/unit/test_engine_selection.py`) with awscrt and the
 process lock monkeypatched.
 
-One CRT surface needs neither an endpoint nor the e2e opt-in:
-`tests/cli/functional/test_crt_no_credentials.py` pins the credential-less CRT
-upload (crt.md section 4), whose failure happens inside the CRT credentials
-delegate before any connection. It drives a real subprocess - the unraisable
-block is written by the interpreter from a CRT worker thread, and a CRT client
-in the pytest process would hold the cross-process lock for the rest of the
-session - against `--endpoint-url http://127.0.0.1:1`, so not even DNS is
-touched. Its expectations are the pinned aws's own measured bytes under
-section 9: the object repr's address and the traceback body collapse to
-placeholders (class 2) while the `Exception ignored in: ` marker, the block's
-position ahead of the result line, the result line, and the exit code are
-compared. The CRT case self-skips when this application's CRT slot
-(`PROCESS_LOCK_NAME`, host-wide) is already taken - by another process on the
-host, or by an in-process CRT client built earlier in the session - since the
-child would silently fall back to classic; the lock is probed in a throwaway
-subprocess so the probe does not hold it. The skip is scoped to that one case,
-so its classic control runs either way.
+Two CRT surfaces need neither an endpoint nor the e2e opt-in, and run the real
+awscrt in a subprocess (a CRT client in the pytest process would hold the
+cross-process lock for the rest of the session):
+`tests/cli/functional/test_crt_no_credentials.py` pins that a credential-less
+upload under a `crt` preference fails its item exactly as the classic engine
+does (crt.md section 4), against `--endpoint-url http://127.0.0.1:1`, so not
+even DNS is touched; `tests/cli/functional/test_crt_no_region.py` pins that a
+CRT run with no resolved region stops before it starts (rc 253), and that a
+resolved region, or the classic engine, lets the run proceed.
 
 ## 5. aws-cli test ports
 
@@ -455,7 +488,9 @@ Ports keep aws-cli test names, canned responses, and expectations verbatim
 where possible (see the adaptation rules in each port's module docstring -
 e.g. `tests/cli/awscli/test_ls_command.py`). Genuine divergences are to be marked
 `xfail(strict=True)` with the open design question in the reason, never
-silently rewritten (none currently; all ports match aws-cli).
+silently rewritten (none currently; all ports match aws-cli). A port whose
+feature boto3-s3 has removed is skipped with the reason rather than deleted,
+since a deleted port could not be told from one never made.
 
 Each ported test is traceable to its aws-cli original by a simple convention:
 a test carrying **no** `# aws-cli:` comment shares its original's class and
@@ -476,8 +511,8 @@ frozen-time signatures included - bit-for-bit.
 The cp port injects `Context.transfer_config` with `use_threads=False`
 (boto3's NonThreadedExecutor path) so multipart call order is deterministic
 against the positional canned list, and spells aws-cli's expected default
-`ChecksumAlgorithm: 'CRC64NVME'` as `DEFAULT_CHECKSUM`: the CLI names aws's
-CRC64NVME itself (`checksumdefault`, cli.md section 5.7) wherever the
+`ChecksumAlgorithm: 'CRC64NVME'` as `DEFAULT_CHECKSUM`: the CLI names aws-cli's
+CRC64NVME itself (`awsclisession.default_upload_algorithm`, cli.md section 5.7) wherever the
 installed botocore can compute it, and elsewhere (no awscrt) pip botocore's
 `'CRC32'` stands (an explicit `--checksum-algorithm` makes the two agree, and
 design/transfer.md section 10 has the full wire-deviation list). Its
@@ -501,9 +536,6 @@ resolve-every-symbol case guards the three-way `__all__` / `TYPE_CHECKING` /
 
 ## 7. Known limitations
 
-- **xdist** (not configured): the e2e tier shares one bucket with an
-  empty-before/after invariant, so it runs serially (the other tiers would be
-  xdist-safe).
 - **moto fidelity**: moto raises an internal `IndexError` for `MaxKeys=-1`
   instead of S3's `InvalidArgument`, so `ls_page_size_negative` and
   `rm_page_size_negative` are `diff_only` (e2e only). Scenarios that hit
@@ -619,7 +651,8 @@ for the dev stack (section 4).
    which skips itself without the variables, as on Linux. `cmd.exe`'s own
    messages arrive in the console's OEM code page; pytest's summary is ASCII.
    Never run the Windows and Linux e2e suites at the same time - the
-   bucket-empty invariant (section 4) is shared.
+   bucket-empty invariant (section 4) is shared, and under xdist each run's
+   workers would force-delete the other's same-named worker buckets.
 
 7. **Regenerate the Windows goldens** when the reference `aws.exe` moves or a
    cp/mv/sync scenario changes. The copy must hold the current POSIX base
@@ -647,7 +680,7 @@ for the dev stack (section 4).
 The skips a Windows run reports are the platform's, not gaps in the setup:
 anything that sets `TZ` mid-process (`time.tzset` is POSIX-only),
 chmod-revoked access and POSIX permission bits (`skip_if_chmod_is_inert` in
-`tests/utils/host.py`), `sh`-based external aliases, `mkfifo`, a path whose
+`tests/utils/host.py`), `mkfifo`, a path whose
 `..` follows a symlinked directory (Windows folds `..` before the filesystem
 sees the path; a Windows-only twin pins what `aws.exe` does instead), the POSIX
 `dir_fd` walk fast path (Windows length limits follow the `LongPathsEnabled`
@@ -673,7 +706,7 @@ runs on: case-insensitive, Windows path semantics, native speed.
 **Pin any expectation that rides the locale's default codec.** Windows hosts
 disagree on it - the CI runner reads cp1252, a Japanese host cp932 (both
 measured) - so a test that expects a `file://` paramfile to decode, or to fail
-decoding, must set `AWS_CLI_FILE_ENCODING` (aws's `compat_open` knob) rather
+decoding, must set `AWS_CLI_FILE_ENCODING` (aws-cli's `compat_open` knob) rather
 than lean on the host. Left to the host, such a test passes on one Windows and
 fails on another: cp1252 decodes every byte, cp932 and UTF-8 reject some. The
 same knob is how a test picks a codec deliberately. Subprocess runs are already
@@ -683,22 +716,25 @@ alone: the official distribution is a frozen interpreter in isolated mode, so
 the interpreter ignores the `PYTHON*` family (measured on the pinned Linux
 binary - `PYTHONIOENCODING` set to `latin-1` leaves its output UTF-8 - and on
 the pinned `aws.exe`, whose result lines keep the host code page under
-`PYTHONUTF8=1`), but aws's own code reads `PYTHONUTF8=1` back for the streams
-it writes error reports on, so `aws.exe`'s error reports move to UTF-8 with
-the child's (measured; `PYTHONIOENCODING` does not move them). On Linux both
-sides of a parity pair land on the same codec regardless, because that build
+`PYTHONUTF8=1`), but aws-cli's own code reads `PYTHONUTF8=1` back for the
+streams it writes error reports on, so `aws.exe`'s error reports move to UTF-8
+with the child's (measured; `PYTHONIOENCODING` does not move them). On Linux
+both sides of a comparison land on the same codec regardless, because that build
 writes UTF-8 of its own accord.
 
-## 9. The output-parity criterion
+## 9. The output comparison criterion
 
-The output-parity charter ([`overview.md`](./overview.md) section 3) requires
-the output to match aws's byte for byte "after a defined normalization"; this
-section is that definition.
+Functional compatibility ([`overview.md`](./overview.md) section 3) holds what
+a successful run prints - its result lines, ls's listing - to what `aws` prints;
+the two are different implementations of one command, so the match is taken
+after a defined normalization, and this section is that definition.
 
 Two runs of the same command under the same arguments and conditions are
-**parity-equal** iff, after the normalization below has been applied to both
+**output-equal** iff, after the normalization below has been applied to both
 sides, their stdout is byte-identical, their stderr is byte-identical, and
-their exit codes are equal.
+their exit codes are equal. A comparison runs this definition on whatever it
+compares; what a difference it finds then means is the last part of this
+section ("Everything else is comparable surface").
 
 The normalization is exactly three classes, and each carries an operational
 test, so which class a difference falls into - or that it falls into none - is
@@ -706,45 +742,34 @@ decided by procedure rather than by taste.
 
 ### Class 1 - program-identity mapping
 
-A closed list of deterministic rewrites translating aws's identity into ours:
-the fixed mapping the CLI unit tests name in their docstrings before asserting
-the pinned aws's measured bytes. Four rules.
+A closed list of deterministic rewrites translating aws-cli's identity into
+ours: the fixed mapping the CLI unit tests name in their docstrings before
+asserting the pinned `aws`'s measured bytes. Three rules.
 
 - **The program token**: `aws` -> `boto3-s3`, in usage lines and in the error
   prefix (`aws: [ERROR]:` -> `boto3-s3: [ERROR]:`).
-- **The command hierarchy**: aws's `s3` command level disappears, because this
-  command *is* `aws s3`. It surfaces in two forms, and both belong to this one
-  rule - the literal token (`aws [options] s3 <subcommand> ...` ->
+- **The command hierarchy**: aws-cli's `s3` command level disappears, because
+  this command *is* `aws s3`. It surfaces in two forms, and both belong to this
+  one rule - the literal token (`aws [options] s3 <subcommand> ...` ->
   `boto3-s3 [options] <subcommand> ...`, and `aws s3 <subcommand>` ->
   `boto3-s3 <subcommand>` in prose and synopsis text), and the top-level usage
   line's metavar chain (`usage: aws [options] <command> <subcommand>
   [<subcommand> ...] [parameters]` -> `usage: boto3-s3 [options] <subcommand>
   [parameters]`).
-- **The leading blank line** aws opens each `aws: [ERROR]:` report with is
-  stripped; ours opens with the report itself. It comes from aws's error
-  writer, so it is bound to that prefix and goes no further: the s3 command
-  layer's own stderr lines (`fatal error:`, `<op> failed:`,
-  `make_bucket failed:` ...) carry neither the blank line nor the prefix on
-  either tool, and are compared verbatim.
-- **The help blurb**: aws lists one help invocation per level (`aws help`,
+- **The help blurb**: aws-cli lists one help invocation per level (`aws help`,
   `aws <command> help`, `aws <command> <subcommand> help`). We have one level
   fewer, so the *first* line - the level above `aws s3` - has no counterpart
-  and goes; aws's middle line is our `boto3-s3 help` and its third is our
+  and goes; aws-cli's middle line is our `boto3-s3 help` and its third is our
   `boto3-s3 <subcommand> help`, both under the hierarchy rule above
   ([`cli.md`](./cli.md) section 2).
 
-One consequence of the first rule, not a fifth rule: when a message quotes a
+One consequence of the first rule, not a fourth rule: when a message quotes a
 character offset or a byte count measured over a line that itself carries the
 program token, the figure moves with the token's width - `boto3-s3` is five
-characters longer than `aws`, so it reads five higher here. The measured
-instance is the codec error a report `AWS_CLI_OUTPUT_ENCODING` cannot
-represent produces ([`cli.md`](./cli.md) section 6): under
-`AWS_CLI_OUTPUT_ENCODING=ascii`, `ls --café` ends `'ascii' codec can't encode
-character '\xe9' in position 36` on aws and `... position 41` here, rc 255 on
-both. The offset is counted over the whole report line, prefix included, so
-the shift *is* the program-token rewrite showing through: class 1, not a
-divergence. A figure counted over text that carries no program token is
-comparable as it stands.
+characters longer than `aws`, so it reads five higher here. Such an offset
+is counted over the whole line, prefix included, so the shift *is* the
+program-token rewrite showing through: class 1, not a difference. A figure
+counted over text that carries no program token is comparable as it stands.
 
 The list is **closed**. A comparison never invents a rule to absorb a
 difference it has just found; a new rule takes an explicit design decision and
@@ -752,7 +777,7 @@ is written here.
 
 ### Class 2 - implementation internals
 
-Operational test: **would these bytes differ if aws's own code ran from a
+Operational test: **would these bytes differ if aws-cli's own code ran from a
 different installation** - the same version installed from PyPI instead of the
 official bundle? Then they describe the implementation that ran, not the
 outcome it reports, and they are excluded. Members: traceback bodies, memory
@@ -764,21 +789,21 @@ marker prefixes (`Exception ignored in: `,
 the block. Mechanically, the excluded body is replaced on both sides with a
 fixed placeholder (the `<PLACEHOLDER>` convention section 3's normalizers
 already use) before comparing, so a block that only one side emits - or one
-that sits somewhere else in the report - is still a divergence.
+that sits somewhere else in the report - is still a difference.
 
 ### Class 3 - run nondeterminism
 
-Operational test: **run the same aws command twice under identical conditions
-and diff the two outputs.** Bytes that differ between aws's own runs can carry
-no byte-parity requirement, because there is no single aws output to match.
+Operational test: **run the same `aws` command twice under identical conditions
+and diff the two outputs.** Bytes that differ between `aws`'s own runs can carry
+no byte requirement, because there is no single `aws` output to match.
 Timing-dependent content qualifies (progress statements, their speed and
 elapsed figures), and so do execution-order effects - chiefly the interleaving
 of the per-item records concurrent work emits: rm's delete lines
 ([`cli.md`](./cli.md) section 5.2) and sync's delete lines against its transfer
 lines ([`cli.md`](./cli.md) section 5.9, [`sync.md`](./sync.md) section 5) are
 both stated non-contractual for exactly this reason. Note how narrow the test
-is: an order aws produces deterministically carries the full requirement, which
-is why ls's listing order is compared unsorted (section 3).
+is: an order aws-cli produces deterministically carries the full requirement,
+which is why ls's listing order is compared unsorted (section 3).
 
 The devices are not class 2's placeholder, because what varies here is whole
 records rather than a span inside one. Progress statements are **dropped**
@@ -798,32 +823,90 @@ wherever a report names the path being written.
 
 ### Everything else is comparable surface
 
-Message wording, punctuation, line counts, record formats, and which stream a
-line goes to are all comparable: a difference that survives the normalization
-is a **parity divergence**. The default resolution is to align with aws-cli.
-Taking the divergence deliberately is allowed, but then it is recorded - in
-[`aws-differences.md`](../docs/cli/aws-differences.md) when a user can observe
-it, otherwise as a residual in the design document that owns the behavior.
+Wording, punctuation, line counts, record formats, and which stream a line
+goes to all survive the normalization. What a difference there means depends
+on where it is (overview.md section 3):
+
+- In what a successful run prints, it is a **functional difference**. The
+  default resolution is to align with aws-cli; taking the difference
+  deliberately is allowed, but then it is recorded in
+  [`aws-differences.md`](../docs/cli/aws-differences.md).
+- In a warning or an error report, the **Messages** rules of overview.md
+  section 3, worked out below, decide what is compared and how. A test may
+  pin what they leave
+  uncompared, but a difference from aws-cli there is neither a bug nor
+  recorded.
+- A difference that comes only from an SDK or Python version difference (an
+  older SDK, pip botocore / s3transfer where aws-cli bundles its own copies,
+  or a Python other than the one aws-cli bundles) is neither a bug nor
+  recorded, wherever it is - unless it breaks one of the error rules, which
+  hold on every version (overview.md section 3).
+
+### Warning and error reports
+
+The **Messages** rules of overview.md section 3, worked out. A message is
+compared by running the pinned `aws` under the same conditions on the same
+OS.
+
+- **The part aws-cli's own code writes** - the sentence around the report, the
+  values it puts in (paths, URIs, keys, counts, option names), and whether a
+  warning or an error is written at all - is compared character for
+  character, and a difference is a bug. Ours may say it differently only
+  where aws-cli's text says something untrue about the run (`Invalid JSON`
+  for valid JSON of the wrong shape) or says nothing about what went wrong (a
+  `fatal error: ` with nothing after it); a misspelling or an awkward phrase
+  is not reason enough. A comment at that place in the code then gives
+  aws-cli's text and the reason.
+- **The part the SDK, awscrt, Python, the OS or S3 writes** - the text of an
+  exception the report carries - is compared by its cause only: for an OS
+  error, the number the text shows (`[Errno 13]`, `[WinError 5]`); for an S3
+  error, the error code and the operation (`An error occurred (AccessDenied)
+  when calling the PutObject operation`); for any other exception, its type
+  (for awscrt, the error name). With the same cause, the rest of the text -
+  the file names an exception carries, its wording - may differ. A different
+  cause is a bug, and so is a text of our own where aws-cli reports that
+  part.
+- **A difference kept** after discussion is commented at its place in the
+  code.
+- **The frame aws-cli writes around the report of an exit code**
+  (`An error occurred (ParamValidation): ` and `Error parsing parameter
+  '--metadata': ` on a usage error) follows our exit code where the two
+  differ. Whether the exit code may differ is decided by the exit-code rule of
+  overview.md section 3, and the reason for a different one is commented at
+  its place. The text inside the frame is compared as the two parts above.
+- **What is left uncompared**: a difference that comes only from a version
+  reaches only the match with aws-cli - the error rules hold on every
+  version, so a version that makes a report hide its cause or print a
+  traceback is a bug like any other. A bug of aws-cli's own is a traceback; a
+  report carrying an exception of a type that marks a programming error
+  (`AssertionError`, `AttributeError`, `IndexError`, `KeyError`,
+  `NameError`, `TypeError`); or a report that fails to be written and leaves
+  another error in its place. That leaves out the report only: where the
+  outcome differs as well - aws-cli stops on a bug of its own where ours runs
+  on - that is a functional difference, written down in
+  [`aws-differences.md`](../docs/cli/aws-differences.md) as one of aws-cli's
+  bugs not copied.
 
 ### Where the criterion applies
 
-Every comparison against aws runs this definition, each tier reaching as far as
-its mechanism allows:
+Every comparison against aws-cli runs this definition, each tier reaching as far
+as its mechanism allows:
 
 - the **e2e differential** (both CLIs against one endpoint in one run) compares
   normalized stdout and the exit code. Stderr it probes for stable tokens
   instead (section 3) - a limit of running against a live endpoint, not a
   relaxation of the criterion;
 - the **golden** capture and drift checks compare that same normalized stdout
-  against the recorded aws run;
+  against the recorded `aws` run;
 - the **unit tier** is where stderr is compared as bytes, its expectations
   being what the pinned `aws` was measured writing - which is also where the
   ad-hoc A/B measurements that settle a behavior question during development
-  end up.
+  end up. For what the Messages rules leave uncompared, such a pin records
+  a choice, not a requirement (above).
 
 The differential applies the same normalizers the goldens do (section 3's
 endpoint policy: timestamps, bucket name, endpoint, credential scope), so a
-parity-relevant value inside a masked span is not compared *there*. Each such
+compared value inside a masked span is not compared *there*. Each such
 value is compensated at another tier rather than dropped: presign's
 credential-scope region by the same-run equality check on the raw value
 (section 3, step 2), ls's timestamps by unit-tier expectations on the rendered

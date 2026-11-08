@@ -5,26 +5,31 @@ from __future__ import annotations
 import datetime as dt
 import io
 import os
+import re
 import threading
+import time
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any, cast
 
 import boto3
+import botocore.exceptions as botocore_exceptions
 import pytest
 from botocore.config import Config
 from botocore.exceptions import ClientError, ProfileNotFound
 
 from boto3_s3 import (
-    CLIENT_REGION,
     S3,
     AccessDeniedError,
     BatchError,
     Boto3S3Error,
     CancelledError,
     CancelToken,
+    CrtClientOptions,
+    Exclude,
     FileInfo,
     FileKind,
+    Include,
     InvalidConfigError,
     IOStorage,
     LocalStorage,
@@ -35,8 +40,9 @@ from boto3_s3 import (
     SyncPair,
     TransferConfig,
     ValidationError,
+    globsieve,
+    sdkerrors,
 )
-from tests.utils.fakemodel import model_meta
 from tests.utils.fakes3 import client_error, listing
 from tests.utils.recorder import make_recording_client
 
@@ -57,9 +63,6 @@ class _FakeS3Client:
     def __init__(self, pages: list[dict[str, Any]]) -> None:
         self._pages = pages
         self.calls: list[dict[str, Any]] = []
-        # The ListBuckets filter gate reads the model, so the fake carries the
-        # one a current botocore has.
-        self.meta = model_meta({"ListBuckets": {"Prefix", "BucketRegion"}})
 
     def can_paginate(self, _name: str) -> bool:
         return True
@@ -83,7 +86,7 @@ class TestLsRouting:
 
         assert client.calls == []
 
-    def test_cancel_from_on_entry_stops_delivery_and_reclaims_prefetch(self) -> None:
+    def test_cancel_from_on_entry_stops_delivery_and_the_prefetch_worker(self) -> None:
         pages = [
             {"Contents": [{"Key": f"p/{i}", "Size": 1, "LastModified": _MTIME}]} for i in range(20)
         ]
@@ -99,6 +102,13 @@ class TestLsRouting:
             S3().ls(storage, on_entry=stop_after_first, cancel_token=token)
 
         assert keys == ["p/0"]
+        # Told to stop, the worker ends by itself; nothing waits for it.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and any(
+            thread.name == "boto3-s3-prefetch" and thread.is_alive()
+            for thread in threading.enumerate()
+        ):
+            time.sleep(0.01)
         assert not any(
             thread.name == "boto3-s3-prefetch" and thread.is_alive()
             for thread in threading.enumerate()
@@ -185,47 +195,229 @@ class TestLsRouting:
             S3().ls("s3:///key", on_entry=lambda _info: None)
 
 
-class TestLsCommonPrefixes:
-    """``ls`` is the one operation that keeps a recursive listing's common prefixes.
+def _object(key: str) -> dict[str, Any]:
+    return {"Key": key, "Size": 1, "LastModified": _MTIME}
 
-    A recursive listing sends no ``Delimiter``, so a conforming service returns
-    none; ``aws s3 ls --recursive`` nevertheless prints whatever it is handed.
-    The oracle is the pinned aws-cli against a service whose page carries the
-    prefix ``mixed/zdir/`` and the object ``mixed/a.txt``:
 
-        $ aws s3 ls s3://bkt/mixed/ --recursive
-                                   PRE zdir/
-        2026-08-12 00:00:00          1 mixed/a.txt
+def _bucket(name: str) -> dict[str, Any]:
+    return {"Name": name, "CreationDate": _MTIME}
 
-    - one entry per prefix, ahead of the page's objects. A page holding prefixes
-    and no object counts as a match for the same reason (aws exits 0, not the 1
-    it reserves for a first page with neither).
-    """
 
-    def test_recursive_listing_delivers_prefixes_ahead_of_objects(self) -> None:
+class TestLsFilter:
+    """``filter`` is offered every entry ``on_entry`` would receive, on both listings."""
+
+    def test_recursive_listing_keeps_what_the_glob_keeps(self) -> None:
+        client = _FakeS3Client(
+            [{"Contents": [_object("p/a.log"), _object("p/b.txt"), _object("p/sub/c.log")]}]
+        )
+        keep = globsieve.compile([Exclude("*"), Include("*.log")])
+        infos: list[FileInfo] = []
+        S3().ls(
+            S3Storage("s3://b/p/", client=client),
+            recursive=True,
+            filter=keep,
+            on_entry=infos.append,
+        )
+        assert [info.key for info in infos] == ["p/a.log", "p/sub/c.log"]
+
+    def test_directory_entries_are_offered_too(self) -> None:
+        # "tmp/*" also matches the common prefix "tmp/" ('*' matches nothing).
         client = _FakeS3Client(
             [
                 {
-                    "Contents": [{"Key": "mixed/a.txt", "Size": 1, "LastModified": _MTIME}],
-                    "CommonPrefixes": [{"Prefix": "mixed/zdir/"}],
+                    "CommonPrefixes": [{"Prefix": "p/keep/"}, {"Prefix": "p/tmp/"}],
+                    "Contents": [_object("p/tmp.txt")],
                 }
             ]
         )
-        infos: list[Any] = []
-        S3().ls(S3Storage("s3://b/mixed/", client=client), on_entry=infos.append, recursive=True)
-        assert [(info.kind, info.key) for info in infos] == [
-            (FileKind.DIRECTORY, "mixed/zdir/"),
-            (FileKind.FILE, "mixed/a.txt"),
+        infos: list[FileInfo] = []
+        S3().ls(
+            S3Storage("s3://b/p/", client=client),
+            filter=globsieve.compile([Exclude("tmp/*")]),
+            on_entry=infos.append,
+        )
+        assert [(info.key, info.kind) for info in infos] == [
+            ("p/keep/", FileKind.DIRECTORY),
+            ("p/tmp.txt", FileKind.FILE),
         ]
-        # Keeping them costs the listing nothing on the wire: still no Delimiter.
-        assert "Delimiter" not in client.calls[0]
 
-    def test_prefix_only_recursive_page_still_delivers_an_entry(self) -> None:
-        # What the CLI's "nothing matched" exit code 1 hangs on.
-        client = _FakeS3Client([{"CommonPrefixes": [{"Prefix": "mixed/only/"}]}])
-        infos: list[Any] = []
-        S3().ls(S3Storage("s3://b/mixed/", client=client), on_entry=infos.append, recursive=True)
-        assert [(info.kind, info.key) for info in infos] == [(FileKind.DIRECTORY, "mixed/only/")]
+    def test_the_filter_sees_the_compare_key_on_entry_gets(self) -> None:
+        # ls takes its key verbatim as the Prefix (no "/" appended, unlike a
+        # recursive rm), and the filter is shown that listing's own entries.
+        client = _FakeS3Client([{"Contents": [_object("p/a"), _object("p-x")]}])
+        offered: list[str | None] = []
+
+        def record(info: FileInfo) -> bool:
+            offered.append(info.compare_key)
+            return True
+
+        delivered: list[FileInfo] = []
+        S3().ls(
+            S3Storage("s3://b/p", client=client),
+            recursive=True,
+            filter=record,
+            on_entry=delivered.append,
+        )
+        assert offered == ["/a", "-x"]
+        assert [info.compare_key for info in delivered] == offered
+
+    def test_bucket_listing_is_filtered_by_name(self) -> None:
+        client = _FakeS3Client([{"Buckets": [_bucket("prod-a"), _bucket("dev-b")]}])
+        infos: list[FileInfo] = []
+        S3().ls(
+            S3Storage("s3://", client=client),
+            filter=globsieve.compile([Exclude("*"), Include("prod-*")]),
+            on_entry=infos.append,
+        )
+        assert [(info.key, info.kind) for info in infos] == [("prod-a", FileKind.BUCKET)]
+
+    @pytest.mark.parametrize(
+        ("target", "page", "on_caller"),
+        [
+            ("s3://b/p/", {"Contents": [_object("p/a")]}, False),
+            ("s3://", {"Buckets": [_bucket("alpha")]}, True),
+        ],
+        ids=["objects-on-prefetch-worker", "buckets-on-calling-thread"],
+    )
+    def test_where_the_filter_runs(
+        self, target: str, page: dict[str, Any], on_caller: bool
+    ) -> None:
+        threads: list[threading.Thread] = []
+
+        def record(_info: FileInfo) -> bool:
+            threads.append(threading.current_thread())
+            return True
+
+        S3().ls(
+            S3Storage(target, client=_FakeS3Client([page])),
+            filter=record,
+            on_entry=lambda _info: None,
+        )
+        assert len(threads) == 1
+        assert (threads[0] is threading.current_thread()) is on_caller
+
+    @pytest.mark.parametrize(
+        ("target", "page"),
+        [
+            ("s3://b/p/", {"Contents": [_object("p/a")]}),
+            ("s3://", {"Buckets": [_bucket("alpha")]}),
+        ],
+        ids=["objects", "buckets"],
+    )
+    def test_an_unnamed_error_from_the_filter_is_attributed_to_ls(
+        self, target: str, page: dict[str, Any]
+    ) -> None:
+        error = NotFoundError("the predicate's own lookup failed")
+
+        def refuse(_info: FileInfo) -> bool:
+            raise error
+
+        delivered: list[FileInfo] = []
+        with pytest.raises(NotFoundError) as exc_info:
+            S3().ls(
+                S3Storage(target, client=_FakeS3Client([page])),
+                filter=refuse,
+                on_entry=delivered.append,
+            )
+        assert exc_info.value is error
+        assert error.operation == "ls"
+        assert delivered == []
+
+    @pytest.mark.parametrize(
+        ("target", "page"),
+        [
+            ("s3://b/p/", {"Contents": [_object("p/a")]}),
+            ("s3://", {"Buckets": [_bucket("alpha")]}),
+        ],
+        ids=["objects", "buckets"],
+    )
+    def test_a_foreign_error_from_the_filter_passes_unchanged(
+        self, target: str, page: dict[str, Any]
+    ) -> None:
+        error = ValueError("not the library's")
+
+        def refuse(_info: FileInfo) -> bool:
+            raise error
+
+        with pytest.raises(ValueError) as exc_info:
+            S3().ls(
+                S3Storage(target, client=_FakeS3Client([page])),
+                filter=refuse,
+                on_entry=lambda _info: None,
+            )
+        assert exc_info.value is error
+
+    def test_an_absolute_pattern_never_matches_a_bucket(self) -> None:
+        # A bucket entry has no bucket/key path for a full-path pattern to match.
+        client = _FakeS3Client([{"Buckets": [_bucket("alpha"), _bucket("beta")]}])
+        infos: list[FileInfo] = []
+        S3().ls(
+            S3Storage("s3://", client=client),
+            filter=globsieve.compile([Exclude("/*")]),
+            on_entry=infos.append,
+        )
+        assert [info.key for info in infos] == ["alpha", "beta"]
+
+    def test_a_cancel_from_on_entry_stops_a_filtered_object_listing(self) -> None:
+        # The filter rejects every page after the first; the listing must
+        # still stop at a page boundary rather than run to its end.
+        released = threading.Event()
+        pulled: list[int] = []
+
+        class _Paginator:
+            def paginate(self, **_kwargs: Any) -> Any:
+                def pages() -> Any:
+                    for i in range(200):
+                        pulled.append(i)
+                        if i == 2:
+                            assert released.wait(5.0)
+                        yield {"Contents": [_object(f"p/{i:03}")]}
+
+                return pages()
+
+        class _Client(_FakeS3Client):
+            def get_paginator(self, _name: str) -> Any:
+                return _Paginator()
+
+        token = CancelToken()
+
+        def stop(_info: FileInfo) -> None:
+            token.cancel()
+            released.set()
+
+        with pytest.raises(CancelledError):
+            S3().ls(
+                S3Storage("s3://b/p/", client=_Client([])),
+                recursive=True,
+                filter=lambda info: info.key == "p/000",
+                on_entry=stop,
+                cancel_token=token,
+            )
+        assert len(pulled) <= 3
+
+    def test_a_cancel_stops_a_filtered_bucket_listing_between_entries(self) -> None:
+        pulled: list[int] = []
+
+        def pages() -> Any:
+            for i in range(200):
+                pulled.append(i)
+                yield {"Buckets": [_bucket(f"b{i:03}")]}
+
+        token = CancelToken()
+
+        def reject_and_cancel(info: FileInfo) -> bool:
+            if info.key == "b001":
+                token.cancel()
+            return False
+
+        with pytest.raises(CancelledError):
+            S3().ls(
+                S3Storage("s3://", client=_FakeS3Client(cast("list[dict[str, Any]]", pages()))),
+                filter=reject_and_cancel,
+                on_entry=lambda _info: None,
+                cancel_token=token,
+            )
+        assert len(pulled) == 2
 
 
 class TestUnknownTransferOption:
@@ -249,6 +441,57 @@ class TestUnknownTransferOption:
         with pytest.raises(ValidationError, match=r"Unknown transfer option\(s\): dry_run") as ei:
             method("src-path", "dest-path", dry_run=True)  # pyright: ignore[reportCallIssue]
         assert type(ei.value) is ValidationError
+
+
+class TestMalformedGrants:
+    """cp / mv / sync refuse a malformed ``grants`` before any work.
+
+    aws-cli finds it only as it maps the first upload or copy, after a sync's
+    deletes may have gone out, or never when nothing needs transferring; here
+    it is a bad argument, refused like one on every route (a download's
+    included, which maps no grants).
+    """
+
+    @pytest.mark.parametrize("op", ["cp", "mv", "sync"])
+    @pytest.mark.parametrize(
+        ("grant", "message"),
+        [
+            ("foo", "grants should be of the form permission=principal"),
+            ("bogus=id=x", "permission must be one of: read|readacl|writeacl|full"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("src", "dest"), [("local-dir", "s3://b/p/"), ("s3://b/p/", "local-dir")]
+    )
+    def test_raises_before_any_work(
+        self, op: str, grant: str, message: str, src: str, dest: str
+    ) -> None:
+        class NoClientS3(S3):
+            def client(self) -> Any:
+                raise AssertionError("client built before option validation")
+
+        method = getattr(NoClientS3(), op)
+        recursive = {} if op == "sync" else {"recursive": True}
+        with pytest.raises(ValidationError, match=re.escape(message)) as ei:
+            method(src, dest, grants=["read=id=ok", grant], **recursive)
+        assert type(ei.value) is ValidationError
+        assert ei.value.operation == op
+
+    def test_well_formed_grants_pass(self, tmp_path: Any) -> None:
+        # The check itself refuses nothing well formed: a dry run of a local
+        # upload with every permission spelled goes through to its record.
+        (tmp_path / "a.txt").write_bytes(b"x")
+        client, calls = make_recording_client([])
+        results: list[OpResult] = []
+        S3().cp(
+            str(tmp_path / "a.txt"),
+            S3Storage("s3://b/a.txt", client=client),
+            dryrun=True,
+            grants=["read=id=a", "full=id=b", "readacl=id=c", "writeacl=id=d"],
+            on_result=results.append,
+        )
+        assert calls == []
+        assert [result.outcome for result in results] == [OpOutcome.DRYRUN]
 
 
 class TestValidationOperationAttribution:
@@ -334,28 +577,6 @@ class TestValidationOperationAttribution:
             S3().ls(_Failing("s3://b/k"), on_entry=lambda _info: None)
         assert exc_info.value is error
         assert exc_info.value.__cause__ is cause
-
-
-class TestStrictChecksPrecedeTheGates:
-    """aws rejects the unsupported ARN families before every other check (its
-    ``add_paths`` runs ahead of the stream checks and ``_validate_path_args``),
-    so a bad location reports as such whatever else is wrong with the call."""
-
-    _OLAP = "s3://arn:aws:s3-object-lambda:us-west-2:123456789012:accesspoint/olap/k"
-
-    def test_mvs_same_path_check_comes_after(self) -> None:
-        with pytest.raises(ValidationError, match="Object Lambda") as exc_info:
-            S3().mv(self._OLAP, self._OLAP)
-        assert exc_info.value.operation == "mv"
-
-    def test_the_stream_gates_come_after(self) -> None:
-        with pytest.raises(ValidationError, match="Object Lambda"):
-            S3().cp(IOStorage(io.BytesIO(b"x")), self._OLAP, recursive=True)
-        with pytest.raises(ValidationError, match="Object Lambda"):
-            S3().cp(self._OLAP, IOStorage(io.BytesIO()), no_overwrite=True)
-        with pytest.raises(ValidationError, match="Object Lambda") as exc_info:
-            S3().mv(self._OLAP, IOStorage(io.BytesIO()), recursive=True)
-        assert exc_info.value.operation == "mv"
 
 
 class TestStorageMethodAttribution:
@@ -552,8 +773,8 @@ class TestClientSeam:
     def test_a_client_the_cli_vetted_skips_the_environment(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # boto3-s3-cli checks every client its sessions build where aws does;
-        # a second look at the environment would refuse runs aws completes.
+        # boto3-s3-cli checks every client its sessions build where aws-cli does;
+        # a second look at the environment would refuse runs aws-cli completes.
         from boto3_s3.s3storage import CA_BUNDLE_ENVIRONMENT_VETTED
 
         monkeypatch.setenv("AWS_CA_BUNDLE", "")
@@ -605,6 +826,78 @@ class TestClientSeam:
             with pytest.raises(InvalidConfigError) as exc_info:
                 build()
             assert isinstance(exc_info.value.__cause__, AttributeError)
+
+    @pytest.mark.parametrize(
+        ("lines", "cause"),
+        [
+            ("retry_mode = bogus", "InvalidRetryModeError"),
+            ("max_attempts = -1", "InvalidMaxRetryAttemptsError"),
+            ("s3 =\n    addressing_style = bogus", "InvalidS3AddressingStyleError"),
+            (
+                "s3 =\n    us_east_1_regional_endpoint = bogus",
+                "InvalidS3UsEast1RegionalEndpointConfigError",
+            ),
+            ("sts_regional_endpoints = bogus", "InvalidSTSRegionalEndpointsConfigError"),
+            ("defaults_mode = bogus", "InvalidDefaultsMode"),
+            ("ec2_metadata_service_endpoint = bogus", "InvalidIMDSEndpointError"),
+            ("ec2_metadata_service_endpoint_mode = bogus", "InvalidIMDSEndpointModeError"),
+            pytest.param(
+                "request_checksum_calculation = bogus",
+                "InvalidChecksumConfigError",
+                marks=pytest.mark.skipif(
+                    not hasattr(botocore_exceptions, "InvalidChecksumConfigError"),
+                    reason="botocore before 1.36 has no checksum settings",
+                ),
+            ),
+            ("[default", "ConfigParseError"),
+        ],
+    )
+    def test_a_config_botocore_refuses_maps_to_invalid_config_error(
+        self, lines: str, cause: str, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # botocore refuses these while it builds any client, each with an
+        # error of its own directly under BotoCoreError.
+        config = tmp_path / "config"
+        config.write_text(f"[default]\nregion = us-east-1\n{lines}\n")
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        monkeypatch.delenv("AWS_PROFILE", raising=False)
+        for build in (lambda: S3().client(), lambda: S3Storage("s3://b/").get_client()):
+            with pytest.raises(InvalidConfigError) as exc_info:
+                build()
+            assert type(exc_info.value.__cause__).__name__ == cause
+
+    @pytest.mark.parametrize(
+        ("config", "target", "cause"),
+        [
+            (
+                Config(use_fips_endpoint=True, s3={"use_accelerate_endpoint": True}),
+                "s3://b/k",
+                "UnsupportedS3ConfigurationError",
+            ),
+            (
+                Config(s3={"use_arn_region": False}),
+                "s3://arn:aws:s3:us-west-2:123456789012:accesspoint/ap/k",
+                "UnsupportedS3AccesspointConfigurationError",
+            ),
+        ],
+        ids=["accelerate-with-fips", "access-point-of-another-region"],
+    )
+    def test_a_setting_the_endpoint_rules_refuse_for_the_target_is_invalid_config(
+        self, config: Config, target: str, cause: str
+    ) -> None:
+        # S3's endpoint rules refuse these when a request names its target,
+        # and botocore names them configuration errors.
+        with pytest.raises(InvalidConfigError) as exc_info:
+            S3(config=config).presign(target)
+        assert type(exc_info.value.__cause__).__name__ == cause
+
+    def test_s3_controls_configuration_error_is_invalid_config(self) -> None:
+        # mv's path check asks S3 Control about an access point ARN, whose
+        # endpoint rules refuse the same settings.
+        exc = botocore_exceptions.UnsupportedS3ControlConfigurationError(msg="dual-stack")
+        error = sdkerrors.translate_boto_error(exc, operation="mv")
+        assert type(error) is InvalidConfigError
+        assert str(error) == str(exc)
 
     def test_a_credential_process_that_cannot_run_maps_to_invalid_config_error(
         self, monkeypatch: pytest.MonkeyPatch
@@ -684,7 +977,7 @@ class TestResolveSeam:
             def client(self) -> Any:
                 return sentinel
 
-        class _P(os.PathLike):  # type: ignore[type-arg]
+        class _P(os.PathLike):  # pyright: ignore[reportMissingTypeArgument]
             def __fspath__(self) -> str:
                 return "s3://my-bucket/key"
 
@@ -720,71 +1013,41 @@ def _captured_transferrer_kwargs(monkeypatch: pytest.MonkeyPatch) -> dict[str, A
 
 
 class TestTransferConfigDefault:
-    """cp / mv / sync fall back to the instance ``transfer_config``; a per-call value wins."""
+    """cp / mv / sync fall back to the instance ``transfer_config``; a per-call value wins.
+
+    The transferrer receives the resolved config (`S3.resolve_transfer_config`),
+    which carries the given settings over.
+    """
 
     def test_instance_default_reaches_the_transferrer(
         self, _captured_transferrer_kwargs: dict[str, Any], tmp_path: Any
     ) -> None:
         src = tmp_path / "x.txt"
         src.write_text("hi")
-        marker = TransferConfig()
+        marker = TransferConfig(max_concurrency=3)
         with pytest.raises(_StopTransferError):
             S3(transfer_config=marker).cp(str(src), "s3://bucket/key")
-        assert _captured_transferrer_kwargs["transfer_config"] is marker
+        assert _captured_transferrer_kwargs["transfer_config"].max_concurrency == 3
 
     def test_per_call_overrides_instance_default(
         self, _captured_transferrer_kwargs: dict[str, Any], tmp_path: Any
     ) -> None:
         src = tmp_path / "x.txt"
         src.write_text("hi")
-        instance_tc, call_tc = TransferConfig(), TransferConfig()
+        instance_tc, call_tc = TransferConfig(max_concurrency=3), TransferConfig(max_concurrency=5)
         with pytest.raises(_StopTransferError):
             S3(transfer_config=instance_tc).cp(str(src), "s3://bucket/key", transfer_config=call_tc)
-        assert _captured_transferrer_kwargs["transfer_config"] is call_tc
+        assert _captured_transferrer_kwargs["transfer_config"].max_concurrency == 5
 
 
-class TestCrtAbsentCredentialsPosture:
-    """``crt_allow_absent_credentials`` reaches every route that builds a Transferrer.
+class TestCrtClientOptionsPosture:
+    """``S3(crt=...)`` reaches every route that builds a Transferrer.
 
-    The flag is what makes ``boto3-s3-cli`` enter the CRT engine with no
-    credentials the way ``aws s3`` does (design/crt.md section 4); a route that
-    forgot to thread it would silently keep boto3's classic fallback there.
-    """
-
-    def _run(self, s3: S3, tmp_path: Any, route: str) -> None:
-        src = tmp_path / "x.txt"
-        src.write_text("hi")
-        if route == "cp":
-            s3.cp(str(src), "s3://bucket/key")
-        elif route == "stream":
-            # The streaming route builds its own Transferrer (s3.py `_cp_stream`).
-            s3.cp(IOStorage(io.BytesIO(b"hi")), "s3://bucket/key")
-        else:
-            s3.sync(str(tmp_path), "s3://bucket/pfx")
-
-    @pytest.mark.parametrize("route", ["cp", "stream", "sync"])
-    @pytest.mark.parametrize("allow", [False, True], ids=["default", "opt-in"])
-    def test_posture_reaches_every_route(
-        self,
-        _captured_transferrer_kwargs: dict[str, Any],
-        tmp_path: Any,
-        route: str,
-        allow: bool,
-    ) -> None:
-        s3 = S3(crt_allow_absent_credentials=allow) if allow else S3()
-        with pytest.raises(_StopTransferError):
-            self._run(s3, tmp_path, route)
-        assert _captured_transferrer_kwargs["crt_allow_absent_credentials"] is allow
-
-
-class TestCrtRegionPosture:
-    """``crt_region`` reaches every route that builds a Transferrer.
-
-    Same reason as the credentials posture above: the declared region - a
-    ``None`` that says "the chain resolved nothing" included - is what makes
-    ``boto3-s3-cli`` reproduce ``aws s3``'s CRT construction failure
-    (design/crt.md section 6), and a route that forgot to thread it would
-    silently fall back to the client's ``aws-global``.
+    The options are what keep ``boto3-s3-cli``'s ``--no-sign-request``
+    anonymous on the CRT lane even where ``--sse aws:kms`` restores signing on
+    the client (design/crt.md section 4), and its CRT lane on aws-cli's trust
+    source; a route that forgot to thread them would sign that route's
+    transfers where ``aws s3`` sends them unsigned.
     """
 
     def _run(self, s3: S3, tmp_path: Any, route: str) -> None:
@@ -799,54 +1062,22 @@ class TestCrtRegionPosture:
 
     @pytest.mark.parametrize("route", ["cp", "stream", "sync"])
     @pytest.mark.parametrize(
-        "declared", [CLIENT_REGION, None, "eu-west-1"], ids=["default", "absent", "explicit"]
+        "declared",
+        [None, CrtClientOptions(verify="/ca.pem")],
+        ids=["default", "declared"],
     )
     def test_posture_reaches_every_route(
         self,
         _captured_transferrer_kwargs: dict[str, Any],
         tmp_path: Any,
         route: str,
-        declared: Any,
+        declared: CrtClientOptions | None,
     ) -> None:
-        s3 = S3() if declared is CLIENT_REGION else S3(crt_region=declared)
+        s3 = S3(crt=declared)
         with pytest.raises(_StopTransferError):
             self._run(s3, tmp_path, route)
-        assert _captured_transferrer_kwargs["crt_region"] is declared
-
-
-class TestCrtSignRequestsPosture:
-    """``crt_sign_requests`` reaches every route that builds a Transferrer.
-
-    The declaration is what keeps ``boto3-s3-cli``'s ``--no-sign-request``
-    anonymous on the CRT lane even where ``--sse aws:kms`` restores signing on
-    the client (design/crt.md section 4); a route that forgot to thread it
-    would sign that route's transfers where ``aws s3`` sends them
-    unsigned.
-    """
-
-    def _run(self, s3: S3, tmp_path: Any, route: str) -> None:
-        src = tmp_path / "x.txt"
-        src.write_text("hi")
-        if route == "cp":
-            s3.cp(str(src), "s3://bucket/key")
-        elif route == "stream":
-            s3.cp(IOStorage(io.BytesIO(b"hi")), "s3://bucket/key")
-        else:
-            s3.sync(str(tmp_path), "s3://bucket/pfx")
-
-    @pytest.mark.parametrize("route", ["cp", "stream", "sync"])
-    @pytest.mark.parametrize("declared", [None, False, True], ids=["default", "unsigned", "signed"])
-    def test_posture_reaches_every_route(
-        self,
-        _captured_transferrer_kwargs: dict[str, Any],
-        tmp_path: Any,
-        route: str,
-        declared: bool | None,
-    ) -> None:
-        s3 = S3() if declared is None else S3(crt_sign_requests=declared)
-        with pytest.raises(_StopTransferError):
-            self._run(s3, tmp_path, route)
-        assert _captured_transferrer_kwargs["crt_sign_requests"] is declared
+        expected = declared if declared is not None else CrtClientOptions()
+        assert _captured_transferrer_kwargs["crt"].crt == expected
 
 
 class TestMaterializeCrtEngine:
@@ -854,8 +1085,18 @@ class TestMaterializeCrtEngine:
 
     The seam ``rm`` uses to pay ``aws s3``'s transfer-manager construction
     without transferring; the postures it forwards are what make that
-    construction fail where aws's does.
+    construction fail where aws-cli's does.
     """
+
+    @pytest.fixture(autouse=True)
+    def _usable_crt(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # An explicit 'crt' resolves only with a usable stack, and claims the
+        # process's CRT slot - kept out of the test process.
+        from boto3_s3 import crtsupport
+
+        monkeypatch.setattr(crtsupport, "has_minimum_crt_version", lambda: True)
+        monkeypatch.setattr(crtsupport, "has_crt_s3transfer", lambda: True)
+        monkeypatch.setattr(crtsupport, "acquire_process_lock", lambda: True)
 
     def test_the_instance_postures_are_forwarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from boto3_s3 import crtsupport
@@ -873,22 +1114,16 @@ class TestMaterializeCrtEngine:
         s3 = S3(
             session=session,
             endpoint_url=endpoint,
-            crt_allow_absent_credentials=True,
-            crt_allow_lockless=True,
-            crt_region=None,
-            crt_sign_requests=False,
+            crt=CrtClientOptions(allow_lockless=True),
         )
         s3.materialize_crt_engine(client, transfer_config=config)  # pyright: ignore[reportArgumentType]
+        assert [entry.pop("config").preferred_transfer_client for entry in seen] == ["crt"]
         assert seen == [
             {
                 "client": client,
-                "config": config,
                 "endpoint": endpoint,
                 "session": session,
-                "allow_absent_credentials": True,
-                "allow_lockless": True,
-                "region": None,
-                "sign_requests": False,
+                "crt": CrtClientOptions(allow_lockless=True),
             }
         ]
 
@@ -937,7 +1172,7 @@ class TestMaterializeCrtEngine:
         config = TransferConfig(preferred_transfer_client="crt")
         client = SimpleNamespace(meta=SimpleNamespace(endpoint_url=None))
         S3(transfer_config=config).materialize_crt_engine(client)  # pyright: ignore[reportArgumentType]
-        assert seen == [config]
+        assert [resolved.preferred_transfer_client for resolved in seen] == ["crt"]
 
     def test_a_classic_selection_never_reads_the_crt_only_boto3_name(
         self, monkeypatch: pytest.MonkeyPatch
@@ -974,7 +1209,7 @@ class TestMaterializeCrtEngine:
         client = SimpleNamespace(meta=SimpleNamespace(endpoint_url=None))
         config = TransferConfig(preferred_transfer_client="crt")
         S3(transfer_config=config).materialize_crt_engine(client)  # pyright: ignore[reportArgumentType]
-        assert built == [config]
+        assert [resolved.preferred_transfer_client for resolved in built] == ["crt"]
 
     @pytest.mark.parametrize(
         ("raised", "expected"),
@@ -1013,20 +1248,6 @@ class TestMaterializeCrtEngine:
             S3(transfer_config=config).materialize_crt_engine(client)  # pyright: ignore[reportArgumentType]
         assert str(info.value) == str(raised)
         assert info.value.__cause__ is raised
-
-    def test_awscrts_region_assertion_passes_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # The CLI converts awscrt's bare AssertionError at its one call site
-        # (aws's empty rc-255 report), so the library must hand it over as is.
-        from boto3_s3 import crtsupport
-
-        def fake(_client: Any, _config: Any, **_kwargs: Any) -> None:
-            raise AssertionError
-
-        monkeypatch.setattr(crtsupport, "materialize_crt_engine", fake)
-        client = SimpleNamespace(meta=SimpleNamespace(endpoint_url=None))
-        config = TransferConfig(preferred_transfer_client="crt")
-        with pytest.raises(AssertionError):
-            S3(transfer_config=config).materialize_crt_engine(client)  # pyright: ignore[reportArgumentType]
 
 
 class TestModuleLevelConvenienceSignatures:

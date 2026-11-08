@@ -44,7 +44,7 @@ callable receives a **pair** and returns whether to copy. `None` — the default
 means the `aws s3` rule. `True` re-copies everything, `False` never overwrites
 (additive only). Note that `None` and `False` are not the same thing.
 
-`create_filter` is the knob `aws s3` does not have: aws always creates.
+`create_filter` is the knob `aws s3` does not have: aws-cli always creates.
 
 ## 2. The default overwrite rule
 
@@ -92,9 +92,9 @@ entirely, so it takes neither.
 equivalent of `--exclude` / `--include`:
 
 ```python
-from boto3_s3 import GlobFilter
+from boto3_s3 import Exclude, Include, globsieve
 
-only_html = GlobFilter().exclude("*").include("*.html").compile()
+only_html = globsieve.compile([Exclude("*"), Include("*.html")])
 s3.sync(src, dest, filter=only_html, delete_filter=True)
 ```
 
@@ -168,13 +168,16 @@ refused. See [`compatibility.md`](../compatibility.md).
 ## 6. Before anything is transferred
 
 - **Downloading** creates the destination directory before scanning, so it
-  exists even if the sync transfers nothing. If a *file* already exists at that
-  path, the run proceeds and then every item fails — or, when the path is
-  written with a trailing separator, stops before anything is listed, the
-  directory creation failing on the file.
-- **Uploading** from a path that does not exist raises. If the source is a file
-  rather than a directory, `sync` warns and completes with warnings rather than
-  failing — `sync` is a directory operation.
+  exists even if the sync transfers nothing; a sync refused before it starts
+  (a bad argument, a directory bucket) creates none. If a *file* already
+  exists at that path, the run proceeds and then every item fails — or, when
+  the path is written with a trailing separator, stops before anything is
+  listed, the directory creation failing on the file.
+- **Uploading** from a path that does not exist raises, and so does one the
+  walk cannot read as a directory — a file, a special file, an unreadable
+  directory, a symlink the `LocalStorage` does not follow — before anything
+  is listed or deleted: `sync` is a directory operation, and an empty source
+  would have its deletions empty the destination.
 - **Syncing an S3 location onto itself** does nothing and succeeds silently;
   there is no self-reference guard like `mv`'s.
 - **S3 Express directory buckets** are rejected on either side, and so are

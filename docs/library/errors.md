@@ -15,8 +15,8 @@ except Boto3S3Error as exc:
 
 Catching the root catches every failure the library reports as its own. The
 deliberate exceptions — programming errors, `KeyboardInterrupt` / `SystemExit`,
-and botocore's `MissingDependencyException` when the CRT engine is requested
-explicitly without a usable awscrt — are listed under
+and botocore's `MissingDependencyException` when a plain boto3 `TransferConfig`
+requests the CRT engine explicitly without a usable awscrt — are listed under
 [`Boto3S3Error`](../reference/exceptions.md#boto3s3error).
 
 ## 1. The hierarchy
@@ -28,7 +28,6 @@ Boto3S3Error                 the root; catch this to catch every reported failur
 ├── ValidationError          an invalid argument, precondition or state
 │   └── InvalidValueError
 ├── TransportError           network or local I/O failure
-├── MalformedResponseError   a response missing what the AWS CLI reads, or a timestamp the host cannot hold
 ├── ConfigurationError       credentials or region missing or unusable
 │   └── InvalidConfigError
 ├── CancelledError           cancelled through a CancelToken
@@ -46,9 +45,11 @@ exceptions in `asyncio` and `concurrent.futures`.
 
 Programming mistakes are not wrapped on the synchronous paths. A `TypeError`
 raised by a `filter` predicate, a `KeyboardInterrupt`, a `SystemExit` — all
-pass straight through. `on_result` and `on_progress` must not raise at all:
-beyond what an operation's reference page states, the library makes no promise
-about a callback that does.
+pass straight through. So does an exception `on_result` or `on_progress`
+raises: it ends the run and reaches the caller as it is, whichever thread the
+callback ran on, and it does not fail the item the callback was reporting on.
+Even so, keep both from raising: beyond that and what an operation's reference
+page states, the library makes no promise about a callback that does.
 
 Every class in the tree has its own entry in the API reference,
 [`exceptions.md`](../reference/exceptions.md) — the exact conditions that raise
@@ -62,9 +63,9 @@ attributes**.
 Every [`Boto3S3Error`](../reference/exceptions.md#boto3s3error) carries
 `operation`, `bucket` and `key`. `BatchError` adds its counters and leaves
 `bucket` and `key` empty — it stands for a whole run rather than one entry.
-Message strings are **display only** — they track `aws s3`'s wording and change
-whenever parity requires it, so branch on the class and read the attributes,
-and never parse `str(exc)`.
+Message strings are **display only** — the wording is not part of the
+contract and can change in any release, so branch on the class and read the
+attributes, and never parse `str(exc)`.
 
 The context attributes are best-effort. `operation=None` is a legitimate value
 rather than a gap: it means no single operation was in scope — while a client is
@@ -93,10 +94,9 @@ synthesized from the response body and has no exception behind it, so its
 | S3 403 / `AccessDenied`; a local `PermissionError` | `AccessDeniedError` |
 | S3 404 / `NoSuchKey` / `NoSuchBucket`; a local `FileNotFoundError` or missing source | `NotFoundError` |
 | S3 5xx or throttling (`InternalError`, `SlowDown`, `ServiceUnavailable`); a connection failure, a timeout, a local I/O `OSError` | `TransportError` |
-| a listing, bucket or HeadObject response missing an element the AWS CLI reads; a `LastModified` the host's local zone cannot represent | `MalformedResponseError` |
-| `NoCredentialsError` / `NoRegionError`; an SDK too old for a requested feature | `ConfigurationError` |
-| an unusable profile, partial credentials, a config value that will not convert | `InvalidConfigError` |
-| an invalid argument or a violated precondition | `ValidationError` |
+| `NoCredentialsError` / `NoRegionError`; an SDK too old for a requested feature, where the library checks it | `ConfigurationError` |
+| an unusable profile, partial credentials, a config value that will not convert or that botocore refuses, a config file botocore cannot parse | `InvalidConfigError` |
+| an invalid argument or a violated precondition; a request botocore's own parameter validation refuses (an `mb` or `ls` input the installed SDK predates), or an `ls` bucket filter on a botocore too old to send one (refused by the library before any request) | `ValidationError` |
 | `CancelToken.cancel()` | `CancelledError` |
 
 An S3 error code not in the table falls back to its HTTP status: 403 and 404 as
@@ -131,11 +131,8 @@ Some details worth knowing:
 - The batch shape applies **regardless of item count** — a single failing item
   still ends in `BatchError`, reported as 1 of 1.
 - Cancelled items are never counted as failures, and a cancelled run raises
-  something else entirely (see [`results.md`](./results.md)). The CRT engine
-  is narrower: there only a `CancelToken` cancel yields cancelled items, so a
-  fatal error or a Ctrl-C that cuts a CRT run short reports its in-flight items
-  as `FAILED`, and a Ctrl-C the CRT manager swallows mid-drain ends the run in
-  `BatchError`.
+  something else entirely (see [`results.md`](./results.md)), on either
+  transfer engine.
 - `skipped` is informational. It counts skips the operation made — a `cp` or
   `mv` that `no_overwrite` stopped from replacing an existing object, an
   archived object passed over under `ignore_glacier_warnings` — but not items

@@ -40,7 +40,8 @@ that contract applies follows the split above.
 an `s3://` string is an S3 location and a scheme-less `"bucket/key"` is a local
 relative path to them. `ls`, `rm`, `mb`, `rb`, `presign` and `website` resolve
 their single `target` themselves and read it as S3 whether or not it carries
-the scheme, with no local fallback.
+the scheme, with no local fallback; `website` reads a string as a bucket name
+whole, as `aws s3 website` does ([`website.md`](./website.md)).
 
 Four consequences are the operations' own:
 
@@ -48,17 +49,15 @@ Four consequences are the operations' own:
   rejects, is stated on each operation's page.
 - The three transfer operations are the only callers of `resolve`, so a
   subclass that overrides it to add a scheme reaches them and none of the other
-  six. Outside the operations,
-  [`ChecksumComparison`](../comparator.md#checksumcomparison) also resolves the
-  two locations it is constructed with through the `S3` it is given, so the
-  override reaches that strategy too.
+  six.
 - The six S3-only operations reject a `Storage` that is not an `S3Storage` with
   `ValidationError` ([`../exceptions.md`](../exceptions.md)), since none of the
   library's `Storage` classes implements `__fspath__`. A custom backend
   ([`../../library/custom-storage.md`](../../library/custom-storage.md)) that
   does implement it is expanded like any other path-like value and read as an
   S3 target instead.
-- Accepting the scheme-less form is deliberate leniency: the library is more
+- `ls`, `presign` and `website` accept the scheme-less form as `aws s3`
+  does. On `rm`, `mb` and `rb` it is deliberate leniency: the library is more
   permissive than `aws s3`, and the strict path rejections belong to the
   command layer ([`../../library/README.md`](../../library/README.md)).
 
@@ -86,8 +85,7 @@ unchanged, and returns what the method returns — `None` for all of them except
 method; the wrapper adds nothing to the contract but the `S3()` it builds.
 
 That `S3()` is constructed per call with no arguments: no `session`, no
-`endpoint_url`, no `config`, no default `transfer_config`, and
-`reusable_after_interrupt=True`. Nothing is shared or memoized between calls, so each
+`endpoint_url`, no `config` and no default `transfer_config`. Nothing is shared or memoized between calls, so each
 call builds its own clients. Configuring any of that means constructing an `S3`
 yourself and calling the method ([`../s3.md`](../s3.md)). Subclassing does not
 reach these functions either — they instantiate `S3` itself, not the subclass.
@@ -115,16 +113,16 @@ return `None`; the record stream is the result. The default discards records.
 `on_entry: ListingCallback` instead — and `mb`, `rb`, `presign` and `website`
 emit nothing.
 
-Records arrive while the run proceeds, not at the end. An item the operation
+Records arrive while the run proceeds, not at the end, and none arrives once the
+operation has raised. An item the operation
 acts on produces one terminal record — `SUCCEEDED`, `FAILED`, `SKIPPED`,
 `DRYRUN` or `CANCELLED` — while `WARNED` and `NOTICE` records are advisories
 outside that rule, so one key may produce more than one callback. An item that
 never reaches the operation, because a filter dropped it during enumeration or
-because the run ended first, produces nothing. Three carve-outs sit between
+because the run ended first, produces nothing. Two carve-outs sit between
 the two — an item a pre-transfer gate consumes with an advisory instead of an
-outcome, an entry discarded from a batched delete's unsent buffer, and an item
-whose request died without a response, which `aws s3` loses as well — and all
-three are stated with `OpResult` in [`../results.md`](../results.md).
+outcome, and an entry discarded from a batched delete's unsent buffer — and
+both are stated with `OpResult` in [`../results.md`](../results.md).
 
 The callback runs on a worker thread for engine transfers and for batched
 deletes, and on the scan's prefetch worker for the warnings a walk or listing
@@ -167,7 +165,9 @@ submission — though a bare `"s3://..."` argument's client is built during
 resolution, which happens before that first poll.
 
 If the token is cancelled at any point the call observes, the call ends by
-raising `CancelledError` after the operation has reclaimed its workers; it does
+raising `CancelledError` — under a graceful cancel once the operation has
+reclaimed its workers, under an immediate one at once, the requests already
+sent finishing behind it (a listing's worker ends by itself either way); it does
 not return normally, and it does not raise `BatchError`. `CancelToken`,
 `CancelMode`, and what the two modes do to accepted and in-flight work are
 specified in [`../results.md`](../results.md).
@@ -181,7 +181,7 @@ documented where it is owned:
   progress ([`../results.md`](../results.md)). `rm` moves no bytes and has none.
 - `capture_response: bool` on `cp` / `mv` / `rm` / `sync` — what a successful
   record's `extra_info` carries ([`../results.md`](../results.md)).
-- `filter: FileFilter | None` on `cp` / `mv` / `rm` / `sync`
+- `filter: FileFilter | None` on `cp` / `mv` / `rm` / `sync` / `ls`
   ([`../filters.md`](../filters.md)), and, on `cp` / `mv` / `sync`, the
   `transfer_config` argument plus the `**options` transfer options
   ([`../options.md`](../options.md)); `rm` takes `transfer_config` too, for its
@@ -199,8 +199,8 @@ documented where it is owned:
 The many-item operations — `cp`, `mv`, `rm` and `sync` — do not abort at the
 first item failure. A failed item becomes a `FAILED` record on `on_result` and
 the run continues through the remaining items. When at least one item failed,
-the call raises `BatchError` once, at the end, after workers are reclaimed; it
-carries the run's rollup counts and a sampled failure on `__cause__`. Warnings
+the call raises `BatchError` once, at the end, after workers are reclaimed (a
+listing's worker ends by itself); it carries the run's rollup counts and a sampled failure on `__cause__`. Warnings
 and skips alone do not raise. The shape does not depend on item count: a
 single-object `cp` or a single-key `rm` whose one item failed also ends in
 `BatchError`, reported as 1 of 1.
@@ -211,8 +211,8 @@ exception directly instead: an unknown key in `**options`
 (`ValidationError`), a client that cannot be built (`ConfigurationError` or its
 `InvalidConfigError` refinement), an S3 Express location or a requested feature
 the installed SDK predates (`ConfigurationError`, naming the version it needs —
-see [`../../compatibility.md`](../../compatibility.md)), a missing local source (`NotFoundError`,
-worded as the AWS CLI words it), a listing rejected outright.
+see [`../../compatibility.md`](../../compatibility.md)), a missing local source (`NotFoundError`),
+a listing rejected outright.
 
 `mb`, `rb`, `presign` and `website` act on a single thing and raise their
 category exception directly; they never raise `BatchError`. `ls` has no item

@@ -3,31 +3,35 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from collections.abc import Sequence
 from typing import Any, ClassVar, cast
 
 # Module-level imports are fine here: mb is loaded at dispatch (stage 2 of
 # the lazy dispatch), after the command is determined.
 from boto3_s3 import S3Storage, ValidationError
-from boto3_s3_cli import clientfactory, globalargs, output, usage
-from boto3_s3_cli.commands.base import Command, Context, expand_positional_paramfile
+from boto3_s3_cli import output, usage
+from boto3_s3_cli.commands.base import (
+    Command,
+    Context,
+    expand_positional_paramfile,
+    refuse_bucketless,
+)
 
 
 class _AppendTagsAction(argparse.Action):
-    """Append one ``KEY VALUE`` pair, carrying aws's token count as a marker.
+    """Append one ``KEY VALUE`` pair, carrying aws-cli's token count as a marker.
 
     Stock ``append`` behavior (the value stays argparse's own shape - a list
     of two-item lists, which ``run`` unpacks as pairs) plus ``aws_nargs``:
-    aws declares TAGS with a token count, so both tokens are taken however
+    aws-cli declares TAGS with a token count, so both tokens are taken however
     they look (``mb --tags -k -v`` tags the bucket ``-k=-v``). The parser base
     class reads the marker and reproduces that on every supported Python
     (``cli._ParamValidationArgumentParser._match_argument``), which stock
     argparse only does from 3.12 on. The real ``nargs=2`` stays, so a missing
-    token still reports aws's ``expected 2 arguments``.
+    token still fails the parse (252).
     """
 
-    # The count aws declares; not an argparse attribute.
+    # The count aws-cli declares; not an argparse attribute.
     aws_nargs: ClassVar[int] = 2
 
     def __call__(
@@ -52,7 +56,7 @@ class MbCommand(Command):
 
     def configure(self, parser: argparse.ArgumentParser) -> None:
         """Add the ``mb``-specific arguments to its subparser."""
-        parser.add_argument("path", metavar="<S3Uri>", help="the bucket to create")
+        parser.add_argument("path", help="the bucket to create")
         # Repeatable KEY VALUE pairs, duplicates passed through for the server
         # to reject (aws-cli TAGS arg: action append, nargs 2).
         parser.add_argument(
@@ -67,65 +71,52 @@ class MbCommand(Command):
         """Create the bucket and return an ``aws s3 mb``-style exit code.
 
         Exit-code shape (aws-cli MbCommand): usage errors - a non-``s3://``
-        path, an S3 Express (``--x-s3``) bucket, a rejected ARN form - exit
-        252 via ``main``; every failure from the create onwards is rc 1 with
-        one ``make_bucket failed:`` line (aws catches every create_bucket
-        exception locally, even request-time credential errors, and its catch
-        spans the success line too - an unwritable stdout is an mb failure, not
-        the dispatcher's 255). The key part
-        of the path is silently dropped, exactly like aws. aws builds the client
-        before validating the path (``S3Command._run_main``), so a
-        client-construction failure (a bad ``--profile``, partial credentials,
-        an empty region) takes precedence over a path usage error - we build it
-        first to match (its 255 wins over the 252).
+        path, a path that names no bucket, an S3 Express (``--x-s3``) bucket,
+        a rejected ARN form - exit
+        252 via ``main``; every failure of the create is rc 1 with one
+        ``make_bucket failed:`` line (aws-cli catches every create_bucket
+        exception locally, even request-time credential errors). The success
+        line is past that catch: the bucket exists by then, so a stdout that
+        cannot take the line is lost output (rc 255 with the error, like every
+        command's), and a process without a stdout (``1>&-``) keeps rc 0 -
+        where aws-cli's catch spans the line and reports the created bucket as an
+        mb failure. The key part
+        of the path is silently dropped, exactly like aws-cli. A client-construction
+        failure (a bad ``--profile``, partial credentials, an empty region)
+        reaches main's exit-code mapping (config -> 253, other botocore -> 255).
         """
-        # Parse-time head (measured, design/cli.md section 6): the --query compile
-        # (252), the --endpoint-url scheme check (252), and the positional
-        # paramfile expansion (252) all precede the client build - they beat a
-        # bad --profile (255) the way aws's parse-time load-cli-arg does.
-        globalargs.validate_query(args)
-        clientfactory.validate_endpoint_url(args)
         expand_positional_paramfile(args, "path", name="path", operation="mb")
-        # Build the client up front, like aws's super()._run_main(), so a
-        # construction error precedes the path checks below (it reaches main's
-        # exit-code mapping: config -> 253, other botocore -> 255).
+        target: str = args.path
+        if not target.startswith("s3://"):
+            # aws-cli's mb: S3 paths only -> rc 252.
+            raise ValidationError(usage.bare_single_uri_usage(), operation="mb")
+
+        # A path that names no bucket (`s3://`, `s3:///k`) is a usage error
+        # (252), where aws-cli sends Bucket="" and reports an mb failure (rc 1).
+        bucket_part = target[len("s3://") :].partition("/")[0]
+        refuse_bucketless(bucket_part, operation="mb")
+
         s3 = ctx.s3(args)
         client = s3.client()
 
-        target: str = args.path
-        if not target.startswith("s3://"):
-            # aws mb: S3 paths only -> rc 252.
-            raise ValidationError(usage.bare_single_uri_usage(), operation="mb")
-
-        bucket_part, _, _key_part = target[len("s3://") :].partition("/")
-        if not bucket_part:
-            # aws sends Bucket="" to the API and botocore's client-side
-            # validation fails inside mb's local catch -> rc 1. S3Storage.validate()
-            # would reject "s3:///k" as a ValidationError (252-shaped), so handle
-            # the form before construction to keep this path at rc 1 (same as rm).
-            message = usage.invalid_bucket_name_message()
-            sys.stderr.write(output.format_make_bucket_failed(target, message) + "\n")
-            return 1
-
         # Rejected ARN forms (S3 Object Lambda / Outposts bucket) raise
-        # ValidationError from S3Storage.validate -> rc 252, matching aws (the
+        # ValidationError from S3Storage.validate -> rc 252, matching aws-cli (the
         # check is deferred from the now non-raising construction).
         storage = S3Storage(target, client=client)
         storage.validate()
         if storage.bucket.endswith("--x-s3"):
             # botocore is_s3express_bucket on the ARN-aware bucket, ordered like
-            # aws (split_s3_bucket_key's ARN rejection runs first, inside
+            # aws-cli (split_s3_bucket_key's ARN rejection runs first, inside
             # validate); a slash-form accesspoint ARN whose name ends --x-s3 is
             # caught here where a naive partition on the first "/" would miss it.
             raise ValidationError("Cannot use mb command with a directory bucket.", operation="mb")
         tags = [(key, value) for key, value in args.tags] if args.tags else None
-        # aws's MbCommand wraps the create *and* its success line in one local
-        # `except Exception`, so a stdout that cannot take the line is reported
-        # as an mb failure like any other rather than reaching the dispatcher.
         try:
             s3.mb(storage, tags=tags)
-            output.uni_write(sys.stdout, output.format_make_bucket(storage.bucket) + "\n")
-            return 0
         except Exception as exc:
-            sys.stderr.write(output.format_make_bucket_failed(target, exc) + "\n")
+            output.write_stderr(output.format_make_bucket_failed(target, exc) + "\n")
             return 1
+        # The bucket exists from here, so the line is outside the failure
+        # catch (aws-cli's spans it, reporting a created bucket as failed).
+        output.write_result_line(output.format_make_bucket(storage.bucket))
+        return 0

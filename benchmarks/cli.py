@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import traceback
 from fnmatch import fnmatch
 from pathlib import Path
 
@@ -61,8 +62,9 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="report raw wall-clock instead of startup-adjusted net times",
     )
-    # Regression-flag self-test only: inflate every boto3-s3 sample by this
-    # many milliseconds and check that the flag fires.
+    # Regression-flag self-test only: inflate every boto3-s3 sample (but the
+    # startup_minimal probe the E2E nets subtract) by this many milliseconds
+    # and check that the flag fires. Such a run is never picked as a baseline.
     run.add_argument("--self-test-handicap-ms", type=float, default=0.0, help=argparse.SUPPRESS)
 
     rep = sub.add_parser("report", help="re-render stored results files")
@@ -112,7 +114,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="instance self-terminates after this budget (default: %(default)s)",
     )
     ec2run.add_argument(
-        "--keep", action="store_true", help="do not terminate at the end (still self-terminates)"
+        "--keep",
+        action="store_true",
+        help="leave the instance and its bucket when the launcher stops first "
+        "(it still self-terminates; `ec2 cleanup` removes the bucket)",
     )
     ec2run.add_argument(
         "--on-demand",
@@ -128,7 +133,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     _add_common(ec2sub.add_parser("setup-iam", help="create the instance role/profile (one-time)"))
-    _add_common(ec2sub.add_parser("cleanup", help="terminate any tagged leftover instances"))
+    _add_common(
+        ec2sub.add_parser(
+            "cleanup", help="terminate tagged leftover instances, then delete leftover buckets"
+        )
+    )
 
     return parser
 
@@ -169,6 +178,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # Fail fast on a missing dev stack before spending in-process time.
         _ours_exe, aws_exe = e2e.check_environment()
         aws_ver = e2e.aws_version(aws_exe)
+        from tests.utils.golden import pinned_aws_version
+
+        # None where the aws-cli source checkout is absent (the EC2 instance's
+        # archive); the launcher installs the pinned version there itself.
+        pinned = pinned_aws_version()
+        if pinned is not None and aws_ver.split(" ", 1)[0] != f"aws-cli/{pinned}":
+            _log(
+                f"[e2e] warning: {aws_exe} is {aws_ver!r}, not the pinned aws-cli {pinned} "
+                "(scripts/install-awscli.sh installs it)"
+            )
 
     options: dict[str, object] = {
         "engines": list(engines),
@@ -293,4 +312,11 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_list()
     except BenchmarkError as exc:
         print(f"benchmarks: error: {exc}", file=sys.stderr)
+        return 2
+    except Exception:
+        # Anything else (an S3 error outside a scenario, a harness bug) is a
+        # harness error too: exit 2, so that 1 keeps meaning a regression flag
+        # (the EC2 launcher reads the exit codes that way).
+        traceback.print_exc()
+        print("benchmarks: error: unexpected failure (traceback above)", file=sys.stderr)
         return 2

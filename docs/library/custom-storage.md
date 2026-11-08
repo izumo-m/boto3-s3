@@ -5,7 +5,9 @@
 transfer, and its bytes move through the same engine.
 
 [`IOStorage`](./streams.md) is a backend written against this same interface — a
-working example to read before you write your own.
+working example to read before you write your own. For a single stream rather
+than a container, derive from `IOStorageBase` or `TextIOStorageBase` instead
+([`streams.md`](./streams.md), section 5).
 
 ## 1. What a custom backend can be
 
@@ -34,30 +36,45 @@ minimal backend implements exactly what it promised.
 - **`as_text()`** — how this side appears in results and progress.
 - **`open(key, mode, *, size=None)`** — per-object byte I/O. `"rb"` returns a
   readable stream, `"wb"` a writable one whose `close()` flushes. `size` is an
-  optional length hint, for reads as well as writes.
+  optional length hint, for reads as well as writes. The `key` the engine
+  passes is the entry's `compare_key`. A single-entry source gets `""`, the
+  location itself; a single-entry destination gets the source's basename when
+  your `as_text()` ends with `/` (a container), and `""` otherwise (the
+  location is the object).
 - **`scan_pages(options)`** — enumerate the container one page of `FileInfo` at
   a time. Callers reach it through `scan()`, which flattens the pages and
   prefetches them in the background.
-- **`get_fileinfo(key)`** — one entry, or `None` when it does not exist.
+- **`get_fileinfo(key="", *, on_warning=None)`** — one entry, or `None` when
+  it does not exist. `key` is relative to your location, and `""` is the
+  location itself: that is how the engine calls it, with no `key` and with
+  `on_warning`, a callable taking a skip message, so implement this exact
+  form.
 - **`delete(info)`** — remove one entry. When the operation runs with
   `capture_response=True`, a mapping you return surfaces on the result record
   under `extra_info["delete"]`.
 
 ### Keys
 
-Two key spaces meet here. `key` is yours — whatever addresses an entry in your
-backend. `compare_key` is the operation-relative, `/`-separated identity that
-globs match and that `sync` pairs the two sides on. **Your `scan_pages` must
-stamp `compare_key` on every entry it yields.** Nothing downstream can recover
-it if you do not.
+Two key spaces meet here. `FileInfo.key` is yours — whatever addresses an entry
+in your backend, which `delete(info)` locates it by. `compare_key` is the
+operation-relative, `/`-separated identity that globs match, that `sync` pairs
+the two sides on, and that the engine passes to `open`. **Your `scan_pages` must
+stamp `compare_key` on every entry it yields, and no two entries of one listing
+may share one.** Nothing downstream checks either or makes up for it.
+
+`key` is your backend's own address of the entry, never a URL that names your
+backend: do not put a scheme such as `s3://` or `http://` in front of it. Which
+backend an entry belongs to is its `storage`, not its key. The address itself
+may hold any characters — an S3 key can contain `://`, and a Windows path reads
+`C:/...` — so nothing inspects a key for a scheme; keeping it out is up to your
+code.
 
 ### Filtering
 
-`options.filter` is applied by `scan()` as a safety net, so forgetting it in
-`scan_pages` cannot leak excluded entries into a `sync` with
-`delete_filter=True` and destroy data. If your backend can filter at its source,
-apply it in `scan_pages` and set `scan_pages_filters = True` to skip the
-redundant second pass.
+By default `scan()` applies `options.filter` itself, to what `scan_pages`
+yields, so a backend need not filter at all. If yours can filter at its source,
+apply `options.filter` in `scan_pages` and set `scan_pages_filters = True` to
+skip the second pass; filtering is then yours to get right.
 
 The predicate runs on the prefetch worker thread. Keep that in mind if your
 implementation shares state. The one exception is a scan with
@@ -86,14 +103,13 @@ part-way through.
 The reading flags nest: `SORTABLE_SCAN` implies `SCAN` implies
 `GET_FILEINFO`. Declaring the strongest one promises the weaker methods too.
 
-**`SORTABLE_SCAN` is not optional for `sync`.** Its pairing walks both listings
-in UTF-8 byte order; an unsorted listing manufactures pairs that do not exist
-and, with `delete_filter`, deletes objects that were never orphans. Nothing
-checks the promise: `sync` merges such a listing the way `aws s3 sync` merges
-an unsorted one from an S3-compatible endpoint, mis-pairing as it goes, so the
-order is yours to get right. `sync` is the only order-sensitive consumer — recursive `cp`
-and `mv` take entries in whatever order you yield them, so a plain `SCAN`
-backend needs no ordering guarantee at all.
+**`SORTABLE_SCAN` is not optional for `sync`, and it is a promise:** asked
+for `sort=True`, your listing comes in UTF-8 byte order of `compare_key`.
+`sync`'s pairing, its deletes included, walks both listings in that order.
+Nothing checks the promise, so the order is yours to get right. `sync` is the
+only order-sensitive consumer — recursive `cp` and `mv` take entries in
+whatever order you yield them, so a plain `SCAN` backend needs no ordering
+guarantee at all.
 
 The gates are also callable directly, so an application can check before it
 starts: `storage.supports(needed)` and `storage.missing_capabilities(needed)`,
@@ -103,8 +119,11 @@ the second naming what is absent.
 
 - **Errors.** Map your backend's failures onto the library taxonomy described in
   [`errors.md`](./errors.md). An exception that is not already a `Boto3S3Error`
-  is wrapped in the base class when it surfaces as a per-item failure, but one
-  raised during enumeration reaches your caller unchanged, so map those yourself.
+  is wrapped in the base class, with yours on `__cause__`, when it surfaces as
+  a per-item failure or while a `sync` content comparison
+  (`EtagComparison` / `ChecksumComparison`) reads your entry, which aborts the
+  `sync`; a `Boto3S3Error` passes as it is. One raised during enumeration
+  reaches your caller unchanged, so map those yourself.
 - **Streams are opened late.** `open` is not called until bytes actually need to
   move, so a dry run never opens anything, and an item that fails before its
   first byte leaves your backend untouched.
@@ -150,6 +169,7 @@ class DictStorage(Storage):
 
 Declaring only the two `OPEN_*` flags makes this usable as the destination of
 a `cp` or `mv` from S3, single-entry or recursive. To be a source it also needs
-`GET_FILEINFO` (and `get_fileinfo`) for a single entry, or `SCAN` (and
+`GET_FILEINFO` (and `get_fileinfo(key="", *, on_warning=None)`, where `""`
+is the location itself) for a single entry, or `SCAN` (and
 `scan_pages`) for a recursive transfer; `SORTABLE_SCAN` for `sync`; and
 `DELETE` to be an `mv` source.

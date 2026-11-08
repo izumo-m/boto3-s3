@@ -1,12 +1,12 @@
 """Differential parity: ``boto3-s3 rm`` vs the real ``aws s3 rm``.
 
 ``rm`` is destructive, so unlike the ls suite the two sides cannot share one
-seeding: the bucket is seeded, aws runs and its end state is captured, then
+seeding: the bucket is seeded, `aws` runs and its end state is captured, then
 the bucket is reset and re-seeded for the boto3-s3 run. Assertion layers:
 
 1. **Golden persist/check** - as in ls, plus the aws-side end state
    (``remaining_keys``) is recorded: the stdout normalization sorts delete
-   lines (aws's output order is parallel-completion order, nondeterministic),
+   lines (`aws`'s output order is parallel-completion order, nondeterministic),
    and the end state pins what sorting relaxes.
 2. **Live diff** - exit codes must match for every scenario, unconditionally
    (exit-code charter, design/overview.md section 3; note rm's rc-1-on-error shape);

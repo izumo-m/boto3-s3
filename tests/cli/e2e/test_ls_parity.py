@@ -4,10 +4,10 @@ For each scenario both CLIs run as subprocesses against the same live
 endpoint and the same seeded keys (``ls`` is read-only, so the sides share
 one seeding). Two layers of assertions:
 
-1. **Golden persist/check** - under ``UPDATE_GOLDENS=1`` the aws capture is
-   written to ``tests/cli/goldens/ls/``; otherwise the live aws output must
+1. **Golden persist/check** - under ``UPDATE_GOLDENS=1`` the `aws` capture is
+   written to ``tests/cli/goldens/ls/``; otherwise the live `aws` output must
    still match the committed golden (detects aws-cli drift after upgrades).
-   Runs *before* the diff so the aws truth is recorded even while our side
+   Runs *before* the diff so the aws-cli truth is recorded even while our side
    is divergent.
 2. **Live diff** - exit codes must match for every scenario, unconditionally
    (exit-code charter, design/overview.md section 3); normalized stdout must match
@@ -41,15 +41,36 @@ from tests.utils.harness import (
 from tests.utils.ls_scenarios import SCENARIOS, LsScenario, resolve_argv
 
 
+def _without_run_buckets(stdout: str, main_bucket: str) -> str:
+    """The all-buckets listing without the buckets this run makes as it goes.
+
+    Those are named ``<main>-...`` (the xdist workers' own buckets, the mb/rb
+    siblings) and come and go while other workers run, so between the two
+    CLIs' listings one can appear or vanish. Dropping them from both sides
+    leaves the rest of the listing compared. It works on the raw output,
+    before `normalize_ls_stdout` tokenizes this worker's bucket name (which
+    is a prefix of other names: ``-gw1`` of ``-gw10``).
+    """
+    prefix = f"{main_bucket}-"
+    kept = [line for line in stdout.splitlines() if not line.rpartition(" ")[2].startswith(prefix)]
+    return "\n".join(kept)
+
+
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=lambda s: s.name)
-def test_ls_parity(scenario: LsScenario, bucket: str, s3_client: Any) -> None:
+def test_ls_parity(
+    scenario: LsScenario, bucket: str, main_bucket_name: str, s3_client: Any
+) -> None:
     seed_bucket(s3_client, bucket, scenario.seed)
     try:
         argv = resolve_argv(scenario, bucket)
         aws_result = run_aws_subprocess(argv)
         ours_result = run_cli_subprocess(argv)
-        aws_lines = normalize_ls_stdout(aws_result.stdout, bucket=bucket)
-        ours_lines = normalize_ls_stdout(ours_result.stdout, bucket=bucket)
+        aws_stdout, ours_stdout = aws_result.stdout, ours_result.stdout
+        if argv == ["ls"]:
+            aws_stdout = _without_run_buckets(aws_stdout, main_bucket_name)
+            ours_stdout = _without_run_buckets(ours_stdout, main_bucket_name)
+        aws_lines = normalize_ls_stdout(aws_stdout, bucket=bucket)
+        ours_lines = normalize_ls_stdout(ours_stdout, bucket=bucket)
 
         if not scenario.diff_only and not scenario.frozen_golden:
             if update_goldens_enabled():

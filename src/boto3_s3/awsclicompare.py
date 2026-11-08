@@ -33,7 +33,8 @@ wrap it in ``ParallelFilter`` to decide on a caller's thread pool.
 
 from __future__ import annotations
 
-from boto3_s3.comparator import SyncPair, compare_size_time
+from boto3_s3.comparator import SyncPair
+from boto3_s3.types import FileInfo, TransferType
 
 
 class AwsCliComparison:
@@ -53,9 +54,37 @@ class AwsCliComparison:
         self.exact_timestamps = exact_timestamps
 
     def __call__(self, pair: SyncPair) -> bool:
-        return compare_size_time(
-            pair, size_only=self.size_only, exact_timestamps=self.exact_timestamps
+        """Whether ``pair`` copies, by the rule in the module docstring.
+
+        The direction comes from ``pair.transfer_type`` (the time rule is
+        direction-asymmetric). Comparisons run at full ``timedelta`` precision
+        (aws-cli's ``total_seconds``). A missing ``size`` or ``mtime`` on either
+        side counts as a difference - aws-cli never faces one (its listings
+        always carry both), so leaning toward copying is the permissive
+        reading. The ``no_overwrite`` write-guard is orthogonal and lives in
+        the ``S3.sync`` loop, not here, so it composes with any
+        ``update_filter=`` strategy.
+        """
+        src, dest = pair.src, pair.dest
+        same_size = src.size is not None and src.size == dest.size
+        if self.size_only and not self.exact_timestamps:
+            # aws-cli's SizeOnlySync.
+            return not same_size
+        # aws-cli's SizeAndLastModifiedSync, or ExactTimestampsSync under
+        # exact_timestamps.
+        return not same_size or not _times_match(
+            src, dest, pair.transfer_type, self.exact_timestamps
         )
+
+
+def _times_match(src: FileInfo, dest: FileInfo, transfer_type: TransferType, exact: bool) -> bool:
+    """aws-cli's ``compare_time``: True when last-modified makes the copy redundant."""
+    if src.mtime is None or dest.mtime is None:
+        return False
+    delta = (dest.mtime - src.mtime).total_seconds()
+    if transfer_type is TransferType.DOWNLOAD:
+        return delta == 0 if exact else delta <= 0
+    return delta >= 0
 
 
 __all__ = ["AwsCliComparison"]

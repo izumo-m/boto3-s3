@@ -1,9 +1,12 @@
-"""``IOStorage`` / ``StdioStorage``: a single stream presented as a ``Storage``.
+"""The stream storages: a single stream presented as a ``Storage``.
 
-Unit-level coverage of the ``open`` contract (binary pass-through, text
-encode/decode, the caller's stream left open), the unsupported container
-operations, ``StdioStorage``'s mode-driven choice of stdin / stdout, and what a
-stdout that cannot take the bytes does to a streaming download.
+Unit-level coverage of the ``open`` contract (``IOStorage``'s binary
+pass-through, ``TextIOStorage``'s encode / decode, the caller's stream left
+open), the bases a stream storage of your own derives from (``IOStorageBase``,
+``TextIOStorageBase`` and the ``open_text`` stream the transfer closes), the
+streams each class refuses, the unsupported container operations,
+``StdioStorage``'s mode-driven choice of stdin / stdout, and what a stdout that
+cannot take the bytes does to a streaming download.
 """
 
 from __future__ import annotations
@@ -13,18 +16,24 @@ import io
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO, Literal, TextIO
 
 import pytest
 from boto3.s3.transfer import TransferConfig
 
 from boto3_s3.exceptions import BatchError, Boto3S3Error, InvalidValueError, ValidationError
-from boto3_s3.iostorage import IOStorage, StdioStorage
+from boto3_s3.iostorage import (
+    IOStorage,
+    IOStorageBase,
+    StdioStorage,
+    TextIOStorage,
+    TextIOStorageBase,
+)
 from boto3_s3.s3 import S3
 from boto3_s3.s3storage import S3Storage
 from boto3_s3.types import FileInfo, OpOutcome, OpResult, ScanOptions
-from tests.utils.fakes3 import get_response, head_response
-from tests.utils.recorder import make_recording_client
+from tests.utils.fakes3 import client_error, get_response, head_response
+from tests.utils.recorder import make_recording_client, ops
 
 _SYNC = TransferConfig(use_threads=False)
 
@@ -116,7 +125,7 @@ class TestNonSeekableSource:
     calls ``tell`` / ``seek`` whenever both exist: a POSIX pipe answers
     ``OSError(ESPIPE)`` (the upload failed ``[Errno 29] Illegal seek``), and a
     Windows pipe answers with meaningless positions and stored a truncated
-    object as a success. Hiding everything but ``read`` - stdin's view, aws's
+    object as a success. Hiding everything but ``read`` - stdin's view, aws-cli's
     ``NonSeekableStream`` - sends both engines down their buffered path.
     """
 
@@ -159,8 +168,9 @@ class TestNonSeekableSource:
         assert reader.seekable()
 
     def test_a_closed_stream_is_left_to_the_transfer(self) -> None:
-        # seekable() raises ValueError on a closed stream: nothing is hidden,
-        # the transfer reports the closed stream as it already does.
+        # seekable() raises ValueError on a closed stream: a probe that cannot
+        # answer adds no failure and no view of its own, so the transfer meets
+        # the stream as it would without the probe.
         buf = io.BytesIO(b"x")
         buf.close()
         reader = IOStorage(buf).open("k", "rb")
@@ -170,10 +180,7 @@ class TestNonSeekableSource:
         # A tarfile member reads through a BufferedReader whose `fileno` is
         # forwarded to a wrapped object that has none (AttributeError) while
         # its `seekable` answers True: it uploaded on both engines before the
-        # check existed and must still reach the engine untouched. A
-        # stream-mode member's `seekable` is forwarded the same way and never
-        # answered - s3transfer's own probe failed such a member on both
-        # engines - so that one is read through the view, which uploads.
+        # check existed and must still reach the engine untouched.
         import tarfile
 
         payload = os.urandom(70000)
@@ -190,38 +197,6 @@ class TestNonSeekableSource:
             reader = IOStorage(member).open("k", "rb")
             assert hasattr(reader, "seek")
             assert reader.read() == payload
-        with tarfile.open(archive, "r|") as stream_tar:
-            streamed = stream_tar.extractfile(next(iter(stream_tar)))
-            assert streamed is not None
-            with pytest.raises(AttributeError):
-                streamed.seekable()
-            reader = IOStorage(streamed).open("k", "rb")
-            assert not hasattr(reader, "seek")
-            assert reader.read() == payload
-
-    def test_a_stream_mode_tarfile_member_uploads_on_the_classic_engine(
-        self, tmp_path: Path
-    ) -> None:
-        import tarfile
-
-        archive = tmp_path / "a.tar"
-        with tarfile.open(archive, "w") as tar:
-            info = tarfile.TarInfo("member.bin")
-            info.size = 5
-            tar.addfile(info, io.BytesIO(b"tarry"))
-        client, calls = make_recording_client([{"ETag": '"e"'}])
-        results: list[OpResult] = []
-        with tarfile.open(archive, "r|") as stream_tar:
-            streamed = stream_tar.extractfile(next(iter(stream_tar)))
-            assert streamed is not None
-            S3().cp(
-                IOStorage(streamed),
-                S3Storage("s3://b/k", client=client),
-                transfer_config=_SYNC,
-                on_result=results.append,
-            )
-        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED]
-        assert [c.operation for c in calls] == ["PutObject"]
 
     def test_a_download_into_a_gzip_over_a_write_only_sink_succeeds(self) -> None:
         # The append cue asks a destination for its descriptor: a GzipFile
@@ -300,104 +275,100 @@ class TestNonSeekableSource:
         assert [c.operation for c in calls] == ["PutObject"]
 
 
-class TestAppendModeStream:
-    """A binary stream that appends every write, behind ``IOStorage``.
+class TestStreamDestinations:
+    """A download writes every stream destination in order, opened by its first byte.
 
-    Such a stream reports ``seekable()`` and takes ``seek``, so the pass-through
-    view would let s3transfer run its positioned, parallel download - and
-    ``O_APPEND`` would land every ranged part at the end, in completion order,
-    with the item reported SUCCEEDED (measured: a 40 MiB object into
-    ``open(p, "ab")`` came back scrambled on every run). A write-only view takes
-    the in-order path instead, the same guard ``StdioStorage`` has for a ``>>``
-    redirected stdout.
+    ``cp`` and ``mv`` hand the destination to the engine through the open
+    route's deferred writer, which offers ``write`` only: the engine writes in
+    order from where the stream stands, whatever the stream claims - an
+    append-mode file (whose positioned writes would land in completion order;
+    measured: a 40 MiB object into ``open(p, "ab")`` came back scrambled), a
+    pipe that answers ``seekable()`` True, a stream already holding bytes.
     """
 
-    def test_an_append_mode_file_gets_a_write_only_view(self, tmp_path: Path) -> None:
-        target = tmp_path / "out.bin"
-        target.write_bytes(b"HEAD")
-        with target.open("ab") as fh:
-            assert fh.seekable()  # the hazard: the raw stream IS seekable
-            writer = IOStorage(fh).open("k", "wb")
-            assert not hasattr(writer, "seek")
-            assert not hasattr(writer, "seekable")
-            writer.write(b"tail")
-            writer.close()
-            assert not fh.closed
-        assert target.read_bytes() == b"HEADtail"
-
-    @pytest.mark.skipif(not hasattr(os, "O_APPEND") or os.name != "posix", reason="POSIX fd flags")
-    def test_an_append_only_descriptor_is_detected_without_the_mode(self, tmp_path: Path) -> None:
-        # A `>>` redirected stdout's .buffer carries mode "wb"; only the
-        # descriptor's O_APPEND flag says where its writes land.
-        fd = os.open(tmp_path / "out.bin", os.O_WRONLY | os.O_CREAT | os.O_APPEND)
-        with os.fdopen(fd, "wb") as fh:
-            assert fh.mode == "wb"
-            writer = IOStorage(fh).open("k", "wb")
-            assert not hasattr(writer, "seek")
-
-    def test_a_pipe_that_claims_seekable_gets_the_write_only_view(self) -> None:
-        # A Windows pipe answers seekable() True and lets seek succeed without
-        # moving: the positioned download wrote its parts down it in completion
-        # order (measured on Windows, classic engine). The descriptor decides.
-        r, w = os.pipe()
-        stream = _ClaimsSeekableWriter(w)
-        try:
-            writer = IOStorage(stream).open("k", "wb")  # pyright: ignore[reportArgumentType]
-            assert not hasattr(writer, "seek")
-            assert not hasattr(writer, "seekable")
-            writer.write(b"in order")
-            writer.close()
-        finally:
-            stream.close()
-        with os.fdopen(r, "rb") as pipe:
-            assert pipe.read() == b"in order"
-
-    def test_a_plain_file_keeps_the_seekable_view(self, tmp_path: Path) -> None:
-        with (tmp_path / "out.bin").open("wb") as fh:
-            writer = IOStorage(fh).open("k", "wb")
-            assert writer.seekable()
-        # A stream with no descriptor is never append-only either.
-        assert IOStorage(io.BytesIO()).open("k", "wb").seekable()
+    @staticmethod
+    def _download(dest: IOStorageBase) -> list[OpResult]:
+        client, _calls = make_recording_client([head_response(), get_response()])
+        results: list[OpResult] = []
+        S3().cp(
+            S3Storage("s3://b/d/a.txt", client=client),
+            dest,
+            transfer_config=_SYNC,
+            on_result=results.append,
+        )
+        return results
 
     def test_a_download_lands_after_the_existing_bytes(self, tmp_path: Path) -> None:
         target = tmp_path / "out.bin"
         target.write_bytes(b"HEAD")
-        client, _calls = make_recording_client([head_response(), get_response()])
         with target.open("ab") as fh:
-            S3().cp(
-                S3Storage("s3://b/d/a.txt", client=client), IOStorage(fh), transfer_config=_SYNC
-            )
+            self._download(IOStorage(fh))
             assert not fh.closed
         assert target.read_bytes() == b"HEADpayload"
 
+    def test_a_download_starts_where_the_stream_stands(self) -> None:
+        # Positioned writes would put the object at offset 0, over "HEAD".
+        buf = io.BytesIO()
+        buf.write(b"HEAD")
+        self._download(IOStorage(buf))
+        assert buf.getvalue() == b"HEADpayload"
 
-class TestTextAdapter:
+    def test_a_pipe_that_claims_seekable_is_written_in_order(self) -> None:
+        r, w = os.pipe()
+        stream = _ClaimsSeekableWriter(w)
+        try:
+            results = self._download(IOStorage(stream))  # pyright: ignore[reportArgumentType]
+        finally:
+            stream.close()
+        with os.fdopen(r, "rb") as pipe:
+            assert pipe.read() == b"payload"
+        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED]
+
+    def test_a_missing_object_leaves_the_destination_unopened(self) -> None:
+        notes = _Notes()
+        client, _calls = make_recording_client([client_error("404", 404, "HeadObject")])
+        with pytest.raises(BatchError):
+            S3().cp(S3Storage("s3://b/d/a.txt", client=client), notes, transfer_config=_SYNC)
+        assert notes.opened == []
+
+
+class TestTextIOStorage:
     def test_encodes_on_read(self) -> None:
-        reader = IOStorage(io.StringIO("héllo")).open("k", "rb")
+        reader = TextIOStorage(io.StringIO("héllo")).open("k", "rb")
         assert reader.read() == "héllo".encode()
 
     def test_encodes_on_read_in_chunks(self) -> None:
-        reader = IOStorage(io.StringIO("abcdef")).open("k", "rb")
+        reader = TextIOStorage(io.StringIO("abcdef")).open("k", "rb")
         assert reader.read(3) + reader.read(3) == b"abcdef"
+
+    def test_a_read_smaller_than_a_character_keeps_the_rest(self) -> None:
+        # One character encodes to several bytes: what a read leaves over is
+        # the next read's start.
+        reader = TextIOStorage(io.StringIO("héllo")).open("k", "rb")
+        data = b""
+        while chunk := reader.read(1):
+            data += chunk
+        assert data == "héllo".encode()
 
     def test_decodes_on_write(self) -> None:
         sink = io.StringIO()
-        writer = IOStorage(sink).open("k", "wb")
+        writer = TextIOStorage(sink).open("k", "wb")
         writer.write("café".encode())
+        writer.close()
         assert sink.getvalue() == "café"
 
     def test_an_unknown_encoding_is_rejected_at_construction(self) -> None:
         # Before this check the name reached codecs only from the first open:
         # cp's eager stream route let the bare LookupError escape the taxonomy
         # while mv's lazy open route reported it as the item's failure.
-        with pytest.raises(InvalidValueError, match="unknown encoding: nope") as excinfo:
-            IOStorage(io.StringIO(), encoding="nope")
+        with pytest.raises(InvalidValueError, match="nope") as excinfo:
+            TextIOStorage(io.StringIO(), encoding="nope")
         assert isinstance(excinfo.value.__cause__, LookupError)
         with pytest.raises(InvalidValueError):
-            IOStorage(io.BytesIO(), encoding="")
+            TextIOStorage(io.StringIO(), encoding="")
 
     def test_custom_encoding(self) -> None:
-        reader = IOStorage(io.StringIO("café"), encoding="latin-1").open("k", "rb")
+        reader = TextIOStorage(io.StringIO("café"), encoding="latin-1").open("k", "rb")
         assert reader.read() == "café".encode("latin-1")
 
     def test_stateful_codec_streams_as_one_encoder_across_chunks(self) -> None:
@@ -406,7 +377,7 @@ class TestTextAdapter:
         # one incremental encoder spans every read, so the chunked bytes equal a
         # single encode of the whole string (BOM once) and round-trip.
         text = "a" * 70000  # exceeds _READ_CHUNK, so read() loops over chunks
-        reader = IOStorage(io.StringIO(text), encoding="utf-16").open("k", "rb")
+        reader = TextIOStorage(io.StringIO(text), encoding="utf-16").open("k", "rb")
         data = b""
         while chunk := reader.read(8192):
             data += chunk
@@ -416,27 +387,239 @@ class TestTextAdapter:
     def test_stateful_codec_read_to_eof_matches_one_encode(self) -> None:
         # The amt=None path (read to EOF) is the same single-encoder stream.
         text = "smørrebrød"
-        reader = IOStorage(io.StringIO(text), encoding="utf-16").open("k", "rb")
+        reader = TextIOStorage(io.StringIO(text), encoding="utf-16").open("k", "rb")
         assert reader.read() == text.encode("utf-16")
 
-    def test_non_textiobase_text_stream_is_wrapped(self) -> None:
-        # The constructor accepts any IO[str], but a text-mode
-        # SpooledTemporaryFile (like codecs.open's StreamReaderWriter) reads
-        # str without deriving from io.TextIOBase. Recognized by its encoding
-        # attribute, it is still adapted to bytes rather than passed through raw.
+    def test_a_text_stream_of_its_own_kind_is_carried(self) -> None:
+        # Neither an io.TextIOBase nor carrying `encoding`: a stream the old
+        # guess took for binary. Declared as text, it is carried as text.
+        class _Text:
+            def __init__(self, text: str) -> None:
+                self._source = io.StringIO(text)
+
+            def read(self, amt: int = -1) -> str:
+                return self._source.read(amt)
+
+        reader = TextIOStorage(_Text("héllo")).open("k", "rb")
+        assert reader.read() == "héllo".encode()
+
+    def test_a_text_mode_spooled_temporary_file_is_carried(self) -> None:
         with tempfile.SpooledTemporaryFile(max_size=1024, mode="w+", encoding="utf-8") as sp:
             sp.write("café")
             sp.seek(0)
-            reader = IOStorage(sp).open("k", "rb")
+            reader = TextIOStorage(sp).open("k", "rb")
             assert reader.read() == "café".encode()
 
-    def test_write_adapter_does_not_close_the_caller_stream(self) -> None:
+    def test_neither_adapter_closes_the_caller_stream(self) -> None:
         sink = io.StringIO()
-        writer = IOStorage(sink).open("k", "wb")
+        writer = TextIOStorage(sink).open("k", "wb")
         writer.write(b"ab")
         writer.close()
         assert not sink.closed
         assert sink.getvalue() == "ab"
+        source = io.StringIO("ab")
+        reader = TextIOStorage(source).open("k", "rb")
+        assert reader.read() == b"ab"
+        reader.close()
+        assert not source.closed
+
+    def test_neither_adapter_seeks(self) -> None:
+        # Read and written in order: an upload takes the engines' buffered
+        # path, a download lands in order.
+        storage = TextIOStorage(io.StringIO("x"))
+        for mode in ("rb", "wb"):
+            fileobj = storage.open("k", mode)
+            assert not hasattr(fileobj, "seek")
+            assert not hasattr(fileobj, "seekable")
+
+
+class TestMismatchedStreams:
+    """Python's own streams of the other kind are refused at construction."""
+
+    @pytest.mark.parametrize("stream", [io.StringIO(), io.TextIOWrapper(io.BytesIO())])
+    def test_io_storage_refuses_a_text_stream(self, stream: Any) -> None:
+        with pytest.raises(ValidationError, match="use TextIOStorage for a text stream"):
+            IOStorage(stream)
+
+    def test_io_storage_refuses_a_text_mode_file(self, tmp_path: Path) -> None:
+        with (tmp_path / "f.txt").open("w") as handle, pytest.raises(ValidationError):
+            IOStorage(handle)
+
+    @pytest.mark.parametrize(
+        "stream", [io.BytesIO(), io.BufferedReader(io.BytesIO()), io.FileIO(os.devnull)]
+    )
+    def test_text_io_storage_refuses_a_binary_stream(self, stream: Any) -> None:
+        with pytest.raises(ValidationError, match="use IOStorage for a binary stream"):
+            TextIOStorage(stream)
+        stream.close()
+
+    def test_text_io_storage_refuses_a_binary_mode_file(self, tmp_path: Path) -> None:
+        with (tmp_path / "f.bin").open("wb") as handle, pytest.raises(ValidationError):
+            TextIOStorage(handle)
+
+
+class _Note(io.StringIO):
+    """A ``StringIO`` that keeps what it held when it was closed."""
+
+    value: str | None = None
+
+    def close(self) -> None:
+        if not self.closed:
+            self.value = self.getvalue()
+        super().close()
+
+
+class _Notes(TextIOStorageBase):
+    """A text endpoint opening a fresh stream per transfer, recording each one."""
+
+    def __init__(self, text: str = "", *, encoding: str = "utf-8") -> None:
+        super().__init__(encoding=encoding)
+        self.text = text
+        self.opened: list[tuple[str, str, _Note]] = []
+
+    def open_text(self, key: str, mode: Literal["r", "w"]) -> TextIO:
+        stream = _Note(self.text if mode == "r" else "")
+        self.opened.append((key, mode, stream))
+        return stream
+
+
+class TestStreamStorageBases:
+    def test_the_bases_cannot_be_instantiated(self) -> None:
+        # The method a subclass must write is abstract: one that forgets it
+        # is refused by Python itself when it is instantiated.
+        with pytest.raises(TypeError):
+            IOStorageBase()  # pyright: ignore[reportAbstractUsage]
+        with pytest.raises(TypeError):
+            TextIOStorageBase()  # pyright: ignore[reportAbstractUsage]
+
+    def test_every_stream_storage_is_an_io_storage_base(self) -> None:
+        for storage in (
+            IOStorage(io.BytesIO()),
+            TextIOStorage(io.StringIO()),
+            StdioStorage(),
+            _Notes(),
+        ):
+            assert isinstance(storage, IOStorageBase)
+        assert not isinstance(StdioStorage(), IOStorage)
+        assert not isinstance(TextIOStorage(io.StringIO()), IOStorage)
+
+    def test_open_text_gets_the_key_and_a_text_mode(self) -> None:
+        notes = _Notes("x")
+        notes.open("a/k", "rb")
+        notes.open("a/k", "wb")
+        assert [(key, mode) for key, mode, _ in notes.opened] == [("a/k", "r"), ("a/k", "w")]
+
+    def test_each_open_starts_a_fresh_codec(self) -> None:
+        # Two transfers through one storage each get utf-16's BOM: the codec
+        # state of the first never reaches the second.
+        notes = _Notes("ab", encoding="utf-16")
+        first = notes.open("k", "rb").read()
+        second = notes.open("k", "rb").read()
+        assert first == second == "ab".encode("utf-16")
+
+    def test_the_adapters_close_what_open_text_returned(self) -> None:
+        notes = _Notes("ab")
+        reader = notes.open("k", "rb")
+        reader.read()
+        reader.close()
+        writer = notes.open("k", "wb")
+        writer.write(b"cd")
+        writer.close()
+        assert [stream.closed for _, _, stream in notes.opened] == [True, True]
+
+    def test_a_failed_tail_still_closes_the_stream(self) -> None:
+        # An object that ends inside a character: the decoder's final flush
+        # raises, and the stream open_text returned is closed all the same.
+        notes = _Notes()
+        writer = notes.open("k", "wb")
+        writer.write("é".encode()[:1])
+        with pytest.raises(UnicodeDecodeError):
+            writer.close()
+        assert notes.opened[0][2].closed
+
+    def test_a_download_closes_the_stream_once_the_item_settles(self) -> None:
+        notes = _Notes()
+        client, _ = make_recording_client([head_response(), get_response()])
+        results: list[OpResult] = []
+        S3().cp(
+            S3Storage("s3://b/d/a.txt", client=client),
+            notes,
+            transfer_config=_SYNC,
+            on_result=results.append,
+        )
+        assert [r.outcome for r in results] == [OpOutcome.SUCCEEDED]
+        assert [mode for _, mode, _ in notes.opened] == ["w"]
+        assert notes.opened[0][2].value == "payload"
+
+    def test_an_upload_closes_the_stream_once_the_item_settles(self) -> None:
+        notes = _Notes("hello")
+        client, calls = make_recording_client([{"ETag": '"e"'}])
+        S3().cp(notes, S3Storage("s3://b/k", client=client), transfer_config=_SYNC)
+        assert ops(calls) == ["PutObject"]
+        assert [mode for _, mode, _ in notes.opened] == ["r"]
+        assert notes.opened[0][2].closed
+
+    def test_a_run_failing_before_the_transfer_closes_the_source(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # cp opens a stream source before it builds the transfer: a failure
+        # in between (the S3 side's client) closes what the open returned.
+        def broken(self: S3Storage) -> Any:
+            raise Boto3S3Error("no client")
+
+        monkeypatch.setattr(S3Storage, "get_client", broken)
+        notes = _Notes("hello")
+        with pytest.raises(Boto3S3Error, match="no client"):
+            S3().cp(notes, S3Storage("s3://b/k"), transfer_config=_SYNC)
+        assert [mode for _, mode, _ in notes.opened] == ["r"]
+        assert notes.opened[0][2].closed
+
+    def test_a_run_failing_before_the_transfer_never_opens_the_destination(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The destination opens at the first write, which never comes: the
+        # deferred writer is discarded, not closed (a close would open it).
+        def broken(self: S3Storage) -> Any:
+            raise Boto3S3Error("no client")
+
+        monkeypatch.setattr(S3Storage, "get_client", broken)
+        notes = _Notes()
+        with pytest.raises(Boto3S3Error, match="no client"):
+            S3().cp(S3Storage("s3://b/k"), notes, transfer_config=_SYNC)
+        assert notes.opened == []
+
+    def test_a_source_that_cannot_be_opened_stops_the_run(self) -> None:
+        # Raised from cp before the transfer, as aws-cli's missing stdin:
+        # the library's base error, the source's own on __cause__.
+        class _Missing(TextIOStorageBase):
+            def open_text(self, key: str, mode: Literal["r", "w"]) -> TextIO:
+                raise FileNotFoundError(errno.ENOENT, "No such file or directory", "x.txt")
+
+        client, calls = make_recording_client([])
+        results: list[OpResult] = []
+        with pytest.raises(Boto3S3Error) as excinfo:
+            S3().cp(
+                _Missing(),
+                S3Storage("s3://b/k", client=client),
+                transfer_config=_SYNC,
+                on_result=results.append,
+            )
+        assert type(excinfo.value) is Boto3S3Error
+        assert isinstance(excinfo.value.__cause__, FileNotFoundError)
+        assert excinfo.value.operation == "cp"
+        assert (results, calls) == ([], [])
+
+    def test_an_interrupt_from_opening_the_source_passes_as_it_is(self) -> None:
+        class _Interrupted(IOStorageBase):
+            def open(
+                self, key: str, mode: Literal["rb", "wb"], *, size: int | None = None
+            ) -> BinaryIO:
+                raise KeyboardInterrupt
+
+        client, calls = make_recording_client([])
+        with pytest.raises(KeyboardInterrupt):
+            S3().cp(_Interrupted(), S3Storage("s3://b/k", client=client), transfer_config=_SYNC)
+        assert calls == []
 
 
 class TestCallerStreamPosition:
@@ -561,7 +744,7 @@ class TestStdioStorage:
     def test_read_without_stdin_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("sys.stdin", None)
         # ValidationError: a runtime-state precondition (exceptions.md section 3).
-        with pytest.raises(ValidationError, match="stdin is required") as excinfo:
+        with pytest.raises(ValidationError) as excinfo:
             StdioStorage().open("k", "rb")
         # A directly invoked storage method names no operation: the storage
         # cannot know which one (cp streams, mv moves onto a stream), so an
@@ -569,7 +752,7 @@ class TestStdioStorage:
         assert excinfo.value.operation is None
 
     def test_write_reads_stdout_per_write(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # aws's bytes_print dereferences sys.stdout on every write, so nothing
+        # aws-cli's bytes_print dereferences sys.stdout on every write, so nothing
         # is captured at open time: a stdout swapped after the open (a
         # redirect_stdout around a library call) receives the bytes.
         first, second = _Stdio(), _Stdio()
@@ -579,44 +762,26 @@ class TestStdioStorage:
         writer.write(b"hi")
         assert (first.buffer.getvalue(), second.buffer.getvalue()) == (b"", b"hi")
 
-    def test_write_without_stdout_fails_on_the_write(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # aws has no stdout precondition (get_binary_stdout does not check,
-        # unlike get_binary_stdin), and its writer dereferences the process
-        # stream per write: the open succeeds and the missing stream surfaces as
-        # the write's own AttributeError, whose text aws prints verbatim in the
-        # item's failure line (measured: `aws s3 cp s3://b/k - 1>&-` reports
-        # "download failed: s3://b/k to - 'NoneType' object has no attribute
-        # 'write'").
-        monkeypatch.setattr("sys.stdout", None)
-        writer = StdioStorage().open("k", "wb")
-        with pytest.raises(AttributeError) as excinfo:
-            writer.write(b"hi")
-        assert str(excinfo.value) == "'NoneType' object has no attribute 'write'"
-
-    def test_close_neither_flushes_nor_closes_stdout(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # The writer aws hands s3transfer has no close and no flush, and a
-        # non-seekable download's final task is a no-op: whatever the process
-        # stream buffered is the interpreter's to flush at exit. Flushing here
-        # instead would turn a stdout that cannot take the bytes into a per-item
-        # transfer failure, where aws lets the process's own shutdown flush fail.
+    def test_close_flushes_but_never_closes_stdout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The transfer closes its writer as the item settles: the view flushes
+        # what the process stream still buffers, so a stdout that cannot take
+        # it fails the item, and leaves the process's stdout open.
         buffer = _RecordingBuffer()
         monkeypatch.setattr("sys.stdout", _BufferStdio(buffer))
         writer = StdioStorage().open("k", "wb")
         writer.write(b"hi")
         writer.close()
-        assert (buffer.flushes, buffer.closes) == (0, 0)
+        assert (buffer.flushes, buffer.closes) == (1, 0)
         assert buffer.getvalue() == b"hi"
 
 
 class TestStreamDownloadWithABrokenStdout:
-    """Which stdout failures a streaming download owns, and which the process does.
+    """A stdout that cannot take a streaming download's bytes fails the item.
 
-    aws's stdout writer only writes: the transfer therefore fails an item when a
-    *write* fails, and never learns about anything that only surfaces when the
-    process stream's buffer is flushed - measured on the pinned aws, where a
-    stdout of ``/dev/full`` gives one ``download failed: ... [Errno 28] No space
-    left on device`` (rc 1) for an object too big for the buffer and a silent
-    exit status 120 for one that fits.
+    Whether the bytes are refused by a ``write`` or by the flush the writer's
+    ``close`` makes as the item settles, the item is FAILED with the stream's
+    error as the cause - never a success whose bytes are still waiting in the
+    process stream's buffer.
     """
 
     @staticmethod
@@ -629,16 +794,35 @@ class TestStreamDownloadWithABrokenStdout:
             on_result=results.append,
         )
 
-    def test_a_flush_that_would_fail_is_never_attempted(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_a_failing_flush_fails_the_item(self, monkeypatch: pytest.MonkeyPatch) -> None:
         buffer = _FailingBuffer(on_flush=True)
         monkeypatch.setattr("sys.stdout", _BufferStdio(buffer))
         results: list[OpResult] = []
-        self._download(StdioStorage(), results)
-        assert [result.outcome for result in results] == [OpOutcome.SUCCEEDED]
-        assert buffer.getvalue() == b"payload"
-        assert buffer.flushes == 0
+        with pytest.raises(BatchError):
+            self._download(StdioStorage(), results)
+        assert buffer.flushes == 1
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        error = results[0].error
+        assert isinstance(error, Boto3S3Error)
+        assert isinstance(error.__cause__, OSError)
+        assert error.__cause__.errno == errno.ENOSPC
+        assert str(error) == str(error.__cause__)  # the cause shows in the message
+
+    def test_a_failing_flush_keeps_a_move_s_source(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The flush runs before the source delete, so a move whose bytes stdout
+        # refused deletes nothing.
+        monkeypatch.setattr("sys.stdout", _BufferStdio(_FailingBuffer(on_flush=True)))
+        client, calls = make_recording_client([head_response(), get_response()])
+        results: list[OpResult] = []
+        with pytest.raises(BatchError):
+            S3().mv(
+                S3Storage("s3://b/d/a.txt", client=client),
+                StdioStorage(),
+                transfer_config=_SYNC,
+                on_result=results.append,
+            )
+        assert ops(calls) == ["HeadObject", "GetObject"]  # and no DeleteObject
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
 
     def test_a_failing_write_fails_the_item(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("sys.stdout", _BufferStdio(_FailingBuffer(on_write=True)))
@@ -647,16 +831,35 @@ class TestStreamDownloadWithABrokenStdout:
             self._download(StdioStorage(), results)
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
         error = results[0].error
-        # The text aws's own failure line carries for this errno.
-        assert str(error) == "[Errno 28] No space left on device"
         assert isinstance(error, Boto3S3Error)
         assert isinstance(error.__cause__, OSError)
+        assert str(error) == str(error.__cause__)  # the cause shows in the message
+
+    def test_an_empty_object_without_a_stdout_fails_the_item(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Nothing is written, but there is nowhere it could have gone: the
+        # writer's close fails the item with the error a write meets, as aws-cli's
+        # writer fails it (measured, rc 1 with the same line).
+        monkeypatch.setattr("sys.stdout", None)
+        client, _calls = make_recording_client([head_response(ContentLength=0), get_response(b"")])
+        results: list[OpResult] = []
+        with pytest.raises(BatchError):
+            S3().cp(
+                S3Storage("s3://b/d/empty.txt", client=client),
+                StdioStorage(),
+                transfer_config=_SYNC,
+                on_result=results.append,
+            )
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        error = results[0].error
+        assert isinstance(error, Boto3S3Error)
+        assert isinstance(error.__cause__, AttributeError)
 
     def test_no_stdout_at_all_fails_the_item(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # aws checks stdin before starting a transfer but never stdout, so this
-        # is a per-item failure rather than a run-killing precondition: the
-        # failure line reads "download failed: <src> to - 'NoneType' object has
-        # no attribute 'write'" (measured, rc 1).
+        # aws-cli checks stdin before starting a transfer but never stdout, so this
+        # is a per-item failure rather than a run-killing precondition (measured,
+        # rc 1): the writer's own write fails, the open having succeeded.
         monkeypatch.setattr("sys.stdout", None)
         results: list[OpResult] = []
         with pytest.raises(BatchError):
@@ -664,7 +867,7 @@ class TestStreamDownloadWithABrokenStdout:
         assert [result.outcome for result in results] == [OpOutcome.FAILED]
         error = results[0].error
         assert isinstance(error, Boto3S3Error)
-        assert str(error) == "'NoneType' object has no attribute 'write'"
+        assert str(error) == str(error.__cause__)  # the cause shows in the message
         # The failing write is what the item recorded: an in-pipeline failure
         # carrying the run's own operation and the item's coordinates, not a
         # pre-flight ValidationError raised before anything was submitted.

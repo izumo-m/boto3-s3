@@ -5,14 +5,16 @@ suite, and the coding and commit conventions. For the project's purpose, scope,
 and design policy, start with [`design/overview.md`](design/overview.md).
 
 The project is in beta and preparing for 1.0. Changes that might break the
-public API or aws-cli compatibility must be discussed before implementation.
+public API or functional compatibility with aws-cli must be discussed before
+implementation.
 
 ## Project layout
 
 The repository is a [uv](https://docs.astral.sh/uv/) workspace with two packages:
 
 - `src/boto3_s3/` — **`boto3-s3`**, the library.
-- `cli/` — **`boto3-s3-cli`**, the `boto3-s3` command (an `aws s3` drop-in).
+- `cli/` — **`boto3-s3-cli`**, the `boto3-s3` command (a by-product: an
+  `aws s3`-compatible command line built on the library).
 - `tests/` — the test suite (see [`design/testing.md`](design/testing.md)).
 - `docs/` — the user documentation (the command, the library guide, the API
   reference).
@@ -75,7 +77,7 @@ Ruff is configured for a line length of 100 and a Python 3.10 target.
 
 ## Tests
 
-`uv run pytest` runs the whole suite **except** the end-to-end parity tests,
+`uv run pytest` runs the whole suite **except** the end-to-end comparison tests,
 which self-skip unless pointed at a live endpoint — so no Docker is needed for
 the default run.
 
@@ -83,12 +85,16 @@ The e2e suite runs `boto3-s3` and the real `aws` command against a local S3
 server (RustFS, the dev stack) and compares their behavior:
 
 ```bash
-scripts/install-awscli.sh    # pin aws to the reference source version — idempotent
-scripts/compose-up.sh        # start the dev stack, wait for its buckets
-source scripts/dev-env.sh    # point AWS tooling and the e2e gate at it
-uv run pytest tests/cli/e2e  # run the parity suite
-scripts/compose.sh down      # tear the stack down
+scripts/install-awscli.sh            # pin aws-cli to the reference source version — idempotent
+scripts/compose-up.sh                # start the dev stack, wait for its buckets
+source scripts/dev-env.sh            # point AWS tooling and the e2e gate at it
+uv run pytest tests/cli/e2e -n auto  # run the comparison suite
+scripts/compose.sh down              # tear the stack down
 ```
+
+`-n auto` runs the suite on parallel workers: half the CPUs, at most four, or
+as many as `BOTO3_S3_E2E_WORKERS` says (the count applies when the command
+names `tests/cli/e2e`, as here). Leave it out to run in one process.
 
 Goldens are the recorded real-aws behavior that the in-process suite replays.
 Regenerate them against a clean dev stack with `UPDATE_GOLDENS=1 uv run pytest
@@ -101,21 +107,51 @@ the tree, with a pinned `aws.exe` — by the procedure in
 [`design/testing.md`](design/testing.md) section 8.
 
 The commands above are the ones to run; [`design/testing.md`](design/testing.md) is
-where the reasoning lives — the test tiers, the exit-code charter's detection
+where the reasoning lives — the test tiers, the exit-code comparison's detection
 surface, the golden contract, and why the stack is pinned the way it is. It
 points back here rather than repeating the commands.
 
 ## Conventions
 
-- **Parity is the contract.** Behavior, options, and exit codes follow `aws s3`.
-  When you add or change a subcommand or option, extend the matching scenarios
-  and tests so parity stays enforced (see [`design/testing.md`](design/testing.md)
-  and the exit-code charter in [`design/overview.md`](design/overview.md)).
+- **Functional compatibility is the contract.** Behavior, options and
+  messages follow `aws s3`, and exit codes carry the meanings aws-cli gives
+  them. When you add or change a subcommand or
+  option, extend the matching scenarios and tests so the comparison keeps
+  covering it (see [`design/testing.md`](design/testing.md) and the design
+  policy in [`design/overview.md`](design/overview.md) section 3).
+- **Names traceable to aws-cli.** Compatibility work depends on reading this
+  codebase side by side with the aws-cli source. When a symbol here (a class,
+  function, or option/config key) corresponds to an aws-cli counterpart, keep
+  the same name with the same meaning, or an extended form whose
+  correspondence remains easy to trace (a function ported from aws-cli keeps
+  aws-cli's name even where it re-raises its failure as the library's
+  exception). Renaming such a symbol to something unrelated - or reusing an
+  aws-cli name for a different meaning - obscures the port; a change (a
+  refactoring included) that would significantly break this correspondence
+  is rejected. Where the code is shaped differently from its counterpart
+  (computing from held state what aws-cli re-parses from a string, say), its
+  docstring or comment names the counterpart and says the two are
+  equivalent.
 - **Typed.** The library ships type information (`py.typed`); keep public APIs
-  typed and basedpyright clean.
+  typed and basedpyright clean. Where code breaks a type on purpose (a test
+  passing a value of the wrong type, say), silence the check with
+  `# pyright: ignore[<rule>]` naming the rule it breaks. `# type: ignore` is
+  turned off in `pyrightconfig.json`, because it silences every diagnostic on
+  its line, whatever its brackets say.
 - **English.** All version-controlled files are written in English.
 - **No dead weight.** Remove implementation and docs that are no longer used
-  rather than leaving them behind; git history is the record.
+  rather than leaving them behind; git history is the record. Once a removed
+  feature is confirmed ignored, the test that confirmed it goes too; an aws-cli
+  test port is skipped instead (see
+  [`design/testing.md`](design/testing.md) section 5).
+- **Portable test expectations.** Pin a test's exit code and the parts of a
+  message the code builds itself (a path, say), never the OS's error text,
+  errno or `OSError` subclass: a missing directory is `[Errno 2]` on Linux but
+  `[WinError 3]` with a locale-dependent sentence on Windows, and
+  `mkdir("out/")` where a file `out` exists raises `FileExistsError` on Linux
+  and Windows but `NotADirectoryError` on macOS. Assert `OSError` or the
+  library's exception class instead. A test that touches such results needs
+  every OS's CI job checked, macOS included.
 
 ## Commits
 

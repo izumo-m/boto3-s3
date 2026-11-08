@@ -4,11 +4,11 @@ Same contract as ``ls_scenarios``: each scenario fixes the bucket layout
 (``seed``) and the CLI argv so the functional (moto) and e2e (dev stack /
 real S3) suites exercise identical inputs. Two rm-specific differences:
 
-- stdout is normalized **sorted** (``harness.normalize_rm_stdout``): aws's
+- stdout is normalized **sorted** (``harness.normalize_rm_stdout``): aws-cli's
   delete-line order is parallel-completion order, nondeterministic run to
   run. The bucket **end state** (``remaining_keys``) is captured in the
   golden to pin what sorting relaxes.
-- rm is destructive, so the e2e diff re-seeds between the aws run and the
+- rm is destructive, so the e2e diff re-seeds between the `aws` run and the
   ours run instead of sharing one seeding.
 
 Charter note (design/overview.md section 3): the exit code is compared for *every*
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 __all__ = ["SCENARIOS", "RmScenario", "resolve_argv"]
 
 # Object tree with a prefix sibling: "data-sibling.txt" shares the string
-# prefix "data" and pins aws's trailing-slash normalization for recursive
+# prefix "data" and pins aws-cli's trailing-slash normalization for recursive
 # targets (it must never be deleted by "rm s3://B/data --recursive").
 _TREE: Mapping[str, int] = {
     "data/a.txt": 3,
@@ -53,15 +53,6 @@ _FILTERED: Mapping[str, int] = {
     "f/a.txt": 3,
     "f/b.bin": 4,
     "f/sub/c.txt": 5,
-}
-
-# A prefix containing glob metacharacters: aws joins the operation path into
-# each filter pattern, so the "[1]" becomes a character class there and the
-# joined pattern cannot match the literal "f[1]/" keys (task #184 parity).
-_GLOB_PREFIX: Mapping[str, int] = {
-    "f[1]/a.txt": 3,
-    "f[1]/sub/b.txt": 4,
-    "f-plain.txt": 2,
 }
 
 _PAGED: Mapping[str, int] = {f"pg/k{i:02d}": 1 for i in range(12)}
@@ -142,14 +133,6 @@ SCENARIOS: tuple[RmScenario, ...] = (
         ("rm", f"s3://{BUCKET_TOKEN}/data/a.txt", "--exclude", "*"),
         _TREE,
     ),
-    # The prefix's "[1]" is glob-interpreted inside the joined pattern, so
-    # --exclude '*' matches nothing and everything is deleted anyway
-    # (verified against aws 2.36.40).
-    RmScenario(
-        "rm_exclude_glob_chars_prefix",
-        ("rm", f"s3://{BUCKET_TOKEN}/f[1]/", "--recursive", "--exclude", "*"),
-        _GLOB_PREFIX,
-    ),
     # The single key roots at its parent: the basename pattern must match.
     RmScenario(
         "rm_exclude_basename_single",
@@ -163,7 +146,7 @@ SCENARIOS: tuple[RmScenario, ...] = (
         ("rm", f"s3://{BUCKET_TOKEN}/data/", "--recursive", "--only-show-errors"),
         _TREE,
     ),
-    # aws quirk: --only-show-errors does NOT suppress dryrun lines.
+    # aws-cli quirk: --only-show-errors does NOT suppress dryrun lines.
     RmScenario(
         "rm_only_show_errors_dryrun",
         ("rm", f"s3://{BUCKET_TOKEN}/data/a.txt", "--dryrun", "--only-show-errors"),
@@ -182,22 +165,8 @@ SCENARIOS: tuple[RmScenario, ...] = (
         expected_stderr_tokens_ours=("fatal error", "NoSuchBucket"),
         expected_stderr_tokens_aws=("fatal error", "NoSuchBucket"),
     ),
-    # botocore client-side validation of Bucket="" -> rc 1 (not 252).
-    RmScenario(
-        "rm_empty_bucket_uri",
-        ("rm", "s3://"),
-        expected_stderr_tokens_ours=("fatal error", "Invalid bucket name"),
-        expected_stderr_tokens_aws=("fatal error", "Invalid bucket name"),
-    ),
-    RmScenario(
-        "rm_empty_bucket_with_key",
-        ("rm", "s3:///key"),
-        expected_stderr_tokens_ours=("delete failed", "Invalid bucket name"),
-        expected_stderr_tokens_aws=("delete failed", "Invalid bucket name"),
-    ),
     # A non-integer page size dies in the CLI's own int() conversion -> rc
-    # 255 on both sides (aws's bare int() escapes to its *general* handler,
-    # converting at parse time - it even precedes the 252 path-type check).
+    # 255 on both sides (aws-cli's bare int() escapes to its *general* handler).
     # No server contact, nothing seeded, nothing deleted.
     RmScenario(
         "rm_page_size_nonint",

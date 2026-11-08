@@ -1,21 +1,21 @@
 """``aws s3`` output formatting (``ls`` listing, ``rm`` delete, ``mb`` / ``rb`` bucket lines).
 
-These lines are held to the output parity charter: they are aws-cli's own bytes
-under the program-identity mapping (``design/aws-cli-option-handling.md``
-section 6, ``design/testing.md`` section 9), so any layout change here is a
-parity divergence rather than a free choice. The single recorded deviation is
-``human_readable_size``'s past-EiB range (its docstring), which no real total
-reaches.
+What a successful run prints here is held to what ``aws s3`` prints, under
+the output comparison criterion (``design/testing.md`` section 9), so a layout
+change to those lines is a functional difference rather than a free choice
+(``design/aws-cli-option-handling.md`` section 6). The single recorded
+deviation is ``human_readable_size``'s past-EiB range (its docstring), which
+no real total reaches.
 """
 
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING
 
 from dateutil.tz import tzlocal
 
 from boto3_s3 import FileKind
-from boto3_s3_cli import usage
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -30,7 +30,7 @@ def uni_write(stream: TextIO, text: str) -> None:
     On a console/codepage that cannot encode the text (a non-ASCII key on a
     cp932 or ``ascii`` stream), re-encode with the stream's encoding and
     ``errors='replace'`` rather than raising - one unencodable key must never
-    abort a listing or a delete run mid-way (aws prints the line with ``?``
+    abort a listing or a delete run mid-way (aws-cli prints the line with ``?``
     substitutions and completes). Flushes like ``uni_print`` does. Every
     stdout line that can carry a key/path goes through here; stderr needs no
     fallback (Python opens it with ``errors='backslashreplace'``) but using
@@ -44,6 +44,37 @@ def uni_write(stream: TextIO, text: str) -> None:
     stream.flush()
 
 
+def write_stderr(text: str) -> None:
+    """Write a report - a failure line, a warning - to stderr (`uni_write`).
+
+    A stderr that cannot take it changes no exit code: a process without one
+    (``2>&-``, ``sys.stderr`` None) writes nothing, and a write error is
+    dropped, leaving what stderr still holds to the final flush, which
+    discards it (``cli._settle_std_streams``).
+    """
+    stream = sys.stderr
+    if stream is None:
+        return
+    try:
+        uni_write(stream, text)
+    except OSError:
+        pass
+
+
+def write_result_line(line: str) -> None:
+    """Write a finished command's one result line to stdout (``mb`` / ``rb``).
+
+    The work is done when this runs, so a stdout that cannot take the line
+    raises its write error for the dispatcher to report as lost output (rc
+    255), and a process without a stdout (``1>&-``, ``sys.stdout`` None)
+    writes nothing and keeps the work's code - the rule
+    ``cli._settle_std_streams`` applies to every command's output.
+    """
+    stream = sys.stdout
+    if stream is not None:
+        uni_write(stream, line + "\n")
+
+
 _DATE_WIDTH = 19
 _SIZE_WIDTH = 10
 _PRE_WIDTH = 30
@@ -54,8 +85,8 @@ def human_readable_size(size: float) -> str:
     """Format a byte count like aws-cli's ``--human-readable`` (base-2 units).
 
     Accepts a float so the transfer progress display can feed it byte-per-
-    second rates (aws renders both through one helper, ``utils.py``). One
-    unreachable-range deviation: past EiB aws's suffix loop falls through and
+    second rates (aws-cli renders both through one helper, ``utils.py``). One
+    unreachable-range deviation: past EiB aws-cli's suffix loop falls through and
     returns ``None`` (rendering ``None``); this keeps counting in EiB - a
     total below 1 EiB (millions of max-size objects) never gets there.
     """
@@ -112,7 +143,7 @@ def format_entry(info: FileInfo, *, recursive: bool, human_readable: bool) -> st
         # aws-cli ListCommand._display_page: ``Prefix.split('/')[-2]`` - the last
         # path component of the common prefix, which always ends with the
         # delimiter ``/``. A prefix ending in ``//`` yields an empty component
-        # rendered ``PRE /`` (matching aws), where ``rstrip`` would wrongly keep
+        # rendered ``PRE /`` (matching aws-cli), where ``rstrip`` would wrongly keep
         # the parent ("PRE a/").
         name = info.key.split("/")[-2]
         return f"{'PRE':>{_PRE_WIDTH}} {name}/"
@@ -140,14 +171,9 @@ def format_delete(location: str, *, dryrun: bool) -> str:
     return f"{prefix}delete: {location}"
 
 
-def error_text(error: object) -> str:
-    """A failure's text as aws's line prints it (`usage.exception_text` for an exception)."""
-    return usage.exception_text(error) if isinstance(error, BaseException) else str(error)
-
-
 def format_delete_failed(location: str, error: BaseException | None) -> str:
     """One ``rm`` per-key failure line (aws-cli results.py FAILURE_FORMAT)."""
-    return f"delete failed: {location} {error_text(error)}"
+    return f"delete failed: {location} {error}"
 
 
 def format_make_bucket(bucket: str) -> str:
@@ -157,7 +183,7 @@ def format_make_bucket(bucket: str) -> str:
 
 def format_make_bucket_failed(path: str, error: object) -> str:
     """The ``mb`` failure line (the original path argument, like aws-cli)."""
-    return f"make_bucket failed: {path} {error_text(error)}"
+    return f"make_bucket failed: {path} {error}"
 
 
 def format_remove_bucket(bucket: str) -> str:
@@ -167,4 +193,4 @@ def format_remove_bucket(bucket: str) -> str:
 
 def format_remove_bucket_failed(path: str, error: object) -> str:
     """The ``rb`` failure line (the original path argument, like aws-cli)."""
-    return f"remove_bucket failed: {path} {error_text(error)}"
+    return f"remove_bucket failed: {path} {error}"

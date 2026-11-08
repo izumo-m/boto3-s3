@@ -22,19 +22,20 @@ def website(
 ) -> None
 ```
 
-`target` names the bucket. It accepts `"s3://bucket"`, the same value without
-the scheme (`"bucket"`), an `os.PathLike` producing either, or an `S3Storage`,
-which is used as given, with its own client rather than this `S3` instance's —
-the path forms the S3-only operations accept are specified in
-[`README.md`](./README.md) and `S3Storage` itself in
-[`../storage.md`](../storage.md). Only the bucket part is used: a key
-(`"s3://bucket/some/key"`) is ignored rather than rejected, because the library
-is the permissive layer and the strict path handling of `aws s3 website`
-belongs to the `boto3-s3` command. A `LocalStorage`, any other `Storage`, and
+`target` names the bucket. A string — or an `os.PathLike` producing one — is
+read the way `aws s3 website` reads its argument: an `s3://` prefix and one
+trailing `/` come off, and the rest is the bucket name whole, never split into
+a bucket and a key. An S3 Object Lambda access point ARN and an Outposts
+bucket ARN are rejected with `ValidationError` before any request, as
+`aws s3` rejects them. Every other name goes to botocore as the bucket: an
+access point ARN is one it takes, and a name it does not take — a key folded
+in (`"s3://bucket/some/key"`), an empty name (`"s3://"`), a malformed ARN —
+fails its client-side parameter validation with `ValidationError` before any
+request, in botocore's words. An `S3Storage` is used as given, with its own
+client rather than this `S3` instance's, and names its bucket
+([`../storage.md`](../storage.md)). A `LocalStorage`, any other `Storage`, and
 any value that is neither a string, a path-like, nor an `S3Storage` are
-rejected with `ValidationError`; so is a location that carries a key but no
-bucket (`"s3:///some/key"`). An empty bucket name (`"s3://"`) reaches botocore
-and fails its client-side parameter validation.
+rejected with `ValidationError`.
 
 `index_document` is the suffix appended to a request for a directory-style
 path, sent as `IndexDocument.Suffix` (`"index.html"` being the usual value).
@@ -79,13 +80,15 @@ The category contracts are specified in
   Its [`InvalidConfigError`](../exceptions.md#invalidconfigerror) refinement
   covers configuration that is present but unusable, such as a set-but-unknown
   `AWS_PROFILE`, partial credentials, or a malformed region or `endpoint_url`.
+  An S3 Express location the SDK predates raises `ConfigurationError` naming
+  the version, before any request.
 
 `website` acts on one bucket and raises its category exception directly; it
 never raises [`BatchError`](../exceptions.md#batcherror). The botocore error
 behind the failure is kept as the raised exception's `__cause__`. Any other
-exception the `PutBucketWebsite` call raised from inside botocore — a redirect
-loop ending in `RecursionError`, a response missing an element botocore reads —
-surfaces as the base [`Boto3S3Error`](../exceptions.md#boto3s3error) with the
+exception the `PutBucketWebsite` call raised from inside botocore — the
+`FileNotFoundError` of a refreshing `credential_process` whose program is gone,
+say — surfaces as the base [`Boto3S3Error`](../exceptions.md#boto3s3error) with the
 original on `__cause__`, the same capture a per-item failure gets;
 `AssertionError` alone is not translated.
 

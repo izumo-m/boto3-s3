@@ -26,8 +26,8 @@ Current state (kept accurate because this docstring is the design record): the
 built-in ``S3Storage`` <-> ``LocalStorage`` pairs transfer through ``s3transfer``
 directly off ``S3Storage``'s client/bucket and ``LocalStorage``'s path
 (``transfer.py``); ``S3._run_transfer`` (``s3.py``) routes those. A custom
-backend (any non-built-in ``scheme``) - and the ``IOStorage`` / ``StdioStorage``
-stream wrappers (``iostorage.py``) - instead ride the **open route**: ``cp`` /
+backend (any non-built-in ``scheme``) - and the stream storages (``IOStorageBase``
+and its subclasses, ``iostorage.py``) - instead ride the **open route**: ``cp`` /
 ``mv`` / ``sync`` move the non-built-in side's bytes through its ``Storage.open``
 (the routing keys on concrete types, not the ``scheme`` string - that is
 display-only)
@@ -62,18 +62,20 @@ _InfoT = TypeVar("_InfoT", bound="FileInfo")
 def sieve_pages(
     pages: Iterator[Sequence[_InfoT]], keep: Callable[[FileInfo], bool]
 ) -> Iterator[list[_InfoT]]:
-    """Apply ``keep`` to each page; drop pages sieved empty (a ``scan_pages`` helper).
+    """Apply ``keep`` to each page, one sieved page per raw page (a ``scan_pages`` helper).
 
     The building block a ``Storage.scan_pages`` implementation uses to honor
     ``options.filter`` when it cannot push the predicate to the source: wrap the
     raw page stream with it. Lazy, so ``prefetch``'s worker drives it - the
-    predicate runs on the worker thread and excluded entries (and pages emptied
-    by it) never enter the hand-off queue.
+    predicate runs on the worker thread and excluded entries never enter the
+    hand-off queue. A page the predicate empties is still yielded, empty: a
+    selective filter can reject page after page, and each pull must return
+    after one raw page so the scan's stop and cancel checks run between pages
+    instead of after the next kept entry (or the whole listing). ``prefetch``
+    keeps empty pages out of its queue.
     """
     for page in pages:
-        kept = [info for info in page if keep(info)]
-        if kept:
-            yield kept
+        yield [info for info in page if keep(info)]
 
 
 def _pull_pages(
@@ -85,15 +87,18 @@ def _pull_pages(
     each page is produced only once the consumer has drained the previous one,
     so a consumer that mutates what it is enumerating - ``sync --delete``
     removing local orphans as the merge-join streams them - never receives an
-    entry captured before its own change. `cancel_token` is honored where
-    ``prefetch`` honors it: before a page pull, leaving entries already yielded
-    untouched.
+    entry captured before its own change. `cancel_token` is honored as
+    ``prefetch`` honors it: a cancel ends the entries at once. A page pull
+    already under way runs on this thread, so it is waited for.
     """
     while cancel_token is None or not cancel_token.cancelled:
         page = next(pages, None)
         if page is None:
             return
-        yield from page
+        for info in page:
+            if cancel_token is not None and cancel_token.cancelled:
+                return
+            yield info
 
 
 class StorageCapability(Flag):
@@ -105,9 +110,10 @@ class StorageCapability(Flag):
     Storage kind implements the operation at all - **not** *permission* (whether a
     particular target is writable / reachable right now); a denied write or a
     missing object stays an execution-time error (an S3 ``403``, a local
-    ``EACCES`` / ``ENOENT``), reported per item like aws-cli - the one
-    aws-parity pre-screen is the transfer commands' missing-local-source
-    check, which runs before items flow.
+    ``EACCES`` / ``ENOENT``), reported per item like aws-cli - the exceptions
+    are the transfer commands' checks of a local source (a missing one, or a
+    directory source whose root the walk would skip), which run before items
+    flow.
 
     The members mirror the methods one-to-one, because support genuinely differs
     per kind (``S3Storage`` reads via ``open("rb")`` but does not write via
@@ -115,7 +121,8 @@ class StorageCapability(Flag):
     single-URL backend reads one object but cannot enumerate):
 
     - ``OPEN_READ`` / ``OPEN_WRITE`` - ``open(key, "rb")`` / ``open(key, "wb")``
-    - ``GET_FILEINFO`` - ``get_fileinfo(key)``, resolving a single entry
+    - ``GET_FILEINFO`` - ``get_fileinfo(key="", *, on_warning=None)``, resolving
+      a single entry
     - ``SCAN`` - ``scan`` / ``scan_pages``, enumerating a container
     - ``SORTABLE_SCAN`` - ``scan`` yields keys in UTF-8 byte order when asked
       (``ScanOptions(sort=True)``); ``sync``'s merge-join needs it on both sides,
@@ -194,10 +201,9 @@ class Storage(abc.ABC):
     takes the base ``ScanOptions`` needs nothing here.)
 
     ``scan_pages_filters`` - whether this backend's ``scan_pages`` already applies
-    ``options.filter`` itself. When ``False`` (default), ``scan`` applies it as
-    a safety net after ``scan_pages`` (on the prefetch worker), so a custom backend
-    that forgets to filter cannot silently leak excluded entries into ``--exclude``
-    / ``--include`` and, on a ``sync --delete`` destination, into deletion. The
+    ``options.filter`` itself. When ``False`` (default), ``scan`` applies it
+    after ``scan_pages`` (on the prefetch worker), so such a backend need not
+    filter at all; when ``True``, filtering is the backend's to get right. The
     built-ins set ``True`` (their ``scan_pages`` filters: ``S3Storage`` sieves;
     ``LocalStorage``'s walk applies it late, after the aws-cli vetting that still
     warns on excluded files - a custom ``LocalFileGenerator``'s
@@ -233,10 +239,8 @@ class Storage(abc.ABC):
         storage's configuration. The high-level ``cp`` / ``sync`` / ``ls`` / ``rm``
         paths build from this and overlay only the run-level knobs
         (``recursive`` / ``sort`` / ``filter`` / ``on_warning`` / ``prefix`` /
-        ``request_payer``, plus the application's ``reusable_after_interrupt``
-        posture), which
-        is what lets an app configure the walk through the storage rather than per
-        call.
+        ``request_payer``), which is what lets an app configure the walk through
+        the storage rather than per call.
         """
         return self.scan_options_type()
 
@@ -257,32 +261,39 @@ class Storage(abc.ABC):
         reaches it, for a consumer that mutates what it enumerates (see
         ``ScanOptions``); the stream is otherwise identical - only the thread
         the producer, the filter and ``on_warning`` run on changes.
-        ``options.filter`` is applied here as a
-        safety net (on the prefetch worker) **unless** the backend declares
-        ``scan_pages_filters`` - so a custom backend that does not filter in
-        ``scan_pages`` cannot silently leak excluded entries; a backend that
-        filters at its source or prunes early declares the flag to skip the
-        redundant re-filter. Pass ``options`` to control the walk (defaults to
+        ``options.filter`` is applied here (on the prefetch worker)
+        **unless** the backend declares ``scan_pages_filters`` - so a backend
+        need not filter in ``scan_pages``; one that filters at its source or
+        prunes early declares the flag to skip the redundant re-filter. Pass
+        ``options`` to control the walk (defaults to
         ``default_scan_options``). To customize the entries, override
         ``scan_pages``, not this method. Each entry has its
-        ``FileInfo.storage`` set to this backend as a safety net (only when a
-        ``scan_pages`` left it ``None``), ahead of the filter - so a predicate
-        always sees the producing backend, per ``FileInfo``'s contract (the
-        built-ins already stamp it during the scan). Used by ``ls`` and the recursive forms of
-        ``cp`` / ``mv`` / ``rm`` / ``sync``. `cancel_token` stops the prefetch
-        producer before another page pull without changing entries already
-        yielded to the consumer.
+        ``FileInfo.storage`` set to this backend (only when a ``scan_pages``
+        left it ``None``, so a backend need not stamp it), ahead of the
+        filter - so a predicate always sees the producing backend, per
+        ``FileInfo``'s contract (the built-ins already stamp it during the
+        scan). Used by ``ls`` and the recursive forms of
+        ``cp`` / ``mv`` / ``rm`` / ``sync``. `cancel_token`'s cancel ends the
+        entries at once, without an exception: pages already fetched are
+        dropped, no page pull starts, and one already in flight is not waited
+        for - but for one under ``read_ahead=False``, which runs on the calling
+        thread. So the consumer looks at the token before it takes the entries
+        for the whole listing. Entries already yielded are unaffected. A scan
+        closed before its end does not wait for a page pull already in flight:
+        the worker is told to stop, drops the
+        page it brings back and ends by itself, and the filter can still run on
+        that page after the close (`concurrency.prefetch`).
         """
         opts = options if options is not None else self.default_scan_options()
 
         def stamped() -> Iterator[Sequence[FileInfo]]:
-            # Safety net: stamp the producing backend so a downstream consumer
-            # (an `options.filter` predicate, sync's content compare via
-            # pair.src.storage, an on_result callback) can reach it even when a
-            # custom scan_pages did not set it. Runs ahead of the filter below,
+            # Stamp the producing backend so a downstream consumer (an
+            # `options.filter` predicate, sync's content compare via
+            # pair.src.storage, an on_result callback) can reach it; a
+            # scan_pages need not set it. Runs ahead of the filter below,
             # honoring FileInfo's contract that `storage` is stamped before any
             # filter runs; the built-ins stamp during the scan, so this only
-            # fills a None left by a bespoke backend.
+            # fills a None another backend left.
             for page in self.scan_pages(opts):
                 for info in page:
                     if info.storage is None:
@@ -296,10 +307,7 @@ class Storage(abc.ABC):
             yield from _pull_pages(pages, cancel_token)
             return
         with prefetch(
-            pages,
-            queue_size=self._scan_prefetch_pages,
-            cancel_token=cancel_token,
-            reusable_after_interrupt=opts.reusable_after_interrupt,
+            pages, queue_size=self._scan_prefetch_pages, cancel_token=cancel_token
         ) as items:
             yield from items
 
@@ -311,13 +319,15 @@ class Storage(abc.ABC):
         it (calling ``super().scan_pages(options)``) to filter or enrich entries a
         page at a time - the work then runs on the prefetch worker, so the
         customized stream keeps the page-ahead overlap, cheaper than
-        re-implementing ``scan``. **Apply ``options.filter`` here** and return
-        already-filtered pages: whatever this producer omits is simply absent
-        downstream (its ``sync`` effect is side-specific - the visibility layer in
-        ``ScanOptions.filter`` / design/globsieve.md). A backend that cannot push the
-        predicate to its source wraps its raw pages with ``sieve_pages``; one
-        that can (e.g. a REST listing) translates ``options.filter`` into a
-        server-side query instead.
+        re-implementing ``scan``. A backend that declares ``scan_pages_filters``
+        applies ``options.filter`` here and returns already-filtered pages:
+        whatever this producer omits is simply absent downstream (its ``sync``
+        effect is side-specific - the visibility layer in ``ScanOptions.filter``
+        / design/globsieve.md). Such a backend either wraps its raw pages with
+        ``sieve_pages`` or (e.g. a REST listing) translates ``options.filter``
+        into a server-side query; one that does not declare it leaves the
+        filter to ``scan``. A page the filter empties should still be yielded,
+        empty, so the scan can stop between pages (``sieve_pages``).
 
         ``options.recursive`` normally walks every transferable entry beneath the
         prefix (all ``FILE`` kind, no directory grouping); a backend-specific
@@ -333,7 +343,7 @@ class Storage(abc.ABC):
         natural order.
         The built-ins always sort - S3's listing is byte-ordered (preserved across
         pages; S3 Express directory buckets are the exception, and ``sync``
-        rejects them for it), the local walk sorts for aws parity - so they
+        rejects them for it), the local walk sorts for aws-cli parity - so they
         ignore the flag.
         ``key`` itself is the full, ``/``-separated identifier; stamp its relative
         form as ``compare_key`` on every entry this producer yields.
@@ -369,8 +379,8 @@ class Storage(abc.ABC):
         the transfer settles - a ``"wb"`` ``close`` flushes buffered
         writes like any file object (whether the backend persists per write or
         defers to the flush - write-through vs write-back - is its own choice).
-        ``LocalStorage`` and the stream Storages (``IOStorage`` /
-        ``StdioStorage``) implement both modes. ``S3Storage`` implements ``"rb"``
+        ``LocalStorage`` and the stream storages (``IOStorageBase`` and its
+        subclasses) implement both modes. ``S3Storage`` implements ``"rb"``
         only - a ``GetObject`` read convenience (chiefly for a content-based
         ``sync`` filter), addressed by the object's full key; its ``"wb"`` stays
         unimplemented, since every S3 write on the *transfer lanes* rides
@@ -425,7 +435,9 @@ class Storage(abc.ABC):
         - present -> a ``FileInfo`` whose ``compare_key`` is the
           entry's basename (``kind`` reflects the entry: a local directory
           target resolves as a DIRECTORY-kind entry that a transfer later
-          fails on, like aws);
+          fails on, like aws-cli - and, looked up as the location itself
+          (``key=""``), named as aws-cli names it, with a trailing separator,
+          so its ``compare_key`` is ``""``);
         - **definitively absent** (an S3 ``404``, a local ``ENOENT`` / ``ENOTDIR``)
           -> ``None``, no warning;
         - present but not a transferable regular file (a local special device /
@@ -491,8 +503,8 @@ class Storage(abc.ABC):
         """Run any deferred strict validation on this location (no-op by default).
 
         Construction is permissive (a building block); an operation - or the CLI
-        at its parity point - calls this to reject a malformed location loudly
-        before use. ``S3Storage`` overrides it with the aws-cli-parity checks
+        where its command checks the location - calls this to reject a malformed
+        location loudly before use. ``S3Storage`` overrides it with aws-cli's checks
         (unsupported ARN forms, a key with no bucket); built-ins that need none
         keep this no-op. Idempotent.
         """

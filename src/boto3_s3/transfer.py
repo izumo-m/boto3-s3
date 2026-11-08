@@ -29,7 +29,7 @@ Engine choices (parity-driven):
   and unconditionally classic for a copy run - the CRT manager has no copy,
   the same rule boto3 and aws-cli apply to s3->s3. The public
   ``transfer_config`` type is ``boto3_s3.transferconfig.TransferConfig``
-  (boto3's subclass plus CRT tuning fields; defaults match aws-cli: 8 MiB
+  (boto3's subclass plus a CRT tuning field; defaults match aws-cli: 8 MiB
   threshold/chunk, 10-way concurrency, a 1000-deep download IO queue), and
   classic honors
   ``use_threads=False`` the way boto3 does - via the ``NonThreadedExecutor``
@@ -56,18 +56,19 @@ Engine choices (parity-driven):
   `_SetAnnotations`, aws-cli's subscriber ported, which writes them after
   the copy behind the tagging write; the preload `AnnotationCopyMode`s stage
   the source payloads up front and ``DEFERRED`` reads them post-copy. A
-  write that fails part way keeps the copied object and reports aws-cli's
-  ``AnnotationCopyError`` wording.
+  write that fails part way keeps the copied object and reports the failure,
+  as aws-cli's ``AnnotationCopyError`` does.
 """
 
 from __future__ import annotations
 
+import contextlib
+import enum
 import errno
 import functools
 import logging
 import mimetypes
 import os
-import posixpath
 import tempfile
 import threading
 from collections.abc import Callable, Generator, Mapping
@@ -75,8 +76,8 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib.metadata import version
-from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import quote, urlparse
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
+from urllib.parse import quote
 
 from botocore.exceptions import BotoCoreError, ClientError
 from s3transfer.compat import seekable
@@ -86,8 +87,9 @@ from s3transfer.exceptions import CancelledError as S3TransferCancelledError
 from s3transfer.futures import NonThreadedExecutor
 from s3transfer.manager import TransferManager
 from s3transfer.upload import UploadSubmissionTask
+from s3transfer.utils import OSUtils
 
-from boto3_s3 import crtsupport, mimetable, requestparams, transferconfig
+from boto3_s3 import concurrency, crtsupport, mimetable, requestparams, transferconfig
 from boto3_s3.exceptions import (
     AccessDeniedError,
     Boto3S3Error,
@@ -98,13 +100,12 @@ from boto3_s3.exceptions import (
     TransportError,
     ValidationError,
 )
-from boto3_s3.localstorage import LocalStorage, translate_os_error
-from boto3_s3.s3storage import (
+from boto3_s3.localstorage import LocalStorage, name_files_as_text, translate_os_error
+from boto3_s3.s3storage import S3Storage, request_pages
+from boto3_s3.sdkerrors import (
     attribute_failure,
     client_build_error,
     crt_error_name,
-    drop_like_aws,
-    read_required,
     s3_errors,
     s3_request,
     translate_boto_error,
@@ -130,7 +131,6 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from boto3.s3.transfer import TransferConfig
-    from boto3.session import Session
     from mypy_boto3_s3 import S3Client
 
     from boto3_s3.storage import Storage
@@ -154,6 +154,12 @@ _METADATA_DIRECTIVE_PROPS: tuple[str, ...] = (
 # sets fall back to a post-copy PutObjectTagging.
 _MAX_TAGGING_HEADER_SIZE = 2 * 1024
 
+# S3's limits on one object's annotations (PutObjectAnnotation): at most
+# 1,000 of them, each payload at most 1 MiB. A source reply past either is
+# outside the API, and the copy stops there instead of storing without bound.
+_MAX_ANNOTATIONS = 1_000
+_MAX_ANNOTATION_PAYLOAD = 1024 * 1024
+
 # user_context slot handing an oversized TagSet from on_queued to on_done.
 _POST_TAGGING_KEY = "boto3_s3_post_copy_tag_set"
 
@@ -163,6 +169,14 @@ _POST_TAGGING_KEY = "boto3_s3_post_copy_tag_set"
 # it unset, and a custom backend's own Mapping response is captured the same
 # way as S3's.
 _DELETE_RESPONSE_KEY = "boto3_s3_delete_response"
+
+# How many of a CRT move's finished transfers `_DoneWorkers` holds at once,
+# running or waiting: the cap s3transfer's CRT manager puts on its transfers.
+_DONE_WORKERS_LIMIT = 128
+
+# user_context slot saying an item's done subscribers have forgotten its future,
+# for a future that reaches tracking after them (`Transferrer._track_future`).
+_FORGOTTEN_KEY = "boto3_s3_forgotten"
 
 _DEFAULT_MULTIPART_THRESHOLD = 8 * 1024 * 1024
 
@@ -174,7 +188,9 @@ class TransferItem:
     ``compare_key`` is the item's operation-relative name (``transferplan.item_paths``)
     - the identity under which results and progress are reported. The
     per-route fields are populated by the orchestrator: ``src_path`` /
-    ``dest_path`` are native local paths; bucket/key pairs are S3 sides.
+    ``dest_path`` are local paths with native separators, in the local
+    storage's text form (``LocalStorage.filename_encoding``; the engine hands
+    the OS its own form, `_os_form`); bucket/key pairs are S3 sides.
     ``head`` carries the single-source HeadObject payload so a single-file
     copy never heads the source twice; ``mtime`` is the source LastModified a
     download stamps onto the local file; ``src_display`` / ``dest_display``
@@ -200,9 +216,10 @@ class TransferItem:
     src_key: str | None = None
     src_path: str | None = None
     # The source listing entry, set by every listing-driven route (upload,
-    # download, copy, and their open-route variants); ``mv`` unlinks an upload
-    # source through its logical ``/``-key, distinct from ``src_path`` (the path
-    # s3transfer reads). None only on the stream routes, which list nothing.
+    # download, copy, and their open-route variants); ``mv`` deletes the source
+    # through it (``src_info.storage.delete(src_info)``, addressed by its own
+    # ``key``, distinct from ``src_path``, the path s3transfer reads). None only
+    # on the stream routes, which list nothing.
     src_info: FileInfo | None = None
     # The destination listing entry, set only by ``sync`` (the pair's ``dest``):
     # the pre-existing object an update overwrites, or None for a new key. cp /
@@ -221,7 +238,7 @@ class TransferItem:
     # replaces dest_path on downloads. Streams get no directory creation and
     # no mtime stamp, and a download without size+etag lets s3transfer probe
     # the object itself - a HeadObject under the default
-    # response_checksum_validation ("when_supported"), the aws stream wire
+    # response_checksum_validation ("when_supported"), the aws-cli stream wire
     # shape; a "when_required" client takes s3transfer's first-chunk GET
     # probe instead.
     src_fileobj: Any = None
@@ -233,13 +250,34 @@ class TransferItem:
     case_conflict_cleanup: Callable[[], None] | None = None
 
 
-def _is_precondition_failed(exc: BaseException) -> bool:
-    """A botocore ClientError carrying S3's conditional-write rejection."""
+# The writes ``no_overwrite`` makes conditional (``IfNoneMatch="*"``): a
+# single-part upload or copy, or a multipart one's completing call
+# (`_allow_if_none_match`).
+_CONDITIONAL_WRITE_OPERATIONS = frozenset({"PutObject", "CopyObject", "CompleteMultipartUpload"})
+
+
+def _is_conditional_write_rejection(exc: BaseException) -> bool:
+    """A botocore ClientError carrying S3's rejection of a conditional write.
+
+    A ``PreconditionFailed`` answer to one of the writes ``no_overwrite``
+    makes conditional. Every other request a transfer sends may meet a 412
+    too - s3transfer's ranged GETs carry ``IfMatch`` and its part copies
+    ``CopySourceIfMatch`` (the object changed since it was listed), and the
+    post-copy tag write can be answered that way - and each of those is a
+    failure. The operation comes from the error itself: botocore names it on
+    the classic engine, and pip s3transfer's CRT translation carries
+    awscrt's ``operation_name`` (an error naming none is not taken for the
+    conditional write).
+    """
     response: Any = getattr(exc, "response", None)
     try:
-        return bool(response["Error"]["Code"] == "PreconditionFailed")
+        code = response["Error"]["Code"]
     except (TypeError, KeyError):
         return False
+    return (
+        code == "PreconditionFailed"
+        and getattr(exc, "operation_name", None) in _CONDITIONAL_WRITE_OPERATIONS
+    )
 
 
 def _applied_size_hint(item: TransferItem) -> int | None:
@@ -273,10 +311,11 @@ def _outcome(future: Any) -> BaseException | None:
     on purpose: an interrupt can be the stored outcome - upstream's submission
     task stores whatever stopped it, a ``KeyboardInterrupt`` under
     ``use_threads=False`` included, and the subscribers here store one that
-    lands in their own work (`_CloseFileobj`, `_DeleteSource`) - and a
-    subscriber that let it escape would skip its failure branch and leave the
-    item without a record. `Transferrer._record_failure` turns that outcome
-    into CANCELLED and hands the interrupt back to the caller.
+    lands in their own work (`_CloseFileobj`, `_SetTags`, `_SetAnnotations`,
+    `_DeleteSource`) - and a subscriber that let it escape would skip its
+    failure branch and leave the item without a record.
+    `Transferrer._record_failure` turns that outcome into CANCELLED and hands
+    the interrupt back to the caller.
     """
     try:
         future.result()
@@ -309,7 +348,7 @@ def _is_cancellation(
     """A future outcome meaning "revoked", not "failed".
 
     Classic s3transfer settles cancelled futures with its own
-    ``CancelledError`` (``FatalError`` on aws's fatal path is a subclass):
+    ``CancelledError`` (``FatalError`` on aws-cli's fatal path is a subclass):
     revoked when the coordinator says so (``revoked``, `_future_revoked`),
     a failure when a task raised that type itself - a caller's stream throwing
     it, nobody having ordered a cancel. The library's own `CancelledError` is
@@ -317,20 +356,17 @@ def _is_cancellation(
     found there came from the caller's code too. Where the engine keeps no
     such status (``revoked`` is None: the CRT coordinator, which never
     produces either type itself, and a submit-time failure) the type cannot
-    tell an ordered cancel from a thrown one, and only this run's cancel
-    token having ordered one (``cancel_initiated``) makes it a revocation.
+    tell an ordered cancel from a thrown one, and only this run having
+    ordered one (``cancel_initiated``) makes it a revocation.
     The CRT data plane surfaces awscrt's ``AWS_ERROR_S3_CANCELED`` instead,
-    matched by the error's ``name`` without importing awscrt - but only when
-    this run's cancel token ordered the cancel (``cancel_initiated``), the
-    one revocation aws-cli has no counterpart for. Every other CRT
-    cancellation classifies as a failure, aws-cli's own rule (measured live:
-    its ``DoneResultSubscriber`` treats every non-``CancelledError`` as a
-    per-item failure, so a fatal or Ctrl-C folding its CRT manager prints a
-    failed line per in-flight transfer). The same rule keeps an interrupted
-    CRT run from reporting success when pip s3transfer's CRT coordinator
-    converts a drain-time ``KeyboardInterrupt`` into ``cancel()`` and
-    discards the interrupt - the item classified FAILED is then the only
-    evidence the run was cut short (design/crt.md section 6).
+    matched by the error's ``name`` without importing awscrt, and a
+    revocation under the same condition: the run ordered the cancel - its
+    cancel token, a fatal folding the manager, or a Ctrl-C (`Transferrer`'s
+    ``_cancel_initiated``) - so an item revoked is ``CANCELLED`` on both
+    engines. aws-cli prints a failed line for each such CRT item instead
+    (measured: its ``DoneResultSubscriber`` treats every
+    non-``CancelledError`` as a per-item failure), which is not copied. A
+    CRT cancellation the run did not order stays a failure.
     """
     if isinstance(exc, (CancelledError, S3TransferCancelledError)):
         if revoked is None:
@@ -377,12 +413,23 @@ def _allow_if_none_match() -> None:
         copy_cls.COMPLETE_MULTIPART_ARGS.append("IfNoneMatch")
 
 
+def _input_member_modeled(client: S3Client, operation: str, member: str) -> bool:
+    """Whether the installed botocore's S3 model has ``member`` in ``operation``'s input.
+
+    The member-presence probe the SDK-floor checks below share: the model is
+    introspected directly (version-agnostic), so a refusal's message names a
+    minimum version only as a hint.
+    """
+    input_shape = client.meta.service_model.operation_model(operation).input_shape
+    return member in getattr(input_shape, "members", {})
+
+
 # Back-compat (supported floor botocore 1.31, docs/compatibility.md):
 # IfNoneMatch reached the S3 write ops only in later botocore - PutObject and
 # CompleteMultipartUpload in 1.35.2, CopyObject in 1.40.61 (each the first
 # release whose S3 model carries the member, read from the published wheels).
-# Below those, --no-overwrite is rejected up front (here for the library, and
-# in the CLI for rc 252) instead of failing deep in botocore with an opaque
+# Below those, --no-overwrite is rejected up front, before any request,
+# instead of failing deep in botocore with an opaque
 # "Unknown parameter in input: IfNoneMatch". Drop this gate once the botocore
 # floor reaches them.
 _CONDITIONAL_WRITE_MIN_BOTOCORE = {"upload": "1.35.2", "copy": "1.40.61"}
@@ -412,8 +459,7 @@ def conditional_write_unsupported_reason(client: S3Client, *, is_copy: bool) -> 
     supported.
     """
     op = "CopyObject" if is_copy else "PutObject"
-    members = getattr(client.meta.service_model.operation_model(op).input_shape, "members", {})
-    if "IfNoneMatch" not in members:
+    if not _input_member_modeled(client, op, "IfNoneMatch"):
         minimum = _CONDITIONAL_WRITE_MIN_BOTOCORE["copy" if is_copy else "upload"]
         return (
             f"--no-overwrite requires botocore >= {minimum} for {op} "
@@ -438,10 +484,7 @@ _ANNOTATIONS_MIN_BOTOCORE = "1.43.31"
 
 def _copy_annotations_param_supported(client: S3Client) -> bool:
     """Whether the installed botocore's CopyObject can carry `AnnotationDirective`."""
-    members = getattr(
-        client.meta.service_model.operation_model("CopyObject").input_shape, "members", {}
-    )
-    return "AnnotationDirective" in members
+    return _input_member_modeled(client, "CopyObject", "AnnotationDirective")
 
 
 def _annotation_directive_blacklisted() -> bool:
@@ -514,10 +557,7 @@ def _checksum_algorithm_unsupported_reason(client: S3Client, algorithm: object) 
     minimum = _CHECKSUM_MIN_BOTOCORE.get(algorithm.lower())
     if minimum is None:
         return None
-    members = getattr(
-        client.meta.service_model.operation_model("PutObject").input_shape, "members", {}
-    )
-    if f"Checksum{algorithm.upper()}" in members:
+    if _input_member_modeled(client, "PutObject", f"Checksum{algorithm.upper()}"):
         return None
     return (
         f"checksum_algorithm={algorithm.upper()} requires botocore >= {minimum}; "
@@ -558,22 +598,38 @@ def _names_item_file(exc: OSError, path: str) -> bool:
     return False
 
 
+def _same_path(path: str) -> str:
+    return path
+
+
+def _os_form(storage: Storage | None, path: str) -> str:
+    """A local side's text path as the OS calls take it (`LocalStorage.os_path`).
+
+    Items carry their local paths as the storage's text - what the results
+    report - and every OS call, s3transfer's and the CRT's included, gets
+    this form. A name the filename encoding cannot represent raises the
+    ``UnicodeEncodeError`` for the caller to record as the item's failure.
+    """
+    return storage.os_path(path) if isinstance(storage, LocalStorage) else path
+
+
+def _text_form(storage: Storage | None) -> Callable[[str], str]:
+    """The reverse of `_os_form`: a local side's OS-form names as its text."""
+    return storage.text_path if isinstance(storage, LocalStorage) else _same_path
+
+
 def _set_file_utime(path: str, timestamp: float) -> None:
     """Set a file's atime/mtime (aws-cli's ``set_file_utime``).
 
     A permission failure (EPERM - typically a file owned by another user) is
-    re-worded the way aws words it, so the resulting warning carries
+    re-worded the way aws-cli words it, so the resulting warning carries
     aws-cli's "attempting to modify the utime" text; every other error keeps
-    its own message - with the path in it: Python 3.10 to 3.12's POSIX
-    ``os.utime`` leaves the path off its error, which 3.13 and the 3.14
-    aws bundles name (``[Errno 36] File name too long: '<path>'``).
+    its own message.
     """
     try:
         os.utime(path, (timestamp, timestamp))
     except OSError as exc:
         if exc.errno != errno.EPERM:
-            if exc.filename is None and exc.errno is not None and os.name != "nt":
-                raise OSError(exc.errno, exc.strerror, path) from exc
             raise
         raise AccessDeniedError(
             "The file was downloaded, but attempting to modify the utime of the file "
@@ -590,7 +646,7 @@ def _mime_types() -> mimetypes.MimeTypes:
     Assembled the way ``mimetypes.init`` assembles the module-level one, with
     one substitution: the built-in tables come from ``mimetable`` (frozen
     CPython 3.14) rather than from the running interpreter, because the guess
-    has to be the one aws makes and aws's official distribution is frozen
+    has to be the one aws-cli makes and aws-cli's official distribution is frozen
     against 3.14. The host-side overlays stay live and keep ``init``'s order -
     the Windows registry first, then whichever ``knownfiles`` exist - so local
     mime.types edits reach both tools alike. Built on first use, and only then:
@@ -616,75 +672,50 @@ def _mime_types() -> mimetypes.MimeTypes:
 
 
 def _guess_content_type(path: str) -> str | None:
-    """The ``Content-Type`` aws guesses for *path*: CPython 3.14's ``guess_type``.
+    """The ``Content-Type`` aws-cli guesses for *path*: CPython 3.14's ``guess_type``.
 
     The tables are frozen (`_mime_types`) and so is the algorithm, a port of
-    3.14's ``MimeTypes.guess_type`` / ``guess_file_type``: a name with a
-    scheme-like prefix of two or more characters takes the URL branch (a
-    ``data:`` URL is read for its media type, anything else is split with
-    ``posixpath`` after ``urlparse`` dropped its query and fragment), every
-    other name is a file path, split with the host's ``os.path`` after its
-    drive is removed. The interpreter aws-cli bundles runs exactly that,
+    3.14's ``MimeTypes.guess_file_type``: the name is a file path, split with
+    the host's ``os.path`` after its drive is removed. aws-cli guesses on an
+    absolute local path, which never takes ``guess_type``'s URL branch (a
+    scheme-like prefix of two or more characters), so only the file branch is
+    ported, and an open-route name (a custom source's ``compare_key``) is read
+    as a file name too. The interpreter aws-cli bundles runs exactly that,
     while a host interpreter before 3.13 split every name with
     ``posixpath``, so on Windows ``C:\\d\\.json`` kept ``.json`` as its
-    extension and went up as ``application/json`` where aws sends the name
+    extension and went up as ``application/json`` where aws-cli sends the name
     untyped - it is all extension to ``ntpath`` (measured 2026-10-06 against
     aws.exe: 8 of 12 names differed under Python 3.10). Strict (IANA-only)
     matching, like aws.
 
     The guess can raise ``UnicodeDecodeError`` on Windows when a registry MIME
     entry is in an undecodable encoding (bpo-9291) - here from the registry read
-    the first call performs, where aws takes it from its own lazy
+    the first call performs, where aws-cli takes it from its own lazy
     ``mimetypes.init``. Any other failure to load the host overlays - an
     ``OSError`` from a ``knownfiles`` entry that exists but cannot be read -
     propagates, and the submit records it as the item's failure, where
-    aws's queued subscriber lets it land; the store stays unbuilt, so every
-    later item retries and fails the same way, as aws's does.
+    aws-cli's queued subscriber lets it land; the store stays unbuilt, so every
+    later item retries and fails the same way, as aws-cli's does.
     """
     try:
-        db = _mime_types()
-        parts = urlparse(path)
-        if parts.scheme and len(parts.scheme) > 1:
-            if parts.scheme == "data":
-                return _data_url_type(parts.path)
-            return _guess_file_type(db, parts.path, posixpath.splitext)
-        return _guess_file_type(db, os.path.splitdrive(path)[1], os.path.splitext)
+        return _guess_file_type(_mime_types(), os.path.splitdrive(path)[1])
     except UnicodeDecodeError:
         return None
 
 
-def _guess_file_type(
-    db: mimetypes.MimeTypes, path: str, splitext: Callable[[str], tuple[str, str]]
-) -> str | None:
+def _guess_file_type(db: mimetypes.MimeTypes, path: str) -> str | None:
     """CPython 3.14's ``MimeTypes._guess_file_type``, strict, the type alone.
 
     Multi-suffix aliases (``.tgz`` -> ``.tar.gz``) are looked up without
     regard to case, an encoding suffix (``.gz``) is peeled case-sensitively,
     and the type is looked up by the lowercased extension that remains.
     """
-    base, ext = splitext(path)
+    base, ext = os.path.splitext(path)
     while (ext_lower := ext.lower()) in db.suffix_map:
-        base, ext = splitext(base + db.suffix_map[ext_lower])
+        base, ext = os.path.splitext(base + db.suffix_map[ext_lower])
     if ext in db.encodings_map:
-        base, ext = splitext(base)
+        base, ext = os.path.splitext(base)
     return db.types_map[True].get(ext.lower())
-
-
-def _data_url_type(url: str) -> str | None:
-    """CPython 3.14's ``data:`` branch of ``guess_type`` over the URL's path.
-
-    ``data:[<mediatype>][;base64],<data>``: the media type before the first
-    ``;`` or ``,``, ``text/plain`` when it is absent or carries a parameter
-    with no type, and no answer at all when there is no ``,``.
-    """
-    comma = url.find(",")
-    if comma < 0:
-        return None
-    semi = url.find(";", 0, comma)
-    media_type = url[:semi] if semi >= 0 else url[:comma]
-    if "=" in media_type or "/" not in media_type:
-        return "text/plain"
-    return media_type
 
 
 def _crt_config_error_type() -> type[Exception] | None:
@@ -722,18 +753,13 @@ def crt_engine_errors(operation: str | None) -> Generator[None, None, None]:
     object other than the singleton's, the serializer's client build - goes
     through `s3_errors`, and what that build raises outside the family
     (``ValueError`` / ``AttributeError`` reading a malformed configuration)
-    through `client_build_error`, as for any client build. awscrt's bare
-    ``AssertionError`` on an unresolved region passes through untouched: the
-    CLI converts it at its one call site, and the library documents it as the
-    programming-error family.
+    through `client_build_error`, as for any client build.
     boto3's ``MissingDependencyException`` never reaches this seam - the
     engine selection raises it ahead, and keeps its documented pass-through.
     """
     with s3_errors(operation=operation):
         try:
             yield
-        except AssertionError:
-            raise
         except (ClientError, BotoCoreError):
             # The boto family ahead of the OSError clause: four of botocore's
             # transport errors (SSLError, the connect / read timeouts,
@@ -797,8 +823,8 @@ class _ResponseCapture:
     stored read wins and the range-specific fields are dropped, leaving the
     object-level metadata. That same first-stored-wins rule would let a
     same-run content filter's source read beat the transfer's own ``GetObject``
-    to the read slot, so ``Transferrer._submit_download`` admits the source
-    key only as it queues the download (``expect``): a read on a key not yet
+    to the read slot, so ``Transferrer._admit_capture`` admits an item's key
+    only as the item is submitted (``expect``): a read on a key not yet
     admitted is simply never stored, so the filter's earlier ``GetObject``
     cannot occupy the slot.
 
@@ -921,16 +947,17 @@ class _ResponseCapture:
 
 
 class Warner:
-    """The op-level warning sink: a message body -> a WARNED ``OpResult``.
+    """The op-level advisory sink: a message body -> a WARNED or NOTICE ``OpResult``.
 
-    A single place that turns a warning into an ``OpResult`` and reports it, so
-    both a backend enumeration (``ScanOptions.on_warning``) and the transfer
+    A single place that turns an advisory into an ``OpResult`` and reports it,
+    so both a backend enumeration (``ScanOptions.on_warning``) and the transfer
     engine funnel their warnings through the same emitter instead of the walk
-    reaching into the transfer engine for one. Warnings count independently of
-    files (``warned > 0`` alone maps to exit code 2, aws rc model); the count is
-    thread-safe because a walk worker and a transfer worker can warn at once.
-    The transfer run's ``Transferrer`` builds one from its result context
-    and exposes it as ``Transferrer.warner``.
+    reaching into the transfer engine for one. Only WARNED counts: warnings
+    count independently of files (``warned > 0`` alone maps to exit code 2,
+    aws-cli rc model), and the count is thread-safe because a walk worker and a
+    transfer worker can warn at once; a NOTICE is display-only. The transfer
+    run's ``Transferrer`` builds one from its result context and exposes it as
+    ``Transferrer.warner``.
     """
 
     def __init__(
@@ -954,41 +981,100 @@ class Warner:
     def warned(self) -> int:
         return self._warned
 
-    def warn(self, body: str, *, key: str = "") -> None:
-        """Record a warning (aws-cli message body, no ``warning: `` prefix)."""
+    def warn(self, body: str, *, info: FileInfo | None = None) -> None:
+        """Record a warning (aws-cli message body, no ``warning: `` prefix).
+
+        ``info`` is the source entry the warning is about, when there is one
+        (a walk's ``on_warning`` names none): the record carries it as
+        ``src_info`` and takes its ``compare_key``.
+        """
         with self._lock:
             self._warned += 1
+        self._report(OpOutcome.WARNED, body, info)
+
+    def notice(self, body: str, *, info: FileInfo | None = None) -> None:
+        """Emit display-only advisory text (no counts, no exit-code effect).
+
+        aws-cli prints the case-conflict messages straight to stderr, bypassing
+        its result recorder - they look like warnings but never count as
+        them. The full text (its ``warning: `` prefix included) rides on
+        ``OpResult.error``; ``info`` is as for `warn`.
+        """
+        self._report(OpOutcome.NOTICE, body, info)
+
+    def _report(self, outcome: OpOutcome, body: str, info: FileInfo | None) -> None:
         if self._on_result is not None:
             self._on_result(
                 OpResult(
                     transfer_type=self._transfer_type,
-                    compare_key=key,
-                    outcome=OpOutcome.WARNED,
+                    compare_key=_advisory_key(info),
+                    outcome=outcome,
                     error=Boto3S3Error(body, operation=self._operation),
+                    src_info=info,
                     src_storage=self._src_storage,
                     dest_storage=self._dest_storage,
                 )
             )
 
 
+def _advisory_key(info: FileInfo | None) -> str:
+    """An advisory record's ``compare_key``: its entry's, or ``""`` without one."""
+    if info is None or info.compare_key is None:
+        return ""
+    return info.compare_key
+
+
+_Mode = TypeVar("_Mode", bound=enum.Enum)
+
+
+def option_mode(
+    options: TransferOptions,
+    name: Literal["copy_props", "annotation_copy_mode", "case_conflict"],
+    default: _Mode,
+    *,
+    operation: str,
+) -> _Mode:
+    """Read one of the three mode options of ``options`` as its enum member.
+
+    The member and its string value are both accepted. Unspecified is
+    ``None``, which reads as ``default``; the check is is-None, not falsy, so
+    a present-but-empty value from an untyped caller (``""``) fails the
+    conversion instead of silently running with the default. Anything else is
+    a caller error reported as ``ValidationError``: the enum's raw
+    ``ValueError`` must not leak past the public API (the exception model
+    keeps every error in the ``Boto3S3Error`` family, design/exceptions.md).
+    The CLI never gets one wrong, having validated each against its choices.
+    """
+    raw = options.get(name)
+    if raw is None:
+        return default
+    try:
+        return type(default)(raw)
+    except ValueError as exc:
+        raise ValidationError(f"Invalid {name} value: {raw!r}", operation=operation) from exc
+
+
 class Transferrer:
     """Submit transfer items of one kind and aggregate their outcomes.
 
     Use as a context manager around the submission loop: ``__exit__`` shuts
-    the manager down - waiting for in-flight transfers on a clean exit, and
-    **cancelling accepted work on any exception** except a graceful cancel
-    (aws's manager context cancels everything still pending when a fatal
+    the manager down - waiting for in-flight transfers on a clean exit, until
+    an exception is noted for the caller, and **cancelling accepted work on
+    that or any exception** except a graceful cancel
+    (aws-cli's manager context cancels everything still pending when a fatal
     escapes the submission loop - measured: a mid-listing fatal leaves the
     queued transfers unrun and prints only the one fatal line). The exception
     is a `CancelledError` backed by a graceful `CancelToken`: a graceful
     cancel means "drain accepted work", so submitted transfers still run to
-    completion; immediate mode cancels them, and a non-`Exception` interrupt
-    (Ctrl-C) uses the manager's direct cancellation path. Every accepted item
-    still gets its one result record under a cancellation: an item that never
+    completion. An immediate cancel and a Ctrl-C leave at once (`_leave`),
+    cancelling what has not started. Every accepted item (but for what a
+    leave leaves behind) still gets its one result record under a
+    cancellation: an item that never
     ran - or was abandoned mid-flight - reports ``CANCELLED`` with a
     `CancelledError` naming the cause, while an in-flight request that
     completes despite the cancel reports its real outcome (s3transfer lets
-    the completion win; design/opresult.md). The rollup counters are
+    the completion win; design/opresult.md), but for a CRT move whose source
+    delete has not started (`_DoneWorkers`). The rollup counters are
     approximate while transfers are in flight and exact after the `with`
     block exits.
 
@@ -998,17 +1084,16 @@ class Transferrer:
     s3transfer's own size probe. ``src_storage`` / ``dest_storage`` are the run's
     two resolved side ``Storage`` objects (``plan.src`` / ``plan.dest``), retained
     so a completion can resolve or report either endpoint alongside its listing
-    entries. ``src_storage`` doubles as ``mv``'s upload-source delete handle: an
-    upload source - a local file or a custom backend - is removed through its
-    ``Storage.delete``, while a download / copy S3 source is removed with a
-    DeleteObject instead (so the handle is consulted only on the upload route).
+    entries.
 
     ``is_move`` turns the run into ``mv``: every record reports
     ``TransferType.MOVE`` while ``transfer_type`` keeps routing the bytes (aws-cli
     ``operation_name`` vs ``transfer_type='move'``), and each successful
-    transfer deletes its source - ``Storage.delete`` for an upload (local or
-    custom backend), a per-object DeleteObject on the owning side's client
-    otherwise.
+    transfer deletes its source through the backend its listing entry came
+    from, ``item.src_info.storage.delete(item.src_info)`` - a local file or a
+    custom backend's entry on an upload, a DeleteObject on the source bucket's
+    client otherwise - so every ``mv`` item carries ``src_info`` with its
+    ``storage``.
     """
 
     def __init__(
@@ -1027,12 +1112,7 @@ class Transferrer:
         on_result: ResultCallback | None = None,
         cancel_token: CancelToken | None = None,
         capture_response: bool = False,
-        crt_endpoint: str | None = None,
-        crt_allow_absent_credentials: bool = False,
-        crt_allow_lockless: bool = False,
-        crt_region: crtsupport.CrtRegion = crtsupport.CLIENT_REGION,
-        crt_sign_requests: bool | None = None,
-        session: Session | None = None,
+        crt: crtsupport.CrtPostures | None = None,
     ) -> None:
         if transfer_type not in (TransferType.UPLOAD, TransferType.DOWNLOAD, TransferType.COPY):
             raise ValidationError(
@@ -1044,15 +1124,13 @@ class Transferrer:
         self._client = client
         self._source_client = source_client if source_client is not None else client
         # The run's two resolved side Storages (plan.src / plan.dest), retained so
-        # a completion can surface them with the listing entries; _src_storage is
-        # also mv's upload-source delete handle (consulted only on the upload
-        # route - a download / copy S3 source is removed with a DeleteObject).
+        # a completion can surface them with the listing entries.
         self._src_storage = src_storage
         self._dest_storage = dest_storage
         self._transfer_config = transfer_config
         self._options: TransferOptions = options if options is not None else TransferOptions()
         self._operation = operation
-        # Library-side --no-overwrite gate (the CLI rejects earlier with rc 252):
+        # The --no-overwrite gate (the CLI reports it on a fatal error: line):
         # only uploads/copies carry IfNoneMatch, and an old botocore lacks it.
         if self._options.get("no_overwrite") and transfer_type in (
             TransferType.UPLOAD,
@@ -1072,110 +1150,79 @@ class Transferrer:
             )
             if reason is not None:
                 raise ConfigurationError(reason, operation=operation)
-        # The copy-props mode is interpreted once here so a bad value fails at
-        # construction rather than at the first submit. None means unspecified;
-        # the check is is-None, not falsy, so a present-but-empty value from an
-        # untyped caller ("") hits the invalid-value error below instead of
-        # silently running with the default.
-        # copy_props=ALL gate: annotations need a capable SDK; every other
-        # mode degrades silently on an old one (design/transfer.md section 4).
+        # The copy-props modes are interpreted once here so a bad value fails
+        # at construction rather than at the first submit (`option_mode`).
         self._copy_props = CopyPropsMode.DEFAULT
         self._annotation_copy_mode = AnnotationCopyMode.PRELOAD_MEMORY
-        if transfer_type is TransferType.COPY:
-            copy_props = self._options.get("copy_props")
-            if copy_props is None:
-                copy_props = CopyPropsMode.DEFAULT
-            try:
-                self._copy_props = CopyPropsMode(copy_props)
-            except ValueError as exc:
-                # A bad value must not leak the enum's raw ValueError past the
-                # public API (the exception model keeps every error in the
-                # Boto3S3Error family, design/exceptions.md); the CLI never gets
-                # here, having validated copy_props against its choices.
-                raise ValidationError(
-                    f"Invalid copy_props value: {copy_props!r}", operation=operation
-                ) from exc
-            annotation_copy_mode = self._options.get("annotation_copy_mode")
-            if annotation_copy_mode is None:
-                annotation_copy_mode = AnnotationCopyMode.PRELOAD_MEMORY
-            try:
-                self._annotation_copy_mode = AnnotationCopyMode(annotation_copy_mode)
-            except ValueError as exc:
-                raise ValidationError(
-                    f"Invalid annotation_copy_mode value: {annotation_copy_mode!r}",
-                    operation=operation,
-                ) from exc
-            # An explicit metadata_directive disables the whole copy-props chain
-            # (aws-cli's s3handler.CopyRequestSubmitter), so ALL never reaches the
-            # annotations path there - don't refuse the combination for a feature
-            # that won't run.
-            if self._copy_props is CopyPropsMode.ALL and not self._options.get(
-                "metadata_directive"
-            ):
-                reason = annotations_copy_unsupported_reason(client)
-                if reason is not None:
-                    raise ConfigurationError(reason, operation=operation)
-        self._on_progress = on_progress
-        self._on_result = on_result
-        self._cancel_token = cancel_token
-        self._capture_response = capture_response
-        # The caller's explicit endpoint (the CLI's --endpoint-url), threaded to
-        # the CRT engine so it pins a custom endpoint the host heuristic would
-        # miss (a VPC interface endpoint under an AWS domain); None = heuristic.
-        self._crt_endpoint = crt_endpoint
-        # aws-cli's posture on a client that resolved no credentials: enter the
-        # CRT engine anyway (crtsupport.create_crt_transfer_manager). False =
-        # boto3's classic fallback, which every library caller keeps.
-        self._crt_allow_absent_credentials = crt_allow_absent_credentials
-        # aws-cli's posture on cross-process lock contention under an explicit
-        # 'crt' preference: build the CRT client without the lock. False =
-        # boto3's classic fallback (crtsupport.create_crt_transfer_manager).
-        self._crt_allow_lockless = crt_allow_lockless
-        # The caller's resolved CRT region (crtsupport.CLIENT_REGION = read it
-        # off the client, boto3's source); a declared None is what reaches
-        # awscrt's own region assertion, as aws-cli's region chain does.
-        self._crt_region: crtsupport.CrtRegion = crt_region
-        # The caller's CRT signing declaration, aws-cli's sign_request. None =
-        # derive it from the client, boto3's rule; a declared False is what
-        # keeps --no-sign-request anonymous on the CRT lane even when
-        # --sse aws:kms restores signing on the botocore client.
-        self._crt_sign_requests = crt_sign_requests
-        # The caller's boto3 session (S3.session), threaded to the CRT engine
-        # so its request serializer reuses the warm session instead of paying
-        # a fresh one per process (crtsupport._botocore_session); None = the
-        # default-session/fresh fallback there.
-        self._session = session
-        self._manager: Any = None
-        self._capture: _ResponseCapture | None = None
+        # Whether a copy runs the copy-props subscriber chain: an explicit
+        # metadata_directive disables the whole chain (aws-cli's
+        # s3handler.CopyRequestSubmitter), so `_submit_copy` attaches none.
+        self._runs_copy_props = False
         # `copy_props=ALL`'s multipart annotation writes pin the destination
         # by its CompleteMultipartUpload response, which s3transfer discards:
         # the classic manager of such a run is handed this stand-in for the
         # client, which keeps that one response (`_CopyCompletions`). Only
-        # where the chain runs - an explicit metadata_directive disables it,
-        # and nothing would then take the responses back out.
-        self._completions: _CopyCompletions | None = (
-            _CopyCompletions(client)
-            if self._copy_props is CopyPropsMode.ALL and not self._options.get("metadata_directive")
-            else None
-        )
+        # where the chain runs - nothing would otherwise take the responses
+        # back out.
+        self._completions: _CopyCompletions | None = None
+        if transfer_type is TransferType.COPY:
+            self._copy_props = option_mode(
+                self._options, "copy_props", CopyPropsMode.DEFAULT, operation=operation
+            )
+            self._annotation_copy_mode = option_mode(
+                self._options,
+                "annotation_copy_mode",
+                AnnotationCopyMode.PRELOAD_MEMORY,
+                operation=operation,
+            )
+            self._runs_copy_props = not self._options.get("metadata_directive")
+            if self._runs_copy_props and self._copy_props is CopyPropsMode.ALL:
+                # copy_props=ALL gate: annotations need a capable SDK; every
+                # other mode degrades silently on an old one
+                # (design/transfer.md section 4). Without the chain, ALL never
+                # reaches the annotations path - the combination is not
+                # refused for a feature that won't run.
+                reason = annotations_copy_unsupported_reason(client)
+                if reason is not None:
+                    raise ConfigurationError(reason, operation=operation)
+                self._completions = _CopyCompletions(client)
+        self._on_progress = on_progress
+        self._on_result = on_result
+        self._cancel_token = cancel_token
+        self._capture_response = capture_response
+        # Set once the run hands an exception to the caller (`__exit__`) or an
+        # interrupt leaves at once (`_leave`): the caller has gone on, so its
+        # callbacks get nothing more.
+        self._left = False
+        # The caller's CRT engine postures (`S3`'s, documented on
+        # crtsupport.create_crt_transfer_manager); the default is boto3's rules.
+        self._crt = crt if crt is not None else crtsupport.CrtPostures()
+        self._manager: Any = None
+        self._capture: _ResponseCapture | None = None
         self._lock = threading.Lock()
         self._futures_lock = threading.Lock()
         self._futures: set[Any] = set()
-        self._shutdown_done = threading.Event()
+        # Sent when the last tracked future is forgotten or an exception is
+        # noted for the caller: what `__exit__`'s wait looks for.
+        self._settled = concurrency.Wake()
+        # Set, and `_watch_stop` sent, once the shutdown is done or the run
+        # leaves: what ends the immediate-cancel watcher.
+        self._shutdown_done = False
+        self._watch_stop = concurrency.Wake()
         # The immediate-cancel watcher, alive from the manager's construction
-        # (`_get_manager`) until the shutdown is done (`__exit__`).
+        # (`_get_manager`) until the shutdown is done (`_shut_down`) or the run
+        # leaves (`_leave`).
         self._watcher: threading.Thread | None = None
-        # True once this run's cancel token ordered accepted transfers
-        # cancelled - set by `__exit__` folding the manager under the token's
-        # own `CancelledError`, and by `_cancel_futures` when the drain-time
-        # watcher escalates. Read by the done callbacks to tell a
-        # token-ordered revocation (CANCELLED - the one cancel aws-cli has no
-        # counterpart for) from every other CRT cancellation - the fatal /
-        # interrupt shutdown's, or one nobody ordered (a swallowed
-        # interrupt's trace) - classified FAILED like aws-cli's
-        # (`_is_cancellation`). Monotonic False->True, always set before the
-        # cancel it describes is issued, so the callback that observes a
-        # cancel outcome observes the flag too.
+        # True once this run ordered accepted transfers cancelled - set by
+        # `__exit__` folding the manager on any exception (the token's own
+        # `CancelledError`, a fatal, a Ctrl-C), by `_cancel_futures` when the
+        # drain-time watcher escalates or a Ctrl-C leaves at once, and by
+        # `_track_future` for a future tracked after either. Read by the done
+        # callbacks to tell a revocation (CANCELLED) from a CRT cancellation
+        # nobody ordered (FAILED; `_is_cancellation`). Monotonic
+        # False->True, always set before the cancel it describes is issued,
+        # so the callback that observes a cancel outcome observes the flag
+        # too.
         self._cancel_initiated = False
         # The first exception the run must hand back to the caller from a
         # place that cannot raise it there, kept by `_note_raise` for `submit`
@@ -1186,6 +1233,9 @@ class Transferrer:
         # (`_deliver`).
         self._pending_raise: BaseException | None = None
         self._pending_lock = threading.Lock()
+        # Where a CRT move's source deletes run, built with the first of them
+        # (`_on_done_workers`).
+        self._done_workers: _DoneWorkers | None = None
         # The thread the caller drives the run from: a record settled there
         # can raise the callback's exception on the spot (`_deliver`).
         self._caller_thread = threading.get_ident()
@@ -1216,35 +1266,127 @@ class Transferrer:
         exc: BaseException | None,
         tb: object,
     ) -> None:
+        """Wait for the submitted transfers, or stop them, by how the block ended.
+
+        - Normally: wait here until every accepted transfer has settled. The
+          first exception noted for the caller (`_note_raise`) ends the wait,
+          and the run then ends as if the block had raised it.
+        - By a graceful cancel's `CancelledError`: the same wait, the accepted
+          transfers running to their end.
+        - By another exception: the manager's own shutdown cancels what is left
+          and reclaims its threads (`_shut_down`); the first exception is the
+          one the caller gets.
+        - By a Ctrl-C (a ``KeyboardInterrupt``) or under an immediate cancel,
+          one that comes during the wait above included: nothing is waited for
+          (`_leave`). The operation raises the cancel's `CancelledError` once
+          this returns.
+
+        The wait is here rather than in the manager's shutdown so that an
+        immediate cancel ends it. Whatever exception the run ends with, the
+        caller's callbacks get nothing more once it has reached the caller
+        (`_left`).
+        """
+        raised: BaseException | None = None
+        try:
+            token = self._cancel_token
+            graceful = (
+                isinstance(exc, CancelledError)
+                and token is not None
+                and token.mode is CancelMode.GRACEFUL
+            )
+            if (exc is None or graceful) and self._manager is not None:
+
+                def settled() -> bool:
+                    # A transfer is forgotten once its done subscribers have run.
+                    return (
+                        not self._futures
+                        or (exc is None and self._pending_raise is not None)
+                        or self._cancelled_immediately()
+                    )
+
+                try:
+                    self._settled.wait_until(settled, cancel_token=token)
+                except BaseException as interrupt:
+                    # Only an asynchronous exception comes out of the wait. It
+                    # ends the run as it would raised in place: a Ctrl-C
+                    # leaves, anything else gets the shutdown.
+                    exc = raised = interrupt
+                else:
+                    if exc is None:
+                        with self._pending_lock:
+                            exc = raised = self._pending_raise
+                            self._pending_raise = None
+            if isinstance(exc, KeyboardInterrupt) or self._cancelled_immediately():
+                self._leave()
+            else:
+                self._shut_down(exc)
+            if raised is not None:
+                raise raised
+        except BaseException:
+            self._left = True
+            raise
+        if exc is not None or (token is not None and token.cancelled):
+            # The block's own exception goes on to the caller once this returns,
+            # and so does the cancel's CancelledError, which the operation
+            # raises next: a cancel can have ended its listing without one, and
+            # the walk may still warn behind it about a page in flight.
+            self._left = True
+
+    def _leave(self) -> None:
+        """End a run a Ctrl-C or an immediate cancel stops, waiting for nothing.
+
+        What has not started never starts, and the caller's callbacks get
+        nothing more (design/overview.md section 3). The manager is not shut
+        down: a request already out finishes on its thread, which then runs the
+        cancel's cleanup (a multipart upload aborted, a temporary file removed),
+        and the idle threads stay until the manager is collected or the process
+        ends. The capture handlers come off the client now, with those requests
+        still out, as the shutdown's own failure path takes them off: better
+        than leaving them on a client the caller may use again.
+        """
+        self._left = True
+        self._cancel_futures()
+        self._shutdown_done = True
+        self._watch_stop.send()
+        if self._capture is not None:
+            self._capture.unregister(self._client)
+
+    def _cancelled_immediately(self) -> bool:
+        token = self._cancel_token
+        return token is not None and token.mode is CancelMode.IMMEDIATE
+
+    def _shut_down(self, exc: BaseException | None) -> None:
         """Drain submitted work, cancelling it when the exit requires that.
 
-        Any exception cancels the accepted transfers, like aws's manager
+        Any exception cancels the accepted transfers, like aws-cli's manager
         context (its ``__exit__`` cancels with ``FatalError(str(exc))`` on a
         fatal and ``CancelledError`` on Ctrl-C; measured live: a fatal
         mid-listing leaves every queued transfer unrun). The one drain-on-
         exception case is a graceful token's `CancelledError`: graceful
         cancellation is *defined* as draining accepted work (exceptions.md),
-        and the watcher thread keeps a mid-drain escalation to immediate
-        effective. The cancelling shutdown is delegated to the manager's own
-        ``__exit__`` - aws's actual path - because s3transfer's public
+        which ``__exit__`` has waited for already, so the shutdown finds
+        nothing left to wait for. The cancelling shutdown is delegated to the manager's own
+        ``__exit__`` - aws-cli's actual path - because s3transfer's public
         ``shutdown()`` forwards its arguments shifted (``(cancel, cancel,
         cancel_msg)``), which would cancel a pending coordinator with the
         message as the exception *class*. ``__exit__`` exists on both engines;
-        the classic one cancels with aws's exception shape
-        (``FatalError(str(exc))``, Ctrl-C's plain ``CancelledError``), so a
-        classic ``CANCELLED`` record names the fatal that revoked it. The CRT
+        the classic one cancels with aws-cli's exception shape
+        (``FatalError(str(exc))``), so a classic ``CANCELLED`` record names
+        the fatal that revoked it. Neither a Ctrl-C nor an immediate cancel
+        comes here (`_leave`). The CRT
         manager's cancel surfaces awscrt's ``AWS_ERROR_S3_CANCELED``, which
-        classifies as a per-item *failure* - aws-cli's measured behavior: a
-        fatal or Ctrl-C folding its CRT manager prints a failed line per
-        in-flight transfer and counts them failed; only a cancel ordered by
-        this run's cancel token, which aws-cli has no counterpart for,
-        classifies ``CANCELLED`` (`_is_cancellation`). A CRT cancellation
-        arriving on the clean drain - pip s3transfer's CRT manager converting
-        a drain-time ``KeyboardInterrupt`` into ``cancel()`` and discarding
-        the interrupt - is the same per-item failure, and the run raises
-        `BatchError` in place of the swallowed ``KeyboardInterrupt``
-        (design/crt.md section 6). The classic manager re-raises a drain-time
-        interrupt itself, so that lane never needs the distinction.
+        classifies ``CANCELLED`` too, the fold having marked the run's order
+        first (`_is_cancellation`; aws-cli prints a failed line per such
+        item, which is not copied). A Ctrl-C in the drain goes as the manager
+        lets it: the classic one cancels and re-raises it, while pip
+        s3transfer's CRT manager may turn it into a cancel and drop it
+        (design/crt.md section 6).
+
+        The manager's shutdown cannot wait for what a CRT move handed to
+        `_DoneWorkers`: as far as it can see, those items' done callbacks have
+        returned. So that wait is here, ahead of the end of the cancel watcher,
+        which keeps an escalation to IMMEDIATE effective on the items still
+        held.
         """
         if self._manager is None:
             # No transfer ran, but a warning the walk reported from its
@@ -1259,38 +1401,36 @@ class Transferrer:
         )
         cancel = exc is not None and not graceful_drain
         # The immediate-cancel watcher has run since the manager was built
-        # (`_get_manager`); the drain keeps it alive until the shutdown is
-        # done, so a mid-drain escalation to IMMEDIATE stays effective.
+        # (`_get_manager`), and is ended below once the shutdown is done.
         watcher = self._watcher
         try:
             if cancel:
-                # A CancelledError with this run's token cancelled is the
-                # token's own order surfacing through the submission loop
-                # (s3._raise_if_cancelled), so the manager cancel it forces is
-                # token-ordered: mark it before it is issued, and the revoked
-                # items classify CANCELLED like the drain-time escalation's.
-                # A fatal or interrupt leaves the flag down - FAILED.
-                if (
-                    isinstance(exc, CancelledError)
-                    and self._cancel_token is not None
-                    and self._cancel_token.cancelled
-                ):
-                    self._cancel_initiated = True
+                # The manager cancel this fold forces - the token's own
+                # CancelledError surfacing through the submission loop
+                # (s3._raise_if_cancelled), a fatal - is this run's order:
+                # mark it before it is issued, and the revoked items classify
+                # CANCELLED on the CRT engine as on the classic one.
+                self._initiate_cancel()
                 self._manager.__exit__(type(exc), exc, None)
             else:
                 self._manager.shutdown()
         finally:
-            self._shutdown_done.set()
-            if watcher is not None:
-                watcher.join()
-            if self._capture is not None:
-                # After shutdown every transfer is drained, so no request is
-                # emitting on the client while the capture handlers are removed.
-                # The finally covers shutdown itself raising (s3transfer re-raises
-                # a KeyboardInterrupt arriving during its drain wait): better to
-                # unregister with stragglers in flight than to leave the handlers
-                # feeding _store forever on a longer-lived client.
-                self._capture.unregister(self._client)
+            try:
+                if self._done_workers is not None:
+                    self._done_workers.close()
+            finally:
+                self._shutdown_done = True
+                self._watch_stop.send()
+                if watcher is not None:
+                    watcher.join()
+                if self._capture is not None:
+                    # After shutdown every transfer is drained, so no request is
+                    # emitting on the client while the capture handlers are removed.
+                    # The finally covers shutdown itself raising (s3transfer re-raises
+                    # a KeyboardInterrupt arriving during its drain wait): better to
+                    # unregister with stragglers in flight than to leave the handlers
+                    # feeding its stores forever on a longer-lived client.
+                    self._capture.unregister(self._client)
         # An interrupt that became an item's outcome during the drain (or on
         # the last submit's worker), or a callback's exception noted there,
         # has no later `submit` to re-raise it.
@@ -1302,32 +1442,58 @@ class Transferrer:
 
         Runs from the manager's construction until the shutdown is done, so
         the escalation is acted on during submission and during the drain
-        alike.
+        alike. Woken by the token's cancel and by the shutdown's end.
         """
         token = self._cancel_token
         assert token is not None
-        while not self._shutdown_done.wait(0.1):
-            if token.mode is CancelMode.IMMEDIATE:
-                self._cancel_futures()
-                return
+        self._watch_stop.wait_until(
+            lambda: self._shutdown_done or token.mode is CancelMode.IMMEDIATE,
+            cancel_token=token,
+        )
+        if not self._shutdown_done:
+            self._cancel_futures()
 
     def _track_future(self, future: Any | None) -> None:
-        """Track a submitted future without losing a synchronous completion race."""
+        """Track a submitted future without losing a synchronous completion race.
+
+        A future tracked once the token is IMMEDIATE, or once the run has left
+        (`_leave`), is cancelled here.
+        """
         if future is None:
             return
         with self._futures_lock:
             self._futures.add(future)
+        token = self._cancel_token
+        if self._left or (token is not None and token.mode is CancelMode.IMMEDIATE):
+            # The watcher, or `_leave`, cancels what is tracked once; a future
+            # tracked after that is cancelled here.
+            self._initiate_cancel()
+            future.cancel()
         # A non-threaded manager may finish before submit() returns and before
-        # _ForgetFuture can remove it. Re-check after insertion to close that race.
-        if future.done():
+        # _ForgetFuture can remove it, and the CRT manager runs an item's done
+        # subscribers inside its submit when the item fails there, its future
+        # then never reporting done. Re-check after insertion to close both.
+        if future.done() or future.meta.user_context.get(_FORGOTTEN_KEY):
             self._forget_future(future)
 
     def _forget_future(self, future: Any) -> None:
+        future.meta.user_context[_FORGOTTEN_KEY] = True
         with self._futures_lock:
             self._futures.discard(future)
+            settled = not self._futures
+        if settled:
+            self._settled.send()
+
+    def _initiate_cancel(self) -> None:
+        """Mark that this run ordered a cancel, and wake what waits for one."""
+        self._cancel_initiated = True
+        # Read after the mark: done workers made after this see the mark.
+        done_workers = self._done_workers
+        if done_workers is not None:
+            done_workers.note_cancel()
 
     def _cancel_futures(self) -> None:
-        self._cancel_initiated = True
+        self._initiate_cancel()
         with self._futures_lock:
             futures = tuple(self._futures)
         for future in futures:
@@ -1352,8 +1518,13 @@ class Transferrer:
         return self._warner.warned
 
     @property
+    def cancel_token(self) -> CancelToken | None:
+        """The run's token, which the listings feeding the run take as well."""
+        return self._cancel_token
+
+    @property
     def warner(self) -> Warner:
-        """The run's warning sink - what a walk's ``ScanOptions.on_warning`` targets."""
+        """The run's advisory sink - what a walk's ``ScanOptions.on_warning`` targets."""
         return self._warner
 
     @property
@@ -1365,16 +1536,9 @@ class Transferrer:
         return self._first_error
 
     # -- non-transfer outcomes ----------------------------------------------
-
-    def warn(self, body: str, *, key: str = "") -> None:
-        """Record a warning through the shared sink (``warner``).
-
-        A transfer that succeeds but fails its mtime stamp produces both a
-        SUCCEEDED and a WARNED record, and ``warned > 0`` alone maps to exit code
-        2 (aws rc model). This engine's own warnings go here; a backend walk
-        reports directly through ``warner``.
-        """
-        self._warner.warn(body, key=key)
+    #
+    # Warnings and notices go through the shared sink (``warner``), the
+    # engine's own as well as a backend walk's.
 
     def skip(self, item: TransferItem) -> None:
         """Record a silent, non-warning skip (no exit-code effect)."""
@@ -1382,31 +1546,13 @@ class Transferrer:
             self._skipped += 1
         self._emit(self._result(item, OpOutcome.SKIPPED))
 
-    def notice(self, body: str, *, key: str = "") -> None:
-        """Emit display-only advisory text (no counts, no exit-code effect).
-
-        aws prints the case-conflict messages straight to stderr, bypassing
-        its result recorder - they look like warnings but never count as
-        them. The full text (its ``warning: `` prefix included) rides on
-        ``OpResult.error``.
-        """
-        self._emit(
-            OpResult(
-                transfer_type=self._result_transfer_type,
-                compare_key=key,
-                outcome=OpOutcome.NOTICE,
-                error=Boto3S3Error(body, operation=self._operation),
-                src_storage=self._src_storage,
-                dest_storage=self._dest_storage,
-            )
-        )
-
     def dryrun(self, item: TransferItem) -> None:
         """Validate per-item request parameters, then report without an API call.
 
-        aws-cli still runs its request-parameter mapper for a dry run. This is
-        observable for options such as malformed `grants`, whose validation is
-        deliberately deferred until an upload or copy item reaches the pipeline.
+        aws-cli still runs its request-parameter mapper for a dry run. The
+        operation layer has already refused a malformed `grants`
+        (`requestparams.validate_grants`); the mapping here keeps the check
+        for a caller driving the `Transferrer` itself.
         """
         if self._transfer_type is TransferType.UPLOAD:
             requestparams.map_put_object_params(self._options, self._operation)
@@ -1434,9 +1580,10 @@ class Transferrer:
     def submit(self, item: TransferItem) -> None:
         """Queue one transfer (blocks when the manager queue is full).
 
-        Request-parameter mapping happens here, per item - so an invalid
-        ``grants`` shape surfaces as an in-flight error like aws (rc 1 via
-        the fatal-error path), never as an upfront usage error.
+        Request-parameter mapping happens here, per item, as on aws. The
+        operation layer refuses a malformed ``grants`` before the run
+        (`requestparams.validate_grants`); a caller driving the `Transferrer`
+        itself meets the mapping's own ``ValidationError`` here instead.
         """
         try:
             if self._transfer_type is TransferType.UPLOAD:
@@ -1453,7 +1600,7 @@ class Transferrer:
                     self._pending_raise = None
             # The item may carry a stream handle - _cp_stream's already-open
             # fileobj, or the open route's deferred reader/writer. A submit
-            # that raises before the manager accepted the work - the grants
+            # that raises before the manager accepted the work - a
             # ValidationError from param mapping, a manager-build failure -
             # means _CloseFileobj never runs, so release here (best-effort;
             # mirrors _CloseFileobj's failure branch, discard-preferring).
@@ -1465,7 +1612,7 @@ class Transferrer:
         # had happened. The same holds for whatever a worker noted since the
         # last submit (`_note_raise`). Re-raise it here - the item's fileobjs
         # were already released by its done subscribers - and the caller's
-        # exit folds the manager the way any mid-run interrupt does.
+        # exit leaves the way any mid-run interrupt does (`_leave`).
         self._raise_pending()
 
     def _note_raise(self, exc: BaseException) -> None:
@@ -1473,6 +1620,7 @@ class Transferrer:
         with self._pending_lock:
             if self._pending_raise is None:
                 self._pending_raise = exc
+        self._settled.send()
 
     def _raise_pending(self) -> None:
         """Re-raise, once, the exception `_note_raise` kept."""
@@ -1487,7 +1635,8 @@ class Transferrer:
         A record settles where its item ends: the calling thread for a
         submit-time outcome, a walk warning or a ``use_threads=False``
         transfer, an s3transfer worker for a threaded one, an awscrt thread
-        for the CRT engine's. Whatever the callback raises belongs to the
+        for the CRT engine's, a `_DoneWorkers` thread for a CRT move's.
+        Whatever the callback raises belongs to the
         caller, but only the calling thread can raise it there: s3transfer
         logs and drops an ``Exception`` from a done callback (the calling
         thread under ``use_threads=False`` included), a worker's
@@ -1499,6 +1648,8 @@ class Transferrer:
         s3transfer's callback runner, is dropped there and still reaches the
         caller through the note.
         """
+        if self._left:
+            return
         callback = self._on_result
         assert callback is not None  # only wired when the caller passed one
         try:
@@ -1507,6 +1658,28 @@ class Transferrer:
             self._note_raise(exc)
             if threading.get_ident() == self._caller_thread:
                 raise
+
+    def _deliver_progress(self, progress: TransferProgress) -> None:
+        """Hand one progress record to the caller's ``on_progress``.
+
+        Progress fires inside the transfer it reports on - s3transfer's read
+        and write path (on the calling thread too under ``use_threads=False``)
+        or an awscrt thread - where an exception would fail that item, or
+        escape into awscrt. What the callback raises is the caller's failure,
+        not the item's, so an ``Exception`` is only noted here and reaches the
+        caller from the next `submit` or from ``__exit__``, as `_deliver` hands
+        back ``on_result``'s. An interrupt (``KeyboardInterrupt`` /
+        ``SystemExit``) is left to propagate, so it cancels the item as one
+        raised anywhere else in the transfer does.
+        """
+        if self._left:
+            return
+        callback = self._on_progress
+        assert callback is not None  # only wired when the caller passed one
+        try:
+            callback(progress)
+        except Exception as exc:
+            self._note_raise(exc)
 
     @staticmethod
     def _close_item_fileobjs(item: TransferItem) -> None:
@@ -1524,49 +1697,50 @@ class Transferrer:
 
     def _submit_upload(self, item: TransferItem) -> Any | None:
         """Map one upload and attach close, move-delete, completion, and tracking hooks."""
-        # Mapped first, like aws-cli's _do_submit: the mapper is what rejects a
-        # malformed --grants, and aws raises that before it looks at the source
-        # at all, so a directory source paired with a bad option must still fail
-        # on the option.
+        # Mapped first, like aws-cli's _do_submit.
         extra_args = requestparams.map_put_object_params(self._options, self._operation)
-        # A directory source is handed through to fail like aws-cli ([Errno 21]
-        # Is a directory, rc 1; aws words the failed line differently, its CRT
-        # lane's untranslated "Unknown Error Code" included - a recorded
-        # deliberate difference, docs/cli/aws-differences.md section 2);
-        # botocore's default checksum wrapper would otherwise open it and mask
-        # the read failure as an opaque rewind error, so detect it and surface
-        # the OS error directly. A stream (src_fileobj) is never a directory.
-        if item.src_fileobj is None and item.src_path and os.path.isdir(item.src_path):
-            self._record_failure(
-                item, IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), item.src_path)
-            )
-            return None
+        # A directory source is handed through to fail as on aws-cli ([Errno 21]
+        # Is a directory, rc 1); botocore's default checksum wrapper would
+        # otherwise open it and mask the read failure as an opaque rewind
+        # error, so detect it and surface the OS error directly. A stream
+        # (src_fileobj) is never a directory.
+        src_path = item.src_path
+        if item.src_fileobj is None and src_path:
+            try:
+                src_path = _os_form(self._src_storage, src_path)
+            except ValueError as exc:
+                self._record_failure(item, exc)
+                return None
+            if os.path.isdir(src_path):
+                self._record_failure(
+                    item, IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), item.src_path)
+                )
+                return None
         name = ""
         if self._options.get("guess_mime_type", True) and "ContentType" not in extra_args:
             name = item.src_path or ""
             if not name and item.src_info is not None:
-                # An open-route item has no local path but its entry does have a
-                # filename: guess from the source key (the destination key for a
-                # single "" source - same basename). A stream item carries no
-                # src_info and stays guess-free (no filename, aws parity) - its
+                # An open-route item has no local path: guess from its
+                # compare_key, the name its S3 key derives from (the basename
+                # for a single source), or from the destination key when a
+                # single source's entry names nothing. A stream item carries no
+                # src_info and stays guess-free (no filename, aws-cli parity) - its
                 # empty name never opens the store below, so an overlay the
                 # host cannot read is no concern of a stream upload, exactly as
-                # aws's stream submitter, which attaches no guessing subscriber.
-                name = item.src_info.key or item.dest_key or ""
+                # aws-cli's stream submitter, which attaches no guessing subscriber.
+                name = item.compare_key or item.dest_key or ""
         if name:
             try:
                 guessed = _guess_content_type(name)
-            except (OSError, ValueError) as exc:
+            except OSError as exc:
                 # A host overlay the guess reads failed to load (a mime.types
-                # that exists but cannot be read, say), or urlparse refused
-                # the name (an unmatched `[` after a scheme-like prefix). aws
-                # guesses inside s3transfer's queued subscriber, so either
-                # error fails that item - `upload failed: ... [Errno 13]
-                # Permission denied: '/etc/mime.types'` - and the run goes
-                # on, a sync's deletes included; raised here it ended the run
-                # as one fatal error. Nothing was submitted, so the item's
-                # fileobj is released the way a submit-time failure releases
-                # it.
+                # that exists but cannot be read, say). aws-cli guesses inside
+                # s3transfer's queued subscriber, so the error fails that
+                # item - `upload failed: ... [Errno 13] Permission denied:
+                # '/etc/mime.types'` - and the run goes on, a sync's deletes
+                # included; raised here it ended the run as one fatal error.
+                # Nothing was submitted, so the item's fileobj is released the
+                # way a submit-time failure releases it.
                 self._close_item_fileobjs(item)
                 self._record_failure(item, exc)
                 return None
@@ -1575,19 +1749,24 @@ class Transferrer:
         subscribers, counted = self._common_subscribers(item)
         if item.src_fileobj is not None:
             subscribers.append(_CloseFileobj(item.src_fileobj))
+        waiting: list[Any] = []
         if self._is_move:
-            subscribers.append(self._delete_source_subscriber(item))
-        subscribers.append(self._completion(item, counted))
-        subscribers.append(_ForgetFuture(self._forget_future))
-        # Manager first: a stream run builds it (and the capture) at first submit.
+            waiting.append(self._delete_source_subscriber(item))
+        completion = self._completion(item, counted)
+        waiting.append(completion)
+        waiting.append(_ForgetFuture(self._forget_future))
         manager = self._get_manager()
-        if self._capture is not None:
-            # Admit the key: only submitted items' responses are recorded.
-            self._capture.expect(item.dest_bucket, item.dest_key)
-        fileobj: Any = item.src_fileobj if item.src_fileobj is not None else item.src_path
-        if item.src_fileobj is not None and not isinstance(manager, TransferManager):
-            # The CRT engine reads the body on an awscrt thread (`_GuardedReader`).
-            fileobj = _GuardedReader(item.src_fileobj, self._note_raise, self._caller_thread)
+        subscribers.extend(self._on_done_workers(manager, item, waiting))
+        self._track_from_queued(manager, subscribers)
+        self._admit_capture(item)
+        fileobj: Any = item.src_fileobj if item.src_fileobj is not None else src_path
+        if item.src_fileobj is not None:
+            # awscrt can read the caller's stream on a thread of its own, or on
+            # an s3transfer worker while it signs (`_GuardedReader`); the
+            # completion reads back what the guard caught there.
+            guard = _GuardedReader(item.src_fileobj, self._note_raise, self._caller_thread)
+            completion.stream_guard = guard
+            fileobj = guard
         return self._accept(
             manager.upload,
             fileobj=fileobj,
@@ -1600,9 +1779,18 @@ class Transferrer:
     def _submit_download(self, item: TransferItem) -> Any:
         """Map one download and order destination, durability, and completion hooks."""
         extra_args = requestparams.map_get_object_params(self._options)
+        dest_path = item.dest_path
+        if dest_path is not None:
+            # The OS form of the destination (`_os_form`); a key whose name the
+            # filename encoding cannot represent fails here, as the item.
+            try:
+                dest_path = _os_form(self._dest_storage, dest_path)
+            except ValueError as exc:
+                self._record_failure(item, exc)
+                return None
         subscribers, counted = self._common_subscribers(item)
-        if item.dest_path is not None:
-            subscribers.append(_DirectoryCreator())
+        if dest_path is not None:
+            subscribers.append(_DirectoryCreator(_text_form(self._dest_storage)))
         if item.dest_fileobj is not None:
             subscribers.append(_CloseFileobj(item.dest_fileobj))
         # Before the mv source delete, like aws-cli registering
@@ -1610,44 +1798,39 @@ class Transferrer:
         # a failed delete then still leaves the downloaded file carrying the
         # source mtime (a later sync compares equal instead of re-downloading).
         subscribers.append(_StampMtime(item, self._stamp_mtime))
+        waiting: list[Any] = []
         if self._is_move:
             # Durability barrier before the source delete (LocalStorage(fsync=True),
-            # a library-only opt-in; off by default = aws parity). Only a real local
+            # a library-only opt-in; off by default = aws-cli parity). Only a real local
             # destination path can be fsynced - a stream / custom (open-route) dest
             # owns its own durability, so item.dest_fileobj downloads are excluded.
             if (
-                item.dest_path is not None
+                dest_path is not None
                 and isinstance(self._dest_storage, LocalStorage)
                 and self._dest_storage.fsync
             ):
-                subscribers.append(_FsyncDest(item.dest_path))
-            subscribers.append(self._delete_source_subscriber(item))
+                waiting.append(_FsyncDest(dest_path, self._dest_storage.text_path))
+            waiting.append(self._delete_source_subscriber(item))
         if item.case_conflict_cleanup is not None:
             # After the source delete, aws-cli's slot for
             # CaseConflictCleanupSubscriber: on_done subscribers run in
             # registration order, so releasing the key earlier would shrink the
             # window in which a same-name-different-case twin still counts as
             # in flight - by an os.utime on cp, by a whole DeleteObject on mv.
-            subscribers.append(_CaseConflictCleanup(item.case_conflict_cleanup))
-        subscribers.append(self._completion(item, counted))
-        subscribers.append(_ForgetFuture(self._forget_future))
-        # Manager first: a stream run builds it (and the capture) at first submit.
+            waiting.append(_CaseConflictCleanup(item.case_conflict_cleanup))
+        waiting.append(self._completion(item, counted))
+        waiting.append(_ForgetFuture(self._forget_future))
         manager = self._get_manager()
-        if item.dest_path is not None and not isinstance(manager, TransferManager):
+        subscribers.extend(self._on_done_workers(manager, item, waiting))
+        if dest_path is not None and not isinstance(manager, TransferManager):
             subscribers.insert(0, _KeepRenameFailure())
-        if self._capture is not None:
-            # Admit the key only now: a same-run content filter may have read
-            # this source through the run's own client (a SyncPair content
-            # update_filter via S3Storage.open(..., "rb")) before submit, and
-            # that GetObject must neither occupy the first-stored-wins read
-            # slot (the transfer's own GetObject is the item's read) nor sit
-            # in the store forever for a pair the run never submits.
-            self._capture.expect(item.src_bucket, item.src_key)
+        self._track_from_queued(manager, subscribers)
+        self._admit_capture(item)
         return self._accept(
             manager.download,
             bucket=item.src_bucket,
             key=item.src_key,
-            fileobj=item.dest_fileobj if item.dest_fileobj is not None else item.dest_path,
+            fileobj=item.dest_fileobj if item.dest_fileobj is not None else dest_path,
             extra_args=extra_args,
             subscribers=subscribers,
         )
@@ -1655,11 +1838,12 @@ class Transferrer:
     def _submit_copy(self, item: TransferItem) -> Any:
         """Map one S3 copy, including copy-props and optional source deletion."""
         extra_args = requestparams.map_copy_object_params(self._options, self._operation)
-        if (
-            extra_args.get("MetadataDirective") == "COPY"
-            and item.size is not None
-            and item.size >= self._multipart_threshold
-        ):
+        # Whether s3transfer will run this copy as multipart: upstream's own
+        # comparison (size >= threshold), which the flip below and the
+        # copy-props subscribers share. A caller-less size (a custom scan) is
+        # predicted single-part; s3transfer then sizes it with its own probe.
+        multipart = item.size is not None and item.size >= self._multipart_threshold
+        if extra_args.get("MetadataDirective") == "COPY" and multipart:
             # A multipart-bound explicit COPY flips to REPLACE in the request
             # parameters only. Every supported s3transfer blocklists
             # MetadataDirective from CreateMultipartUpload, so no wire request
@@ -1667,25 +1851,19 @@ class Transferrer:
             # PRESERVED_METADATA_FIELDS strip from dropping the caller's own
             # properties (ContentType and friends) where aws-cli's fork -
             # tableless - passes them through. The single-part CopyObject keeps
-            # the real COPY. The multipart prediction is upstream's own
-            # comparison (size >= threshold, like the annotation gate); a
-            # caller-less size (a custom scan) skips the flip and leaves the
+            # the real COPY. A caller-less size skips the flip and leaves the
             # decision - and upstream's own preservation - to its probe.
             extra_args["MetadataDirective"] = "REPLACE"
         subscribers, counted = self._common_subscribers(item)
-        source_client: Any = self._source_client
-        if not self._options.get("metadata_directive"):
-            copy_props_subscribers, source_client = self._copy_props_subscribers(item)
-            subscribers.extend(copy_props_subscribers)
+        if self._runs_copy_props:
+            subscribers.extend(self._copy_props_subscribers(item, multipart=multipart))
         if self._is_move:
             subscribers.append(self._delete_source_subscriber(item))
         subscribers.append(self._completion(item, counted))
         subscribers.append(_ForgetFuture(self._forget_future))
-        # Manager first: a stream run builds it (and the capture) at first submit.
         manager = self._get_manager()
-        if self._capture is not None:
-            # Admit the key: only submitted items' responses are recorded.
-            self._capture.expect(item.dest_bucket, item.dest_key)
+        self._track_from_queued(manager, subscribers)
+        self._admit_capture(item)
         return self._accept(
             manager.copy,
             copy_source={"Bucket": item.src_bucket, "Key": item.src_key},
@@ -1693,8 +1871,49 @@ class Transferrer:
             key=item.dest_key,
             extra_args=extra_args,
             subscribers=subscribers,
-            source_client=source_client,
+            source_client=self._source_client,
         )
+
+    def _on_done_workers(self, manager: Any, item: TransferItem, waiting: list[Any]) -> list[Any]:
+        """Hand the done subscribers that can wait to `_DoneWorkers`, on a CRT move.
+
+        ``waiting`` runs from an item's durability barrier or source delete to
+        its last subscriber. It stays as it is where nothing there waits on
+        awscrt's thread: the classic engine has workers of its own, a `cp`
+        deletes nothing, and removing a local source is one system call. The
+        workers number the setting the classic engine's pool reads,
+        ``max_request_concurrency`` (``max_concurrency`` sets it too). The
+        ``[s3]`` key ``max_concurrent_requests`` does not reach it: that key is
+        not passed on the CRT path (design/crt.md section 4).
+        """
+        if not self._is_move or isinstance(manager, TransferManager):
+            return waiting
+        info = item.src_info
+        assert info is not None  # as in `_delete_source_subscriber`
+        if isinstance(info.storage, LocalStorage):
+            return waiting
+        if self._done_workers is None:
+            config: Any = self._transfer_config or transferconfig.TransferConfig()
+            self._done_workers = _DoneWorkers(
+                config.max_request_concurrency, lambda: self._cancel_initiated, self._note_raise
+            )
+        return [_HandToDoneWorkers(self._done_workers, waiting)]
+
+    def _track_from_queued(self, manager: Any, subscribers: list[Any]) -> None:
+        """Track a classic transfer from its ``on_queued``, ahead of its own tasks.
+
+        Under ``use_threads=False`` the manager call runs the whole transfer
+        on the calling thread before it returns, so the tracking `submit`
+        does after it comes too late for an IMMEDIATE cancel to reach the
+        transfer in flight. ``on_queued`` runs before the first request task
+        (on the calling thread there, on the submission thread otherwise);
+        registered first, it also precedes the other ``on_queued`` work, such
+        as the annotation preload. The CRT engine keeps the tracking after
+        the call: its coordinator cannot cancel before the request is made,
+        and its ``on_queued`` runs before that.
+        """
+        if isinstance(manager, TransferManager):
+            subscribers.insert(0, _TrackFuture(self._track_future))
 
     def _accept(self, hand_over: Callable[..., Any], **kwargs: Any) -> Any:
         """Hand one transfer to the manager, keeping its own refusal in the taxonomy.
@@ -1754,7 +1973,9 @@ class Transferrer:
             subscribers.append(_ProvideETag(item.etag))
         if self._on_progress is not None:
             subscribers.append(
-                _Progress(self._result_transfer_type, item.compare_key, total, self._on_progress)
+                _Progress(
+                    self._result_transfer_type, item.compare_key, total, self._deliver_progress
+                )
             )
         return subscribers, counted
 
@@ -1771,68 +1992,56 @@ class Transferrer:
     def _delete_source_subscriber(self, item: TransferItem) -> _DeleteSource:
         """The per-item source deletion for ``mv`` (aws-cli DeleteSource* trio).
 
-        An upload source - a local file or a custom (open-route) backend object -
-        is removed through its own ``Storage.delete(info)``, keyed by the source
-        listing entry (``src_info``); the delete maps the OS / backend error into
-        the library taxonomy, preserving the message aws prints (``move failed:
-        ... [Errno 13] ...``). S3 sources get a single DeleteObject - on the
-        manager's client for downloads, the source-side client for copies - with
-        ``RequestPayer`` forwarded like every other request.
+        The source is removed through its own backend's ``Storage.delete(info)``,
+        keyed by the source listing entry (``src_info``, whose ``storage`` is
+        the backend it came from): a local file or a custom (open-route)
+        backend object on an upload, a single DeleteObject on the source
+        bucket's client for a download or a copy, with ``RequestPayer``
+        forwarded like every other request. Each delete raises in the library
+        taxonomy with the source's own key - an OS error keeps the message ``aws``
+        prints (``move failed: ... [Errno 13] ...``) - so the record never
+        attributes it to the destination that copied fine.
         """
-        if self._transfer_type is TransferType.UPLOAD:
-            src_storage = self._src_storage
-            info = item.src_info
-            assert src_storage is not None and info is not None
-            return _DeleteSource(lambda: src_storage.delete(info), capture=self._capture_response)
-        client: Any = (
-            self._client if self._transfer_type is TransferType.DOWNLOAD else self._source_client
-        )
-        bucket = item.src_bucket
-        key = item.src_key
-        params = requestparams.map_delete_object_params(self._options)
-
-        def delete_s3_source() -> Any:
-            # Pre-translate to the taxonomy carrying the *source* bucket/key, as
-            # S3Storage.delete and the upload path's Storage.delete already do -
-            # whatever the request raised, botocore's family or not.
-            # Otherwise _record_failure re-tags the raw exception with the copy
-            # destination (dest_bucket/dest_key), mis-attributing a source-delete
-            # failure to the object that copied fine.
-            with s3_request(operation=self._operation, bucket=bucket, key=key):
-                return client.delete_object(Bucket=bucket, Key=key, **params)
-
-        return _DeleteSource(delete_s3_source, capture=self._capture_response)
-
-    def _copy_props_subscribers(self, item: TransferItem) -> tuple[list[Any], Any]:
-        """Translate the selected copy-props mode into ordered request subscribers."""
-        mode = self._copy_props
-        exclude = _ExcludeAnnotationDirective(
-            item, client=self._client, multipart_threshold=self._multipart_threshold
-        )
-        if mode is CopyPropsMode.NONE:
-            return (
-                [_ReplaceMetadataDirective(), _ReplaceTaggingDirective(), exclude],
-                self._source_client,
+        info = item.src_info
+        assert info is not None and info.storage is not None
+        storage = info.storage
+        if isinstance(storage, S3Storage):
+            request_payer = self._options.get("request_payer") or None
+            return _DeleteSource(
+                lambda: storage.delete(info, request_payer=request_payer),
+                capture=self._capture_response,
             )
+        return _DeleteSource(lambda: storage.delete(info), capture=self._capture_response)
+
+    def _copy_props_subscribers(self, item: TransferItem, *, multipart: bool) -> list[Any]:
+        """Translate the selected copy-props mode into ordered request subscribers.
+
+        ``multipart`` is `_submit_copy`'s prediction of how s3transfer runs
+        the copy, which every subscriber that differs by it reads.
+        """
+        mode = self._copy_props
+        exclude = _ExcludeAnnotationDirective(client=self._client, multipart=multipart)
+        if mode is CopyPropsMode.NONE:
+            return [_ReplaceMetadataDirective(), _ReplaceTaggingDirective(), exclude]
         metadata = _SetMetadataDirectiveProps(
             item,
             source_client=self._source_client,
-            multipart_threshold=self._multipart_threshold,
+            multipart=multipart,
             head_params=requestparams.map_head_object_params_with_copy_source_sse(self._options),
             operation=self._operation,
         )
         if mode is CopyPropsMode.METADATA_DIRECTIVE:
-            return [metadata, _ReplaceTaggingDirective(), exclude], self._source_client
+            return [metadata, _ReplaceTaggingDirective(), exclude]
         tags = _SetTags(
             item,
             source_client=self._source_client,
             dest_client=self._client,
-            multipart_threshold=self._multipart_threshold,
+            multipart=multipart,
             options=self._options,
             operation=self._operation,
         )
         if mode is CopyPropsMode.DEFAULT:
-            return [metadata, tags, exclude], self._source_client
+            return [metadata, tags, exclude]
         # CopyPropsMode.ALL - annotations carried instead of excluded (the
         # constructor already refused the mode on an incapable SDK).
         assert self._completions is not None
@@ -1841,13 +2050,13 @@ class Transferrer:
             source_client=self._source_client,
             dest_client=self._client,
             completions=self._completions,
-            multipart_threshold=self._multipart_threshold,
+            multipart=multipart,
             mode=self._annotation_copy_mode,
             options=self._options,
             temp_dir=getattr(self._transfer_config, "annotation_temp_dir", None),
             operation=self._operation,
         )
-        return [metadata, tags, annotations], self._source_client
+        return [metadata, tags, annotations]
 
     # -- engine internals ----------------------------------------------------
 
@@ -1897,10 +2106,9 @@ class Transferrer:
         ``preferred_transfer_client`` is read with boto3's defaults (no config
         = ``'auto'``); a copy run is unconditionally classic - the CRT manager
         has no copy, the same rule boto3 and aws-cli apply to s3->s3.
-        ``crt_allow_absent_credentials``, ``crt_allow_lockless``,
-        ``crt_region`` and ``crt_sign_requests`` are the caller-declared
-        posture departures from boto3's rules available here, and apply only
-        when the caller asks for them.
+        The lock and signing postures in ``crt`` are the caller-declared
+        departures from boto3's rules available here, and apply only when the
+        caller asks for them.
         """
         if self._transfer_type is TransferType.COPY:
             return None
@@ -1917,23 +2125,16 @@ class Transferrer:
         # The copy tables are inert for CRT (it has no copy path) but keeping
         # one alignment site means the classic fallback never sees them unpatched.
         _allow_inline_mpu_tagging()
-        # The run's client is the route-selected one (an S3Storage may carry its
-        # own), so the S3-level endpoint pin only applies to the client it built.
-        endpoint = crtsupport.caller_endpoint(self._client, self._crt_endpoint)
         # Every construction failure is classified at this seam
         # (`crt_engine_errors`): design/exceptions.md carves out exactly one
         # pass-through (MissingDependencyException, raised by selects_crt
         # above), and none of these is it.
         with crt_engine_errors(self._operation):
+            # The run's client is the route-selected one (an S3Storage may
+            # carry its own), so the S3-level endpoint pin only applies to the
+            # client it built (`CrtPostures.engine_arguments`).
             return crtsupport.create_crt_transfer_manager(
-                self._client,
-                self._transfer_config,
-                endpoint=endpoint,
-                session=self._session,
-                allow_absent_credentials=self._crt_allow_absent_credentials,
-                allow_lockless=self._crt_allow_lockless,
-                region=self._crt_region,
-                sign_requests=self._crt_sign_requests,
+                self._client, self._transfer_config, **self._crt.engine_arguments(self._client)
             )
 
     def _create_classic_manager(self) -> Any:
@@ -1962,7 +2163,9 @@ class Transferrer:
         # disrupt a concurrent transfer. Run parallel operations with one client
         # per thread (design/s3.md thread-safety note).
         client: Any = self._completions if self._completions is not None else self._client
-        return TransferManager(client, config=config, executor_cls=executor_cls)
+        return TransferManager(
+            client, config=config, osutil=_ReplacingOSUtils(), executor_cls=executor_cls
+        )
 
     @property
     def _multipart_threshold(self) -> int:
@@ -2072,15 +2275,43 @@ class Transferrer:
         """
         if self._capture is None:
             return None, None
-        if self._transfer_type in (TransferType.UPLOAD, TransferType.COPY):
-            # Also drain any read recorded for this key (a content filter's
-            # GetObject of the pre-overwrite destination through this client):
-            # it is not the item's transfer response, and must not linger.
-            self._capture.pop_read(item.dest_bucket, item.dest_key)
-            return self._capture.pop_write(item.dest_bucket, item.dest_key), None
+        bucket, key = self._captured_key(item)
         if self._transfer_type is TransferType.DOWNLOAD:
-            return None, self._capture.pop_read(item.src_bucket, item.src_key)
-        return None, None
+            return None, self._capture.pop_read(bucket, key)
+        # Also drain any read recorded for this key (a content filter's
+        # GetObject of the pre-overwrite destination through this client):
+        # it is not the item's transfer response, and must not linger.
+        self._capture.pop_read(bucket, key)
+        return self._capture.pop_write(bucket, key), None
+
+    def _captured_key(self, item: TransferItem) -> tuple[str | None, str | None]:
+        """The object whose response the capture keeps for ``item``.
+
+        The source for a download, else the destination. The key admitted at
+        submit (`_admit_capture`) and the key drained at the item's terminal
+        (`_drain_captured`) are chosen here, so they cannot disagree - an
+        admitted key nobody drained would sit in the store for the rest of
+        the run.
+        """
+        if self._transfer_type is TransferType.DOWNLOAD:
+            return item.src_bucket, item.src_key
+        return item.dest_bucket, item.dest_key
+
+    def _admit_capture(self, item: TransferItem) -> None:
+        """Admit ``item``'s key into the response capture (`_ResponseCapture.expect`).
+
+        Called by each route after `_get_manager`, which builds the capture
+        (on a stream run, at the first submit). Only now, at submit: only
+        submitted items' responses are recorded. A same-run content filter
+        may have read a download's source through the run's own client (a
+        ``SyncPair`` content ``update_filter`` via ``S3Storage.open(...,
+        "rb")``) before submit, and that GetObject must neither occupy the
+        first-stored-wins read slot (the transfer's own GetObject is the
+        item's read) nor sit in the store forever for a pair the run never
+        submits.
+        """
+        if self._capture is not None:
+            self._capture.expect(*self._captured_key(item))
 
     def _record_failure(
         self, item: TransferItem, exc: BaseException, revoked: bool | None = None
@@ -2108,15 +2339,15 @@ class Transferrer:
         ):
             # An accepted item revoked as a cancellation: classic s3transfer's
             # CancelledError shapes (a fatal elsewhere, classic Ctrl-C) or a
-            # CRT cancel this run's token ordered. CANCELLED, not FAILED -
-            # nothing is wrong with the item itself, and the run's outcome is
-            # the exception the operation raises. Deliberately richer than
-            # aws-cli, which drops cancelled items from output and counts;
-            # first_error stays reserved for real failures (BatchError's
-            # diagnostic sample). Every other CRT cancel - the fatal /
-            # interrupt shutdown's, or one nobody ordered (a swallowed
-            # interrupt's trace) - falls through to the failure branch below,
-            # aws-cli's own classification (`_is_cancellation`).
+            # CRT cancel this run ordered (its token, a fatal, a Ctrl-C).
+            # CANCELLED, not FAILED - nothing is wrong with the item itself,
+            # and the run's outcome is the exception the operation raises.
+            # Deliberately richer than aws-cli, which drops cancelled items
+            # from output and counts on its classic engine and fails them on
+            # its CRT one; first_error stays reserved for real failures
+            # (BatchError's diagnostic sample). A CRT cancel the run did not
+            # order falls through to the failure branch below
+            # (`_is_cancellation`).
             error = CancelledError(
                 str(exc) or "canceled",
                 operation=self._operation,
@@ -2127,28 +2358,22 @@ class Transferrer:
                 self._cancelled += 1
             self._emit(self._result(item, OpOutcome.CANCELLED, error=error))
             return
-        if drop_like_aws(exc):
-            # A failure without a response (a connection closed, a timeout):
-            # aws-cli's completion handler raises on it and s3transfer swallows
-            # that, so the item vanishes - no record, no count (`lost_like_aws`).
-            return
-        if _is_precondition_failed(exc):
+        # A failure without any response (a connection closed, a read timeout)
+        # is FAILED like every other: aws-cli's completion handler loses it
+        # with no line at rc 0, which is not copied (design/opresult.md).
+        if self._options.get("no_overwrite") and _is_conditional_write_rejection(exc):
             # --no-overwrite's IfNoneMatch rejection: the object already
             # exists, which is the asked-for outcome - a silent skip, not a
-            # failure (aws-cli DoneResultSubscriber; rc stays 0).
+            # failure (aws-cli DoneResultSubscriber; rc stays 0). aws-cli skips
+            # every PreconditionFailed whatever the request was; any other 412
+            # fails the item here (docs/cli/aws-differences.md).
             with self._lock:
                 self._skipped += 1
             self._emit(self._result(item, OpOutcome.SKIPPED))
             return
-        if isinstance(exc, CancelledError):
-            # The library's cancellation type on a future nobody revoked: the
-            # caller's own code threw it. The item failed, and a FAILED record
-            # must not carry the type that means "revoked", so it is reported
-            # as the base error with the throw on __cause__ - what the same
-            # throw of concurrent.futures' CancelledError becomes.
-            thrown = exc
-            exc = Boto3S3Error(str(thrown))
-            exc.__cause__ = thrown
+        # The library's own CancelledError on a future nobody revoked was
+        # thrown by the caller's code: like every library exception the
+        # caller's code raises, it is recorded as it is (a FAILED record).
         error = self._local_failure(item, exc) or translate_boto_error(
             exc,
             operation=self._operation,
@@ -2188,7 +2413,7 @@ class Transferrer:
         Permission denied`` for a download into a directory it cannot write),
         the CRT engine reporting it under awscrt's name - so the failure takes
         the category the library's own file paths give it
-        (`translate_os_error`), its message (aws's words) as it is, and names
+        (`translate_os_error`), its message (aws-cli's words) as it is, and names
         the file in ``key`` with no ``bucket`` (design/exceptions.md section
         2.1), not the object. botocore's own errors that are also ``OSError``
         (``SSLError``) are the request's; so is an ``OSError`` naming some
@@ -2196,11 +2421,17 @@ class Transferrer:
         ``mime.types`` - raised in the same task; a stream item has no local
         path and keeps the request's attribution.
         """
-        path = item.dest_path if self._transfer_type is TransferType.DOWNLOAD else item.src_path
+        download = self._transfer_type is TransferType.DOWNLOAD
+        path = item.dest_path if download else item.src_path
         if path is None or isinstance(exc, BotoCoreError):
             return None
         key = path.replace(os.sep, "/")
         if isinstance(exc, OSError):
+            # The engines name the files in the OS form; the item's path and
+            # every report are the local side's text.
+            name_files_as_text(
+                exc, _text_form(self._dest_storage if download else self._src_storage)
+            )
             if not _names_item_file(exc, path):
                 return None
             return translate_os_error(exc, operation=self._operation, key=key)
@@ -2216,7 +2447,7 @@ class Transferrer:
         the calling thread under ``use_threads=False`` - after a successful
         download. Failure
         does not undo the transfer (the bytes are on disk): it adds a WARNED
-        record with aws's wording - the broad catch is deliberate, ``os.utime``
+        record - the broad catch is deliberate, ``os.utime``
         can raise ``OverflowError`` / ``ValueError`` on Windows for timestamps
         outside ``localtime()``'s range besides the common ``OSError``.
 
@@ -2230,12 +2461,16 @@ class Transferrer:
         if item.mtime is None or item.dest_path is None:
             return
         try:
-            _set_file_utime(item.dest_path, item.mtime.replace(microsecond=0).timestamp())
+            _set_file_utime(
+                _os_form(self._dest_storage, item.dest_path),
+                item.mtime.replace(microsecond=0).timestamp(),
+            )
         except Exception as exc:
-            self.warn(
+            name_files_as_text(exc, _text_form(self._dest_storage))
+            self._warner.warn(
                 f"Skipping file {item.dest_path}. Successfully Downloaded {item.dest_path} "
                 f"but was unable to update the last modified time. {exc}",
-                key=item.compare_key,
+                info=item.src_info,
             )
 
 
@@ -2274,10 +2509,28 @@ class _TaskGuard:
       each byte once across retries (`_writing_once`).
 
     The attribute lookups are guards: an upstream that reshapes its task
-    degrades to its own behavior.
+    degrades to its own behavior. The hooks stay only while the task runs
+    (`_uninstall`).
     """
 
     _note: Callable[[BaseException], None]
+
+    # The attributes `_install` may set on a task.
+    _HOOKS = ("_execute_main", "_log_and_set_exception", "_handle_io")
+
+    def _uninstall(self, fn: Any) -> None:
+        """Take `_install`'s hooks off a task that has run.
+
+        Each hook holds the task's own bound method, so a task keeping them is
+        a reference cycle, and what it holds - a download's written chunk above
+        all - stays in memory until a collection finds the cycle, past the
+        bound of the IO queue (measured: 1 GiB downloaded ahead of its writer
+        peaked at 1053 MiB against 354, and 93 against 72 with the writer
+        keeping up).
+        """
+        hooks = getattr(fn, "__dict__", {})
+        for name in self._HOOKS:
+            hooks.pop(name, None)
 
     def _install(self, fn: Any) -> None:
         coordinator = getattr(fn, "_transfer_coordinator", None)
@@ -2340,8 +2593,8 @@ def _writing_once(handle_io: Callable[..., Any]) -> Callable[..., Any]:
     whose chunks it writes as they arrive (``ImmediatelyWriteIOGetObjectTask``),
     and a body cut mid-stream is retried from its first byte. A destination
     that can seek takes each chunk at its offset, so the retry overwrites; one
-    that cannot (a stream, an append-mode file, a pipe - `IOStorage`'s
-    write-only views) gets the chunks appended, the bytes before the cut twice
+    that cannot (a stream destination, behind the deferred writer that offers
+    only ``write``) gets the chunks appended, the bytes before the cut twice
     and still reported SUCCEEDED (measured: a 50-byte object cut at 3 bytes
     came out 53 bytes, exit code 0). The ranged path does not have the problem
     - its writes pass through s3transfer's ``DeferQueue``, which drops what it
@@ -2376,13 +2629,14 @@ class _SerialExecutor(_TaskGuard, NonThreadedExecutor):
     with neither the file nor the object, and ``SubmissionTask._main``
     swallowed the interrupt, so the run went on to the next item). An
     interrupt escaping a done callback (past ``_execute_main``) is noted at
-    this executor's boundary the same way, and the terminal subscribers run
-    once per item so upstream's second announce, re-running the uncleared
-    list, cannot double-count. The subscribers whose own work decides the
-    item's fate do not let one escape at all - the open route's commit and
-    mv's source delete store it as the future's outcome, as upstream's
-    submission task does for one that lands in its own body - and that
-    outcome records CANCELLED and is handed back the same way (`_outcome`,
+    this executor's boundary the same way, and the terminal subscribers and
+    those that send requests run once per item so upstream's second
+    announce, re-running the uncleared list, cannot double-count or send
+    twice. The subscribers whose own work decides the item's fate do not let
+    one escape at all - the open route's commit, copy-props' post-copy
+    writes and mv's source delete store it as the future's outcome, as
+    upstream's submission task does for one that lands in its own body - and
+    that outcome records CANCELLED and is handed back the same way (`_outcome`,
     `Transferrer._record_failure`). The last gap is the submission task's own
     unwind after its final task settled the item: upstream swallows an
     interrupt there without storing it, so the hook that would have stored it
@@ -2403,6 +2657,8 @@ class _SerialExecutor(_TaskGuard, NonThreadedExecutor):
             if not isinstance(exc, Exception):
                 self._note(exc)
             raise
+        finally:
+            self._uninstall(fn)
 
 
 class _ThreadedExecutor(_TaskGuard, ThreadPoolExecutor):
@@ -2410,13 +2666,13 @@ class _ThreadedExecutor(_TaskGuard, ThreadPoolExecutor):
 
     A signal is only ever delivered to the main thread, so a ``BaseException``
     outside ``Exception`` raised on one of these workers comes from the
-    caller's own code running there: an event handler registered on the
-    client (a CLI plugin's), the caller's stream read or written by a task.
+    caller's own code running there: an event handler the caller registered
+    on the client, the caller's stream read or written by a task.
     Upstream lets it pass `Task.__call__` with the transfer still unsettled -
     the item then recorded SUCCEEDED, so a ``mv`` deleted its source though
     no PutObject went out and a download into a stream reported success with
     nothing written - and the pool's work item swallowed it, so the run
-    returned normally (measured: ``sys.exit(3)`` in a plugin's PutObject
+    returned normally (measured: ``sys.exit(3)`` in a PutObject event
     handler). `_TaskGuard` settles the item CANCELLED and notes the exception;
     one escaping a task past its main (a done callback) is noted here.
     `Transferrer.submit` / ``__exit__`` re-raise it on the calling thread, so
@@ -2440,6 +2696,32 @@ class _ThreadedExecutor(_TaskGuard, ThreadPoolExecutor):
             if not isinstance(exc, Exception):
                 self._note(exc)
             raise
+        finally:
+            self._uninstall(fn)
+
+
+class _ReplacingOSUtils(OSUtils):
+    """s3transfer's ``OSUtils`` for the classic engine, committing a download in one step.
+
+    s3transfer puts a filename download in place with ``rename_file``, which
+    on Windows removes the destination and then renames the temp file onto
+    it: two downloads whose names differ only in case can interleave between
+    the two steps on a case-insensitive filesystem, and one then fails with
+    ``[WinError 183]``. This commit is ``os.replace``, one step. Where Windows
+    refuses that, s3transfer's own commit runs as it would have, so the
+    outcome and the report are aws-cli's: a destination another process
+    holds open is ``[WinError 32]`` rather than the replace's ``[WinError
+    5]``, and a link to a directory is removed and replaced as aws-cli
+    replaces it. Elsewhere s3transfer's commit is the same rename and fails
+    the same way again. The CRT engine's manager cannot take an ``OSUtils``
+    (`crtsupport.create_crt_transfer_manager`).
+    """
+
+    def rename_file(self, current_filename: str, new_filename: str) -> None:
+        try:
+            os.replace(current_filename, new_filename)
+        except OSError:
+            super().rename_file(current_filename, new_filename)
 
 
 class _StreamInterruptedError(RuntimeError):
@@ -2447,19 +2729,32 @@ class _StreamInterruptedError(RuntimeError):
 
 
 class _GuardedReader:
-    """A CRT upload's body that hands the caller's interrupt back, not to awscrt.
+    """A caller's upload stream that hands its interrupt back, not to awscrt.
 
-    awscrt reads an upload body from its own event-loop thread (its
-    ``InputStream`` duck-types ``read`` / ``readinto`` / ``seek``). A
-    ``BaseException`` outside ``Exception`` the caller's stream raises there
-    reaches awscrt's native layer as is: a ``SystemExit`` stalled the process
-    for good, and a ``KeyboardInterrupt`` became the request's
+    awscrt reads the body itself: on the CRT engine from its own event-loop
+    thread, and on the classic engine from an s3transfer worker while its
+    request signer hashes a signed payload (its ``InputStream`` duck-types
+    ``read`` / ``readinto`` / ``seek``). A ``BaseException`` outside
+    ``Exception`` the stream raises there reaches awscrt's native layer as is:
+    a ``SystemExit`` stalled the CRT engine for good and ended the process
+    under the signer, and a ``KeyboardInterrupt`` became the request's
     ``AWS_ERROR_UNKNOWN`` with the interrupt itself gone (measured). This view
     notes it for the calling thread (`Transferrer._note_raise`, re-raised by
     the next ``submit`` or ``__exit__``) and raises an ordinary exception in
-    its place, which awscrt turns into that request's failure. On the calling
-    thread itself (s3transfer positioning the body at submit) the exception
-    propagates unchanged. Every other attribute delegates to the stream.
+    its place, which awscrt turns into that request's failure; it also keeps
+    the interrupt (``interrupt``) for the item's completion, which records
+    the item CANCELLED as every interrupted item is (`_Completion`). On the
+    calling thread itself (s3transfer positioning the body at submit, and every
+    read under ``use_threads=False``) the exception propagates unchanged. Every
+    other attribute delegates to the stream.
+
+    An ordinary exception the stream raises where awscrt reads it (a text
+    stream's ``UnicodeEncodeError``, an ``OSError``) reaches awscrt as is,
+    and awscrt reports the request as ``AWS_ERROR_UNKNOWN``, dropping it.
+    The last one is kept in ``failure`` - awscrt handles some on its own (a
+    ``BlockingIOError`` meaning "no data yet") and fails the request on the
+    first it does not, so the last is the cause - and the item fails with it
+    instead (`_Completion`), as it does where nothing but the SDK reads it.
     """
 
     _GUARDED = frozenset({"read", "read1", "readinto", "readinto1", "seek", "tell"})
@@ -2468,19 +2763,28 @@ class _GuardedReader:
         self._raw = raw
         self._note = note
         self._caller = caller
+        # What the stream raised on awscrt's thread, kept for the item's
+        # completion: awscrt reports only its own failure for the read.
+        self.interrupt: BaseException | None = None
+        self.failure: Exception | None = None
 
     def __getattr__(self, name: str) -> Any:
         attr = getattr(self._raw, name)
         if name not in self._GUARDED or not callable(attr):
             return attr
-        note, caller = self._note, self._caller
+        guard, note, caller = self, self._note, self._caller
 
         def call(*args: Any, **kwargs: Any) -> Any:
             try:
                 return attr(*args, **kwargs)
             except BaseException as exc:
-                if isinstance(exc, Exception) or threading.get_ident() == caller:
+                if threading.get_ident() == caller:
                     raise
+                if isinstance(exc, Exception):
+                    guard.failure = exc
+                    raise
+                if guard.interrupt is None:
+                    guard.interrupt = exc
                 note(exc)
                 raise _StreamInterruptedError(str(exc) or repr(exc)) from exc
 
@@ -2596,10 +2900,18 @@ class _CountBytes:
 
 
 class _DirectoryCreator:
-    """Create the download destination's parent directory (aws-cli subscriber)."""
+    """Create the download destination's parent directory (aws-cli subscriber).
+
+    The download's file is in the OS form (`_os_form`); ``text_path`` turns
+    the names a failure reports back into the destination's text.
+    """
+
+    def __init__(self, text_path: Callable[[str], str] = _same_path) -> None:
+        self._text_path = text_path
 
     def on_queued(self, future: Any, **kwargs: Any) -> None:
-        directory = os.path.dirname(future.meta.call_args.fileobj)
+        fileobj: str = future.meta.call_args.fileobj
+        directory = os.path.dirname(fileobj)
         try:
             if not os.path.exists(directory):
                 os.makedirs(directory)
@@ -2609,28 +2921,21 @@ class _DirectoryCreator:
             # key names the file being downloaded (a local failure's address,
             # design/exceptions.md section 2.1), as the engine's own record
             # of the item's local file does.
+            name_files_as_text(exc, self._text_path)
             raise translate_os_error(
                 exc,
                 operation=None,
-                key=future.meta.call_args.fileobj.replace(os.sep, "/"),
-                message=f"Could not create directory {directory}: {exc}",
+                key=self._text_path(fileobj).replace(os.sep, "/"),
+                message=f"Could not create directory {self._text_path(directory)}: {exc}",
             ) from exc
-        except ValueError as exc:
-            # A key with an embedded NUL (an S3-compatible listing can carry
-            # one): aws's subscriber lets the ValueError through, worded by
-            # its bundled 3.14, whose os functions name themselves in it -
-            # 3.10 and 3.11 say "embedded null byte".
-            if str(exc) == "embedded null byte":
-                raise ValueError("mkdir: embedded null character in path") from exc
-            raise
 
 
 class _FsyncDest:
     """Fsync a ``mv`` download's destination file before its S3 source is deleted.
 
     A library-only durability step, opt-in via ``LocalStorage(fsync=True)`` (off
-    by default = aws parity). s3transfer finalizes a filename download with a
-    temp-file write + ``os.rename`` and never fsyncs, so aws-cli / s3transfer
+    by default = aws-cli parity). s3transfer finalizes a filename download with a
+    temp-file write and a rename and never fsyncs, so aws-cli / s3transfer
     delete the durable S3 source while the downloaded bytes may still be only in
     the page cache - a crash between the two loses the move outright. Placed
     immediately before ``_DeleteSource`` (the same slot and flip contract as
@@ -2649,8 +2954,11 @@ class _FsyncDest:
     own parent; the common case downloads into an existing tree.
     """
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, text_path: Callable[[str], str] = _same_path) -> None:
+        # ``path`` is the OS form the download wrote (`_os_form`); ``text_path``
+        # names it - and the files an error carries - as the destination's text.
         self._path = path
+        self._text_path = text_path
 
     def on_done(self, future: Any, **kwargs: Any) -> None:
         if _outcome(future) is not None:
@@ -2658,12 +2966,14 @@ class _FsyncDest:
         try:
             self._fsync()
         except OSError as exc:
+            name_files_as_text(exc, self._text_path)
+            text = self._text_path(self._path)
             future.set_exception(
                 translate_os_error(
                     exc,
                     operation=None,
-                    key=self._path.replace(os.sep, "/"),
-                    message=f"Failed to persist {self._path} to disk: {exc}",
+                    key=text.replace(os.sep, "/"),
+                    message=f"Failed to persist {text} to disk: {exc}",
                 )
             )
 
@@ -2702,7 +3012,7 @@ class _KeepRenameFailure:
     the destination, a name too long to create, on Windows a file another
     process holds open - is handed to the coordinator's ``set_exception``,
     which ignores it once the transfer is done: the item read as a success, a
-    ``mv`` deleted its source, and nothing was written (aws's outcome as
+    ``mv`` deleted its source, and nothing was written (aws-cli's outcome as
     well, measured). Installed when the transfer is queued, this makes that
     late ``set_exception`` an override, so every subscriber after it - the
     stamp, the source delete, the completion - sees the failure. Guarded on
@@ -2744,7 +3054,172 @@ class _StampMtime:
         self._stamp(self._item)
 
 
-class _DeleteSource:
+class _DoneWorkers:
+    """Run the end of a CRT move's done subscribers on threads of their own.
+
+    awscrt calls a transfer's done subscribers on the one thread that also
+    hands out the CRT client's requests, so a subscriber that waits there holds
+    up every transfer and every other item's subscribers. A move's source
+    delete is such a wait: run there, the DeleteObject requests go one at a
+    time (measured on real S3: 25 ms a key, 27 s for 1000 objects against 6 s
+    on the classic engine, and aws-cli's the same). `_HandToDoneWorkers` brings
+    them here instead, where items run side by side as on the classic engine's
+    workers while each item's subscribers keep their order.
+
+    - **The limit** (`_DONE_WORKERS_LIMIT`): ``run`` blocks awscrt's thread once
+      that many items are held, which slows the transfers down to the deletes,
+      until the run orders a cancel (`note_cancel`). Nothing here needs that
+      thread to make progress: a source is deleted through its own backend, on
+      S3 through the botocore client. The manager's submit can run an item's
+      subscribers too, on the calling thread, so more than one thread can wait
+      at the limit; each sleeps on its own `concurrency.Wake`.
+    - **A cancel**: an item whose turn comes after the run ordered a cancel
+      settles as cancelled instead of running, so its source stays beside the
+      finished download, and the request that item would have sent never
+      starts. Requests already out finish and report their real outcome.
+    - **A refusal**: the pool takes nothing once it is closed, or at interpreter
+      shutdown, and an item that arrives then runs in line. A Ctrl-C in the
+      manager's drain can leave transfers behind to get there. A thread that
+      cannot start refuses as well, but with the work
+      already queued for a later worker, so an item settles only once.
+    - **An escape**: what a subscriber lets out goes to ``note_raise``, for the
+      run to raise to its caller, as a worker's or an awscrt thread's exception
+      would otherwise be lost.
+    """
+
+    def __init__(
+        self,
+        workers: int,
+        cancelled: Callable[[], bool],
+        note_raise: Callable[[BaseException], None],
+    ) -> None:
+        self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="boto3-s3-done")
+        self._held = 0
+        self._held_lock = threading.Lock()
+        # Sent when an item settles and when the run orders a cancel (`run`).
+        self._room = concurrency.WakeAll()
+        # Sent when the count of items held drops to none (`close`).
+        self._idle = concurrency.Wake()
+        self._cancelled = cancelled
+        self._note_raise = note_raise
+
+    def run(self, subscribers: list[Any], future: Any) -> None:
+        """Hold one finished transfer's ``subscribers`` until a worker runs them."""
+        wake = concurrency.Wake()
+        try:
+            self._room.add(wake)
+            wake.wait_until(self._take_place)
+        finally:
+            self._room.discard(wake)
+        claim = threading.Lock()
+
+        def settle_once() -> None:
+            if claim.acquire(blocking=False):
+                self._settle(subscribers, future)
+
+        try:
+            self._pool.submit(settle_once)
+        except RuntimeError:
+            settle_once()
+
+    def _take_place(self) -> bool:
+        """Count one more item held, if there is room or the run ordered a cancel.
+
+        A cancel has the item settle as cancelled once a worker is free, and
+        awscrt's thread is not to wait for that.
+        """
+        with self._held_lock:
+            if self._held >= _DONE_WORKERS_LIMIT and not self._cancelled():
+                return False
+            self._held += 1
+            return True
+
+    def note_cancel(self) -> None:
+        """The run has ordered a cancel: wake whoever waits at the limit."""
+        self._room.send()
+
+    def _settle(self, subscribers: list[Any], future: Any) -> None:
+        try:
+            if self._cancelled() and _outcome(future) is None:
+                future.set_exception(S3TransferCancelledError("cancelled before the source delete"))
+            for subscriber in subscribers:
+                subscriber.on_done(future=future)
+        except BaseException as exc:
+            self._note_raise(exc)
+        finally:
+            with self._held_lock:
+                self._held -= 1
+                idle = not self._held
+            self._room.send()
+            if idle:
+                self._idle.send()
+
+    def close(self) -> None:
+        """Refuse new items and wait for the ones held, without taking a lock.
+
+        A Ctrl-C can land here, and the plain waits do not survive one. On
+        Python 3.10 to 3.12 ``Thread.join``, and so the pool's own waiting
+        shutdown, marks a thread finished when interrupted while it runs, so
+        that thread is waited for neither by a second call nor at interpreter
+        exit; a ``Condition`` can be left half-taken, and the workers then
+        block for good. So this sleeps on a `concurrency.Wake` that the last
+        item to settle sends. The pool's threads end by themselves once the
+        queue is empty.
+        """
+        self._pool.shutdown(wait=False)
+        self._idle.wait_until(lambda: not self._held)
+
+
+class _HandToDoneWorkers:
+    """The ``on_done`` a CRT move runs in place of the subscribers it hands over."""
+
+    def __init__(self, workers: _DoneWorkers, subscribers: list[Any]) -> None:
+        self._workers = workers
+        self._subscribers = subscribers
+
+    def on_done(self, future: Any, **kwargs: Any) -> None:
+        self._workers.run(self._subscribers, future)
+
+
+class _PostTransferWrite:
+    """An ``on_done`` subscriber that writes after the transfer, its failure the item's outcome.
+
+    mv's source delete (`_DeleteSource`) and copy-props' tagging and
+    annotation writes (`_SetTags`, `_SetAnnotations`); aws-cli's
+    counterparts are ``OnDoneFilteredSubscriber`` subclasses, which have
+    neither rule below. A subclass's `_settle` does the work, and:
+
+    - it runs once per item: an interrupt escaping a later done callback on
+      the serial executor leaves upstream's callback list uncleared, and its
+      second announce re-runs the whole list (`_SerialExecutor`). A repeat
+      returns before the ``try``, and the flag is set inside it, so an
+      interrupt landing on the flag is stored too;
+    - whatever it raises - an interrupt included (``use_threads=False`` runs
+      it on the calling thread), anywhere past the flag - settles the item
+      here instead of escaping into the engine's callback loop: stored as
+      the future's outcome, it becomes CANCELLED (an interrupt) or FAILED,
+      an interrupt is re-raised to the caller (`_outcome`), and a second
+      announce cannot find the flag set and record a success.
+
+    `_CloseFileobj` also stores its failure, but has no once flag.
+    """
+
+    _ran: bool = False
+
+    def on_done(self, future: Any, **kwargs: Any) -> None:
+        if self._ran:
+            return
+        try:
+            self._ran = True
+            self._settle(future)
+        except BaseException as exc:
+            future.set_exception(exc)
+
+    def _settle(self, future: Any) -> None:
+        raise NotImplementedError
+
+
+class _DeleteSource(_PostTransferWrite):
     """Delete the transfer's source after it succeeds (mv; aws-cli port).
 
     Sits ahead of ``_Completion`` - the aws-cli slot between the route extras
@@ -2752,40 +3227,26 @@ class _DeleteSource:
     ``_CaseConflictCleanup`` allowed in between (aws-cli's own order) - so a
     deletion failure can flip the already-settled future via
     ``set_exception`` (s3transfer accepts the post-done override) and
-    ``_Completion`` then records aws's ``move failed`` outcome. A failed
-    transfer leaves the source untouched.
+    ``_Completion`` then records aws-cli's ``move failed`` outcome. A failed
+    transfer leaves the source untouched. A delete cut short by an interrupt
+    is stored too: whether it reached the service is unknown, so the item
+    must not be recorded as moved.
     """
 
     def __init__(self, delete: Callable[[], Any], *, capture: bool = False) -> None:
         self._delete = delete
         self._capture = capture
-        self._ran = False
 
-    def on_done(self, future: Any, **kwargs: Any) -> None:
-        # Once per item: an interrupt escaping a later done callback on the
-        # serial executor leaves upstream's callback list uncleared, and its
-        # second announce re-runs the whole list (`_SerialExecutor`).
-        if self._ran:
-            return
-        self._ran = True
+    def _settle(self, future: Any) -> None:
         if _outcome(future) is not None:
             return
-        try:
-            response = self._delete()
-        except BaseException as exc:
-            # An interrupt included (use_threads=False runs this on the calling
-            # thread): whether the delete reached the service is unknown, so
-            # the item must not be recorded as moved. Stored as the outcome, it
-            # becomes CANCELLED and is re-raised to the caller (`_outcome`).
-            future.set_exception(exc)
-            return
-        # mv's S3 source removal returns a DeleteObject response; stash it (minus
-        # ResponseMetadata) for _Completion to surface under extra_info["delete"].
-        # A local source delete returns None (nothing to capture); a custom backend
-        # may return its own Mapping response.
-        if self._capture and isinstance(response, Mapping):
-            captured = cast("Mapping[str, Any]", response)
-            future.meta.user_context[_DELETE_RESPONSE_KEY] = strip_response_metadata(captured)
+        response = self._delete()
+        # mv's S3 source removal returns a DeleteObject response; stash it
+        # (minus ResponseMetadata) for _Completion to surface under
+        # extra_info["delete"]. A local source delete returns None (nothing
+        # to capture); a custom backend may return its own Mapping response.
+        if self._capture and response is not None:
+            future.meta.user_context[_DELETE_RESPONSE_KEY] = strip_response_metadata(response)
 
 
 class _CloseFileobj:
@@ -2794,8 +3255,8 @@ class _CloseFileobj:
     The transfer owns every fileobj a ``Storage.open`` hands it (the file
     protocol the open route relies on): a real backend's ``close`` releases a
     reader or flushes a writer's buffered writes (``Storage.open``'s contract),
-    while a caller-supplied stream (``IOStorage``) hands back a close-suppressing
-    view, so this is a harmless flush there. Sits before ``_DeleteSource`` /
+    while a caller-supplied stream (``IOStorage``, ``TextIOStorage``) hands back
+    a close-suppressing view, so this is a harmless flush there. Sits before ``_DeleteSource`` /
     ``_Completion`` so a writer's ``close`` (flush) failure flips the settled
     future to a failure - and, for ``mv``, leaves the source in place (``_DeleteSource``
     then sees the failure and skips its delete). A transfer that already failed
@@ -2838,9 +3299,9 @@ class _CaseConflictCleanup:
     still in flight. Without it the set keeps every key ever admitted, and a later
     item whose name differs only by case is wrongly judged to conflict with an
     already-finished download (skipped, or - in ``error`` mode - a spurious
-    failure) instead of being let through as aws does. Detecting an in-flight twin
+    failure) instead of being let through as aws-cli does. Detecting an in-flight twin
     relies on the submit loop running ahead of completions (a non-blocking,
-    threaded manager - aws runs at ``max_concurrent_requests=1`` and still detects;
+    threaded manager - aws-cli runs at ``max_concurrent_requests=1`` and still detects;
     a fully synchronous NonThreadedExecutor completes each item before the next is
     judged, so the set would always be empty).
     """
@@ -2878,6 +3339,8 @@ class _Completion:
         self._counted = counted
         self._hinted = hinted
         self._settled = False
+        # A CRT upload's stream guard (`_GuardedReader`), set at submit.
+        self.stream_guard: _GuardedReader | None = None
 
     def on_done(self, future: Any, **kwargs: Any) -> None:
         # Once per item: an interrupt escaping `on_result` on the serial
@@ -2889,6 +3352,23 @@ class _Completion:
         self._settled = True
         exc = _outcome(future)
         if exc is not None:
+            guard = self.stream_guard
+            if guard is not None and guard.interrupt is not None:
+                # The stream raised an interrupt on awscrt's thread, and awscrt
+                # failed the request with its own error in its place: the
+                # item's outcome is the interrupt, CANCELLED like every
+                # interrupted item (`Transferrer._record_failure`).
+                exc = guard.interrupt
+            elif (
+                guard is not None
+                and guard.failure is not None
+                and crt_error_name(exc) == "AWS_ERROR_UNKNOWN"
+            ):
+                # awscrt reported the read that raised as its own unknown
+                # error and dropped the exception: the item fails with what
+                # the stream raised, as on the classic engine. Any other
+                # outcome (a cancellation, a network failure) stays awscrt's.
+                exc = guard.failure
             self._on_failure(self._item, exc, _future_revoked(future))
             return
         # Classic s3transfer resolves an unknown-size download's size on the
@@ -2910,6 +3390,25 @@ class _Completion:
         )
 
 
+class _TrackFuture:
+    """Add a queued top-level future to cancellation tracking.
+
+    A future cancelled as it is tracked (or by the watcher meanwhile) stops
+    the rest of the ``on_queued`` work too - the copy-props reads, the
+    download's parent directory - by raising out of upstream's callback
+    loop: ``SubmissionTask._main`` records nothing over the settled outcome
+    and announces the item once.
+    """
+
+    def __init__(self, track: Callable[[Any], None]) -> None:
+        self._track = track
+
+    def on_queued(self, future: Any, **kwargs: Any) -> None:
+        self._track(future)
+        if future.done():
+            raise S3TransferCancelledError("cancelled before the transfer started")
+
+
 class _ForgetFuture:
     """Remove a settled top-level future from cancellation tracking."""
 
@@ -2918,6 +3417,17 @@ class _ForgetFuture:
 
     def on_done(self, future: Any, **kwargs: Any) -> None:
         self._forget(future)
+
+
+def _source_request(item: TransferItem, operation: str) -> contextlib.AbstractContextManager[None]:
+    """`s3_request` for a copy-props read of the copy's source, carrying its bucket/key.
+
+    Translated here, the failure names the object it came from: a raw
+    exception from a source-side read would reach
+    `Transferrer._record_failure`, which attributes it to the copy's
+    destination.
+    """
+    return s3_request(operation=operation, bucket=item.src_bucket, key=item.src_key)
 
 
 class _ReplaceMetadataDirective:
@@ -2953,16 +3463,14 @@ class _ExcludeAnnotationDirective:
       injection is skipped there too.
     """
 
-    def __init__(self, item: TransferItem, *, client: Any, multipart_threshold: int) -> None:
-        self._item = item
+    def __init__(self, *, client: Any, multipart: bool) -> None:
         self._client = client
-        self._multipart_threshold = multipart_threshold
+        self._multipart = multipart
 
     def on_queued(self, future: Any, **kwargs: Any) -> None:
         if not _copy_annotations_param_supported(self._client):
             return
-        size = self._item.size or 0
-        if size >= self._multipart_threshold and not _annotation_directive_blacklisted():
+        if self._multipart and not _annotation_directive_blacklisted():
             return
         future.meta.call_args.extra_args["AnnotationDirective"] = "EXCLUDE"
 
@@ -3000,8 +3508,9 @@ class _CopyCompletions:
             return self._responses.pop((bucket, key), None)
 
 
-class _SetAnnotations:
-    """`copy-props all`: carry S3 object annotations onto a multipart copy (aws subscriber port).
+class _SetAnnotations(_PostTransferWrite):
+    """`copy-props all`: carry S3 object annotations onto a multipart copy
+    (aws-cli subscriber port).
 
     A single-part CopyObject carries annotations server-side (the directive
     default is COPY), so nothing is sent - aws-cli's wire behavior. A
@@ -3009,10 +3518,10 @@ class _SetAnnotations:
     onto the destination after the copy completes, from this subscriber's
     ``on_done`` - aws-cli's ``SetAnnotationsSubscriber``. Registered after
     `_SetTags`, it sees the outcome the post-copy tagging write left: a
-    tagging failure that rolled the object back has already settled the
-    future, so nothing is written; a rollback that failed too escapes
-    `_SetTags` and leaves the future a success, so the annotations are
-    written - aws-cli's order and request set in every corner.
+    tagging failure has already settled the future, so nothing is written -
+    aws-cli's order and request set, except where the rollback delete fails
+    too: aws-cli's future is then left a success and it writes the
+    annotations, while here the item has failed and none is written.
 
     The reads follow ``annotation_copy_mode``: the memory and tempfile modes
     list every page and read every payload in ``on_queued``, before the
@@ -3025,7 +3534,11 @@ class _SetAnnotations:
     ``VersionId``, as aws-cli pins it - kept for it by `_CopyCompletions`,
     since s3transfer discards that response. A write that
     fails does not stop the others, and any failure settles the future with
-    aws-cli's ``AnnotationCopyError`` wording, the destination kept.
+    an `_AnnotationCopyError` (aws-cli's ``AnnotationCopyError``), the
+    destination kept. An interrupt landing in a deferred read or a write
+    stops there and is stored as the item's outcome, as `_SetTags` stores
+    one, and the subscriber runs once per item, so upstream's second announce
+    (`_SerialExecutor`) neither re-reads the source nor re-sends the writes.
     """
 
     def __init__(
@@ -3035,7 +3548,7 @@ class _SetAnnotations:
         source_client: Any,
         dest_client: Any,
         completions: _CopyCompletions,
-        multipart_threshold: int,
+        multipart: bool,
         mode: AnnotationCopyMode,
         options: TransferOptions,
         temp_dir: str | os.PathLike[str] | None,
@@ -3045,61 +3558,46 @@ class _SetAnnotations:
         self._source_client = source_client
         self._dest_client = dest_client
         self._completions = completions
-        self._multipart_threshold = multipart_threshold
+        self._multipart = multipart
         self._mode = mode
         self._options = options
         self._temp_dir = temp_dir
         self._operation = operation
-        self._multipart = False
         self._store: _MemoryAnnotationStore | _TempfileAnnotationStore | None = None
 
     def on_queued(self, future: Any, **kwargs: Any) -> None:
-        size = self._item.size or 0
-        if size < self._multipart_threshold:
-            return
-        self._multipart = True
-        if self._mode is not AnnotationCopyMode.DEFERRED:
+        if self._multipart and self._mode is not AnnotationCopyMode.DEFERRED:
             self._read_source()
 
     def on_done(self, future: Any, **kwargs: Any) -> None:
+        # Release the store whatever happened, after any outcome is stored.
+        try:
+            super().on_done(future, **kwargs)
+        finally:
+            self.close()
+
+    def _settle(self, future: Any) -> None:
         if not self._multipart:
             return
         bucket = future.meta.call_args.bucket
         key = future.meta.call_args.key
         completed = self._completions.take(bucket, key)
-        try:
-            if _outcome(future) is not None:
-                return  # the copy (or the tagging write before this) failed
-            if self._store is None:
-                try:
-                    self._read_source()
-                except Exception as exc:
-                    future.set_exception(exc)
-                    return
-            self._write(future, bucket, key, completed or {})
-        finally:
-            self.close()
-
-    def _source_element(self, entry: Mapping[str, Any], element: str) -> Any:
-        """An element aws-cli reads off a source reply by subscript (`read_required`).
-
-        A missing one is a ``MalformedResponseError`` with the ``KeyError``'s
-        text, naming the source rather than the copy destination.
-        """
-        return read_required(
-            entry,
-            element,
-            operation=self._operation,
-            bucket=self._item.src_bucket,
-            key=self._item.src_key,
-        )
+        if _outcome(future) is not None:
+            return  # the copy (or the tagging write before this) failed
+        if self._store is None:
+            # DEFERRED: a failed read is stored as the outcome too.
+            self._read_source()
+        self._write(future, bucket, key, completed or {})
 
     def _read_source(self) -> None:
         """Read every source annotation into the selected store.
 
         List all pages and collect every name before fetching payloads,
-        aws-cli's order. Any failure closes and discards the partial store
-        before the exception propagates.
+        aws-cli's order. A source past S3's limits (more than
+        ``_MAX_ANNOTATIONS`` names, a payload over ``_MAX_ANNOTATION_PAYLOAD``)
+        fails the item there, so a faulty server cannot grow the store without
+        bound. Any failure closes and discards the partial store before the
+        exception propagates.
         """
         if self._mode is AnnotationCopyMode.PRELOAD_TEMPFILE:
             store: _MemoryAnnotationStore | _TempfileAnnotationStore = _TempfileAnnotationStore(
@@ -3114,16 +3612,6 @@ class _SetAnnotations:
         if version_id is not None:
             list_params["VersionId"] = version_id
             get_params["VersionId"] = version_id
-
-        # Each request - a listing page, an annotation and its body - is
-        # translated carrying the *source* bucket/key: a raw exception from these
-        # source-side reads would be re-tagged with the copy destination by
-        # _record_failure (see delete_s3_source).
-        def source_request() -> Any:
-            return s3_request(
-                operation=self._operation, bucket=self._item.src_bucket, key=self._item.src_key
-            )
-
         try:
             paginator = self._source_client.get_paginator("list_object_annotations")
             pages = iter(
@@ -3134,24 +3622,45 @@ class _SetAnnotations:
                 )
             )
             names: list[str] = []
-            while True:
-                with source_request():
-                    page = next(pages, None)
-                if page is None:
-                    break
-                for annotation in page.get("Annotations", []):
-                    names.append(self._source_element(annotation, "AnnotationName"))
+            for page in request_pages(
+                pages,
+                operation=self._operation,
+                bucket=self._item.src_bucket,
+                key=self._item.src_key,
+            ):
+                names.extend(
+                    annotation["AnnotationName"] for annotation in page.get("Annotations", [])
+                )
+                if len(names) > _MAX_ANNOTATIONS:
+                    raise Boto3S3Error(
+                        f"The source lists more than {_MAX_ANNOTATIONS} annotations",
+                        operation=self._operation,
+                        bucket=self._item.src_bucket,
+                        key=self._item.src_key,
+                    )
             for name in names:
-                with source_request():
+                with _source_request(self._item, self._operation):
                     response = self._source_client.get_object_annotation(
                         Bucket=self._item.src_bucket,
                         Key=self._item.src_key,
                         AnnotationName=name,
                         **get_params,
                     )
-                body = self._source_element(response, "AnnotationPayload")
-                with source_request():
-                    payload = body.read()
+                body = response["AnnotationPayload"]
+                with _source_request(self._item, self._operation):
+                    payload = body.read(_MAX_ANNOTATION_PAYLOAD + 1)
+                    if len(payload) <= _MAX_ANNOTATION_PAYLOAD:
+                        # botocore checks the body's length and checksum only on
+                        # the read that finds its end, which a sized read that
+                        # takes the whole payload never is.
+                        payload += body.read(1)
+                if len(payload) > _MAX_ANNOTATION_PAYLOAD:
+                    raise Boto3S3Error(
+                        f"The source's annotation {name!r} is larger than 1 MiB",
+                        operation=self._operation,
+                        bucket=self._item.src_bucket,
+                        key=self._item.src_key,
+                    )
                 store.add(name, payload)
         except BaseException:
             self.close()
@@ -3182,6 +3691,11 @@ class _SetAnnotations:
                 written.append(name)
             except Exception as exc:
                 failed.append((name, str(exc)))
+            except BaseException as exc:
+                # An interrupt: the remaining writes are not sent, and it is
+                # stored as the outcome in place of any write failure so far.
+                future.set_exception(exc)
+                return
         if failed:
             future.set_exception(_AnnotationCopyError(bucket, key, written, failed))
 
@@ -3194,10 +3708,9 @@ class _SetAnnotations:
 class _AnnotationCopyError(Exception):
     """A completed multipart copy that could not carry every annotation.
 
-    aws-cli's ``AnnotationCopyError``, word for word (measured): names written
-    join with ``", "`` and collapse to ``(none)`` when the first write already
-    failed, failures join with ``"; "`` as ``name: message``, both in the
-    source listing's order.
+    aws-cli's ``AnnotationCopyError``: names written join with ``", "`` and
+    collapse to ``(none)`` when the first write already failed, failures join
+    with ``"; "`` as ``name: message``, both in the source listing's order.
     """
 
     def __init__(
@@ -3259,7 +3772,7 @@ class _TempfileAnnotationStore:
 
 
 class _SetMetadataDirectiveProps:
-    """Carry source metadata into a multipart copy (aws subscriber port).
+    """Carry source metadata into a multipart copy (aws-cli subscriber port).
 
     A single-part CopyObject inherits metadata via S3's default
     ``MetadataDirective=COPY``; the multipart path (CreateMultipartUpload +
@@ -3291,22 +3804,20 @@ class _SetMetadataDirectiveProps:
         item: TransferItem,
         *,
         source_client: Any,
-        multipart_threshold: int,
+        multipart: bool,
         head_params: dict[str, Any],
         operation: str,
     ) -> None:
         self._item = item
         self._source_client = source_client
-        self._multipart_threshold = multipart_threshold
+        self._multipart = multipart
         self._head_params = head_params
         self._operation = operation
 
     def on_queued(self, future: Any, **kwargs: Any) -> None:
         extra_args: dict[str, Any] = future.meta.call_args.extra_args
-        size = self._item.size or 0
-        is_multipart = size >= self._multipart_threshold
         has_explicit = any(prop in extra_args for prop in _METADATA_DIRECTIVE_PROPS)
-        if not is_multipart and not has_explicit:
+        if not self._multipart and not has_explicit:
             return
         head = self._head_source()
         extra_args.setdefault("MetadataDirective", "REPLACE")
@@ -3317,12 +3828,7 @@ class _SetMetadataDirectiveProps:
     def _head_source(self) -> Mapping[str, Any]:
         if self._item.head is not None:
             return self._item.head
-        # Pre-translate carrying the *source* bucket/key: a raw exception from
-        # this source-side read would be re-tagged with the copy destination by
-        # _record_failure (see delete_s3_source).
-        with s3_request(
-            operation=self._operation, bucket=self._item.src_bucket, key=self._item.src_key
-        ):
+        with _source_request(self._item, self._operation):
             return self._source_client.head_object(
                 Bucket=self._item.src_bucket, Key=self._item.src_key, **self._head_params
             )
@@ -3340,7 +3846,7 @@ def _allow_inline_mpu_tagging() -> None:
     destination rollback when the tagging write fails), which would silently
     strip the header and force every small tag set through the post-copy
     PutObjectTagging fallback: a wire divergence, and a failure-timing one
-    (aws fails at create and keeps the source where tagging is denied).
+    (aws-cli fails at create and keeps the source where tagging is denied).
     Removed EAFP-style: the table is process-shared, so two threads building
     their first manager concurrently could both pass a membership check and
     the loser's ``remove`` would raise; catching ``ValueError`` instead also
@@ -3352,34 +3858,31 @@ def _allow_inline_mpu_tagging() -> None:
         pass
 
 
-def _mpu_inline_tagging_supported() -> bool:
-    """Whether s3transfer forwards an inline ``Tagging`` header to
-    CreateMultipartUpload.
-
-    `_allow_inline_mpu_tagging` makes this hold on every supported s3transfer
-    at manager build; the probe stays as a guard so a future upstream that
-    reshapes the table degrades to the post-copy PutObjectTagging fallback
-    instead of silently dropping the header.
-    """
-    return "Tagging" not in CopySubmissionTask.CREATE_MULTIPART_ARGS_BLACKLIST
-
-
-class _SetTags:
-    """Carry source tags into a multipart copy (aws subscriber port).
+class _SetTags(_PostTransferWrite):
+    """Carry source tags into a multipart copy (aws-cli subscriber port).
 
     Single-part copies inherit tags via ``TaggingDirective=COPY``; multipart
     copies read GetObjectTagging from the source and either inline the
     percent-encoded set in the ``Tagging`` header on CreateMultipartUpload
     (<= ~2 KiB - `_allow_inline_mpu_tagging` keeps the header off upstream's
-    create blacklist, like aws-cli's bundled table; the
-    `_mpu_inline_tagging_supported` probe guards the alignment) or apply it
-    with a post-copy PutObjectTagging - rolling the destination object back
-    with a delete
-    when that tagging write fails, then surfacing the tagging failure on the
-    transfer future. If the rollback delete itself also fails, aws-cli lets
-    that delete error escape the done callback (s3transfer swallows it) and
-    records the transfer as a success; we mirror that, leaving the future
-    settled (and, for ``mv``, letting the source delete proceed).
+    create blacklist, like aws-cli's bundled table) or apply it with a
+    post-copy PutObjectTagging - rolling the destination object back
+    with a delete when that tagging write fails, then surfacing the tagging
+    failure on the transfer future. A rollback delete that fails too leaves
+    the destination in place without its tags, and the item still fails with
+    the tagging error (`_rollback`); aws-cli lets that delete error escape its
+    done callback before the future is settled, so its copy reads as a
+    success and a ``mv`` deletes its source - not copied (a failure is never
+    reported as a success).
+
+    An interrupt landing in either request (``use_threads=False`` runs this
+    on the calling thread) is stored as the item's outcome rather than let
+    escape, as `_DeleteSource` stores one: the item records CANCELLED, a
+    ``mv`` keeps its source, the interrupt is re-raised to the caller, and no
+    rollback is sent after it - whether the write reached the service is
+    unknown. It runs once per item, so upstream's second announce after an
+    interrupt escaping a later done callback (`_SerialExecutor`) does not
+    send the tagging write again, nor record a success for an untagged copy.
     """
 
     def __init__(
@@ -3388,14 +3891,14 @@ class _SetTags:
         *,
         source_client: Any,
         dest_client: Any,
-        multipart_threshold: int,
+        multipart: bool,
         options: TransferOptions,
         operation: str,
     ) -> None:
         self._item = item
         self._source_client = source_client
         self._dest_client = dest_client
-        self._multipart_threshold = multipart_threshold
+        self._multipart = multipart
         self._options = options
         self._operation = operation
 
@@ -3403,8 +3906,7 @@ class _SetTags:
         extra_args: dict[str, Any] = future.meta.call_args.extra_args
         if "Tagging" in extra_args or "TaggingDirective" in extra_args:
             return
-        size = self._item.size or 0
-        if size < self._multipart_threshold:
+        if not self._multipart:
             return
         tag_set = self._get_source_tags()
         if not tag_set:
@@ -3413,12 +3915,12 @@ class _SetTags:
             f"{quote(tag['Key'], safe='')}={quote(tag['Value'], safe='')}" for tag in tag_set
         )
         fits_inline = len(header.encode("utf-8")) <= _MAX_TAGGING_HEADER_SIZE
-        if fits_inline and _mpu_inline_tagging_supported():
+        if fits_inline:
             extra_args["Tagging"] = header
         else:
             future.meta.user_context[_POST_TAGGING_KEY] = tag_set
 
-    def on_done(self, future: Any, **kwargs: Any) -> None:
+    def _settle(self, future: Any) -> None:
         tag_set = future.meta.user_context.get(_POST_TAGGING_KEY)
         if not tag_set:
             return
@@ -3434,65 +3936,49 @@ class _SetTags:
                 **requestparams.map_put_object_tagging_params(self._options),
             )
         except Exception as exc:
-            self._rollback(bucket, key)
-            future.set_exception(exc)
+            # A failed write rolls back; an interrupt in the write sends no
+            # rollback and, like one while a failed write is handled, is
+            # stored as the outcome (`_PostTransferWrite.on_done`).
+            interrupt = self._rollback(bucket, key)
+            future.set_exception(exc if interrupt is None else interrupt)
 
     def _get_source_tags(self) -> list[dict[str, str]]:
-        # Pre-translate carrying the *source* bucket/key: a raw exception from
-        # this source-side read would be re-tagged with the copy destination by
-        # _record_failure (see delete_s3_source).
-        with s3_request(
-            operation=self._operation, bucket=self._item.src_bucket, key=self._item.src_key
-        ):
+        with _source_request(self._item, self._operation):
             response = self._source_client.get_object_tagging(
                 Bucket=self._item.src_bucket,
                 Key=self._item.src_key,
                 **requestparams.map_get_object_tagging_params(self._options),
             )
-        # aws-cli subscripts the reply's TagSet, then each tag's Key and Value
-        # as it serializes them; a missing one is a MalformedResponseError
-        # naming the source, with the KeyError's text aws-cli prints.
-        tags = read_required(
-            response,
-            "TagSet",
-            operation=self._operation,
-            bucket=self._item.src_bucket,
-            key=self._item.src_key,
-        )
-        return [
-            {
-                "Key": read_required(
-                    tag,
-                    "Key",
-                    operation=self._operation,
-                    bucket=self._item.src_bucket,
-                    key=self._item.src_key,
-                ),
-                "Value": read_required(
-                    tag,
-                    "Value",
-                    operation=self._operation,
-                    bucket=self._item.src_bucket,
-                    key=self._item.src_key,
-                ),
-            }
-            for tag in tags
-        ]
+        return response["TagSet"]
 
-    def _rollback(self, bucket: str, key: str) -> None:
-        # A raised delete error is left to escape on_done (matching aws-cli): the
-        # already-swallowed on_done callback keeps the future settled as success.
-        self._dest_client.delete_object(
-            Bucket=bucket,
-            Key=key,
-            **requestparams.map_delete_object_params(self._options),
-        )
+    def _rollback(self, bucket: str, key: str) -> BaseException | None:
+        """Delete the destination whose tagging write failed, best-effort.
+
+        A delete that fails is logged at debug level and leaves the
+        destination untagged; the item still fails with the tagging error.
+        An interrupt that cuts the delete short is returned, to be stored as
+        the item's outcome in place of that error.
+        """
+        try:
+            self._dest_client.delete_object(
+                Bucket=bucket,
+                Key=key,
+                **requestparams.map_delete_object_params(self._options),
+            )
+        except Exception:
+            logger.debug(
+                "deleting s3://%s/%s after its tagging write failed also failed",
+                bucket,
+                key,
+                exc_info=True,
+            )
+        except BaseException as exc:
+            return exc
+        return None
 
 
 __all__ = [
     "TransferItem",
     "Transferrer",
     "Warner",
-    "annotations_copy_unsupported_reason",
-    "conditional_write_unsupported_reason",
 ]

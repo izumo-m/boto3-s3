@@ -12,7 +12,7 @@ file plays aws-cli's ``fileformat.py``, holding the plan it produces:
   classification is its responsibility; the planner receives resolved
   ``Storage`` objects).
 - ``utils.find_dest_path_comp_key``      -> ``item_paths`` / ``dest_for``
-  (kept here rather than mirroring aws's ``utils`` home because they operate
+  (kept here rather than mirroring aws-cli's ``utils`` home because they operate
   on the ``TransferPlan`` this module owns)
 
 The planner sits *above* the storage backends: an endpoint arrives as a
@@ -61,8 +61,9 @@ class TransferPlan:
     (the custom side's root stays bare ``""``, its directory-ness carried by
     ``use_src_name`` alone). ``--exclude`` / ``--include``
     need no source/destination path here: ``boto3_s3.globsieve`` matches a
-    relative pattern against each item's ``compare_key`` and a root-anchored one
-    against its full ``key`` at match time.
+    relative pattern against each entry's ``compare_key`` and a root-anchored one
+    against its full path (a local ``key``, an S3 ``bucket/key``), both stamped
+    as aws-cli's base makes them before the filter runs.
     """
 
     paths_type: PathsType
@@ -85,7 +86,7 @@ def _paths_type(src: Storage, dest: Storage, *, operation: str) -> PathsType:
     through ``Storage.open`` (``opens3`` / ``s3open``), which must pair with
     s3 - ``open`` to ``local``, ``open`` to ``open`` and ``local`` to ``local``
     have no ``aws s3`` route and are rejected (the CLI layer phrases the
-    strict aws message itself). A stdio stream never reaches the built-in
+    strict aws-cli message itself). A stdio stream never reaches the built-in
     cases (``cp`` diverts it to the stream path up front), so it folds into
     the custom arm harmlessly.
     """

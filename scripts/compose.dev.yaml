@@ -4,7 +4,7 @@
 #
 # Usage (from repo root):
 #   scripts/compose-up.sh          # start the stack, wait for bucket init
-#   source scripts/dev-env.sh      # point AWS tooling (aws / boto3-s3) at it
+#   source scripts/dev-env.sh      # point AWS tooling (`aws` / boto3-s3) at it
 #   uv run pytest tests/cli/e2e    # run the e2e parity suite
 #   scripts/compose.sh down        # tear down (any compose subcommand works)
 #
@@ -22,7 +22,7 @@ services:
   s3:
     # Pinned: design/endpoint-fidelity.md records how this release answers
     # differently from real S3, and a new release needs its probes re-run.
-    image: rustfs/rustfs:1.0.2
+    image: rustfs/rustfs:1.0.4
     environment:
       RUSTFS_ACCESS_KEY: devadmin
       RUSTFS_SECRET_KEY: devadmin

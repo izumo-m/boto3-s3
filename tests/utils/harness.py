@@ -29,17 +29,17 @@ _SUBPROCESS_TIMEOUT = 60.0
 
 def default_checksum_algorithm() -> str:
     """The ``ChecksumAlgorithm`` a CLI upload names when ``--checksum-algorithm``
-    is absent: aws's CRC64NVME where the installed botocore can compute it
-    (``boto3_s3_cli.checksumdefault``), else pip botocore's own default, which
+    is absent: aws-cli's CRC64NVME where the installed botocore can compute it
+    (``boto3_s3.awsclisession``), else pip botocore's own default, which
     s3transfer stamps on a classic upload. Tests that record upload requests
     compare against this rather than a literal so they hold on both stacks."""
     from botocore import httpchecksum
 
-    from boto3_s3_cli import checksumdefault
+    from boto3_s3 import awsclisession
 
     supported = getattr(httpchecksum, "_SUPPORTED_CHECKSUM_ALGORITHMS", ())
-    if checksumdefault.AWS_DEFAULT_CHECKSUM_ALGORITHM.lower() in supported:
-        return checksumdefault.AWS_DEFAULT_CHECKSUM_ALGORITHM
+    if awsclisession.AWS_DEFAULT_CHECKSUM_ALGORITHM.lower() in supported:
+        return awsclisession.AWS_DEFAULT_CHECKSUM_ALGORITHM
     return str(httpchecksum.DEFAULT_CHECKSUM_ALGORITHM)
 
 
@@ -62,24 +62,6 @@ DATE_TOKEN = "<DATE>"
 AMZ_DATE_TOKEN = "<AMZ_DATE>"
 SIGNATURE_TOKEN = "<SIGNATURE>"
 REGION_TOKEN = "<REGION>"
-
-
-def bucket_name_report(name: str) -> str:
-    """botocore's client-side bad-bucket-name report for *name*, as aws prints it.
-
-    The bytes the pinned aws writes (measured: ``aws s3 mb s3://``, ``aws s3
-    website s3://bkt/key``) - the ``ParamValidationError`` text with the regex
-    tail. A literal, not botocore's function, so a test pins the wording rather
-    than restating the code under test.
-    """
-    return (
-        "Parameter validation failed:\n"
-        f'Invalid bucket name "{name}": Bucket name must match the regex '
-        '"^[a-zA-Z0-9.\\-_]{1,255}$" or be an ARN matching the regex '
-        '"^arn:(aws).*:(s3|s3-object-lambda):[a-z\\-0-9]*:[0-9]{12}:accesspoint[/:]'
-        "[a-zA-Z0-9\\-.]{1,63}$|^arn:(aws).*:s3-outposts:[a-z\\-0-9]+:[0-9]{12}:"
-        'outpost[/:][a-zA-Z0-9\\-]{1,63}[/:]accesspoint[/:][a-zA-Z0-9\\-]{1,63}$"'
-    )
 
 
 class CliResult(NamedTuple):
@@ -117,7 +99,7 @@ def unused_ctx() -> Context:
 
     Only the parse layer qualifies (``--query``, the paramfile loads, the
     integer coercions, the profile resolution). Every command builds its client
-    right after that, at aws's own slot, so a check that fires later needs
+    right after that, at aws-cli's own slot, so a check that fires later needs
     `built_client_ctx` instead."""
     from boto3_s3_cli.commands.base import Context
 
@@ -130,9 +112,9 @@ def unused_ctx() -> Context:
 def built_client_ctx() -> Context:
     """A ``Context`` for paths that build the client and then fail without using it.
 
-    The counterpart of `unused_ctx` for every check past aws's client-build
+    The counterpart of `unused_ctx` for every check past aws-cli's client-build
     slot - the path-type gates, the onto-itself guard, the checksum / SSE-C
-    pairings, the missing local source, ``rm``'s bucket-less synthesis. The
+    pairings, the missing local source, an unwalkable source root. The
     factory hands out a recording client scripted with nothing, so the
     "unexpected call" guard simply moves from construction to the first API
     call (the root conftest fails the test on an exhausted recorder)."""
@@ -164,16 +146,15 @@ def _run_subprocess(
     # credentials/endpoint intact); the caller's overrides win (the CRT lane
     # points AWS_CONFIG_FILE at a preferred_transfer_client=crt profile).
     #
-    # PYTHONUTF8=1 fixes the child's stdio at UTF-8, the encoding the capture
-    # below decodes. Left alone, a Windows child writes the host's codepage
-    # (cp932 and cp1252 measured on two hosts) and its non-ASCII output would
-    # come back as U+FFFD. The pinned aws.exe honors the variable for its
-    # error reports alone (aws's own code reads it back for those streams; its
-    # frozen interpreter ignores it), so an error report moves to UTF-8 on both
-    # sides while aws.exe's result lines keep the host codepage (measured) -
-    # PYTHONIOENCODING moves neither, aws.exe ignores it. UTF-8 mode also pins the
-    # child's locale.getpreferredencoding(), so a subprocess test of the
-    # file:// paramfile encoding must set AWS_CLI_FILE_ENCODING itself.
+    # PYTHONUTF8=1 moves the error reports to UTF-8, the encoding the capture
+    # below decodes, on both tools: the pinned aws.exe and the CLI read it back
+    # for those reports alone (aws-cli's frozen interpreter ignores it). Everything
+    # else either writes - result lines, warnings - keeps the encoding aws-cli
+    # uses: UTF-8 on a UTF-8 Linux host, the host's codepage on Windows (cp932
+    # and cp1252 measured on two hosts), where non-ASCII result lines come back
+    # as U+FFFD from both tools alike. PYTHONIOENCODING moves neither. The
+    # file:// paramfile encoding follows the same host encoding, so a
+    # subprocess test of it sets AWS_CLI_FILE_ENCODING itself.
     proc_env = {**os.environ, "PYTHONUTF8": "1", **(env or {})}
     proc = subprocess.run(
         cmd,
@@ -287,9 +268,9 @@ def run_cli_in_process_streaming(
     err = io.StringIO()
     original_stdin = sys.stdin
     if stdin_payload is not None:
-        sys.stdin = _BinaryStdinShim(stdin_payload)  # type: ignore[assignment]
+        sys.stdin = _BinaryStdinShim(stdin_payload)
     try:
-        with contextlib.redirect_stdout(stdout_shim), contextlib.redirect_stderr(err):  # type: ignore[arg-type]
+        with contextlib.redirect_stdout(stdout_shim), contextlib.redirect_stderr(err):
             rc = cli.main(argv, ctx=ctx)
     finally:
         sys.stdin = original_stdin
@@ -357,7 +338,7 @@ def normalize_ls_stdout(stdout: str, *, bucket: str) -> list[str]:
     changes - in particular the lines are **not sorted** (``ls`` output order
     is deterministic and itself parity-relevant) and no line is dropped (the
     blank line before the ``--summarize`` footer is part of the contract).
-    ``splitlines()`` absorbs ``\\r\\n`` from aws on Windows.
+    ``splitlines()`` absorbs ``\\r\\n`` from `aws` on Windows.
     """
     lines: list[str] = []
     for line in stdout.splitlines():
@@ -390,7 +371,7 @@ def normalize_rm_stdout(stdout: str, *, bucket: str) -> list[str]:
 def normalize_cp_stdout(stdout: str, *, bucket: str) -> list[str]:
     """Normalize ``cp`` stdout for golden storage / cross-run comparison.
 
-    aws prints progress with the carriage-return rewrite protocol - no isatty
+    `aws` prints progress with the carriage-return rewrite protocol - no isatty
     gate, so piped stdout carries ``Completed ...`` segments joined by ``\\r``
     and result lines right-padded over them. Per physical line, the segment
     after the last ``\\r`` (what a terminal would leave visible) is kept,
@@ -559,7 +540,7 @@ def presign_scope_region(stdout: str) -> str | None:
     """The raw credential-scope region of a presign URL (or ``None``).
 
     Reads the region segment out of ``X-Amz-Credential`` on the first URL
-    line, before any masking - the e2e same-run check compares aws's against
+    line, before any masking - the e2e same-run check compares `aws`'s against
     ours so the region the two CLIs sign with must be identical even though
     the normalizer folds the environment default away.
     """
@@ -613,8 +594,9 @@ def create_bucket_in_region(client: Any, bucket: str) -> None:
     ``IllegalLocationConstraintException``, so any other region must be passed
     as ``CreateBucketConfiguration.LocationConstraint``; us-east-1 (the region
     the dev stack reports) forbids the field and takes the plain form. The mb/rb parity
-    suites pre-create their sibling bucket through here so their run_e2e.sh
-    lane works in any region.
+    suites pre-create their sibling bucket through here, and each xdist worker
+    of the e2e suite its own bucket, so their run_e2e.sh lane works in any
+    region.
     """
     region = client.meta.region_name
     if region and region != "us-east-1":
@@ -630,7 +612,8 @@ def force_delete_bucket(client: Any, bucket: str) -> None:
     """Purge *bucket* and delete it; a missing bucket is a no-op.
 
     The bucket-lifecycle suites (mb/rb) clear their sibling buckets with this
-    before and after each test (the e2e fixtures). A bucket the account does
+    before and after each test, and each xdist worker its own bucket before
+    and after its run (the e2e fixtures). A bucket the account does
     not own is left untouched without a request naming it
     (endpoint-fidelity T4: see `bucket_exists`).
     """
@@ -742,7 +725,7 @@ def assert_stderr_tokens(
     carries environment-dependent content (endpoint hosts, request ids,
     timings), so e2e probes stable tokens (error codes, option names) rather
     than comparing bytes. The byte-level criterion (design/testing.md section
-    9) is carried by the unit tier, whose expectations are the pinned aws's own
+    9) is carried by the unit tier, whose expectations are the pinned `aws`'s own
     measured bytes.
 
     ``require_empty`` additionally asserts *stderr* is exactly empty - the one

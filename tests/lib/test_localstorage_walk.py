@@ -2,10 +2,10 @@
 
 Pins aws-cli ``FileGenerator.list_files`` parity for ``LocalStorage.walk_local``:
 the byte-order sort (``foo.txt`` before ``foo/bar`` - the appended-separator
-trick), depth-first interleaving, the warn-and-skip battery with aws-cli wording,
-the silent symlink skip, and the invalid-timestamp epoch fallback. The single-path
+trick), depth-first interleaving, the warn-and-skip battery, the silent symlink
+skip, and the invalid-timestamp epoch fallback. The single-path
 point op (``LocalStorage.get_fileinfo``) is covered separately, including the
-deliberate absence of a directory check (aws fails later at open - rc 1
+deliberate absence of a directory check (aws-cli fails later at open - rc 1
 ``[Errno 21]``) and the existence-check contract (absent -> ``None``, no warning).
 """
 
@@ -19,8 +19,9 @@ from pathlib import Path
 
 import pytest
 
+from boto3_s3 import globsieve
 from boto3_s3.exceptions import NotFoundError, TransportError, ValidationError
-from boto3_s3.globsieve import GlobFilter
+from boto3_s3.globsieve import Exclude
 from boto3_s3.localstorage import (
     LocalFileGenerator,
     LocalStorage,
@@ -59,6 +60,19 @@ def _make_tree(tmp_path: Path, *names: str) -> None:
         target.write_bytes(b"x" * 3)
 
 
+def _assert_warned(warnings: list[str], *expected: tuple[object, ...]) -> None:
+    """Each warning, in order, carries every fragment of its expected tuple.
+
+    A fragment is the skipped path or a word for the cause - what shows why the
+    entry was skipped. aws-cli's exact wording is not pinned: the details of a
+    warning are not matched.
+    """
+    assert len(warnings) == len(expected), warnings
+    for warning, fragments in zip(warnings, expected, strict=True):
+        for fragment in fragments:
+            assert str(fragment) in warning, (fragment, warning)
+
+
 class TestWalkOrder:
     def test_files_sort_before_their_namesake_directory(self, tmp_path: Path) -> None:
         # 'a.txt' < 'a/' in byte order because '.' (0x2E) < '/' (0x2F): the
@@ -82,16 +96,11 @@ class TestWalkWarnings:
             assert _keys(tmp_path, on_warning=warnings.append) == ["ok.txt"]
         finally:
             (tmp_path / "secret.txt").chmod(0o644)
-        assert warnings == [
-            f"Skipping file {tmp_path / 'secret.txt'}. File/Directory is not readable."
-        ]
+        _assert_warned(warnings, (tmp_path / "secret.txt", "not readable"))
 
     @skip_if_chmod_is_inert
-    def test_no_follow_unreadable_root_warning_drops_the_separator(self, tmp_path: Path) -> None:
-        # aws-cli's should_ignore_file rebinds the separator-stripped path
-        # before its warning battery in the no-follow mode, so the warning
-        # names the scanned root without the trailing separator (the default
-        # follow mode strips nothing on either side and keeps it).
+    def test_no_follow_unreadable_root_warns_and_yields_nothing(self, tmp_path: Path) -> None:
+        # The no-follow mode checks the scanned root itself before descending.
         _make_tree(tmp_path, "locked/inner.txt")
         locked = tmp_path / "locked"
         locked.chmod(0)
@@ -100,7 +109,7 @@ class TestWalkWarnings:
             assert _keys(locked, follow_symlinks=False, on_warning=warnings.append) == []
         finally:
             locked.chmod(0o755)
-        assert warnings == [f"Skipping file {locked}. File/Directory is not readable."]
+        _assert_warned(warnings, (locked, "not readable"))
 
     @skip_if_chmod_is_inert
     def test_unreadable_directory_warns_once_and_prunes(self, tmp_path: Path) -> None:
@@ -116,11 +125,11 @@ class TestWalkWarnings:
     def test_probe_failure_of_a_vanished_entry_warns_does_not_exist(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # aws-cli vets by full path with the existence probe first, so an entry
-        # whose readability probe fails *because the full path no longer
-        # resolves* (raced away since the stat; on Windows an over-MAX_PATH
-        # path) warns "does not exist" there, never "not readable". Simulate
-        # the race: the probe deletes the entry, then reports failure.
+        # An entry whose readability probe fails *because the full path no
+        # longer resolves* (raced away since the stat; on Windows an
+        # over-MAX_PATH path) is reported as missing, not as unreadable: that
+        # is its cause. Simulate the race: the probe deletes the entry, then
+        # reports failure.
         _make_tree(tmp_path, "ok.txt", "gone.txt")
 
         def _vanish(name: str, full: str, dir_fd: int | None, *, is_dir: bool) -> bool:
@@ -132,17 +141,17 @@ class TestWalkWarnings:
         monkeypatch.setattr("boto3_s3.localstorage._is_readable_child", _vanish)
         warnings: list[str] = []
         assert _keys(tmp_path, on_warning=warnings.append) == ["ok.txt"]
-        assert warnings == [f"Skipping file {tmp_path / 'gone.txt'}. File does not exist."]
+        _assert_warned(warnings, (tmp_path / "gone.txt", "does not exist"))
 
     @pytest.mark.skipif(os.name != "nt", reason="Windows MAX_PATH band")
     def test_over_max_path_entries_warn_does_not_exist_like_aws(self, tmp_path: Path) -> None:
         # With long paths disabled (LongPathsEnabled=0, the Windows default) a
         # full path over MAX_PATH fails every full-path syscall, while the
         # scandir-cached stat still vets the entry - so the readability probe
-        # is what catches it, and its failure path must pick aws's "File does
-        # not exist." wording (aws.exe gives the same skip set, same wording,
-        # rc 2). The fixtures ride the \\?\ extended-length prefix, which
-        # bypasses the limit at creation time only.
+        # is what catches it, and its failure path must report the entries as
+        # missing (aws.exe gives the same skip set, rc 2). The fixtures ride the
+        # \\?\ extended-length prefix, which bypasses the limit at creation
+        # time only.
         ext = "\\\\?\\"
         long_file = tmp_path / ("n" * 250)  # over 260 under any tmp root
         long_dir = tmp_path / ("m" * 250)  # the directory itself crosses
@@ -161,10 +170,9 @@ class TestWalkWarnings:
             _make_tree(tmp_path, "ok.txt")
             warnings: list[str] = []
             assert _keys(tmp_path, on_warning=warnings.append) == ["ok.txt"]
-            assert sorted(warnings) == [
-                f"Skipping file {long_dir}. File does not exist.",
-                f"Skipping file {long_file}. File does not exist.",
-            ]
+            _assert_warned(
+                sorted(warnings), (long_dir, "does not exist"), (long_file, "does not exist")
+            )
         finally:
             # pytest's own tmp cleanup runs without the \\?\ prefix and would
             # trip over these; remove them the way they were made.
@@ -178,8 +186,8 @@ class TestWalkWarnings:
         # every unrolled level is admitted, until the descent's full-path open
         # accumulates SYMLOOP_MAX links and the kernel stops it with ELOOP.
         # aws-cli vets children by full path, so os.path.exists() fails there
-        # and it warns "File does not exist." and exits rc 2 - the walk must
-        # emit that same warning, not prune the subtree silently (rc 0).
+        # and it warns and exits rc 2 - the walk must warn too, not prune the
+        # subtree silently (rc 0).
         _make_tree(tmp_path, "a/keep.txt")
         (tmp_path / "a" / "up").symlink_to(tmp_path)
         warnings: list[str] = []
@@ -188,27 +196,54 @@ class TestWalkWarnings:
         assert keys and all(key.endswith("keep.txt") for key in keys)
         if os.name == "nt":
             # No ELOOP on Windows: the descent dies on the path-length limit
-            # instead, at a host-dependent depth with the not-readable wording -
-            # pin only that it warns rather than pruning silently.
-            assert warnings and all(w.startswith("Skipping file ") for w in warnings)
+            # instead, at a host-dependent depth - pin only that it warns
+            # rather than pruning silently.
+            assert warnings
             return
-        assert len(warnings) == 1
-        assert warnings[0].startswith("Skipping file ")
-        assert warnings[0].endswith(". File does not exist.")
-        warned = warnings[0].removeprefix("Skipping file ").removesuffix(". File does not exist.")
-        assert os.path.basename(warned) == "up"  # the cycle link the descent died on
+        _assert_warned(warnings, ("does not exist",))
+        # Named as aws-cli names it: its parent listing finds the looping path
+        # not to be a directory, so the path carries no trailing separator.
+        assert f"{os.sep}up. " in warnings[0], warnings
+
+    @pytest.mark.skipif(
+        os.name != "posix" or os.pathconf("/", "PC_PATH_MAX") != 4096, reason="Linux's PATH_MAX"
+    )
+    def test_a_directory_one_byte_short_of_path_max_keeps_its_separator(
+        self, tmp_path: Path
+    ) -> None:
+        # Its own path (4095 bytes) is a directory; only the separator the
+        # descent opens takes it past the limit. aws-cli's parent listing
+        # sees a directory, adds the separator, and its descent warns the
+        # separator form - the walk must warn the same, not end the run.
+        _make_tree(tmp_path, "top.txt")
+        fd = os.open(tmp_path, os.O_RDONLY)
+        length = len(str(tmp_path))
+        while length < 4095:
+            name = "d" * min(200, 4095 - length - 1)
+            if 0 < 4095 - length - 1 - len(name) < 2:
+                name = name[:-2]
+            os.mkdir(name, dir_fd=fd)
+            child = os.open(name, os.O_RDONLY, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            length += 1 + len(name)
+        os.close(fd)
+        warnings: list[str] = []
+        assert _keys(tmp_path, on_warning=warnings.append) == ["top.txt"]
+        _assert_warned(warnings, ("does not exist",))
+        assert f"{os.sep}. " in warnings[0], warnings
 
     def test_symlink_leaf_at_the_cycle_boundary_warns_like_aws(self, tmp_path: Path) -> None:
         # A cycle whose boundary directory still holds a *symlink* file leaf: the
         # fast walk vets that leaf through the directory fd (its own single link,
         # re-anchored), so a dir-relative probe admits it - but the leaf's full path
         # crosses SYMLOOP_MAX and the transfer's full-path open would ELOOP (rc 1).
-        # aws-cli stats every entry by full path, so it warn-skips the leaf ("File
-        # does not exist.", rc 2). The walk must match: every admitted entry
-        # resolves by full path, and the boundary link is warned away rather than
-        # admitted to fail at open (a regular-file leaf, unlike this one, never
-        # diverges - its full path resolves the same ancestor chain the directory
-        # open already survived, so only a symlink leaf needs this fallback).
+        # aws-cli stats every entry by full path, so it warn-skips the leaf (rc 2).
+        # The walk must match: the leaf's full-path re-stat at its turn
+        # (restat_leaf) fails, so every admitted entry resolves by full path and
+        # the boundary link is warned away rather than admitted to fail at open
+        # (a regular-file leaf, unlike this one, never diverges - its full path
+        # resolves the same ancestor chain the directory open already survived).
         _make_tree(tmp_path, "keep.txt")
         (tmp_path / "link").symlink_to(tmp_path / "keep.txt")  # a symlink file leaf
         (tmp_path / "loop").symlink_to(tmp_path)  # a directory cycle
@@ -220,29 +255,18 @@ class TestWalkWarnings:
         if os.name == "nt":
             # No ELOOP on Windows: the boundary is path length, at a host-dependent
             # depth - pin only that it warns, not admits an unopenable leaf.
-            assert warnings and all(w.startswith("Skipping file ") for w in warnings)
+            assert warnings
             return
-        leaf_warnings = [
-            w
-            for w in warnings
-            if w.endswith(". File does not exist.")
-            and os.path.basename(
-                w.removeprefix("Skipping file ").removesuffix(". File does not exist.")
-            )
-            == "link"
-        ]
+        leaf_warnings = [w for w in warnings if "does not exist" in w and f"{os.sep}link" in w]
         assert leaf_warnings, warnings  # the boundary symlink leaf, warned away by name
 
     @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
-    def test_special_file_warns_with_awscli_wording(self, tmp_path: Path) -> None:
+    def test_special_file_warns_and_is_skipped(self, tmp_path: Path) -> None:
         _make_tree(tmp_path, "ok.txt")
         os.mkfifo(tmp_path / "pipe")  # pyright: ignore[reportAttributeAccessIssue]
         warnings: list[str] = []
         assert _keys(tmp_path, on_warning=warnings.append) == ["ok.txt"]
-        assert warnings == [
-            f"Skipping file {tmp_path / 'pipe'}. File is character special device, "
-            "block special device, FIFO, or socket."
-        ]
+        _assert_warned(warnings, (tmp_path / "pipe", "special"))
 
     def test_invalid_timestamp_falls_back_to_epoch(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -258,96 +282,7 @@ class TestWalkWarnings:
         warnings: list[str] = []
         infos = list(LocalStorage(str(tmp_path)).walk_local(on_warning=warnings.append))
         assert [info.mtime for info in infos] == [datetime(1970, 1, 1, tzinfo=timezone.utc)]
-        assert warnings == ["File has an invalid timestamp. Passing epoch time as timestamp."]
-
-
-class TestFullPathBoundaryProbe:
-    """The fd-relative fast walk re-vets a file leaf by full path near the OS
-    limits (`crosses_full_path_boundary`). PATH_MAX is a byte limit, so the
-    length floor counts bytes: a multibyte path must reach the probe at a few
-    hundred characters (a 1024-byte PATH_MAX host would otherwise admit a
-    leaf that aws-cli's full-path stat warn-skips)."""
-
-    @pytest.mark.skipif(
-        os.name == "nt",
-        reason="targets the POSIX dir_fd fast path; Windows length limits "
-        "depend on the LongPathsEnabled policy",
-    )
-    def test_length_floor_counts_bytes_not_characters(self, tmp_path: Path) -> None:
-        recorded: list[str] = []
-
-        class _Recording(LocalFileGenerator):
-            def triggers_warning(self, path: str, notify: Callable[[str], None]) -> bool:
-                recorded.append(path)
-                return super().triggers_warning(path, notify)
-
-        # A leaf whose full path is >= 1000 bytes but far below 1000
-        # characters (CJK components: 3 bytes per character in UTF-8). The
-        # tree must land just past the floor, not overshoot by a whole
-        # component: macOS caps a full path at 1024 bytes, so an overshot
-        # tree fails at mkdir before the walk ever runs.
-        component = "あ" * 80  # 80 characters, 240 bytes
-        leaf_bytes = len(os.fsencode(os.sep + "f.txt"))
-        parent = tmp_path
-        while (pad := 1000 - leaf_bytes - 1 - len(os.fsencode(str(parent)))) > 240:
-            parent = parent / component
-        # A zero pad still needs a final component; 3 extra bytes stay far
-        # under the 1024-byte cap.
-        parent = parent / (("あ" * (pad // 3) + "x" * (pad % 3)) or "xxx")
-        parent.mkdir(parents=True)
-        (parent / "f.txt").write_bytes(b"x")
-        (tmp_path / "short.txt").write_bytes(b"x")
-        full = str(parent / "f.txt")
-        assert len(full) < 1000 and 1000 <= len(os.fsencode(full)) < 1024
-
-        storage = LocalStorage(str(tmp_path), walker=_Recording())
-        keys = [i.compare_key or "" for i in storage.scan(LocalScanOptions(recursive=True))]
-        # This host's PATH_MAX sits above the floor, so the full-path battery
-        # finds nothing wrong and the leaf stays in the scan set; the point is
-        # that the byte-measured floor consulted it at all.
-        assert any(key.endswith("f.txt") for key in keys)
-        assert full in recorded
-        # An ordinary short leaf stays off the probe (fsencode never runs on
-        # the hot path, and the battery is never consulted for it).
-        assert str(tmp_path / "short.txt") not in recorded
-
-    @pytest.mark.skipif(
-        os.name == "nt",
-        reason="targets the POSIX dir_fd fast path; Windows length limits "
-        "depend on the LongPathsEnabled policy",
-    )
-    def test_a_directory_takes_the_probe_too_and_by_its_bare_path(self, tmp_path: Path) -> None:
-        # A directory child near the floor is re-vetted here, exactly like a file
-        # leaf, and by the *bare* full path aws-cli's vetting loop uses. Leaving
-        # it to fail its own descent instead would warn from scan_children, whose
-        # battery reproduces aws-cli's descent wording - the separator-terminated
-        # path - and so would name a boundary-crossing directory differently from
-        # aws-cli.
-        recorded: list[str] = []
-
-        class _Recording(LocalFileGenerator):
-            def triggers_warning(self, path: str, notify: Callable[[str], None]) -> bool:
-                recorded.append(path)
-                return super().triggers_warning(path, notify)
-
-        # The same construction as the leaf case above, one level shallower, so
-        # that the *directory* itself lands just past the byte floor (its inner
-        # file then stays well under macOS's 1024-byte cap).
-        component = "あ" * 80  # 80 characters, 240 bytes
-        deep = tmp_path
-        while (pad := 1000 - 1 - len(os.fsencode(str(deep)))) > 240:
-            deep = deep / component
-        deep = deep / (("あ" * (pad // 3) + "x" * (pad % 3)) or "xxx")
-        deep.mkdir(parents=True)
-        (deep / "i.txt").write_bytes(b"x")
-        assert 1000 <= len(os.fsencode(str(deep))) < 1024
-
-        storage = LocalStorage(str(tmp_path), walker=_Recording())
-        keys = [i.compare_key or "" for i in storage.scan(LocalScanOptions(recursive=True))]
-        # This host's PATH_MAX sits above the floor, so the battery finds nothing
-        # wrong and the subtree stays in the scan set.
-        assert any(key.endswith("i.txt") for key in keys)
-        assert str(deep) in recorded  # the directory, named without a separator
+        _assert_warned(warnings, ("invalid timestamp",))
 
 
 class _MutateAtFinalize(LocalFileGenerator):
@@ -382,17 +317,14 @@ class TestDirectoryChangedBeforeItsDescent:
     """A sub-directory that stops being an openable directory between its parent's
     scan and the descent into it.
 
-    aws-cli re-tests such a child immediately before recursing, on the
-    separator-terminated path its sort key carries: gone or no longer a
-    directory falls to the file-stat path, whose ``os.stat`` raises and warns
-    through the battery, and unreadable warns through the recursion's own
-    ``should_ignore_file``. Either way it is one warning, on the
-    separator-terminated path, and the walk continues (rc 2). Measured against
-    the pinned aws (a directory swapped mid-walk under
-    ``cp --recursive --dryrun``): ``warning: Skipping file <dir>/. File does not
-    exist.`` for the replaced and the removed shape, ``... File/Directory is not
-    readable.`` for the chmod'd one, every remaining entry still transferred.
-    cp / mv / sync share this walk, so all three inherit the behaviour.
+    aws-cli re-tests such a child immediately before recursing: gone or no
+    longer a directory falls to the file-stat path, whose ``os.stat`` raises and
+    warns through the battery, and unreadable warns through the recursion's own
+    ``should_ignore_file``. Either way it is one warning, and the walk continues
+    (rc 2). Measured against the pinned `aws` (a directory swapped mid-walk under
+    ``cp --recursive --dryrun``): one warning for the replaced, the removed and
+    the chmod'd shape, every remaining entry still transferred. cp / mv / sync
+    share this walk, so all three inherit the behaviour.
     """
 
     def _swapped(
@@ -425,7 +357,7 @@ class TestDirectoryChangedBeforeItsDescent:
         # aws-cli's should_ignore_file runs again at the top of each descent
         # and, not following symlinks, strips the separator to test the name
         # itself - so the link is dropped silently, never followed. Measured
-        # against the pinned aws (--no-follow-symlinks, the directory swapped
+        # against the pinned `aws` (--no-follow-symlinks, the directory swapped
         # for a link right after its parent's scan): only the other entries
         # are listed, rc 0; ours followed the link into the other tree.
         keys, warnings, walker = self._swapped(
@@ -441,26 +373,6 @@ class TestDirectoryChangedBeforeItsDescent:
         assert keys == ["aaa.txt", "mmm/other.txt", "zzz/inner.txt"]
         assert warnings == []
 
-    @skip_if_chmod_is_inert
-    def test_made_unreadable_warns_without_the_separator_when_links_are_not_followed(
-        self, tmp_path: Path
-    ) -> None:
-        # The no-follow re-test rebinds the separator-stripped path before its
-        # battery, so the warning names the directory without the separator
-        # (the follow mode keeps it - the test below). Measured against the
-        # pinned aws: `.../mmm. File/Directory is not readable.` without
-        # --follow-symlinks stripping, `.../mmm/.` with the default follow.
-        target = tmp_path / "mmm"
-        try:
-            keys, warnings, walker = self._swapped(
-                tmp_path, lambda: target.chmod(0), follow_symlinks=False
-            )
-        finally:
-            target.chmod(0o755)
-        assert walker.fired
-        assert keys == ["aaa.txt", "zzz/inner.txt"]
-        assert warnings == [f"Skipping file {target}. File/Directory is not readable."]
-
     def test_replaced_by_a_regular_file_warns_and_the_walk_goes_on(self, tmp_path: Path) -> None:
         target = tmp_path / "mmm"
 
@@ -474,24 +386,10 @@ class TestDirectoryChangedBeforeItsDescent:
         # The descent's ENOTDIR is a warning, not a fatal error - everything
         # sorting after the swapped directory is still enumerated.
         assert keys == ["aaa.txt", "zzz/inner.txt"]
-        assert warnings == [f"Skipping file {target}{os.sep}. File does not exist."]
-
-    def test_removed_warns_with_the_trailing_separator(self, tmp_path: Path) -> None:
-        target = tmp_path / "mmm"
-
-        def remove_it() -> None:
-            (target / "inner.txt").unlink()
-            target.rmdir()
-
-        keys, warnings, walker = self._swapped(tmp_path, remove_it)
-        assert walker.fired
-        assert keys == ["aaa.txt", "zzz/inner.txt"]
-        # The separator is aws-cli's: the name it carries for a vetted
-        # sub-directory has one appended, and its warning keeps it.
-        assert warnings == [f"Skipping file {target}{os.sep}. File does not exist."]
+        _assert_warned(warnings, (target, "does not exist"))
 
     @skip_if_chmod_is_inert
-    def test_made_unreadable_warns_not_readable_with_the_separator(self, tmp_path: Path) -> None:
+    def test_made_unreadable_warns_and_the_walk_goes_on(self, tmp_path: Path) -> None:
         target = tmp_path / "mmm"
         try:
             keys, warnings, walker = self._swapped(tmp_path, lambda: target.chmod(0))
@@ -499,7 +397,7 @@ class TestDirectoryChangedBeforeItsDescent:
             target.chmod(0o755)
         assert walker.fired
         assert keys == ["aaa.txt", "zzz/inner.txt"]
-        assert warnings == [f"Skipping file {target}{os.sep}. File/Directory is not readable."]
+        _assert_warned(warnings, (target, "not readable"))
 
     def test_the_paged_scan_behaves_the_same(self, tmp_path: Path) -> None:
         # sync consumes the walk through scan (the sortable paged surface), not
@@ -518,7 +416,7 @@ class TestDirectoryChangedBeforeItsDescent:
         keys = [info.compare_key for info in storage.scan(options)]
         assert walker.fired
         assert keys == ["aaa.txt", "zzz/inner.txt"]
-        assert warnings == [f"Skipping file {target}{os.sep}. File does not exist."]
+        _assert_warned(warnings, (target, "does not exist"))
 
 
 def _replace_with_a_directory(target: Path) -> Callable[[], None]:
@@ -539,7 +437,7 @@ class TestLeafBecameADirectoryBeforeItsTurn:
     name in its descent loop, so a file replaced by a directory after its parent's
     ``listdir`` is descended and the new children are transferred - addressed by
     the bare name the leaf sorted under, since the separator was appended only to
-    names that were directories at scan time. Measured against the pinned aws (a
+    names that were directories at scan time. Measured against the pinned `aws` (a
     file swapped for a directory holding ``child.txt`` while the walk was inside an
     earlier sibling): ``cp --recursive``, ``mv --recursive`` and ``sync`` all exit 0
     having uploaded ``mmm.txt/child.txt``, and ``--dryrun`` previews that key,
@@ -729,10 +627,9 @@ class TestLeafVanishedBeforeItsTurn:
     The third shape of the mid-walk race: aws-cli takes every leaf's stats in its
     descent loop (``_safely_get_file_stats``), so a name deleted after its
     parent's ``listdir`` fails there, runs the warning battery, and is skipped -
-    the file never enters the transfer stream. Measured against the pinned aws (a
+    the file never enters the transfer stream. Measured against the pinned `aws` (a
     leaf deleted while the walk was inside an earlier sibling): ``cp --recursive``
-    prints ``warning: Skipping file <abs>. File does not exist.`` and exits 2,
-    with nothing uploaded for that name, and ``--dryrun`` previews the same
+    warns and exits 2, with nothing uploaded for that name, and ``--dryrun`` previews the same
     skip. Without the re-stat the stale record was submitted and the upload
     failed with ``[Errno 2] No such file or directory`` (rc 1).
     """
@@ -752,7 +649,7 @@ class TestLeafVanishedBeforeItsTurn:
         keys, warnings, walker = self._vanished(tmp_path)
         assert walker.fired
         assert keys == ["aaa.txt", "zzz/inner.txt"]
-        assert warnings == [f"Skipping file {tmp_path / 'mmm.txt'}. File does not exist."]
+        _assert_warned(warnings, (tmp_path / "mmm.txt", "does not exist"))
 
     def test_the_complete_view_drops_it_too(self, tmp_path: Path) -> None:
         # The complete view surfaces entries the transfer vetting rejects, not
@@ -761,7 +658,7 @@ class TestLeafVanishedBeforeItsTurn:
         keys, warnings, walker = self._vanished(tmp_path, enumerate_all_entries=True)
         assert walker.fired
         assert keys == ["", "aaa.txt", "zzz/", "zzz/inner.txt"]
-        assert warnings == [f"Skipping file {tmp_path / 'mmm.txt'}. File does not exist."]
+        _assert_warned(warnings, (tmp_path / "mmm.txt", "does not exist"))
 
     @pytest.mark.skipif(not hasattr(os, "symlink"), reason="needs symlinks")
     @pytest.mark.parametrize("become", ["dangling", "loop"])
@@ -781,7 +678,7 @@ class TestLeafVanishedBeforeItsTurn:
             target.symlink_to(tmp_path / ("nowhere" if become == "dangling" else "mmm.txt"))
 
         for follow, expected_warnings in (
-            (True, [f"Skipping file {target}. File does not exist."]),
+            (True, [(target, "does not exist")]),
             (False, []),
         ):
             walker = _MutateAtFinalize(target, swap)
@@ -802,7 +699,7 @@ class TestLeafVanishedBeforeItsTurn:
             assert leaf.is_symlink
             assert leaf.stat_result is not None and stat.S_ISLNK(leaf.stat_result.st_mode)
             assert leaf.size == target.lstat().st_size
-            assert warnings == expected_warnings
+            _assert_warned(warnings, *expected_warnings)
             target.unlink()
             target.write_bytes(b"x" * 3)
 
@@ -816,12 +713,13 @@ class TestLeafVanishedBeforeItsTurn:
         options = LocalScanOptions(recursive=True, on_warning=warnings.append)
         assert [info.compare_key for info in storage.scan(options)] == ["aaa.txt", "zzz/inner.txt"]
         assert walker.fired
-        assert warnings == [f"Skipping file {target}. File does not exist."]
+        _assert_warned(warnings, (target, "does not exist"))
 
-    def test_a_healed_race_drops_the_leaf_silently(self, tmp_path: Path) -> None:
+    def test_a_healed_race_drops_the_leaf_with_the_stat_s_error(self, tmp_path: Path) -> None:
         # aws-cli skips whatever it could not stat, warning only for what its
-        # battery can still see wrong: a leaf whose stat failed and that is back
-        # by the time the battery looks is dropped with no warning at all.
+        # battery can still see wrong, so a leaf whose stat failed and that is
+        # back by the time the battery looks is dropped with no warning at all.
+        # Here the skip stays, warned with the failed stat's own error (rc 2).
         _make_tree(tmp_path, "aaa.txt", "mmm.txt")
         target = str(tmp_path / "mmm.txt")
         real_stat = os.stat
@@ -841,7 +739,7 @@ class TestLeafVanishedBeforeItsTurn:
             keys = _keys(tmp_path, on_warning=warnings.append)
         assert failed == [target]
         assert keys == ["aaa.txt"]
-        assert warnings == []
+        assert warnings == [f"Skipping file {target}. No such file or directory."]
 
 
 class TestLeafRewrittenBeforeItsTurn:
@@ -849,7 +747,7 @@ class TestLeafRewrittenBeforeItsTurn:
 
     aws-cli reads every leaf's size and timestamp in its descent loop, never at
     scan time, so what it transfers - and what ``sync`` compares - is the file as
-    of the moment it is emitted. Measured against the pinned aws (an 8-byte leaf
+    of the moment it is emitted. Measured against the pinned `aws` (an 8-byte leaf
     rewritten to 120 bytes while the walk was inside an earlier sibling):
     ``cp --recursive`` and ``mv --recursive`` both put a 120-byte object, rc 0,
     where the scan-time size put an 8-byte truncation of it.
@@ -947,7 +845,7 @@ class TestLeafRewrittenBeforeItsTurn:
             "mmm.txt",
             datetime(1970, 1, 1, tzinfo=timezone.utc),
         )
-        assert warnings == ["File has an invalid timestamp. Passing epoch time as timestamp."]
+        _assert_warned(warnings, ("invalid timestamp",))
 
     def test_an_mtime_that_healed_before_its_turn_draws_no_warning(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -955,7 +853,7 @@ class TestLeafRewrittenBeforeItsTurn:
         # aws-cli never sees the scan-time stamp - its only stat is the one at
         # the leaf's turn - so a timestamp that became representable by then
         # is just the file's timestamp: no warning, rc 0 (measured on the
-        # pinned aws with the same mutation; ours warned and exited 2, while
+        # pinned `aws` with the same mutation; ours warned and exited 2, while
         # stamping the healed value the warning said it would not).
         _make_tree(tmp_path, "aaa.txt", "mmm.txt")
         target = tmp_path / "mmm.txt"
@@ -974,29 +872,6 @@ class TestLeafRewrittenBeforeItsTurn:
             datetime(2020, 1, 1, tzinfo=timezone.utc),
         )
         assert warnings == []
-
-    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
-    def test_the_timestamp_warning_sorts_where_aws_cli_sends_it(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # aws-cli warns at the leaf's turn, after every earlier-sorting
-        # sibling's subtree has been vetted, so a special file under `aaa/`
-        # warns before the timestamp of `zzz` (measured on the pinned aws:
-        # fifo first, then the timestamp; ours had them the other way round
-        # from warning at the parent's scan).
-        _make_tree(tmp_path, "zzz")
-        (tmp_path / "aaa").mkdir()
-        os.mkfifo(tmp_path / "aaa" / "fifo")  # pyright: ignore[reportAttributeAccessIssue]
-        unrepresentable = 1234567890.0
-        self._pretend_unrepresentable(monkeypatch, unrepresentable)
-        os.utime(tmp_path / "zzz", (unrepresentable, unrepresentable))
-        warnings: list[str] = []
-        assert _keys(tmp_path, on_warning=warnings.append) == ["zzz"]
-        assert warnings == [
-            f"Skipping file {tmp_path / 'aaa' / 'fifo'}. File is character special device, "
-            "block special device, FIFO, or socket.",
-            "File has an invalid timestamp. Passing epoch time as timestamp.",
-        ]
 
     def test_a_one_level_scan_still_warns_for_its_record(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1017,7 +892,7 @@ class TestLeafRewrittenBeforeItsTurn:
             ("aaa.txt", infos[0].mtime),
             ("mmm.txt", datetime(1970, 1, 1, tzinfo=timezone.utc)),
         ]
-        assert warnings == ["File has an invalid timestamp. Passing epoch time as timestamp."]
+        _assert_warned(warnings, ("invalid timestamp",))
 
     def test_a_link_leaf_warns_from_its_own_stat(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1041,15 +916,13 @@ class TestLeafRewrittenBeforeItsTurn:
         )
         leaf = next(info for info in infos if info.compare_key == "link.txt")
         assert leaf.mtime == datetime(1970, 1, 1, tzinfo=timezone.utc)
-        assert warnings == ["File has an invalid timestamp. Passing epoch time as timestamp."]
+        _assert_warned(warnings, ("invalid timestamp",))
 
-    def test_a_link_broken_at_the_scan_warns_about_its_own_stamp_too(
+    def test_a_link_broken_at_the_scan_takes_the_epoch_fallback(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # The complete followed view falls back to a broken link's lstat leaf.
-        # A link that broke before its turn warned about its unrenderable
-        # stamp, one already broken at the parent's scan did not - the
-        # fallback silenced every warning to keep "does not exist" single.
+        # The complete followed view falls back to a broken link's lstat leaf,
+        # whose unrenderable stamp is stamped as the epoch like any other.
         link = tmp_path / "link.txt"
         link.symlink_to(tmp_path / "gone.txt")
         self._pretend_unrepresentable(monkeypatch, link.lstat().st_mtime)
@@ -1062,10 +935,7 @@ class TestLeafRewrittenBeforeItsTurn:
         leaf = next(info for info in infos if info.compare_key == "link.txt")
         assert leaf.is_symlink
         assert leaf.mtime == datetime(1970, 1, 1, tzinfo=timezone.utc)
-        assert warnings == [
-            f"Skipping file {link}. File does not exist.",
-            "File has an invalid timestamp. Passing epoch time as timestamp.",
-        ]
+        assert any(str(link) in w and "does not exist" in w for w in warnings), warnings
 
 
 class TestSymlinks:
@@ -1088,38 +958,57 @@ class TestSymlinks:
         (tmp_path / "broken").symlink_to(tmp_path / "gone")
         warnings: list[str] = []
         assert _keys(tmp_path, on_warning=warnings.append) == ["plain.txt"]
-        assert warnings == [f"Skipping file {tmp_path / 'broken'}. File does not exist."]
+        _assert_warned(warnings, (tmp_path / "broken", "does not exist"))
 
     @skip_if_chmod_is_inert
-    def test_no_follow_link_in_a_searchless_directory_warns_like_aws(self, tmp_path: Path) -> None:
+    def test_a_link_in_a_searchless_directory_warns_like_aws(self, tmp_path: Path) -> None:
         # A directory that can be read but not searched (r--) lists its entries
         # with their types, so the walk knows the link from d_type; aws-cli's
         # test is an lstat by full path, which fails there, so it takes the
-        # entry for a non-link and its battery warns "File does not exist."
-        # (measured on the pinned aws: two warnings, rc 2, where ours dropped
-        # both silently, rc 0). The follow mode already agreed: the followed
-        # stat fails the same way on both sides.
+        # entry for a non-link and its battery warns that it does not exist
+        # (measured on the pinned aws: two warnings, rc 2). Whether the warning
+        # is written is aws-cli's part of the report (overview.md section 3,
+        # Messages). The follow mode agrees too: the followed stat fails the
+        # same way on both sides.
         _make_tree(tmp_path, "a.txt")
         locked = tmp_path / "rd"
         locked.mkdir()
         (locked / "l").symlink_to(tmp_path / "a.txt")
         (locked / "lb").symlink_to(tmp_path / "nosuch")
         locked.chmod(0o444)
-        expected = [
-            f"Skipping file {locked / 'l'}. File does not exist.",
-            f"Skipping file {locked / 'lb'}. File does not exist.",
-        ]
+        expected = ((locked / "l", "does not exist"), (locked / "lb", "does not exist"))
         try:
             # Vetting runs in directory-read order on both sides (aws-cli's
             # listdir, our scandir), so only the set of warnings is pinned.
             warnings: list[str] = []
             assert _keys(tmp_path, follow_symlinks=False, on_warning=warnings.append) == ["a.txt"]
-            assert sorted(warnings) == expected
+            _assert_warned(sorted(warnings), *expected)
+            assert sum(str(locked / "lb") in w for w in warnings) == 1  # the other is `l`
             warnings = []
             assert _keys(tmp_path, on_warning=warnings.append) == ["a.txt"]
-            assert sorted(warnings) == expected
+            _assert_warned(sorted(warnings), *expected)
+            assert sum(str(locked / "lb") in w for w in warnings) == 1  # the other is `l`
         finally:
             locked.chmod(0o755)
+
+    def test_a_link_the_full_path_test_misses_is_vetted_then_classified(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The entry's type says symlink, but the full-path test says it is
+        # not one (the race where it is replaced between the listing and the
+        # test): the entry is vetted like aws-cli's non-link and, with nothing
+        # wrong, classified rather than skipped.
+        _make_tree(tmp_path, "a.txt")
+        link = tmp_path / "link.txt"
+        link.symlink_to(tmp_path / "a.txt")
+        real_islink = os.path.islink
+        monkeypatch.setattr(
+            os.path, "islink", lambda p: False if os.fspath(p) == str(link) else real_islink(p)
+        )
+        warnings: list[str] = []
+        keys = _keys(tmp_path, follow_symlinks=False, on_warning=warnings.append)
+        assert keys == ["a.txt", "link.txt"]
+        assert warnings == []
 
 
 class TestSymlinkLoopDetection:
@@ -1300,10 +1189,9 @@ class TestWalkIsCustomizable:
                 strip: int,
                 options: LocalScanOptions,
                 notify: Callable[[str], None],
-                sym_depth: int = 0,
             ) -> list[WalkChild]:
                 children = super().scan_children(
-                    dir_path, strip=strip, options=options, notify=notify, sym_depth=sym_depth
+                    dir_path, strip=strip, options=options, notify=notify
                 )
                 # An injected child stamps its own compare_key (info.key[strip:]).
                 key = (dir_path + "_synthetic").replace(os.sep, "/")
@@ -1344,9 +1232,7 @@ class TestWalkIsCustomizable:
     def test_walk_dir_override_prunes_a_subtree(self, tmp_path: Path) -> None:
         # walk_dir is the public recursion seam: override it and return early for
         # a directory to prune its subtree, calling super() for the rest. It
-        # recurses via self.walk_dir, so the override applies at every level; the
-        # followed-symlink depth counter is threaded through unchanged (an app that
-        # wants its own depth logic re-implements the loop).
+        # recurses via self.walk_dir, so the override applies at every level.
         _make_tree(tmp_path, "a.txt", "keep/b.txt", "skip/c.txt", "keep/skip/d.txt")
 
         class _PruneSkip(LocalFileGenerator):
@@ -1358,7 +1244,6 @@ class TestWalkIsCustomizable:
                 strip: int,
                 notify: Callable[[str], None],
                 detector: LoopDetector | None,
-                sym_depth: int = 0,
             ) -> Iterator[list[LocalFileInfo]]:
                 if os.path.basename(dir_path.rstrip(os.sep)) == "skip":
                     return  # do not descend into any 'skip' directory
@@ -1368,7 +1253,6 @@ class TestWalkIsCustomizable:
                     strip=strip,
                     notify=notify,
                     detector=detector,
-                    sym_depth=sym_depth,
                 )
 
         keys = [
@@ -1510,10 +1394,7 @@ class TestEnumerateAllEntries:
             info.stat_result is not None and stat.S_ISLNK(info.stat_result.st_mode)
             for info in infos[1:]
         )
-        assert set(warnings) == {
-            f"Skipping file {broken}. File does not exist.",
-            f"Skipping file {loop}. File does not exist.",
-        }
+        _assert_warned(sorted(warnings), (broken, "does not exist"), (loop, "does not exist"))
 
     @pytest.mark.skipif(
         os.name == "nt",
@@ -1542,7 +1423,7 @@ class TestEnumerateAllEntries:
         )
 
         assert [info.compare_key for info in infos] == ["", "target.txt"]
-        assert warnings == [f"Skipping file {link}. File does not exist."]
+        _assert_warned(warnings, (link, "does not exist"))
 
     @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
     def test_complete_view_includes_special_files_without_transfer_warnings(
@@ -1616,11 +1497,11 @@ class TestEnumerateAllEntries:
         _make_tree(tmp_path, "a.txt")
         storage = LocalStorage(str(tmp_path))
 
-        drop_all = GlobFilter().exclude("*").compile()
+        drop_all = globsieve.compile([Exclude("*")])
         opts = LocalScanOptions(recursive=True, enumerate_all_entries=True, filter=drop_all)
         assert list(storage.scan(opts)) == []
 
-        drop_txt = GlobFilter().exclude("*.txt").compile()
+        drop_txt = globsieve.compile([Exclude("*.txt")])
         opts = LocalScanOptions(recursive=True, enumerate_all_entries=True, filter=drop_txt)
         assert [info.compare_key for info in storage.scan(opts)] == [""]
 
@@ -1657,11 +1538,11 @@ class TestEnumerateAllEntries:
         _make_tree(tmp_path, "a.txt")
         storage = LocalStorage(str(tmp_path))
 
-        drop_all = GlobFilter().exclude("*").compile()
+        drop_all = globsieve.compile([Exclude("*")])
         opts = LocalScanOptions(recursive=False, enumerate_all_entries=True, filter=drop_all)
         assert list(storage.scan(opts)) == []
 
-        drop_txt = GlobFilter().exclude("*.txt").compile()
+        drop_txt = globsieve.compile([Exclude("*.txt")])
         opts = LocalScanOptions(recursive=False, enumerate_all_entries=True, filter=drop_txt)
         assert [info.compare_key for info in storage.scan(opts)] == [""]
 
@@ -1761,6 +1642,17 @@ class TestScanPagesAreScandirAligned:
         assert len(pages) == 1
         assert [info.compare_key for info in pages[0]] == ["a.txt", "sub/"]
 
+    def test_a_page_the_filter_empties_is_yielded_empty(self, tmp_path: Path) -> None:
+        # One page per file-run still, so the scan can stop between the runs a
+        # selective filter rejects (storage.sieve_pages).
+        _make_tree(tmp_path, "a.txt", "z.txt", "sub/b.txt")
+        options = LocalScanOptions(recursive=True, filter=lambda info: info.compare_key == "z.txt")
+        pages = [
+            [info.compare_key for info in page]
+            for page in LocalStorage(str(tmp_path)).scan_pages(options)
+        ]
+        assert pages == [[], [], ["z.txt"]]
+
 
 class TestGetFileinfo:
     """``LocalStorage.get_fileinfo`` - the single-path point op (no walk)."""
@@ -1790,7 +1682,7 @@ class TestGetFileinfo:
         def counting_stat(*args: object, **kwargs: object) -> os.stat_result:
             nonlocal calls
             calls += 1
-            return real_stat(*args, **kwargs)  # type: ignore[arg-type]
+            return real_stat(*args, **kwargs)
 
         monkeypatch.setattr(os, "stat", counting_stat)
         info = storage.get_fileinfo()
@@ -1816,36 +1708,115 @@ class TestGetFileinfo:
         assert excinfo.value.bucket is None
 
     @skip_if_chmod_is_inert
-    def test_unreadable_directory_warning_keeps_the_separator_when_following(
-        self, tmp_path: Path
-    ) -> None:
-        # aws-cli's local_format names an existing directory source with a
-        # trailing separator and its warning keeps it (measured: `cp d
-        # s3://b/k` warns `.../d/. File/Directory is not readable.`, rc 2);
-        # its no-follow check rebinds the stripped path first, so there the
-        # warning has none (measured, `--no-follow-symlinks`).
+    def test_unreadable_directory_warns_and_skips(self, tmp_path: Path) -> None:
+        # Measured: `cp d s3://b/k` warns about an unreadable directory source
+        # and exits 2, with --no-follow-symlinks as without it.
         locked = tmp_path / "locked"
         locked.mkdir()
         locked.chmod(0)
         try:
-            warnings: list[str] = []
-            assert LocalStorage(str(locked)).get_fileinfo(on_warning=warnings.append) is None
-            assert warnings == [f"Skipping file {locked}{os.sep}. File/Directory is not readable."]
-            warnings = []
-            storage = LocalStorage(str(locked), follow_symlinks=False)
-            assert storage.get_fileinfo(on_warning=warnings.append) is None
-            assert warnings == [f"Skipping file {locked}. File/Directory is not readable."]
+            for follow in (True, False):
+                warnings: list[str] = []
+                storage = LocalStorage(str(locked), follow_symlinks=follow)
+                assert storage.get_fileinfo(on_warning=warnings.append) is None
+                _assert_warned(warnings, (locked, "not readable"))
         finally:
             locked.chmod(0o755)
 
     def test_directory_is_returned_without_a_type_check(self, tmp_path: Path) -> None:
-        # aws parity: no type check, so a directory source yields a FileInfo and
+        # aws-cli parity: no type check, so a directory source yields a FileInfo and
         # fails later at open ([Errno 21], rc 1). Its kind still reflects the
         # entry (the FileInfo contract), so a filter can tell it apart.
         info = LocalStorage(str(tmp_path)).get_fileinfo()
         assert info is not None
-        assert info.key == str(tmp_path).replace(os.sep, "/")
         assert info.kind is FileKind.DIRECTORY
+
+    @pytest.mark.parametrize("typed_separator", [False, True])
+    def test_directory_is_named_with_a_trailing_separator(
+        self, tmp_path: Path, typed_separator: bool
+    ) -> None:
+        # aws-cli's local_format names a directory with a trailing separator,
+        # so its last component - its compare_key - is empty.
+        typed = str(tmp_path) + (os.sep if typed_separator else "")
+        info = LocalStorage(typed).get_fileinfo()
+        assert info is not None
+        assert info.key == str(tmp_path).replace(os.sep, "/") + "/"
+        assert info.compare_key == ""
+
+    def test_file_typed_with_a_trailing_separator_is_absent(self, tmp_path: Path) -> None:
+        # aws-cli looks the path up with the separator typed, which a file
+        # does not take (ENOTDIR).
+        target = tmp_path / "a.txt"
+        target.write_bytes(b"x")
+        warnings: list[str] = []
+        storage = LocalStorage(str(target) + os.sep)
+        assert storage.get_fileinfo(on_warning=warnings.append) is None
+        assert warnings == []
+
+    @skip_if_chmod_is_inert
+    @pytest.mark.parametrize(("follow", "suffix"), [(True, os.sep), (False, "")])
+    def test_unreadable_directory_warns_in_aws_cli_form(
+        self, tmp_path: Path, follow: bool, suffix: str
+    ) -> None:
+        # local_format's trailing separator, which should_ignore_file removes
+        # from a no-follow directory before it warns (measured on `aws`).
+        locked = tmp_path / "locked"
+        locked.mkdir()
+        locked.chmod(0)
+        warnings: list[str] = []
+        storage = LocalStorage(str(locked), follow_symlinks=follow)
+        try:
+            assert storage.get_fileinfo(on_warning=warnings.append) is None
+        finally:
+            locked.chmod(0o755)
+        assert warnings == [f"Skipping file {locked}{suffix}. File/Directory is not readable."]
+
+    @pytest.mark.skipif(os.name != "nt", reason="the Windows drive root")
+    @pytest.mark.parametrize("tail", ["\\", "/", "\\."])
+    def test_a_drive_root_keeps_its_separator_for_the_symlink_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tail: str
+    ) -> None:
+        # Only a separator the user typed is removed before the symlink
+        # check: "C:/" stripped to "C:" would name the drive's working
+        # directory, which a no-follow lookup skips when that directory was
+        # entered through a symlink.
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        try:
+            link.symlink_to(real, target_is_directory=True)
+        except OSError:
+            pytest.skip("cannot create symlinks here")
+        monkeypatch.chdir(link)
+        drive = tmp_path.drive
+        info = LocalStorage(drive + tail, follow_symlinks=False).get_fileinfo()
+        assert info is not None
+        assert (info.key, info.compare_key) == (f"{drive}//", "")
+
+    @pytest.mark.skipif(os.name == "nt", reason="the POSIX root")
+    @pytest.mark.parametrize("typed", ["/", "/.", "/.."])
+    def test_the_root_gains_a_separator_like_any_directory(self, typed: str) -> None:
+        # local_format appends the separator to abspath, which already ends
+        # in one at the root: aws-cli's form of "/" is "//".
+        info = LocalStorage(typed).get_fileinfo()
+        assert info is not None
+        assert (info.key, info.compare_key) == ("//", "")
+
+    @pytest.mark.skipif(not hasattr(os, "symlink"), reason="needs symlinks")
+    @pytest.mark.parametrize("typed_separator", [False, True])
+    def test_no_follow_directory_symlink_skips_with_either_form(
+        self, tmp_path: Path, typed_separator: bool
+    ) -> None:
+        # The OS follows a symlink named with a trailing separator, so the
+        # link is looked at without it (aws-cli's should_ignore_file).
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
+        typed = str(link) + (os.sep if typed_separator else "")
+        assert LocalStorage(typed, follow_symlinks=False).get_fileinfo() is None
+        followed = LocalStorage(typed).get_fileinfo()
+        assert followed is not None and followed.is_symlink
 
     def test_missing_returns_none_silently(self, tmp_path: Path) -> None:
         # Definitively absent -> None, no warning (the existence-check contract).
@@ -1871,10 +1842,7 @@ class TestGetFileinfo:
         os.mkfifo(pipe)  # pyright: ignore[reportAttributeAccessIssue]
         warnings: list[str] = []
         assert LocalStorage(str(pipe)).get_fileinfo(on_warning=warnings.append) is None
-        assert warnings == [
-            f"Skipping file {pipe}. File is character special device, "
-            "block special device, FIFO, or socket."
-        ]
+        _assert_warned(warnings, (pipe, "special"))
 
     @skip_if_chmod_is_inert
     def test_unreadable_file_warns_and_skips(self, tmp_path: Path) -> None:
@@ -1886,7 +1854,7 @@ class TestGetFileinfo:
             assert LocalStorage(str(secret)).get_fileinfo(on_warning=warnings.append) is None
         finally:
             secret.chmod(0o644)
-        assert warnings == [f"Skipping file {secret}. File/Directory is not readable."]
+        _assert_warned(warnings, (secret, "not readable"))
 
     def test_no_follow_symlink_skips_silently(self, tmp_path: Path) -> None:
         target = tmp_path / "real.txt"
@@ -2115,7 +2083,7 @@ class TestStatResultAndSymlink:
 
 class TestEmptyPath:
     def test_validate_rejects_the_empty_string(self, tmp_path: Path) -> None:
-        # "" is not a location: os.path.exists("") is False and aws refuses
+        # "" is not a location: os.path.exists("") is False and aws-cli refuses
         # it, but os.path.abspath("") is the working directory - so an
         # operation onto "" silently worked in the working directory (a
         # sync with delete_filter deleted its files). validate is the

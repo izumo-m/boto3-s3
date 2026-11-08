@@ -5,6 +5,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-09
+
+- `S3.from_aws_cli()` builds an `S3` whose session and clients are assembled the way `aws s3` assembles its own, and `cp`, `mv`, `sync` and `rm` read the config file's `[s3]` section as `aws s3` does (`S3.resolve_transfer_config` returns the config a run would use).
+- `cp`, `mv` and `sync` take `source_region` (`S3.source_client()` builds that client), and `mv` takes `validate_same_s3_paths` (`S3.check_mv_paths()` runs its checks ahead of a run).
+- `ls` takes a `filter=` like the other operations, and `ChecksumComparison` compares objects stored with a `SHA512`, `MD5` or `XXHASH` checksum instead of copying them every run.
+- `S3` and `LocalStorage` take a `filename_encoding` for local file names on Linux and macOS (`LocalStorage.os_path` / `text_path` convert a path between the two forms); the CRT engine moves only files whose names are valid UTF-8.
+- `pin_proxy_connect()` makes botocore open HTTPS-proxy tunnels with the CONNECT request aws-cli sends.
+- `GlobFilter`'s builder is replaced by `Exclude` / `Include` rules compiled with `globsieve.compile`, which matches as `aws s3` does on every OS; `GlobPattern`, `PatternKind`, `is_anchored` and the matcher classes are gone.
+- `IOStorage` takes binary streams only and the new `TextIOStorage` takes text ones; `IOStorageBase` and `TextIOStorageBase` are the bases for a stream endpoint of your own, `StdioStorage` is no longer an `IOStorage`, and a download opens its stream only when the first byte arrives.
+- The CRT engine's own settings are one value, `CrtClientOptions` (`crt=`) on `S3` and `S3Deleter`, which can also name the TLS trust source, and `crt=` on `Transferrer`; `crt_allow_absent_credentials`, `crt_region` and `CLIENT_REGION` / `CrtRegion` are removed, and the CRT engine takes the client's region and signs exactly when the client does.
+- `ChecksumComparison()` no longer takes `s3, src, dest`, and warnings and notices carry the entry as `src_info` (`Warner.warn` / `notice` take `info=`; `Transferrer.warn` / `notice` are removed).
+- `reusable_after_interrupt` is removed: a Ctrl-C or an immediate cancel now reaches the caller at once with requests still out, and after a Ctrl-C that `S3` is not used again (a `CancelToken` stops an operation and keeps it usable); a cancel or early stop no longer waits for a listing page (`sieve_pages` now yields a page the filter empties).
+- Removed `MalformedResponseError`, `S3ScanOptions.include_common_prefixes`, `TransferConfig`'s `should_stream` / `disk_throughput` / `direct_io`, the walk's `crosses_full_path_boundary` and `sym_depth`, `pathresolver`'s MRAP and Outposts probes and `boto3_s3.transfer`'s SDK-floor probes; `s3_errors` and `translate_boto_error` moved to the new `boto3_s3.sdkerrors`.
+- Errors are classified more precisely: a config file or setting botocore refuses raises `InvalidConfigError`, a classic download that gave up retrying a body read `TransportError`, and an SDK too old for `mb`'s tags or `ls`'s bucket filters `ValidationError`.
+- The library no longer checks or works around code you hand it that breaks its documented contract or responses outside S3's API, and no longer reproduces `aws s3`'s error details or makes up for older SDKs; what such code raises is recorded as the error policy says.
+- `presign` returns the URL `aws s3 presign` returns for the client's region however the client was built, and `website` reads a string target as `aws s3 website` reads its argument.
+- A single local directory source is named as `aws s3` names it, and a local source that cannot be walked as a directory stops a `sync` or recursive `cp` / `mv` before it starts instead of running on an empty source.
+- Failures that went unreported now fail their item: a request that dies without a response, a `PreconditionFailed` outside `no_overwrite`'s own write, a multipart copy's failed post-copy writes (so `mv` keeps its source), and a stdout that cannot take a download; an exception from `on_progress` ends the run, and a malformed `grants` is refused before it starts.
+- On the CRT engine, items cut short are `CANCELLED` as on the classic engine, and `mv` from S3 no longer deletes its sources one at a time (`on_result` can now run on several threads at once there, and a cancel can leave a finished file beside its source).
+- On Windows a classic-engine download replaces its destination in one step, and a classic download no longer keeps the data it has written in memory.
+
 ## [0.12.0] - 2026-10-18
 
 - Added `is_s3express_accesspoint_path`, `LocalStorage.exists()` / `ensure_directory()` and a `transfer_config` for `rm` and `S3Deleter`; `S3PathResolver` and `has_underlying_s3_path` now cover an S3 Express access point, which `sync` refuses, and an empty local path is rejected instead of meaning the working directory.
@@ -36,19 +57,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.10.0] - 2026-08-13
 
-- Local file timestamps at the edge of `datetime`'s range now warn and fall back to the epoch exactly where `aws s3` does, a download stamps whole seconds on the local file like aws, and an S3-side timestamp the local zone cannot represent now stops the run where aws stops.
-- S3 listings and single-object heads now fail on an entry missing a required element the way aws fails, instead of silently dropping it.
+- Local file timestamps at the edge of `datetime`'s range now warn and fall back to the epoch exactly where `aws s3` does, a download stamps whole seconds on the local file like aws-cli, and an S3-side timestamp the local zone cannot represent now stops the run where aws-cli stops.
+- S3 listings and single-object heads now fail on an entry missing a required element the way aws-cli fails, instead of silently dropping it.
 - A local entry that changes underneath a recursive walk — a directory replaced or removed, a file that became a directory, one that vanished or was rewritten — is now handled the way `aws s3` handles it (warned and skipped, descended, or transferred as it now is) instead of failing the scan.
-- `sync` now refuses a listing that arrives out of order with a `ValidationError` instead of an internal assertion (aws keeps merging there and can delete files present on both sides — deliberately not mirrored).
-- Added `ScanOptions.read_ahead`; a deleting `sync` walks its local destination without read-ahead, so a tree aliased through symlinked directories no longer reports spurious delete failures (aws's shape).
+- `sync` now refuses a listing that arrives out of order with a `ValidationError` instead of an internal assertion (aws-cli keeps merging there and can delete files present on both sides — deliberately not mirrored).
+- Added `ScanOptions.read_ahead`; a deleting `sync` walks its local destination without read-ahead, so a tree aliased through symlinked directories no longer reports spurious delete failures (aws-cli's shape).
 - `guess_mime_type` now guesses from the MIME table of the official aws-cli build on every host interpreter, so the stored `Content-Type` no longer depends on the Python version.
-- A stream destination no longer checks stdout up front or flushes it on completion (aws's writer shape): a missing or failing stdout is a per-item transfer failure.
-- Added `S3ScanOptions.include_common_prefixes`; `ls` uses it to keep prefix entries in recursive listings the way aws displays them.
+- A stream destination no longer checks stdout up front or flushes it on completion (aws-cli's writer shape): a missing or failing stdout is a per-item transfer failure.
+- Added `S3ScanOptions.include_common_prefixes`; `ls` uses it to keep prefix entries in recursive listings the way `aws` displays them.
 - Fixed a rare hang: a cancellation upgraded to immediate while `sync` was already settling pooled filter decisions now cancels them instead of waiting forever.
 - `wait_on_interrupt` was renamed `reusable_after_interrupt`: the flag declares whether operations stay callable after a caught Ctrl-C, which the old name did not convey. Declaring `False` now also abandons an in-flight listing page pull whichever window the interrupt lands in; previously an interrupt outside the pull itself waited the pull out.
 - `presign` URLs now name the client's own regional endpoint like `aws s3 presign`; outside `us-east-1` they named the legacy global host while carrying the real region in their credential scope.
 - Added `pathresolver.is_outpost_path` and `is_outpost_alias_path`, the S3 Outposts counterparts of `is_mrap_path` for callers that pin a signature version; all three probes now recognize every spelling botocore signs with SigV4a, not just aws-cli's canonical ones.
-- More aws-cli parity on transfer wording and shapes: a single-file copy to the bare `s3:///` root keeps the explicit slash and names its destination key like aws, a rewritten `HeadObject` 404 keeps botocore's retry note, and a failed annotation copy reports aws-cli's failure text.
+- More aws-cli parity on transfer wording and shapes: a single-file copy to the bare `s3:///` root keeps the explicit slash and names its destination key like aws-cli, a rewritten `HeadObject` 404 keeps botocore's retry note, and a failed annotation copy reports aws-cli's failure text.
 - `TransferConfig`'s download IO queue now defaults to the depth `aws s3` runs at, so passing a default-constructed config no longer shrinks it tenfold.
 - A CRT-engine run cut short — by Ctrl-C or by a fatal error elsewhere in the run — now counts the cancelled items as failures the way `aws s3` does (a Ctrl-C that previously returned as if the run had succeeded now raises `BatchError`); only a `CancelToken` cancel still reports them cancelled.
 - Added two more `aws s3` CRT postures to `S3(...)`: `crt_allow_lockless` lets an explicit `crt` preference build the CRT engine under cross-process lock contention the way `aws s3` does (an `auto` run never inherits the opt-in through the process singleton), and `crt_sign_requests` declares whether the CRT engine signs its requests instead of deriving it from the client. Every default keeps boto3's own behavior.
@@ -77,7 +98,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Ctrl-C exit posture moved to `S3(wait_on_interrupt=...)` (reaching scans via `ScanOptions`); the per-storage constructor option is gone, and it no longer applies to `SystemExit`.
 - More aws-cli parity: `sync` now rejects S3 Express directory buckets (their listings are unordered, which could mis-pair the merge), and a `mv` download stamps the file mtime before deleting the source; relative local storages also resolve consistently if the process chdir's after construction.
 - CRT transfers now derive their endpoint and TLS settings from the run's actual client - a client with a different endpoint, `verify`, or S3 addressing config falls back to the classic engine instead of riding the first client's settings; custom-backend scans stamp `FileInfo.storage` before filters run, and the open route no longer skips the keyless-source listing probe.
-- Streaming downloads to stdout now always write in order like aws (a stdout redirected with `>>` opens O_APPEND, where seek-based parallel writes could interleave chunks).
+- Streaming downloads to stdout now always write in order like aws-cli (a stdout redirected with `>>` opens O_APPEND, where seek-based parallel writes could interleave chunks).
 - Custom-backend (open-route) transfers now call `Storage.open` when an entry's bytes first move, not when it is queued: large recursive runs no longer exhaust file handles, failed or cancelled entries leave the backend untouched, and destinations receive one strictly ordered write stream.
 
 ## [0.7.0] - 2026-07-17
@@ -110,7 +131,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release.
 
-[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.12.0...HEAD
+[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.13.0...HEAD
+[0.13.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.12.0...boto3-s3-v0.13.0
 [0.12.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.11.1...boto3-s3-v0.12.0
 [0.11.1]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.11.0...boto3-s3-v0.11.1
 [0.11.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.10.0...boto3-s3-v0.11.0

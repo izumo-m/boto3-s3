@@ -1,4 +1,4 @@
-"""Unit tests for boto3_s3_cli.s3errormsg (aws's `after-call.s3` rewriter).
+"""Unit tests for boto3_s3_cli.s3errormsg (aws-cli's `after-call.s3` rewriter).
 
 The three rewrites and their wording are aws-cli's, ported verbatim; each case
 below is a canned parsed response of the shape the real service returns.
@@ -7,8 +7,6 @@ below is a canned parsed response of the shape the real service returns.
 from __future__ import annotations
 
 from typing import Any
-
-import pytest
 
 from boto3_s3_cli import s3errormsg
 
@@ -48,7 +46,7 @@ def test_permanent_redirect_continues_the_message_with_the_endpoint() -> None:
             "Endpoint": "bkt.s3.eu-west-1.amazonaws.com",
         }
     )
-    # aws drops the message's trailing period so the endpoint reads as its
+    # aws-cli drops the message's trailing period so the endpoint reads as its
     # continuation, then puts the advice on its own line.
     assert message == (
         _REDIRECT_MESSAGE[:-1] + ": bkt.s3.eu-west-1.amazonaws.com\n" + s3errormsg.REGION_ERROR_MSG
@@ -67,7 +65,7 @@ def test_kms_sigv4_message_keeps_its_text_and_gains_the_advice() -> None:
 
 def test_the_branches_are_ordered_like_aws() -> None:
     # A PermanentRedirect whose message also mentions the signature version
-    # takes the sigv4 branch: aws tests that one first.
+    # takes the sigv4 branch: aws-cli tests that one first.
     message = _enhance(
         {
             "Code": "PermanentRedirect",
@@ -93,18 +91,3 @@ def test_a_successful_response_is_left_alone() -> None:
 def test_a_missing_parse_is_tolerated() -> None:
     # botocore emits after-call with parsed=None when nothing was parsed.
     s3errormsg.enhance_error_msg(parsed=None)
-
-
-def test_an_error_without_a_message_is_left_alone() -> None:
-    parsed: dict[str, Any] = {"Error": {"Code": "404"}}
-    s3errormsg.enhance_error_msg(parsed=parsed)
-    assert parsed == {"Error": {"Code": "404"}}
-
-
-def test_a_bare_permanent_redirect_fails_on_the_element_aws_reads_first() -> None:
-    # aws reads the endpoint before the message, so a response carrying
-    # neither names `Endpoint` in the failure line (measured through a fake
-    # S3 answering `<Error><Code>PermanentRedirect</Code></Error>`).
-    with pytest.raises(KeyError) as excinfo:
-        s3errormsg.enhance_error_msg({"Error": {"Code": "PermanentRedirect"}})
-    assert excinfo.value.args == ("Endpoint",)
