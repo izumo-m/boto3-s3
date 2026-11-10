@@ -132,7 +132,10 @@ masked debug output the supported way (run the CLI with `--debug`, or call
 ### 3.4 The `http.client` wire dump is not handled
 
 As in section 2, the `http.client` wire dump does not appear under the default
-`--debug`.
+`--debug`. An option that raises the debuglevel to show it must mask it too.
+The dump bypasses `logging`, so that takes a redactor patched onto
+`http.client`, installed and removed with the debug output itself (`--debug`,
+`set_stream_logger`), not around each operation.
 
 ## 4. Replacement notation
 
