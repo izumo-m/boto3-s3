@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-10
+
 - `LocalStorage(skip_unreadable=False)` lists unreadable files instead of skipping them, so each fails or is compared on its own (`LocalFileGenerator.should_ignore_entry` now takes `options`); `EtagComparison` and `ChecksumComparison` take a local file they cannot read as differing instead of stopping the `sync`.
 - A local walk under a `GlobFilter` no longer looks at what the rules exclude: an excluded file is not checked and a directory with everything below it excluded is not read, so neither warns (`GlobFilter.excludes_below` tells whether a directory is such a one); the glob matching was reworked.
 
@@ -134,7 +136,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release.
 
-[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.13.0...HEAD
+[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.14.0...HEAD
+[0.14.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.13.0...boto3-s3-v0.14.0
 [0.13.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.12.0...boto3-s3-v0.13.0
 [0.12.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.11.1...boto3-s3-v0.12.0
 [0.11.1]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-v0.11.0...boto3-s3-v0.11.1
