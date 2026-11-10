@@ -169,6 +169,7 @@ def compile(rules: Iterable[Exclude | Include]) -> GlobFilter: ...  # boto3_s3.g
 class GlobFilter:
     def __call__(self, info: FileInfo) -> bool: ...
     def included(self, relative: str | None, full: str | None = None) -> bool: ...
+    def excludes_below(self, relative: str | None, full: str | None = None) -> bool: ...
     @property
     def rules(self) -> tuple[Exclude | Include, ...]: ...
 
@@ -242,3 +243,42 @@ through `normcase` first. On Linux and macOS that is the identity: matching is
 byte-exact and `\` is an ordinary character. On Windows it lower-cases with
 Windows' own table and turns `/` into `\`, so matching is case-insensitive and
 the two separators are one, in an S3 key as in a pattern.
+
+**A local walk prunes by it.** When the `filter` of an operation that walks a
+local directory — a recursive `cp` / `mv` source, a local `sync` side, the
+`case_conflict` pre-walk — is a `GlobFilter`, the walk drops what it excludes
+before looking at it: a file the rules exclude is not stat'ed or checked, and a
+directory under which they exclude everything (`excludes_below`) is not read.
+Nothing there is warned about, where the AWS CLI walks and checks every entry
+and warns — an unreadable file, a FIFO — even for what `--exclude` leaves out.
+The entries taken part are the same. Only a `GlobFilter` itself prunes: the
+same rules inside a predicate of your own (`lambda f: web(f) and ...`) run
+after the checks, since a predicate may read the stat, so that walk looks at
+everything and warns as the AWS CLI does. A symlink is checked before the
+rules, since only its stat says what it leads to.
+
+**Directories.** `excludes_below(relative, full=None)` answers `True` when
+every entry whose R starts with `relative` and whose F starts with `full` is
+excluded — the directory itself among them — whatever names follow, so a walk
+need not descend it. Pass a directory's R and F with their trailing separator,
+as a walk stamps them (`compare_key` and `key` of a `DIRECTORY` entry; on
+Windows F starts with its whole drive or share); with `full` `None` only the
+patterns matched against R apply, as in `included`.
+`False` means only that the rules cannot be shown to exclude everything there,
+never that something is kept. The answer is `True` when the latest `Exclude`
+pattern ending in `*` that matches the directory is followed by no `Include`
+whose literal head (its text before the first `*`, `?` or `[`) and the
+directory's path are such that one starts with the other:
+
+```python
+rules = globsieve.compile([Exclude("*"), Include("src/*"), Exclude("*/node_modules/*")])
+rules.excludes_below("lib/")                   # True
+rules.excludes_below("src/")                   # False
+rules.excludes_below("src/a/node_modules/")    # True
+```
+
+It does not see that several `Exclude` patterns cover a directory only
+together (`ex/a*` with `ex/[!a]*`), that a pattern which does not match the
+directory itself excludes everything below it (`ex/?*` at `ex/`, though it
+answers `True` for every directory under `ex/`), or that an `Include` such as
+`?/x` cannot reach a directory.

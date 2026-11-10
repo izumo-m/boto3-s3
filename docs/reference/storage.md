@@ -354,7 +354,7 @@ constructs `scan_options_type` with all field defaults.
 This is the single place a backend seeds the scan **source config** it holds on
 its instance — how this particular source is read, set once on the constructor.
 `LocalStorage` seeds `follow_symlinks` / `detect_symlink_loops` /
-`enumerate_all_entries`, `S3Storage` seeds `page_size` / `fetch_owner`. The
+`enumerate_all_entries` / `skip_unreadable`, `S3Storage` seeds `page_size` / `fetch_owner`. The
 high-level operations build from this value and overlay only the run-level
 knobs, so a storage's configuration reaches every operation, not just an
 arg-less `scan()`. `read_ahead` is seeded here too by a backend whose listing
@@ -486,6 +486,7 @@ class LocalStorage(Storage):
         follow_symlinks: bool = True,
         detect_symlink_loops: bool = False,
         enumerate_all_entries: bool = False,
+        skip_unreadable: bool = True,
         fsync: bool = False,
         filename_encoding: str | None = None,
     ) -> None: ...
@@ -514,13 +515,13 @@ later changes directory, and `FileInfo.key` always comes out absolute.
 subclass. The walker is stateless across a walk, so one instance may be shared
 by several `LocalStorage` instances.
 
-`follow_symlinks`, `detect_symlink_loops` and `enumerate_all_entries` are this
-source's scan configuration. They are held on the instance and seeded into
-every scan through `default_scan_options`, so an operation inherits them
-without being passed them; their per-entry meanings are on `LocalScanOptions`
-([`./options.md`](./options.md)). `get_fileinfo` reads `follow_symlinks` only —
-the enumeration and loop settings shape a walk and do not apply to resolving
-one entry. It looks the location itself up in the AWS CLI's form: a path typed
+`follow_symlinks`, `detect_symlink_loops`, `enumerate_all_entries` and
+`skip_unreadable` are this source's scan configuration. They are held on the
+instance and seeded into every scan through `default_scan_options`, so an
+operation inherits them without being passed them; their per-entry meanings are
+on `LocalScanOptions` ([`./options.md`](./options.md)). `get_fileinfo` reads
+`follow_symlinks` and `skip_unreadable` only — the enumeration and loop settings
+shape a walk and do not apply to resolving one entry. It looks the location itself up in the AWS CLI's form: a path typed
 with a trailing `os.sep` (`\` on Windows, where `/` does not count) is looked
 up with one, so a file so named is absent, and a directory is named with one —
 its `key` ends in `/` and its `compare_key` is `""`. Its skip warnings name it
@@ -639,8 +640,8 @@ sub-directories — and a page never spans two directory reads.
 A non-recursive scan yields one level as a single page, in the same sort order,
 with sub-directories surfacing as `DIRECTORY`-kind entries whose key ends in
 `/` rather than being descended. A non-directory location is the single-entry
-case, stat'd honoring the passed options' `follow_symlinks` with `compare_key`
-set to the basename.
+case, stat'd honoring the passed options' `follow_symlinks` and
+`skip_unreadable` with `compare_key` set to the basename.
 
 Under `enumerate_all_entries` both forms lead with the scanned path's own
 record, whose `compare_key` is `""`; the recursive form then walks, the
@@ -663,7 +664,7 @@ options object is taken.
 ### default_scan_options()
 
 Returns a `LocalScanOptions` seeded with the constructor's `follow_symlinks`,
-`detect_symlink_loops` and `enumerate_all_entries`.
+`detect_symlink_loops`, `enumerate_all_entries` and `skip_unreadable`.
 
 ### open(key, mode, \*, size=None)
 
@@ -697,7 +698,8 @@ for a child, following the same deliberate `..` / absolute-key resolution as
 `open`. `FileInfo.key` is absolute and `compare_key` is its basename — for the
 location itself, in the AWS CLI's form described under the constructor (a
 directory's `key` ends in `/` and its `compare_key` is `""`). Whether a
-symlink is followed is the storage's own `follow_symlinks`, not a parameter.
+symlink is followed, and whether an unreadable file is skipped, is the
+storage's own `follow_symlinks` and `skip_unreadable`, not a parameter.
 
 One `os.stat` is taken and reused for the size, the mtime, the special-file
 check and the returned `stat_result`, so the checks and the stored snapshot
@@ -706,7 +708,8 @@ cannot disagree.
 Returns `None` for a definitively absent path (`ENOENT` / `ENOTDIR`, which
 includes a broken symlink when following), for a symlink when
 `follow_symlinks=False`, and — after warning through `on_warning` — for a
-special or unreadable file or directory. A directory is returned with `FileKind.DIRECTORY`
+special or unreadable file or directory; under `skip_unreadable=False` an
+unreadable file is returned and fails where it is read. A directory is returned with `FileKind.DIRECTORY`
 and no type check, and fails later at open the way `aws s3` fails. A stat error
 that is not absence is raised, translated, with `operation` unset for the
 operation layer to fill and the path as `key`.
@@ -1521,6 +1524,7 @@ class LocalFileGenerator:
         dir_fd: int | None,
         st: os.stat_result,
         *,
+        options: LocalScanOptions,
         notify: Callable[[str], None],
     ) -> bool: ...
     def stat_info(
@@ -1598,14 +1602,19 @@ matches.
 
 The fields of `options` this reads: `on_warning` (the warning channel, dropped
 when `None`), `enumerate_all_entries`, `follow_symlinks`,
-`detect_symlink_loops`, `filter`, and `storage`. Under
+`detect_symlink_loops`, `skip_unreadable`, `filter`, and `storage`. Under
 `enumerate_all_entries` the root leads in a one-record page and each descended
 directory rides the page flushed before its children. `filter` is applied here,
-on the yielded pages, *after* the vetting battery — so an excluded file still
-emits the warnings the AWS CLI would in the normal view — and after the
-producing backend is stamped, so a predicate can read `info.storage`. The root
-itself is vetted with `should_ignore_file`; its children per entry in
-`scan_children`.
+on the yielded pages, *after* the vetting battery and after the producing
+backend is stamped, so a predicate can read `info.stat_result` and
+`info.storage`. A `filter` that is a `GlobFilter` also prunes the walk before
+the vetting: `scan_children` drops by name a file the rules exclude and a
+directory under which they exclude everything (`GlobFilter.excludes_below`),
+and `walk_dir` does not descend such a directory, so what the rules exclude is
+never looked at and draws no warning — where the AWS CLI vets every entry, and
+warns, before filtering. Any other predicate, the same rules inside a function
+included, runs only after the vetting. The root itself is vetted with
+`should_ignore_file`; its children per entry in `scan_children`.
 
 `detect_symlink_loops` takes effect only together with `follow_symlinks`, since
 a cycle requires a followed link; without both, no `LoopDetector` is built and
@@ -1636,7 +1645,11 @@ matches an ancestor is skipped with a `Symbolic link loop detected` warning.
 Override it and return early for a directory to prune its subtree, or
 re-implement the loop to cap depth — preserving the depth-first byte order
 `sync`'s merge-join relies on. `compare_key` stamping and `options.filter` are
-not this method's job.
+not this method's job, with one exception: when `options.filter` is a
+`GlobFilter` that excludes everything below a sub-directory
+(`excludes_below` on its `compare_key` and `key`), the loop does not descend
+it — whichever `scan_children` produced it, and for a leaf that became a
+directory at its turn.
 
 ### restat_leaf(path, info, \*, options, notify)
 
@@ -1707,6 +1720,14 @@ are directory-relative.
 A path contributes at most one child, never two: a followed symlink describes
 its target, and a non-followed symlink in the complete view describes the link
 itself.
+
+When `options.filter` is a `GlobFilter`, an entry the rules exclude by its name
+never reaches `classify_child`: a file they exclude, or a directory under which
+they exclude everything (`GlobFilter.excludes_below`). The decision uses the
+key and `compare_key` the default `stat_info` and `dir_child` stamp, from the
+name and the type the scan reports, so the entry is not stat'ed, vetted or
+warned about. A symlink is classified first, since only its stat says what it
+leads to.
 
 A directory that cannot be opened or scanned — replaced, removed or locked away
 in the race between its parent's scan and this descent — is put through the
@@ -1813,10 +1834,9 @@ it. The default is exactly `normalize_sort`.
 The list arrives **unsorted**, so pruning here happens before the sort; call
 `super().finalize_children` or `normalize_sort` for byte order. **Dropping a
 `DIRECTORY` child prunes its whole subtree**, because the walk never descends
-what this does not return — a saving `aws s3` cannot make, since it vets every
-file, which is why this is the right seam for a backup walk that need not
-match `aws s3`, and not the default. A backup walker normally customizes only
-this method.
+what this does not return. A `GlobFilter` in `options.filter` already prunes by
+itself (`list_file_pages`), so this is the seam for a walker that excludes by
+rules of its own; such a backup walker normally customizes only this method.
 
 Note that a `finalize_children` override prunes by its own rules and never sees
 `options.filter`, so it does not by itself justify setting
@@ -1849,13 +1869,15 @@ that check's message to `notify`. Used for the root, for a directory whose scan
 could not be established, for a leaf whose re-stat fails at its turn
 (`restat_leaf`), and for the near-boundary re-vetting.
 
-### should_ignore_entry(entry, full, dir\_fd, st, \*, notify)
+### should_ignore_entry(entry, full, dir\_fd, st, \*, options, notify)
 
 The same battery on one entry's already-taken stat, the directory-entry form of
 `triggers_warning`. It decides only whether a *present* entry is ignorable — a
 special file, or one the process cannot read — since the no-follow skip and the
 "does not exist" case belong to `classify_child`. The readability probe is
-directory-relative where the platform allows.
+directory-relative where the platform allows. Under
+`options.skip_unreadable=False` a file is not probed, so an unreadable one is
+kept; a directory is probed either way.
 
 One refinement on the probe's failure path: an entry whose full-path resolution
 fails, because it exceeds the host's path limit or raced away, warns "File does

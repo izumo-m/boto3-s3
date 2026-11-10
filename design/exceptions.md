@@ -164,7 +164,8 @@ Custom backends: an exception a custom `Storage` raises that is not already a
 a per-item failure (the translators' last-resort clause, section 3), and so is
 one raised while a `sync` content comparison (`EtagComparison` /
 `ChecksumComparison`) reads the custom side, which aborts the `sync`
-(`comparator`'s `_read_readable`); one raised during enumeration (`scan`) or
+(`comparator`'s `_read_readable`; a local side that cannot be read reads as
+differing instead); one raised during enumeration (`scan`) or
 elsewhere on the fatal path propagates **as-is**.
 The library assumes a well-behaved backend that maps its own errors to this
 taxonomy ([`storage.md`](./storage.md) section 2).

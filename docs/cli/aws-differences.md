@@ -43,7 +43,8 @@ from it), a transfer or delete whose request dies
 without any response, a multipart copy whose tag write and its cleanup both
 fail, a local source that cannot be walked as a directory, a path with no
 bucket, two downloads whose names differ only in case on Windows, a filtered
-path holding glob characters, `--exclude` / `--include`
+path holding glob characters, a local entry `aws` warns about where
+`--exclude` leaves it out, `--exclude` / `--include`
 between nested S3 prefixes or across sides on Windows (below), a timestamp
 (an object's or a local file's) only `aws`'s local-time conversion cannot
 hold, a
@@ -515,6 +516,19 @@ that say outright that the run comes out differently, listed in section 1.
   this command takes the path - the working directory included - literally:
   those runs exclude what the patterns name. This holds until AWS documents
   the behavior as intended.
+- **What `--exclude` leaves out of a local directory is not looked at.** `aws`
+  walks the whole local tree and checks every entry before it applies
+  `--exclude` / `--include`, so it warns about an unreadable file or
+  directory, a special file (a FIFO, a socket), a file with an invalid
+  timestamp or one that vanished during the walk even where the filters leave
+  it out: `aws s3 cp --recursive src s3://bkt/p --exclude 'ex/*'` prints
+  `warning: Skipping file .../src/ex/locked. File/Directory is not readable.`
+  and exits 2 (measured on 2.36.40). This command does not read a directory
+  under which the filters exclude everything, and does not check a file they
+  exclude, so the same run prints no warning and exits 0, and an excluded tree
+  such as `node_modules` costs no time. What is transferred or deleted is the
+  same. A symlink is still checked before the filters, since only its target
+  says what it is.
 - **The `--version` line.** `aws` names itself and its interpreter; this
   command names the four packages that decide its behavior —
   `boto3-s3-cli/<v> boto3-s3/<v> boto3/<v> botocore/<v> Python/<v>

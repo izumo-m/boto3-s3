@@ -31,7 +31,7 @@ from boto3_s3.exceptions import Boto3S3Error, NotFoundError, ValidationError
 from boto3_s3.localstorage import LocalStorage, to_native_path
 from boto3_s3.s3storage import S3Storage, object_info
 from boto3_s3.sdkerrors import attribute_failure, s3_request
-from boto3_s3.storage import Storage, StorageCapability
+from boto3_s3.storage import LeadingSlashView, Storage, StorageCapability
 from boto3_s3.transfer import TransferItem, Transferrer, option_mode
 from boto3_s3.types import (
     CancelToken,
@@ -62,7 +62,7 @@ def walk_source_scan_options(
 
     Built from the storage's own ``default_scan_options`` - which seeds the
     source-config held on the instance (``LocalStorage``'s ``follow_symlinks`` /
-    ``detect_symlink_loops`` / ``enumerate_all_entries``, a
+    ``detect_symlink_loops`` / ``enumerate_all_entries`` / ``skip_unreadable``, a
     custom backend's own knobs, all configured on the constructor) - with only
     the run-level knobs overlaid: the operation-inherent ones (``recursive`` /
     ``sort`` / ``on_warning`` / the item ``filter``). So a ``LocalStorage`` subclass,
@@ -618,7 +618,7 @@ def s3_listing_filter(item_filter: FileFilter, base_key: str) -> FileFilter:
     """
     if not base_key.endswith(_JOIN_SEPARATORS) or base_key.endswith("/"):
         return item_filter
-    return _rooted_view(item_filter)
+    return LeadingSlashView(item_filter)
 
 
 def local_walk_filter(item_filter: FileFilter, storage: Storage) -> FileFilter:
@@ -636,17 +636,7 @@ def local_walk_filter(item_filter: FileFilter, storage: Storage) -> FileFilter:
     """
     if not isinstance(storage, LocalStorage) or not storage.abspath.endswith(("/", os.sep)):
         return item_filter
-    return _rooted_view(item_filter)
-
-
-def _rooted_view(item_filter: FileFilter) -> FileFilter:
-    """``item_filter`` shown each entry with a leading ``/`` on its ``compare_key``."""
-
-    def rooted(info: FileInfo) -> bool:
-        relative = info.compare_key
-        return item_filter(info if relative is None else replace(info, compare_key=f"/{relative}"))
-
-    return rooted
+    return LeadingSlashView(item_filter)
 
 
 def _filter_single_s3_source(

@@ -52,6 +52,7 @@ from boto3_s3.exceptions import Boto3S3Error, ConfigurationError, NotFoundError,
 from boto3_s3.localstorage import LocalStorage
 from boto3_s3.storage import Storage
 from boto3_s3.types import FileInfo, S3FileInfo, TransferType
+from tests.utils.host import skip_if_chmod_is_inert
 from tests.utils.pairbuilders import local_info, make_pair, native_key, write_file
 
 try:
@@ -871,10 +872,11 @@ class _MidReadFailingLocal(LocalStorage):
 
 
 class TestReadableSideFailure:
-    """A failure reading the readable side leaves either strategy as a library
-    error (`ContentComparison._read_readable`): the caller's backend's as the
-    base error with its own on ``__cause__`` (a family error as it is), the
-    local file's in the local taxonomy."""
+    """A failure reading the readable side (`ContentComparison._read_readable`):
+    a local file that cannot be read reads as differing, so the pair is copied
+    and fails or succeeds on its own; the caller's backend's failure leaves
+    either strategy as the base error with its own on ``__cause__`` (a family
+    error as it is)."""
 
     @staticmethod
     def _strategies() -> list[Any]:
@@ -883,8 +885,11 @@ class TestReadableSideFailure:
 
     @staticmethod
     def _pair(storage: Storage) -> SyncPair:
-        src = FileInfo(key="k", compare_key="obj", size=10, storage=storage)
-        dest = S3FileInfo(key="obj", etag='"abc"', size=10)
+        # The S3 side carries _DATA's ETag and checksum, so a side that reads
+        # as _DATA compares equal: a True below can only come from the failure.
+        src = FileInfo(key="k", compare_key="obj", size=len(_DATA), storage=storage)
+        etag = f'"{hashlib.md5(_DATA).hexdigest()}"'
+        dest = S3FileInfo(key="obj", etag=etag, size=len(_DATA))
         return SyncPair(compare_key="obj", transfer_type=TransferType.UPLOAD, src=src, dest=dest)
 
     @pytest.mark.parametrize("strategy", [0, 1], ids=["etag", "checksum"])
@@ -905,12 +910,33 @@ class TestReadableSideFailure:
         assert (excinfo.value.operation, excinfo.value.key) == ("sync", "obj")
 
     @pytest.mark.parametrize("strategy", [0, 1], ids=["etag", "checksum"])
-    def test_a_local_read_failure_is_translated(self, strategy: int, tmp_path: Path) -> None:
+    def test_a_local_mid_read_failure_reads_as_differing(
+        self, strategy: int, tmp_path: Path
+    ) -> None:
         compare = self._strategies()[strategy]
-        with pytest.raises(NotFoundError) as excinfo:
-            compare(self._pair(_MidReadFailingLocal(str(tmp_path))))
-        assert isinstance(excinfo.value.__cause__, FileNotFoundError)
-        assert (excinfo.value.operation, excinfo.value.key) == ("sync", "obj")
+        assert compare(self._pair(_MidReadFailingLocal(str(tmp_path)))) is True
+
+    @pytest.mark.parametrize("strategy", [0, 1], ids=["etag", "checksum"])
+    def test_a_missing_local_file_reads_as_differing(self, strategy: int, tmp_path: Path) -> None:
+        # Removed between the listing and the compare: LocalStorage.open fails.
+        compare = self._strategies()[strategy]
+        assert compare(self._pair(LocalStorage(str(tmp_path)))) is True
+
+    @skip_if_chmod_is_inert
+    @pytest.mark.parametrize("strategy", [0, 1], ids=["etag", "checksum"])
+    def test_an_unreadable_local_file_reads_as_differing(
+        self, strategy: int, tmp_path: Path
+    ) -> None:
+        secret = tmp_path / "obj"
+        secret.write_bytes(_DATA)
+        compare = self._strategies()[strategy]
+        pair = self._pair(LocalStorage(str(tmp_path)))
+        assert compare(pair) is False  # readable, the digests match
+        secret.chmod(0)
+        try:
+            assert compare(pair) is True
+        finally:
+            secret.chmod(0o644)
 
 
 # -- request payer -------------------------------------------------------------

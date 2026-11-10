@@ -443,22 +443,18 @@ without `part_size` and the config read fails — a `[s3] multipart_chunksize`
 that is not a size, or a set-but-missing profile where the `S3` was built
 without a session.
 
-Raises, from a call: a failure reading the readable side, as a
-[`Boto3S3Error`](./exceptions.md#boto3s3error). On a `LocalStorage` side an
-`OSError` is translated into the library taxonomy —
-[`NotFoundError`](./exceptions.md#notfounderror) for a missing file,
-[`AccessDeniedError`](./exceptions.md#accessdeniederror) for a permission
-failure, [`TransportError`](./exceptions.md#transporterror) otherwise —
-carrying `operation="sync"` and the entry's compare key; its own `open`
-failure is translated first, the same way but unnamed, so a file removed
-between the listing and the compare surfaces as a `NotFoundError` whose
-`operation` is `"sync"` when the strategy ran under `sync` and `None` when it
-was called directly. On any other backend a `Boto3S3Error` the backend raises
-passes as it is, and anything else becomes the `Boto3S3Error` base with the
-original on `__cause__`, carrying `operation="sync"` and the compare key.
-Either way the exception aborts the `sync` run rather than being recorded as a
-per-item failure, as [`PairFilter`](#pairfilter) states for any raising
-predicate.
+A `LocalStorage` side that cannot be read — not readable (a
+[`LocalStorage`](./storage.md) built with `skip_unreadable=False` lists such a
+file), removed or made unreadable since the listing, or failing mid-read —
+reads as differing. The pair is then copied, so an upload fails for that file
+alone and a download replaces it; one file never stops the whole `sync`.
+
+Raises, from a call: a failure reading a readable side on any other backend. A
+`Boto3S3Error` the backend raises passes as it is, and anything else becomes
+the [`Boto3S3Error`](./exceptions.md#boto3s3error) base with the original on
+`__cause__`, carrying `operation="sync"` and the compare key. Either way the
+exception aborts the `sync` run rather than being recorded as a per-item
+failure, as [`PairFilter`](#pairfilter) states for any raising predicate.
 
 The object holds no mutable state, so it is safe to wrap in
 [`ParallelFilter`](#parallelfilter), which is how the per-pair reads are
@@ -501,8 +497,9 @@ any byte is read — the same safeguard the pair path applies. With
 `check_size=False`, `s3_size` is ignored entirely.
 
 Raises: for a **path** source, an `OSError` from the open, the read, or the
-`os.path.getsize` is translated into the library taxonomy exactly as on the pair
-path — [`NotFoundError`](./exceptions.md#notfounderror),
+`os.path.getsize` is translated into the library taxonomy — unlike the pair
+path, which takes a local file it cannot read as differing —
+[`NotFoundError`](./exceptions.md#notfounderror),
 [`AccessDeniedError`](./exceptions.md#accessdeniederror) or
 [`TransportError`](./exceptions.md#transporterror) — carrying
 `operation="compare"` and the path, as given (through `os.fspath`), for the key.
@@ -634,8 +631,8 @@ of them, so such an object reads as carrying no checksum
 Raises, from a call: a `BotoCoreError` from `GetObjectAttributes` — absent
 credentials, an unreachable endpoint, a read timeout — is not a per-object
 verdict but a broken environment, so it is translated into the taxonomy and
-raised, aborting the run instead of silently copying everything. A failure
-reading the readable side is raised exactly as it is for
+raised, aborting the run instead of silently copying everything. A readable
+side that cannot be read is handled exactly as it is for
 [`EtagComparison`](#etagcomparison).
 
 ## ParallelFilter

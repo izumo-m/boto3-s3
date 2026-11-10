@@ -463,8 +463,8 @@ own `delete` — keeps that setting through every operation.
 ## LocalScanOptions
 
 `ScanOptions` for a local filesystem walk — the option type `LocalStorage`
-requires. It adds the walk's three source-config knobs plus one internal field.
-The three are set on the `LocalStorage` constructor and seeded into every scan
+requires. It adds the walk's four source-config knobs plus one internal field.
+The four are set on the `LocalStorage` constructor and seeded into every scan
 by that backend's `default_scan_options`, so an application configures the walk
 once on the storage rather than per operation; the high-level operations
 preserve whatever the storage holds ([`storage.md`](./storage.md)).
@@ -475,6 +475,7 @@ class LocalScanOptions(ScanOptions):
     follow_symlinks: bool = True
     detect_symlink_loops: bool = False
     enumerate_all_entries: bool = False
+    skip_unreadable: bool = True
     storage: Storage | None = None
 ```
 
@@ -485,9 +486,11 @@ readability battery, and skip symlinks that are not to be followed. `True` is
 the complete filesystem-entry view: the scanned directory itself,
 sub-directories, symlinks, special files, and entries whose metadata is
 readable even when their content is not. A `filter` can still remove any
-candidate, but filtering a directory record is already too late to prune its
-children — pruning before descent is a `LocalFileGenerator.finalize_children`
-override ([`storage.md`](./storage.md)). Because the operations preserve this
+candidate, but removing a directory record does not remove its children. A
+`GlobFilter` prunes a directory under which it excludes everything (the walk
+does not descend it, [`filters.md`](./filters.md)); for rules of your own,
+pruning before descent is a `LocalFileGenerator.finalize_children` override
+([`storage.md`](./storage.md)). Because the operations preserve this
 setting, a caller that enables it owns the consequence: surviving entries reach
 the operation and may fail, block, have device side effects, or be removed by
 `mv` or by `sync`'s delete lane, under that operation's normal behavior.
@@ -507,6 +510,29 @@ descending until the kernel's loop limit ends the walk with a misleading
 `File does not exist.` warning. It is a library extension that `aws s3` has no
 counterpart for, which is why it is off by default; off, it costs no extra
 `stat`.
+
+`skip_unreadable` (default `True`, the `aws s3` behavior) is whether the
+transfer view opens each file to check that it can be read, skipping one that
+cannot with a `File/Directory is not readable.` warning. `False` is a library
+extension that lists such a file like any other and saves that open and close
+per file. A `sync` then compares it by size and time as usual, and whatever
+needs its bytes fails or decides for that file alone: its upload fails, and a
+content comparison ([`comparator.md`](./comparator.md)) takes it as differing.
+So, unlike `aws s3`:
+
+- an unreadable source file does not make a `sync` with deletes delete its
+  destination copy;
+- an unreadable destination file is compared by size and time rather than
+  always replaced;
+- an unreadable destination-only file is deleted when deletes are on;
+- a `dryrun` lists the transfer of an unreadable file.
+
+It applies to files only. A directory that cannot be read has no entries to
+list and is skipped with the warning either way, and a special file is skipped
+by its type. The complete view (`enumerate_all_entries`) never skips an entry
+for being unreadable, so the setting does not change it. `LocalStorage`'s
+`get_fileinfo` reads it too, so a single-file `cp` or `mv` of an unreadable file
+fails at its upload instead of being skipped.
 
 `storage` (default `None`) is not a caller knob. `LocalStorage` threads its own
 instance through this field so the shared, stateless walker can stamp each

@@ -12,6 +12,7 @@ the wire).
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import threading
@@ -24,7 +25,7 @@ from typing import Any, cast
 import pytest
 from boto3.s3.transfer import TransferConfig
 
-from boto3_s3 import CrtClientOptions, Exclude, Include, crtsupport, globsieve
+from boto3_s3 import CrtClientOptions, EtagComparison, Exclude, Include, crtsupport, globsieve
 from boto3_s3.awsclicompare import AwsCliComparison
 from boto3_s3.comparator import ParallelFilter, SyncPair
 from boto3_s3.exceptions import (
@@ -1007,6 +1008,116 @@ class TestSyncDownload:
         assert excinfo.value.operation == "sync"
         assert isinstance(excinfo.value.__cause__, ValueError)  # the enum's own refusal
         assert calls == []
+
+
+@skip_if_chmod_is_inert
+class TestSkipUnreadable:
+    """``LocalStorage(skip_unreadable=False)``: an unreadable file is listed
+    like any other, so the sync compares it and whatever needs its bytes fails
+    or decides for that file alone. The default skips it with a warning, as
+    ``aws s3`` does - which is what makes a sync with deletes remove the
+    destination copy of an unreadable source file (measured on ``aws``
+    2.36.40)."""
+
+    @pytest.mark.parametrize("skip", [True, False], ids=["skip", "list"])
+    def test_upload_delete_spares_the_copy_of_an_unchanged_unreadable_file(
+        self, tmp_path: Path, skip: bool
+    ) -> None:
+        src = tmp_path / "src"
+        locked = _write(src, "b.txt", b"xx", mtime=_OLDER)
+        locked.chmod(0)
+        client, calls = make_recording_client([listing(("p/b.txt", 2)), {}])
+        results: list[OpResult] = []
+        try:
+            S3().sync(
+                LocalStorage(src, skip_unreadable=skip),
+                S3Storage("s3://bucket/p", client=client),
+                delete_filter=True,
+                transfer_config=_SERIAL,
+                on_result=results.append,
+            )
+        finally:
+            locked.chmod(0o644)
+        if skip:
+            assert ops(calls) == ["ListObjectsV2", "DeleteObjects"]
+            assert OpOutcome.WARNED in {r.outcome for r in results}
+        else:
+            assert ops(calls) == ["ListObjectsV2"]
+            assert results == []
+
+    @pytest.mark.parametrize("update_filter", [None, EtagComparison()], ids=["time", "etag"])
+    def test_a_changed_unreadable_file_fails_alone(
+        self, tmp_path: Path, update_filter: EtagComparison | None
+    ) -> None:
+        # Same size, newer: the size-and-time check copies it, and the ETag
+        # check cannot read it, which reads as differing - either way the
+        # upload is tried and fails for this file, the other still goes. The
+        # listing carries b.txt's own ETag, so a read that succeeded would skip.
+        src = tmp_path / "src"
+        locked = _write(src, "b.txt", b"xx", mtime=_NEWER)
+        _write(src, "c.txt", b"cc")
+        locked.chmod(0)
+        page = listing(("p/b.txt", 2))
+        page["Contents"][0]["ETag"] = f'"{hashlib.md5(b"xx").hexdigest()}"'
+        client, calls = make_recording_client([page, {}], read_bodies=True)
+        results: list[OpResult] = []
+        try:
+            with pytest.raises(BatchError):
+                S3().sync(
+                    LocalStorage(src, skip_unreadable=False),
+                    S3Storage("s3://bucket/p", client=client),
+                    update_filter=update_filter,
+                    transfer_config=_SERIAL,
+                    on_result=results.append,
+                )
+        finally:
+            locked.chmod(0o644)
+        outcomes = {r.compare_key: (r.outcome, type(r.error)) for r in results}
+        assert outcomes == {
+            "b.txt": (OpOutcome.FAILED, AccessDeniedError),
+            "c.txt": (OpOutcome.SUCCEEDED, type(None)),
+        }
+        assert [call.params["Key"] for call in calls if call.operation == "PutObject"] == [
+            "p/c.txt"
+        ]
+
+    @pytest.mark.parametrize("skip", [True, False], ids=["skip", "list"])
+    def test_download_over_unreadable_files(self, tmp_path: Path, skip: bool) -> None:
+        # b.txt is unchanged by size and time (the listing's time: a download
+        # counts a newer local file as changed); c.txt is not in S3.
+        out = tmp_path / "out"
+        kept = _write(out, "b.txt", b"xx", mtime=MTIME)
+        stale = _write(out, "c.txt", b"cc")
+        kept.chmod(0)
+        stale.chmod(0)
+        client, calls = make_recording_client([listing(("d/b.txt", 2)), get_response(b"xx")])
+        results: list[OpResult] = []
+        try:
+            S3().sync(
+                S3Storage("s3://bucket/d", client=client),
+                LocalStorage(out, skip_unreadable=skip),
+                delete_filter=True,
+                transfer_config=_SERIAL,
+                on_result=results.append,
+            )
+        finally:
+            for path in (kept, stale):
+                if path.exists():
+                    path.chmod(0o644)
+        done = {
+            (r.transfer_type, r.compare_key) for r in results if r.outcome is OpOutcome.SUCCEEDED
+        }
+        if skip:
+            # Both are skipped with a warning, so b.txt reads as absent and is
+            # downloaded over, and c.txt is kept.
+            assert ops(calls) == ["ListObjectsV2", "GetObject"]
+            assert done == {(TransferType.DOWNLOAD, "b.txt")}
+            assert stale.exists()
+        else:
+            # Both are listed: b.txt is unchanged, c.txt is deleted.
+            assert ops(calls) == ["ListObjectsV2"]
+            assert done == {(TransferType.DELETE, "c.txt")}
+            assert not stale.exists()
 
 
 class TestSyncFilesystemRoot:

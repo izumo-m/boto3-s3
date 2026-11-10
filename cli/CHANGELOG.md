@@ -5,6 +5,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-10
+
+- `--exclude` / `--include` no longer make a local walk look at what they leave out, so nothing there is warned about and an excluded tree costs no time (exit codes changed).
+
 ## [0.10.0] - 2026-11-09
 
 - Ctrl-C now ends any command at once at exit code 130 with `cancelled: ctrl-c received`, waiting for nothing, so an unfinished multipart upload or a temporary file can stay behind (exit codes changed).
@@ -123,7 +127,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release.
 
-[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.10.0...HEAD
+[Unreleased]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.11.0...HEAD
+[0.11.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.10.0...boto3-s3-cli-v0.11.0
 [0.10.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.9.0...boto3-s3-cli-v0.10.0
 [0.9.0]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.8.1...boto3-s3-cli-v0.9.0
 [0.8.1]: https://github.com/izumo-m/boto3-s3/compare/boto3-s3-cli-v0.8.0...boto3-s3-cli-v0.8.1

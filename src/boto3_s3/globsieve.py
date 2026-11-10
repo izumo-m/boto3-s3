@@ -53,9 +53,12 @@ aws-cli matches both strings through ``normcase``: byte-exact on POSIX, where
 system's own table and with ``/`` turned into ``\``, so the two separators are
 one, in an S3 key as in a pattern (``normcase``).
 
-The rules of one kind of match are compiled into one regular expression,
-latest rule first, so an entry costs one regex call (two when the list has a
-pattern matched against F), plus one ``normcase`` call per string on Windows.
+The rule list is cut into runs of one kind (Exclude or Include), and the
+latest run that matches decides. Within a run, a pattern made only of literal
+text and ``*`` is matched by the string operation its shape needs (a set
+member, a prefix, a suffix or a substring), and the others by one regular
+expression, so an entry costs a few string operations per run until one
+matches, plus one ``normcase`` call per string on Windows.
 A ``GlobFilter`` is immutable once compiled, so one instance serves every
 thread of an operation and any number of operations.
 
@@ -68,7 +71,9 @@ root.
 from __future__ import annotations
 
 import fnmatch
+import itertools
 import ntpath
+import operator
 import os
 import re
 import sys
@@ -326,26 +331,77 @@ def _classify(
     return _Pattern(position, include, _DRIVE, "", drive, rest)
 
 
-_Match = Callable[[str], "re.Match[str] | None"]
+# A test of one string: truthy when some pattern of its group matches it whole.
+_Test = Callable[[str], object]
+
+
+def _tests(patterns: Iterable[tuple[str, str]]) -> tuple[_Test, ...]:
+    """Compile patterns matched against one string into the fewest tests.
+
+    Each pattern is a ``(lead, text)`` pair, both already folded: ``lead`` is
+    matched literally (a root-relative pattern's drive) and ``text`` is an
+    ``fnmatch`` pattern. A pattern made only of literal text and ``*`` takes
+    the string operation its shape needs - a literal is a set member, ``P*`` a
+    prefix, ``*S`` a suffix, ``*M*`` a substring, and ``*`` the empty prefix -
+    one call for all the prefixes, one for the suffixes, one for the
+    literals and one per substring; every other pattern joins a single
+    alternation of ``fnmatch.translate`` forms. Each test is a C-level call,
+    so a group costs no Python frame. Together they match as ``fnmatch``
+    does (``*`` crosses every character, a newline too).
+    """
+    exact: set[str] = set()
+    prefixes: list[str] = []
+    suffixes: list[str] = []
+    infixes: list[str] = []
+    bodies: list[str] = []
+    for lead, text in patterns:
+        pieces = text.split("*")
+        inner = [piece for piece in pieces[1:-1] if piece]
+        first, last = lead + pieces[0], pieces[-1]
+        if "?" in text or "[" in text:
+            bodies.append(f"(?:{re.escape(lead)}{fnmatch.translate(text)})")
+        elif len(pieces) == 1:
+            exact.add(first)
+        elif not inner and not last:
+            prefixes.append(first)
+        elif not inner and not first:
+            suffixes.append(last)
+        elif len(inner) == 1 and not first and not last:
+            infixes.append(inner[0])
+        else:
+            bodies.append(f"(?:{re.escape(lead)}{fnmatch.translate(text)})")
+    tests: list[_Test] = []
+    if prefixes:
+        tests.append(operator.methodcaller("startswith", tuple(prefixes)))
+    if suffixes:
+        tests.append(operator.methodcaller("endswith", tuple(suffixes)))
+    if exact:
+        tests.append(frozenset(exact).__contains__)
+    tests.extend(operator.methodcaller("__contains__", infix) for infix in infixes)
+    if bodies:
+        tests.append(re.compile("|".join(bodies)).match)
+    return tuple(tests)
 
 
 class _Plan(NamedTuple):
-    """The regexes a filter runs for entries on one drive D.
+    """What a filter runs for entries on one drive D.
 
-    ``relative`` matches R and ``full`` matches F, each ``None`` when no rule
-    takes that form. Each is the alternation of its rules, latest first, and
-    every alternative ends in an empty marker group, so the match's
-    ``lastindex`` names the rule that decided; ``*_rules`` maps it to that
-    rule's ``(index, include)``. ``full_top`` is the latest full-path rule's
-    index (-1 when there is none): a relative match at a later index makes
-    the full-path regex unnecessary.
+    ``tests`` holds the rule list cut into runs of one kind, latest run
+    first, each run's ``_tests`` against R and then against F, as ``(test,
+    on_full, include)``. The first test that matches decides, as the last
+    matching rule does, since every rule of a run is of its kind. ``uses_full``
+    is whether any test matches F.
+
+    ``covers`` and ``includes`` serve ``GlobFilter.excludes_below``, latest
+    first: each Exclude pattern ending in ``*`` as ``(position, on_full,
+    tests)``, and each Include pattern as ``(position, on_full, head)``, its
+    literal text up to the first ``*``, ``?`` or ``[``.
     """
 
-    relative: _Match | None
-    relative_rules: dict[int | None, tuple[int, bool]]
-    full: _Match | None
-    full_rules: dict[int | None, tuple[int, bool]]
-    full_top: int
+    tests: tuple[tuple[_Test, bool, bool], ...]
+    uses_full: bool
+    covers: tuple[tuple[int, bool, tuple[_Test, ...]], ...]
+    includes: tuple[tuple[int, bool, str], ...]
 
 
 # Distinct drives whose plans a filter keeps. An operation meets one or two
@@ -353,31 +409,19 @@ class _Plan(NamedTuple):
 # the rest built per call.
 _PLAN_CACHE = 64
 
-
-def _union(
-    alternatives: list[tuple[int, bool, str]],
-) -> tuple[_Match | None, dict[int | None, tuple[int, bool]]]:
-    """Compile ``(index, include, regex)`` alternatives into one last-match-wins regex."""
-    if not alternatives:
-        return None, {}
-    regex = re.compile(
-        "|".join(f"(?:{body})(?P<r{index}>)" for index, _include, body in reversed(alternatives))
-    )
-    rules: dict[int | None, tuple[int, bool]] = {
-        regex.groupindex[f"r{index}"]: (index, include) for index, include, _ in alternatives
-    }
-    return regex.match, rules
+# A pattern's literal head: everything before its first glob character.
+_HEAD = re.compile(r"[^*?\[]*")
 
 
 def _plan(patterns: tuple[_Pattern, ...], drive: str, fold: Callable[[str], str] | None) -> _Plan:
     """Resolve the drive-dependent forms for entries on ``drive`` and compile the plan."""
-    relative: list[tuple[int, bool, str]] = []
-    full: list[tuple[int, bool, str]] = []
+    # (position, include, on_full, lead, text), in rule order.
+    resolved: list[tuple[int, bool, bool, str, str]] = []
     for p in patterns:
         if p.form == _RELATIVE:
-            relative.append((p.position, p.include, fnmatch.translate(p.text)))
+            resolved.append((p.position, p.include, False, "", p.text))
         elif p.form == _FULL:
-            full.append((p.position, p.include, fnmatch.translate(p.text)))
+            resolved.append((p.position, p.include, True, "", p.text))
         else:
             # Only Windows patterns reach here, so `fold` is the Windows fold.
             assert fold is not None
@@ -385,9 +429,7 @@ def _plan(patterns: tuple[_Pattern, ...], drive: str, fold: Callable[[str], str]
                 # ntpath.join keeps the base's drive (none on the S3 side) and
                 # takes the pattern's root and rest; the drive is the base's,
                 # matched literally.
-                full.append(
-                    (p.position, p.include, re.escape(fold(drive)) + fnmatch.translate(p.text))
-                )
+                resolved.append((p.position, p.include, True, fold(drive), p.text))
             elif p.drive.lower() == drive.lower():
                 # The same drive, as ntpath.join compares it: the pattern joins
                 # like a relative one. Written in another case, the joined path
@@ -395,17 +437,39 @@ def _plan(patterns: tuple[_Pattern, ...], drive: str, fold: Callable[[str], str]
                 # makes D's own - or, where Windows' table and str.lower part,
                 # a prefix no entry under D has.
                 if fold(p.drive) == fold(drive):
-                    relative.append((p.position, p.include, fnmatch.translate(fold(p.rest))))
+                    resolved.append((p.position, p.include, False, "", fold(p.rest)))
             else:
                 # Another drive: the join ignores the base, adding a separator
                 # between a UNC drive and the rest.
                 sep = "\\" if p.rest and p.drive[-1] not in ":\\/" else ""
                 joined = p.drive + sep + p.rest
-                full.append((p.position, p.include, fnmatch.translate(fold(joined))))
-    relative_match, relative_rules = _union(relative)
-    full_match, full_rules = _union(full)
-    full_top = full[-1][0] if full else -1
-    return _Plan(relative_match, relative_rules, full_match, full_rules, full_top)
+                resolved.append((p.position, p.include, True, "", fold(joined)))
+    runs: list[list[tuple[_Test, bool, bool]]] = []
+    for include, run in itertools.groupby(resolved, key=lambda item: item[1]):
+        relative: list[tuple[str, str]] = []
+        full: list[tuple[str, str]] = []
+        for _position, _include, on_full, lead, text in run:
+            (full if on_full else relative).append((lead, text))
+        runs.append(
+            [(test, False, include) for test in _tests(relative)]
+            + [(test, True, include) for test in _tests(full)]
+        )
+    tests = tuple(test for run in reversed(runs) for test in run)
+    latest = resolved[::-1]
+    return _Plan(
+        tests,
+        any(on_full for _test, on_full, _include in tests),
+        tuple(
+            (position, on_full, _tests([(lead, text)]))
+            for position, include, on_full, lead, text in latest
+            if not include and text.endswith("*")
+        ),
+        tuple(
+            (position, on_full, lead + _HEAD.match(text).group())  # pyright: ignore[reportOptionalMemberAccess]
+            for position, include, on_full, lead, text in latest
+            if include
+        ),
+    )
 
 
 class GlobFilter:
@@ -425,6 +489,8 @@ class GlobFilter:
     ``included(relative, full=None)`` is the same decision on plain strings:
     ``relative`` is R and ``full`` is F (a local absolute path, in either
     separator, or ``bucket/key``), ``None`` where there is none.
+    ``excludes_below(relative, full=None)`` says, from a directory's R and F,
+    that everything under it is excluded, so a walk can skip it.
 
     ``rules`` is the rule list as given to ``compile``. The filter is
     immutable and safe to share between threads; it pickles by its rules (a
@@ -487,30 +553,83 @@ class GlobFilter:
                 full = f"{cast('S3Storage', info.storage).bucket}/{info.key}"
         return self.included(info.compare_key, full)
 
+    def _plan_for(self, full: str | None) -> _Plan:
+        """The plan for entries on ``full``'s drive (the one plan, without drive forms)."""
+        drive = "" if full is None else _splitroot(full.replace("/", "\\"))[0]
+        plan = self._plans.get(drive)
+        if plan is None:
+            plan = _plan(self._patterns, drive, self._fold)
+            if len(self._plans) < _PLAN_CACHE:
+                self._plans[drive] = plan
+        return plan
+
     def included(self, relative: str | None, full: str | None = None) -> bool:
         """Whether an entry with path ``relative`` below the base and full path ``full`` is kept."""
         plan = self._static
         if plan is None:
-            drive = "" if full is None else _splitroot(full.replace("/", "\\"))[0]
-            plan = self._plans.get(drive)
-            if plan is None:
-                plan = _plan(self._patterns, drive, self._fold)
-                if len(self._plans) < _PLAN_CACHE:
-                    self._plans[drive] = plan
+            plan = self._plan_for(full)
         fold = self._fold
-        best = -1
-        verdict = True
-        if relative is not None and plan.relative is not None:
-            match = plan.relative(relative if fold is None else fold(relative))
-            if match is not None:
-                best, verdict = plan.relative_rules[match.lastindex]
-        if full is not None and plan.full is not None and plan.full_top > best:
-            match = plan.full(full if fold is None else fold(full))
-            if match is not None:
-                index, include = plan.full_rules[match.lastindex]
-                if index > best:
-                    verdict = include
-        return verdict
+        if fold is not None:
+            if relative is not None:
+                relative = fold(relative)
+            if full is not None and plan.uses_full:
+                full = fold(full)
+        for test, on_full, include in plan.tests:
+            text = full if on_full else relative
+            if text is not None and test(text):
+                return include
+        return True
+
+    def excludes_below(self, relative: str | None, full: str | None = None) -> bool:
+        """Whether every entry under a directory with R ``relative`` and F ``full`` is excluded.
+
+        ``True`` promises that ``included`` rejects every entry whose R starts
+        with ``relative`` and whose F starts with ``full`` - the directory
+        itself among them - whatever names follow, so a walk need not descend
+        it. ``relative`` and ``full`` are the directory's R and F with their
+        trailing separator, as a walk stamps them - on Windows ``full`` starts
+        with its whole drive or share, which a longer name cannot change (a bare
+        ``/`` would become a UNC share and be judged by another drive's
+        rules); ``full`` is ``None`` for entries that have no F (only the
+        relative patterns then apply, as in ``included``). ``False`` means the
+        rules cannot be shown to exclude all of them, never that something is
+        kept.
+
+        The decision: the latest Exclude pattern ending in ``*`` that matches
+        the directory matches every path that extends it, so no earlier rule
+        matters below it. The subtree is excluded unless a later Include could
+        match there, which the test allows whenever the Include's literal head
+        (its text before the first ``*``, ``?`` or ``[``) and the directory's
+        path are such that one starts with the other. So ``node_modules/*``,
+        ``*/node_modules/*`` and ``*`` followed by ``Include("src/*")`` (at
+        ``lib/``; not at ``src/``, a directory below it, or the root) answer
+        ``True``; ``ex/?*`` does not for ``ex/`` itself (only below it), and
+        neither do several Excludes that cover a directory only together.
+        """
+        plan = self._static
+        if plan is None:
+            plan = self._plan_for(full)
+        fold = self._fold
+        if fold is not None:
+            if relative is not None:
+                relative = fold(relative)
+            if full is not None:
+                full = fold(full)
+        cover = -1
+        for position, on_full, tests in plan.covers:
+            text = full if on_full else relative
+            if text is not None and tests[0](text):
+                cover = position
+                break
+        if cover < 0:
+            return False
+        for position, on_full, head in plan.includes:
+            if position < cover:
+                break
+            text = full if on_full else relative
+            if text is not None and (text.startswith(head) or head.startswith(text)):
+                return False
+        return True
 
     def __repr__(self) -> str:
         return f"GlobFilter({list(self._rules)!r})"

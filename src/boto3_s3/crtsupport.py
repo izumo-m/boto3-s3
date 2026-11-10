@@ -460,7 +460,10 @@ def create_crt_transfer_manager(
     # reads the attribute it would have set, so its construction fails with
     # AttributeError. A CRT filename download therefore commits with
     # s3transfer's own rename, as on aws-cli, not with the classic engine's
-    # one-step replace (`transfer._ReplacingOSUtils`).
+    # one-step replace (`transfer._ReplacingOSUtils`). Once an s3transfer
+    # release stores the osutil it is handed (0.6.2 through 0.19.3 do not),
+    # pass `transfer._ReplacingOSUtils()` here; do not set the private
+    # `_osutil` to get there sooner.
     kwargs: dict[str, Any] = {
         "crt_s3_client": crt_s3_client.crt_client,
         "crt_request_serializer": _crt_serializer,

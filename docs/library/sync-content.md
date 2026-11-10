@@ -187,8 +187,9 @@ if comparison.content_differs(
 ETag is never read as a match.
 
 The source is a path or an already-open binary stream. A path is opened and
-closed here, and a failure to open or read it raises the same library error a
-sync would (`NotFoundError` for a file that is gone). A stream is read from
+closed here, and a failure to open or read it raises a library error
+(`NotFoundError` for a file that is gone) — unlike a sync, which takes a local
+file it cannot read as differing and lets its transfer fail. A stream is read from
 where it stands, is never closed, and its own errors reach you unchanged.
 
 `size` is the source's own byte size, and it does two jobs: it fixes the part
