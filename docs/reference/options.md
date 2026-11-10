@@ -486,9 +486,11 @@ readability battery, and skip symlinks that are not to be followed. `True` is
 the complete filesystem-entry view: the scanned directory itself,
 sub-directories, symlinks, special files, and entries whose metadata is
 readable even when their content is not. A `filter` can still remove any
-candidate, but filtering a directory record is already too late to prune its
-children — pruning before descent is a `LocalFileGenerator.finalize_children`
-override ([`storage.md`](./storage.md)). Because the operations preserve this
+candidate, but removing a directory record does not remove its children. A
+`GlobFilter` prunes a directory under which it excludes everything (the walk
+does not descend it, [`filters.md`](./filters.md)); for rules of your own,
+pruning before descent is a `LocalFileGenerator.finalize_children` override
+([`storage.md`](./storage.md)). Because the operations preserve this
 setting, a caller that enables it owns the consequence: surviving entries reach
 the operation and may fail, block, have device side effects, or be removed by
 `mv` or by `sync`'s delete lane, under that operation's normal behavior.

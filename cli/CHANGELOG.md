@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `--exclude` / `--include` no longer make a local walk look at what they leave out, so nothing there is warned about and an excluded tree costs no time (exit codes changed).
+
 ## [0.10.0] - 2026-11-09
 
 - Ctrl-C now ends any command at once at exit code 130 with `cancelled: ctrl-c received`, waiting for nothing, so an unfinished multipart upload or a temporary file can stay behind (exit codes changed).

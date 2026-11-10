@@ -276,9 +276,11 @@ class LocalScanOptions(ScanOptions):
     readability battery, and skip no-follow symlinks. ``True`` is the complete
     filesystem-entry view: include the root, directories, symlinks, special
     files, and entries whose metadata is readable even when their content is not.
-    A filter can still remove any candidate; filtering a directory record is too
-    late to prune its children, while ``LocalFileGenerator.finalize_children`` can
-    prune before descent. High-level operations preserve this source setting, so
+    A filter can still remove any candidate. Removing a directory record does
+    not remove its children; a ``GlobFilter`` prunes a directory under which it
+    excludes everything (the walk does not descend it), and
+    ``LocalFileGenerator.finalize_children`` can prune by rules of its own.
+    High-level operations preserve this source setting, so
     a caller that enables it is responsible for filtering out entries an intended
     transfer cannot consume.
 

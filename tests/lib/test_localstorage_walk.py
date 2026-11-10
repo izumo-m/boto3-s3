@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import stat
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,7 +22,7 @@ import pytest
 
 from boto3_s3 import globsieve
 from boto3_s3.exceptions import NotFoundError, TransportError, ValidationError
-from boto3_s3.globsieve import Exclude
+from boto3_s3.globsieve import Exclude, Include
 from boto3_s3.localstorage import (
     LocalFileGenerator,
     LocalStorage,
@@ -29,6 +30,7 @@ from boto3_s3.localstorage import (
     WalkChild,
     to_native_path,
 )
+from boto3_s3.storage import LeadingSlashView
 from boto3_s3.types import FileInfo, FileKind, LocalFileInfo, LocalScanOptions, ScanOptions
 from tests.utils.host import skip_if_chmod_is_inert
 
@@ -1656,6 +1658,153 @@ class TestEnumerateAllEntries:
         assert outcomes[0] == outcomes[1]
         assert outcomes[0][0] == [""]
         assert len(outcomes[0][1]) == 1 and "is not readable" in outcomes[0][1][0]
+
+
+class _ScanSpy(LocalFileGenerator):
+    """Records every directory the walk reads, relative to ``root``."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = str(root)
+        self.read: list[str] = []
+
+    def scan_children(
+        self,
+        dir_path: str,
+        *,
+        strip: int,
+        options: LocalScanOptions,
+        notify: Callable[[str], None],
+    ) -> list[WalkChild]:
+        relative = os.path.relpath(dir_path, self.root).replace(os.sep, "/")
+        self.read.append(relative)
+        return super().scan_children(dir_path, strip=strip, options=options, notify=notify)
+
+
+def _pruned_scan(
+    root: Path,
+    item_filter: Callable[[FileInfo], bool],
+    walker: LocalFileGenerator | None = None,
+    **options: bool,
+) -> tuple[list[str], list[str]]:
+    """The compare_keys a recursive scan yields under ``item_filter``, and its warnings."""
+    warnings: list[str] = []
+    scan = LocalScanOptions(
+        recursive=True, filter=item_filter, on_warning=warnings.append, **options
+    )
+    storage = LocalStorage(str(root), walker=walker)
+    return [info.compare_key or "" for info in storage.scan(scan)], warnings
+
+
+class TestGlobFilterPrunesTheWalk:
+    """A ``GlobFilter`` drops what it excludes before the stat and the vetting.
+
+    A directory everything under which is excluded is not read, and an
+    excluded file is not stat'ed or probed, so neither warns. Any other
+    predicate - the same rules inside a function - runs after the vetting.
+    """
+
+    def test_an_excluded_directory_is_not_read(self, tmp_path: Path) -> None:
+        _make_tree(tmp_path, "keep.txt", "ex/a.txt", "ex/sub/b.txt", "in/c.txt")
+        spy = _ScanSpy(tmp_path)
+        keys, warnings = _pruned_scan(tmp_path, globsieve.compile([Exclude("ex/*")]), spy)
+        assert keys == ["in/c.txt", "keep.txt"]
+        assert spy.read == [".", "in"]
+        assert warnings == []
+
+    def test_a_directory_an_include_may_reach_is_read(self, tmp_path: Path) -> None:
+        _make_tree(tmp_path, "top.txt", "src/a.py", "src/deep/b.py", "lib/c.py")
+        spy = _ScanSpy(tmp_path)
+        rules = globsieve.compile([Exclude("*"), Include("src/*")])
+        keys, _ = _pruned_scan(tmp_path, rules, spy)
+        assert keys == ["src/a.py", "src/deep/b.py"]
+        assert spy.read == [".", "src", "src/deep"]
+
+    def test_a_pattern_led_by_star_prunes_at_any_depth(self, tmp_path: Path) -> None:
+        _make_tree(tmp_path, "a/node_modules/x/y.js", "a/b.js", "node_modules/z.js")
+        spy = _ScanSpy(tmp_path)
+        rules = globsieve.compile([Exclude("*/node_modules/*")])
+        keys, _ = _pruned_scan(tmp_path, rules, spy)
+        assert keys == ["a/b.js", "node_modules/z.js"]
+        assert "a/node_modules" not in spy.read
+
+    @skip_if_chmod_is_inert
+    def test_what_is_excluded_is_not_vetted(self, tmp_path: Path) -> None:
+        _make_tree(tmp_path, "keep.txt", "secret.lock", "ex/inner.txt")
+        (tmp_path / "secret.lock").chmod(0)
+        (tmp_path / "ex").chmod(0)
+        rules = globsieve.compile([Exclude("ex/*", "*.lock")])
+        try:
+            pruned = _pruned_scan(tmp_path, rules)
+            wrapped = _pruned_scan(tmp_path, lambda info: rules(info))
+        finally:
+            (tmp_path / "secret.lock").chmod(0o644)
+            (tmp_path / "ex").chmod(0o755)
+        assert pruned == (["keep.txt"], [])
+        # The same rules inside a function: vetted first, so both warn.
+        assert wrapped[0] == ["keep.txt"]
+        assert len(wrapped[1]) == 2
+        assert all("not readable" in warning for warning in wrapped[1])
+
+    def test_the_complete_view_keeps_a_directory_its_rules_keep(self, tmp_path: Path) -> None:
+        # `ex/?*` keeps `ex/` itself (it does not match) and excludes all below,
+        # so the record stays while the directories under it are not read.
+        _make_tree(tmp_path, "ex/a/b.txt", "ex/c.txt", "keep.txt")
+        spy = _ScanSpy(tmp_path)
+        rules = globsieve.compile([Exclude("ex/?*")])
+        keys, _ = _pruned_scan(tmp_path, rules, spy, enumerate_all_entries=True)
+        assert keys == ["", "ex/", "keep.txt"]
+        assert spy.read == [".", "ex"]
+        rules = globsieve.compile([Exclude("ex/*")])
+        spy = _ScanSpy(tmp_path)
+        keys, _ = _pruned_scan(tmp_path, rules, spy, enumerate_all_entries=True)
+        assert keys == ["", "keep.txt"]
+        assert spy.read == ["."]
+
+    def test_the_descent_is_pruned_for_a_child_the_name_check_did_not_see(
+        self, tmp_path: Path
+    ) -> None:
+        # A walker that reads directories without the rules (here: it hides
+        # them from its own scan) still has walk_dir decline to descend.
+        _make_tree(tmp_path, "ex/sub/a.txt", "keep.txt")
+
+        class _Blind(_ScanSpy):
+            def scan_children(
+                self,
+                dir_path: str,
+                *,
+                strip: int,
+                options: LocalScanOptions,
+                notify: Callable[[str], None],
+            ) -> list[WalkChild]:
+                blind = replace(options, filter=None)
+                return super().scan_children(dir_path, strip=strip, options=blind, notify=notify)
+
+        spy = _Blind(tmp_path)
+        keys, _ = _pruned_scan(tmp_path, globsieve.compile([Exclude("ex/*")]), spy)
+        assert keys == ["keep.txt"]
+        assert spy.read == ["."]
+
+    def test_a_filesystem_root_view_prunes_by_its_led_relative_path(self, tmp_path: Path) -> None:
+        # A walk of `/` shows the rules R led by "/" (LeadingSlashView), and
+        # the pruning reads the rules through it with that lead.
+        _make_tree(tmp_path, "ex/a.txt", "keep.txt")
+        rules = globsieve.compile([Exclude("?ex/*")])
+        spy = _ScanSpy(tmp_path)
+        keys, _ = _pruned_scan(tmp_path, LeadingSlashView(rules), spy)
+        assert keys == ["keep.txt"]
+        assert spy.read == ["."]
+        spy = _ScanSpy(tmp_path)
+        keys, _ = _pruned_scan(tmp_path, rules, spy)
+        assert keys == ["ex/a.txt", "keep.txt"]
+        assert spy.read == [".", "ex"]
+
+    def test_a_followed_symlink_to_an_excluded_place_is_not_descended(self, tmp_path: Path) -> None:
+        _make_tree(tmp_path, "real/a.txt")
+        (tmp_path / "link").symlink_to(tmp_path / "real", target_is_directory=True)
+        spy = _ScanSpy(tmp_path)
+        keys, _ = _pruned_scan(tmp_path, globsieve.compile([Exclude("link/*")]), spy)
+        assert keys == ["real/a.txt"]
+        assert spy.read == [".", "real"]
 
 
 class TestScanPagesAreScandirAligned:

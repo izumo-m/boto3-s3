@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from boto3_s3 import Exclude, globsieve
 from boto3_s3.exceptions import InvalidValueError
 from boto3_s3.localstorage import LocalStorage
 from boto3_s3.s3 import S3
@@ -115,6 +116,26 @@ class TestConversion:
         assert infos[0].size == len(b"\x81\xe0.txt")
         assert len(warnings) == 1
         assert "cp932" in warnings[0]
+
+    def test_the_walk_prunes_by_the_text_name(self, tmp_path: Path) -> None:
+        _tree(tmp_path)
+        storage = LocalStorage(str(tmp_path), filename_encoding=_OTHER)
+        rules = globsieve.compile([Exclude("表/*", "日本語.txt")])
+        infos = list(storage.scan(LocalScanOptions(recursive=True, filter=rules)))
+        assert [info.compare_key for info in infos] == ["plain.txt"]
+
+    def test_an_excluded_name_that_does_not_encode_back_draws_no_warning(
+        self, tmp_path: Path
+    ) -> None:
+        for raw in (b"\x87\x90.txt", b"\x81\xe0.txt", b"keep"):
+            with open(os.path.join(os.fsencode(tmp_path), raw), "wb") as handle:
+                handle.write(raw)
+        warnings: list[str] = []
+        storage = LocalStorage(str(tmp_path), filename_encoding="cp932")
+        rules = globsieve.compile([Exclude("*.txt")])
+        options = LocalScanOptions(recursive=True, filter=rules, on_warning=warnings.append)
+        assert [info.compare_key for info in storage.scan(options)] == ["keep"]
+        assert warnings == []
 
     def test_transfers_name_s3_keys_and_local_files_as_text(self, tmp_path: Path) -> None:
         _tree(tmp_path)

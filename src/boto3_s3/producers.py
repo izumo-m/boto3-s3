@@ -31,7 +31,7 @@ from boto3_s3.exceptions import Boto3S3Error, NotFoundError, ValidationError
 from boto3_s3.localstorage import LocalStorage, to_native_path
 from boto3_s3.s3storage import S3Storage, object_info
 from boto3_s3.sdkerrors import attribute_failure, s3_request
-from boto3_s3.storage import Storage, StorageCapability
+from boto3_s3.storage import LeadingSlashView, Storage, StorageCapability
 from boto3_s3.transfer import TransferItem, Transferrer, option_mode
 from boto3_s3.types import (
     CancelToken,
@@ -618,7 +618,7 @@ def s3_listing_filter(item_filter: FileFilter, base_key: str) -> FileFilter:
     """
     if not base_key.endswith(_JOIN_SEPARATORS) or base_key.endswith("/"):
         return item_filter
-    return _rooted_view(item_filter)
+    return LeadingSlashView(item_filter)
 
 
 def local_walk_filter(item_filter: FileFilter, storage: Storage) -> FileFilter:
@@ -636,17 +636,7 @@ def local_walk_filter(item_filter: FileFilter, storage: Storage) -> FileFilter:
     """
     if not isinstance(storage, LocalStorage) or not storage.abspath.endswith(("/", os.sep)):
         return item_filter
-    return _rooted_view(item_filter)
-
-
-def _rooted_view(item_filter: FileFilter) -> FileFilter:
-    """``item_filter`` shown each entry with a leading ``/`` on its ``compare_key``."""
-
-    def rooted(info: FileInfo) -> bool:
-        relative = info.compare_key
-        return item_filter(info if relative is None else replace(info, compare_key=f"/{relative}"))
-
-    return rooted
+    return LeadingSlashView(item_filter)
 
 
 def _filter_single_s3_source(

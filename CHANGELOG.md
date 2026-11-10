@@ -6,6 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - `LocalStorage(skip_unreadable=False)` lists unreadable files instead of skipping them, so each fails or is compared on its own (`LocalFileGenerator.should_ignore_entry` now takes `options`); `EtagComparison` and `ChecksumComparison` take a local file they cannot read as differing instead of stopping the `sync`.
+- A local walk under a `GlobFilter` no longer looks at what the rules exclude: an excluded file is not checked and a directory with everything below it excluded is not read, so neither warns (`GlobFilter.excludes_below` tells whether a directory is such a one); the glob matching was reworked.
 
 ## [0.13.0] - 2026-11-09
 

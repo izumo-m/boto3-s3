@@ -32,11 +32,11 @@ web.included("x.html", "/home/u/site/x.html")  # the decision on plain strings
   for the host's path rules. A value that is not a rule raises
   `ValidationError`.
 - `GlobFilter`: an immutable `FileFilter` (`__call__(info) -> bool`), with
-  `included(relative, full=None)` for plain strings and `rules`. It pickles
-  by its rules, so it crosses into a process pool.
+  `included(relative, full=None)` for plain strings, `excludes_below(relative,
+  full=None)` for a directory (section 3) and `rules`. It pickles by its
+  rules, so it crosses into a process pool.
 - `normcase(text)`: aws-cli's matching fold on this host (section 4), for a
-  caller that reasons about patterns on its own (s3bak's pruning of whole
-  directories).
+  caller that reasons about patterns on its own.
 
 The decision is aws-cli's `Filter.call`: the patterns apply in order, the last
 one that matches decides, and an entry no pattern matches is included. A
@@ -102,23 +102,68 @@ Notes:
 
 ## 3. Matching and its cost
 
-The rules of one form of match are compiled into one regular expression: the
-alternation of their `fnmatch.translate` forms, latest rule first, each
-alternative ending in an empty marker group whose index (`match.lastindex`)
-names the rule that decided. Relative rules match R and full-path rules match
-F; the later of the two matches wins, and the F regex is skipped when R's
-match is later than every full-path rule. When the list holds a Windows
-root-relative or drive-relative pattern, the two regexes depend on D, so they
-are built per drive on first sight and kept (up to 64 drives; an operation
-meets one or two).
+The rule list is cut into runs of one kind (consecutive Excludes, consecutive
+Includes), and the runs are tried latest first: the first run with a matching
+pattern decides, as the last matching rule would, since every rule of a run is
+of its kind. Within a run, a pattern made only of literal text and `*` is
+matched by the string operation its shape needs - a literal by set
+membership, `P*` by `startswith`, `*S` by `endswith`, `*M*` by `in`, `*` by
+the empty prefix - with one call for all the run's prefixes, one for its
+suffixes, one for its literals and one per substring, each a C-level call.
+Every other pattern of the run (one with `?` or `[`, or `*` elsewhere, such as
+`P*S`) joins a single regular expression of `fnmatch.translate` forms. Relative
+rules match R and full-path rules match F, in the same run. When the list holds
+a Windows root-relative or drive-relative pattern, the plan depends on D, so it
+is built per drive on first sight and kept (up to 64 drives; an operation meets
+one or two); a root-relative pattern's drive is a literal head of its text.
 
-Per entry this is one regex call (two when the list has full-path rules), F
-is built only when full-path rules exist, and on Windows each string matched
-is folded once. The old general engine's shape specializations (literal /
-prefix / suffix sets, macro shapes) are gone; measured on a 20-pattern
-exclude list the new engine costs about 0.4 µs per entry against the old
-0.35, and half the old cost on mixed include/exclude lists - small next to a
-local walk's 4.6 to 5.7 µs per entry.
+Measured per `included` call (POSIX, 1,000 paths of about 30 characters that
+mostly do not match; Python 3.10 / 3.14): one `*.tmp` costs about 0.12 / 0.09
+µs, twenty excludes mixing `*.x`, `x/*` and `*/x/*` about 0.4 / 0.3 µs (the
+former single regex took 1.0 / 1.1 µs: `fnmatch.translate` builds `*/x/*`
+with lookahead, about 0.15 µs a pattern), `*` followed by two Includes about
+0.22 / 0.14 µs. A list alternating Exclude and Include twenty times, one run
+per rule, costs about 1.3 / 0.7 µs, where the single regex took about 1.0 /
+1.1. A local walk spends 5 to 7 µs an entry, and with a `GlobFilter` the
+filter runs twice for every kept entry (section 7).
+
+### Directories: `excludes_below`
+
+`excludes_below(relative, full=None)` answers, from a directory's R and F
+(with their trailing separator), that every entry whose R starts with
+`relative` and whose F starts with `full` is excluded - the directory itself
+among them - whatever names follow. `False` means only that the rules cannot
+be shown to exclude them all. With `full` `None` the entries have no F, so only
+relative patterns apply, as in `included`. On Windows `full` must start with
+its whole drive or share, as a walk's does: a longer name cannot change that
+drive, where a bare `/` would grow into a UNC share and be judged by another
+drive's plan. The local walk uses it to skip a directory (section 7); it is
+public for a walker that applies the rules with an anchoring of its own (s3bak,
+whose `finalize_children` prunes by its own copy of this test).
+
+The decision: take the latest Exclude whose pattern ends in `*` and matches the
+directory (against R or F, by its form). If there is none, the answer is
+`False`. Otherwise the subtree is excluded unless a later Include could match
+in it, which is allowed whenever the Include's literal head - its text before
+the first `*`, `?` or `[` (with a root-relative pattern's drive in front) -
+and the directory's path are such that one starts with the other.
+
+Why it holds: a pattern `Q*` that matches the directory's path d matches every
+path extending d, since the final `*` takes the rest. (That `*` is always a
+wildcard: a closed `[...]` ends in `]`, and an unclosed `[` is a literal.) So
+for every entry below, that Exclude matches, and only a later rule can change
+the verdict. A later Exclude leaves it excluded. A later Include matching an
+entry e requires e to start with its head h; e also starts with d, so one of h
+and d starts with the other - exactly what the test refuses. The fold (section
+4) works character by character, so it keeps both prefixes, and every entry
+below d has d's drive (given a `full` that starts with its whole drive), so
+the plan is the same.
+
+What it does not find (the walk then descends, which only costs time):
+several Excludes that cover a directory only together (`ex/a*` and
+`ex/[!a]*`), a pattern that does not match the directory itself (`ex/?*` at
+`ex/`; it does at every directory below), and an Include whose head reaches
+the directory only through a glob (`?/x`).
 
 ## 4. Case and separators: `normcase`
 
@@ -191,10 +236,38 @@ side applies it as `ScanOptions.filter`: the backend's `scan_pages` stamps
 `compare_key` and runs the predicate on the listing's prefetch worker, page by
 page (or on the consuming thread where the scan runs without read-ahead;
 [`storage.md`](./storage.md)), so an excluded entry is absent downstream and
-the predicate must be thread-safe and cheap. The local backend applies it
-inside the walk, after aws-cli's vetting, so an excluded file still emits the
-warnings aws-cli would. The single-object routes apply it inline on the calling
-thread. `ls` has no aws-cli counterpart for the filter, so it shows the
+the predicate must be thread-safe and cheap. The single-object routes apply it
+inline on the calling thread.
+
+**The local walk** applies it inside the walk, to every entry after the
+vetting. When the filter is a `GlobFilter` - as the operation passes it, or
+inside the `LeadingSlashView` a filesystem-root walk is shown - the walk also
+prunes by it before the vetting: each directory's read drops a file the rules
+exclude and a directory under which they exclude everything (section 3), from
+the name and the type the scan reports, and the descent skips such a directory
+whichever override produced it. So what the rules exclude is not stat'ed,
+probed, warned about or read below. aws-cli walks and vets everything and
+filters afterwards, so it warns about an unreadable file or directory, a
+special file, an invalid timestamp or a vanished entry inside an excluded
+place too, and exits 2 for it; the library's own warnings (a symbolic link
+loop, a name that does not survive `filename_encoding`) are not given there
+either. What is transferred or deleted is the same, since the filter drops
+those entries either way. The difference is in docs/cli/aws-differences.md.
+
+- Only a `GlobFilter` prunes. Any other predicate, a `GlobFilter` inside a
+  function included, runs after the vetting alone, since it may read the stat
+  (`size`, `stat_result`), and running it earlier would show it a FIFO or an
+  unreadable file it is not shown today.
+- A symlink is vetted before the rules, since only its stat says what it
+  leads to; a followed directory link is then not descended if the rules
+  exclude everything below it.
+- The late filter still runs on every entry. Telling a name-checked entry from
+  one an overriding `scan_children` or `finalize_children` added would need a
+  mark the entries do not carry, and guessing wrong would let an entry past
+  the filter.
+- The S3 side is not pruned: its listing is a flat `ListObjectsV2` by prefix,
+  and pruning would need one listing per level with `Delimiter`, which costs
+  more requests on an ordinary tree. `ls` has no aws-cli counterpart for the filter, so it shows the
 predicate exactly what it delivers. Its object listing applies it as
 `ScanOptions.filter`, recursive or not, so the `DIRECTORY` entries of a
 non-recursive listing are offered too, with the `compare_key` relative to the
@@ -238,7 +311,11 @@ seeded fuzz against a verbatim port of aws-cli's `filters.py` (`create_filter`,
 `_get_*_root`, `Filter.call`, `_match_pattern`) on `posixpath` and a 3.14
 `ntpath` port, over bases without glob characters that do not nest: every
 entry's verdict equals aws-cli's with its own side's patterns, and with both
-sides' except the Windows cross-side case of section 6. The `splitroot` /
-`join` ports are cross-checked against Python 3.14 when uv finds one. The
+sides' except the Windows cross-side case of section 6. A second fuzz feeds
+it lists of the string-operation shapes, a regex pattern among them now and
+then, in several runs. `excludes_below` is fuzzed for soundness: whenever it
+answers `True`, `included` rejects the directory and random paths below it,
+with and without F, on both host models. The `splitroot` / `join` ports are
+cross-checked against Python 3.14 when uv finds one. The
 operation tests pin each route's view (section 5) and the two deliberate
 differences.

@@ -35,6 +35,16 @@ and a predicate of your own:
 
 Patterns are `fnmatch` form, in which `*` is greedy and crosses `/`.
 
+On a local directory walk a `GlobFilter` also saves work: what it excludes is
+not looked at. An excluded file is not stat'ed or checked, and a directory such
+as `node_modules/` under `Exclude("node_modules/*")` is not read at all, so
+nothing there is warned about either (`aws s3` checks every file first and
+warns about an unreadable one even when `--exclude` leaves it out). The same
+rules inside your own predicate, as in `lambda f: keep(f) and ...`, do not
+prune: a predicate may read the file's size or stat, so the walk looks at
+everything first and warns as `aws s3` does
+([reference](../reference/filters.md#globfilter)).
+
 ## 2. Which path a pattern matches
 
 The filter decides as `aws s3` does, which joins each pattern onto the
@@ -149,6 +159,17 @@ m.included("foo.log")   # False
 ```
 
 `included(relative, full=None)` takes the path below the directory or prefix being enumerated and, for the
-patterns matched against a full path, that full path. `globsieve.normcase` is
+patterns matched against a full path, that full path. `excludes_below` takes a
+directory's path (ending in `/`) the same way and says whether everything under
+it is excluded, for a walk of your own that should not descend it:
+
+```python
+src = globsieve.compile([Exclude("*"), Include("src/*")])
+src.excludes_below("logs/")   # True
+src.excludes_below("src/")    # False
+m.excludes_below("logs/")     # False: logs/ may hold a .txt file
+```
+
+`globsieve.normcase` is
 the fold `aws s3` applies to both strings before matching on this platform.
 `Exclude`, `Include` and `GlobFilter` are also available at the package root.

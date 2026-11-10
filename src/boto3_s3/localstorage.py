@@ -99,7 +99,8 @@ The override seams, finest first - extend at the smallest layer that fits:
 - ``LocalFileGenerator.finalize_children`` - a directory's ``compare_key``-
   stamped children as a whole, before the walk consumes them (default: just
   ``normalize_sort``; override to prune / harvest /
-  strip - dropping a directory prunes its subtree);
+  strip - dropping a directory prunes its subtree; a ``GlobFilter`` in
+  ``ScanOptions.filter`` prunes by itself, before this);
 - ``LocalFileGenerator.scan_children`` - one directory enumerated, its children
   ``compare_key``-stamped, then ``finalize_children``\\ d (override to change *how*
   a directory is read, reusing ``classify_child`` / ``dir_child`` / the two above);
@@ -145,7 +146,8 @@ from boto3_s3.exceptions import (
     TransportError,
     ValidationError,
 )
-from boto3_s3.storage import Storage, StorageCapability
+from boto3_s3.globsieve import GlobFilter
+from boto3_s3.storage import LeadingSlashView, Storage, StorageCapability
 from boto3_s3.types import FileInfo, FileKind, LocalFileInfo, LocalScanOptions, ScanOptions
 
 if TYPE_CHECKING:
@@ -265,6 +267,25 @@ def _walk_codec(options: LocalScanOptions) -> _FilenameCodec | None:
     storage = options.storage
     if isinstance(storage, LocalStorage):
         return storage._codec  # pyright: ignore[reportPrivateUsage]
+    return None
+
+
+def _walk_glob(options: LocalScanOptions) -> tuple[GlobFilter, str] | None:
+    """The ``GlobFilter`` a walk prunes by and the text its view puts before R, or ``None``.
+
+    Only a rule list prunes: ``options.filter`` being a ``GlobFilter``, or the
+    view of one that a filesystem-root walk is shown (``LeadingSlashView``,
+    R led by ``/``). Any other predicate - a function, a ``GlobFilter`` inside
+    one - may read what the stat gives, and runs after the vetting alone.
+    """
+    item_filter = options.filter
+    lead = ""
+    if isinstance(item_filter, LeadingSlashView):
+        item_filter = item_filter.inner
+        lead = "/"
+    # Exactly a GlobFilter: a subclass may decide otherwise than its rules.
+    if isinstance(item_filter, GlobFilter) and type(item_filter) is GlobFilter:
+        return item_filter, lead
     return None
 
 
@@ -575,13 +596,19 @@ class LocalFileGenerator:
         ``detect_symlink_loops`` (with ``follow_symlinks``, skips a directory that
         resolves to one of its own ancestors with a ``Symbolic link loop
         detected`` warning - a library extension, off = ``aws s3`` behaviour, no
-        extra ``stat``); and ``filter`` (drops entries it rejects - applied
-        *after* the aws-cli vetting so an excluded file still emits the warnings
-        aws-cli would in the normal view, and yielding only survivors saves paging them downstream;
-        the predicate can read each ``LocalFileInfo``'s ``stat_result`` /
-        ``is_symlink``, stamped for free from the walk). The root is vetted with
-        ``should_ignore_file``; its children per entry in
-        ``scan_children``.
+        extra ``stat``); and ``filter`` (drops entries it rejects, yielding only
+        survivors, which saves paging them downstream). A filter that is a
+        ``GlobFilter`` (or the view of one a filesystem-root walk is shown)
+        also prunes the walk: ``scan_children`` drops a file it excludes and a
+        directory under which it excludes everything (``excludes_below``) by
+        name, before the stat and the vetting, and ``walk_dir`` does not
+        descend such a directory - so what the rules exclude is never looked at
+        and draws no warning, where aws-cli vets every entry before filtering.
+        Any other predicate runs only here, *after* the vetting, so it can read
+        each ``LocalFileInfo``'s ``stat_result`` / ``is_symlink``, stamped for
+        free from the walk. Every yielded entry still passes ``filter`` here.
+        The root is vetted with ``should_ignore_file``; its children per entry
+        in ``scan_children``.
         """
         notify: Callable[[str], None] = (
             options.on_warning if options.on_warning is not None else (lambda body: None)
@@ -660,7 +687,11 @@ class LocalFileGenerator:
         ``options.enumerate_all_entries`` makes this loop also emit each descended
         directory's own record on the page flushed just before its descent.
         ``compare_key`` is stamped in ``scan_children``; ``ScanOptions.filter``
-        is ``list_file_pages``'s job on the yielded pages, not this method's.
+        is ``list_file_pages``'s job on the yielded pages, not this method's -
+        except that a ``GlobFilter`` under which everything below a directory is
+        excluded (``GlobFilter.excludes_below`` on its ``compare_key`` and
+        ``key``) keeps the loop from descending it, whichever ``scan_children``
+        produced the child (``list_file_pages``).
 
         Each leaf is re-stat'ed with ``restat_leaf`` just before its turn, the
         aws-cli semantics of a name that changed since its parent's scan: gone is
@@ -674,6 +705,7 @@ class LocalFileGenerator:
         # directory path, so a child's path is this prefix plus its sort name.
         prefix = dir_path if dir_path.endswith(os.sep) else dir_path + os.sep
         codec = _walk_codec(options)
+        glob = _walk_glob(options)
         for sort_name, info, loop_key in self.scan_children(
             dir_path, strip=strip, options=options, notify=notify
         ):
@@ -713,6 +745,15 @@ class LocalFileGenerator:
             # directory, the record survives and only the children are lost.
             if options.enumerate_all_entries:
                 run.append(info)
+            if glob is not None:
+                # Everything under sub is excluded by the rules: no descent.
+                # scan_children already dropped such a directory by its name;
+                # this catches the rest - a leaf promoted at its turn, and a
+                # child an overriding scan_children or finalize_children kept.
+                keep, lead = glob
+                relative = info.compare_key
+                if relative is not None and keep.excludes_below(lead + relative, info.key):
+                    continue
             # Descending runs sub's own scandir; hand off the files collected so
             # far first (they all sort before anything under sub) as this
             # directory's page, so a consumer overlaps that read. Flush before
@@ -1016,6 +1057,15 @@ class LocalFileGenerator:
         directory either: aws-cli's parent listing, whose ``isdir`` fails
         the same way, never added the separator.
 
+        With a ``GlobFilter`` as ``options.filter`` (or the view of one), an
+        entry the rules exclude by its name never reaches ``classify_child``:
+        a file they exclude, or a directory under which they exclude
+        everything (``GlobFilter.excludes_below``), decided on the key and
+        ``compare_key`` the default ``stat_info`` / ``dir_child`` stamp from
+        the name and the scan's type, so it is not stat'ed, vetted or warned
+        about. A symlink is classified first, since only its stat says what
+        it leads to.
+
         The fast path scans through the directory's own fd where the platform
         allows (``have_dir_fd``), so each entry's stat and readability probe
         are dir-relative (``fstatat`` - no path re-walk); the followed stat each
@@ -1097,10 +1147,28 @@ class LocalFileGenerator:
                     name_files_as_text(exc, codec.to_text)
                 raise
             return []
+        codec = _walk_codec(options)
+        glob = _walk_glob(options)
         try:
             with scan as it:
                 for entry in it:
                     full = os.path.join(dir_path, entry.name)
+                    if glob is not None and not entry.is_symlink():
+                        # Excluded by its name: dropped before the stat and the
+                        # vetting, so it costs nothing and warns of nothing. The
+                        # key and R are the ones the child would be stamped with
+                        # (below, and dir_child / stat_info). A symlink waits for
+                        # its stat, which says what it leads to.
+                        keep, lead = glob
+                        key = full if os.sep == "/" else full.replace(os.sep, "/")
+                        if codec is not None:
+                            key = codec.to_text(key)
+                        if entry.is_dir(follow_symlinks=False):
+                            key += "/"
+                            if keep.excludes_below(lead + key[strip:], key):
+                                continue
+                        elif not keep.included(lead + key[strip:], key):
+                            continue
                     child = self.classify_child(entry, full, dir_fd, options=options, notify=notify)
                     if child is None:
                         continue
@@ -1108,7 +1176,6 @@ class LocalFileGenerator:
         finally:
             if dir_fd is not None:
                 os.close(dir_fd)
-        codec = _walk_codec(options)
         if codec is not None:
             # The OS-form names become the storage's text here, before the key
             # is cut and the children sorted: the order is the text's. A name
@@ -1295,12 +1362,12 @@ class LocalFileGenerator:
         - so an override shapes the subtree from ``compare_key`` / ``key`` /
         ``kind``, not from the backend handle. Dropping a ``DIRECTORY`` child prunes
         its whole subtree (the walk
-        never descends what this does not return) - a speedup ``aws s3`` cannot do
-        (it vets every file), so it is the right place for a non-parity backup
-        walk, not the default. ``enumerate_all_entries`` surfaces directories,
-        symlinks, and other native entries without an override; a backup walker
-        normally customizes only this method to prune excluded subtrees. The
-        default returns the sorted list unchanged.
+        never descends what this does not return). A ``GlobFilter`` in
+        ``options.filter`` already prunes by itself (``list_file_pages``); this
+        is the place for a walker that excludes by rules of its own.
+        ``enumerate_all_entries`` surfaces directories, symlinks, and other
+        native entries without an override. The default returns the sorted list
+        unchanged.
         """
         return self.normalize_sort(children)
 
@@ -1502,8 +1569,9 @@ class LocalStorage(Storage):
     ``SORTABLE_SCAN``), and delete. ``scan_options_type`` is
     ``LocalScanOptions`` (arg-less ``scan()`` builds it, and ``scan_pages``
     requires it). ``scan_pages_filters`` is ``True`` - the walk applies
-    ``options.filter`` (the default walker late, after vetting/warnings; a custom
-    ``LocalFileGenerator`` possibly early), so ``scan`` does not re-apply it.
+    ``options.filter`` (to every entry it yields, after the vetting; a
+    ``GlobFilter`` also by name before it, see ``LocalFileGenerator.list_file_pages``),
+    so ``scan`` does not re-apply it.
     """
 
     scheme: ClassVar[str] = "local"

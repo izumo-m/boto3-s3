@@ -308,6 +308,31 @@ class TestWarnings:
         assert calls == []
 
     @skip_if_chmod_is_inert
+    def test_an_excluded_path_is_not_vetted(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # aws-cli vets every entry before the filters and warns (rc 2) even for
+        # what --exclude leaves out; the walk here never looks at it.
+        monkeypatch.chdir(tmp_path)
+        Path("keep.txt").write_bytes(b"x")
+        Path("secret.lock").write_bytes(b"x")
+        Path("ex").mkdir()
+        Path("secret.lock").chmod(0)
+        Path("ex").chmod(0)
+        ctx, calls = _recording_ctx([])
+        try:
+            argv = ["cp", ".", "s3://b/t", "--recursive", "--dryrun"]
+            rc = cli.main([*argv, "--exclude", "ex/*", "--exclude", "*.lock"], ctx=ctx)
+        finally:
+            Path("secret.lock").chmod(0o644)
+            Path("ex").chmod(0o755)
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert captured.err == ""
+        assert captured.out == f"(dryrun) upload: .{os.sep}keep.txt to s3://b/t/keep.txt\n"
+        assert calls == []
+
+    @skip_if_chmod_is_inert
     def test_quiet_keeps_rc_2_but_prints_nothing(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:

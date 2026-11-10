@@ -149,6 +149,125 @@ class TestDecision:
         assert _kept([Exclude("/base/*"), Exclude("x")], None, "/base/x") is False
 
 
+class TestShapes:
+    """Patterns of literal text and ``*`` take string operations; the rest a regex."""
+
+    @pytest.mark.parametrize(
+        ("pattern", "matching", "other"),
+        [
+            ("a.txt", ["a.txt"], ["a.txtx", "xa.txt", ""]),
+            ("", [""], ["a"]),
+            ("src/*", ["src/", "src/a/b"], ["src", "xsrc/a"]),
+            ("*.tmp", [".tmp", "a/b.tmp"], ["a.tmpx", "a.tm"]),
+            ("*/node_modules/*", ["a/node_modules/", "x/node_modules/y/z"], ["node_modules/x"]),
+            ("*", ["", "a/b"], []),
+            ("**", ["", "a"], []),
+            ("**.tmp", ["a.tmp"], ["a.tmpx"]),
+            ("*a**b*", ["ab", "xaybz"], ["ba"]),
+            ("a*b", ["ab", "a/x/b"], ["a", "b", "abx"]),
+            ("*x*", ["x", "a" + chr(10) + "x"], ["y"]),
+            ("a?c*", ["abc", "abcd"], ["ac"]),
+            ("[ab]*", ["a", "bx"], ["c"]),
+        ],
+    )
+    def test_each_shape_matches_the_whole_path(
+        self, pattern: str, matching: list[str], other: list[str]
+    ) -> None:
+        keep = globsieve.compile([Exclude(pattern)])
+        for path in matching:
+            assert keep.included(path) is False, path
+            assert fnmatch.fnmatchcase(path, pattern)
+        for path in other:
+            assert keep.included(path) is True, path
+            assert not fnmatch.fnmatchcase(path, pattern)
+
+    def test_runs_of_one_kind_decide_by_the_latest_match(self) -> None:
+        rules = [Exclude("*.log", "tmp/*"), Include("*keep*", "tmp/a?"), Exclude("tmp/ab")]
+        assert _kept(rules, "x.log", None) is False
+        assert _kept(rules, "keep.log", None) is True
+        assert _kept(rules, "tmp/ax", None) is True
+        assert _kept(rules, "tmp/ab", None) is False
+        assert _kept(rules, "tmp/b", None) is False
+        assert _kept(rules, "other", None) is True
+
+    @pytest.mark.usefixtures("windows")
+    def test_windows_folds_the_shapes_like_the_regex(self) -> None:
+        rules = [Exclude("SRC/*", "*.TMP", "*/Node_Modules/*", "A.txt")]
+        for path in ("src\\x", "src/x", "a.tmp", "x/node_modules/y", "a.TXT"):
+            assert _kept(rules, path, None) is False, path
+        assert _kept(rules, "srcx", None) is True
+
+    @pytest.mark.usefixtures("windows")
+    def test_a_rooted_shape_keeps_the_drive_literal(self) -> None:
+        rules = [Exclude("\\base\\*")]
+        assert _kept(rules, "x", "C:/base/x") is False
+        assert _kept(rules, "x", "D:/base/x") is False
+        assert _kept(rules, "x", "C:/other/x") is True
+
+
+class TestExcludesBelow:
+    """Whether everything under a directory is excluded (the walk's pruning test)."""
+
+    @pytest.mark.parametrize(
+        ("rules", "directory", "pruned"),
+        [
+            ([Exclude("node_modules/*")], "node_modules/", True),
+            ([Exclude("node_modules/*")], "node_modules/a/", True),
+            ([Exclude("node_modules/*")], "src/", False),
+            ([Exclude("*/node_modules/*")], "a/b/node_modules/", True),
+            ([Exclude("*/node_modules/*")], "node_modules/", False),
+            ([Exclude("*node_modules*")], "node_modules/", True),
+            ([Exclude("*")], "", True),
+            ([Exclude("*"), Include("src/*")], "lib/", True),
+            ([Exclude("*"), Include("src/*")], "src/", False),
+            ([Exclude("*"), Include("src/*")], "s/", True),
+            # The root holds src/, and a shorter head may lead into it.
+            ([Exclude("*"), Include("src/*")], "", False),
+            ([Exclude("*"), Include("src/a/*")], "src/", False),
+            # A head of "" may match anywhere.
+            ([Exclude("*"), Include("*.txt")], "lib/", False),
+            # Only a later Include counts; a later Exclude changes nothing.
+            ([Include("ex/keep"), Exclude("ex/*")], "ex/", True),
+            ([Exclude("ex/*"), Exclude("ex/a")], "ex/", True),
+            ([Exclude("ex/*"), Include("ex/keep")], "ex/", False),
+            # The cover must match the directory itself: `ex/?*` does not
+            # match `ex/`, but it matches everything below it.
+            ([Exclude("ex/?*")], "ex/", False),
+            ([Exclude("ex/?*")], "ex/a/", True),
+            # Not shown, though true: several Excludes covering together, and
+            # an Include whose head cannot reach the directory only by glob.
+            ([Exclude("ex/a*", "ex/[!a]*")], "ex/", False),
+            ([Exclude("*"), Include("?/x")], "ab/", False),
+            ([Exclude("ex/a")], "ex/", False),
+        ],
+    )
+    def test_relative_rules(
+        self, rules: list[Exclude | Include], directory: str, pruned: bool
+    ) -> None:
+        assert globsieve.compile(rules).excludes_below(directory) is pruned
+
+    @pytest.mark.usefixtures("posix")
+    def test_full_path_rules_need_the_full_path(self) -> None:
+        keep = globsieve.compile([Exclude("/base/ex/*")])
+        assert keep.excludes_below("ex/", "/base/ex/") is True
+        assert keep.excludes_below("ex/", None) is False
+        later = globsieve.compile([Exclude("*"), Include("/base/src/*")])
+        assert later.excludes_below("lib/", "/base/lib/") is True
+        assert later.excludes_below("src/", "/base/src/") is False
+        # Without F the full-path Include cannot apply, as in `included`.
+        assert later.excludes_below("src/", None) is True
+        assert later.included("src/x", None) is False
+
+    @pytest.mark.usefixtures("windows")
+    def test_windows_folds_the_directory(self) -> None:
+        keep = globsieve.compile([Exclude("Node_Modules/*")])
+        assert keep.excludes_below("node_modules/", "C:/b/node_modules/") is True
+        assert keep.excludes_below("NODE_MODULES\\", "C:/b/NODE_MODULES/") is True
+        rooted = globsieve.compile([Exclude("*"), Include("\\base\\src\\*")])
+        assert rooted.excludes_below("lib/", "C:/base/lib/") is True
+        assert rooted.excludes_below("src/", "D:/base/src/") is False
+
+
 class TestFileFilter:
     """The call form reads R from ``compare_key`` and F from the record's kind."""
 
@@ -1048,6 +1167,36 @@ def _pattern(rng: random.Random, os: _Os, entries: list[_Entry]) -> str:
     return base + joint + body
 
 
+def _shape_pattern(rng: random.Random, os: _Os, entries: list[_Entry]) -> str:
+    """A pattern of literal text and ``*``, cut from an entry's R or full path.
+
+    Each shape the engine matches with a string operation (a literal, ``P*``,
+    ``*S``, ``*M*``, ``*``) and ``P*S``, which it leaves to the regex; on
+    Windows sometimes respelled in case or separator.
+    """
+    if entries and rng.random() < 0.85:
+        entry = rng.choice(entries)
+        source = entry.relative if rng.random() < 0.6 else entry.aws.src
+    else:
+        source = _text(rng, _PATTERN_CHARS[3:], 0, 5)
+    start = rng.randint(0, len(source))
+    end = rng.randint(start, len(source))
+    star = "**" if rng.random() < 0.1 else "*"
+    pattern = rng.choice(
+        (
+            source,
+            source[:end] + star,
+            star + source[start:],
+            star + source[start:end] + star,
+            star,
+            source[:start] + star + source[end:],
+        )
+    )
+    if os.windows and rng.random() < 0.3:
+        pattern = pattern.upper() if rng.random() < 0.5 else pattern.replace("/", _BS)
+    return pattern
+
+
 def _drive_dependent(pattern: str, os: _Os) -> bool:
     if not os.windows:
         return False
@@ -1104,6 +1253,58 @@ def _operations(rng: random.Random, os: _Os) -> list[_Operation]:
     ]
 
 
+def _compare_with_aws(
+    rng: random.Random,
+    os: _Os,
+    pattern_of: Callable[[random.Random, _Os, list[_Entry]], str],
+    rounds: int,
+    most_rules: int,
+) -> tuple[int, int]:
+    """Random rule lists against aws-cli's ``Filter``: (entries compared, crossed sides).
+
+    Each entry's verdict must equal aws-cli's with its own side's patterns;
+    with both sides', the count of differences is returned for the caller to
+    judge (``TestAgainstAwsFilter``).
+    """
+    compared = crossed = 0
+    for _ in range(rounds):
+        operations = _operations(rng, os)
+        pool = [entry for op in operations for entry in op.entries]
+        rules: list[Exclude | Include] = []
+        flat: list[tuple[str, str]] = []
+        for _ in range(rng.randint(1, most_rules)):
+            patterns = tuple(pattern_of(rng, os, pool) for _ in range(rng.choice((1, 1, 1, 2))))
+            kind = "exclude" if rng.random() < 0.6 else "include"
+            rules.append(Exclude(*patterns) if kind == "exclude" else Include(*patterns))
+            flat.extend((f"--{kind}", p) for p in patterns)
+        keep = globsieve.compile(rules)
+        for op in operations:
+            both = _aws_create_filter(
+                {"filters": flat, "src": op.src, "dest": op.dest, "dir_op": op.dir_op}, os
+            )
+            for entry in op.entries:
+                own_location = op.src if entry.side in ("file", "key") else entry.side
+                own = _aws_create_filter(
+                    {
+                        "filters": flat,
+                        "src": own_location,
+                        "dest": own_location,
+                        "dir_op": op.dir_op,
+                    },
+                    os,
+                )
+                ours = keep.included(entry.relative, entry.full)
+                context = f"rules={rules!r} op={op.src!r}->{op.dest!r} entry={entry!r}"
+                assert ours is bool(list(own.call([entry.aws]))), context
+                aws = bool(list(both.call([entry.aws])))
+                compared += 1
+                if ours is not aws:
+                    crossed += 1
+                    assert entry.aws.src_type == "local", context
+                    assert any(_drive_dependent(p, os) for _kind, p in flat), context
+    return compared, crossed
+
+
 class TestAgainstAwsFilter:
     """Seeded fuzz against aws-cli's ``Filter``, on both host models.
 
@@ -1124,45 +1325,78 @@ class TestAgainstAwsFilter:
     ) -> None:
         os = _NT_OS if os_name == "nt" else _POSIX_OS
         request.getfixturevalue("windows" if os.windows else "posix")
-        rng = random.Random(seed)
-        compared = crossed = 0
-        for _ in range(1500):
-            operations = _operations(rng, os)
-            pool = [entry for op in operations for entry in op.entries]
-            rules: list[Exclude | Include] = []
-            flat: list[tuple[str, str]] = []
-            for _ in range(rng.randint(1, 4)):
-                patterns = tuple(_pattern(rng, os, pool) for _ in range(rng.choice((1, 1, 1, 2))))
-                kind = "exclude" if rng.random() < 0.6 else "include"
-                rules.append(Exclude(*patterns) if kind == "exclude" else Include(*patterns))
-                flat.extend((f"--{kind}", p) for p in patterns)
-            keep = globsieve.compile(rules)
-            for op in operations:
-                both = _aws_create_filter(
-                    {"filters": flat, "src": op.src, "dest": op.dest, "dir_op": op.dir_op}, os
-                )
-                for entry in op.entries:
-                    own_location = op.src if entry.side in ("file", "key") else entry.side
-                    own = _aws_create_filter(
-                        {
-                            "filters": flat,
-                            "src": own_location,
-                            "dest": own_location,
-                            "dir_op": op.dir_op,
-                        },
-                        os,
-                    )
-                    ours = keep.included(entry.relative, entry.full)
-                    context = f"rules={rules!r} op={op.src!r}->{op.dest!r} entry={entry!r}"
-                    assert ours is bool(list(own.call([entry.aws]))), context
-                    aws = bool(list(both.call([entry.aws])))
-                    compared += 1
-                    if ours is not aws:
-                        crossed += 1
-                        assert entry.aws.src_type == "local", context
-                        assert any(_drive_dependent(p, os) for _kind, p in flat), context
+        compared, crossed = _compare_with_aws(random.Random(seed), os, _pattern, 1500, 4)
         assert compared > 30000
         # On POSIX an absolute pattern joins alike onto both bases, and a
         # relative one keeps its base's literal prefix: nothing crosses.
         if not os.windows:
             assert crossed == 0
+
+    @pytest.mark.parametrize(("os_name", "seed"), [("posix", 20261110), ("nt", 20261111)])
+    def test_shape_lists_equal_aws(
+        self, os_name: str, seed: int, request: pytest.FixtureRequest
+    ) -> None:
+        """Lists of string-operation shapes, a regex pattern among them now and then, in runs."""
+        os = _NT_OS if os_name == "nt" else _POSIX_OS
+        request.getfixturevalue("windows" if os.windows else "posix")
+
+        def pattern_of(rng: random.Random, os: _Os, pool: list[_Entry]) -> str:
+            return _pattern(rng, os, pool) if rng.random() < 0.2 else _shape_pattern(rng, os, pool)
+
+        compared, crossed = _compare_with_aws(random.Random(seed), os, pattern_of, 1000, 7)
+        assert compared > 20000
+        if not os.windows:
+            assert crossed == 0
+
+
+class TestExcludesBelowAgainstIncluded:
+    """Seeded fuzz: a subtree ``excludes_below`` vouches for holds no kept entry."""
+
+    @pytest.mark.parametrize(("os_name", "seed"), [("posix", 20261112), ("nt", 20261113)])
+    def test_a_pruned_subtree_keeps_nothing(
+        self, os_name: str, seed: int, request: pytest.FixtureRequest
+    ) -> None:
+        os = _NT_OS if os_name == "nt" else _POSIX_OS
+        request.getfixturevalue("windows" if os.windows else "posix")
+        rng = random.Random(seed)
+        name_chars = _NT_NAME_CHARS if os.windows else _POSIX_NAME_CHARS
+        pruned = 0
+        for _ in range(3000):
+            parts = [_text(rng, name_chars, 1, 2) for _ in range(rng.randint(0, 2))]
+            relative = "".join(f"{part}/" for part in parts)
+            if rng.random() < 0.5:
+                base = rng.choice(_NT_LOCAL_BASES if os.windows else _POSIX_LOCAL_BASES)
+                base = base.replace(os.sep, "/")
+                full = base + ("" if base.endswith("/") else "/") + relative
+                side = "local"
+                if rng.random() < 0.2:
+                    # A filesystem-root walk's view leads R with a "/".
+                    relative = f"/{relative}"
+            else:
+                full = f"bkt/pre/{relative}"
+                side = "s3"
+            below = [(relative, full)]
+            for _ in range(6):
+                rest = _text(rng, _S3_KEY_CHARS, 1, 4)
+                below.append((relative + rest, full + rest))
+            pool = [
+                _Entry(
+                    _AwsFileInfo(f.replace("/", os.sep) if side == "local" else f, side), r, f, side
+                )
+                for r, f in below
+            ]
+            rules: list[Exclude | Include] = []
+            for _ in range(rng.randint(1, 4)):
+                pattern = (
+                    _pattern(rng, os, pool) if rng.random() < 0.3 else _shape_pattern(rng, os, pool)
+                )
+                rules.append(Exclude(pattern) if rng.random() < 0.6 else Include(pattern))
+            keep = globsieve.compile(rules)
+            for with_full in (True, False):
+                directory_full = full if with_full else None
+                if not keep.excludes_below(relative, directory_full):
+                    continue
+                pruned += 1
+                for r, f in below:
+                    assert keep.included(r, f if with_full else None) is False, (rules, r, f)
+        assert pruned > 1000

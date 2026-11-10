@@ -48,6 +48,7 @@ from __future__ import annotations
 import abc
 import os
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import replace
 from enum import Flag, auto
 from typing import Any, BinaryIO, ClassVar, Literal, TypeVar
 
@@ -76,6 +77,26 @@ def sieve_pages(
     """
     for page in pages:
         yield [info for info in page if keep(info)]
+
+
+class LeadingSlashView:
+    """A filter shown each entry with a ``/`` put before its ``compare_key``.
+
+    The view of the operation's filter for the sides whose R aws-cli reads with
+    a leading ``/`` (``producers.local_walk_filter``, ``s3_listing_filter``):
+    the filter is shown a copy of each entry carrying that R, and the record
+    keeps its own. ``inner`` is the filter as given; a local walk reads it to
+    prune by a ``GlobFilter`` (`localstorage`).
+    """
+
+    __slots__ = ("inner",)
+
+    def __init__(self, inner: Callable[[FileInfo], bool]) -> None:
+        self.inner = inner
+
+    def __call__(self, info: FileInfo) -> bool:
+        relative = info.compare_key
+        return self.inner(info if relative is None else replace(info, compare_key=f"/{relative}"))
 
 
 def _pull_pages(
