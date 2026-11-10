@@ -58,8 +58,10 @@ object reads as carrying no checksum. An upload / download comparison reads the
 **readable** (non-S3) side through its ``Storage.open`` on whatever thread
 drives the ``update_filter`` lane (``sync``'s calling thread, or a pool worker
 under ``ParallelFilter``) - any backend, not just a
-local file - and a read failure leaves the strategy as a ``Boto3S3Error``
-(`ContentComparison`'s ``_read_readable``). SSE-C objects need the customer key to
+local file. A local file that cannot be read reads as differing (copied, so
+its upload fails for that file alone); another backend's read failure leaves
+the strategy as a ``Boto3S3Error`` (`ContentComparison`'s ``_read_readable``).
+SSE-C objects need the customer key to
 ``GetObjectAttributes`` and are not supported (they read as indeterminate ->
 copy).
 """

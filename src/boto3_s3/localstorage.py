@@ -20,7 +20,10 @@ unreadable; the default ``False`` retains exact ``aws s3`` transfer enumeration.
 ``follow_symlinks`` independently selects one interpretation per symlink: follow
 and return/descend the target, or return the link itself as an lstat-based leaf in
 the complete view (the normal no-follow view skips it). A failed followed stat in
-the complete view warns and falls back to lstat. These settings ride
+the complete view warns and falls back to lstat. ``skip_unreadable=False``
+(another library extension) keeps the transfer view's files without opening each
+to check that it can be read, so an unreadable file is listed and fails or
+decides for itself where its bytes are needed. These settings ride
 ``LocalScanOptions`` (seeded from the ``LocalStorage`` constructor), so every scan
 and high-level operation preserves the configured candidate enumeration policy.
 
@@ -994,7 +997,8 @@ class LocalFileGenerator:
         the list to
         ``finalize_children`` (which sorts, and is the override point for
         pruning / registration). ``options`` carries the per-walk context the
-        classification reads (``follow_symlinks`` / ``enumerate_all_entries``).
+        classification reads (``follow_symlinks`` / ``enumerate_all_entries`` /
+        ``skip_unreadable``).
         A path contributes one child: a followed symlink describes its target;
         a no-follow symlink in the complete view describes the link itself. A
         directory that cannot be opened or scanned - replaced, deleted or
@@ -1230,7 +1234,7 @@ class LocalFileGenerator:
             # target, which Windows refuses for a directory).
             return WalkChild(entry.name, self.stat_info(entry, full, st, notify), None)
         if not options.enumerate_all_entries and self.should_ignore_entry(
-            entry, full, dir_fd, st, notify=notify
+            entry, full, dir_fd, st, options=options, notify=notify
         ):
             return None
         if stat_module.S_ISDIR(st.st_mode):
@@ -1360,6 +1364,7 @@ class LocalFileGenerator:
         dir_fd: int | None,
         st: os.stat_result,
         *,
+        options: LocalScanOptions,
         notify: Callable[[str], None],
     ) -> bool:
         """The special-file + readability battery on one entry's stat (the DirEntry
@@ -1379,7 +1384,8 @@ class LocalFileGenerator:
         stat above), or raced away since - is reported there as missing, never
         as unreadable. A full-path existence re-check on this rare branch does
         the same; a genuinely unreadable present entry is still reported as
-        unreadable.
+        unreadable. Under ``options.skip_unreadable=False`` a file is not probed
+        (a directory still is), so an unreadable one is kept.
         """
         if _is_special_mode(st.st_mode):
             notify(
@@ -1387,7 +1393,10 @@ class LocalFileGenerator:
                 "block special device, FIFO, or socket."
             )
             return True
-        if not _is_readable_child(entry.name, full, dir_fd, is_dir=stat_module.S_ISDIR(st.st_mode)):
+        is_dir = stat_module.S_ISDIR(st.st_mode)
+        if not (is_dir or options.skip_unreadable):
+            return False
+        if not _is_readable_child(entry.name, full, dir_fd, is_dir=is_dir):
             if not os.path.exists(full):
                 notify(f"Skipping file {full}. File does not exist.")
             else:
@@ -1535,6 +1544,7 @@ class LocalStorage(Storage):
         follow_symlinks: bool = True,
         detect_symlink_loops: bool = False,
         enumerate_all_entries: bool = False,
+        skip_unreadable: bool = True,
         fsync: bool = False,
         filename_encoding: str | None = None,
     ) -> None:
@@ -1571,14 +1581,16 @@ class LocalStorage(Storage):
             )
             self._abspath = os.path.normpath(self._unnormalized)
         # How this local source is read: symlink interpretation, whether every
-        # metadata-readable native entry is enumerated before filtering, and
-        # whether recursive descent guards against symlink cycles. Seeded into
-        # every scan and high-level operation via default_scan_options. The
-        # single-path get_fileinfo reads only follow_symlinks; enumeration / loop
+        # metadata-readable native entry is enumerated before filtering,
+        # whether recursive descent guards against symlink cycles, and whether
+        # an unreadable file is skipped. Seeded into every scan and high-level
+        # operation via default_scan_options. The single-path get_fileinfo
+        # reads only follow_symlinks and skip_unreadable; enumeration / loop
         # settings shape a scan and do not apply to resolving one entry.
         self._follow_symlinks = follow_symlinks
         self._detect_symlink_loops = detect_symlink_loops
         self._enumerate_all_entries = enumerate_all_entries
+        self._skip_unreadable = skip_unreadable
         # A library-only durability knob for this local backend as a *destination*
         # (default off = aws-cli parity). When set, a ``mv`` whose download lands here
         # fsyncs the file (and its parent directory) before deleting the S3 source,
@@ -1798,17 +1810,20 @@ class LocalStorage(Storage):
         (``Storage.default_scan_options``).
 
         ``follow_symlinks`` / ``detect_symlink_loops`` /
-        ``enumerate_all_entries`` come from the constructor, so every scan reads the walk
+        ``enumerate_all_entries`` / ``skip_unreadable`` come from the constructor,
+        so every scan reads the walk
         configured once on this ``LocalStorage``; an operation overlays only its
         own knobs (``recursive`` / ``sort`` / ``filter`` / ``on_warning``) onto
         this.
         The single-path ``get_fileinfo`` does not build these options - it reads
-        ``follow_symlinks`` directly and ignores the enumeration / loop knobs.
+        ``follow_symlinks`` and ``skip_unreadable`` directly and ignores the
+        enumeration / loop knobs.
         """
         return LocalScanOptions(
             follow_symlinks=self._follow_symlinks,
             detect_symlink_loops=self._detect_symlink_loops,
             enumerate_all_entries=self._enumerate_all_entries,
+            skip_unreadable=self._skip_unreadable,
         )
 
     @override
@@ -1824,7 +1839,7 @@ class LocalStorage(Storage):
         and a page never spans two directory reads - the unit a prefetch
         consumer overlaps.
         ``options.follow_symlinks`` / ``options.detect_symlink_loops`` /
-        ``options.enumerate_all_entries`` /
+        ``options.enumerate_all_entries`` / ``options.skip_unreadable`` /
         ``options.on_warning`` / ``options.filter`` are threaded into it - a
         symlink skip, the cycle guard, the aws-cli-worded warning channel a
         transfer needs, and the per-entry filter (applied in the walk, after
@@ -1873,7 +1888,7 @@ class LocalStorage(Storage):
         ``path``, and a non-directory root degrades to a "does not exist"
         warning rather than a scan error). The walk reads this storage's held
         source-config (``follow_symlinks`` / ``detect_symlink_loops`` /
-        ``enumerate_all_entries`` from the constructor, via
+        ``enumerate_all_entries`` / ``skip_unreadable`` from the constructor, via
         ``default_scan_options`` - the same walk ``scan``
         runs); ``on_warning`` is the per-call overlay, like an operation's. This
         is the raw walk (no ``ScanOptions.filter``); ``scan`` applies the filter
@@ -1897,7 +1912,8 @@ class LocalStorage(Storage):
         the recursive walk: no descent, so a sub-directory surfaces as a single
         ``DIRECTORY`` entry (S3-style) rather than its files. A non-directory
         scanned path is the single-entry case - stat'd through ``_stat_one``
-        honoring the passed ``follow_symlinks`` (not the storage's), with
+        honoring the passed ``follow_symlinks`` / ``skip_unreadable`` (not the
+        storage's), with
         ``compare_key`` set to the basename, like ``get_fileinfo``. A directory is
         first vetted through ``should_ignore_file`` as in the recursive walk: a
         no-follow symlink is silently skipped and an unreadable or special path
@@ -1935,11 +1951,16 @@ class LocalStorage(Storage):
                 return
         elif not os.path.isdir(os_root):
             # A single-file non-recursive scan honors the passed options'
-            # follow_symlinks (like the directory branch below), so it stats
+            # follow_symlinks / skip_unreadable (like the directory branch below), so it stats
             # through _stat_one directly rather than get_fileinfo (which reads the
             # storage's own config); compare_key is the basename, as get_fileinfo
             # stamps for a single entry.
-            info = self._stat_one(root, follow_symlinks=options.follow_symlinks, notify=notify)
+            info = self._stat_one(
+                root,
+                follow_symlinks=options.follow_symlinks,
+                skip_unreadable=options.skip_unreadable,
+                notify=notify,
+            )
             if info is not None:
                 info.compare_key = info.key.rsplit("/", 1)[-1]
                 if item_filter is None or item_filter(info):
@@ -1978,6 +1999,7 @@ class LocalStorage(Storage):
         *,
         follow_symlinks: bool,
         notify: Callable[[str], None],
+        skip_unreadable: bool = True,
         directory_form: bool = False,
     ) -> LocalFileInfo | None:
         """One path's ``LocalFileInfo``, or ``None`` when there is no transferable entry.
@@ -1986,8 +2008,10 @@ class LocalStorage(Storage):
         ``follow_symlinks=False`` symlink, or a definitively absent path (``ENOENT`` /
         ``ENOTDIR`` - including a broken symlink when following), is a silent ``None``; a special /
         unreadable file or directory warns via ``notify`` and returns ``None``
-        (aws-cli's warn-and-skip); a regular file or directory returns a ``LocalFileInfo`` (no
-        type check, so a directory is returned and fails later at open). A stat error
+        (aws-cli's warn-and-skip; ``skip_unreadable=False`` keeps an unreadable
+        file, which then fails where it is read); a regular file or directory
+        returns a ``LocalFileInfo`` (no type check, so a directory is returned and
+        fails later at open). A stat error
         other than absence (e.g. a permission error reaching the path) is raised -
         existence could not be determined. ``compare_key`` is the caller's to stamp.
 
@@ -2040,7 +2064,7 @@ class LocalStorage(Storage):
                 "block special device, FIFO, or socket."
             )
             return None
-        if not is_readable(native, is_directory):
+        if (is_directory or skip_unreadable) and not is_readable(native, is_directory):
             notify(f"Skipping file {shown}. File/Directory is not readable.")
             return None
         size, mtime = get_file_stat(native, st)
@@ -2147,7 +2171,8 @@ class LocalStorage(Storage):
         ``open``, ``key`` is joined under the location and
         a ``..`` / absolute ``key`` deliberately resolves outside it (a building
         block an app drives, not a confinement boundary - see ``open``).
-        Whether a symlink is followed is the storage's own ``follow_symlinks``
+        Whether a symlink is followed, and whether an unreadable file is
+        skipped, is the storage's own ``follow_symlinks`` / ``skip_unreadable``
         config (constructor), like every scan built from
         ``default_scan_options`` (a caller-supplied ``LocalScanOptions``
         carries its own settings instead).
@@ -2162,7 +2187,11 @@ class LocalStorage(Storage):
         else:
             target = self._abspath
         info = self._stat_one(
-            target, follow_symlinks=self._follow_symlinks, notify=notify, directory_form=not key
+            target,
+            follow_symlinks=self._follow_symlinks,
+            skip_unreadable=self._skip_unreadable,
+            notify=notify,
+            directory_form=not key,
         )
         if info is not None:
             info.compare_key = info.key.rsplit("/", 1)[-1]

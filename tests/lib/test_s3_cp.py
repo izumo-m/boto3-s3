@@ -27,6 +27,7 @@ from s3transfer.utils import OSUtils
 
 from boto3_s3 import Exclude, Include, crtsupport, globsieve, producers, transferplan
 from boto3_s3.exceptions import (
+    AccessDeniedError,
     BatchError,
     CancelledError,
     NotFoundError,
@@ -452,6 +453,28 @@ class TestUploadRoute:
         assert calls == []
         assert [result.outcome for result in results] == [OpOutcome.WARNED]
         assert str(src) in str(results[0].error)
+
+    @skip_if_chmod_is_inert
+    def test_unreadable_single_source_fails_when_listed(self, tmp_path: Path) -> None:
+        # skip_unreadable=False keeps the file, so its upload is tried and fails.
+        src = tmp_path / "secret.txt"
+        src.write_bytes(b"x")
+        src.chmod(0)
+        client, calls = make_recording_client([], read_bodies=True)
+        results: list[OpResult] = []
+        try:
+            with pytest.raises(BatchError):
+                S3().cp(
+                    LocalStorage(src, skip_unreadable=False),
+                    S3Storage("s3://b/k", client=client),
+                    transfer_config=_SYNC,
+                    on_result=results.append,
+                )
+        finally:
+            src.chmod(0o644)
+        assert calls == []
+        assert [result.outcome for result in results] == [OpOutcome.FAILED]
+        assert isinstance(results[0].error, AccessDeniedError)
 
     def test_directory_single_source_fails_is_a_directory(self, tmp_path: Path) -> None:
         # A non-recursive cp of a directory fails like aws-cli with [Errno 21]

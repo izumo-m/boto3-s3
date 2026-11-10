@@ -122,6 +122,49 @@ class TestWalkWarnings:
             (tmp_path / "locked").chmod(0o755)
         assert len(warnings) == 1 and "is not readable" in warnings[0]
 
+    @skip_if_chmod_is_inert
+    def test_unreadable_file_is_kept_without_warning_when_not_skipped(self, tmp_path: Path) -> None:
+        _make_tree(tmp_path, "ok.txt", "secret.txt")
+        (tmp_path / "secret.txt").chmod(0)
+        warnings: list[str] = []
+        try:
+            keys = _keys(tmp_path, on_warning=warnings.append, skip_unreadable=False)
+        finally:
+            (tmp_path / "secret.txt").chmod(0o644)
+        assert keys == ["ok.txt", "secret.txt"]
+        assert warnings == []
+
+    @skip_if_chmod_is_inert
+    def test_unreadable_directory_is_skipped_even_when_files_are_not(self, tmp_path: Path) -> None:
+        _make_tree(tmp_path, "ok.txt", "locked/inner.txt")
+        (tmp_path / "locked").chmod(0)
+        warnings: list[str] = []
+        try:
+            keys = _keys(tmp_path, on_warning=warnings.append, skip_unreadable=False)
+        finally:
+            (tmp_path / "locked").chmod(0o755)
+        assert keys == ["ok.txt"]
+        _assert_warned(warnings, (tmp_path / "locked", "not readable"))
+
+    @skip_if_chmod_is_inert
+    def test_one_level_scan_of_an_unreadable_file_keeps_it_when_not_skipped(
+        self, tmp_path: Path
+    ) -> None:
+        secret = tmp_path / "secret.txt"
+        secret.write_bytes(b"x")
+        secret.chmod(0)
+        warnings: list[str] = []
+        try:
+            infos = list(
+                LocalStorage(secret).scan(
+                    LocalScanOptions(skip_unreadable=False, on_warning=warnings.append)
+                )
+            )
+        finally:
+            secret.chmod(0o644)
+        assert [info.compare_key for info in infos] == ["secret.txt"]
+        assert warnings == []
+
     def test_probe_failure_of_a_vanished_entry_warns_does_not_exist(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1105,11 +1148,14 @@ class TestWalkIsCustomizable:
                 dir_fd: int | None,
                 st: os.stat_result,
                 *,
+                options: LocalScanOptions,
                 notify: Callable[[str], None],
             ) -> bool:
                 if full.endswith(".tmp"):
                     return True
-                return super().should_ignore_entry(entry, full, dir_fd, st, notify=notify)
+                return super().should_ignore_entry(
+                    entry, full, dir_fd, st, options=options, notify=notify
+                )
 
         storage = LocalStorage(str(tmp_path), walker=_NoTmp())
         keys = [info.compare_key for info in storage.scan(LocalScanOptions(recursive=True))]
@@ -1855,6 +1901,21 @@ class TestGetFileinfo:
         finally:
             secret.chmod(0o644)
         _assert_warned(warnings, (secret, "not readable"))
+
+    @skip_if_chmod_is_inert
+    def test_unreadable_file_is_returned_when_not_skipped(self, tmp_path: Path) -> None:
+        secret = tmp_path / "secret.txt"
+        secret.write_bytes(b"x")
+        secret.chmod(0)
+        warnings: list[str] = []
+        try:
+            info = LocalStorage(str(secret), skip_unreadable=False).get_fileinfo(
+                on_warning=warnings.append
+            )
+        finally:
+            secret.chmod(0o644)
+        assert info is not None and info.size == 1
+        assert warnings == []
 
     def test_no_follow_symlink_skips_silently(self, tmp_path: Path) -> None:
         target = tmp_path / "real.txt"

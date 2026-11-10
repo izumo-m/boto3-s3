@@ -62,7 +62,7 @@ def walk_source_scan_options(
 
     Built from the storage's own ``default_scan_options`` - which seeds the
     source-config held on the instance (``LocalStorage``'s ``follow_symlinks`` /
-    ``detect_symlink_loops`` / ``enumerate_all_entries``, a
+    ``detect_symlink_loops`` / ``enumerate_all_entries`` / ``skip_unreadable``, a
     custom backend's own knobs, all configured on the constructor) - with only
     the run-level knobs overlaid: the operation-inherent ones (``recursive`` /
     ``sort`` / ``on_warning`` / the item ``filter``). So a ``LocalStorage`` subclass,

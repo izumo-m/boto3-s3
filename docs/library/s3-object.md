@@ -140,7 +140,7 @@ either give it to the `S3` object for every location, or pass
 
 How a location is *scanned* is configured on the `Storage`, not per operation.
 `LocalStorage(path, follow_symlinks=..., detect_symlink_loops=...,
-enumerate_all_entries=...)` controls the local walk;
+enumerate_all_entries=..., skip_unreadable=...)` controls the local walk;
 `S3Storage(uri, page_size=..., fetch_owner=...)` controls the listing. A bare
 string gets the defaults, so pass a configured `Storage` when you need to change
 them — there is no per-call `page_size=` argument.

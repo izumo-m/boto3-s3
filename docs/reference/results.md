@@ -453,7 +453,8 @@ while its `stat_result` describes the target.
 Every `LocalFileInfo` produced by `LocalStorage` carries both fields; a value
 built by hand may leave `stat_result` at `None`. The enumeration knobs that
 decide which entries appear at all — `enumerate_all_entries`,
-`follow_symlinks`, `detect_symlink_loops` — belong to `LocalScanOptions`
+`follow_symlinks`, `detect_symlink_loops`, `skip_unreadable` — belong to
+`LocalScanOptions`
 ([`options.md`](./options.md)).
 
 ## S3FileInfo

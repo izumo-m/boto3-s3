@@ -429,16 +429,16 @@ class TestSizeCheckToggle:
         )
         assert EtagComparison(check_size=True)(pair) is True
 
-    def test_size_check_off_reads_and_raises_on_missing(self, tmp_path: Path) -> None:
-        # check_size off: no short-circuit, so the missing file is opened. The read
-        # now goes through Storage.open, whose OSError is translated to a Boto3S3Error.
+    def test_size_check_off_reads_past_a_size_mismatch(self, tmp_path: Path) -> None:
+        # check_size off: no short-circuit, so the file is read and its matching
+        # ETag decides (skip), whatever the sizes say.
+        p = write_file(tmp_path, _TEN)
         pair = _pair(
             TransferType.UPLOAD,
-            src=local_info(native_key(tmp_path / "nope"), size=10),
-            dest=_s3(etag="abc", size=20),
+            src=local_info(native_key(p), size=len(_TEN)),
+            dest=_s3(etag=_TEN_SINGLE, size=20),
         )
-        with pytest.raises(Boto3S3Error):
-            EtagComparison(check_size=False)(pair)
+        assert EtagComparison(check_size=False)(pair) is False
 
     def test_equal_size_still_hashes(self, tmp_path: Path) -> None:
         # Same size, different content: the size check passes through to the hash.

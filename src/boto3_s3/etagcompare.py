@@ -136,18 +136,20 @@ class EtagComparison(ContentComparison):
     hash. ``check_size=False`` restores pure-ETag semantics.
 
     An upload / download comparison reads the **readable** (non-S3) side through
-    its ``Storage.open`` - any backend, not just a local file - and a read
+    its ``Storage.open`` - any backend, not just a local file. A local file
+    that cannot be read (unreadable, or removed since the listing) reads as
+    differing, so its upload fails for that file alone; another backend's read
     failure leaves the strategy as a ``Boto3S3Error`` (`ContentComparison`'s
-    ``_read_readable``: a ``NotFoundError`` for a local file removed between
-    the listing and the compare); the s3-to-s3 path reads nothing. A pair with
+    ``_read_readable``). The s3-to-s3 path reads nothing. A pair with
     neither side an S3 object is treated as differing (copy).
 
     ``content_differs`` applies the same judgment to a **single** source - a
     local path or an open binary stream against an ETag the caller supplies -
     outside any sync. Everything above about the part size, ``check_size`` and
-    which ETags are reconstructible holds for it; what differs is only that the
+    which ETags are reconstructible holds for it; what differs is that the
     ETag and the two sizes are passed directly instead of read off a
-    ``SyncPair``.
+    ``SyncPair``, and that a path it cannot read raises instead of reading as
+    differing.
     """
 
     __slots__ = ("check_size", "part_size")

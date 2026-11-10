@@ -52,6 +52,7 @@ def make_recording_client(
     region: str = "us-east-1",
     service: str = "s3",
     endpoint_url: str | None = None,
+    read_bodies: bool = False,
 ) -> tuple[S3Client, list[ApiCall]]:
     """Build a client for *service* replaying *parsed_responses* in call order.
 
@@ -72,7 +73,9 @@ def make_recording_client(
     the network before ``_make_api_call`` is intercepted. A fresh ``Session``
     (not the process-global default) keeps the fake credentials from being
     cached and leaking into the e2e suite's real client later in the same
-    run.
+    run. *read_bodies* reads a call's ``Body`` stream before answering, as
+    botocore does when it sends, so a source that cannot be read fails that
+    call (unrecorded) as it would against a server.
     """
     client: Any = boto3.session.Session().client(
         service, region_name=region, endpoint_url=endpoint_url
@@ -81,6 +84,9 @@ def make_recording_client(
     remaining = list(parsed_responses)
 
     def _canned_api_call(operation_name: str, api_params: dict[str, Any]) -> dict[str, Any]:
+        body: Any = api_params.get("Body")
+        if read_bodies and hasattr(body, "read"):
+            body.read()
         calls.append(ApiCall(operation_name, dict(api_params)))
         if not remaining:
             exhausted_calls.append(f"{service}.{operation_name}")

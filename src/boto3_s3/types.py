@@ -298,6 +298,22 @@ class LocalScanOptions(ScanOptions):
     a misleading ``File does not exist.`` warning (which is ``aws s3``'s
     behavior). Off is zero extra cost (no per-directory ``stat``).
 
+    ``skip_unreadable`` (default ``True``, aws-cli's behavior) is whether the
+    transfer view opens each file to check that it can be read, skipping one
+    that cannot with a ``File/Directory is not readable.`` warning. ``False``
+    (a library extension) lists such a file like any other, saving that open
+    and close per file: a ``sync`` compares it by size and time as usual, and
+    whatever then needs its bytes fails or decides for that file alone - its
+    upload fails, a content comparison takes it as differing. So, unlike
+    ``aws s3``, an unreadable source file does not make a ``sync`` with deletes
+    delete its destination copy, an unreadable destination file is compared
+    rather than always replaced, and an unreadable destination-only file is
+    deleted when deletes are on. It applies to files only: a directory that
+    cannot be read has no entries to list and is skipped either way, and a
+    special file is skipped by its type. The complete view
+    (``enumerate_all_entries``) never skips an entry for being unreadable, so
+    the setting does not change it.
+
     ``storage`` is not a user knob: ``LocalStorage`` threads its own instance here
     (``scan_pages`` / ``walk_local``) so the *shared, stateless*
     ``LocalFileGenerator`` can stamp each entry's
@@ -312,6 +328,7 @@ class LocalScanOptions(ScanOptions):
     follow_symlinks: bool = True
     detect_symlink_loops: bool = False
     enumerate_all_entries: bool = False
+    skip_unreadable: bool = True
     storage: Storage | None = None
 
 

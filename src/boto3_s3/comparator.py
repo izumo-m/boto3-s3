@@ -352,35 +352,42 @@ class ContentComparison:
         raise NotImplementedError
 
     @staticmethod
-    def _read_readable(readable: FileInfo, digest: Callable[[BinaryIO], _R]) -> _R:
+    def _read_readable(readable: FileInfo, digest: Callable[[BinaryIO], _R]) -> _R | None:
         """Open the readable side as ``storage.open(compare_key, "rb")`` and digest it.
 
         Relies on the entry's ``storage`` and ``compare_key``, which every scan
-        stamps (a hand-built pair must set both). A ``LocalStorage`` side is
-        the library's own file: its ``open`` translates its own failure, and a
-        raw ``OSError`` from the stream (a fault mid-read or on close) takes
-        the local taxonomy's category too. Any other backend is the caller's
-        code (design/overview.md section 3): a ``Boto3S3Error`` it raises
-        passes as it is, and anything else becomes the base error with the
-        original as ``__cause__``. Either way the exception leaves the
-        strategy, aborting a ``sync`` as any raising predicate does.
+        stamps (a hand-built pair must set both). ``None`` means the side could
+        not be read, which the strategies take as differing.
+
+        A ``LocalStorage`` side is the library's own file, and a failure to read
+        it - unreadable (``skip_unreadable=False`` lists such a file), gone or
+        made unreadable since the listing, a fault mid-read - returns ``None``:
+        with nothing to compare, the pair is copied, so an upload fails for that
+        file alone and a download replaces it, rather than one file stopping the
+        whole ``sync``. Any other backend is the caller's code
+        (design/overview.md section 3): a ``Boto3S3Error`` it raises passes as it
+        is, and anything else becomes the base error with the original as
+        ``__cause__``. That exception leaves the strategy, aborting a ``sync`` as
+        any raising predicate does.
         """
         storage = cast("Storage", readable.storage)
         key = cast("str", readable.compare_key)
         try:
             with storage.open(key, "rb") as fh:
                 return digest(fh)
-        except Boto3S3Error:
-            raise
         except Exception as exc:
             # Deferred import: this module stays SDK-free at import time.
-            from boto3_s3.localstorage import LocalStorage, translate_os_error
+            from boto3_s3.localstorage import LocalStorage
 
-            if not isinstance(storage, LocalStorage):
-                raise Boto3S3Error(str(exc), operation="sync", key=key) from exc
-            if isinstance(exc, OSError):
-                raise translate_os_error(exc, operation="sync", key=key) from exc
-            raise
+            if isinstance(storage, LocalStorage):
+                # LocalStorage.open raises its failure translated; the stream's
+                # own read or close raises a raw OSError.
+                if isinstance(exc, (Boto3S3Error, OSError)):
+                    return None
+                raise
+            if isinstance(exc, Boto3S3Error):
+                raise
+            raise Boto3S3Error(str(exc), operation="sync", key=key) from exc
 
 
 def all_of(*predicates: Callable[[_T], bool]) -> Callable[[_T], bool]:

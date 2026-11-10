@@ -104,7 +104,8 @@ front only when the declaration is honest:
   does not pass them per operation (`S3ScanOptions` = the `ListObjectsV2`
   knobs `page_size` / `fetch_owner`, plus the operation-set `request_payer` /
   `prefix`; `LocalScanOptions` = `follow_symlinks` /
-  `detect_symlink_loops` / `enumerate_all_entries`, plus the internal `storage`
+  `detect_symlink_loops` / `enumerate_all_entries` / `skip_unreadable`, plus the
+  internal `storage`
   back-reference the walk stamps on each entry). A subclass keeps one backend's
   knobs from leaking into another's; the built-ins reject a foreign options
   type, and a custom backend reads its own knobs from its own subclass or from
@@ -128,8 +129,9 @@ front only when the declaration is honest:
   engine" (`LocalStorage`: an absent path, a `follow_symlinks=False` symlink,
   or a special / unreadable file after the aws-cli-style warn-and-skip - but a
   directory *is* returned, with no type check, and fails later at `open` the
-  way aws-cli fails). Whether a symlink is followed is `LocalStorage`'s own
-  `follow_symlinks` config, read from the storage like every scan (not a
+  way aws-cli fails). Whether a symlink is followed, and whether an unreadable
+  file is skipped, is `LocalStorage`'s own `follow_symlinks` /
+  `skip_unreadable` config, read from the storage like every scan (not a
   parameter here). `enumerate_all_entries` does not apply: the point query
   always uses those single-file rules.
 - **`delete(info) -> Mapping | None`** — remove the entry `info` identifies, by
@@ -156,7 +158,7 @@ A few more members come with working defaults a custom backend normally keeps:
   the single place a backend seeds the **source-config it holds on the instance**.
   The built-ins override it to inject their constructor knobs
   (`LocalStorage(follow_symlinks=…, detect_symlink_loops=…,
-  enumerate_all_entries=…)`,
+  enumerate_all_entries=…, skip_unreadable=…)`,
   `S3Storage(page_size=…, fetch_owner=…)`); a custom backend overrides it to seed
   its own instance state (or for any dynamic default). Every scan builds from it:
   the high-level `cp` / `sync` / `ls` / `rm` paths take

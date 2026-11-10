@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `LocalStorage(skip_unreadable=False)` lists unreadable files instead of skipping them, so each fails or is compared on its own (`LocalFileGenerator.should_ignore_entry` now takes `options`); `EtagComparison` and `ChecksumComparison` take a local file they cannot read as differing instead of stopping the `sync`.
+
 ## [0.13.0] - 2026-11-09
 
 - `S3.from_aws_cli()` builds an `S3` whose session and clients are assembled the way `aws s3` assembles its own, and `cp`, `mv`, `sync` and `rm` read the config file's `[s3]` section as `aws s3` does (`S3.resolve_transfer_config` returns the config a run would use).

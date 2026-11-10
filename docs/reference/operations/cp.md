@@ -117,7 +117,8 @@ dry run of such a transfer still leaves the directory behind.
 
 Listing and walk behavior is configured on the storage, not here: an
 `S3Storage`'s `page_size` and `fetch_owner`, and a `LocalStorage`'s
-`follow_symlinks`, `detect_symlink_loops` and `enumerate_all_entries`. Pass a
+`follow_symlinks`, `detect_symlink_loops`, `enumerate_all_entries` and
+`skip_unreadable`. Pass a
 configured storage as `src` to change any of them
 ([`../storage.md`](../storage.md), [`../options.md`](../options.md)).
 
