@@ -15,10 +15,10 @@ how the dev stack's server was chosen (section 3).
 
 Every known way the dev stack answers differently from real S3, plus the
 places where moto does and a golden is affected. The dev stack column is the
-observed behavior of RustFS 1.0.4 (`rustfs/rustfs:1.0.4`, image revision
-`46337942`): probed on 1.0.2 on 2026-10-17, again on 1.0.3, which keeps
-1.0.2's server code, on 2026-10-25, and on 1.0.4, whose probes match
-1.0.3's, on 2026-11-09. The compose file pins that release, so a
+observed behavior of RustFS 1.0.5 (`rustfs/rustfs:1.0.5`, image revision
+`34e6449e`). The rows were first probed on 1.0.2 on 2026-10-17, and each
+pinned release since has re-run them beside the one before it, most recently
+1.0.5 beside 1.0.4 on 2026-11-12. The compose file pins that release, so a
 newer one has not been checked against these rows until the probes are re-run;
 `docker exec boto3-s3-dev-s3-1 rustfs --version` prints the running one.
 
@@ -32,7 +32,7 @@ goldens replay on moto: a golden captured on one endpoint only works if moto
 answers the same way. The last column points to the test-side changes in
 section 2; the table doubles as the probe checklist for a new endpoint.
 
-| # | Surface | Dev stack (RustFS 1.0.4) | Real S3 | moto | Section 2 |
+| # | Surface | Dev stack (RustFS 1.0.5) | Real S3 | moto | Section 2 |
 |---|---|---|---|---|---|
 | G1 | PutBucketWebsite without an IndexDocument (error document only, or empty) | rejected, `MalformedXML` | rejected (`InvalidArgument`; the error-document-only shape *unverified*) | stored | T8 |
 | G2 | `--storage-class` other than STANDARD and REDUCED_REDUNDANCY (STANDARD_IA, ONEZONE_IA, INTELLIGENT_TIERING, GLACIER_IR, GLACIER, DEEP_ARCHIVE) | `InvalidStorageClass`, rc 1 | accepted, rc 0 (*measured*) | accepted | T9 |
@@ -54,12 +54,14 @@ section 2; the table doubles as the probe checklist for a new endpoint.
 | G18 | ListBuckets with a `Prefix` | the prefix is ignored: every bucket is listed | only the matching buckets | - | none |
 | G19 | Object ACL stored by a PutObject with a grant, on a bucket that allows ACLs (BucketOwnerPreferred) | not stored: GetObjectAcl answers the owner's FULL_CONTROL alone, whatever was sent | the grants sent (*measured*) | the grants sent | none |
 | G20 | ETag of an SSE-S3 object | differs on every write of the same bytes and is not the MD5 of the content, single PUT and multipart alike | the MD5 of the content (a multipart object: the MD5 of the part MD5s with `-N`), the same on every write (*measured*; an SSE-C or SSE-KMS object's ETag differs on every write on both) | the MD5 of the content | none |
-| G21 | ListObjectsV2 entry of a multipart object under SSE-S3 or SSE-C | no ETag | the ETag HeadObject answers (*measured*) | - | none |
 | G22 | `--sse aws:kms` | refused, `InvalidRequest` ("SSE-KMS requires a configured and running KMS service": the compose file configures none), rc 1 | accepted with the `aws/s3` key (*measured*) | accepted | none |
 | G23 | SSE-C on a new bucket | accepted | refused, `AccessDenied` ("this bucket has blocked upload requests that specify ... SSE-C"): new buckets block SSE-C (`BlockedEncryptionTypes`) until a PutBucketEncryption lifts it (*measured*) | - | none |
 | G24 | Anonymous PutObject sent aws-chunked with an unsigned trailer (`STREAMING-UNSIGNED-PAYLOAD-TRAILER`, as the CRT engine sends it), where a bucket policy allows anonymous writes | refused, `UnexpectedContent`, rc 1 | accepted: both CLIs' anonymous CRT uploads succeed (*measured*) | - | none |
-| G25 | DeleteObjects naming a key that holds a control character (U+0001), Quiet or not | deletes the key, then answers `InternalError` ("XML response contains a control character") | refuses the request as `MalformedXML`; the key stays (*measured*) | - | none |
+| G25 | DeleteObjects naming a key that holds a control character (U+0001), Quiet or not | cannot be set up: the key itself is refused (G27) | refuses the request as `MalformedXML`; the key stays (*measured*) | - | none |
 | G26 | An object uploaded with a `SHA512`, `MD5` or `XXHASH64` / `XXHASH3` / `XXHASH128` checksum, single PUT or multipart | accepted, but stored without it: `GetObjectAttributes` returns no checksum (a multipart object: `ChecksumType: COMPOSITE` and no value) | stored: `FULL_OBJECT` for a single PUT, `COMPOSITE` (the algorithm over the part digests) for a multipart one (*measured*) | stored for a single PUT (but `MD5`: none); a multipart object's `COMPOSITE` value is SHA256's whatever the algorithm | none |
+| G27 | A key holding a C0 control character other than TAB (U+0000-U+0008, U+000A-U+001F) | PutObject refused, `InvalidArgument` | accepted (U+0001 *measured*: G25) | - | none |
+| G28 | A key ending in `__XLDIR__` | PutObject refused, `InvalidArgument` (the suffix RustFS stores directory markers under) | accepted | - | none |
+| G29 | CreateBucket with a `LocationConstraint` other than `us-east-1` | refused, `InvalidLocationConstraint`: the server's region is us-east-1 | a constraint naming the endpoint's region creates the bucket there | - | none |
 
 G14 changes no test - the e2e sync scenarios shift times by a day - but a
 behavior that depends on it (`sync --exact-timestamps` converging) looks
@@ -71,9 +73,12 @@ suite: `tests/run_e2e.sh` creates a new bucket, so a scenario that uploads
 with SSE-C would need the block lifted first (none does today). G25 shows in
 no CLI run - aws-cli deletes one key per request, and the deleter sends a key
 XML cannot carry in a `DeleteObject` of its own (deleter.md) - only in a
-probe that batches such a key. G26 means `ChecksumComparison` copies every
-such object on the dev stack, and a test of it there or on moto cannot
-stand in for real S3 (`test_checksumcompare` serves the responses itself).
+probe that batches such a key, and on the dev stack not even there (G27).
+G26 means `ChecksumComparison` copies every such object on the dev stack,
+and a test of it there or on moto cannot stand in for real S3
+(`test_checksumcompare` serves the responses itself). G29 meets only a
+client whose region is not us-east-1: `scripts/dev-env.sh` sets us-east-1
+(T15), so neither CLI sends a constraint.
 
 ## 2. Test-side changes
 
